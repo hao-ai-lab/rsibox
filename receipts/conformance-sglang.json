@@ -1,0 +1,113 @@
+{
+ "engine": "sglang",
+ "time": 1793445069.0844746,
+ "passed": true,
+ "cases": {
+  "c0_repeatable": {
+   "passed": true,
+   "seconds": 31.09772751107812,
+   "detail": {
+    "runs": 30,
+    "digest": "3a55017bea3757fb"
+   }
+  },
+  "c1_noop": {
+   "passed": true,
+   "seconds": 1.8078385260887444,
+   "detail": {
+    "digest": "3a55017bea3757fb"
+   }
+  },
+  "c2_visible": {
+   "passed": true,
+   "seconds": 1.1259566929657012,
+   "detail": {
+    "digest": "2ce040c84ce3f6ef",
+    "witness": {
+     "sglang/srt/layers/sampler.py:Sampler.forward": [
+      0,
+      1
+     ]
+    }
+   }
+  },
+  "c3_fresh_equivalence": {
+   "passed": true,
+   "seconds": 86.09495518309996,
+   "detail": {
+    "digest": "2ce040c84ce3f6ef"
+   }
+  },
+  "c4_uninstall": {
+   "passed": true,
+   "seconds": 1.1419490110129118,
+   "detail": {
+    "digest": "3a55017bea3757fb"
+   }
+  },
+  "c5_failed_install": {
+   "passed": true,
+   "seconds": 2.201639082049951,
+   "detail": {
+    "prepare": "RuntimeError('injected fault in prepare')",
+    "commit": "RuntimeError('injected fault in commit')"
+   }
+  },
+  "c6_refusal": {
+   "passed": true,
+   "seconds": 1.0557235139422119,
+   "detail": {
+    "signature": "Sampler._preprocess_logits: signature changed",
+    "new-definition": "new definition: helper",
+    "syntax": "edit does not parse: '(' was never closed (<unknown>, line 193)"
+   }
+  },
+  "c7_chain": {
+   "passed": true,
+   "seconds": 12.137851624982432,
+   "detail": {
+    "edits": 10,
+    "base_exact": true,
+    "changed": 10
+   }
+  },
+  "c8_crash_and_hang": {
+   "passed": true,
+   "seconds": 305.000188881997,
+   "detail": {
+    "crash_detect_s": 6.324464455945417,
+    "crash_reason": "engine failed: engine closed the connection",
+    "crash_recover_s": 59.097294431878254,
+    "hang_detect_s": 60.0060172281228,
+    "hang_reason": "no result within 60.0 s",
+    "hang_recover_s": 60.28889930504374,
+    "tamper_reason": "identity mismatch after new: /tmp/fastrsi-vhf_vd9b/1.sock"
+   }
+  },
+  "c9_soak": {
+   "passed": true,
+   "seconds": 3.356260088039562,
+   "detail": {
+    "cycles": 20,
+    "before": {
+     "rss_kib": 6120236,
+     "gpu_mib": 58889
+    },
+    "after": {
+     "rss_kib": 6134516,
+     "gpu_mib": 58889
+    }
+   }
+  },
+  "c10_not_proven": {
+   "passed": true,
+   "seconds": 1.1172672829125077,
+   "detail": {
+    "proven": false,
+    "not_run": [
+     "sglang/srt/layers/sampler.py:Sampler._forward_ascend_backend"
+    ]
+   }
+  }
+ }
+}

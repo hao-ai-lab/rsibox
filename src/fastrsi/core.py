@@ -212,6 +212,13 @@ class Session:
             self.poison(f"process lost: {error}")
         return result
 
+    def proof(self):
+        """Did every edited function actually run? Installed is not the same as proven."""
+        hits = self.witness()
+        names = list(self.data["functions"])
+        return {"proven": bool(names) and all(any(hits.get(n, ())) for n in names),
+                "not_run": [n for n in names if not any(hits.get(n, ()))]}
+
     def exercise(self, timeout=120.0, **fields):
         """Run the engine's workload. A hang or a dead engine poisons the session."""
         try:

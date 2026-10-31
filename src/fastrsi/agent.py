@@ -108,6 +108,11 @@ class Agent:
     def op_present(self, request):
         return {"present": [p for p in request["paths"] if find_module(p)]}
 
+    def op_modules(self, request):
+        return {"modules": sorted(
+            getattr(module, "__file__", None) for module in list(sys.modules.values())
+            if request["pattern"] in (getattr(module, "__file__", None) or ""))}
+
     def op_prepare(self, request):
         if request.get("fault") == "prepare":
             raise RuntimeError("injected fault in prepare")

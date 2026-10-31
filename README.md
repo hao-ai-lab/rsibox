@@ -1,87 +1,91 @@
 # FastRSI
 
-Edit a running ML engine without restarting it. FastRSI installs the edit into the live processes, proves the new code
-ran, undoes it on request, and tells you when only a restart can be trusted.
+Edit a running ML engine without restarting it. FastRSI installs the edit into the live processes,
+proves the new code ran, undoes it on request, and tells you when only a restart can be trusted.
 
-FastRSI is a development tool. Edits run unsandboxed inside the engine. Do not use it in production.
+FastRSI is a development tool. Edits run unsandboxed inside the engine. Do not use it in
+production.
+
+This is an early, private version. It handles Python functions only.
 
 ## Try it without a GPU
 
 ```bash
-uv pip install fastrsi
-fastrsi demo
+uv sync
+uv run fastrsi demo
 ```
 
 ```
-installed  edit-1   route=function  processes=3/3
-witness    edit-1   ran in 3/3
+installed  a1b2c3  processes=3
+witness    ran in 2 of 3 processes
 output     changed
-undone     edit-1   base identity and output restored
-refused    edit-2   signature change: restart needed
+undone     base identity proven, output restored
+refused    forward: signature changed: restart needed
 ```
 
 ## Use it on an engine
 
 ```bash
-fastrsi start vllm -- --model Qwen/Qwen3-8B
+export FASTRSI_MODEL=/path/to/model
+fastrsi start vllm -o gpu=2
+fastrsi exercise
 fastrsi install fix.patch
-fastrsi check -- python my_check.py
-fastrsi undo
 fastrsi status
+fastrsi fresh fix.patch
+fastrsi undo
+fastrsi stop
 ```
 
-`install` exits 0 when the edit is live and proven, 2 when it is refused, and 1 when it fails. A failed install leaves
-the engine on base. Every command writes a receipt to `.fastrsi/receipts/`.
+Patch paths are relative to the engine's site directory, with `a/` and `b/` prefixes.
 
-`status` reports one of three states:
+`install` exits 0 when the edit is live, 2 when it is refused, and 1 when it fails. A failed
+install leaves the engine on base. Every command writes a receipt to `.fastrsi/session/receipts/`.
+
+`status` reports one of three states, and whether the edit has actually run:
 
 | State | Meaning |
 |---|---|
-| `base` | Original code, proven |
-| `edited` | Your edit is live and witnessed |
-| `poisoned` | FastRSI no longer trusts this process. Restart it |
+| `base` | Original code, proven by hash in every process |
+| `edited` | Your edit is live. `proven` says whether every edited function has run |
+| `poisoned` | FastRSI no longer trusts this process. Run `fastrsi restart` |
 
-A live result is a signal, not a final answer. Before you rely on one, run the same edit in a fresh process:
-
-```bash
-fastrsi check --fresh -- python my_check.py
-```
+A live result is a signal, not a final answer. `fastrsi fresh` starts a separate engine with the
+edit and compares outputs. It needs a second GPU.
 
 ## Supported engines
 
-| Engine | Works live | Needs a restart |
-|---|---|---|
-| Toy | Functions | Signatures, new modules |
-| vLLM, TP<=2 | To be filled from conformance receipts | To be filled |
-| verl | To be filled | To be filled |
-| Kernels | To be filled | To be filled |
+| Engine | Conformance | Reaches | Needs a restart |
+|---|---|---|---|
+| Toy | 11 of 11, in CI | Function bodies | Signatures, new definitions, module code |
+| vLLM | 11 of 11, [receipt](receipts/conformance-vllm.json) | Python that runs per request, such as the sampler | Same, plus anything in a compiled graph |
+| SGLang, one request at a time | 11 of 11, [receipt](receipts/conformance-sglang.json) | Python that runs per request, such as the sampler | Same |
 
-An engine is listed only if it passes the [conformance suite](docs/conformance.md).
+An edit inside a compiled graph installs, but `status` reports it as not proven.
 
 ## What FastRSI costs
 
-FastRSI is not free. The [overhead book](docs/overhead.md) reports its idle cost, memory, install time, growth, drift
-against a cold process, and time to detect failure, per engine, generated from receipts you can rerun:
+The [overhead book](docs/overhead.md) reports idle cost, memory, install time, growth and failure
+detection per engine. Rerun it with:
 
 ```bash
-fastrsi overhead vllm
+fastrsi overhead vllm -o gpu=2
+python3 tools/overhead_doc.py
 ```
 
 This page makes no speedup claims.
 
 ## Known limits
 
-- State can drift in a long-lived process. Long edit chains can read differently from a cold run.
-- Hangs and bad memory are detected by timeouts, so detection can take minutes.
-- Native crashes can leave a process unusable. FastRSI marks it `poisoned`.
+- Python functions only: no native code, compiled graphs or kernels.
+- One edit at a time, installed between requests.
+- Hangs are found by timeout, so detection takes as long as the timeout you set.
+- Exact comparison needs a repeatable workload. `c0_repeatable` checks this first.
 
-## Add an engine
+## More
 
-Copy `fastrsi/engines/toy.py`, implement the contract, then run:
-
-```bash
-fastrsi conformance my_engine
-```
+- [Design](docs/design.md)
+- [Conformance](docs/conformance.md)
+- [Add an engine](docs/adding-an-engine.md)
 
 ## License
 

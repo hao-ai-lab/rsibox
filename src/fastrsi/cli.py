@@ -3,7 +3,6 @@
 import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
 
@@ -67,6 +66,7 @@ def cmd_status(args):
               "installs": session.data["installs"]}
     if state == EDITED:
         record["witness"] = session.witness()
+        record.update(session.proof())
     return emit(record, 1 if state == POISONED else 0)
 
 
@@ -93,7 +93,8 @@ def cmd_conformance(args):
 
     with tempfile.TemporaryDirectory() as work:
         workdir = args.output or os.path.join(work, "conformance")
-        record = Suite(load(args.engine), workdir, **parse_options(args.option)).run()
+        only = set(args.only.split(",")) if args.only else None
+        record = Suite(load(args.engine), workdir, **parse_options(args.option)).run(only)
     return emit(record, 0 if record["passed"] else 1)
 
 
@@ -135,9 +136,23 @@ def cmd_demo(args):
     return 0
 
 
-def cmd_check(args):
-    command = args.command[1:] if args.command[:1] == ["--"] else args.command
-    return subprocess.run(command).returncode
+def cmd_fresh(args):
+    session = open_session()
+    if session.state == POISONED:
+        return emit({"state": POISONED, "reason": session.data["reason"]}, 1)
+    edit = edits.from_patch(session.engine.root(), args.patch)
+    session.engine.reset()
+    live = session.exercise()
+    if live is None:
+        return emit({"state": POISONED, "reason": session.data["reason"]}, 1)
+    other = session.engine.fresh(edit)
+    try:
+        other.reset()
+        fresh = other.exercise(timeout=120.0)
+    finally:
+        other.stop()
+    same = live["digest"] == fresh["digest"]
+    return emit({"live": live["digest"], "fresh": fresh["digest"], "same": same}, 0 if same else 1)
 
 
 def main(argv=None):
@@ -162,8 +177,8 @@ def main(argv=None):
     add("exercise", cmd_exercise)
     add("restart", cmd_restart)
     add("stop", cmd_stop)
-    add("check", cmd_check, (("command",), {"nargs": argparse.REMAINDER}))
-    add("conformance", cmd_conformance, engine, option, output)
+    add("fresh", cmd_fresh, (("patch",), {}))
+    add("conformance", cmd_conformance, engine, option, output, (("--only",), {}))
     add("overhead", cmd_overhead, engine, option, output,
         (("--rounds",), {"type": int, "default": 3}),
         (("--repeats",), {"type": int, "default": 20}),

@@ -16,3 +16,7 @@ def forward(x):
 
 def postprocess(values):
     return [value + 0 for value in values]
+
+
+def unused(value):
+    return value * 7

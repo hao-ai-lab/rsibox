@@ -2,7 +2,8 @@
 
 import importlib
 
-ENGINES = {"toy": "fastrsi.engines.toy:Toy", "vllm": "fastrsi.engines.vllm:VLLM"}
+ENGINES = {"toy": "fastrsi.engines.toy:Toy", "vllm": "fastrsi.engines.vllm:VLLM",
+           "sglang": "fastrsi.engines.sglang:SGLang"}
 
 
 def load(name):

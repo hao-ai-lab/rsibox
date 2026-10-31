@@ -1,10 +1,8 @@
 """The template plugin: a CPU engine with a driver and two workers. Runs in CI."""
 
-import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import time
@@ -84,27 +82,14 @@ class Toy(Engine):
         except ProcessLookupError:
             return False
 
-    def _request(self, timeout, **fields):
-        with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(timeout)
-            sock.connect(os.path.join(self.agent_dir, "engine"))
-            sock.sendall(json.dumps(fields).encode() + b"\n")
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = sock.recv(1 << 16)
-                if not chunk:
-                    raise RuntimeError("engine closed the connection")
-                data += chunk
-        return json.loads(data)
-
     def exercise(self, timeout, xs=None):
         began = time.perf_counter()
-        reply = self._request(timeout, xs=list(xs) if xs is not None else list(range(32)))
+        reply = self.request(timeout, xs=list(xs) if xs is not None else list(range(32)))
         reply["seconds"] = time.perf_counter() - began
         return reply
 
     def reset(self):
-        return self._request(30.0, reset=True)["digest"]
+        return self.request(30.0, reset=True)["digest"]
 
     def _pids(self):
         pid = self._pid()
@@ -141,6 +126,7 @@ class Toy(Engine):
                 "return [value + 1 for value in values]")],
             crash=(path, "return x * 2 + 1", "__import__('os')._exit(3)"),
             hang=(path, "return x * 2 + 1", "__import__('time').sleep(3600)"),
+            unreached=(path, "return value * 7", "return value * 8"),
             witness_processes=2,
             exercise_timeout=3.0,
         )

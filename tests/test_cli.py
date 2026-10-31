@@ -31,7 +31,10 @@ def test_lifecycle(tmp_path):
         code, out, err = run(tmp_path, "install", str(patch))
         assert code == 0, out + err
         assert json.loads(run(tmp_path, "exercise")[1])["digest"] != before
-        assert json.loads(run(tmp_path, "status")[1])["state"] == "edited"
+        status = json.loads(run(tmp_path, "status")[1])
+        assert status["state"] == "edited" and status["proven"]
+        code, out, err = run(tmp_path, "fresh", str(patch))
+        assert code == 0 and json.loads(out)["same"], out + err
         assert run(tmp_path, "undo")[0] == 0
         assert json.loads(run(tmp_path, "status")[1])["state"] == "base"
     finally:

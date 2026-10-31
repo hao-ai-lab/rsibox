@@ -28,6 +28,7 @@ def measure_stock_vs_agent(engine_class, workdir, options, rounds, repeats, warm
     arms = {"stock": [], "agent": []}
     memory = {"stock": [], "agent": []}
     startup = {"stock": [], "agent": []}
+    order = []
     for index in range(rounds * 2):
         arm = ("stock", "agent")[(index + index // 2) % 2]
         engine = engine_class(os.path.join(workdir, f"{arm}-{index}"), **options)
@@ -36,8 +37,11 @@ def measure_stock_vs_agent(engine_class, workdir, options, rounds, repeats, warm
         startup[arm].append(time.perf_counter() - began)
         try:
             spec = engine.spec()
-            arms[arm] += timed_runs(engine, spec, repeats, warmup)
+            runs = timed_runs(engine, spec, repeats, warmup)
+            arms[arm] += runs
             memory[arm].append(engine.stats())
+            order.append({"arm": arm, "median": statistics.median(runs), "max": max(runs),
+                          "startup_s": startup[arm][-1], **memory[arm][-1]})
         finally:
             engine.stop()
     medians = {arm: statistics.median(values) for arm, values in arms.items()}
@@ -46,6 +50,7 @@ def measure_stock_vs_agent(engine_class, workdir, options, rounds, repeats, warm
         "idle_cost_pct": 100 * (medians["agent"] / medians["stock"] - 1),
         "startup_s": {arm: summary(values) for arm, values in startup.items()},
         "memory": memory,
+        "rounds": order,
     }
 
 
@@ -63,16 +68,22 @@ def measure_session(engine_class, workdir, options, cycles):
             session.exercise(timeout=spec.exercise_timeout, **spec.exercise_args)
         results["base"] = timed_runs(engine, spec, 5, 0)
 
-        installs, undos, stats = [], [], [engine.stats()]
+        installs, undos, reads, stats = [], [], [], [engine.stats()]
         for _ in range(cycles):
             receipt = session.install(edit)
             installs.append(receipt["seconds"])
             session.exercise(timeout=spec.exercise_timeout, **spec.exercise_args)
             undos.append(session.undo()["seconds"])
+            reads.append(session.exercise(timeout=spec.exercise_timeout,
+                                          **spec.exercise_args)["seconds"])
             stats.append(engine.stats())
         results["install_s"] = summary(installs)
         results["undo_s"] = summary(undos)
         results["growth"] = {"first": stats[0], "last": stats[-1], "cycles": cycles}
+        quarter = max(1, cycles // 4)
+        early, late = statistics.median(reads[:quarter]), statistics.median(reads[-quarter:])
+        results["base_read_drift"] = {"early_s": early, "late_s": late,
+                                      "percent": 100 * (late / early - 1), "cycles": cycles}
 
         began = time.perf_counter()
         engine.reset()

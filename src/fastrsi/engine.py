@@ -1,7 +1,9 @@
 """The contract. A plugin answers engine questions; the session does the rest."""
 
+import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -39,6 +41,7 @@ class Spec:
     chain: list
     crash: tuple
     hang: tuple
+    unreached: tuple  # installs, but this workload never runs it as Python
     witness_processes: int
     exercise_timeout: float = 30.0
     exercise_args: dict = field(default_factory=dict)
@@ -71,6 +74,20 @@ class Engine:
         if os.path.exists(self._agent_pointer):
             shutil.rmtree(self.agent_dir, ignore_errors=True)
             os.unlink(self._agent_pointer)
+
+    def request(self, timeout, **fields):
+        """One JSON request to the engine's own socket, in the agent directory."""
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(timeout)
+            sock.connect(os.path.join(self.agent_dir, "engine"))
+            sock.sendall(json.dumps(fields).encode() + b"\n")
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(1 << 20)
+                if not chunk:
+                    raise RuntimeError("engine closed the connection")
+                data += chunk
+        return json.loads(data)
 
     def start(self, agent=True, overlay=None):
         """Launch to ready. overlay is an Edit already present in the fresh process's source."""

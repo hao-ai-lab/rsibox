@@ -55,6 +55,13 @@ class Suite:
         receipt = self.session.undo()
         require(receipt["outcome"] == "undone", f"undo: {receipt}")
 
+    def c0_repeatable(self, runs=30):
+        """Every exactness case below assumes this. Without it they prove nothing."""
+        seen = {self.checked() for _ in range(runs)}
+        require(len(seen) == 1, f"base gave {len(seen)} outputs in {runs} runs: "
+                "the workload is not deterministic, so exact comparison means nothing")
+        return {"runs": runs, "digest": self.base}
+
     def c1_noop(self):
         self.installed(self.spec.noop)
         digest = self.checked()
@@ -164,10 +171,22 @@ class Suite:
         require(digest == self.base, f"base moved after {cycles} cycles")
         return {"cycles": cycles, "before": before, "after": after}
 
-    CASES = ("c1_noop", "c2_visible", "c3_fresh_equivalence", "c4_uninstall",
-             "c5_failed_install", "c6_refusal", "c7_chain", "c8_crash_and_hang", "c9_soak")
+    def c10_not_proven(self):
+        self.installed(self.spec.unreached)
+        digest = self.checked()
+        proof = self.session.proof()
+        self.undone()
+        require(not proof["proven"], f"unreached edit read as proven: {proof}")
+        require(digest == self.base, "an edit that never ran changed output")
+        return proof
+
+    CASES = ("c0_repeatable", "c1_noop", "c2_visible", "c3_fresh_equivalence", "c4_uninstall",
+             "c5_failed_install", "c6_refusal", "c7_chain", "c8_crash_and_hang", "c9_soak",
+             "c10_not_proven")
 
     def run(self, only=None):
+        if os.path.exists(self.engine._agent_pointer):
+            self.engine.remove_agent_dir()
         shutil.rmtree(self.workdir, ignore_errors=True)
         os.makedirs(self.workdir)
         self.engine.start()
@@ -180,6 +199,10 @@ class Suite:
             for name in self.CASES:
                 if only and name not in only:
                     continue
+                if results.get("c0_repeatable", {}).get("passed") is False:
+                    results[name] = {"passed": False, "seconds": 0.0,
+                                     "error": "not run: base output is not repeatable"}
+                    continue
                 began = time.perf_counter()
                 try:
                     detail = getattr(self, name)()
@@ -189,8 +212,9 @@ class Suite:
                     results[name] = {"passed": False, "seconds": time.perf_counter() - began,
                                      "error": str(error)}
                     if self.session.state != BASE:
-                        self.session.restart() if self.session.state == POISONED \
-                            else self.session.undo()
+                        recover = self.session.restart if self.session.state == POISONED \
+                            else self.session.undo
+                        recover()
         finally:
             self.engine.stop()
         record = {"engine": self.engine.name, "time": time.time(),
