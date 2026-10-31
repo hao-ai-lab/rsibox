@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.fastrsi/
+.pytest_cache/
+.ruff_cache/
+dist/
