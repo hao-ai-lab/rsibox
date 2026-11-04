@@ -13,23 +13,26 @@ undoes it on request. When a change cannot be swapped safely, the lab says "rest
 ## Layout
 
 ```
-core/                    what every agent reads
-  livelab_overview.md    skill: a live lab exists, its fixed verbs, function groups
-  toolsmith_offline.md   subagent prompt: build tools with no engine running
-  toolsmith_online.md    subagent prompt: build tools against the running engine
-template/livelab/        the fixed interface, a stub, and the conformance cases
-repos/<engine>/          one live lab per engine, plus kept tools and real examples
-docs/                    design docs, mirroring the tree (see docs/README.md)
+core/                    what agents read
+  livelab_overview.md    skill: the live lab, its calls, function groups
+  developer.md           developer agent: edit, install, check, keep or revert
+  toolsmith_offline.md   toolsmith, once per repo: mine PRs and tests, build and verify the lab
+  toolsmith_online.md    toolsmith, on call: polish slow checks, extend to new modules
+template/livelab/        the fixed interface (install, check, reset, uninstall) and conformance
+repos/<engine>/          kb/ (costs, workload, mechanisms), livelab/, tools/, examples/
+docs/                    docs about FastRSI itself (see docs/README.md)
 ```
 
 ## How it fits together
 
-1. An agent loads `core/livelab_overview.md` and learns the lab's verbs.
-2. For a new engine, `toolsmith_online` bootstraps `repos/<engine>/livelab/` from
-   `template/livelab/` and iterates until it passes conformance.
-3. For a change, `toolsmith_offline` tags the patch by function group and builds checks;
-   `toolsmith_online` reloads it, checks it, and measures it in the live lab.
-4. Tools that prove useful are kept in `repos/<engine>/tools/` for the next agent.
+1. **Offline, once per repo:** `toolsmith_offline` mines the repo's PRs and tests, bootstraps
+   `repos/<engine>/livelab/` from the template, verifies it against fresh processes, and fills
+   `repos/<engine>/kb/`.
+2. **Online:** the developer agent loads the skill, then edits, `install`s, `check`s, and keeps
+   (`reset`) or reverts (`uninstall`) inside the warm engine. Promising edits run the full
+   benchmark asynchronously.
+3. **On call:** a cost hook flags slow checks and fallback restarts; `toolsmith_online` then
+   polishes or extends the lab and saves the tool for the next agent.
 
 ## First example
 

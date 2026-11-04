@@ -5,31 +5,37 @@ description: Use when changing, testing or profiling code in an ML engine (vLLM,
 
 # Live lab
 
-A live lab is a running engine you can change without restarting it. Every lab has the same
-verbs. How each verb works depends on the engine: read `repos/<engine>/livelab/README.md`.
+A live lab is a warm, running engine you can change without restarting it. Restarting spends
+most of a check on setup (77–90% in our vLLM, Megatron-LM and FastVideo measurements); a live
+lab keeps that state resident.
 
-## Verbs
+## Calls
 
-`start`, `stop`, `install`, `undo`, `status`, `witness`, `capture`, `profile`, `receipt`.
-The contract is `template/livelab/INTERFACE.md`.
+`install(patch)`, `check(workload)`, `reset()`, `uninstall()`, `status()`.
+Contract: `template/livelab/INTERFACE.md`. Engine specifics: `repos/<engine>/livelab/README.md`.
+
+## Before every experiment
+
+1. Read `repos/<engine>/kb/`: probes, their cost, reset rules, unsupported paths.
+2. Pick the cheapest probe that still runs the code you changed.
+3. Promising result: send it to the full evaluation F(x) asynchronously and keep working.
 
 ## Function groups
 
-Every changed function belongs to one group. The group decides how it reloads and how to check it.
+| Group | What it is | Install refreshes |
+|---|---|---|
+| OP | Body of a per-call Python function | Swap in place |
+| GRAPH | Code inside a CUDA graph or torch.compile region | Swap, recapture affected graphs |
+| STATE | Objects built once at start (buffers, runners, batch builders) | Rebuild them in place |
+| RESOURCE | Load-time memory layout and allocation | Allocate new, copy, switch, free |
+| RANKS | Anything all GPUs must agree on | All ranks or none |
+| NATIVE | CUDA/C++ kernel source | Versioned shared library, rebind, recapture |
 
-| Group | What it is | Reload | Check |
-|---|---|---|---|
-| OP | Body of a per-call Python function | Swap the body | Rerun on captured inputs |
-| GRAPH | Code inside a CUDA graph or torch.compile region | Swap, recapture affected graphs | Graph output equals eager |
-| STATE | Objects built once at start | Rebuild in place, keep weights and KV | PR tests plus one real step |
-| RESOURCE | Load-time memory layout and allocation | Allocate new, copy, switch, free | Lookups return the same values |
-| RANKS | Anything all GPUs must agree on | All ranks or none | All ranks report the same version |
-| NATIVE | CUDA/C++ kernel source | Refused: restart | Kernel microbenchmark |
+Startup logic, launch flags and environment variables need a restart.
 
 ## Rules
 
-- `status` is `base`, `edited` or `poisoned`. On `poisoned`, restart. Do not keep measuring.
-- A result counts only with a receipt from the lab. Never write or edit a receipt yourself.
-- Building tools: hand off to `toolsmith_offline` (no engine) or `toolsmith_online` (live engine).
-
-<!-- TODO: expand once template/livelab/INTERFACE.md is settled. -->
+- On `poisoned`, or when the cost hook says a call restarted, do not keep measuring on that lab.
+- A check counts only if it says the patched path ran.
+- A result counts only with the lab's receipt. Never write or edit one.
+- Slow check, failed install or an uncovered module: call `toolsmith_online`.

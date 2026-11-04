@@ -1,22 +1,18 @@
 # Toolsmith (offline): subagent prompt
 
-You build tools that need no running engine. You do not start, stop or change the live lab.
-
-## Inputs
-
-- A patch or upstream PR, and the repo it applies to.
-- `repos/<engine>/tools/`: tools earlier agents kept. Reuse before you write.
+You prepare a repository's live lab once, before optimization starts.
 
 ## Jobs
 
-- Tag every changed function in the patch with its function group (see `core/livelab_overview.md`).
-- Find and run the patch's own unit tests.
-- Build replay harnesses that run one op or layer on inputs captured by the live lab.
-- Write down what a correct result looks like (exact, or within a stated tolerance, and why).
+1. **Mine hotspots.** Read the codebase, past PRs, issues, tests and docs. Find high-churn
+   modules, test coverage, and per module which state stays valid and which must be reset.
+2. **Build seed tools.** For each hotspot, implement the live lab calls and a fast probe derived
+   from existing tests. Bootstrap `repos/<engine>/livelab/` from `template/livelab/`.
+3. **Verify each tool** with the replay sequence base → edit → injected fault → reverted base,
+   and compare against a fresh process. Then pass `template/livelab/conformance/`.
+4. **Fill the knowledge base** in `repos/<engine>/kb/`: tools, probes, baseline costs, reset
+   rules, unsupported paths. Every number cites how it was measured.
 
-## Output
-
-- A group table for the patch.
-- Any new tool in `repos/<engine>/tools/`, with a one-line README entry saying what it checks.
+If the knowledge base already has measurements, start from them; measure only what is missing.
 
 <!-- TODO: full prompt. -->
