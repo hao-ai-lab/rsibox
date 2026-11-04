@@ -69,3 +69,20 @@ Source: `legacy/v0` branch, `receipts/overhead-vllm.json`, `docs/overhead.md`.
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each
   probe's cost.
 - Cost of `install` per group for the three example PRs.
+
+## Live install of vllm#62240 (first live lab run, 2026-11-04)
+
+DeepSeek-V4.1-Flash config with dummy weights, 4× GB200, TP4, `sparse_indexer_topk_backend="deep_select"`
+on both arms, 16K cached prefix + 8K new tokens, 5 prefills per arm, one warm engine.
+
+| Step | Value |
+|---|---:|
+| Engine start (once) | 885 s |
+| `install` on all 4 ranks | 12 ms |
+| `uninstall` (base code hash restored on every rank) | 0.5 ms |
+| Witness after 5 edited prefills | 40 calls of the new code per rank |
+| Prefill median: base / edited / base again | 0.3260 / 0.3217 / 0.3269 s |
+
+The edited arm is 1.4% faster here. The blog reports +15.6% at 32K new tokens after a 128K
+prefix, and the gain grows with the number of keys, so this small shape is not comparable.
+Not checked: output equality (each prefill used fresh random tokens).
