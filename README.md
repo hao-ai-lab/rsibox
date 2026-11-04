@@ -19,7 +19,7 @@ core/                    what every agent reads
   toolsmith_online.md    subagent prompt: build tools against the running engine
 template/livelab/        the fixed interface, a stub, and the conformance cases
 repos/<engine>/          one live lab per engine, plus kept tools and real examples
-docs/                    design docs and decisions (see docs/README.md)
+docs/                    design docs, mirroring the tree (see docs/README.md)
 ```
 
 ## How it fits together

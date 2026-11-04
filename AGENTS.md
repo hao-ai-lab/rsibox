@@ -19,6 +19,7 @@ These rules apply to every coding agent (Claude Code, Codex, Antigravity, others
 - `repos/<engine>/` holds everything engine-specific: `livelab/`, `tools/`, `examples/`.
   Nothing engine-specific goes anywhere else.
 - `docs/` follows `docs/README.md`. Do not add loose files at the repo root.
+- No decision logs, ADRs or changelogs. Update the doc that describes the thing instead.
 
 ## Trust
 
