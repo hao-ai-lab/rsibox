@@ -21,7 +21,7 @@ a piece of state that can be kept separately.
 
 ## DeepSeek-V4.1-Flash startup (TP4, 4× B200)
 
-Source: `/raid/juc049/engine-bench/startup/REPORT.md`, 2026-10-08, `vllm/vllm-openai:v0.31.0`,
+Source: our startup measurement, 2026-10-08, `vllm/vllm-openai:v0.31.0`,
 `--max-model-len 16384`. Seconds.
 
 | Phase | Cold | Warm |
@@ -38,7 +38,7 @@ pinned host memory per rank. No torch.compile for this model in this image.
 
 ## Restart after one edit (Qwen3-8B, warm caches otherwise)
 
-Source: internal tree `fastrsi-frameworks/docs/edit-cost.md` (hao-ai-lab/rsii), dev workload.
+Source: our per-edit restart measurement (pre-v0 internal tree), dev workload.
 
 | Edit | Ready | vs warm 17.8 s |
 |---|---:|---:|
