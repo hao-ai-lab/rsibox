@@ -76,6 +76,16 @@ test, because it misleads the reader.
 - **Add tests meticulously.** Fewer, sharper tests over many shallow ones. A new test must fail
   on the bug it is for; show that in the PR.
 
+## Prove offline, check cheaply online
+
+- Settle guarantees at development time (offline toolsmith), not on every run. Prefer designs
+  that make the bad case impossible (fail closed, read-only) and prove them once with a test
+  that tries the bad case. See `core/toolsmith_offline.md`.
+- Online checks are allowed only when small (a service's own start-up self-check, seconds) and
+  must state their cost.
+- Every component must report its timings, and every experiment must report time to first
+  token per request and total experiment time.
+
 ## Where things go
 
 - `core/`: the skill and the agent prompts (developer, toolsmith offline and online). No code.
