@@ -39,6 +39,9 @@ then the iteration on top of it. That way each framework rule points to the PR t
     `feat(livelab)!: ...`.
   - CI (`.github/workflows/pr-rules.yml`) fails titles that don't match.
 - **Description:** fill `.github/pull_request_template.md`. Say what you did not verify.
+  An Antigravity reviewer then polishes the title and description in CI, and the change is
+  applied only if every fact is kept (`.github/review/`). Run it locally before opening a PR:
+  `python3 .github/review/review.py --pr <n> --apply`.
 - **Loop record:** a PR that changes `repos/<engine>/` is a loop iteration. Its description
   fills the "Loop record" section: engine, upstream PRs, function groups, the rule added,
   overheads measured with their sources, receipts, and what is not verified. Write "none" when

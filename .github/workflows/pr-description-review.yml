@@ -1,0 +1,45 @@
+name: PR description review
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: description-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+jobs:
+  checker:
+    name: Description checker rejects changed facts (golden cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/review/test_review.py -v
+  review:
+    name: Polish title and description via the review service, apply only if facts are kept
+    needs: checker
+    # On "labeled", run only for the review-description label (to re-review after edits).
+    if: github.event.action != 'labeled' || github.event.label.name == 'review-description'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
+          FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: |
+          if [ -z "$FASTRSI_REVIEW_URL" ] || [ -z "$FASTRSI_REVIEW_TOKEN" ]; then
+            echo "::notice::Review service not configured (vars.FASTRSI_REVIEW_URL, secrets.FASTRSI_REVIEW_TOKEN). Skipped; nothing changed."
+            exit 0
+          fi
+          python3 .github/review/review.py --pr "$PR" --engine service --url "$FASTRSI_REVIEW_URL" --apply
