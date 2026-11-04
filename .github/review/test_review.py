@@ -45,6 +45,17 @@ class Accepts(unittest.TestCase):
         self.assertEqual(check(TITLE, BODY, TITLE, BODY), [])
 
 
+    def test_backticks_around_existing_text(self):
+        """Formatting existing text as code is not a new fact (seen on PR 6: the checker
+        rejected a rewrite that only added backticks)."""
+        new = rewrite("Install took 22 ms; the 32K point", "Install took `22 ms`; the `32K` point")
+        self.assertEqual(check(TITLE, BODY, TITLE, new), [])
+
+    def test_code_span_unwrapped(self):
+        new = rewrite("We hot-swap `sparse_attn_indexer` from", "We hot-swap sparse_attn_indexer from")
+        self.assertEqual(check(TITLE, BODY, TITLE, new), [])
+
+
 class Rejects(unittest.TestCase):
     def test_changed_number(self):
         """The failure we fear most: a fluent rewrite that quietly changes a measurement."""
@@ -60,6 +71,17 @@ class Rejects(unittest.TestCase):
         """Dropping the base commit loses the one thing that makes the result reproducible."""
         new = rewrite(" on base `0124e16a6c06`", "")
         self.assertTrue(any("dropped code" in x for x in check(TITLE, BODY, TITLE, new)))
+
+    def test_invented_code_span(self):
+        """A new flag or command the author never wrote must not appear."""
+        new = rewrite("Install took 22 ms;", "Install took 22 ms with `VLLM_USE_FASTRSI_JIT`;")
+        self.assertTrue(any("added code" in x for x in check(TITLE, BODY, TITLE, new)))
+
+    def test_changed_number_inside_code(self):
+        """Moving a number into backticks must not hide a change to it."""
+        new = rewrite("Install took 22 ms;", "Install took `2.2 ms`;")
+        p = check(TITLE, BODY, TITLE, new)
+        self.assertTrue(any("numbers" in x for x in p), p)
 
     def test_title_scope_changed(self):
         p = check(TITLE, BODY, "feat(core): replay PR 62240 in the live lab", BODY)
