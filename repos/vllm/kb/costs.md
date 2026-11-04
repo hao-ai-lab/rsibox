@@ -86,3 +86,19 @@ on both arms, 16K cached prefix + 8K new tokens, 5 prefills per arm, one warm en
 The edited arm is 1.4% faster here. The blog reports +15.6% at 32K new tokens after a 128K
 prefix, and the gain grows with the number of keys, so this small shape is not comparable.
 Not checked: output equality (each prefill used fresh random tokens).
+
+## Same edit on a long-running `vllm serve` (2026-11-04, second session)
+
+One server (dev mode, lab extension, dummy weights, TP4, `deep_select` on both arms), two
+experiments with no restart in between. Same prompts in every arm.
+
+| Shape | Install | Uninstall | Witness per rank | Prefill: base / edited / base again |
+|---|---:|---:|---:|---|
+| 16K cached + 8K new, 5 reps | 15 ms | 1.2 ms | 20 calls | 0.185 / 0.188 / 0.189 s (median) |
+| 130K cached + 32K new, 3 reps | 16 ms | 1.4 ms | 12 calls | 0.341, 0.676, 0.679 / 0.331, 0.326, 0.323 / 0.328, 0.316, 0.322 s |
+
+Reading: no speedup is detected at either shape. At 130K + 32K the base arm had two slow
+requests, so its median is not usable; base again matches edited. The witness shows the new
+function ran (4 calls per request), but not whether its DeepSelect branch was taken; that needs
+a branch-level witness. Dummy weights make outputs irreproducible (base vs base again: 0 of 5
+tokens equal), so output equality needs real weights.
