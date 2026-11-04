@@ -5,3 +5,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 dist/
+
+# Private notes and experiment scripts (see AGENTS.md, "What stays out of the repo")
+.lab/

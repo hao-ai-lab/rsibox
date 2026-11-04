@@ -82,6 +82,24 @@ test, because it misleads the reader.
 - `docs/`: docs about FastRSI itself, following `docs/README.md`. No loose files at the root.
 - No decision logs, ADRs or changelogs. Update the doc that describes the thing instead.
 
+## What stays out of the repo
+
+The repo will be public. Experiments and the machines they ran on are not part of it.
+
+- **Never commit:**
+  - experiment or setup scripts tied to one machine, cluster or run;
+  - internal IPs and hostnames; cluster, pod and namespace names; usernames;
+  - home and scratch paths (`/raid/...`, `/home/<user>/...`, `/workspace/...`);
+  - how to reach a machine: kubeconfig, SSH, tunnel or proxy recipes;
+  - tokens, keys and anything else secret.
+- **Keep them instead** in a private folder outside the repo: `~/fastrsi-lab/<engine>/`.
+  If you must keep notes inside the checkout, use `.lab/`, which git ignores.
+- **What `kb/` may say:** generic hardware ("4× GB200, aarch64, 956 GiB RAM") and measured
+  numbers with their source described generically ("our 2026-10-08 startup run"), never how
+  to reach the machine or where its files live.
+- CI (`.github/workflows/pr-rules.yml`) greps added lines for common leak patterns. It is a
+  pattern check, not a guarantee: you are still responsible for what you commit.
+
 ## Trust
 
 - A result counts only if it comes with a receipt from a live lab that passes

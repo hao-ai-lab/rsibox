@@ -46,6 +46,18 @@ jobs:
           fi
           [ $bad = 0 ] && echo "OK: checked $(git rev-list --count "$BASE..$HEAD") commits and the PR text"
           exit $bad
+  leak-check:
+    name: Added lines have no common env-detail or secret patterns (pattern check, not a guarantee)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/leak-check.sh "$BASE" "$HEAD"
   loop-record:
     name: PRs that change repos/<engine>/ fill every Loop record field (presence only, see AGENTS.md)
     runs-on: ubuntu-latest
