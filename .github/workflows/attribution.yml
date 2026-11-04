@@ -1,0 +1,30 @@
+name: Attribution
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  attribution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No AI co-authors or "Generated with" lines (see AGENTS.md)
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          pattern='(co-authored-by:.*(claude|anthropic|codex|openai|gemini|antigravity|copilot))|generated with \[?(claude|codex|gemini|antigravity)'
+          bad=0
+          if git log --format=%B "$BASE..$HEAD" | grep -Eiq "$pattern"; then
+            echo "A commit message names an AI co-author or a 'Generated with' line."; bad=1
+          fi
+          if printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" | grep -Eiq "$pattern"; then
+            echo "The PR title or description has a 'Generated with' line or AI co-author."; bad=1
+          fi
+          exit $bad
