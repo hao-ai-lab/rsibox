@@ -15,12 +15,39 @@ We build FastRSI one engine and a few real PRs at a time.
    can be kept warm separately is an opportunity to disaggregate. Record it in `kb/costs.md`.
 5. **Keep what works.** Proven tools go to `repos/<engine>/tools/`; lessons go to `kb/`.
 
+## Framework, artifact, loop
+
+The repo holds three things. Keep them apart.
+
+- **Framework:** what works for any engine. `core/`, `template/`, `docs/`, `AGENTS.md`,
+  `.github/`.
+- **Artifact:** what the loop produced for one engine. `repos/<engine>/`. It shows the current
+  state only: edit `kb/` in place, never append history.
+- **Loop:** the journey. It lives in pull requests, not in files. One loop iteration is one PR,
+  and its description carries the record (see below).
+
+An iteration that needs a framework change splits in two stacked PRs: the framework PR first,
+then the iteration on top of it. That way each framework rule points to the PR that needed it.
+
 ## Pull requests
 
 - **Title:** `<type>(<scope>): <summary>`, for example `feat(vllm): replay PR 62240 in the live lab`.
   - Types: `feat`, `fix`, `perf`, `docs`, `test`, `ci`, `refactor`, `chore`.
-  - Scope: the component, such as `core`, `livelab`, `vllm`, `fastvideo`, `ci`, `docs`.
+  - Scope says which part changed. An engine name (`vllm`, `fastvideo`) means artifact or loop
+    work. `core`, `livelab`, `ci`, `docs`, `process` mean framework work.
+  - Add `!` before the colon for a breaking change, such as a new `INTERFACE.md` version:
+    `feat(livelab)!: ...`.
   - CI (`.github/workflows/pr-rules.yml`) fails titles that don't match.
+- **Description:** fill `.github/pull_request_template.md`. Say what you did not verify.
+- **Loop record:** a PR that changes `repos/<engine>/` is a loop iteration. Its description
+  fills the "Loop record" section: engine, upstream PRs, function groups, the rule added,
+  overheads measured with their sources, receipts, and what is not verified. Write "none" when
+  a field does not apply; do not delete it. CI checks that every field has text, not that the
+  text is true.
+- **One iteration per PR.** Keep it small enough to review in one sitting. Stack PRs when one
+  step depends on another.
+- **Merge** with squash, keeping the PR description as the commit body, so the loop record is
+  also in `git log`.
 - **Attribution:** do not add AI tools as co-authors. No co-author trailer naming Claude,
   Claude Code, Codex, Gemini, Antigravity or any other AI tool, in any commit. No
   "Generated with ..." lines or AI badges in commits, PR titles, descriptions or comments.
