@@ -1,91 +1,43 @@
 # FastRSI
 
-Edit a running ML engine without restarting it. FastRSI installs the edit into the live processes,
-proves the new code ran, undoes it on request, and tells you when only a restart can be trusted.
+Hot-reload your inference engine. Make it faster while it keeps running.
 
-FastRSI is a development tool. Edits run unsandboxed inside the engine. Do not use it in
-production.
+FastRSI gives a coding agent a **live lab**: a running engine it can change without a restart.
+The agent swaps a code change into the live processes, proves the new code ran, measures it, and
+undoes it on request. When a change cannot be swapped safely, the lab says "restart needed".
 
-This is an early, private version. It handles Python functions only.
+> **Status:** restarting development around a skill-first design. Nothing here runs yet.
+> The previous version (Python package, vLLM and SGLang plugins, conformance receipts) is on the
+> [`legacy/v0`](https://github.com/GindaChen/fastrsi/tree/legacy/v0) branch.
 
-## Try it without a GPU
-
-```bash
-uv sync
-uv run fastrsi demo
-```
+## Layout
 
 ```
-installed  a1b2c3  processes=3
-witness    ran in 2 of 3 processes
-output     changed
-undone     base identity proven, output restored
-refused    forward: signature changed: restart needed
+core/                    what agents read
+  livelab_overview.md    skill: the live lab, its calls, function groups
+  developer.md           developer agent: edit, install, check, keep or revert
+  toolsmith_offline.md   toolsmith, once per repo: mine PRs and tests, build and verify the lab
+  toolsmith_online.md    toolsmith, on call: polish slow checks, extend to new modules
+template/livelab/        the fixed interface (install, check, reset, uninstall) and conformance
+repos/<engine>/          kb/ (costs, workload, mechanisms), livelab/, tools/, examples/
+docs/                    docs about FastRSI itself (see docs/README.md)
 ```
 
-## Use it on an engine
+## How it fits together
 
-```bash
-export FASTRSI_MODEL=/path/to/model
-fastrsi start vllm -o gpu=2
-fastrsi exercise
-fastrsi install fix.patch
-fastrsi status
-fastrsi fresh fix.patch
-fastrsi undo
-fastrsi stop
-```
+1. **Offline, once per repo:** `toolsmith_offline` mines the repo's PRs and tests, bootstraps
+   `repos/<engine>/livelab/` from the template, verifies it against fresh processes, and fills
+   `repos/<engine>/kb/`.
+2. **Online:** the developer agent loads the skill, then edits, `install`s, `check`s, and keeps
+   (`reset`) or reverts (`uninstall`) inside the warm engine. Promising edits run the full
+   benchmark asynchronously.
+3. **On call:** a cost hook flags slow checks and fallback restarts; `toolsmith_online` then
+   polishes or extends the lab and saves the tool for the next agent.
 
-Patch paths are relative to the engine's site directory, with `a/` and `b/` prefixes.
+## First example
 
-`install` exits 0 when the edit is live, 2 when it is refused, and 1 when it fails. A failed
-install leaves the engine on base. Every command writes a receipt to `.fastrsi/session/receipts/`.
-
-`status` reports one of three states, and whether the edit has actually run:
-
-| State | Meaning |
-|---|---|
-| `base` | Original code, proven by hash in every process |
-| `edited` | Your edit is live. `proven` says whether every edited function has run |
-| `poisoned` | FastRSI no longer trusts this process. Run `fastrsi restart` |
-
-A live result is a signal, not a final answer. `fastrsi fresh` starts a separate engine with the
-edit and compares outputs. It needs a second GPU.
-
-## Supported engines
-
-| Engine | Conformance | Reaches | Needs a restart |
-|---|---|---|---|
-| Toy | 11 of 11, in CI | Function bodies | Signatures, new definitions, module code |
-| vLLM | 11 of 11, [receipt](receipts/conformance-vllm.json) | Python that runs per request, such as the sampler | Same, plus anything in a compiled graph |
-| SGLang, one request at a time | 11 of 11, [receipt](receipts/conformance-sglang.json) | Python that runs per request, such as the sampler | Same |
-
-An edit inside a compiled graph installs, but `status` reports it as not proven.
-
-## What FastRSI costs
-
-The [overhead book](docs/overhead.md) reports idle cost, memory, install time, growth and failure
-detection per engine. Rerun it with:
-
-```bash
-fastrsi overhead vllm -o gpu=2
-python3 tools/overhead_doc.py
-```
-
-This page makes no speedup claims.
-
-## Known limits
-
-- Python functions only: no native code, compiled graphs or kernels.
-- One edit at a time, installed between requests.
-- Hangs are found by timeout, so detection takes as long as the timeout you set.
-- Exact comparison needs a repeatable workload. `c0_repeatable` checks this first.
-
-## More
-
-- [Design](docs/design.md)
-- [Conformance](docs/conformance.md)
-- [Add an engine](docs/adding-an-engine.md)
+`repos/vllm/examples/dsv41-prefill/`: the three vLLM PRs behind "+35.6–43.9% new-token prefill
+throughput" in vLLM's DeepSeek-V4.1-Flash post, hot-reloaded one at a time.
 
 ## License
 
