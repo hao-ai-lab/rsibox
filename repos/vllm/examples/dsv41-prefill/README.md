@@ -24,9 +24,16 @@ share one clean base. Checked on 2026-11-04:
 Not possible without porting: reverting #59894 on the Oct 29 base conflicts in all 6 of its files;
 cherry-picking #62240 or #62359 onto the Oct 9 base conflicts too.
 
+## Environment
+
+Both stack-A patches change only Python, so stack A needs no C++ build: install the precompiled
+wheel for `4e0ad57` (`wheels.vllm.ai/4e0ad572036166a8bdf1782f4a07b4e33016646b/`, x86_64 and
+aarch64 exist), then reverse-apply `62240.patch` and `62359.patch` in `site-packages` to get the
+base. Stack B (#59894) also changes only Python; wheels exist for its base `8cbd5d0` and for `ad73a47`, both architectures.
+
 ## Plan
 
-1. Tag every changed function by group, per patch.
+1. Tag every changed function by group, per patch: [groups.md](groups.md).
 2. Per PR: its own tests offline, `install`, a quick check, one 32K point, `uninstall`/`install`
    to A/B, then the full workload ([../../kb/workload.md](../../kb/workload.md)).
 3. Start with #62240 on stack A (one function, OP).

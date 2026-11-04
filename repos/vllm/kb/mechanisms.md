@@ -16,6 +16,10 @@ Source: LiveLab-MLSys paper draft, §3.2. 959 performance PRs found; 80 inspecte
 - Compiled paths: torch.compile inlines functions, so swapping the Python is not enough;
   recapture the affected CUDA graphs.
 - C++/CUDA extensions cannot be unloaded: build a versioned side library and rebind op pointers.
+- Functions decorated with `@eager_break_during_capture` (for example `sparse_attn_indexer`):
+  swap `fn.__wrapped__.__code__`, not the wrapper. Breakable-graph replay calls the inner
+  function, so no recapture is needed, except for batches captured in `CUDAGraphMode.FULL`.
+  Source: `vllm/compilation/breakable_cudagraph.py` at `4e0ad57`. Not yet run.
 
 ## Unsupported
 
