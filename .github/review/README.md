@@ -48,15 +48,31 @@ GET  /v1/review/<id>   ->  {"status": "queued|running|done|error", "reply", "err
 `reply` is the raw reviewer output (the TITLE/BODY/NOTES blocks). The service only runs the
 prompt; checking and applying happen in CI, so the service never needs GitHub write access.
 
-**Setup:**
+**The server** is `server.py` (standard library only). It runs `agy` headless in a fresh empty
+directory per job. Headless `agy` auto-denies tools that need the "command" permission: a test
+prompt telling it to `touch` a file did not create one. So a hostile PR description cannot run
+shell commands on the host. Every call except `/v1/health` needs `Authorization: Bearer <token>`.
 
-1. Run the service on a machine logged in to Antigravity, for example b200: a small HTTP server
-   that, per job, runs `agy -p "$prompt" --model "$model"` and stores the reply.
-2. Expose it with the existing Cloudflare tunnel: add an ingress rule
-   `hostname: services.fastrsi.ai`, `path: ^/v1/review`, pointing at the server's local port.
-3. Protect it: the server checks `Authorization: Bearer <token>`. Optionally also put a
-   Cloudflare Access policy with a service token in front.
-4. In the GitHub repo settings:
+**Deployment on b200** (as of 2026-11-04):
+
+| Piece | Where |
+|---|---|
+| Server | user unit `fastrsi-review.service`, `127.0.0.1:8792`, code copied to `~/.local/share/fastrsi-review/server.py` |
+| Token | `~/.config/fastrsi-review/token` (mode 600) |
+| Tunnel | `fastrsi-services` (`5727d6e5-…`), config `~/.cloudflared/fastrsi-services.yml`, user unit `fastrsi-services-tunnel.service` |
+| DNS | `services.fastrsi.ai`, CNAME to that tunnel |
+
+Redeploy after changing `server.py`: copy it over and `systemctl --user restart fastrsi-review`.
+
+Trap: `~/.cloudflared/config.yml` names another tunnel, and `cloudflared tunnel route dns` used it
+instead of the tunnel given on the command line. Always pass
+`--config ~/.cloudflared/fastrsi-services.yml` to `cloudflared tunnel` commands for this service.
+
+**Setup steps:**
+
+1. Run the server and tunnel as above. Optionally put a Cloudflare Access policy with a service
+   token in front.
+2. In the GitHub repo settings:
    - variable `FASTRSI_REVIEW_URL` = `https://services.fastrsi.ai/v1/review`
    - secret `FASTRSI_REVIEW_TOKEN` = the bearer token
    - secrets `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, only if you use Access
