@@ -703,6 +703,76 @@ class JournaledR1Test(unittest.TestCase):
         self.assertEqual((calls, u["receipt"]["rebuild"]["why"]), ([(0, "base")], "undo"))
 
 
+class ParallelTest(unittest.TestCase):
+    """Pain point (DeepSeek-V4.1 EP4DP4): only DP rank 0's replies came back, and witness,
+    receipt and undo covered 1 of 4 groups with no word."""
+    _host, _plan = RebuildTest._host, RebuildTest._plan
+
+    def test_a_missing_rank_or_dp_group_refuses_the_transaction(self):
+        """Input: the host over 2 worker ranks; (a) the engine's parallel config says TP 2 x
+        DP 2 (this is DP rank 0); (b) DP 1, but the executor drops rank 1's reply. Expected:
+        (a) parallel() expects ranks 0, 1 and "dp1", says DP>1 is unsupported, and a
+        transaction aborts with a blocking participant_missing naming dp1; (b) aborts naming
+        rank 1. Neither rank runs the edit. Fails before this change: (a) and (b) committed
+        with no finding. Not: a real DP launch (the main session's NVL run)."""
+        from types import SimpleNamespace as NS
+        from . import host as H
+        pc = NS(world_size=2, data_parallel_size=2, data_parallel_rank=0)
+        d = H.parallel(NS(vllm_config=NS(parallel_config=pc)))
+        self.assertEqual(d["expected"], [0, 1, "dp1"])
+        self.assertIn("not supported", d["note"])
+        h, names, calls, sides = self._host("dp")
+        h.co.participants[0].expected = d["expected"]
+        r = h.handle({"op": "txn", "plan": self._plan("dp", accept="all")})
+        fs = [f for f in r["receipt"]["findings"] if f["check"] == "participant_missing"]
+        self.assertEqual((r["outcome"], fs[0]["missing"], fs[0]["overridable"]),
+                         ("aborted", ["dp1"], False))
+        h, names, calls, sides = self._host("drop")
+        h.co.participants[0].expected = [0, 1]
+        ex = h.core.model_executor
+        full = ex.collective_rpc
+        ex.collective_rpc = lambda name, timeout=None, args=(): full(name, timeout, args)[:1]
+        r = h.handle({"op": "txn", "plan": self._plan("drop", accept="all")})
+        fs = [f for f in r["receipt"]["findings"] if f["check"] == "participant_missing"]
+        self.assertEqual((r["outcome"], fs[0]["missing"]), ("aborted", ["1"]))
+        for n in names:
+            e = sys.modules[n + ".engine"].Engine()
+            e.step(1)
+            self.assertEqual(e.ran[-1], "base")
+
+
+class AtBaseOpTest(unittest.TestCase):
+    _host, _plan = RebuildTest._host, RebuildTest._plan
+
+    def test_at_base_after_undo_and_a_leftover(self):
+        """Input: the host's at_base op after a committed and undone worker transaction, then
+        after a cell that set a worker attribute outside the journal (accepted) and its
+        undo. Expected: ok with every rank's journal empty and digests equal; then not ok,
+        naming the leftover per rank. Fails before this change: no at_base op."""
+        from types import SimpleNamespace as NS
+        h, names, calls, sides = self._host("ab")
+        for s in sides:
+            s.scope["worker"] = s.lp.scope["worker"] = NS()
+        self.assertEqual(h.handle({"op": "txn", "plan": self._plan("ab")})["outcome"],
+                         "committed")
+        self.assertFalse(h.handle({"op": "at_base"})["ok"])
+        self.assertTrue(h.handle({"op": "undo", "txn": "ab"})["ok"])
+        b = h.handle({"op": "at_base"})
+        self.assertTrue(b["ok"], b)
+        ranks = b["participants"]["workers"]["ranks"]
+        self.assertEqual([(x["journal_len"], len(set(map(tuple, x["modules"].values()))))
+                          for x in ranks], [(0, 1), (0, 1)])
+        r = h.handle({"op": "txn", "plan": {"id": "lo", "accept": ["repair_not_undoable"],
+                                            "repairs": [{"cell": "worker.leftover = 1",
+                                                         "declares": [], "on": ["worker"]}]}})
+        self.assertEqual(r["outcome"], "committed")
+        self.assertTrue(h.handle({"op": "undo", "txn": "lo"})["ok"])
+        b = h.handle({"op": "at_base"})
+        self.assertFalse(b["ok"])
+        self.assertEqual([x["extra_attrs"] for x in b["participants"]["workers"]["ranks"]],
+                         [{"worker": ["leftover"]}] * 2)
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())
 

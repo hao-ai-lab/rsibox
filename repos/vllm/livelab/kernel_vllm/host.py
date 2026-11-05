@@ -56,6 +56,12 @@ How a transaction runs (kernel StepGapCoordinator, loop.md 4b):
 - The import finder that patches vllm.v1.engine.core asks the other finders on sys.meta_path
   for the module (an overlay such as FASTRSI_OVERLAY first), so import this module after the
   overlay's finder is installed; a core imported before it is patched in place.
+- The worker group expects a reply from every rank this engine core reaches (TP x PP); a
+  missing one is a blocking participant_missing. At data parallel >1 vLLM runs one engine core
+  per DP group and this host reaches only its own: the other groups are expected too, so every
+  transaction is refused with participant_missing naming them (DP>1 unsupported, said
+  plainly); only DP rank 0 serves the channel. `at_base` (control op): every side back at its
+  start state (kernel at_base), for a warm engine pool between jobs.
 - A loop job waits `gap_timeout` to start; once started it may run until its own run timeout
   (phase 2: the same again; R1: its deadline), so a long R1 is not taken for a lost gap.
 
@@ -140,9 +146,13 @@ class WorkerGroup(C.Participant):
     name = "workers"
     bounded = True
 
-    def __init__(self, host):
+    def __init__(self, host, expected=None):
         self.host = host
         self.broken = None       # set when a collective_rpc timed out: replies are misaligned
+        # the ranks every call must reach (kernel `expected`: a missing reply is a blocking
+        # participant_missing): this engine core's workers, and at DP>1 the other DP groups,
+        # which this host cannot reach
+        self.expected = expected
 
     def _rpc(self, method, payload):
         if self.broken:
@@ -214,6 +224,32 @@ class WorkerGroup(C.Participant):
     def rebuild(self, payload):
         return self._rpc("rebuild", payload)
 
+    def at_base(self, _=None):
+        return self._rpc("at_base", None)
+
+
+def parallel(core):
+    """{"world", "dp", "dp_rank", "expected", "note"} from the engine's parallel config: the
+    worker ranks this engine core's collective_rpc reaches (TP x PP), and at data parallel >1
+    the other DP groups as `dp<d>`. This host reaches only its own DP group's workers (vLLM
+    runs one engine core per DP group), so at DP>1 every transaction is refused with a
+    participant_missing naming the other groups: DP>1 is not supported, and says so. No
+    config (tests): no expectation."""
+    cfg = getattr(core, "vllm_config", None) or getattr(
+        getattr(core, "model_executor", None), "vllm_config", None)
+    pc = getattr(cfg, "parallel_config", None)
+    if pc is None:
+        return {"world": None, "dp": None, "dp_rank": None, "expected": None, "note": None}
+    world = int(getattr(pc, "world_size", 1) or 1)
+    dp = int(getattr(pc, "data_parallel_size", 1) or 1)
+    rank = int(getattr(pc, "data_parallel_rank", 0) or 0)
+    expected = list(range(world)) + [f"dp{d}" for d in range(dp) if d != rank]
+    note = None if dp == 1 else (
+        f"data parallel {dp}: this host (DP rank {rank}) reaches only its own group's "
+        f"{world} worker(s); the other groups are not participants, so transactions are "
+        "refused (participant_missing). DP>1 is not supported by the kernel adapter yet")
+    return {"world": world, "dp": dp, "dp_rank": rank, "expected": expected, "note": note}
+
 
 class Host:
     def __init__(self, core, root):
@@ -226,9 +262,10 @@ class Host:
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
         self.core_side = Side("core", scope={"core": core})   # starts its analyzer child
         self.started = None                 # the workers' warm call at engine start (warm())
+        self.dp = parallel(core)
         self.co = C.StepGapCoordinator(
-            [WorkerGroup(self), C.CallParticipant("core", self.core_side.dispatch,
-                                                  bounded=True)],
+            [WorkerGroup(self, self.dp["expected"]),
+             C.CallParticipant("core", self.core_side.dispatch, bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             phase2_deadline_s=PHASE2_DEADLINE_S,
             rebuilds={"R1": self._r1, "R6": self._r6}, rebuild_deadline_s=REBUILD_DEADLINE_S,
@@ -357,7 +394,9 @@ class Host:
             elif op == "warm":                # analyzers of every side (alive, ready, spawns)
                 r = self.analyzers(cmd.get("wait_s", 0.0))
             elif op == "ping":
-                r = F.ok(pid=os.getpid(), poison=self.co.poison)
+                r = F.ok(pid=os.getpid(), poison=self.co.poison, parallel=self.dp)
+            elif op == "at_base":             # back at the start state? (warm engine pool)
+                r = self.co.at_base()
             else:
                 r = F.not_ok(f"unknown op {op!r}")
         except Exception as e:
@@ -432,6 +471,13 @@ def _patch_core(mod):
         return r
 
     def run_busy_loop(self):
+        pc = getattr(getattr(self, "vllm_config", None), "parallel_config", None)
+        if DIR and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
+            # one control channel, one host: at DP>1 only DP rank 0 serves it (its
+            # transactions are refused with participant_missing; see parallel())
+            print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "
+                  "channel)", file=sys.stderr, flush=True)
+            return orig_loop(self)
         if DIR and not _HOST:
             h = Host(self, DIR)
             _HOST.append(h)

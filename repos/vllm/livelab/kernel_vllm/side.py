@@ -60,7 +60,8 @@ from kernel import swap as S
 from . import graphs as G
 
 METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "abort", "undo",
-           "status", "proof", "witness_check", "reset", "versions", "warm", "rebuild")
+           "status", "proof", "witness_check", "reset", "versions", "warm", "rebuild",
+           "at_base")
 
 
 # Model code: under torch.compile and CUDA graphs its Python runs only while tracing and
