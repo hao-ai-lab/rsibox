@@ -148,6 +148,15 @@ Same staged code (new hash `73d9f00e04cc058d`) and the same findings (none) in a
 `test_process_analysis_stages_the_same_code_and_findings` checks code objects (`==`: bytecode,
 constants, names, line tables) and findings for 14 kinds of edit.
 
+Several modules in one transaction. A participant stages a plan's modules so that each sees
+the names the others' patches add (`overlay`, from `swap.staged_names`): module B's
+`from .a import new_helper`, where A's patch adds `new_helper`, takes A's staged object, and B's
+added definitions and top-level defaults can use it at definition time. A module that fails
+is staged again after the others, so the plan's module order does not matter. Nothing is put
+in `sys.modules` or any module dict before the commit, which applies every module through
+one journal mark (all or none; undo removes them together), as vLLM #51899 needs (it adds a
+helper in one file and imports it in another).
+
 With the one-by-one `Coordinator` instead (each rank switching at its own boundary), the same
 commit and undo gave at least one step with mixed versions in 20 of 20 runs on CPU; the
 step-gap coordinator gave none in 20 of 20.
@@ -237,6 +246,7 @@ test_group_witness_is_kept_per_rank_and_uneven_is_a_finding ... ok
 test_half_committed_group_is_undone ... ok
 test_hung_commit_ends_the_gap_at_the_deadline ... ok
 test_linked_receipts_and_measured_times ... ok
+test_module_imports_a_name_another_module_of_the_txn_adds ... ok
 test_name_and_txn_record_still_accept ... ok
 test_one_by_one_commit_mixes_versions ... ok
 test_prepare_never_holds_the_loop_longer_than_the_budget ... ok
@@ -262,7 +272,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 38 tests in 5.4s
+Ran 39 tests in 5.4s
 
 OK
 ```
@@ -333,6 +343,11 @@ Each test's docstring says what it proves and what it does not.
   killed and the prepare analyzes in-process, holding the GIL as before; the
   `analyze_fallback` finding blocks the vote until accepted, and each later prepare tries a
   new child first.
+- Names a patch adds that another module of the same transaction uses are found only through
+  `from m import name` at module level (and in added definitions and top-level defaults). A
+  method default or a class-level statement of an existing class that needs them is
+  evaluated against the live module and fails; two patches that import from each other are
+  not staged.
 - A chained edit of a function the earlier edit did not touch, when the earlier edit moved
   lines above it: the function's running code keeps the file's line, the text the
   participant stages against has another, and the target is not found (`no_live_function`).

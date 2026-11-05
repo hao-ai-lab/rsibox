@@ -185,7 +185,11 @@ class LocalParticipant(Participant):
     installed and the code objects it swapped in. A later plan for the same module is staged
     against that text (not the file), and the participant's own code objects are not
     `base_mismatch`. Undo of a transaction also forgets every later one (the journal undoes
-    them too). A plan that would change nothing is an `empty_change` finding."""
+    them too). A plan that would change nothing is an `empty_change` finding.
+
+    Several modules in one plan are staged so that each sees the module-level names the
+    others' patches add (`swap.staged_names` as stage's `overlay`), in any plan order; nothing
+    is visible before commit."""
 
     def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None):
         self.name = name
@@ -249,16 +253,36 @@ class LocalParticipant(Participant):
                 return v + module[len(k):]
         return module
 
+    def _stage(self, m, spec, own, overlay):
+        return S.stage(self._actual(m), spec["source"], spec["targets"],
+                       spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
+                       base_source=self._live_source(m), own_codes=own,
+                       compile=spec.get("compile", "definitions"),
+                       analyzer=None if spec.get("analyze") == "inline" else self.analyzer,
+                       overlay=overlay)
+
     def prepare(self, plan):
         txn, accept = plan["id"], plan.get("accept", ())
         fs, staged, items, ok, timings = [], [], {}, True, {}
         own = [c for cs in self._codes.values() for c in cs]
-        for m, spec in plan.get("modules", {}).items():
-            r = S.stage(self._actual(m), spec["source"], spec["targets"],
-                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
-                        base_source=self._live_source(m), own_codes=own,
-                        compile=spec.get("compile", "definitions"),
-                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer)
+        # The modules of one transaction see each other's staged names (`overlay`): module B's
+        # `from a import new` finds what A's patch adds, though A is applied only at commit.
+        # A module that fails is staged again once more modules have staged, until no more
+        # succeed, so the plan's module order does not matter.
+        res, overlay, todo = {}, {}, list(plan.get("modules", {}))
+        while todo:
+            again = []
+            for m in todo:
+                r = res[m] = self._stage(m, plan["modules"][m], own, overlay)
+                if r["staged"] is not None:
+                    overlay.update(S.staged_names(r["staged"]))
+                elif len(todo) > 1:
+                    again.append(m)
+            if len(again) == len(todo):
+                break
+            todo = again
+        for m in plan.get("modules", {}):
+            r = res[m]
             fs += r["findings"]
             ok = ok and r["ok"]
             if r["staged"] is not None:

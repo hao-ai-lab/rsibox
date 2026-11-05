@@ -37,6 +37,7 @@ live half; `analyzer=None` runs it here. Both give the same staged code and find
 import ast
 import copy
 import importlib
+import importlib.util
 import marshal
 import os
 import select
@@ -254,10 +255,11 @@ def _defaults_stub(q, node):
     return _try_compile(ast.fix_missing_locations(ast.Module(body, [])), "<defaults>")
 
 
-def _defaults(mod, q, stub):
-    """Evaluate a def's new defaults in a scratch namespace (module globals). Returns
-    (defaults, kwdefaults) or raises."""
-    ns = {}
+def _defaults(mod, q, stub, imports=None):
+    """Evaluate a def's new defaults in a scratch namespace (module globals; a top-level
+    def's defaults also see the patch's new `imports`). Returns (defaults, kwdefaults) or
+    raises."""
+    ns = dict(imports or {})
     exec(_raise(stub), mod.__dict__, ns)
     parts = q.split(".")
     obj = ns[parts[0]]
@@ -347,7 +349,10 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
     for n in tree.body:
         if isinstance(n, (ast.Import, ast.ImportFrom)):
             names = [(a.asname or a.name).split(".")[0] for a in n.names]
-            imports.append({"names": names, **_try_compile(ast.Module([n], []), filename)})
+            imp = {"names": names, **_try_compile(ast.Module([n], []), filename)}
+            if isinstance(n, ast.ImportFrom):     # resolvable against an overlay (see stage)
+                imp["from"] = [n.level, n.module, [[a.name, a.asname] for a in n.names]]
+            imports.append(imp)
     t = time.perf_counter()
     new_units, compiled, new_error = [], None, None
     try:
@@ -412,7 +417,7 @@ def _err(e):
 
 
 def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
-          base_source=None, own_codes=(), compile="definitions", analyzer=None):
+          base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)]; base_hash: text_hash of the source the patch was
     made against (checked against the base text); base_source: the text the live module runs
@@ -428,6 +433,9 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     a `ProcessAnalyzer` in a child process, so this process holds the GIL only for the live
     half. Both give the same staged code and findings. When the analyzer fails, the analysis
     runs here and an `analyze_fallback` finding says why and what it cost.
+    overlay: {module name: {name: object}}, names that modules staged earlier in the same
+    transaction add (`staged_names`): a `from m import name` of this patch takes the staged
+    object when the live module m does not have the name yet. Nothing is made visible.
     Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
     can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -520,11 +528,14 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
             st.removes.append((owner, name))
 
     try:
-        # 4. imports the module lacks, run in a scratch namespace
+        # 4. imports the module lacks, run in a scratch namespace (a name another module of
+        # this transaction adds comes from the overlay: that module is not applied yet)
         for imp in a["imports"]:
             if any(x not in mod.__dict__ for x in imp["names"]):
-                ns = {}
-                exec(_raise(imp), mod.__dict__, ns)
+                ns = _from_overlay(mod, imp, overlay)
+                if ns is None:
+                    ns = {}
+                    exec(_raise(imp), mod.__dict__, ns)
                 st.imports.update({x: v for x, v in ns.items() if x not in mod.__dict__})
         if a["new_error"] is not None:
             raise _Failed(a["new_error"])
@@ -536,7 +547,7 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         timings["parse_compile_s"] = round(timings["parse_s"] + timings["compile_s"], 6)
         # 5. added definitions, built in a scratch namespace
         for ad in a["added"]:
-            ns = {}
+            ns = dict(st.imports)
             exec(_raise(ad), mod.__dict__, ns)
             q, cls_name, name = ad["q"], ad["cls"], ad["name"]
             if cls_name is None:
@@ -582,7 +593,7 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         defaults = kwdefaults = J.KEEP
         if "defaults" in r:
             try:
-                defaults, kwdefaults = _defaults(mod, q, r["defaults"])
+                defaults, kwdefaults = _defaults(mod, q, r["defaults"], st.imports)
             except Exception as e:
                 fs.append(F.finding("defaults_not_evaluated", _err(e),
                                     "the new defaults evaluate", subject=k))
@@ -644,6 +655,41 @@ def _analyze(req, analyzer, timings, fs, kname):
             return a
     timings["analyze"] = "inline"
     return analyze(**req)
+
+
+def staged_names(st):
+    """{module name: {name: object}} a staged module adds at module level (definitions and
+    imports): the `overlay` for the next module of the same transaction."""
+    names = dict(st.imports)
+    names.update({n: o for owner, n, o in st.adds if owner is st.mod.__dict__})
+    return {st.mod.__name__: names}
+
+
+def _from_overlay(mod, imp, overlay):
+    """The names a `from m import ...` binds, when m is in the overlay and the overlay has
+    one of the names; else None (run the import as usual)."""
+    if not overlay or not imp.get("from") or imp.get("error") is not None:
+        return None
+    level, name, pairs = imp["from"]
+    if any(n == "*" for n, _ in pairs):
+        return None
+    try:
+        target = importlib.util.resolve_name("." * level + (name or ""), mod.__package__)
+    except Exception:
+        return None
+    staged = overlay.get(target)
+    if not staged or not any(n in staged for n, _ in pairs):
+        return None
+    tmod = importlib.import_module(target)
+    ns = {}
+    for n, asname in pairs:
+        if n in staged:
+            ns[asname or n] = staged[n]
+        elif hasattr(tmod, n):
+            ns[asname or n] = getattr(tmod, n)
+        else:
+            ns[asname or n] = importlib.import_module(f"{target}.{n}")
+    return ns
 
 
 def _invalid(msg, kname):

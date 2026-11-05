@@ -1118,6 +1118,42 @@ class AnalyzerFallbackTest(unittest.TestCase):
         self.assertEqual(e.ran, ["v1"])
 
 
+class CrossModuleTest(unittest.TestCase):
+    """Pain point (vLLM #51899): one edit adds a name in module A and imports it in module B.
+    Staging B failed (A is applied only at commit), so the lab shimmed sys.modules."""
+
+    def test_module_imports_a_name_another_module_of_the_txn_adds(self):
+        """Proves: with ops adding `double` and engine importing it (plain import, and as the default of an added function), one prepare stages both in either plan order with nothing visible before commit; the commit makes engine use ops' very object (step(3) = 34); undo removes both. Not: import cycles between the two patches."""
+        A_SRC = edit(OPS, ("def make_shift(k):", "def double(x):\n    return 2 * x\n\n\n"
+                                                 "def make_shift(k):"))
+        B_SRC = edit(ENG, ("from .ops import activate, make_shift, scale",
+                           "from .ops import activate, double, make_shift, scale"),
+                     ("class Engine:", "def twice(x, f=double):\n    return f(x)\n\n\n"
+                                       "class Engine:"),
+                     ("y = self.shift(activate(scale(x)))",
+                      "y = twice(self.shift(activate(scale(x))))"))
+        for order in (("toy.engine", "toy.ops"), ("toy.ops", "toy.engine")):
+            name, eng, ops = fresh("xmod")
+            p = C.LocalParticipant("rank0", alias={"toy": name})
+            src = {"toy.ops": A_SRC, "toy.engine": B_SRC}
+            tg = {"toy.ops": [], "toy.engine": [["Engine.step", at(ENG, "def step")]]}
+            r = p.prepare({"id": "x", "modules": {m: {"source": src[m], "targets": tg[m]}
+                                                  for m in order}})
+            self.assertEqual((r["ok"], r["findings"]), (True, []), order)
+            # staged, not visible: neither module has the new names yet
+            self.assertEqual([n for n in ("double", "twice") if n in vars(ops) or n in vars(eng)],
+                             [], order)
+            self.assertEqual(eng.Engine().step(3), 17)
+            self.assertTrue(p.commit("x")["ok"])
+            self.assertEqual(eng.Engine().step(3), 34)
+            self.assertIs(eng.double, ops.double)
+            self.assertIs(eng.twice.__defaults__[0], ops.double)
+            self.assertTrue(p.undo("x")["ok"])
+            self.assertEqual([n for n in ("double", "twice") if n in vars(ops) or n in vars(eng)],
+                             [], order)
+            self.assertEqual(eng.Engine().step(3), 17)
+
+
 class AcceptRecordTest(unittest.TestCase):
     """Accept by name with a record. Pain point: a standing accept that silently keeps
     covering a check after the checked code changed (DSv4.1 bound_shape_mismatch was accepted

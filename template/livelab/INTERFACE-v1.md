@@ -68,6 +68,10 @@ Signatures and plan format: `kernel/coordinator.py`.
 | `status()` / `status(id)` | none | `base`, `edited` or `poisoned`; live ids; code fingerprint; poison findings / one transaction's host state |
 
 A patch is `{"files": {module: full patched text}, "accept": [check], "undo_resets": [...]}`.
+A patch may change several
+modules at once: one module's patch can import a name another module's patch adds. The
+modules are staged together and nothing is visible before the commit, which applies them all
+or none.
 
 The lab records a code **fingerprint** per participant (content hash and object identity of
 every function its engine modules reach) at start and after every commit, and checks it after
