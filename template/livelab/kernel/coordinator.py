@@ -176,7 +176,10 @@ class LocalParticipant(Participant):
     participant that loaded the package under another name). `quiesce(fn)`: runs fn at this
     participant's step boundary and returns its result (default: now, in the caller's thread).
     `scope`: names a repair cell can use. `resets`: {"R3": callable, ...}, data resets an
-    undo can ask for (each returns a JSON-able summary or None).
+    undo can ask for (each returns a JSON-able summary or None). `analyzer`: where `stage`
+    parses, compiles and compares the texts (`swap.ProcessAnalyzer()`: a child process, so
+    prepare holds this process's GIL only briefly; default: here). A plan module with
+    `"analyze": "inline"` is analyzed here anyway (for a before/after).
 
     Chained edits: the participant remembers the source text each committed transaction
     installed and the code objects it swapped in. A later plan for the same module is staged
@@ -184,8 +187,9 @@ class LocalParticipant(Participant):
     `base_mismatch`. Undo of a transaction also forgets every later one (the journal undoes
     them too). A plan that would change nothing is an `empty_change` finding."""
 
-    def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None):
+    def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None):
         self.name = name
+        self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
         self.resets = dict(resets or {})
         self.alias = dict(alias or {})
         self.quiesce = quiesce or (lambda fn: fn())
@@ -253,7 +257,8 @@ class LocalParticipant(Participant):
             r = S.stage(self._actual(m), spec["source"], spec["targets"],
                         spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
                         base_source=self._live_source(m), own_codes=own,
-                        compile=spec.get("compile", "definitions"))
+                        compile=spec.get("compile", "definitions"),
+                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer)
             fs += r["findings"]
             ok = ok and r["ok"]
             if r["staged"] is not None:

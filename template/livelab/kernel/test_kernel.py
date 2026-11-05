@@ -923,6 +923,140 @@ def cached(x=lambda: 0):
                                      [L.content_hash(c) for c in whole[k]], k)
 
 
+class ProcessAnalyzerTest(unittest.TestCase):
+    """Prepare's text half (parse, unit compile, outside-changes compare) in a child process.
+    Pain point: on vLLM's scheduler.py the two parses and two `ast.dump` calls held the engine
+    core's GIL 14-19 ms at a time, so a step during prepare took 3.4-3.95x the median at TP4."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.A = S.ProcessAnalyzer().start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.A.close()
+
+    @staticmethod
+    def _summary(r):
+        """Everything stage decides: findings, items, and the staged swap (code objects
+        compared with ==, which covers bytecode, constants, names and line tables)."""
+        out = {"ok": r["ok"], "findings": r["findings"], "items": r["items"]}
+        st = r["staged"]
+        if st is not None:
+            out.update(
+                imports={k: id(v) for k, v in st.imports.items()},
+                swaps=[(id(fn), c, d, kw) for fn, c, d, kw in st.swaps],
+                adds=[(id(o), n, getattr(getattr(x, "__func__", x), "__code__", x))
+                      for o, n, x in st.adds],
+                removes=[(id(o), n) for o, n in st.removes], keys=st.keys,
+                expect=[(id(fn), id(o), h) for fn, o, h in st.expect])
+        return out
+
+    def test_process_analysis_stages_the_same_code_and_findings(self):
+        """Proves: for 14 edits (method with an assert, closure, closure change, decorated, defaults and defaults that fail, added function, method and import, removed method, outside change, generator expression, targets not in the base, a target nothing runs, whole-module compile, a patch that does not parse), stage with the analysis in a child process returns the same findings, items and staged code objects as in-process, and the child really ran (timings say "process"). Not: other Python versions in parent and child (the child is this interpreter)."""
+        name, eng, ops = fresh("analyzer")
+        _, _, gone = fresh("analyzer_gone")       # nothing runs scale's base code any more
+        gone.scale.__code__ = (lambda x: x).__code__
+        E, O = eng.__name__, ops.__name__
+        step = [["Engine.step", at(ENG, "def step")]]
+        shift = [["make_shift.<locals>.shift", at(OPS, "def shift")]]
+        scale = [["scale", at(OPS, "def scale")]]
+        stall = [["Cluster.longest_stall.<locals>.<genexpr>", at(ENG, "(b - a for a, b in")]]
+        cases = {
+            "method": (E, edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")\n'
+                                     '        assert x is not None')), step, {}),
+            "closure": (O, edit(OPS, ("return x + k", "return x + k * 1")), shift, {}),
+            "closure_changed": (O, edit(OPS, ("return x + k", "return x + k + bias")), shift,
+                                {}),
+            "decorated": (O, edit(OPS, ("return x + 1", "return x + 2")),
+                          [["activate", at(OPS, "@traced")]], {}),
+            "defaults": (O, edit(OPS, ("def scale(x):", "def scale(x, m=STEP_SCALE):")),
+                         scale, {}),
+            "defaults_fail": (O, edit(OPS, ("def scale(x):", "def scale(x, m=NOPE):")), scale,
+                              {}),
+            "added": (E, edit(ENG, ("import threading\n", "import threading\nimport fractions\n"),
+                              ("        self.tokens.clear()\n",
+                               "        self.tokens.clear()\n\n    def extra(self):\n"
+                               "        return helper(1)\n"),
+                              ("class Gap:", "def helper(x):\n    return fractions.Fraction(x)"
+                               "\n\n\nclass Gap:"),
+                              ('self.ran.append("base")', 'self.ran.append(str(helper(1)))')),
+                      step, {}),
+            "removed": (E, edit(ENG, ("    def drain(self):\n        self.tokens.clear()\n\n",
+                                      "")), [], {}),
+            "outside": (O, edit(OPS, ("STEP_SCALE = 2", "STEP_SCALE = 3"),
+                                ("return x * STEP_SCALE", "return x * STEP_SCALE * 1")), scale, {}),
+            "genexpr": (E, edit(ENG, ("(b - a for a, b in", "(2 * (b - a) for a, b in")), stall,
+                        {}),
+            "missing": (E, edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")')),
+                        [["Engine.nope", 3], ["Engine.step", 1]] + step, {}),
+            "not_live": (gone.__name__, edit(OPS, ("return x * STEP_SCALE",
+                                                   "return x * STEP_SCALE * 1")), scale, {}),
+            "module": (E, edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")')), step,
+                       {"compile": "module"}),
+            "bad_patch": (E, ENG + "\ndef (:\n", step, {}),
+        }
+        for case, (mod, src, targets, kw) in cases.items():
+            here = S.stage(mod, src, targets, **kw)
+            there = S.stage(mod, src, targets, analyzer=self.A, **kw)
+            if case != "bad_patch":
+                self.assertEqual((here["timings"]["analyze"], there["timings"]["analyze"]),
+                                 ("inline", "process"), case)
+            self.assertEqual(self._summary(there), self._summary(here), case)
+        checks = {c: sorted(f["check"] for f in S.stage(m, s, t, analyzer=self.A, **kw)
+                            ["findings"]) for c, (m, s, t, kw) in cases.items()}
+        self.assertEqual(checks, {   # the cases cover the checks they are named for
+            "method": [], "closure": [], "closure_changed": ["closure_changed"],
+            "decorated": [], "defaults": [], "defaults_fail": ["defaults_not_evaluated"],
+            "added": [], "removed": ["removed_definition"], "outside": ["outside_changes"],
+            "genexpr": [], "missing": ["not_in_patch", "not_in_patch"],
+            "not_live": ["no_live_function", "outside_changes"], "module": [],
+            "bad_patch": ["patch_invalid"]})
+
+    def test_process_analysis_keeps_the_gil_free(self):
+        """Proves: staging a one-line edit of a 30,000-line module holds the caller's GIL under 10 ms at a time with the analysis in a child process, while in-process it holds it for one whole parse. Not: vLLM's own numbers (CPU and live runs in the kernel README)."""
+        budget = 0.010
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        body = "".join(f"def f{i}(x):\n    y = x + {i}\n    return [y, y * 2, {{'k': y}}]\n\n\n"
+                       for i in range(6000))
+        with open(os.path.join(tmp, "kt_bigmod.py"), "w") as f:
+            f.write(body)
+        sys.path.insert(0, tmp)
+        self.addCleanup(sys.path.remove, tmp)
+        import kt_bigmod
+        self.addCleanup(sys.modules.pop, "kt_bigmod", None)
+        new = body.replace("y = x + 7\n", "y = x + 8\n", 1)
+        targets = [["f7", at(body, "def f7(")]]
+
+        def longest_hold(**kw):
+            gc.collect()           # an engine freezes its heap after startup (vLLM does), so a
+            gc.freeze()            # collection triggered by earlier tests' garbage is not counted
+            self.addCleanup(gc.unfreeze)
+            box = {}
+            th = threading.Thread(target=lambda: box.update(r=S.stage(
+                "kt_bigmod", new, targets, **kw)))
+            gaps, last = [], time.perf_counter()
+            th.start()
+            while th.is_alive():
+                time.sleep(0.0005)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+            th.join()
+            self.assertTrue(box["r"]["ok"], box["r"]["findings"])
+            self.assertEqual(box["r"]["findings"], [])
+            return max(gaps), box["r"]["timings"]
+
+        inline, t_in = longest_hold()
+        if t_in["parse_s"] / 2 < 2 * budget:
+            self.skipTest(f"one parse takes {t_in['parse_s'] / 2:.3f} s here: too fast to tell")
+        there, t_pr = longest_hold(analyzer=self.A)
+        self.assertEqual((t_in["analyze"], t_pr["analyze"]), ("inline", "process"))
+        self.assertGreater(inline, 2 * budget)
+        self.assertLess(there, budget, f"in-process: {inline:.3f} s")
+
+
 class AcceptRecordTest(unittest.TestCase):
     """Accept by name with a record. Pain point: a standing accept that silently keeps
     covering a check after the checked code changed (DSv4.1 bound_shape_mismatch was accepted

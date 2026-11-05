@@ -9,7 +9,7 @@ Pure Python, standard library only; it imports no engine.
 | File | What it does |
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
-| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. |
+| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. |
 | `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10). |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
@@ -118,6 +118,31 @@ import). Each unit's code objects equal the whole-module compile for all 43,457 
 vLLM 0.33 (content hash). The longest single GIL hold is now one parse (11-13 ms here);
 the outside-changes comparison (two `ast.dump` calls of about 9 ms) is next.
 
+Analysis off the process. Those parses and dumps still stretched engine steps: at TP4 (8.6 ms
+steps) the longest step during a core prepare was 3.4-3.95x the median, per-definition compile
+or not. A helper thread does not help (same GIL). So `stage` is split: `analyze` is its text
+half (parse both texts, match targets, add the witness, compile the units, find added,
+removed and imported names, compare the blanked trees); it needs only the two texts, the
+targets and which targets are live, and returns plain data and code objects. Import, locate,
+the base check against running code, exec of imports, added definitions and defaults, old/new
+pairing and the running-frame check stay in the engine process. `LocalParticipant(analyzer=
+swap.ProcessAnalyzer())` runs `analyze` in one long-lived child of the same interpreter (same
+`-O` level; requests and replies are `marshal` data, code objects included); a plan module with
+`"analyze": "inline"` runs it in-process (for a before/after). If the child fails, `stage`
+analyzes in-process and says so in `timings["analyze_fallback"]`. The same edit of
+`Scheduler.schedule` on CPU, prepared by a core `LocalParticipant` in a background thread while
+the main thread ticks every 0.5 ms (9 runs each; our 2026-11-05 CPU run):
+
+| Analysis | longest GIL hold, median (max) | prepare wall, median |
+|---|---|---|
+| before (in-process, previous kernel) | 20.7 ms (219.7 ms, a gc pass over the new ASTs) | 83 ms |
+| in-process (`"analyze": "inline"`) | 20.4 ms (221.3 ms) | 77 ms |
+| child process (`ProcessAnalyzer`) | 1.4 ms (1.8 ms) | 82 ms |
+
+Same staged code (new hash `73d9f00e04cc058d`) and the same findings (none) in all three;
+`test_process_analysis_stages_the_same_code_and_findings` checks code objects (`==`: bytecode,
+constants, names, line tables) and findings for 14 kinds of edit.
+
 With the one-by-one `Coordinator` instead (each rank switching at its own boundary), the same
 commit and undo gave at least one step with mixed versions in 20 of 20 runs on CPU; the
 step-gap coordinator gave none in 20 of 20.
@@ -188,8 +213,8 @@ nothing; the host is poisoned, so the next transaction is refused (undo is still
 
 ## Golden tests
 
-`python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 2.5 s; one
-test builds a 2.5 M-object heap, one waits out a 0.6 s hang). `python3 -m unittest` also runs the conformance cases on
+`python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 5 s; one
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang, two start an analyzer child). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
@@ -205,24 +230,31 @@ test_group_witness_is_kept_per_rank_and_uneven_is_a_finding ... ok
 test_half_committed_group_is_undone ... ok
 test_hung_commit_ends_the_gap_at_the_deadline ... ok
 test_linked_receipts_and_measured_times ... ok
+test_name_and_txn_record_still_accept ... ok
 test_one_by_one_commit_mixes_versions ... ok
 test_prepare_never_holds_the_loop_longer_than_the_budget ... ok
+test_process_analysis_keeps_the_gil_free ... ok
+test_process_analysis_stages_the_same_code_and_findings ... ok
 test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
 test_stage_compiles_only_the_changed_definitions ... ok
+test_stage_findings_carry_the_checked_code_hash ... ok
+test_standing_accept_expires_when_code_changes ... ok
 test_step_gap_commit_and_undo_never_mix_versions ... ok
 test_step_gap_failed_commit_is_undone_in_the_same_gap ... ok
+test_swap_a_generator_expression ... ok
 test_swap_reaches_every_holder ... ok
 test_timed_out_caller_resolves_the_outcome_with_status ... ok
+test_undo_after_a_deadline_rollback_leaves_every_rank_undone ... ok
 test_undo_of_an_older_txn_reports_the_later_ones ... ok
 test_undo_restores_exact_base ... ok
 test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 28 tests in 2.5s
+Ran 35 tests in 5.1s
 
 OK
 ```
@@ -288,6 +320,9 @@ Each test's docstring says what it proves and what it does not.
   in one piece. Copies of a function object made with `types.FunctionType(code, ...)` are not
   found by the namespace path.
 - The host's transaction table lives in memory: a host crash loses `status`.
+- The analyzer child is this interpreter, started with the same `-O` level; equivalence is
+  tested for that case only. A child that dies or does not answer within `timeout_s` is
+  killed and the prepare analyzes in-process (`analyze_fallback`), holding the GIL as before.
 - A chained edit of a function the earlier edit did not touch, when the earlier edit moved
   lines above it: the function's running code keeps the file's line, the text the
   participant stages against has another, and the target is not found (`no_live_function`).
