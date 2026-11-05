@@ -14,7 +14,7 @@ Pure Python, standard library only; it imports no engine.
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. Running frames: stage sees steps in flight (prepare runs while the engine steps), so a frame on a thread stack there is an advisory `running_frame` (reported, never blocks); `validate` checks the thread stacks again in the gap, and only a frame live at the quiesce point votes no (through the plan's accept). A suspended generator or coroutine still blocks at stage. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
-| `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails, a phase-2 deadline (`Lane`, `deadline_missed`, host poison); `prove` after the workload (witness counts per rank); `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process; `CallParticipant` is the shape an engine implements over its RPC. `GroupParticipant` / `merge_ranks`: several ranks reached by one call, with per-rank replies in `ranks`. |
+| `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails, a phase-2 deadline (`Lane`, `deadline_missed`, host poison); `prove` after the workload (witness counts per rank); `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process (an engine adds its own static checks with `checks=[fn(module, items) -> findings]`, e.g. vLLM's `captured_target` for model code in graph mode); `CallParticipant` is the shape an engine implements over its RPC. `GroupParticipant` / `merge_ranks`: several ranks reached by one call, with per-rank replies in `ranks`. |
 | `session.py` | The host's state machine for one lab: a stack of committed transactions, the code fingerprint each participant should show (content hash and code object id of every function the modules' namespaces reach), checked after every abort, rollback, undo and `status()`. Crash, hang, lost participant, a missed phase-2 deadline, failed undo or code changed outside the journal poison it; a poisoned session refuses install (undo stays allowed) until the lab respawns its workers. |
 | `toy/` | A toy engine: ops with a decorator and a closure factory; an `Engine` built in `__init__` with a saved bound-method callback, a cache, and a `step` that records the code version it ran; a single-engine busy loop; and a `Cluster` (the engine core) that steps several ranks together and runs queued work only between steps. `load_copy` gives each participant its own module copy. |
 
@@ -311,6 +311,7 @@ test_closure_with_no_base_version_is_a_finding ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
 test_edit_that_changes_no_code_is_refused ... ok
+test_engine_checks_add_findings_at_prepare ... ok
 test_editing_a_deleted_definition_is_a_finding_not_a_crash ... ok
 test_fallback_to_in_process_is_a_finding ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
@@ -354,7 +355,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 58 tests in 7.7s
+Ran 59 tests in 7.7s
 
 OK
 ```

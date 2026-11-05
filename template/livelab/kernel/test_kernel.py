@@ -211,6 +211,28 @@ class KernelTest(unittest.TestCase):
         e.step(1)
         self.assertEqual(e.ran[-1], "v1")
 
+    def test_engine_checks_add_findings_at_prepare(self):
+        """Proves: an engine check given to LocalParticipant (`checks`) adds its findings to prepare's vote: a `captured_target` for the target votes no, and an accept record with that subject lets it through. Not: the vLLM check itself (adapter tests)."""
+        name, eng, _ = fresh("checks")
+        seen = []
+
+        def captured(module, items):
+            seen.append((module, sorted(items)))
+            return [F.finding("captured_target", "runs only in captured graphs", "runs eagerly",
+                              subject=k) for k in items]
+        p = C.LocalParticipant("core", alias={"toy": name}, checks=[captured])
+        mods = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")',
+                                                    'self.ran.append("v1")')),
+                               "targets": [["Engine.step", at(ENG, "def step")]]}}
+        r = p.prepare({"id": "c1", "modules": mods})
+        k = f"toy.engine:Engine.step:{at(ENG, 'def step')}"
+        self.assertEqual((r["ok"], [(f["check"], f["subject"]) for f in r["findings"]]),
+                         (False, [("captured_target", k)]))
+        self.assertEqual(seen, [("toy.engine", [k])])
+        r = p.prepare({"id": "c2", "modules": mods,
+                       "accept": [{"check": "captured_target", "subject": k}]})
+        self.assertTrue(r["ok"], r["findings"])
+
     def test_running_frame_never_runs_the_new_code(self):
         """Proves: zero calls under a running loop frame give running_frame, an uncalled function zero_witness. Not: frames in C or other processes."""
         name, eng, _ = fresh("loop")

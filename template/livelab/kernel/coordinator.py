@@ -200,8 +200,10 @@ class LocalParticipant(Participant):
     is visible before commit. A plan module without `targets` lets stage find them; the reply's
     `targets` says which it staged."""
 
-    def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None):
+    def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None,
+                 checks=None):
         self.name = name
+        self.checks = list(checks or ())   # engine checks: fn(module, items) -> [findings]
         self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
         self.resets = dict(resets or {})
         self.alias = dict(alias or {})
@@ -307,6 +309,13 @@ class LocalParticipant(Participant):
             timings[m] = r.get("timings", {})
             if "targets" in r:
                 targets[m] = r["targets"]
+            for check in self.checks:         # the engine's own static checks of the targets
+                try:
+                    fs += check(m, r["items"]) or []
+                except Exception as e:
+                    fs.append({**F.finding("patch_invalid", f"engine check {check!r}: "
+                                           f"{type(e).__name__}: {e}", "the check runs",
+                                           subject=m), "advisory": True})
         cells = []
         for rep in plan.get("repairs", []):
             missing = [n for n in rep["declares"] if n not in self.scope]
