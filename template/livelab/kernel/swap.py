@@ -68,6 +68,17 @@ def qual_index(tree):
             q = pre + "<lambda>"
             idx.setdefault(q, []).append(node)
             visit(node.body, q + ".<locals>.")
+        elif isinstance(node, ast.GeneratorExp):
+            # its own code object, a constant of the enclosing code (list/set/dict
+            # comprehensions are inlined since 3.12 and have none). The first iterable is
+            # evaluated by the enclosing code, so it is named there.
+            q = pre + "<genexpr>"
+            idx.setdefault(q, []).append(node)
+            visit(node.generators[0].iter, pre)
+            for x in [node.elt] + node.generators[0].ifs + node.generators[1:]:
+                visit(x, q + ".<locals>.")
+            for g in node.generators:
+                visit(g.target, q + ".<locals>.")
         else:
             for x in ast.iter_child_nodes(node):
                 visit(x, pre)
@@ -90,6 +101,10 @@ def _blank(tree, targets, added):
         n = idx[q][i]
         if isinstance(n, _DEF):
             n.body, n.args = [ast.Pass()], ast.arguments([], [], None, [], [], None, [])
+        elif isinstance(n, ast.GeneratorExp):    # keep the first iterable (enclosing code)
+            g = n.generators[0]
+            n.elt, n.generators = ast.Constant(None), [
+                ast.comprehension(ast.Name("_", ast.Store()), g.iter, [], 0)]
         else:
             n.body, n.args = ast.Constant(None), ast.arguments([], [], None, [], [], None, [])
 
@@ -450,6 +465,10 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
                             subject=kname))
     timings["compare_s"] = round(time.perf_counter() - t, 6)
     timings["stage_s"] = round(time.perf_counter() - t0, 6)
+    for f in fs:        # what a standing accept matches on: the checked code
+        item = st.items.get(f.get("subject")) if isinstance(f.get("subject"), str) else None
+        if item:
+            f["code_hash"] = item["new_hash"]
     return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
 
 

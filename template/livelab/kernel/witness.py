@@ -91,11 +91,15 @@ def live_codes(suspended=True):
 
 
 def inject(node, key):
-    """Insert the counter call at the top of a def or lambda node (in place)."""
+    """Insert the counter call at the top of a def, lambda or generator expression (in place)."""
     call = ast.Call(ast.Name(HIT, ast.Load()), [ast.Constant(key)], [])
     if isinstance(node, ast.Lambda):
         node.body = ast.copy_location(
             ast.BoolOp(ast.Or(), [ast.copy_location(call, node.body), node.body]), node.body)
+        return
+    if isinstance(node, ast.GeneratorExp):    # counts once per item produced, not per call
+        node.elt = ast.copy_location(
+            ast.BoolOp(ast.Or(), [ast.copy_location(call, node.elt), node.elt]), node.elt)
         return
     body = node.body
     doc = isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \

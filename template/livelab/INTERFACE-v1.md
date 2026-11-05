@@ -116,7 +116,8 @@ overridable: `patch_invalid`, `no_live_function`, `not_in_patch`, `closure_chang
 An accept record `{check, by, reason, scope}` says who accepted a finding and why; `decide`
 returns the records it used (`accepts`) so the transaction record can carry them. Scope `txn` covers
 this transaction; `standing` also names `participant` and `code_hash` and covers a finding only while
-both still match, so it expires when the checked code changes. A check accepted on every run is a
+both still match, so it expires when the checked code changes. Stage findings about a staged
+definition carry its new `code_hash`; participants add `participant`. A check accepted on every run is a
 calibration bug in the check, not a standing accept. Writing accepts into receipts waits for the
 receipt writer's human owner.
 

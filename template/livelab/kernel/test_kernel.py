@@ -923,5 +923,42 @@ class AcceptRecordTest(unittest.TestCase):
         self.assertEqual(d["accepts"], [rec])
 
 
+class GenexprTargetTest(unittest.TestCase):
+    """A changed generator expression is a target in its own right (its code is a constant of
+    the enclosing function; no function object holds it). Pain point: the vLLM adapter got
+    `not_in_patch` for such targets and fell back to a heap scan."""
+
+    def test_swap_a_generator_expression(self):
+        name, eng, _ = fresh("genexpr")
+        new = edit(ENG, ("(b - a for a, b in", "(2 * (b - a) for a, b in"))
+        line = at(ENG, "(b - a for a, b in")
+        c = eng.Cluster({})
+        c.ends = [0.0, 1.0, 3.0]
+        self.assertEqual(c.longest_stall(), 2.0)
+        r, d, a = install(eng.__name__, new, [["Cluster.longest_stall.<locals>.<genexpr>", line]],
+                          J.Journal(), W.Witness())
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertNotIn("not_in_patch", [f["check"] for f in r["findings"]])
+        self.assertTrue(d["proceed"], d["blocking"])
+        self.assertTrue(a["ok"], a)
+        self.assertEqual(c.longest_stall(), 4.0)      # the new expression runs
+
+
+    def test_stage_findings_carry_the_checked_code_hash(self):
+        """A standing accept matches on code_hash; a finding without one could never match."""
+        name, eng, _ = fresh("hash")
+        line = at(ENG, "def longest_stall")
+        t = [["Cluster.longest_stall", line]]
+        one = edit(ENG, ("(b - a for a, b in", "(2 * (b - a) for a, b in"))
+        two = edit(ENG, ("(b - a for a, b in", "(3 * (b - a) for a, b in"))
+        _, _, a = install(eng.__name__, one, t, J.Journal(), W.Witness())
+        self.assertTrue(a["ok"], a)
+        r = S.stage(eng.__name__, two, t)        # running code is `one`, not the file: base_mismatch
+        k = next(iter(r["items"]))
+        fs = [f for f in r["findings"] if f["check"] == "base_mismatch"]
+        self.assertTrue(fs, r["findings"])
+        self.assertEqual(fs[0]["code_hash"], r["items"][k]["new_hash"])
+
+
 if __name__ == "__main__":
     unittest.main()
