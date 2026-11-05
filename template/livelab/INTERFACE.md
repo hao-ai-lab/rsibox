@@ -60,7 +60,10 @@ runs, `proof` after the workload ran, `undo` whenever it is undone. Every record
 `schema` (`fastrsi-receipt/proposed-v1`), `kind`, `id`, and `writer: {pid, written_at}` added
 by the writer.
 
-`txn`: the transaction (prepare, vote, commit or abort, rollback of a failed commit).
+`txn`: the transaction. Phase 1 (prepare, the vote) runs while the engine steps; phase 2
+(validate, commit or abort, rollback of a failed commit) runs in one gap between steps. A
+caller that times out gets `in-doubt` and asks the host's `status(id)` (prepared, committed,
+aborted, undone, in-doubt); the record is written once the outcome is known.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -69,14 +72,15 @@ by the writer.
 | `base_hash`, `patch_hash` | str | hash of the base sources, and of the patched sources plus repair cells |
 | `plan` | `{targets, predicted_resources, recipes, certainty, accept, undo_resets}` | what the planner predicted, the accepted check names, the resets an undo must run |
 | `actual_recipes` | [str] | recipes that ran (empty unless committed) |
-| `participants` | `{name: {prepare, commit, abort, undo}}` | each call's `{"ok": bool, ...}` reply |
+| `participants` | `{name: {prepare, validate, commit, abort, undo}}` | each call's `{"ok": bool, ...}` reply |
 | `commit_hashes` | `{participants: {name: {key: [hash]}}, agree}` | code hashes right after commit, and whether all participants agree |
 | `findings` | [finding + `participant`] | every finding of the transaction, in the findings schema |
 | `decisions` | `{accepted: [check], blocking: [check]}` | how the accept list was applied |
 | `outcome` | `committed` \| `aborted` \| `rolled_back` | all switched, none switched, or switched and undone in the same transaction |
-| `timeline` | `{edit, queued, prepare_start, vote, committed, txn_end}` | measured unix seconds |
+| `timeline` | `{edit, prepare_start, prepared, gap_start, vote, committed, gap_end, txn_end}` | measured unix seconds |
 | `edit_to_run_s` | float \| null | `committed - edit`; null if nothing committed |
-| `phases_s` | float | `txn_end - queued`: for a step-gap transaction, how long the engine's loop stalled |
+| `prepare_s` | float | `prepared - prepare_start`: phase 1, while the engine steps |
+| `gap_s` | float \| null | `gap_end - gap_start`: phase 2, how long the engine's loop stalled |
 | `baseline_restart_s` | `{seconds, source}` \| null | the warm restart this transaction replaces |
 | `rollback` | `{status, participants}` | undo of a failed commit: `not_needed`, `undone` or `partial` |
 

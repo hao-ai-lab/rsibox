@@ -54,10 +54,11 @@ stop.set()
 loop.join()
 
 print("outcome:       ", res["outcome"], "edit_to_run_s", res["receipt"]["edit_to_run_s"],
-      "gap stall phases_s", res["receipt"]["phases_s"])
+      "prepare_s", res["receipt"]["prepare_s"], "gap_s", res["receipt"]["gap_s"])
 tl = res["receipt"]["timeline"]
-print("in the gap:     prepare+vote", round(tl["vote"] - tl["prepare_start"], 4),
-      "s, commit", round(tl["committed"] - tl["vote"], 4), "s")
+print("in the gap:     validate", round(tl["vote"] - tl["gap_start"], 6),
+      "s, commit", round(tl["committed"] - tl["vote"], 6), "s; longest stall between steps",
+      round(cluster.longest_stall(), 6))
 print("proof witness: ", {r: list(w.values()) for r, w in proof["receipt"]["witness"].items()},
       "edit_to_finish_s", proof["receipt"]["edit_to_finish_s"])
 print("undo:          ", undo["receipt"]["status"], "undo_s", undo["receipt"]["undo_s"])
@@ -69,18 +70,21 @@ print("receipts:      ", [(r["kind"], r["id"] == res["txn"]) for r in R.read(pat
 Real output:
 
 ```
-outcome:        committed edit_to_run_s 0.022584 gap stall phases_s 0.02273
-in the gap:     prepare+vote 0.0221 s, commit 0.0001 s
-proof witness:  {'rank0': [40], 'rank1': [40], 'rank2': [40]} edit_to_finish_s 0.047017
-undo:           undone undo_s 0.000613
+outcome:        committed edit_to_run_s 0.024824 prepare_s 0.024473 gap_s 0.000103
+in the gap:     validate 3e-05 s, commit 7.3e-05 s; longest stall between steps 0.008111
+proof witness:  {'rank0': [40], 'rank1': [40], 'rank2': [40]} edit_to_finish_s 0.049065
+undo:           undone undo_s 0.00054
 versions per step, collapsed: [('base', 'base', 'base'), ('v1', 'v1', 'v1'), ('base', 'base', 'base')]
 steps with mixed versions:    []
 receipts:       [('txn', True), ('proof', True), ('undo', True)]
 ```
 
-Note the gap stall: the loop does not step while the transaction runs, and 97% of it is
-prepare (the heap scans), not the switch. On a large engine a heap scan costs far more than
-in the toy, so prepare is the part to move out of the gap.
+Prepare (locate, heap scan, compile, stage) runs while the loop steps; the loop stops only for
+validate and commit (0.1 ms here). But the longest stall between steps was 8 ms, not the gap:
+the heap scan is one C call that holds the GIL, so a prepare in another thread of the SAME
+process still stalls the loop. On this machine, with 5 million extra objects, a 0.15 s scan
+stalled the loop thread 53 ms. Phase 1 is free only in another process, or once locate stops
+scanning the whole heap.
 
 With the one-by-one `Coordinator` instead (each rank switching at its own boundary), the same
 commit and undo gave at least one step with mixed versions in 20 of 20 runs on CPU; the
@@ -88,13 +92,14 @@ step-gap coordinator gave none in 20 of 20.
 
 ## Golden tests
 
-`python3 -m unittest -v` from `template/livelab` (CPU, about 0.5 s):
+`python3 -m unittest -v` from `template/livelab` (CPU, about 1.2 s):
 
 ```
 test_accept_list ... ok
 test_closure_change_is_a_finding_not_an_exception ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
+test_gap_stays_small_while_prepare_is_slow ... ok
 test_linked_receipts_and_measured_times ... ok
 test_one_by_one_commit_mixes_versions ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
@@ -103,11 +108,13 @@ test_running_frame_never_runs_the_new_code ... ok
 test_step_gap_commit_and_undo_never_mix_versions ... ok
 test_step_gap_failed_commit_is_undone_in_the_same_gap ... ok
 test_swap_reaches_every_holder ... ok
+test_timed_out_caller_resolves_the_outcome_with_status ... ok
 test_undo_restores_exact_base ... ok
 test_undo_runs_the_declared_data_reset ... ok
+test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 15 tests in 0.515s
+Ran 18 tests in 1.242s
 
 OK
 ```
@@ -122,9 +129,14 @@ Each test's docstring says what it proves and what it does not.
   limits (`closure_changed`, `no_live_function`, ...) are not overridable.
 - **Prepare changes nothing visible.** New code, defaults, imports and added definitions are
   built beside the old state. Only `apply` (inside `commit`) switches.
-- **Ranks that step together switch in one gap.** `StepGapCoordinator` queues the whole
-  transaction to the loop owner. A failed commit is undone in the same gap, so no step runs
-  the new code anywhere.
+- **Ranks that step together switch in one gap.** Phase 1 (prepare) runs while the loop
+  steps; `StepGapCoordinator` queues phase 2 (validate, commit or abort) to the loop owner.
+  Validate re-checks that every function still runs the code object prepare staged against;
+  a change in between (`changed_since_prepare`) aborts everyone. A failed commit is undone in
+  the same gap, so no step runs the new code anywhere.
+- **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
+  `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
+  2 that had not started when the caller gave up is cancelled.
 - **Undo is exact for code, not for data.** The journal restores the same code and attribute
   objects and removes every name it added. Data the new code wrote (requests, cache entries)
   needs the reset the plan declares in `undo_resets`; a missing hook is a `reset_failed`
@@ -134,8 +146,9 @@ Each test's docstring says what it proves and what it does not.
 
 ## Not covered yet
 
-- Prepare outside the gap (stage first, then vote and commit in the gap after checking that
-  nothing changed since).
+- A locate that does not scan the whole heap: in the same process the scan stalls the loop
+  through the GIL even outside the gap.
+- The host's transaction table lives in memory: a host crash loses `status`.
 - A second edit on top of a committed one, when the edit moved the target's first line: the
   running code then has the patch's line, and the target is not found (`no_live_function`).
 - Functions defined with `exec` into foreign globals are not found (the scan matches by

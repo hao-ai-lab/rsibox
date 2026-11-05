@@ -96,6 +96,12 @@ CATALOG = {
         [{"action": "inspect the participant (REPL) and retry", "cost": "seconds"}, RESTART],
         "participants run different code: every collective of the next step is suspect",
         [], False),
+    "changed_since_prepare": (
+        "the code a staged swap was built against changed between prepare and the gap "
+        "(another transaction or a REPL edit); committing would overwrite that change",
+        [{"action": "prepare again against the current code", "cost": "one prepare"}],
+        "the other change is lost silently, and undo would restore a base that no longer "
+        "was the base", ["Proving an edit applied"], False),
     "reset_failed": (
         "the data reset the undo plan declares did not run; undo restored the code, but data "
         "the new code wrote (requests, cache entries) stays",

@@ -264,9 +264,9 @@ class KernelTest(unittest.TestCase):
         rec = res["receipt"]
         self.assertEqual(res["outcome"], "rolled_back")
         self.assertEqual({n: sorted(r) for n, r in rec["participants"].items()},
-                         {"rank0": ["commit", "prepare", "undo"],
-                          "rank1": ["abort", "commit", "prepare"],
-                          "core": ["abort", "prepare"]})
+                         {"rank0": ["commit", "prepare", "undo", "validate"],
+                          "rank1": ["abort", "commit", "prepare", "validate"],
+                          "core": ["abort", "prepare", "validate"]})
         self.assertEqual(rec["participants"]["rank1"]["commit"]["error"],
                          "commit: RuntimeError: rank1: worker process lost")
         self.assertEqual((rec["rollback"]["status"], list(rec["rollback"]["participants"])),
@@ -322,8 +322,8 @@ class KernelTest(unittest.TestCase):
         tl = rec["timeline"]
         self.assertEqual(tl["edit"], t_edit)
         self.assertEqual(rec["edit_to_run_s"], round(tl["committed"] - tl["edit"], 6))
-        self.assertTrue(tl["edit"] <= tl["queued"] <= tl["prepare_start"] <= tl["vote"]
-                        <= tl["committed"] <= tl["txn_end"])
+        self.assertTrue(tl["edit"] <= tl["prepare_start"] <= tl["prepared"] <= tl["gap_start"] <= tl["vote"]
+                        <= tl["committed"] <= tl["gap_end"] <= tl["txn_end"])
         self.assertGreater(rec["edit_to_run_s"], 0)
         self.assertEqual(prf["edit_to_finish_s"],
                          round(prf["timeline"]["proved"] - prf["timeline"]["edit"], 6))
@@ -412,13 +412,14 @@ class KernelTest(unittest.TestCase):
 
     # -- step-gap transactions: ranks that step together --------------------------------------
 
-    def _cluster(self, tag, gap_mode, quiesce=None):
+    def _cluster(self, tag, gap_mode, quiesce=None, slow=None):
         """Three ranks, each its own toy copy, stepped together by one Cluster loop (the engine
         core). gap_mode: participants switch when called (the loop owner calls them in its
         gap); otherwise each switches at its own engine's boundary (the old way). The
         coordinator reaches each rank through CallParticipant over a loopback call that takes
         1 ms, like an RPC: in one process without it, the GIL would make three back-to-back
-        commits look atomic and hide the race. Returns (cluster, call participants, locals)."""
+        commits look atomic and hide the race. slow: {rank: {method: extra seconds}}.
+        Returns (cluster, call participants, locals)."""
         engines, ps, lps = {}, [], []
         for pname in ("rank0", "rank1", "rank2"):
             name, eng, _ = fresh(tag + pname)
@@ -426,8 +427,8 @@ class KernelTest(unittest.TestCase):
             q = (quiesce or {}).get(pname) or (None if gap_mode else e.at_boundary)
             lp = C.LocalParticipant(pname, alias={"toy": name}, quiesce=q)
 
-            def rpc(method, payload, lp=lp):
-                time.sleep(0.001)
+            def rpc(method, payload, lp=lp, extra=(slow or {}).get(pname, {})):
+                time.sleep(0.001 + extra.get(method, 0))
                 return getattr(lp, method)(payload)
             lps.append(lp)
             ps.append(C.CallParticipant(pname, rpc))
@@ -467,7 +468,72 @@ class KernelTest(unittest.TestCase):
         self.assertEqual([t for t in cl.log if len(set(t)) > 1], [])
         self.assertEqual([k for k, _ in itertools.groupby(cl.log)],
                          [("base",) * 3, ("v1",) * 3, ("base",) * 3])
-        self.assertLess(res["receipt"]["phases_s"], 1.0)   # how long the gap stalled the loop
+        self.assertLess(res["receipt"]["gap_s"], 0.1)   # how long the gap stalled the loop
+
+    def test_gap_stays_small_while_prepare_is_slow(self):
+        """Proves: a 0.3 s prepare (like a heap scan) runs while steps go on; the loop stalls only for validate+commit. Not: vLLM's real scan cost."""
+        cl, ps, _ = self._cluster("slowprep", gap_mode=True, slow={"rank0": {"prepare": 0.3}})
+        co = C.StepGapCoordinator(ps, cl.at_gap)
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        self._steps(cl)
+        halt()
+        rec, tl = res["receipt"], res["receipt"]["timeline"]
+        self.assertEqual(rec["outcome"], "committed")
+        self.assertGreaterEqual(rec["prepare_s"], 0.3)
+        self.assertLess(rec["gap_s"], 0.05)              # 6 loopback calls of 1 ms, no scan
+        self.assertLess(cl.longest_stall(), 0.05)       # measured by the loop itself
+        self.assertEqual([t for t in cl.log if len(set(t)) > 1], [])
+        k = co.txns[res["txn"]]
+        self.assertEqual(sorted(k["res"]["rank0"]), ["commit", "prepare", "validate"])
+        self.assertTrue(tl["prepare_start"] < tl["prepared"] <= tl["gap_start"] < tl["gap_end"])
+
+    def test_validate_catches_a_change_between_prepare_and_gap(self):
+        """Proves: a REPL edit of rank1's target after prepare is caught by validate in the gap, and no rank commits. Not: changes to data."""
+        cl, ps, lps = self._cluster("validate", gap_mode=True)
+        repl = L.code_tree(compile(edit(ENG, ('"base"', '"repl"')), "engine.py", "exec"))[0][
+            ("Engine.step", at(ENG, "def step"))][0]
+        r1 = cl.engines["rank1"]
+
+        def gap(fn):                              # the REPL edit lands between the phases
+            type(r1).step.__code__ = repl
+            return cl.at_gap(fn)
+        co = C.StepGapCoordinator(ps, gap)
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        self._steps(cl)
+        halt()
+        self.assertEqual((res["outcome"], co.status(res["txn"])["state"]), ("aborted", "aborted"))
+        self.assertEqual([(f["participant"], f["check"]) for f in res["receipt"]["findings"]],
+                         [("rank1", "changed_since_prepare")])
+        self.assertEqual([lp.status(res["txn"])["state"] for lp in lps], ["aborted"] * 3)
+        self.assertEqual({k for k, _ in itertools.groupby(cl.log)},
+                         {("base", "base", "base"), ("base", "repl", "base")})   # never v1
+
+    def test_timed_out_caller_resolves_the_outcome_with_status(self):
+        """Proves: a caller whose gap call times out mid-commit gets in-doubt, and status gives the real outcome; an unstarted one is cancelled. Not: host crashes."""
+        cl, ps, _ = self._cluster("indoubt", gap_mode=True,
+                                  slow={r: {"commit": 0.05} for r in ("rank0", "rank1", "rank2")})
+        co = C.StepGapCoordinator(ps, lambda fn: cl.at_gap(fn, timeout=0.05))
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        self.assertEqual((res["outcome"], res["receipt"]), ("in-doubt", None))
+        self.assertEqual(co.status(res["txn"])["state"], "in-doubt")
+        wait_for(lambda: co.status(res["txn"])["state"] != "in-doubt")
+        st = co.status(res["txn"])
+        self._steps(cl)
+        halt()
+        self.assertEqual((st["state"], st["outcome"]), ("committed", "committed"))
+        self.assertEqual(co.txns[res["txn"]]["rec"]["outcome"], "committed")   # written late
+        self.assertEqual([t for t in cl.log if len(set(t)) > 1], [])
+        self.assertEqual(cl.log[-1], ("v1",) * 3)
+
+        def stalled(fn):                          # the loop never reaches a gap
+            raise TimeoutError("no step gap within 0.05 s")
+        co2 = C.StepGapCoordinator(ps, stalled)
+        res2 = co2.run({"modules": self.V1})
+        self.assertEqual((res2["outcome"], co2.status(res2["txn"])["state"]),
+                         ("aborted", "aborted"))
 
     def test_one_by_one_commit_mixes_versions(self):
         """Proves: the old coordinator (each rank at its own boundary) lets a step run ranks on different versions. Not: how often in a real engine."""

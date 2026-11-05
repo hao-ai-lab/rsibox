@@ -94,6 +94,7 @@ class Cluster:
         self.engines = dict(engines)       # rank name -> Engine
         self.delay = delay
         self.log = []                      # per cluster step: the version each rank's step ran
+        self.ends = []                     # per cluster step: time.perf_counter() at its end
         self.gap = Gap()
 
     def step(self, x=1):
@@ -101,6 +102,11 @@ class Cluster:
             e.run_boundary()
             e.step(x)
         self.log.append(tuple(e.ran[-1] for e in self.engines.values()))
+        self.ends.append(time.perf_counter())
+
+    def longest_stall(self):
+        """Longest time between the ends of two consecutive steps (seconds)."""
+        return max((b - a for a, b in zip(self.ends, self.ends[1:])), default=0.0)
 
     def at_gap(self, fn, timeout=5.0):
         return self.gap.call(fn, timeout)

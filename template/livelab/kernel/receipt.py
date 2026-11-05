@@ -11,8 +11,10 @@ opens the file in append mode under an exclusive lock and never rewrites a line.
 A transaction leaves up to three records that share its `id` (schema proposed for INTERFACE
 v1; see template/livelab/INTERFACE.md):
 
-- `txn` (from Coordinator.run): plan, each participant's prepare / commit / abort replies,
-  the vote outcome, in-transaction rollback, findings and decisions, edit_to_run_s.
+- `txn` (from Coordinator.run): plan, each participant's prepare / validate / commit / abort
+  replies, the outcome, in-transaction rollback, findings and decisions, edit_to_run_s,
+  prepare_s (phase 1, steps go on) and gap_s (phase 2, the loop stalls). When the caller
+  timed out, the record is written once `status(txn)` first sees the transaction finished.
 - `proof` (from Coordinator.prove, after the workload ran): witness counts per participant,
   their findings (zero_witness, running_frame), the caller's golden results, edit_to_finish_s.
 - `undo` (from Coordinator.undo, whenever it happens): code undo per participant, then the
@@ -29,7 +31,7 @@ SCHEMA = "fastrsi-receipt/proposed-v1"
 FIELDS = {
     "txn": ("schema", "kind", "id", "interface_version", "engine", "base_hash", "patch_hash",
             "plan", "actual_recipes", "participants", "commit_hashes", "findings", "decisions",
-            "outcome", "timeline", "edit_to_run_s", "phases_s", "baseline_restart_s",
+            "outcome", "timeline", "edit_to_run_s", "prepare_s", "gap_s", "baseline_restart_s",
             "rollback"),
     "proof": ("schema", "kind", "id", "witness", "findings", "golden", "timeline",
               "edit_to_finish_s"),

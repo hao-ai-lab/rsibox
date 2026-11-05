@@ -110,6 +110,7 @@ class Staged:
         self.keys = []           # witness keys armed by this swap
         self.old_codes = {}      # key -> [code objects the target ran before]
         self.functions = {}      # key -> [function objects that held the target's code]
+        self.expect = []         # (function, code it ran at stage time, its hash): validate
         self.items = {}          # key -> JSON summary
 
 
@@ -299,7 +300,27 @@ def stage(module, source, targets, base_hash=None, key_module=None):
     for o, (c, d, kw) in plan.items():
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
+            st.expect.append((fn, o, L.content_hash(o)))
     return F.ok(staged=st, items=st.items, findings=fs)
+
+
+def validate(st):
+    """Phase 2, inside the gap: is what `stage` saw still true? Every function to swap must
+    still run the exact code object staged against (identity and hash), and every name to add
+    must still be absent. Cheap: no heap scan, no compile. Never raises."""
+    fs = []
+    for fn, old, h in st.expect:
+        now = fn.__code__
+        if now is not old:
+            fs.append(F.finding("changed_since_prepare",
+                                f"{fn.__qualname__} runs code {L.content_hash(now)}",
+                                f"the staged base {h}", subject=fn.__qualname__))
+    for owner, name, _ in st.adds:
+        present = name in owner if isinstance(owner, dict) else name in vars(owner)
+        if present:
+            fs.append(F.finding("changed_since_prepare", f"{name} was added meanwhile",
+                                f"{name} absent, as at prepare", subject=name))
+    return F.ok(checked=len(st.expect)) if not fs else F.not_ok("changed since prepare", fs)
 
 
 def _enclosing(code, run):

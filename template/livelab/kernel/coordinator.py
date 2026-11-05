@@ -1,22 +1,26 @@
 """Coordinator: two-phase transactions over participants (worker ranks, engine core, API server).
 
-    prepare (every participant stages beside the old state, runs its checks, votes)
-      -> unanimous yes: commit on each
-      -> otherwise:     abort on all (drop staged state; nothing was visible)
-    a commit that fails or crashes -> undo on the participants that already committed
+    phase 1, while steps go on: prepare on every participant (stage beside the old state,
+      run checks, vote); a no vote aborts here
+    phase 2, in the gap: validate on every participant (the staged plan is still valid),
+      then commit on all, or abort on all; a commit that fails undoes the committed ones
 
-`StepGapCoordinator` runs all of that inside ONE gap between two steps of the loop owner, so
-participants that step together never run a step on different versions. `Coordinator` calls
-participants one after another, each switching at its own quiesce point: between two commits
-a step can see mixed versions (the toy test shows it). Receipts are linked records sharing the
-transaction id: `run` appends `txn`, `prove` appends `proof` (witnesses after the workload,
-edit_to_finish_s), `undo` appends `undo` (code undo, then the plan's `undo_resets`).
+`StepGapCoordinator` runs phase 2 inside ONE gap between two steps of the loop owner, so
+participants that step together never run a step on different versions, and the loop stalls
+only for phase 2. `Coordinator` runs phase 2 right away, each participant switching at its
+own quiesce point: between two commits a step can see mixed versions (the toy test shows it).
+The host answers `status(txn)`: prepared, committed, aborted, undone or in-doubt. Receipts are
+linked records sharing the transaction id: `run` appends `txn`, `prove` appends `proof`
+(witnesses after the workload, edit_to_finish_s), `undo` appends `undo` (code undo, then the
+plan's `undo_resets`).
 
 Participant protocol (every call returns an ok-dict and never raises; a crash or a reply that
 is not an ok-dict counts as not-ok):
 
-    prepare(plan) -> {"ok", "staged", "findings"}     ok is the vote
-    commit(txn)   -> {"ok", ...}                     at the participant's quiesce point
+    prepare(plan) -> {"ok", "staged", "findings"}     phase 1; ok is the vote
+    validate(txn) -> {"ok", "findings"}              phase 2: staged identities still hold
+    status(txn)   -> {"ok", "state"}                 prepared, committed, aborted, undone
+    commit(txn)  -> {"ok", ...}                     at the participant's quiesce point
     abort(txn)    -> {"ok"}                          drop staged state
     undo(txn)     -> {"ok", ...}                     journal.undo_to(the txn's mark)
     proof(txn)    -> {"ok", "hashes", "witness"}     code hashes right after commit
@@ -39,6 +43,7 @@ to a worker rank, or the engine-core input-queue channel), which on the far side
 to a LocalParticipant.
 """
 import json
+import threading
 import time
 import uuid
 
@@ -75,6 +80,12 @@ class Participant:
         return F.not_ok(f"no {kind} reset", [F.finding(
             "reset_failed", f"no {kind} hook", f"a {kind} hook", subject=kind)])
 
+    def validate(self, txn):
+        return F.ok()
+
+    def status(self, txn):
+        return F.ok(txn=txn, state="unknown")
+
 
 class CallParticipant(Participant):
     """A participant in another process, reached through `call(method, payload) -> dict`."""
@@ -110,6 +121,12 @@ class CallParticipant(Participant):
     def reset(self, kind):
         return self._do("reset", kind)
 
+    def validate(self, txn):
+        return self._do("validate", txn)
+
+    def status(self, txn):
+        return self._do("status", txn)
+
 
 class LocalParticipant(Participant):
     """The kernel in this process. `alias`: {plan module prefix: this process's prefix} (a
@@ -127,6 +144,22 @@ class LocalParticipant(Participant):
         self.journal = J.Journal(name)
         self.witness = W.Witness()
         self._staged, self._marks, self._done = {}, {}, {}
+        self._state = {}              # txn -> prepared | committed | aborted | undone
+
+    def status(self, txn):
+        return F.ok(txn=txn, state=self._state.get(txn, "unknown"))
+
+    def validate(self, txn):
+        """Phase 2, in the gap, before the vote: is the staged plan still valid?"""
+        if txn not in self._staged:
+            return F.not_ok(f"nothing staged for {txn}")
+        staged, cells, _ = self._staged[txn]
+        fs = []
+        for st in staged:
+            fs += S.validate(st)["findings"]
+        fs = [{**f, "participant": self.name} for f in fs]
+        return F.ok(checked=sum(len(st.expect) for st in staged)) if not fs else \
+            F.not_ok("changed since prepare", fs)
 
     def _actual(self, module):
         for k, v in self.alias.items():
@@ -161,14 +194,17 @@ class LocalParticipant(Participant):
         d = F.decide(fs, accept)
         out_fs = [{**f, "participant": self.name} for f in d["findings"]]
         if not (ok and d["proceed"]):
+            self._state[txn] = "aborted"
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
+        self._state[txn] = "prepared"
         return F.ok(staged=items, findings=out_fs)
 
     def commit(self, txn):
         if txn not in self._staged:
             return F.not_ok(f"nothing staged for {txn}")
         staged, cells, accept = self._staged.pop(txn)
+        self._state[txn] = "aborted"  # until the commit below succeeds
         gone = []                     # set if the quiesce call gave up: the job must not run
 
         def do():
@@ -200,6 +236,7 @@ class LocalParticipant(Participant):
                 return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"])
             self._marks[txn] = mark
             self._done[txn] = staged
+            self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
                         journal=self.journal.describe(mark))
 
@@ -210,7 +247,8 @@ class LocalParticipant(Participant):
             return F.not_ok(f"commit: {type(e).__name__}: {e}")
 
     def abort(self, txn):
-        self._staged.pop(txn, None)
+        if self._staged.pop(txn, None) is not None or self._state.get(txn) == "prepared":
+            self._state[txn] = "aborted"
         return F.ok()
 
     def undo(self, txn):
@@ -224,6 +262,7 @@ class LocalParticipant(Participant):
         if r["ok"]:
             del self._marks[txn]
             self._done.pop(txn, None)
+            self._state[txn] = "undone"
         return r
 
     def proof(self, txn):
@@ -267,10 +306,21 @@ def _call(p, method, arg):
 
 
 class Coordinator:
-    """Two-phase transactions, one participant call after another. Each participant switches
-    at its own quiesce point, so between two commits a step can run with participants on
-    different versions. Use it only when participants do not step together (or for one);
-    for ranks that step together use StepGapCoordinator."""
+    """The transaction host. Two phases:
+
+    1. `prepare` on every participant, in the caller's thread while steps go on: locate,
+       compile, stage, check. Nothing is visible. A no vote aborts here.
+    2. Inside `_in_gap`: `validate` on every participant (is the staged plan still valid?),
+       then commit on all, or abort on all; a commit that fails undoes the committed ones.
+
+    The plain Coordinator runs phase 2 right away and each participant switches at its own
+    quiesce point: between two commits a step can see mixed versions. StepGapCoordinator runs
+    phase 2 in one gap between two steps of the loop owner.
+
+    The host records every transaction's state; `status(txn)` answers prepared, committed,
+    aborted, undone, or in-doubt (phase 2 started but has not finished). A caller whose gap
+    call timed out resolves the outcome with `status`, never by assuming failure; a phase 2
+    that had not started when the caller gave up is cancelled (aborted)."""
 
     def __init__(self, participants, writer=None, engine=None, interface_version="0",
                  clock=time.time):
@@ -279,93 +329,158 @@ class Coordinator:
         self.engine = engine or {"name": "unknown", "version": None, "commit": None}
         self.interface_version = interface_version
         self.clock = clock
-        self.txns = {}                     # txn id -> {"plan", "edit"} for prove and undo
+        self.txns = {}                     # txn id -> host record (see _record)
+        self._lock = threading.Lock()
 
     def _in_gap(self, fn):
-        """Run fn where the transaction must happen. Here: right now, in this thread."""
+        """Run fn where phase 2 must happen. Here: right now, in this thread."""
         return fn()
-
-    def _guarded(self, fn):
-        """Run fn through _in_gap. If the gap call gives up (timeout, loop gone), a job still
-        queued must not run later: it is cancelled. Returns (result, error)."""
-        gone = []
-
-        def job():
-            return None if gone else fn()
-        try:
-            return self._in_gap(job), None
-        except Exception as e:
-            gone.append(True)
-            return None, f"{type(e).__name__}: {e}"
 
     def _write(self, rec):
         return self.writer.append(rec) if self.writer else {"ok": False, "error": "no writer"}
 
+    # -- host state ----------------------------------------------------------------------
+    def status(self, txn):
+        """{"ok", "txn", "state", "outcome", "written"}. Once phase 2 has finished, the first
+        status call after a timed-out run writes the transaction's receipt."""
+        with self._lock:
+            t = self.txns.get(txn)
+            if t is None:
+                return F.not_ok(f"unknown transaction {txn}", txn=txn, state="unknown")
+            state = t["state"]
+            if state == "prepared" and t["started"] and not t["done"]:
+                state = "in-doubt"
+            pending = t["done"] and not t["receipt"]
+        if pending:
+            self._finish(txn)
+        return F.ok(txn=txn, state=state, outcome=t.get("outcome"), written=t["receipt"])
+
     # -- the transaction -----------------------------------------------------------------
-    def _phases(self, plan, tl):
-        """prepare -> vote -> commit, or abort; undo the committed ones if a commit fails."""
-        now, txn = self.clock, plan["id"]
-        res = {p.name: {} for p in self.participants}
-        tl["prepare_start"] = now()
+    def _phase2(self, txn, tl):
+        """validate -> commit, or abort; undo the committed ones if a commit fails. Inside
+        the gap. Returns the phase-2 result; never raises."""
+        now, t = self.clock, self.txns[txn]
+        res = t["res"]
+        tl["gap_start"] = now()
         for p in self.participants:
-            res[p.name]["prepare"] = _call(p, "prepare", plan)
+            res[p.name]["validate"] = _call(p, "validate", txn)
         tl["vote"] = now()
         rollback = {"status": "not_needed", "participants": {}}
-        out = {"res": res, "rollback": rollback, "extra": [], "hashes": {}}
-        if not all(res[p.name]["prepare"]["ok"] for p in self.participants):
+        out = {"rollback": rollback, "extra": [], "hashes": {}}
+        if not all(res[p.name]["validate"]["ok"] for p in self.participants):
             for p in self.participants:
                 res[p.name]["abort"] = _call(p, "abort", txn)
             out["outcome"] = "aborted"
-            return out
-        committed, failed = [], None
-        for p in self.participants:
-            r = res[p.name]["commit"] = _call(p, "commit", txn)
-            if not r["ok"]:
-                failed = p
-                break
-            committed.append(p)
-        if failed is None:
-            tl["committed"] = now()
-            out["outcome"] = "committed"
+        else:
+            committed, failed = [], None
             for p in self.participants:
-                out["hashes"][p.name] = _call(p, "proof", txn).get("hashes")
-            return out
-        out["outcome"] = "rolled_back"
-        out["extra"].append({**F.finding("participant_failed", res[failed.name]["commit"]
-                                         .get("error"), "commit ok on every participant"),
-                             "participant": failed.name})
-        for p in reversed(committed):
-            rollback["participants"][p.name] = res[p.name]["undo"] = _call(p, "undo", txn)
-        for p in self.participants:
-            if p not in committed:
-                res[p.name]["abort"] = _call(p, "abort", txn)
-        rollback["status"] = ("undone" if all(u["ok"] for u in rollback["participants"].values())
-                              else "partial")
-        tl["rolled_back"] = now()
+                r = res[p.name]["commit"] = _call(p, "commit", txn)
+                if not r["ok"]:
+                    failed = p
+                    break
+                committed.append(p)
+            if failed is None:
+                tl["committed"] = now()
+                out["outcome"] = "committed"
+            else:
+                out["outcome"] = "rolled_back"
+                out["extra"].append({**F.finding(
+                    "participant_failed", res[failed.name]["commit"].get("error"),
+                    "commit ok on every participant"), "participant": failed.name})
+                for p in reversed(committed):
+                    rollback["participants"][p.name] = res[p.name]["undo"] = \
+                        _call(p, "undo", txn)
+                for p in self.participants:
+                    if p not in committed:
+                        res[p.name]["abort"] = _call(p, "abort", txn)
+                rollback["status"] = ("undone" if all(
+                    u["ok"] for u in rollback["participants"].values()) else "partial")
+        tl["gap_end"] = now()
         return out
 
     def run(self, plan, edit_time=None, baseline_restart=None):
         """One transaction; appends a `txn` receipt. edit_time: when the edit was made (unix
         seconds; default now). baseline_restart: {"seconds", "source"} of the warm restart
-        this replaces. Returns {"ok", "outcome", "txn", "receipt", "written"}; never raises."""
+        this replaces. Returns {"ok", "outcome", "txn", "receipt", "written"}, where outcome is
+        committed, aborted, rolled_back, or in-doubt (resolve it with `status`)."""
         now = self.clock
         tl = {"edit": edit_time if edit_time is not None else now()}
         txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"
         plan = {**plan, "id": txn}
-        tl["queued"] = now()
-        out, err = self._guarded(lambda: self._phases(plan, tl))
-        if out is None:
-            out = {"res": {}, "rollback": {"status": "not_needed", "participants": {}},
-                   "hashes": {}, "outcome": "aborted",
-                   "extra": [F.finding("participant_failed", f"the transaction never ran: {err}",
-                                       "a step gap within the timeout")]}
-        tl["txn_end"] = now()
-        if out["outcome"] == "committed":
-            self.txns[txn] = {"plan": plan, "edit": tl["edit"]}
-        fs = [f for r in out["res"].values() for x in r.values()
+        t = self.txns[txn] = {"plan": plan, "edit": tl["edit"], "tl": tl, "state": "prepared",
+                              "res": {p.name: {} for p in self.participants},
+                              "started": False, "cancelled": False, "done": False,
+                              "receipt": False, "baseline": baseline_restart}
+        # phase 1: outside the gap, steps go on
+        tl["prepare_start"] = now()
+        for p in self.participants:
+            t["res"][p.name]["prepare"] = _call(p, "prepare", plan)
+        tl["prepared"] = now()
+        if not all(t["res"][p.name]["prepare"]["ok"] for p in self.participants):
+            for p in self.participants:
+                t["res"][p.name]["abort"] = _call(p, "abort", txn)
+            self._done(txn, {"outcome": "aborted", "extra": [], "hashes": {},
+                             "rollback": {"status": "not_needed", "participants": {}}})
+            return self._finish(txn)
+
+        # phase 2: inside the gap
+        def job():
+            with self._lock:
+                if t["cancelled"]:
+                    return None
+                t["started"] = True
+            out = self._phase2(txn, tl)
+            self._done(txn, out)
+            return out
+        try:
+            self._in_gap(job)
+        except Exception as e:
+            with self._lock:
+                if not t["started"]:
+                    t["cancelled"] = True
+            if t["cancelled"]:
+                for p in self.participants:
+                    t["res"][p.name]["abort"] = _call(p, "abort", txn)
+                self._done(txn, {"outcome": "aborted", "hashes": {},
+                                 "rollback": {"status": "not_needed", "participants": {}},
+                                 "extra": [F.finding("participant_failed",
+                                                     f"phase 2 never started: {type(e).__name__}:"
+                                                     f" {e}", "a step gap within the timeout")]})
+                return self._finish(txn)
+            if not t["done"]:
+                return {"ok": False, "outcome": "in-doubt", "txn": txn, "receipt": None,
+                        "written": {"ok": False, "error": "in doubt: ask status(txn)"},
+                        "error": f"{type(e).__name__}: {e}"}
+        return self._finish(txn)
+
+    def _done(self, txn, out):
+        t = self.txns[txn]
+        with self._lock:
+            t["tl"]["txn_end"] = self.clock()
+            t["out"] = out
+            t["outcome"] = out["outcome"]
+            t["state"] = "committed" if out["outcome"] == "committed" else "aborted"
+            t["done"] = True
+
+    def _finish(self, txn):
+        """Build and append the `txn` receipt once phase 2 is over (or phase 1 aborted)."""
+        t = self.txns[txn]
+        with self._lock:
+            if t["receipt"]:
+                return {"ok": t["outcome"] == "committed", "outcome": t["outcome"], "txn": txn,
+                        "receipt": t["rec"], "written": {"ok": True, "note": "already written"}}
+            t["receipt"] = True
+        plan, tl, out, res = t["plan"], t["tl"], t["out"], t["res"]
+        if out["outcome"] == "committed":       # code hashes, read after the gap
+            for p in self.participants:
+                out["hashes"][p.name] = _call(p, "proof", txn).get("hashes")
+        fs = [f for r in res.values() for x in r.values()
               for f in x.get("findings", [])] + out["extra"]
         modules = plan.get("modules", {})
         hs = [json.dumps(h, sort_keys=True) for h in out["hashes"].values()]
+
+        def span(a, b):
+            return round(tl[b] - tl[a], 6) if a in tl and b in tl else None
         rec = {
             "schema": R.SCHEMA, "kind": "txn", "id": txn,
             "interface_version": self.interface_version, "engine": self.engine,
@@ -383,7 +498,7 @@ class Coordinator:
             "actual_recipes": ((["R0 swap"] if modules else [])
                                + (["R10 repair"] if plan.get("repairs") else []))
             if out["outcome"] == "committed" else [],
-            "participants": out["res"],
+            "participants": res,
             "commit_hashes": {"participants": out["hashes"],
                               "agree": (len(set(hs)) == 1) if hs else None},
             "findings": fs,
@@ -391,12 +506,13 @@ class Coordinator:
                           "blocking": sorted({f["check"] for f in fs
                                               if not f.get("accepted")})},
             "outcome": out["outcome"], "timeline": tl,
-            "edit_to_run_s": (round(tl["committed"] - tl["edit"], 6)
-                              if "committed" in tl else None),
-            "phases_s": round(tl["txn_end"] - tl["queued"], 6),
-            "baseline_restart_s": baseline_restart,
+            "edit_to_run_s": span("edit", "committed"),
+            "prepare_s": span("prepare_start", "prepared"),
+            "gap_s": span("gap_start", "gap_end"),
+            "baseline_restart_s": t["baseline"],
             "rollback": out["rollback"],
         }
+        t["rec"] = rec
         return {"ok": out["outcome"] == "committed", "outcome": out["outcome"], "txn": txn,
                 "receipt": rec, "written": self._write(rec)}
 
@@ -429,38 +545,43 @@ class Coordinator:
     def undo(self, txn):
         """Undo a committed transaction on every participant (newest first), then run the
         plan's `undo_resets` (R2, R3, ...) on each: code undo cannot un-write data the new code
-        produced. Appends an `undo` receipt."""
+        produced. In the gap. Appends an `undo` receipt."""
         now = self.clock
-        resets = self.txns.get(txn, {}).get("plan", {}).get("undo_resets", [])
+        t = self.txns.get(txn, {})
+        resets = t.get("plan", {}).get("undo_resets", [])
         tl = {"queued": now()}
-        res, err = self._guarded(lambda: self._undo_phases(txn, resets, tl))
+        try:
+            res, err = self._in_gap(lambda: self._undo_phases(txn, resets, tl)), None
+        except Exception as e:
+            res, err = None, f"{type(e).__name__}: {e}"
         tl["undo_end"] = now()
         res = res or {}
-        calls = [x for r in res.values() for x in [r.get("undo")] + list(r.get("reset", {})
-                                                                              .values()) if x]
+        calls = [x for r in res.values()
+                 for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x]
         fs = [{**f, "participant": n} for n, r in res.items()
               for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x
               for f in x.get("findings", [])]
         ok = err is None and all(x["ok"] for x in calls)
         rec = {"schema": R.SCHEMA, "kind": "undo", "id": txn, "participants": res,
                "resets": list(resets), "status": "undone" if ok else "partial",
-               "findings": fs + ([F.finding("undo_incomplete", f"undo never ran: {err}",
+               "findings": fs + ([F.finding("undo_incomplete", f"undo did not finish: {err}",
                                             "a step gap within the timeout")] if err else []),
                "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
-        if ok:
-            self.txns.pop(txn, None)
+        if ok and t:
+            with self._lock:
+                t["state"] = "undone"
         return {"ok": ok, "participants": res, "receipt": rec, "written": self._write(rec)}
 
 
 class StepGapCoordinator(Coordinator):
-    """The coordinator for participants that step together (worker ranks + engine core): the
-    loop owner runs the whole transaction in ONE gap between two steps: prepare on all,
-    vote, commit on all, and undo after a failed commit. So no step ever sees participants on
-    different versions. `gap(fn)` queues fn to the loop owner and returns its result (for
-    vLLM: the engine-core busy loop; the participants are then called directly from it, e.g.
-    by collective_rpc, which completes on every worker before the next step).
-    Participants must not quiesce on their own: build them with the default `quiesce`.
-    The gap stalls the engine for the whole transaction: `phases_s` in the receipt."""
+    """The host for participants that step together (worker ranks + engine core), living in
+    the loop owner: phase 1 (prepare) runs in the caller's thread while steps go on; phase 2
+    (validate, commit or abort, undo of a failed commit) runs in ONE gap between two steps.
+    So no step ever sees participants on different versions, and the loop stalls only for
+    phase 2 (`gap_s` in the receipt). `gap(fn)` queues fn to the loop owner and returns its
+    result (for vLLM: the engine-core busy loop, which calls the workers by collective_rpc;
+    that completes on every worker before the next step). Participants must not quiesce on
+    their own: build them with the default `quiesce`."""
 
     def __init__(self, participants, gap, **kw):
         super().__init__(participants, **kw)
