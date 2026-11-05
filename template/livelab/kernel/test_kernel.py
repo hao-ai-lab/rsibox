@@ -1677,6 +1677,35 @@ class RuntimeClosureUndoTest(unittest.TestCase):
         self.assertIn("2 function object(s)", u["findings"][0]["observed"])
         self.assertEqual(ops.make_shift(1)(5), 6)
 
+    def test_a_partial_undo_stays_partial_when_undone_again(self):
+        """Proves: after an undo that leaves closures of an added nested def running (`closure_not_restored`, not ok), the participant says "partial", and a second undo is not ok with the same finding; through a coordinator the transaction's state is "partial" too. Before, the second undo found no mark and answered ok with `undone` 0 and state "undone" (our 2026-11-05 GPU run, engine core), while the closure still ran the new code. Not: what to do with the closure (rebuild its holder or respawn)."""
+        name, eng, ops = fresh("rtclosure4")
+        new = edit(OPS, ("        return x + k\n    return shift\n",
+                         "        return x + k\n\n    def shift2(x):\n        return x - k\n"
+                         "    return shift2\n"))
+        p = C.LocalParticipant("core", alias={"toy": name})
+        self.assertTrue(p.prepare({"id": "a", "modules": {"toy.ops": {"source": new}}})["ok"])
+        self.assertTrue(p.commit("a")["ok"])
+        held = ops.make_shift(1)
+        u = p.undo("a")
+        self.assertEqual((u["ok"], [f["check"] for f in u["findings"]]),
+                         (False, ["closure_not_restored"]))
+        self.assertEqual(p.status("a")["state"], "partial")
+        u2 = p.undo("a")
+        self.assertEqual((u2["ok"], [f["check"] for f in u2["findings"]]),
+                         (False, ["closure_not_restored"]))
+        self.assertEqual((p.status("a")["state"], held(5), ops.make_shift(1)(5)), ("partial", 4, 6))
+
+        name, eng, ops = fresh("rtclosure5")
+        co = C.Coordinator([C.LocalParticipant("core", alias={"toy": name})])
+        res = co.run({"modules": {"toy.ops": {"source": new}}})
+        self.assertEqual(res["outcome"], "committed")
+        held = ops.make_shift(1)
+        for _ in range(2):
+            u = co.undo(res["txn"])
+            self.assertEqual((u["ok"], u["receipt"]["status"]), (False, "partial"))
+        self.assertEqual(co.status(res["txn"])["state"], "partial")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -210,7 +210,8 @@ class LocalParticipant(Participant):
         self.journal = J.Journal(name)
         self.witness = W.Witness()
         self._staged, self._marks, self._done = {}, {}, {}
-        self._state = {}              # txn -> prepared | committed | aborted | undone
+        self._state = {}              # txn -> prepared | committed | aborted | undone | partial
+        self._partial = {}            # txn -> findings of an undo that could not restore all
         self._sources = {}            # committed txn -> {plan module: source it installed}
         self._codes = {}              # committed txn -> [code objects it swapped in]
         self._pending = {}            # prepared txn -> {plan module: source}
@@ -397,6 +398,11 @@ class LocalParticipant(Participant):
 
     def undo(self, txn):
         txn, _ = txn_ref(txn)
+        if txn in self._partial:
+            # An earlier undo ran the whole journal back but could not restore everything
+            # (e.g. closure_not_restored). Nothing is left to undo, and saying "undone" now
+            # would hide what is still running: repeat the findings.
+            return F.not_ok("undo already ran and was partial", self._partial[txn], undone=0)
         if txn not in self._marks:
             # Nothing of txn is installed here (never committed, or a late commit after a
             # deadline applied nothing). Drop what is staged, so a commit arriving after this
@@ -416,17 +422,20 @@ class LocalParticipant(Participant):
             r = self.quiesce(lambda: self.journal.undo_to(mark))
         except Exception as e:
             return F.not_ok(f"undo: {type(e).__name__}: {e}")
-        if r["ok"]:                    # the journal undid every later transaction too
-            for t in [txn] + later:
-                self._marks.pop(t, None)
-                for d in (self._done, self._sources, self._codes):
-                    d.pop(t, None)
-                self._state[t] = "undone"
-            if later:
-                r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
-                    **F.finding("undo_cascade",
-                                f"undoing {txn} also undid later transactions {later}",
-                                f"only {txn} undone"), "participant": self.name}]}
+        # The journal is back at the mark either way (a failed inverse is skipped and
+        # reported), and it undid every later transaction too.
+        for t in [txn] + later:
+            self._marks.pop(t, None)
+            for d in (self._done, self._sources, self._codes):
+                d.pop(t, None)
+            self._state[t] = "undone" if r["ok"] else "partial"
+        if not r["ok"]:
+            self._partial[txn] = r.get("findings", [])
+        if later:
+            r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
+                **F.finding("undo_cascade",
+                            f"undoing {txn} also undid later transactions {later}",
+                            f"only {txn} undone"), "participant": self.name}]}
         return r
 
     def proof(self, txn):
@@ -978,9 +987,9 @@ class Coordinator:
                "findings": fs + ([F.finding("undo_incomplete", f"undo did not finish: {err}",
                                             "a step gap within the timeout")] if err else []),
                "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
-        if ok and t:
+        if t:                          # partial: an undo ran but could not restore everything
             with self._lock:
-                t["state"] = "undone"
+                t["state"] = "undone" if ok else "partial"
         return {"ok": ok, "participants": res, "receipt": rec, "written": self._write(rec)}
 
 

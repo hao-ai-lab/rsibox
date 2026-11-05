@@ -295,6 +295,7 @@ imports torch on CPU and is skipped without it). `python3 -m unittest` also runs
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
+test_a_partial_undo_stays_partial_when_undone_again ... ok
 test_accept_list ... ok
 test_accept_record_with_a_subject_covers_only_that_subject ... ok
 test_auto_target_only_the_heap_finds_live ... ok
@@ -350,7 +351,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 54 tests in 7.7s
+Ran 55 tests in 7.7s
 
 OK
 ```
@@ -417,11 +418,16 @@ Each test's docstring says what it proves and what it does not.
   the functions that run one and gives each its old code (`closures_restored` in the undo
   result). A function made from a nested definition the edit added, or one whose free
   variables changed, has no base code: a `closure_not_restored` finding with the count and the
-  qualname, and the undo is not ok. Generator expressions are left out (their function never
+  qualname, and the undo is not ok: the transaction's state is "partial", and undoing it again
+  repeats the finding instead of answering "undone". Generator expressions are left out (their function never
   outlives the call). Cost: in a CPU process that imported vLLM 0.33's model runner (0.86 M
   gc objects), the pass took 57.6 ms median (one `get_objects` plus a Python loop: 84.1 ms;
-  our 2026-11-05 CPU run); it holds the GIL in one piece, inside the undo's gap, on every undo
-  of a swap whose code has a nested def or lambda.
+  our 2026-11-05 CPU run); it holds the GIL in one piece, inside the undo's gap. So it runs only
+  for the new nested codes whose reference count grew since apply (a live function holds one):
+  on our 2026-11-05 GPU run (1x B200, Qwen3-8B, TP1) undo of a `Scheduler.schedule` swap went
+  from 0.12 s (the pass, 0 closures restored) to under 1 ms on the engine core, and undos of
+  swaps that add a transient lambda (worker and core) stalled streams 1.13-1.21x the median
+  step. When a closure is alive the pass still runs in the gap (0.12-0.15 s on that engine core).
 - **The heap scan unfreezes the gc.** Engines call `gc.freeze()` after startup, and
   `gc.get_objects()` and `gc.get_referrers()` both skip frozen objects.
 
