@@ -8,9 +8,10 @@ only so far.
 |---|---|
 | `host.py` | The engine-core host. Patches `EngineCoreProc` when imported with `FASTRSI_KERNEL_DIR` set: custom input-queue items run jobs on the busy-loop thread; a phase-2 job runs only when no batch is in flight (pause keep: `scheduler.has_requests` is shadowed to False while `batch_queue` drains). Runs the kernel's `StepGapCoordinator` over two participants (the workers, the engine core) and serves a file control channel. Records every step's duration. |
 | `worker_ext.py` | `KernelWorkerExtension` (`--worker-extension-cls`): the participant protocol on each worker rank, reached by `collective_rpc("fastrsi_kernel", args=(method, payload))` issued from the busy loop. |
-| `side.py` | One participant side (worker or core): a kernel `LocalParticipant`, prepare in a background thread (`prepare_start` / `prepare_poll`), per-role plan filtering (`"on": ["worker"]`), a fault hook for tests, and replies that never raise (collective_rpc reply desync, kb/lessons.md). |
+| `side.py` | One participant side (worker or core): a kernel `LocalParticipant`, prepare in a background thread (`prepare_start` / `prepare_poll`, repeatable until commit, abort or undo), per-role plan filtering (`"on": ["worker"]`), a fault hook for tests, and replies that never raise (collective_rpc reply desync, kb/lessons.md). |
 | `client.py` | Sends one op over the file channel (`ctl.json` -> `reply/<seq>.json`): `txn`, `prove`, `undo`, `status`, `ping`. Replies carry the kernel's receipt records; receipts also go to `receipts.jsonl` next to the channel. |
 | `live_test.py` | The live golden tests below, against a running engine. |
+| `test_adapter.py` | CPU tests of the adapter's own logic (worker-group prepare polling): `PYTHONPATH=../../../template/livelab python3 -m unittest kernel_vllm.test_adapter -v` from `repos/vllm/livelab`. |
 
 ## How a transaction runs
 
@@ -18,7 +19,8 @@ only so far.
 client ── ctl.json ──► host thread (engine-core process)
   phase 1, engine keeps stepping:
     workers: collective_rpc(prepare_start) from the loop; each rank stages in a thread;
-             collective_rpc(prepare_poll) every 20 ms until done
+             collective_rpc(prepare_poll) every 20 ms until every rank is done (a rank
+             that finished keeps answering with its result)
     core:    prepare in the host thread
   phase 2, one job on the busy loop, after in-flight batches land (pause keep):
     validate (workers + core) -> commit (workers + core), or abort; undo of a failed commit
@@ -122,10 +124,10 @@ penalties module, as before) against the default per-definition units:
 | max chunk gap during prepare / median 19.9-22.6 ms | 31.8-57.0 ms (1.6-2.5x) | 30.3-37.1 ms (1.5-1.9x) |
 | max engine step during prepare (host) | 29.3-45.8 ms | 29.9-34.0 ms |
 
-What is left is one parse of the base and one of the patched text (about 14 ms each in the
+What was left is one parse of the base and one of the patched text (about 14 ms each in the
 engine process, single C calls) and the outside-changes comparison (two `ast.dump` calls). At
-TP1 the median step is 20 ms, so the stall stays under 2x; at TP4 (8.6 ms median step) one
-14 ms parse alone would still be about 2.6x (not measured at TP4 yet).
+TP4 (8.6 ms median step) that made the longest step during a core prepare 3.4-3.95x the
+median.
 
 T4n / T4 (`--tests T0,T4n,T4`): while 6 streams of 800 tokens run, the worker hangs 4 s in
 commit (fault hook, delay only):
@@ -163,5 +165,9 @@ undo. At TP1 there is one rank, so `ranks_agree` is null (nothing to compare) an
   core voted no (`empty_change`, it had no module) and the workers were staged against the
   file while T1's text was live (`base_mismatch`). T2 now stages against T1's text and the
   core abstains; it aborts at validate (`participant_failed` on the worker).
+- At TP4, 1 of 33 worker prepares aborted for nothing: a rank dropped its prepare result on
+  its first finished poll, but the group polls every rank while any is pending, so ranks 0-2
+  answered "no prepare started" while rank 3 still prepared. Nothing was committed. Fixed:
+  a rank keeps its result until commit, abort or undo (`test_adapter.py`).
 - The receipt writer (`kernel/receipt.py`) is still a proposal that needs a human owner
   (AGENTS.md, Trust).

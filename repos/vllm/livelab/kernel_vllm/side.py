@@ -8,6 +8,9 @@ is then read by the wrong call (kb/lessons.md).
 - Phase 1 runs in a background thread of this process (`prepare_start`, then `prepare_poll`),
   so the engine keeps stepping while the side locates, compiles and stages. The heap scan
   still holds the GIL while it runs, so steps of this process slow down meanwhile.
+- `prepare_poll` can be repeated: a finished rank keeps answering with its result until the
+  transaction is committed, aborted or undone. The worker group polls every rank with one
+  collective_rpc while any rank is pending, so a rank that finished early is asked again.
 - A plan module runs only on the roles in its `"on"` list (default: every role), so one plan
   can swap a worker function and an engine-core function. A role the plan gives no module
   abstains: it votes yes, and its commit, abort and undo change nothing (the kernel would
@@ -46,7 +49,7 @@ class Side:
     def __init__(self, role, scope=None, resets=None, rank=None):
         self.role, self.rank = role, rank
         self.lp = C.LocalParticipant(role, scope=scope, resets=resets)
-        self._jobs = {}        # txn -> {"thread", "result", "t0"}
+        self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None      # phase-2 calls with a deadline (kernel Lane)
         self._abstain = {}     # txn -> state, for plans that give this role no module
@@ -189,12 +192,14 @@ class Side:
                 return F.not_ok(f"no prepare started for {payload}")
             if job["result"] is None:
                 return F.ok(pending=True)
-            return self._jobs.pop(payload)["result"]
+            return job["result"]           # kept: other ranks may still be pending
         if method == "reset":
             return self.lp.reset(payload)
         if method == "versions":
             return self.versions()
-        _, deadline_at = C.txn_ref(payload)
+        txn, deadline_at = C.txn_ref(payload)
+        if method in ("commit", "abort", "undo") and isinstance(txn, str):
+            self._jobs.pop(txn, None)          # the vote is over: drop the prepare result
         if deadline_at is None or method not in C.PHASE2:
             return self._fault(method, payload) or self._local(method, payload)
         if self._lane is None:
