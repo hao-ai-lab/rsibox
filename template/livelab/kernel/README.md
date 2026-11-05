@@ -260,6 +260,7 @@ the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
 test_accept_list ... ok
+test_accept_record_with_a_subject_covers_only_that_subject ... ok
 test_auto_target_only_the_heap_finds_live ... ok
 test_auto_targets_stage_like_explicit_ones ... ok
 test_chained_edit_stages_against_the_installed_text ... ok
@@ -302,7 +303,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 42 tests in 5.4s
+Ran 43 tests in 5.4s
 
 OK
 ```

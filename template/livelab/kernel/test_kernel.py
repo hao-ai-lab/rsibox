@@ -1280,6 +1280,17 @@ class AcceptRecordTest(unittest.TestCase):
         self.assertFalse(d["proceed"])
         self.assertEqual(d["blocking"], ["zero_witness"])
 
+    def test_accept_record_with_a_subject_covers_only_that_subject(self):
+        """Proves: a record naming a subject accepts that subject's finding of the check and leaves the same check on another subject blocking. Not: subject patterns."""
+        fs = [{**F.finding("running_frame", "o", "e", subject=k), "participant": "core"}
+              for k in ("toy.engine:run_loop:80", "toy.engine:Engine.step:22")]
+        rec = {"check": "running_frame", "subject": "toy.engine:run_loop:80", "by": "agent",
+               "reason": "the busy loop restarts on the next request"}
+        d = F.decide(fs, [rec])
+        self.assertEqual((d["proceed"], [f["accepted"] for f in d["findings"]], d["accepts"]),
+                         (False, [True, False], [rec]))
+        self.assertTrue(F.decide(fs[:1], [rec])["proceed"])
+
     def test_name_and_txn_record_still_accept(self):
         self.assertTrue(F.decide([self._f("h2")], ["zero_witness"])["proceed"])
         rec = {"check": "zero_witness", "by": "agent", "reason": "rank-specific"}

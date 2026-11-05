@@ -125,7 +125,9 @@ fell back from its child process to the engine's own process reports `analyze_fa
 An accept record `{check, by, reason, scope}` says who accepted a finding and why; `decide`
 returns the records it used (`accepts`) so the transaction record can carry them. Scope `txn` covers
 this transaction; `standing` also names `participant` and `code_hash` and covers a finding only while
-both still match, so it expires when the checked code changes. Stage findings about a staged
+both still match, so it expires when the checked code changes. A record with a `subject` (any
+scope) covers only that subject's findings of the check (for example one witness key), not all of
+them. Stage findings about a staged
 definition carry its new `code_hash`; participants add `participant`. A check accepted on every run is a
 calibration bug in the check, not a standing accept. Writing accepts into receipts waits for the
 receipt writer's human owner.

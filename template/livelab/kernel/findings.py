@@ -21,6 +21,8 @@ check name, or an accept record that says who accepted it and why, for the trans
 
     {"check": str, "by": str, "reason": str,
      "scope": "txn" | "standing",   # "txn": this transaction only (the default)
+     "subject": str,                # optional, any scope: only the findings of this check
+                                    # about this subject (e.g. one witness key), not all
      "participant": str, "code_hash": str}   # standing only: matches a finding only while the
                                              # finding's participant and code_hash still equal
                                              # these, so it expires when the checked code changes
@@ -201,6 +203,8 @@ def finding(check, observed, expected, subject=None):
 
 def _matches(rec, f):
     if rec.get("check") != f["check"]:
+        return False
+    if "subject" in rec and f.get("subject") != rec["subject"]:
         return False
     if rec.get("scope", "txn") == "standing":
         for k in ("participant", "code_hash"):
