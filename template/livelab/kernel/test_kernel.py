@@ -1,0 +1,403 @@
+"""Golden tests of the transaction kernel on the toy engine (CPU, standard library only).
+
+Run from template/livelab:  python3 -m unittest kernel.test_kernel -v
+
+Toy arithmetic: Engine.step(x) = shift(activate(scale(x))) with scale = x*2, activate = x+1,
+shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy package
+(`toy.load_copy`), so participants and tests never share module objects.
+"""
+import gc
+import itertools
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import unittest
+
+from . import coordinator as C
+from . import findings as F
+from . import journal as J
+from . import locate as L
+from . import receipt as R
+from . import swap as S
+from . import toy
+from . import witness as W
+
+OPS, ENG = toy.source("ops"), toy.source("engine")
+_n = itertools.count()
+
+
+def fresh(tag, path=None):
+    """A new copy of the toy package: (package name, engine module, ops module)."""
+    name = f"kt{next(_n)}_{tag}"
+    toy.load_copy(name, path)
+    return name, sys.modules[name + ".engine"], sys.modules[name + ".ops"]
+
+
+def at(src, needle):
+    """1-based line of the first line containing `needle` (the target's first line)."""
+    return next(i for i, line in enumerate(src.splitlines(), 1) if needle in line)
+
+
+def edit(src, *pairs):
+    for old, new in pairs:
+        assert old in src, old
+        src = src.replace(old, new, 1)
+    return src
+
+
+def install(module, source, targets, journal, witness, accept=()):
+    """stage -> decide -> apply, as a participant does."""
+    r = S.stage(module, source, targets)
+    d = F.decide(r["findings"], accept)
+    if not (r["ok"] and d["proceed"]):
+        return r, d, None
+    return r, d, S.apply(r["staged"], journal, witness)
+
+
+def step_target():
+    return {"source": None, "base_hash": L.text_hash(ENG),
+            "targets": [["Engine.step", at(ENG, "def step")]]}
+
+
+def text(path):
+    with open(path) as f:
+        return f.read()
+
+
+def wait_for(cond, timeout=5.0):
+    end = time.time() + timeout
+    while not cond():
+        if time.time() > end:
+            raise AssertionError("timed out")
+        time.sleep(0.005)
+
+
+class KernelTest(unittest.TestCase):
+
+    def test_swap_reaches_every_holder(self):
+        """Proves: one swap reaches from-import copies, a decorator wrapper, a saved bound method and closures. Not: copied code objects."""
+        name, eng, ops = fresh("holders")
+        e = eng.Engine()
+        gc.freeze()                       # engines freeze the heap after startup (vLLM does)
+        self.addCleanup(gc.unfreeze)
+        self.assertEqual(e.step(3), 17)
+        holders = {q: {(h["kind"], h["where"]) for h in L.locate(m, q, line)["holders"]}
+                   for m, q, line in [(name + ".ops", "scale", at(OPS, "def scale")),
+                                      (name + ".ops", "activate", at(OPS, "@traced")),
+                                      (name + ".engine", "Engine.on_token",
+                                       at(ENG, "def on_token"))]}
+        self.assertEqual(holders["scale"], {("module_dict", f"{name}.ops.scale"),
+                                            ("module_dict", f"{name}.engine.scale")})
+        self.assertIn(("closure_cell", "traced.<locals>.wrapper"), holders["activate"])
+        self.assertIn(("bound_method", "Engine().on_token"), holders["Engine.on_token"])
+
+        j, w = J.Journal(), W.Witness()
+        ops_new = edit(OPS, ("return x * STEP_SCALE", "return x * 3"),
+                       ("return x + 1", "return x + 2"), ("return x + k", "return x + 2 * k"))
+        r, d, a = install(name + ".ops", ops_new,
+                          [("scale", at(OPS, "def scale")), ("activate", at(OPS, "@traced")),
+                           ("make_shift.<locals>.shift", at(OPS, "def shift"))], j, w)
+        self.assertEqual((r["findings"], a["ok"]), ([], True))
+        r, d, a = install(name + ".engine", edit(ENG, ("self.tokens.append(t)",
+                                                       "self.tokens.append(-t)")),
+                          [("Engine.on_token", at(ENG, "def on_token"))], j, w)
+        self.assertEqual((r["findings"], a["ok"]), ([], True))
+
+        self.assertEqual(e.step(3), 31)                  # 3*3=9, +2=11, +2*10=31
+        self.assertEqual(e.tokens, [17, -31])            # callback runs the new on_token
+        self.assertEqual(eng.scale(3), 9)                # the from-import copy
+        self.assertEqual((ops.activate(3), ops.activate.calls), (5, 3))   # wrapper kept
+        self.assertEqual(e.shift(0), 0 + 2 * 10)         # closure made before the swap
+        self.assertEqual(eng.make_shift(1)(0), 2)        # closure made after the swap
+        self.assertEqual(w.counts[f"{name}.ops:scale:{at(OPS, 'def scale')}"], 2)
+
+    def test_undo_restores_exact_base(self):
+        """Proves: undo_to(mark) restores the same code objects and removes added methods, imports and witness keys. Not: data the new code wrote."""
+        name, eng, _ = fresh("undo")
+        e = eng.Engine()
+        base_code, base_hash = eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__)
+        mod_keys, cls_keys = set(vars(eng)), set(vars(eng.Engine))
+        new = edit(ENG, ("import threading", "import statistics\nimport threading"),
+                   ("self.steps += 1", "self.steps += 2"),
+                   ("    def drain(self):", "    def mean_token(self):\n"
+                    "        return statistics.mean(self.tokens)\n\n    def drain(self):"))
+        j, w = J.Journal(), W.Witness()
+        mark = j.mark("txn-1")
+        r, d, a = install(name + ".engine", new, [("Engine.step", at(ENG, "def step"))], j, w)
+        self.assertEqual((r["findings"], a["ok"]), ([], True))
+        e.step(1)
+        e.step(3)
+        self.assertEqual((e.steps, e.mean_token()), (4, 15))         # (13 + 17) / 2
+        self.assertEqual(sorted(set(vars(eng)) - mod_keys), ["__fastrsi_hit__", "statistics"])
+        self.assertEqual(sorted(set(vars(eng.Engine)) - cls_keys), ["mean_token"])
+        self.assertEqual([x["kind"] for x in j.describe()],
+                         ["added", "added", "added", "added", "code", "added"])
+
+        u = j.undo_to(mark)
+        self.assertEqual((u["ok"], u["undone"], j.entries), (True, 6, []))
+        self.assertIs(eng.Engine.step.__code__, base_code)
+        self.assertEqual(L.content_hash(eng.Engine.step.__code__), base_hash)
+        self.assertEqual((set(vars(eng)), set(vars(eng.Engine))), (mod_keys, cls_keys))
+        self.assertFalse(hasattr(e, "mean_token"))
+        self.assertEqual(w.counts, {})
+        e.step(1)
+        self.assertEqual(e.steps, 5)
+
+    def test_code_identity_and_hash(self):
+        """Proves: identity is file/qualname/line and the hash is content only (copies equal, moves equal, edits differ). Not: equal behavior."""
+        n0, e0, _ = fresh("id0")
+        n1, e1, _ = fresh("id1")
+        line = at(ENG, "def step")
+        c0 = L.locate(n0 + ".engine", "Engine.step", line)["codes"][0]
+        c1 = L.locate(n1 + ".engine", "Engine.step", line)["codes"][0]
+        self.assertIsNot(e0.Engine.step.__code__, e1.Engine.step.__code__)
+        self.assertEqual((os.path.basename(c0["file"]), c0["qualname"], c0["firstlineno"]),
+                         ("engine.py", "Engine.step", 21))
+        self.assertEqual(c0["hash"], c1["hash"])
+
+        def code(src, q):
+            return L.code_tree(compile(src, "engine.py", "exec"))[0][
+                (q, at(src, "def " + q.split(".")[-1]))][0]
+        moved = code("\n\n\n" + ENG, "Engine.step")
+        self.assertEqual((moved.co_firstlineno, L.content_hash(moved)), (24, c0["hash"]))
+        edited = code(edit(ENG, ("self.steps += 1", "self.steps += 2")), "Engine.step")
+        self.assertNotEqual(L.content_hash(edited), c0["hash"])
+
+    def test_closure_change_is_a_finding_not_an_exception(self):
+        """Proves: a new closure variable is a non-overridable closure_changed finding and nothing changes. Not: changed cell values."""
+        name, eng, _ = fresh("closure")
+        e = eng.Engine()
+        new = edit(OPS, ("return x + k", "return x + k + bias"))
+        r = S.stage(name + ".ops", new, [("make_shift.<locals>.shift", at(OPS, "def shift"))])
+        self.assertTrue(r["ok"])
+        (f,) = r["findings"]
+        self.assertEqual((f["check"], f["observed"], f["expected"], f["overridable"]),
+                         ("closure_changed", "free variables ('bias', 'k')",
+                          "the running closure's ('k',)", False))
+        d = F.decide(r["findings"], accept=["closure_changed"])
+        self.assertEqual((d["proceed"], d["blocking"]), (False, ["closure_changed"]))
+        self.assertEqual(e.step(3), 17)
+
+    def test_running_frame_never_runs_the_new_code(self):
+        """Proves: zero calls under a running loop frame give running_frame, an uncalled function zero_witness. Not: frames in C or other processes."""
+        name, eng, _ = fresh("loop")
+        e, stop = eng.Engine(delay=0.001), threading.Event()
+        th = threading.Thread(target=eng.run_loop, args=(e, stop), daemon=True)
+        th.start()
+        try:
+            wait_for(lambda: e.steps > 0)
+            new = edit(ENG, ("engine.step(x)\n", "engine.step(x + 1)\n"),
+                       ("self.steps += 1", "self.steps = self.steps + 1"),
+                       ("self.tokens.clear()", "self.tokens = []"))
+            p = C.LocalParticipant("core", alias={"toy": name}, quiesce=e.at_boundary)
+            plan = {"id": "t", "accept": ["running_frame"], "modules": {"toy.engine": {
+                "source": new, "targets": [["run_loop", at(ENG, "def run_loop")],
+                                           ["Engine.step", at(ENG, "def step")],
+                                           ["Engine.drain", at(ENG, "def drain")]]}}}
+            prep = p.prepare(plan)
+            self.assertEqual([(f["check"], f["accepted"]) for f in prep["findings"]],
+                             [("running_frame", True)])
+            self.assertTrue(p.commit("t")["ok"])
+            n = e.steps
+            wait_for(lambda: e.steps >= n + 5)
+            chk = p.witness_check("t")
+        finally:
+            stop.set()
+            th.join()
+        k = {q: f"toy.engine:{q}:{at(ENG, s)}" for q, s in
+             [("run_loop", "def run_loop"), ("Engine.step", "def step"),
+              ("Engine.drain", "def drain")]}
+        self.assertEqual(chk["counts"][k["run_loop"]], 0)
+        self.assertGreaterEqual(chk["counts"][k["Engine.step"]], 5)
+        self.assertEqual({f["subject"]: f["check"] for f in chk["findings"]},
+                         {k["run_loop"]: "running_frame", k["Engine.drain"]: "zero_witness"})
+        self.assertEqual(e.tokens[-1], 13)   # the loop still calls step(1), not step(2) -> 15
+
+    def _three(self, tag, quiesce=None, core_path=None):
+        out = []
+        for pname in ("rank0", "rank1", "core"):
+            name, eng, _ = fresh(tag + pname, core_path if pname == "core" else None)
+            e = eng.Engine()
+            out.append((C.LocalParticipant(pname, alias={"toy": name},
+                                           quiesce=(quiesce or {}).get(pname),
+                                           scope={"engine": e}), eng, e))
+        return out
+
+    def test_vote_no_changes_nobody(self):
+        """Proves: one participant on another build votes no and every participant keeps its base code objects. Not: a vote over real RPC."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        for f in ("__init__.py", "ops.py", "engine.py"):
+            shutil.copy(os.path.join(toy.HERE, f), tmp)
+        with open(os.path.join(tmp, "engine.py"), "w") as fh:
+            fh.write(edit(ENG, ("make_shift(10)", "make_shift(20)")))
+        parts = self._three("vote", core_path=tmp)
+        base = [eng.Engine.step.__code__ for _, eng, _ in parts]
+        spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        path = os.path.join(tmp, "receipts.jsonl")
+        res = C.Coordinator([p for p, _, _ in parts], R.ReceiptWriter(path)).run(
+            {"modules": {"toy.engine": spec}})
+        self.assertEqual(res["outcome"], "aborted")
+        rec = res["receipt"]
+        self.assertEqual({n: r["prepare"]["ok"] for n, r in rec["participants"].items()},
+                         {"rank0": True, "rank1": True, "core": False})
+        self.assertEqual([(f["participant"], f["check"]) for f in rec["findings"]],
+                         [("core", "base_mismatch"), ("core", "outside_changes")])
+        self.assertEqual([eng.Engine.step.__code__ for _, eng, _ in parts], base)
+        self.assertEqual([e.step(3) for _, _, e in parts], [17, 17, 27])
+        self.assertEqual((rec["undo"]["status"], rec["actual_recipes"], rec["edit_to_run_s"]),
+                         ("not_needed", [], None))
+        self.assertEqual(R.read(path)[0]["outcome"], "aborted")
+
+    def test_commit_failure_undoes_the_committed(self):
+        """Proves: a participant lost at commit gets rank0 undone and core aborted, and the receipt says so. Not: a half-switched participant."""
+        def lost(fn):
+            raise RuntimeError("rank1: worker process lost")
+        parts = self._three("fail", quiesce={"rank1": lost})
+        base = [(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))
+                for _, eng, _ in parts]
+        spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        res = C.Coordinator([p for p, _, _ in parts]).run({"modules": {"toy.engine": spec}})
+        rec = res["receipt"]
+        self.assertEqual(res["outcome"], "rolled_back")
+        self.assertEqual({n: sorted(r) for n, r in rec["participants"].items()},
+                         {"rank0": ["commit", "prepare", "undo"],
+                          "rank1": ["abort", "commit", "prepare"],
+                          "core": ["abort", "prepare"]})
+        self.assertEqual(rec["participants"]["rank1"]["commit"]["error"],
+                         "commit: RuntimeError: rank1: worker process lost")
+        self.assertEqual((rec["undo"]["status"], list(rec["undo"]["participants"])),
+                         ("undone", ["rank0"]))
+        self.assertIn(("rank1", "participant_failed"),
+                      [(f["participant"], f["check"]) for f in rec["findings"]])
+        self.assertEqual([(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))
+                          for _, eng, _ in parts], base)
+        self.assertEqual([e.step(3) for _, _, e in parts], [17, 17, 17])
+        self.assertEqual(parts[0][0].journal.entries, [])
+
+    def test_receipt_fields_and_measured_times(self):
+        """Proves: the receipt has every field, its times are differences of measured timestamps, and writes append. Not: GPU costs."""
+        parts = self._three("receipt")
+        _, ceng, ce = parts[2]
+        ce.delay = 0.02
+        stop = threading.Event()
+        th = threading.Thread(target=ceng.run_loop, args=(ce, stop), daemon=True)
+        parts[2][0].quiesce = ce.at_boundary
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "receipts.jsonl")
+        co = C.Coordinator([p for p, _, _ in parts], R.ReceiptWriter(path),
+                           engine={"name": "toy", "version": "0", "commit": None})
+        th.start()
+        try:
+            wait_for(lambda: ce.looping)
+            t_edit = time.time()
+            spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+            res = co.run({"modules": {"toy.engine": spec}, "recipes": ["R0"],
+                          "predicted_resources": ["code objects"], "certainty": "L2"},
+                         edit_time=t_edit,
+                         baseline_restart={"seconds": 31.0, "source": "kb/costs.md R9"})
+            first = text(path)
+            spec2 = {"source": edit(OPS, ("return x + 1", "return x + 2")),
+                     "base_hash": L.text_hash(OPS), "targets": [["activate", at(OPS, "@traced")]]}
+            res2 = co.run({"modules": {"toy.ops": spec2}})
+        finally:
+            stop.set()
+            th.join()
+        self.assertEqual((res["outcome"], res2["outcome"]), ("committed", "committed"))
+        recs = R.read(path)
+        self.assertEqual(len(recs), 2)
+        self.assertTrue(text(path).startswith(first))
+        rec = recs[0]
+        self.assertEqual(sorted(set(R.FIELDS) | {"writer"}), sorted(rec))
+        tl = rec["timeline"]
+        self.assertEqual(tl["edit"], t_edit)
+        self.assertEqual(rec["edit_to_run_s"], round(tl["committed"] - tl["edit"], 6))
+        self.assertEqual(rec["edit_to_finish_s"], round(tl["finished"] - tl["edit"], 6))
+        self.assertTrue(tl["edit"] <= tl["prepare_start"] <= tl["vote"] <= tl["committed"]
+                        <= tl["finished"])
+        self.assertGreater(rec["edit_to_run_s"], 0)
+        self.assertEqual(rec["baseline_restart_s"], {"seconds": 31.0, "source": "kb/costs.md R9"})
+        self.assertEqual((rec["actual_recipes"], rec["proofs"]["hashes_agree"], rec["outcome"]),
+                         (["R0 swap"], True, "committed"))
+        self.assertEqual(rec["engine"], {"name": "toy", "version": "0", "commit": None})
+        self.assertEqual([e.step(3) for _, _, e in parts], [1800, 1800, 1800])
+
+    def test_accept_list(self):
+        """Proves: an overridable finding proceeds only once accepted; a non-overridable one is refused even when accepted. Not: who should accept."""
+        name, _, ops = fresh("accept")
+        p = C.LocalParticipant("rank0", alias={"toy": name})
+        new = edit(OPS, ("STEP_SCALE = 2", "STEP_SCALE = 3"),
+                   ("return x * STEP_SCALE", "return x * STEP_SCALE + 1"))
+        mods = {"toy.ops": {"source": new, "targets": [["scale", at(OPS, "def scale")]]}}
+        r = p.prepare({"id": "a", "modules": mods})
+        self.assertEqual((r["ok"], [(f["check"], f["accepted"]) for f in r["findings"]]),
+                         (False, [("outside_changes", False)]))
+        self.assertEqual(ops.scale(3), 6)
+        r = p.prepare({"id": "b", "modules": mods, "accept": ["outside_changes"]})
+        self.assertEqual((r["ok"], [(f["check"], f["accepted"]) for f in r["findings"]]),
+                         (True, [("outside_changes", True)]))
+        self.assertTrue(p.commit("b")["ok"])
+        self.assertEqual((ops.scale(3), ops.STEP_SCALE), (7, 2))   # body new, constant old
+
+        bad = {"toy.ops": {"source": edit(OPS, ("return x + k", "return x + k + bias")),
+                           "targets": [["make_shift.<locals>.shift", at(OPS, "def shift")]]}}
+        r = p.prepare({"id": "c", "modules": bad, "accept": "all"})
+        self.assertEqual((r["ok"], [(f["check"], f["accepted"]) for f in r["findings"]]),
+                         (False, [("closure_changed", False)]))
+
+    def test_repair_cell_sets_missing_field_and_undo_removes_it(self):
+        """Proves (R10): a repair cell sets a field the new step needs, step works, and undo removes the field. Not: device memory repairs."""
+        name, eng, _ = fresh("repair")
+        e = eng.Engine()
+        new = edit(ENG, ("        self.steps = 0\n", "        self.steps = 0\n        self.bias = 0\n"),
+                   ("y = self.shift(activate(scale(x)))",
+                    "y = self.shift(activate(scale(x))) + self.bias"))
+        mods = {"toy.engine": {"source": new,
+                               "targets": [["Engine.__init__", at(ENG, "def __init__")],
+                                           ["Engine.step", at(ENG, "def step")]]}}
+        p = C.LocalParticipant("core", alias={"toy": name}, scope={"engine": e})
+        self.assertTrue(p.prepare({"id": "swap-only", "modules": mods})["ok"])
+        self.assertTrue(p.commit("swap-only")["ok"])
+        with self.assertRaisesRegex(AttributeError, "bias"):
+            e.step(3)
+        self.assertTrue(p.undo("swap-only")["ok"])
+
+        plan = {"id": "swap+repair", "modules": mods,
+                "repairs": [{"cell": "engine.bias = 5", "declares": ["engine"]}]}
+        self.assertTrue(p.prepare(plan)["ok"])
+        c = p.commit("swap+repair")
+        self.assertTrue(c["ok"])
+        self.assertIn({"kind": "added", "target": "Engine", "name": "bias"}, c["journal"])
+        self.assertEqual((e.step(3), vars(e)["bias"]), (22, 5))
+        self.assertEqual(eng.Engine().bias, 0)               # new objects get it from __init__
+        self.assertTrue(p.undo("swap+repair")["ok"])
+        self.assertNotIn("bias", vars(e))
+        self.assertEqual(e.step(3), 17)
+
+    def test_repair_that_cannot_be_undone_is_a_finding(self):
+        """Proves: in-place or undeclared mutations by a repair cell are repair_not_undoable findings, not exceptions. Not: deeper than one level."""
+        name, eng, _ = fresh("repair2")
+        e, other = eng.Engine(), eng.Engine()
+        p = C.LocalParticipant("core", alias={"toy": name},
+                               scope={"engine": e, "other": other})
+        cell = "engine.bias = 1\nengine.tokens.append(99)\nother.steps = 7"
+        plan = {"id": "r", "repairs": [{"cell": cell, "declares": ["engine"]}]}
+        self.assertTrue(p.prepare(plan)["ok"])
+        c = p.commit("r")
+        self.assertFalse(c["ok"])
+        self.assertEqual(sorted((f["check"], f["observed"]) for f in c["findings"]),
+                         [("repair_not_undoable", "engine.tokens changed in place"),
+                          ("repair_not_undoable", "undeclared other changed: steps")])
+        self.assertNotIn("bias", vars(e))                     # declared: undone
+        self.assertEqual((e.tokens, other.steps), ([99], 7))  # not undoable: still there
+        self.assertTrue(p.prepare({**plan, "id": "r2", "accept": ["repair_not_undoable"]})["ok"])
+        self.assertTrue(p.commit("r2")["ok"])
+        self.assertEqual(vars(e)["bias"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
