@@ -26,6 +26,7 @@ is not an ok-dict counts as not-ok):
     proof(txn)    -> {"ok", "hashes", "witness"}     code hashes right after commit
     witness_check(txn) -> {"ok", "counts", "findings"}  after the workload
     reset(kind)   -> {"ok", ...}                     data reset hook: "R2", "R3", ...
+    fingerprint(modules) -> {"ok", "code"}           {key: [content hash, code object id]}
 
 A plan is plain data, so it can cross a process boundary:
 
@@ -43,6 +44,7 @@ to a worker rank, or the engine-core input-queue channel), which on the far side
 to a LocalParticipant.
 """
 import json
+import sys
 import threading
 import time
 import uuid
@@ -86,6 +88,9 @@ class Participant:
     def status(self, txn):
         return F.ok(txn=txn, state="unknown")
 
+    def fingerprint(self, modules):
+        return F.not_ok("no fingerprint")
+
 
 class CallParticipant(Participant):
     """A participant in another process, reached through `call(method, payload) -> dict`."""
@@ -127,13 +132,22 @@ class CallParticipant(Participant):
     def status(self, txn):
         return self._do("status", txn)
 
+    def fingerprint(self, modules):
+        return self._do("fingerprint", modules)
+
 
 class LocalParticipant(Participant):
     """The kernel in this process. `alias`: {plan module prefix: this process's prefix} (a
     participant that loaded the package under another name). `quiesce(fn)`: runs fn at this
     participant's step boundary and returns its result (default: now, in the caller's thread).
     `scope`: names a repair cell can use. `resets`: {"R3": callable, ...}, data resets an
-    undo can ask for (each returns a JSON-able summary or None)."""
+    undo can ask for (each returns a JSON-able summary or None).
+
+    Chained edits: the participant remembers the source text each committed transaction
+    installed and the code objects it swapped in. A later plan for the same module is staged
+    against that text (not the file), and the participant's own code objects are not
+    `base_mismatch`. Undo of a transaction also forgets every later one (the journal undoes
+    them too). A plan that would change nothing is an `empty_change` finding."""
 
     def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None):
         self.name = name
@@ -145,6 +159,33 @@ class LocalParticipant(Participant):
         self.witness = W.Witness()
         self._staged, self._marks, self._done = {}, {}, {}
         self._state = {}              # txn -> prepared | committed | aborted | undone
+        self._sources = {}            # committed txn -> {plan module: source it installed}
+        self._codes = {}              # committed txn -> [code objects it swapped in]
+        self._pending = {}            # prepared txn -> {plan module: source}
+
+    def _live_source(self, module):
+        """The text the live module runs: the latest committed transaction's, else None."""
+        for txn in reversed(list(self._sources)):
+            if module in self._sources[txn]:
+                return self._sources[txn][module]
+        return None
+
+    def fingerprint(self, modules):
+        """{key: [content hash, id of the code object]} for every function the modules' own
+        namespaces reach (no heap scan). Equal fingerprints mean the same code objects run."""
+        out = {}
+        try:
+            for m in modules:
+                mod = sys.modules.get(self._actual(m))
+                if mod is None:
+                    return F.not_ok(f"module {m} not loaded")
+                for fn in L.module_functions(mod):
+                    c = fn.__code__
+                    out[L.key_of(m, c.co_qualname, c.co_firstlineno)] = [L.content_hash(c),
+                                                                         id(c)]
+        except Exception as e:
+            return F.not_ok(f"fingerprint: {type(e).__name__}: {e}")
+        return F.ok(code=out)
 
     def status(self, txn):
         return F.ok(txn=txn, state=self._state.get(txn, "unknown"))
@@ -170,9 +211,11 @@ class LocalParticipant(Participant):
     def prepare(self, plan):
         txn, accept = plan["id"], plan.get("accept", ())
         fs, staged, items, ok, timings = [], [], {}, True, {}
+        own = [c for cs in self._codes.values() for c in cs]
         for m, spec in plan.get("modules", {}).items():
             r = S.stage(self._actual(m), spec["source"], spec["targets"],
-                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"))
+                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
+                        base_source=self._live_source(m), own_codes=own)
             fs += r["findings"]
             ok = ok and r["ok"]
             if r["staged"] is not None:
@@ -192,12 +235,19 @@ class LocalParticipant(Participant):
                                     "a cell that compiles and declares names in scope"))
                 ok = False
             cells.append((code, list(rep["declares"])))
+        if ok and not cells and all(f["overridable"] for f in fs) and not any(
+                it.get("changed") or it.get("added") for it in items.values()) \
+                and not any(st.removes for st in staged):
+            fs.append(F.finding("empty_change", f"{len(items)} target(s), none changed; no "
+                                "definition added or deleted; no repair cell",
+                                "at least one change to install"))
         d = F.decide(fs, accept)
         out_fs = [{**f, "participant": self.name} for f in d["findings"]]
         if not (ok and d["proceed"]):
             self._state[txn] = "aborted"
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
+        self._pending[txn] = {m: spec["source"] for m, spec in plan.get("modules", {}).items()}
         self._state[txn] = "prepared"
         return F.ok(staged=items, findings=out_fs, timings=timings)
 
@@ -237,6 +287,8 @@ class LocalParticipant(Participant):
                 return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"])
             self._marks[txn] = mark
             self._done[txn] = staged
+            self._sources[txn] = self._pending.pop(txn, {})
+            self._codes[txn] = [c for st in staged for _, c, _, _ in st.swaps]
             self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
                         journal=self.journal.describe(mark))
@@ -248,6 +300,7 @@ class LocalParticipant(Participant):
             return F.not_ok(f"commit: {type(e).__name__}: {e}")
 
     def abort(self, txn):
+        self._pending.pop(txn, None)
         if self._staged.pop(txn, None) is not None or self._state.get(txn) == "prepared":
             self._state[txn] = "aborted"
         return F.ok()
@@ -260,10 +313,12 @@ class LocalParticipant(Participant):
             r = self.quiesce(lambda: self.journal.undo_to(mark))
         except Exception as e:
             return F.not_ok(f"undo: {type(e).__name__}: {e}")
-        if r["ok"]:
-            del self._marks[txn]
-            self._done.pop(txn, None)
-            self._state[txn] = "undone"
+        if r["ok"]:                    # the journal undid every later transaction too
+            for t in [t for t, m in self._marks.items() if m >= mark]:
+                del self._marks[t]
+                for d in (self._done, self._sources, self._codes):
+                    d.pop(t, None)
+                self._state[t] = "undone"
         return r
 
     def proof(self, txn):

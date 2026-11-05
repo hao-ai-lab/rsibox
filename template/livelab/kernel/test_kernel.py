@@ -360,11 +360,48 @@ class KernelTest(unittest.TestCase):
         self.assertTrue(p.commit("b")["ok"])
         self.assertEqual((ops.scale(3), ops.STEP_SCALE), (7, 2))   # body new, constant old
 
-        bad = {"toy.ops": {"source": edit(OPS, ("return x + k", "return x + k + bias")),
+        # on top of what b installed (the participant now stages against b's text)
+        bad = {"toy.ops": {"source": edit(new, ("return x + k", "return x + k + bias")),
                            "targets": [["make_shift.<locals>.shift", at(OPS, "def shift")]]}}
         r = p.prepare({"id": "c", "modules": bad, "accept": "all"})
         self.assertEqual((r["ok"], [(f["check"], f["accepted"]) for f in r["findings"]]),
                          (False, [("closure_changed", False)]))
+
+    def test_edit_that_changes_no_code_is_refused(self):
+        """Proves: a comment-only edit, and a module-constant edit whose outside_changes is accepted, are both refused as empty_change instead of committing nothing. Not: a planner that lists unchanged targets on purpose."""
+        name, _, ops = fresh("empty")
+        p = C.LocalParticipant("rank0", alias={"toy": name})
+        comment = edit(OPS, ("def scale(x):", "def scale(x):  # faster"))
+        const = edit(OPS, ("STEP_SCALE = 2", "STEP_SCALE = 3"))
+        for i, (src, accept) in enumerate([(comment, ()), (const, "all")]):
+            r = p.prepare({"id": f"e{i}", "accept": accept, "modules": {"toy.ops": {
+                "source": src, "targets": S.changed_targets(OPS, src)}}})
+            self.assertEqual((r["ok"], r["staged"], [(f["check"], f["accepted"])
+                                                     for f in r["findings"]]),
+                             (False, {}, [("outside_changes", True)] * i
+                              + [("empty_change", False)]))
+        self.assertEqual((ops.scale(3), ops.STEP_SCALE, p.journal.entries), (6, 2, []))
+
+    def test_chained_edit_stages_against_the_installed_text(self):
+        """Proves: a second edit of the same function, made on top of the first, stages against the text the first installed (no base_mismatch), and undoing both returns the base code object. Not: an edit that moved the target's first line."""
+        name, _, ops = fresh("chain")
+        p = C.LocalParticipant("rank0", alias={"toy": name})
+        base, line = ops.activate.__wrapped__.__code__, at(OPS, "@traced")
+        a2 = edit(OPS, ("return x + 1", "return x + 2"))
+        a3 = edit(a2, ("return x + 2", "return x + 3"))
+        for txn, old, new in (("a", OPS, a2), ("b", a2, a3)):
+            self.assertEqual(S.changed_targets(old, new), [["activate", line]])
+            r = p.prepare({"id": txn, "modules": {"toy.ops": {
+                "source": new, "base_hash": L.text_hash(old), "targets": [["activate", line]]}}})
+            self.assertEqual((r["ok"], r["findings"]), (True, []))
+            self.assertTrue(p.commit(txn)["ok"])
+        self.assertEqual(ops.activate(1), 4)
+        self.assertTrue(p.undo("b")["ok"])
+        self.assertEqual(ops.activate(1), 3)
+        self.assertTrue(p.undo("a")["ok"])
+        self.assertIs(ops.activate.__wrapped__.__code__, base)
+        self.assertEqual((ops.activate(1), p.status("a")["state"], p.status("b")["state"]),
+                         (2, "undone", "undone"))
 
     def test_removed_definition_is_a_finding_and_undo_restores_it(self):
         """Proves: an edit that only deletes a helper is a removed_definition finding; accepted, the helper is gone live; undo restores it. Not: from-import copies."""

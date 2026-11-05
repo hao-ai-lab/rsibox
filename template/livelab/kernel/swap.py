@@ -139,21 +139,29 @@ def _set_class_cell(fn, cls):
         fn.__closure__[fn.__code__.co_freevars.index("__class__")].cell_contents = cls
 
 
-def stage(module, source, targets, base_hash=None, key_module=None, scan="auto"):
+def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
+          base_source=None, own_codes=()):
     """module: the live module's name; source: the full patched module text; targets:
-    [(qualname, firstlineno in the base file)]; base_hash: text_hash of the source the patch
-    was made against (checked against this module's file); key_module: the module name used in
+    [(qualname, firstlineno in the base)]; base_hash: text_hash of the source the patch was
+    made against (checked against the base text); base_source: the text the live module runs
+    now, when an earlier transaction changed it (default: the module's file); own_codes: code
+    objects this participant installed itself (with their witness), which match base_source
+    by construction and are not reported as `base_mismatch`; key_module: the module name used in
     witness keys (participants that load a module under another name pass the shared one);
     scan: "auto" (heap scan only when the module namespace cannot find a target, suspended
     frames only for generator / coroutine targets) or "always" (both scans, as before v2.2).
     Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
-    can be staged (bad patch, import error). Never raises."""
+    can be staged (bad patch, import error). Each target's item says whether its definition
+    `changed` (AST, before the witness is added). Never raises."""
     kname = key_module or module
     fs, timings, t0 = [], {}, time.perf_counter()
     try:
         mod = importlib.import_module(module)
-        with open(mod.__file__) as fh:
-            base_src = fh.read()
+        if base_source is None:
+            with open(mod.__file__) as fh:
+                base_src = fh.read()
+        else:
+            base_src = base_source
         base_tree = ast.parse(base_src, mod.__file__)
         tree = ast.parse(source, mod.__file__)
     except Exception as e:
@@ -162,7 +170,7 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto")
             "that parses", subject=kname)], staged=None, items={})
     st = Staged(mod)
     if base_hash is not None and L.text_hash(base_src) != base_hash:
-        fs.append(F.finding("base_mismatch", f"module file hash {L.text_hash(base_src)}",
+        fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
                             f"plan base hash {base_hash}", subject=kname))
     base_idx = L.code_tree(compile(base_tree, mod.__file__, "exec", dont_inherit=True))[0]
     timings["parse_compile_s"] = round(time.perf_counter() - t0, 6)
@@ -185,7 +193,7 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto")
                 line_map[(q, first_line(n))] = first_line(b)
 
     # 1. targets: find them in base, running code and patch; add the witness
-    todo = []
+    todo, changed, own = [], {}, {id(c) for c in own_codes}
     for q, line in targets:
         line = int(line)
         k = L.key_of(kname, q, line)
@@ -207,10 +215,11 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto")
             continue
         base_code = base_idx[(q, line)][0]
         for o in olds:
-            if L.content_hash(o) != L.content_hash(base_code):
+            if id(o) not in own and L.content_hash(o) != L.content_hash(base_code):
                 fs.append(F.finding("base_mismatch", f"running code {L.content_hash(o)}",
                                     f"the file's code {L.content_hash(base_code)}", subject=k))
         node = pq[q][i]
+        changed[k] = ast.dump(bq[q][i]) != ast.dump(node)
         W.inject(node, k)
         todo.append((q, line, i, k, olds))
 
@@ -326,7 +335,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto")
         st.keys.append(k)
         st.old_codes[k] = list(olds)
         st.functions[k] = [fn for o in olds for fn in held.get(o, [])]
-        st.items[k] = {"base_hash": L.content_hash(olds[0]) if olds else None,
+        st.items[k] = {"changed": changed[k],
+                       "base_hash": L.content_hash(olds[0]) if olds else None,
                        "new_hash": L.content_hash(new),
                        "functions": sum(len(held.get(o, [])) for o in olds),
                        "via": sum(len(held.get(o, [])) for o, _ in chain)}
@@ -360,6 +370,20 @@ def validate(st):
             fs.append(F.finding("changed_since_prepare", f"{name} was deleted meanwhile",
                                 f"{name} present, as at prepare", subject=name))
     return F.ok(checked=len(st.expect)) if not fs else F.not_ok("changed since prepare", fs)
+
+
+def changed_targets(base_src, new_src):
+    """Planning helper: [[qualname, first line in base_src]] of every definition (function,
+    method, nested function, lambda) whose AST differs, for qualnames defined as many times in
+    both texts. An enclosing function of a changed one is listed too. Added and removed
+    definitions are not targets: `stage` finds them. Raises SyntaxError on a bad text."""
+    bq, pq = qual_index(ast.parse(base_src)), qual_index(ast.parse(new_src))
+    out = []
+    for q, bn in bq.items():
+        pn = pq.get(q, [])
+        if len(pn) == len(bn):
+            out += [[q, first_line(b)] for b, p in zip(bn, pn) if ast.dump(b) != ast.dump(p)]
+    return sorted(out, key=lambda t: t[1])
 
 
 def removed_definitions(base_tree, tree):

@@ -3,17 +3,19 @@
 The small, engine-agnostic core that every live-change mechanism shares: locate the live code,
 swap it, journal every change so undo is exact, report findings instead of raising, count
 calls of the new code, run two-phase transactions over participants, and write linked
-receipts. Pure Python, standard library only; it imports no engine.
+receipts, and keep the session state (base, edited, poisoned) that `status()` reports.
+Pure Python, standard library only; it imports no engine.
 
 | File | What it does |
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
-| `swap.py` | `stage` compiles the patched module, adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. |
+| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` compiles the patched module, adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. |
 | `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10). |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
 | `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails; `prove` after the workload; `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process; `CallParticipant` is the shape an engine implements over its RPC. |
+| `session.py` | The host's state machine for one lab: a stack of committed transactions, the code fingerprint each participant should show (content hash and code object id of every function the modules' namespaces reach), checked after every abort, rollback, undo and `status()`. Crash, hang, lost participant, failed undo or code changed outside the journal poison it; a poisoned session refuses install and uninstall until the lab respawns its workers. |
 | `toy/` | A toy engine: ops with a decorator and a closure factory; an `Engine` built in `__init__` with a saved bound-method callback, a cache, and a `step` that records the code version it ran; a single-engine busy loop; and a `Cluster` (the engine core) that steps several ranks together and runs queued work only between steps. `load_copy` gives each participant its own module copy. |
 
 ## Walkthrough: one transaction in one step gap
@@ -111,13 +113,17 @@ step-gap coordinator gave none in 20 of 20.
 
 ## Golden tests
 
-`python3 -m unittest -v` from `template/livelab` (CPU, about 1.5 s; one test builds a 2.5 M-object heap):
+`python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 1.5 s; one
+test builds a 2.5 M-object heap). `python3 -m unittest` also runs the conformance cases on
+the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
 test_accept_list ... ok
+test_chained_edit_stages_against_the_installed_text ... ok
 test_closure_change_is_a_finding_not_an_exception ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
+test_edit_that_changes_no_code_is_refused ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
 test_linked_receipts_and_measured_times ... ok
 test_one_by_one_commit_mixes_versions ... ok
@@ -135,7 +141,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 20 tests in 1.49s
+Ran 22 tests in 1.50s
 
 OK
 ```
@@ -158,6 +164,13 @@ Each test's docstring says what it proves and what it does not.
 - **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
   `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
   2 that had not started when the caller gave up is cancelled.
+- **An edit that changes nothing is refused.** A plan whose targets are all unchanged (a
+  comment, or a module constant whose `outside_changes` was accepted), with nothing added,
+  deleted or repaired, is an `empty_change` finding, not a commit that reports success.
+- **Chained edits stage against what is live.** Each participant remembers the text every
+  committed transaction installed and the code objects it swapped in; a later plan for the
+  same module is staged against that text, and those code objects are not `base_mismatch`.
+  Undo of a transaction forgets it and every later one (the journal undoes them too).
 - **Deletions are edits too.** A definition the edit deletes (module function, method,
   class) but the live module still defines is a `removed_definition` finding; accepted, it is
   deleted through the journal, and undo puts the same object back. Copies made by
@@ -175,8 +188,11 @@ Each test's docstring says what it proves and what it does not.
   in one piece. Copies of a function object made with `types.FunctionType(code, ...)` are not
   found by the namespace path.
 - The host's transaction table lives in memory: a host crash loses `status`.
-- A second edit on top of a committed one, when the edit moved the target's first line: the
-  running code then has the patch's line, and the target is not found (`no_live_function`).
+- A chained edit of a function the earlier edit did not touch, when the earlier edit moved
+  lines above it: the function's running code keeps the file's line, the text the
+  participant stages against has another, and the target is not found (`no_live_function`).
+- The installed text is what the plan asked for. When `outside_changes` was accepted, the
+  live module is neither that text nor the file, and the next stage compares against the plan.
 - Functions defined with `exec` into foreign globals are not found (the scan matches by
   `__globals__`, so module copies stay apart).
 - Real RPC: the toy tests reach ranks through `CallParticipant` over a 1 ms in-process call;

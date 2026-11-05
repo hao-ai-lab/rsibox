@@ -116,6 +116,27 @@ CATALOG = {
         [{"action": "run the reset by hand (REPL) or add the hook", "cost": "ms to seconds"},
          RESTART],
         "later results read data written by code that is no longer installed", [], False),
+    "empty_change": (
+        "the plan changes no definition, adds or deletes none and runs no repair cell, so "
+        "committing it would report success while the engine runs the same code",
+        [{"action": "check that the edit reached the planner (file saved, right module)",
+          "cost": "seconds"},
+         {"action": "if the edit is outside function bodies: soft or warm restart",
+          "cost": "recipe R5 or R9"}],
+        "a silent no-op install reads as a success", ["Proving an edit applied"], False),
+    "tampered": (
+        "a participant runs code that no committed transaction installed (a REPL or another "
+        "tool changed it outside the journal), or it did not answer",
+        [{"action": "inspect the participant (REPL) and respawn its worker group",
+          "cost": "respawn"}, RESTART],
+        "undo cannot restore a base it never recorded; later results are not comparable",
+        [], False),
+    "session_poisoned": (
+        "an earlier fault left the session in a state the host cannot prove (crash, hang, "
+        "lost participant, failed undo, code changed outside the journal)",
+        [{"action": "respawn the worker group (reset kind respawn)", "cost": "respawn"},
+         RESTART],
+        "a change installed now would be measured against an unknown base", [], False),
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),
