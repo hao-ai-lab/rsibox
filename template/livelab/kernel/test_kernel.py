@@ -366,6 +366,33 @@ class KernelTest(unittest.TestCase):
         self.assertEqual((r["ok"], [(f["check"], f["accepted"]) for f in r["findings"]]),
                          (False, [("closure_changed", False)]))
 
+    def test_removed_definition_is_a_finding_and_undo_restores_it(self):
+        """Proves: an edit that only deletes a helper is a removed_definition finding; accepted, the helper is gone live; undo restores it. Not: from-import copies."""
+        name, eng, _ = fresh("removed")
+        e = eng.Engine()
+        e.step(3)
+        drain = vars(eng.Engine)["drain"]
+        new = edit(ENG, ("    def drain(self):\n        self.tokens.clear()\n\n", ""))
+        mods = {"toy.engine": {"source": new, "targets": []}}
+        p = C.LocalParticipant("core", alias={"toy": name})
+        r = p.prepare({"id": "a", "modules": mods})
+        self.assertEqual((r["ok"], [(f["check"], f["subject"], f["accepted"])
+                                    for f in r["findings"]]),
+                         (False, [("removed_definition", "toy.engine:Engine.drain", False)]))
+        e.drain()                                           # not accepted: still there
+        self.assertEqual(e.tokens, [])
+        self.assertTrue(p.prepare({"id": "b", "modules": mods,
+                                   "accept": ["removed_definition"]})["ok"])
+        c = p.commit("b")
+        self.assertIn({"kind": "removed", "target": "Engine", "name": "drain"}, c["journal"])
+        with self.assertRaisesRegex(AttributeError, "drain"):
+            e.drain()                                       # the forgotten caller fails live
+        self.assertTrue(p.undo("b")["ok"])
+        self.assertIs(vars(eng.Engine)["drain"], drain)     # the same function object is back
+        e.step(3)
+        e.drain()
+        self.assertEqual(e.tokens, [])
+
     def test_repair_cell_sets_missing_field_and_undo_removes_it(self):
         """Proves (R10): a repair cell sets a field the new step needs, step works, and undo removes the field. Not: device memory repairs."""
         name, eng, _ = fresh("repair")

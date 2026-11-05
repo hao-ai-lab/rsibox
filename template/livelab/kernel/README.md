@@ -92,7 +92,7 @@ step-gap coordinator gave none in 20 of 20.
 
 ## Golden tests
 
-`python3 -m unittest -v` from `template/livelab` (CPU, about 1.2 s):
+`python3 -m unittest -v` from `template/livelab` (CPU, about 1.3 s):
 
 ```
 test_accept_list ... ok
@@ -102,6 +102,7 @@ test_commit_failure_undoes_the_committed ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
 test_linked_receipts_and_measured_times ... ok
 test_one_by_one_commit_mixes_versions ... ok
+test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
@@ -114,7 +115,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 18 tests in 1.242s
+Ran 19 tests in 1.339s
 
 OK
 ```
@@ -137,6 +138,10 @@ Each test's docstring says what it proves and what it does not.
 - **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
   `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
   2 that had not started when the caller gave up is cancelled.
+- **Deletions are edits too.** A definition the edit deletes (module function, method,
+  class) but the live module still defines is a `removed_definition` finding; accepted, it is
+  deleted through the journal, and undo puts the same object back. Copies made by
+  `from x import f` elsewhere still hold it (not covered).
 - **Undo is exact for code, not for data.** The journal restores the same code and attribute
   objects and removes every name it added. Data the new code wrote (requests, cache entries)
   needs the reset the plan declares in `undo_resets`; a missing hook is a `reset_failed`

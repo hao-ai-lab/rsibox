@@ -96,6 +96,14 @@ CATALOG = {
         [{"action": "inspect the participant (REPL) and retry", "cost": "seconds"}, RESTART],
         "participants run different code: every collective of the next step is suspect",
         [], False),
+    "removed_definition": (
+        "the edit deletes a function, method or class that the live module still defines; a "
+        "swap that only adds and replaces leaves it callable, so a forgotten caller keeps "
+        "working live and fails after a restart",
+        [{"action": "accept: delete it from the live module (undo puts it back)", "cost": "ms"},
+         {"action": "leave it (dead code runs nowhere unless a caller was forgotten)",
+          "cost": "none, but live results can hide the forgotten caller"}],
+        "a live run passes while the restarted engine fails", [], True),
     "changed_since_prepare": (
         "the code a staged swap was built against changed between prepare and the gap "
         "(another transaction or a REPL edit); committing would overwrite that change",

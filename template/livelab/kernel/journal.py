@@ -9,6 +9,7 @@ Entries are typed:
 | `attr`   | setattr on an attribute that existed      | setattr back to the old object  |
 | `added`  | an attribute or dict key that did not exist | delete it                     |
 | `object` | container[key] = value on an existing key | put the old object back         |
+| `removed`| delete an attribute or dict key (a definition the edit deletes) | put it back |
 
 `mark()` returns the log length; `undo_to(mark)` pops entries back to it, newest first, so the
 base comes back exactly: the same code objects, the same attribute objects, added names gone.
@@ -58,6 +59,11 @@ class Entry:
             setattr(t, n, old)
         elif self.kind == "object":
             t[n] = old
+        elif self.kind == "removed":
+            if isinstance(t, dict):
+                t[n] = old
+            else:
+                setattr(t, n, old)
         elif self.kind == "added":
             if isinstance(t, (dict, list)):
                 if n in t:
@@ -130,6 +136,16 @@ class Journal:
     def set_item(self, container, key, value):
         self.record_item(container, key)
         container[key] = value
+
+    def delete(self, owner, name):
+        """Delete owner[name] (a dict) or owner.name (its own attribute); undo puts the same
+        object back."""
+        if isinstance(owner, dict):
+            self.entries.append(Entry("removed", owner, name, owner[name]))
+            del owner[name]
+        else:
+            self.entries.append(Entry("removed", owner, name, vars(owner)[name]))
+            delattr(owner, name)
 
     # -- repair cells (R10) --------------------------------------------------------------
     def repair(self, declared, audit=None):

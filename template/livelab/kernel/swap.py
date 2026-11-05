@@ -111,6 +111,7 @@ class Staged:
         self.old_codes = {}      # key -> [code objects the target ran before]
         self.functions = {}      # key -> [function objects that held the target's code]
         self.expect = []         # (function, code it ran at stage time, its hash): validate
+        self.removes = []        # (owner: module dict or class, name) the edit deletes
         self.items = {}          # key -> JSON summary
 
 
@@ -214,10 +215,25 @@ def stage(module, source, targets, base_hash=None, key_module=None):
         if isinstance(n, _DEF):
             W.inject(n, L.key_of(kname, q, first_line(n)))
 
+    # 2b. removed definitions: a live edit that only adds and swaps leaves them callable, so a
+    # forgotten caller works live and fails after a restart (vLLM #61843). A finding; on
+    # accept, apply deletes them through the journal.
+    removed = removed_definitions(base_tree, tree)
+    for q in removed:
+        cls, _, name = q.rpartition(".")
+        owner = mod.__dict__ if not cls else getattr(mod, cls, None)
+        present = owner is not None and (name in owner if isinstance(owner, dict)
+                                         else name in vars(owner))
+        if present:
+            fs.append(F.finding("removed_definition", f"{q} is deleted by the edit but defined "
+                                "in the live module", f"{q} gone, as after a restart",
+                                subject=f"{kname}:{q}"))
+            st.removes.append((owner, name))
+
     # 3. anything else changed?
     tq = [(q, i) for q, _, i, _, _ in todo]
-    if _blank(ast.parse(base_src), tq, set()) != _blank(ast.parse(source), tq,
-                                                        {q for q, _, _ in added}):
+    if _blank(ast.parse(base_src), tq, set(removed)) != _blank(ast.parse(source), tq,
+                                                               {q for q, _, _ in added}):
         fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
                             "(beyond added definitions and imports)",
                             "only target bodies, added definitions and imports differ",
@@ -320,7 +336,27 @@ def validate(st):
         if present:
             fs.append(F.finding("changed_since_prepare", f"{name} was added meanwhile",
                                 f"{name} absent, as at prepare", subject=name))
+    for owner, name in st.removes:
+        present = name in owner if isinstance(owner, dict) else name in vars(owner)
+        if not present:
+            fs.append(F.finding("changed_since_prepare", f"{name} was deleted meanwhile",
+                                f"{name} present, as at prepare", subject=name))
     return F.ok(checked=len(st.expect)) if not fs else F.not_ok("changed since prepare", fs)
+
+
+def removed_definitions(base_tree, tree):
+    """Qualnames the edit deletes: top-level functions and classes, and methods of top-level
+    classes that stay (a deleted class is reported once, not per method)."""
+    def defs(t):
+        out = set()
+        for n in t.body:
+            if isinstance(n, (*_DEF, ast.ClassDef)):
+                out.add(n.name)
+            if isinstance(n, ast.ClassDef):
+                out |= {f"{n.name}.{m.name}" for m in n.body if isinstance(m, _DEF)}
+        return out
+    gone = defs(base_tree) - defs(tree)
+    return sorted(q for q in gone if "." not in q or q.split(".")[0] not in gone)
 
 
 def _enclosing(code, run):
@@ -348,6 +384,8 @@ def apply(st, journal, witness):
                 journal.set_item(owner, name, obj)
             else:
                 journal.set_attr(owner, name, obj)
+        for owner, name in st.removes:     # only reached when removed_definition was accepted
+            journal.delete(owner, name)
     except Exception as e:
         u = journal.undo_to(start)
         return F.not_ok(f"apply: {type(e).__name__}: {e}", u["findings"], undo=u)
