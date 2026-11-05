@@ -78,6 +78,16 @@ LOADER = re.compile(r"(?:^|\.)_?load(?:_\w+)?_(?:weights|model)$")
 graph_mode = G.graph_mode
 
 
+# globals torch.compile (Dynamo) adds to a model module when it traces it: an R1 recompile
+# leaves them; at_base lists them apart from an edit's leftovers
+DYNAMO_GLOBALS = ("__compiled_fn", "__resume_at", "__builtins_dict__", "__subclass_",
+                  "__import_", "___")
+
+
+def dynamo_name(name):
+    return name.startswith(DYNAMO_GLOBALS)
+
+
 def stream_capturing():
     """Is this thread's current CUDA stream recording a graph? The worker witness's probe: a
     call made then is counted as capture, not as a run (kernel witness)."""
@@ -97,7 +107,7 @@ class Side:
         if os.environ.get("FASTRSI_KERNEL_ANALYZE", "process") == "process":
             analyzer = S.ProcessAnalyzer()     # the participant starts it (kernel warm start)
         self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer,
-                                     checks=[self._captured_check],
+                                     checks=[self._captured_check], engine_names=dynamo_name,
                                      capturing=stream_capturing if role == "worker" else None)
         self.rebuild_fn = None   # R1 on this worker: rebuild.run (vLLM); tests may set it
         self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
