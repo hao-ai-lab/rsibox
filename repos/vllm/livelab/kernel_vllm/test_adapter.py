@@ -537,6 +537,164 @@ class RepairCellTest(unittest.TestCase):
         self.assertEqual(vars(w), {})
 
 
+class OverlayTest(unittest.TestCase):
+    """Pain point (live queue run): the host's import finder loaded vllm.v1.engine.core from
+    the installed package and ignored FASTRSI_OVERLAY, so the core ran the installed file
+    while the plan's base was the overlay's: a false base_mismatch."""
+
+    def test_the_core_comes_from_the_overlay_and_is_patched(self):
+        """Input: an installed `vllm/v1/engine/core.py` (SRC = "installed") and an overlay
+        finder that serves its own core.py (SRC = "overlay"), installed first as the startup
+        hook does; then the host's finder in front of it. Expected: importing
+        vllm.v1.engine.core gives the overlay's module, and the host patched its
+        EngineCoreProc. Fails before this change: SRC was "installed" (the host asked
+        PathFinder directly). Not: a real vLLM import (the GPU run)."""
+        import importlib.abc
+        import importlib.util
+        import os
+        import shutil
+        import tempfile
+        import types
+        from unittest import mock
+        from . import host as H
+        core = ("SRC = {!r}\n\n\nclass EngineCoreProc:\n"
+                "    def _handle_client_request(self, t, r):\n        pass\n\n"
+                "    def _process_engine_step(self):\n        pass\n\n"
+                "    def run_busy_loop(self):\n        pass\n")
+        inst, over = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, inst, True)
+        self.addCleanup(shutil.rmtree, over, True)
+        with open(os.path.join(inst, "core.py"), "w") as f:
+            f.write(core.format("installed"))
+        with open(os.path.join(over, "core.py"), "w") as f:
+            f.write(core.format("overlay"))
+
+        class Overlay(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "vllm.v1.engine.core":
+                    return importlib.util.spec_from_file_location(
+                        name, os.path.join(over, "core.py"))
+                return None
+        pkgs = {}
+        for n in ("vllm", "vllm.v1", "vllm.v1.engine"):
+            m = types.ModuleType(n)
+            m.__path__ = [inst] if n == "vllm.v1.engine" else []
+            pkgs[n] = m
+        meta = [Overlay()] + list(sys.meta_path)
+        meta.insert(0, H._After())                  # the host imported after the overlay
+        with mock.patch.dict(sys.modules, pkgs), mock.patch.object(sys, "meta_path", meta):
+            sys.modules.pop("vllm.v1.engine.core", None)
+            mod = importlib.import_module("vllm.v1.engine.core")
+            self.assertEqual(mod.SRC, "overlay")
+            self.assertEqual(mod.__file__, os.path.join(over, "core.py"))
+            self.assertIn("_patch_core", mod.EngineCoreProc.run_busy_loop.__qualname__)
+
+
+class LoaderRouteTest(unittest.TestCase):
+    def test_zero_witness_on_a_weight_loader_routes_to_r6(self):
+        """Input: a worker transaction that swaps a model's load_weights (it runs only when
+        weights load) and a forward that runs. Expected: the proof's zero_witness on
+        load_weights has route R6 and reload-the-weights as its first action; the forward
+        has no finding. Fails before this change: the actions were send work / R5 / R1 (a
+        live run with #61699 needed R6 and was not told). Not: the reload (R6 tests)."""
+        import os
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        name = f"kvl{next(_n)}_model"
+        text = ("class Model:\n    def forward(self, x):\n        return x\n\n"
+                "    def load_weights(self, ws):\n        return set(ws)\n")
+        with open(os.path.join(tmp, name + ".py"), "w") as f:
+            f.write(text)
+        sys.path.insert(0, tmp)
+        self.addCleanup(sys.path.remove, tmp)
+        import importlib
+        m = importlib.import_module(name)
+        side = Side("worker", scope={"worker": object()}, rank=0)
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        new = text.replace("return x\n", "return x + 1\n").replace("set(ws)", "set(ws) | {0}")
+        self.assertTrue(side.dispatch("prepare", {"id": "ld", "modules": {
+            name: {"source": new}}})["ok"])
+        self.assertTrue(side.dispatch("commit", "ld")["ok"])
+        m.Model().forward(1)
+        r = side.dispatch("witness_check", "ld")
+        (f,) = r["findings"]
+        self.assertEqual((f["subject"].split(":")[1], f["route"]), ("Model.load_weights", "R6"))
+        self.assertIn("reload the weights", f["actions"][0]["action"])
+
+
+class R6Test(unittest.TestCase):
+    """Pain point (live #61699): the weight reload ran as a repair cell inside the phase-2 gap
+    (seconds of copying while every rank waits at the barrier, under the 5 s deadline)."""
+    _host, _plan = RebuildTest._host, RebuildTest._plan
+
+    def test_r6_cell_runs_after_the_gap_and_undo_restores_the_weights(self):
+        """Input: a plan with "rebuild": ["R6"] and an R6 cell that sleeps 0.3 s (a weight
+        copy) and replaces the worker's weights, journaling the old ones (record_call).
+        Expected: committed; the gap is far shorter than the cell (it ran after the gap, as
+        one rebuild job), the receipt names "R6 weight reload" and rebuild.results.R6.how
+        ["cell"]; the new weights are in place; undo puts the old weights back and R6 after
+        undo rebuilds nothing (how ["journal"]). Fails before this change: the host had no R6,
+        so the plan aborted with rebuild_failed. Not: a real weight load (GPU run)."""
+        from types import SimpleNamespace as NS
+        w = NS(weights=[1, 2, 3])
+        h, names, calls, sides = self._host("r6", ranks=1, worker=None)
+        sides[0].scope["worker"] = w
+        cell = ("import time\nold = list(worker.weights)\ntime.sleep(0.3)\n"
+                "journal.record_call(lambda: worker.weights.__setitem__(slice(None), old), "
+                "'old weights')\nworker.weights[:] = [9, 9, 9]\n")
+        p = self._plan("r6", rebuild=["R6"], rebuild_cells={"R6": {"cell": cell}})
+        r = h.handle({"op": "txn", "plan": p})
+        rec = r["receipt"]
+        self.assertEqual(r["outcome"], "committed", rec["findings"])
+        self.assertLess(rec["gap_s"], 0.2)
+        self.assertGreaterEqual(rec["rebuild"]["seconds"]["R6"], 0.3)
+        self.assertEqual(rec["rebuild"]["results"]["R6"]["how"], ["cell"])
+        self.assertIn("R6 weight reload", rec["actual_recipes"])
+        self.assertEqual(w.weights, [9, 9, 9])
+        u = h.handle({"op": "undo", "txn": "r6"})
+        self.assertTrue(u["ok"])
+        self.assertEqual(w.weights, [1, 2, 3])
+        self.assertEqual(u["receipt"]["rebuild"]["results"]["R6"]["how"], ["journal"])
+
+
+class JournaledR1Test(unittest.TestCase):
+    def test_a_cell_that_fails_after_r1_rebuilds_the_base_graphs_on_rollback(self):
+        """Input: a worker transaction swapping the toy step plus a repair cell that runs
+        rebuild.run(worker, journal) (R1: here a recapture that records which code it
+        captured) and then fails. Expected: the commit fails, the code is back at base, and
+        R1 ran again during the rollback AFTER the code undo, so the last capture is of the
+        base code. Fails before this change: rebuild.run took no journal; the rollback left
+        the graphs captured from the edit (the live run served edited code with "rolled_back").
+        Not: vLLM's capture (GPU run)."""
+        from unittest import mock
+        from . import rebuild as RB
+        p = plan("jr1")
+        name = next(iter(p["modules"])).rsplit(".", 1)[0]
+        w = _worker("FULL_AND_PIECEWISE", "NONE")
+        captured = []
+
+        def recapture(worker):
+            e = sys.modules[name + ".engine"].Engine()
+            e.step(1)
+            captured.append(e.ran[-1])
+            return {"how": "recapture"}
+        side = Side("worker", scope={"worker": w}, rank=0)
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        p["repairs"] = [{"cell": "from kernel_vllm import rebuild\n"
+                                 "rebuild.run(worker, journal)\nraise RuntimeError('capture refused')\n",
+                         "declares": [], "on": ["worker"]}]
+        with mock.patch.object(RB, "recapture", recapture):
+            self.assertTrue(side.dispatch("prepare", p)["ok"])
+            c = side.dispatch("commit", p["id"])
+        self.assertFalse(c["ok"])
+        self.assertEqual(c["findings"][0]["check"], "repair_failed")
+        self.assertEqual(captured, ["v1", "base"])
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())
 

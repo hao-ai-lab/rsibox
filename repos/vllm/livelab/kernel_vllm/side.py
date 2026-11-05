@@ -47,6 +47,7 @@ is then read by the wrong call (kb/lessons.md).
 """
 import importlib
 import os
+import re
 import sys
 import threading
 import time
@@ -68,6 +69,11 @@ METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "ab
 CAPTURED_PREFIXES = ("vllm.model_executor.models.", "vllm.model_executor.layers.")
 R1 = {"action": "recapture the graphs after the swap (recipe R1), or run eager",
       "cost": "recipe R1"}
+R6 = {"action": "reload the weights with the edited loader after the commit (plan \"rebuild\": "
+      "[\"R6\"] with an R6 cell in \"rebuild_cells\"; the cell journals the old weights)",
+      "cost": "recipe R6 (seconds: one weight load and copy)"}
+# weight loaders run once at load: a swap of one never runs unless the weights are reloaded
+LOADER = re.compile(r"(?:^|\.)_?load(?:_\w+)?_(?:weights|model)$")
 graph_mode = G.graph_mode
 
 
@@ -180,7 +186,14 @@ class Side:
         """Proof time: a zero_witness on model code while the engine runs graphs says why and
         routes to R1 (recapture)."""
         for f in (r.get("findings") or []) if isinstance(r, dict) else []:
-            if f.get("check") == "zero_witness" and self._captured(str(f.get("subject", ""))):
+            subj = str(f.get("subject", ""))
+            qual = subj.split(":")[1] if subj.count(":") >= 2 else ""
+            if f.get("check") == "zero_witness" and LOADER.search(qual):
+                f["route"] = "R6"
+                f["observed"] += " (a weight loader: it runs when the weights load)"
+                f["actions"] = [R6] + list(f.get("actions", []))
+                continue
+            if f.get("check") == "zero_witness" and self._captured(subj):
                 f["route"] = "R1"
                 f["observed"] += " (model code; the engine runs captured graphs or compiled code)"
                 f["actions"] = [R1] + list(f.get("actions", []))
@@ -250,7 +263,10 @@ class Side:
         side has no graphs: it answers how "none"."""
         txn, _ = C.txn_ref(payload)
         why = payload.get("why") if isinstance(payload, dict) else None
+        route = (payload.get("route") if isinstance(payload, dict) else None) or "R1"
         w = self.scope.get("worker")
+        if route == "R6":
+            return self._r6(txn, why, payload.get("cell"))
         if w is None:
             return F.ok(how="none", note=f"no graphs on the {self.role} side")
         if why == "commit":              # the fault hook fails the first R1 only
@@ -264,6 +280,28 @@ class Side:
         with self.lp.witness.capture():
             r = fn(w)
         return F.ok(**r, why=why)
+
+    def _r6(self, txn, why, cell):
+        """R6 on this side: run the plan's R6 cell after the commit (outside the gap), with
+        the scope, `journal` (this participant's: its entries belong to the transaction, so
+        undo restores what the cell journaled), `witness` and `arm(key)`. After undo or a
+        rollback the journal already restored the weights: nothing to do."""
+        if why != "commit":
+            return F.ok(how="journal", note="the transaction's undo restored what the R6 cell "
+                        "journaled; nothing to rebuild", why=why)
+        if not cell:
+            return F.not_ok("R6: the plan has no \"rebuild_cells\": {\"R6\": {\"cell\": ...}}")
+        lp, t0 = self.lp, time.perf_counter()
+        keys = lp._cell_keys.setdefault(txn, [])
+
+        def arm(key):
+            keys.append(key)
+            return lp.witness.arm(key, lp.journal)
+        n = len(lp.journal.entries)
+        exec(compile(cell, f"<R6 {txn}>", "exec"),
+             {**self.scope, "journal": lp.journal, "witness": lp.witness, "arm": arm})
+        return F.ok(how="cell", why=why, seconds=round(time.perf_counter() - t0, 6),
+                    journal=lp.journal.describe(n))
 
     def warm(self, payload=None):
         """This side's analyzer: started with the side; `{"wait_s": s}` waits for its boot."""

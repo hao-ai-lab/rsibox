@@ -48,6 +48,14 @@ How a transaction runs (kernel StepGapCoordinator, loop.md 4b):
   Python on eager paths and the old graphs elsewhere (`steps_between` / `steps_during` in the
   receipt). A failed R1 undoes the transaction and runs R1 again from the base code; undo of
   such a transaction runs R1 too. `"recapture": false` turns the automatic R1 off.
+- R6 (reload weights with an edited loader) is a post-commit rebuild too: a plan with
+  `"rebuild": ["R6"]` and `"rebuild_cells": {"R6": {"cell": src}}` runs that cell on every
+  worker right after the commit gap, as one busy-loop job (a weight copy must not hold the
+  phase-2 gap). The cell journals the old weights (`journal.record_call`), so undo restores
+  them and R6 after undo rebuilds nothing. A zero_witness on a loader routes to R6.
+- The import finder that patches vllm.v1.engine.core asks the other finders on sys.meta_path
+  for the module (an overlay such as FASTRSI_OVERLAY first), so import this module after the
+  overlay's finder is installed; a core imported before it is patched in place.
 - A loop job waits `gap_timeout` to start; once started it may run until its own run timeout
   (phase 2: the same again; R1: its deadline), so a long R1 is not taken for a lost gap.
 
@@ -55,7 +63,6 @@ The host records every step's duration, so a reply can say how long steps stalle
 """
 import collections
 import importlib.abc
-import importlib.machinery
 import json
 import os
 import statistics
@@ -224,7 +231,7 @@ class Host:
                                                   bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             phase2_deadline_s=PHASE2_DEADLINE_S,
-            rebuilds={"R1": self._r1}, rebuild_deadline_s=REBUILD_DEADLINE_S,
+            rebuilds={"R1": self._r1, "R6": self._r6}, rebuild_deadline_s=REBUILD_DEADLINE_S,
             rebuild_job=lambda fn: self.in_loop(
                 fn, gap=True, timeout=self.gap_timeout,
                 run_timeout=(REBUILD_DEADLINE_S or 3600.0) + RPC_GRACE_S + 5.0),
@@ -236,6 +243,17 @@ class Host:
         """R1 on every worker (kernel rebuild route), from the busy loop."""
         return self.co.participants[0].rebuild({"txn": txn, "why": why,
                                                 "deadline_at": deadline_at})
+
+    def _r6(self, txn, why, deadline_at):
+        """R6 on every worker (kernel rebuild route): the plan's R6 cell
+        (`"rebuild_cells": {"R6": {"cell": src}}`) reloads weights with the edited loader,
+        after the commit gap, as its own busy-loop job (a weight copy takes seconds: it must
+        not run inside the phase-2 gap). After undo or a rollback the journal has already put
+        the old weights back (the cell's record_call), so the workers rebuild nothing."""
+        plan = (self.co.txns.get(txn) or {}).get("plan") or {}
+        cell = ((plan.get("rebuild_cells") or {}).get("R6") or {}).get("cell")
+        return self.co.participants[0].rebuild({"txn": txn, "why": why, "route": "R6",
+                                                "cell": cell, "deadline_at": deadline_at})
 
     def steps_between(self, t0, t1):
         """Steps that started between two unix times (kernel `steps`)."""
@@ -427,13 +445,23 @@ def _patch_core(mod):
 
 
 class _After(importlib.abc.MetaPathFinder):
-    """Patch vllm.v1.engine.core right after it is imported."""
+    """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
+    finders load it. It asks the finders after it on sys.meta_path, in order, for the spec
+    (an overlay finder such as FASTRSI_OVERLAY's, then the installed package), instead of
+    PathFinder directly: that bypassed the overlay, so the engine core ran the installed file
+    while the plan's base was the overlay's, a false base_mismatch (live queue run)."""
 
     def find_spec(self, name, path, target=None):
         if name != "vllm.v1.engine.core":
             return None
-        spec = importlib.machinery.PathFinder.find_spec(name, path)
-        if spec is None or spec.loader is None:
+        spec = None
+        for f in list(sys.meta_path):
+            if f is self or isinstance(f, _After) or not hasattr(f, "find_spec"):
+                continue
+            spec = f.find_spec(name, path, target)
+            if spec is not None:
+                break
+        if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
             return None
         orig = spec.loader.exec_module
 
@@ -445,4 +473,7 @@ class _After(importlib.abc.MetaPathFinder):
 
 
 if DIR and not any(isinstance(f, _After) for f in sys.meta_path):
-    sys.meta_path.insert(0, _After())
+    if "vllm.v1.engine.core" in sys.modules:     # imported before this module: patch it now
+        _patch_core(sys.modules["vllm.v1.engine.core"])
+    else:
+        sys.meta_path.insert(0, _After())
