@@ -49,6 +49,25 @@ the per-rank replies in `ranks` (`merge_ranks`): witness counts and code hashes 
 rank in the receipts, and ranks that differ are findings (`witness_uneven`) or
 `commit_hashes.ranks_agree: false`.
 
+Rebuild after the commit (a route such as R1: make the engine's captured or compiled code run
+the edit). The host registers `rebuilds={"R1": fn(txn, why, deadline_at) -> ok-dict}` (why:
+"commit", "rollback", "undo"; the engine picks how, e.g. vLLM recompiles under torch.compile and
+recaptures in pure CUDA-graph modes, and says which in the reply). A transaction rebuilds when
+its plan says so (`"rebuild": ["R1"]`; `[]`: never) or, with no `rebuild` key, when prepare
+returned an accepted, non-advisory finding whose `route` the host can rebuild (vLLM: an
+accepted `captured_target`). The rebuild is a post-commit phase of the same transaction: it
+runs right after phase 2, outside the gap and not under the phase-2 deadline (a recompile takes
+tens of seconds), under its own deadline (`rebuild_deadline_s`), as one job of the loop owner
+(`rebuild_job(fn)`; StepGapCoordinator: the host's loop, so the engine is paused while it
+runs). Steps that start between the commit and the rebuild run the new Python code on eager
+paths and the old graphs elsewhere; the receipt says how many (`steps(a, b)`, a host count of
+steps started between two unix times) and what the engine did meanwhile (`rebuild_while`). If
+the rebuild fails, the transaction is undone (in a gap) and every route is rebuilt again from
+the base code (`rebuild_failed`, outcome rolled_back). The txn receipt has `rebuild` (routes,
+results, seconds, steps) and `recapture_s` (the R1 seconds); `edit_to_run_s` then ends when
+the rebuild did (`edit_to_commit_s`: at the commit). Undo of a transaction that rebuilt (or of
+one whose undo cascades to one) rebuilds again after the code undo.
+
 A plan is plain data, so it can cross a process boundary:
 
     {"id": str (optional),
@@ -65,6 +84,8 @@ A plan is plain data, so it can cross a process boundary:
                  declared-object audit cannot undo (an nn.Module submodule, Parameter.data),
                  `journal.record_call(undo_fn, label)` for an in-place re-init
      "accept": [check names] or "all",
+     "rebuild": ["R1", ...],   routes to rebuild right after the commit (default: from the
+                               accepted findings' routes; [] turns that off)
      "undo_resets": ["R2" | "R3" | ...],   resets the undo runs after the code undo
      "recipes": [...], "predicted_resources": [...], "certainty": str}
 
@@ -97,6 +118,7 @@ def txn_ref(ref):
 
 
 PHASE2 = ("validate", "commit", "abort", "undo")
+REBUILD_RECIPES = {"R1": "R1 recapture"}      # receipt names of the rebuild routes
 
 
 class Participant:
@@ -204,7 +226,7 @@ class LocalParticipant(Participant):
     `targets` says which it staged."""
 
     def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None,
-                 checks=None):
+                 checks=None, capturing=None):
         self.name = name
         self.checks = list(checks or ())   # engine checks: fn(module, items) -> [findings]
         self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
@@ -221,7 +243,7 @@ class LocalParticipant(Participant):
         self.quiesce = quiesce or (lambda fn: fn())
         self.scope = dict(scope or {})
         self.journal = J.Journal(name)
-        self.witness = W.Witness()
+        self.witness = W.Witness(capturing)   # capturing: fn() -> True while a graph records
         self._staged, self._marks, self._done = {}, {}, {}
         self._state = {}              # txn -> prepared | committed | aborted | undone | partial
         self._partial = {}            # txn -> findings of an undo that could not restore all
@@ -470,7 +492,8 @@ class LocalParticipant(Participant):
             keys += st.keys
             for k, fns in st.functions.items():
                 hashes[k] = sorted({L.content_hash(f.__code__) for f in fns})
-        return F.ok(hashes=hashes, witness={k: self.witness.counts.get(k, 0) for k in keys})
+        return F.ok(hashes=hashes, witness={k: self.witness.counts.get(k, 0) for k in keys},
+                    witness_capture={k: self.witness.capture_counts.get(k, 0) for k in keys})
 
     def reset(self, kind):
         hook = self.resets.get(kind)
@@ -586,8 +609,9 @@ def merge_ranks(method, replies):
         states = {r.get("state") for r in rs}
         out["state"] = states.pop() if len(states) == 1 else "mixed"
     elif method == "witness_check":
-        keys = {k for r in rs for k in r.get("counts", {})}
-        out["counts"] = {k: min(r.get("counts", {}).get(k, 0) for r in rs) for k in keys}
+        for f in ("counts", "capture_counts"):
+            keys = {k for r in rs for k in r.get(f, {})}
+            out[f] = {k: min(r.get(f, {}).get(k, 0) for r in rs) for k in keys}
     elif method == "proof":
         out["hashes"] = rs[0].get("hashes") if rs else {}
     return out
@@ -700,8 +724,15 @@ class Coordinator:
     allowed, `recovered()` clears it after the lab respawned its participants."""
 
     def __init__(self, participants, writer=None, engine=None, interface_version="0",
-                 clock=time.time, phase2_deadline_s=5.0):
+                 clock=time.time, phase2_deadline_s=5.0, rebuilds=None,
+                 rebuild_deadline_s=600.0, rebuild_job=None, rebuild_while=None, steps=None):
         self.participants = list(participants)
+        # post-commit rebuilds (module doc): route -> fn(txn, why, deadline_at) -> ok-dict
+        self.rebuilds = dict(rebuilds or {})
+        self.rebuild_deadline_s = rebuild_deadline_s
+        self.rebuild_job = rebuild_job or (lambda fn: fn())  # where a rebuild runs
+        self.rebuild_while = rebuild_while or "the caller's thread runs the rebuild"
+        self.steps = steps            # fn(t0, t1) -> steps started between two unix times
         self.writer = writer
         self.engine = engine or {"name": "unknown", "version": None, "commit": None}
         self.interface_version = interface_version
@@ -829,6 +860,111 @@ class Coordinator:
         tl["gap_end"] = now()
         return out
 
+    def _routes(self, plan, res):
+        """The routes to rebuild after the commit: the plan's `rebuild`, else the routes of
+        accepted, non-advisory prepare findings that a registered rebuild serves."""
+        if plan.get("rebuild") is not None:
+            return list(plan["rebuild"])
+        return sorted({f["route"] for r in res.values()
+                       for f in (r.get("prepare") or {}).get("findings", [])
+                       if f.get("accepted") and not f.get("advisory")
+                       and f.get("route") in self.rebuilds})
+
+    def _rebuild(self, route, txn, why, deadline_at):
+        """(ok-dict, seconds) of one rebuild; never raises."""
+        t0 = time.perf_counter()
+        try:
+            r = self.rebuilds[route](txn, why, deadline_at)
+        except Exception as e:
+            r = F.not_ok(f"{route}: {type(e).__name__}: {e}")
+        if not isinstance(r, dict) or "ok" not in r:
+            r = F.not_ok(f"{route}: bad reply {r!r}")
+        return r, round(time.perf_counter() - t0, 6)
+
+    def _rebuild_all(self, routes, txn, why, since=None):
+        """Every route in order, as one job of the loop owner, stopping at the first that
+        fails. since: unix time of the code change (for the steps between it and the job).
+        Returns {"routes", "why", "ok", "results", "seconds", "while", "steps_between",
+        "steps_during", "start", "end"}."""
+        rb = {"routes": list(routes), "why": why, "ok": True, "results": {}, "seconds": {},
+              "while": self.rebuild_while}
+        d = self.rebuild_deadline_s
+        deadline_at = None if d is None else time.time() + d
+
+        def job():
+            rb["start"] = time.time()
+            for route in routes:
+                r, sec = self._rebuild(route, txn, why, deadline_at)
+                rb["results"][route], rb["seconds"][route] = r, sec
+                if not r["ok"]:
+                    rb["ok"] = False
+                    break
+            rb["end"] = time.time()
+        try:
+            self.rebuild_job(job)
+        except Exception as e:          # the job did not run, or not by the deadline
+            rb["ok"] = False
+            rb["error"] = f"{type(e).__name__}: {e}"
+            self.poison.append({**F.finding(
+                "deadline_missed", f"rebuild {routes} ({why}): {rb['error']}",
+                f"the rebuild answers within {d} s"), "participant": "rebuild"})
+        rb.setdefault("end", time.time())
+        if self.steps is not None:     # what the engine did around the rebuild
+            try:
+                if since is not None and "start" in rb:
+                    rb["steps_between"] = self.steps(since, rb["start"])
+                if "start" in rb:
+                    rb["steps_during"] = self.steps(rb["start"], rb["end"])
+            except Exception:
+                pass
+        return rb
+
+    @staticmethod
+    def _rebuild_error(rb):
+        bad = [f"{k}: {r.get('error')}" for k, r in rb["results"].items() if not r["ok"]]
+        return "; ".join(bad) or rb.get("error") or "no result"
+
+    def _after_commit(self, txn):
+        """The post-commit phase (outside the gap): rebuild; on failure undo every participant
+        in a gap and rebuild every route again from the base code."""
+        t, now = self.txns[txn], self.clock
+        out, tl = t["out"], t["tl"]
+        routes = t["rebuild"]
+        tl["rebuild_start"] = now()
+        rb = out["rebuild"] = self._rebuild_all(routes, txn, "commit", since=tl.get("gap_end"))
+        tl["rebuilt"] = now()
+        if rb["ok"]:
+            t["rebuilt"] = list(routes)
+            return
+        out["outcome"] = "rolled_back"
+        out["extra"].append({**F.finding(
+            "rebuild_failed", f"after the commit: {self._rebuild_error(rb)}",
+            f"{routes} ok on every participant"), "subject": "commit"})
+        rollback = out["rollback"]
+        d = self.phase2_deadline_s
+
+        def undo_all():
+            end_at = None if d is None else time.time() + d
+            for p in reversed(self.participants):
+                rollback["participants"][p.name] = t["res"][p.name]["undo"] = self._bounded(
+                    p, "undo", txn, end_at, t["missed"])
+        try:
+            self._in_gap(undo_all)
+        except Exception as e:
+            rollback["error"] = f"undo: {type(e).__name__}: {e}"
+        tl["code_undone"] = now()
+        back = rb["back"] = self._rebuild_all(routes, txn, "rollback", since=time.time())
+        if not back["ok"]:
+            out["extra"].append({**F.finding(
+                "rebuild_failed", f"rebuilding from the base code after the undo: "
+                f"{self._rebuild_error(back)}", "the base code's graphs again"),
+                "subject": "rollback"})
+        rollback["status"] = ("undone" if back["ok"] and "error" not in rollback and all(
+            u["ok"] for u in rollback["participants"].values()) else "partial")
+        tl["rolled_back"] = now()
+        with self._lock:
+            t["outcome"], t["state"] = "rolled_back", "aborted"
+
     def run(self, plan, edit_time=None, baseline_restart=None):
         """One transaction; appends a `txn` receipt. edit_time: when the edit was made (unix
         seconds; default now). baseline_restart: {"seconds", "source"} of the warm restart
@@ -854,10 +990,16 @@ class Coordinator:
         for p in self.participants:
             t["res"][p.name]["prepare"] = _call(p, "prepare", plan)
         tl["prepared"] = now()
-        if not all(t["res"][p.name]["prepare"]["ok"] for p in self.participants):
+        t["rebuild"] = self._routes(plan, t["res"])
+        missing = [r for r in t["rebuild"] if r not in self.rebuilds]
+        if missing or not all(t["res"][p.name]["prepare"]["ok"] for p in self.participants):
             for p in self.participants:
                 t["res"][p.name]["abort"] = _call(p, "abort", txn)
-            self._done(txn, {"outcome": "aborted", "extra": [], "hashes": {},
+            self._done(txn, {"outcome": "aborted", "hashes": {},
+                             "extra": [{**F.finding("rebuild_failed", f"the plan asks for "
+                                                    f"{r}, and this host has no rebuild for it",
+                                                    f"one of {sorted(self.rebuilds)}"),
+                                        "subject": r} for r in missing],
                              "rollback": {"status": "not_needed", "participants": {}}})
             return self._finish(txn)
 
@@ -889,6 +1031,8 @@ class Coordinator:
                 return {"ok": False, "outcome": "in-doubt", "txn": txn, "receipt": None,
                         "written": {"ok": False, "error": "in doubt: ask status(txn)"},
                         "error": f"{type(e).__name__}: {e}"}
+        if t["outcome"] == "committed" and t["rebuild"]:
+            self._after_commit(txn)       # post-commit phase, outside the gap
         return self._finish(txn)
 
     def _done(self, txn, out):
@@ -952,7 +1096,8 @@ class Coordinator:
                      "accept": plan.get("accept", []),
                      "undo_resets": plan.get("undo_resets", [])},
             "actual_recipes": ((["R0 swap"] if modules else [])
-                               + (["R10 repair"] if plan.get("repairs") else []))
+                               + (["R10 repair"] if plan.get("repairs") else [])
+                               + [REBUILD_RECIPES.get(r, r) for r in t.get("rebuilt", [])])
             if out["outcome"] == "committed" else [],
             "participants": res,
             "commit_hashes": {"participants": out["hashes"], "ranks": rank_hashes,
@@ -962,7 +1107,11 @@ class Coordinator:
                           "blocking": sorted({f["check"] for f in fs
                                               if not f.get("accepted")})},
             "outcome": out["outcome"], "timeline": tl,
-            "edit_to_run_s": span("edit", "committed"),
+            # with a rebuild, the edit runs in every step only once the rebuild is done
+            "edit_to_run_s": span("edit", "rebuilt" if t.get("rebuilt") else "committed"),
+            "edit_to_commit_s": span("edit", "committed"),
+            "rebuild": out.get("rebuild"),
+            "recapture_s": ((out.get("rebuild") or {}).get("seconds") or {}).get("R1"),
             "prepare_s": span("prepare_start", "prepared"),
             "gap_s": span("gap_start", "gap_end"),
             "baseline_restart_s": t["baseline"],
@@ -984,18 +1133,26 @@ class Coordinator:
         now = self.clock
         res = {p.name: _call(p, "witness_check", txn) for p in self.participants}
         fs = [{**f, "participant": n} for n, r in res.items() for f in r.get("findings", [])]
-        witness = {}
+        witness, capture = {}, {}
         for n, r in res.items():
             if r.get("ranks"):
                 ranks = {str(x.get("rank")): x.get("counts", {}) for x in r["ranks"]}
                 witness.update({f"{n}/rank{k}": c for k, c in ranks.items()})
+                capture.update({f"{n}/rank{x.get('rank')}": x.get("capture_counts", {})
+                                for x in r["ranks"]})
                 fs += witness_uneven(n, ranks, tolerance)
             else:
                 witness[n] = r.get("counts", {})
+                capture[n] = r.get("capture_counts", {})
         edit = self.txns.get(txn, {}).get("edit")
         t = now()
         rec = {"schema": R.SCHEMA, "kind": "proof", "id": txn,
                "witness": witness,
+               # calls made while graphs were captured, apart from the live ones above: a
+               # replay runs no Python, so only live calls (or a device probe) prove a run
+               "witness_capture": capture,
+               "ran": {w: {k: W.ran(capture.get(w, {}).get(k, 0), n) for k, n in c.items()}
+                       for w, c in witness.items()},
                "findings": fs, "golden": golden,
                "timeline": {"edit": edit, "proved": t},
                "edit_to_finish_s": round(t - edit, 6) if edit is not None else None}
@@ -1015,18 +1172,38 @@ class Coordinator:
                     p, "reset", kind, end_at, missed)
         return res
 
+    def _undo_routes(self, txn, res):
+        """The routes to rebuild after an undo: this transaction's, and those of the later
+        transactions its undo cascaded to (`also_undone`, on any rank)."""
+        also = set()
+        for r in res.values():
+            u = r.get("undo") or {}
+            for x in [u] + list(u.get("ranks") or []):
+                also.update(x.get("also_undone") or [])
+        routes = list(self.txns.get(txn, {}).get("rebuilt", []))
+        for a in sorted(also):
+            routes += [x for x in self.txns.get(a, {}).get("rebuilt", []) if x not in routes]
+        return routes
+
     def undo(self, txn):
         """Undo a committed transaction on every participant (newest first), then run the
         plan's `undo_resets` (R2, R3, ...) on each: code undo cannot un-write data the new code
-        produced. In the gap. Appends an `undo` receipt."""
+        produced. In the gap. Then, outside the gap, the rebuilds the transaction ran after its
+        commit (R1: the graphs of the base code again). Appends an `undo` receipt."""
         now = self.clock
         t = self.txns.get(txn, {})
         resets = t.get("plan", {}).get("undo_resets", [])
         tl = {"queued": now()}
+        rb = {}
         try:
             res, err = self._in_gap(lambda: self._undo_phases(txn, resets, tl)), None
         except Exception as e:
             res, err = None, f"{type(e).__name__}: {e}"
+        routes = self._undo_routes(txn, res or {}) if err is None else []
+        if routes:                     # rebuild from the base code, outside the gap
+            tl["rebuild_start"] = now()
+            rb = self._rebuild_all(routes, txn, "undo", since=tl.get("code_undone"))
+            tl["rebuilt"] = now()
         tl["undo_end"] = now()
         res = res or {}
         calls = [x for r in res.values()
@@ -1034,12 +1211,20 @@ class Coordinator:
         fs = [{**f, "participant": n} for n, r in res.items()
               for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x
               for f in x.get("findings", [])]
-        ok = err is None and all(x["ok"] for x in calls)
+        if rb and not rb["ok"]:
+            fs.append({**F.finding("rebuild_failed", "rebuilding after the undo: "
+                                   f"{self._rebuild_error(rb)}", "the base code's graphs again"),
+                       "subject": "undo"})
+        ok = err is None and all(x["ok"] for x in calls) and rb.get("ok", True)
         rec = {"schema": R.SCHEMA, "kind": "undo", "id": txn, "participants": res,
                "resets": list(resets), "status": "undone" if ok else "partial",
                "findings": fs + ([F.finding("undo_incomplete", f"undo did not finish: {err}",
                                             "a step gap within the timeout")] if err else []),
+               "rebuild": rb or None,
+               "recapture_s": (rb.get("seconds") or {}).get("R1"),
                "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
+        if t and rb.get("ok"):
+            t["rebuilt"] = []
         if t:                          # partial: an undo ran but could not restore everything
             with self._lock:
                 t["state"] = "undone" if ok else "partial"
@@ -1057,6 +1242,12 @@ class StepGapCoordinator(Coordinator):
     their own: build them with the default `quiesce`."""
 
     def __init__(self, participants, gap, **kw):
+        # a rebuild is one job of the loop owner (not inside phase 2's gap): no step runs
+        # while it runs; steps may run between the commit and the rebuild
+        kw.setdefault("rebuild_job", gap)
+        kw.setdefault("rebuild_while", "paused: the rebuild runs as one job of the engine loop, "
+                      "so no step runs during it; steps between the commit and the rebuild "
+                      "run the new Python code and the old graphs")
         super().__init__(participants, **kw)
         self.gap = gap
 

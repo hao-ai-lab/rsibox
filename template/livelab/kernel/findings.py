@@ -86,14 +86,35 @@ CATALOG = {
         ["Proving an edit applied"], True),
     "captured_target": (
         "the engine runs this code only inside captured graphs or compiled code (the engine "
-        "says so from its config and the target's module): a swap changes the Python function, "
-        "but the captured or compiled steps never call it, so the edit commits and never runs",
-        [{"action": "recapture the graphs after the swap (recipe R1)", "cost": "recipe R1"},
+        "says so from its config, the target's module and the ops that split its graphs): a "
+        "swap changes the Python function, but the captured or compiled steps never call it, "
+        "so the edit commits and never runs",
+        [{"action": "recapture the graphs with the commit (plan \"rebuild\": [\"R1\"]; an "
+                    "accepted finding with route R1 does it on a host that can)",
+          "cost": "recipe R1"},
          {"action": "run the engine eager for this experiment", "cost": "a restart"},
-         {"action": "accept if the code runs outside the graphs (a custom op at a graph split, "
-                    "prefill-only paths); the proof's witness will tell", "cost": "none"}],
+         {"action": "accept if the code runs outside the graphs (the finding says when the "
+                    "engine could not decide); the proof's witness will tell", "cost": "none"}],
         "an edit that never runs reads as an edit that changed nothing",
         ["Proving an edit applied"], True),
+    "captured_partly": (
+        "the engine runs this code in Python on some steps (prefill and mixed batches: through "
+        "an op that splits the graph, or with no graph) and only inside captured graphs on "
+        "others (decode batches in full graphs): the new code runs on the first kind now, and "
+        "on the second only after a recapture",
+        [{"action": "recapture with the commit (plan \"rebuild\": [\"R1\"]) to run it on every "
+                    "step", "cost": "recipe R1"},
+         {"action": "go on: prefill steps run the new code now, decode steps the old one",
+          "cost": "none"}],
+        "a decode-heavy result mixes old and new code", ["Proving an edit applied"], True),
+    "rebuild_failed": (
+        "the rebuild the transaction needs right after its commit (R1: capture the graphs "
+        "again) failed, or the host cannot run it: graphs would replay the old code, or be "
+        "missing. The transaction is undone and the rebuild runs again from the base code",
+        [{"action": "read the rebuild's error (per rank), fix it, run the transaction again",
+          "cost": "seconds"}, RESTART],
+        "graphs and Python run different code: results and step times are not comparable",
+        [], False),
     "zero_witness": (
         "the swapped code has not run since the swap",
         [{"action": "send work that takes this path", "cost": "seconds"},

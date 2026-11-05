@@ -1831,3 +1831,164 @@ class RuntimeClosureUndoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaptureWitnessTest(unittest.TestCase):
+    """Pain point: after a CUDA-graph recapture (TP2, Qwen3.5-35B-A3B MoE) the witness read
+    13280 calls per rank and no zero_witness, yet every call was made while graphs were
+    captured: a replay runs no Python, so the counter proved capture, not a run."""
+
+    def test_capture_calls_are_counted_apart_from_live_calls(self):
+        """Input: Engine.step swapped; 3 calls while the engine says it captures (the
+        participant's `capturing` probe), 2 more inside `witness.capture()` (a recapture's
+        warm-up runs), then the proof. Expected: live 0, capture 5, and a zero_witness routed
+        to R1 whose note asks for a device-side probe; the proof receipt says "ran during
+        capture 5, ran live 0". After 2 live calls: no finding, "ran during capture 5, ran
+        live 2". Not: CUDA itself (vLLM asks torch whether the stream is capturing)."""
+        name, eng, _ = fresh("capwit")
+        capturing = [False]
+        p = C.LocalParticipant("workers", alias={"toy": name}, capturing=lambda: capturing[0])
+        co = C.Coordinator([p], phase2_deadline_s=None)
+        k = f"toy.engine:Engine.step:{at(ENG, 'def step')}"
+        r = co.run({"id": "cw", "modules": {"toy.engine": {
+            "source": edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")')),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual(r["outcome"], "committed")
+        e = eng.Engine()
+        capturing[0] = True
+        for _ in range(3):
+            e.step(1)
+        capturing[0] = False
+        with p.witness.capture():
+            e.step(1)
+            e.step(1)
+        pr = co.prove("cw")["receipt"]
+        self.assertEqual((pr["witness"], pr["witness_capture"], pr["ran"]),
+                         ({"workers": {k: 0}}, {"workers": {k: 5}},
+                          {"workers": {k: "ran during capture 5, ran live 0"}}))
+        (f,) = pr["findings"]
+        self.assertEqual((f["check"], f.get("route")), ("zero_witness", "R1"))
+        self.assertIn("5 calls while graphs were captured", f["observed"])
+        self.assertIn("device-side probe", f["note"])
+        e.step(1)
+        e.step(1)
+        pr = co.prove("cw")["receipt"]
+        self.assertEqual((pr["findings"], pr["ran"]),
+                         ([], {"workers": {k: "ran during capture 5, ran live 2"}}))
+
+    def test_the_witness_is_a_constant_for_dynamo(self):
+        """Input: a swap of f(x) = x*2 to x*3 applied while torch is loaded; then
+        torch.compile (eager backend, fullgraph) of a caller of f, called 3 times. Expected: the witness hook is marked with
+        assume_constant_result, so Dynamo calls it once while tracing and the compiled calls
+        never (1 call, not 4). Pain point: a recompile failed in Dynamo on the traced counter
+        ("modifying buffers ... cudagraph inside the compiler"). Not: vLLM's compiler backend
+        or CUDA graphs (the GPU queue job)."""
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        mod = f"kt{next(_n)}_dyn"
+        base = "def f(x):\n    return x * 2\n"
+        with open(os.path.join(d, mod + ".py"), "w") as fh:
+            fh.write(base)
+        sys.path.insert(0, d)
+        self.addCleanup(sys.path.remove, d)
+        m = importlib.import_module(mod)
+        w, j = W.Witness(), J.Journal("t")
+        r, dec, a = install(mod, base.replace("x * 2", "x * 3"), [["f", 1]], j, w)
+        self.assertTrue(a and a["ok"], (r["findings"], dec))
+
+        def caller(x):
+            return m.f(x) + 1
+        torch._dynamo.reset()
+        g = torch.compile(caller, backend="eager", fullgraph=True)
+        x = torch.ones(2)
+        outs = [g(x) for _ in range(3)]
+        self.assertEqual(outs[-1].tolist(), [4.0, 4.0])
+        self.assertEqual(w.counts, {f"{mod}:f:1": 1})
+        self.assertTrue(getattr(w.hook, "_dynamo_marked_constant", False))
+        self.assertIs(m.__fastrsi_hit__, w.hook)
+
+
+class RebuildTest(unittest.TestCase):
+    """Pain point: a model-code edit in graph mode committed, then the lab had to recapture by
+    hand over another RPC: commit and recapture were not one transaction, a failed recapture
+    left the edit committed, and undo did not recapture back."""
+
+    def _host(self, name, fail_on=()):
+        calls = []
+
+        def r1(txn, why, deadline_at):
+            calls.append((txn, why, deadline_at is not None))
+            if why in fail_on:
+                return F.not_ok(f"capture failed ({why})")
+            return F.ok(how="recapture", graphs=3)
+
+        def captured(module, items):
+            return [{**F.finding("captured_target", "runs only in graphs", "runs eagerly",
+                                 subject=k), "route": "R1"} for k in items]
+        p = C.LocalParticipant("workers", alias={"toy": name}, checks=[captured])
+        co = C.Coordinator([p], phase2_deadline_s=None, rebuilds={"R1": r1})
+        return co, calls
+
+    def _plan(self, tid, **kw):
+        return {"id": tid, "accept": ["captured_target"], **kw, "modules": {"toy.engine": {
+            "source": edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")')),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+
+    def test_an_accepted_route_rebuilds_after_the_commit_and_after_undo(self):
+        """Input: a plan whose captured_target (route R1) is accepted, on a host that
+        registers R1. Expected: R1 runs once after the commit (why "commit", with a
+        deadline), the txn receipt has rebuild.ok, recapture_s, actual_recipes with "R1
+        recapture" and edit_to_run_s >= edit_to_commit_s; undo runs R1 again (why "undo") and
+        its receipt has recapture_s. A plan with "rebuild": [] does not rebuild. Not: the
+        engine's recapture itself (adapter tests and the GPU job)."""
+        name, eng, _ = fresh("r1")
+        co, calls = self._host(name)
+        r = co.run(self._plan("r1"))
+        rec = r["receipt"]
+        self.assertEqual((r["outcome"], calls), ("committed", [("r1", "commit", True)]))
+        self.assertTrue(rec["rebuild"]["ok"])
+        self.assertEqual(rec["rebuild"]["results"]["R1"]["how"], "recapture")
+        self.assertIsNotNone(rec["recapture_s"])
+        self.assertIn("R1 recapture", rec["actual_recipes"])
+        self.assertGreaterEqual(rec["edit_to_run_s"], rec["edit_to_commit_s"])
+        e = eng.Engine()
+        e.step(1)
+        self.assertEqual(e.ran[-1], "v1")
+        u = co.undo("r1")
+        self.assertEqual((u["ok"], calls[-1]), (True, ("r1", "undo", True)))
+        self.assertIsNotNone(u["receipt"]["recapture_s"])
+        e.step(1)
+        self.assertEqual(e.ran[-1], "base")
+        n = len(calls)
+        r = co.run(self._plan("r1-none", rebuild=[]))
+        self.assertEqual((r["outcome"], len(calls), r["receipt"]["rebuild"]),
+                         ("committed", n, None))
+
+    def test_a_failed_rebuild_undoes_the_transaction_and_rebuilds_back(self):
+        """Input: the same plan, R1 failing after the commit. Expected: outcome rolled_back,
+        a not-overridable rebuild_failed finding, the code back at base, and R1 run again
+        from the base code (why "rollback"); a plan naming a route the host lacks aborts
+        before phase 2 with rebuild_failed. Not: a rebuild that hangs (its deadline is the
+        host's)."""
+        name, eng, _ = fresh("r1fail")
+        co, calls = self._host(name, fail_on=("commit",))
+        r = co.run(self._plan("r1f"))
+        rec = r["receipt"]
+        self.assertEqual(r["outcome"], "rolled_back")
+        self.assertEqual([w for _, w, _ in calls], ["commit", "rollback"])
+        f = [x for x in rec["findings"] if x["check"] == "rebuild_failed"]
+        self.assertEqual([(x["subject"], x["overridable"]) for x in f], [("commit", False)])
+        self.assertEqual((rec["rollback"]["status"], rec["rebuild"]["back"]["ok"]),
+                         ("undone", True))
+        self.assertEqual(co.status("r1f")["state"], "aborted")
+        e = eng.Engine()
+        e.step(1)
+        self.assertEqual(e.ran[-1], "base")
+        r = co.run(self._plan("r9", rebuild=["R9"]))
+        self.assertEqual((r["outcome"], [x["check"] for x in r["receipt"]["findings"]
+                                         if x["check"] == "rebuild_failed"]),
+                         ("aborted", ["rebuild_failed"]))

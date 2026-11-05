@@ -13,12 +13,16 @@ v1; see template/livelab/INTERFACE.md):
 
 - `txn` (from Coordinator.run): plan, each participant's prepare / validate / commit / abort
   replies, the outcome, in-transaction rollback, findings and decisions, edit_to_run_s,
-  prepare_s (phase 1, steps go on) and gap_s (phase 2, the loop stalls). When the caller
-  timed out, the record is written once `status(txn)` first sees the transaction finished.
-- `proof` (from Coordinator.prove, after the workload ran): witness counts per participant,
-  their findings (zero_witness, running_frame), the caller's golden results, edit_to_finish_s.
+  prepare_s (phase 1, steps go on) and gap_s (phase 2, the loop stalls); the post-commit
+  `rebuild` (R1 ...) with recapture_s, and edit_to_commit_s. When the caller timed out, the
+  record is written once `status(txn)` first sees the transaction finished.
+- `proof` (from Coordinator.prove, after the workload ran): live witness counts per
+  participant, the calls made during graph capture apart (`witness_capture`, and `ran`: "ran
+  during capture N, ran live M"), their findings (zero_witness, running_frame), the caller's
+  golden results, edit_to_finish_s.
 - `undo` (from Coordinator.undo, whenever it happens): code undo per participant, then the
-  data resets the plan declared (`undo_resets`: R2, R3, ...), status, undo_s.
+  data resets the plan declared (`undo_resets`: R2, R3, ...), the rebuild from the base code,
+  status, undo_s.
 
 Every record also has `schema` and `kind`; the writer adds `writer: {pid, written_at}`.
 """
@@ -32,11 +36,11 @@ FIELDS = {
     "txn": ("schema", "kind", "id", "interface_version", "engine", "base_hash", "patch_hash",
             "plan", "actual_recipes", "participants", "commit_hashes", "findings", "decisions",
             "outcome", "timeline", "edit_to_run_s", "prepare_s", "gap_s", "baseline_restart_s",
-            "rollback"),
+            "rollback", "edit_to_commit_s", "rebuild", "recapture_s"),
     "proof": ("schema", "kind", "id", "witness", "findings", "golden", "timeline",
-              "edit_to_finish_s"),
+              "edit_to_finish_s", "witness_capture", "ran"),
     "undo": ("schema", "kind", "id", "participants", "resets", "status", "findings",
-             "timeline", "undo_s"),
+             "timeline", "undo_s", "rebuild", "recapture_s"),
 }
 OUTCOMES = ("committed", "aborted", "rolled_back")
 

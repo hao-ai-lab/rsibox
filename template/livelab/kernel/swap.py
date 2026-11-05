@@ -1265,10 +1265,13 @@ def apply(st, journal, witness):
         journal.record_closures(closure_pairs(st))
         for name, value in st.imports.items():
             journal.set_item(g, name, value)
-        if getattr(g.get(W.HIT), "__self__", None) is not witness:
-            journal.set_item(g, W.HIT, witness.hit)
+        hook = getattr(witness, "hook", None) or witness.hit
+        if g.get(W.HIT) is not hook:
+            W.trace_safe(hook)         # torch.compile calls it while tracing, never traces it
+            journal.set_item(g, W.HIT, hook)
         for k in st.keys:
             journal.set_item(witness.counts, k, 0)
+            witness.capture_counts[k] = 0   # read only for committed keys: not journaled
         for fn, code, d, kw in st.swaps:
             journal.set_code(fn, code, d, kw)
         for owner, name, obj in st.adds:

@@ -2,15 +2,34 @@
 
 The swap injects `__fastrsi_hit__("<key>")` as the first statement of each new body (after
 the docstring), as `fastrsi_lab_cov.install_batch` does. `__fastrsi_hit__` is a global of the
-module, bound to the participant's `Witness.hit`; the swap adds it through the journal, so undo
-removes it and the counter keys with it.
+module, bound to the participant's `Witness.hook` (a plain function that calls `hit`); the
+swap adds it through the journal, so undo removes it and the counter keys with it.
 
-`check(keys, old_codes)` turns counts into findings, so a swap that never ran is never a pass:
-- `running_frame`: zero calls and a frame of the old code is still running (a loop entered
-  before the swap keeps executing the old bytecode);
-- `zero_witness`: zero calls otherwise.
+Calls made while the engine records a graph (CUDA graph capture, and the warm-up runs of a
+recapture) are counted apart, in `capture_counts`: a graph replay runs no Python, so those
+calls prove only that the new code was captured, never that a step ran it. The engine says when
+it captures: `Witness(capturing=fn)` asks fn() at every call (vLLM: the CUDA stream is
+capturing), and `with witness.capture():` marks a whole recapture.
+
+The counter is safe inside code a tracer compiles: `trace_safe()` (called by the swap when it
+binds the hook) marks the hook for torch.compile with `torch._dynamo.assume_constant_result`,
+so Dynamo calls it once while tracing instead of tracing its dict update into the graph (a
+traced counter failed a recompile: "modifying buffers ... cudagraph inside the compiler"). The
+hook is a function of the key alone: Dynamo needs every argument of a constant-result call to
+be a constant, and a bound method's `self` is not. A
+call made while tracing counts as a capture call when the engine marks its recompile with
+`capture()`; compiled code then never calls it.
+
+`check(keys, old_codes)` turns live counts into findings, so a swap that never ran is never a
+pass:
+- `running_frame`: zero live calls and a frame of the old code is still running (a loop
+  entered before the swap keeps executing the old bytecode);
+- `zero_witness`: zero live calls otherwise. With calls during capture it says how many and
+  routes to R1 (the code runs only inside graphs), noting that only a device-side probe (a
+  counter the captured code increments) or an output change proves a replay runs it.
 """
 import ast
+import contextlib
 import inspect
 import sys
 import types
@@ -21,12 +40,43 @@ from .locate import all_objects, sliced
 HIT = "__fastrsi_hit__"
 
 
+DEVICE_PROBE = ("calls during capture prove the graph holds the new code, not that a replay "
+                "ran it: a device-side probe (a counter the captured code increments) or an "
+                "output change is needed to prove the replay")
+
+
 class Witness:
-    def __init__(self):
-        self.counts = {}
+    def __init__(self, capturing=None):
+        self.counts = {}            # live calls: the code ran in a step
+        self.capture_counts = {}    # calls while a graph was recorded (see the module doc)
+        self.capturing = capturing  # fn() -> bool, asked at every call; None: never
+        self._capture = 0           # > 0 inside `capture()`
+        self.hook = _hook(self)     # what the swap binds as __fastrsi_hit__
+        trace_safe(self.hook)
+
+    def _capturing(self):
+        if self._capture:
+            return True
+        if self.capturing is None:
+            return False
+        try:
+            return bool(self.capturing())
+        except Exception:           # a probe that fails counts the call as live
+            return False
 
     def hit(self, key):
-        self.counts[key] = self.counts.get(key, 0) + 1
+        c = self.capture_counts if self._capturing() else self.counts
+        c[key] = c.get(key, 0) + 1
+
+    @contextlib.contextmanager
+    def capture(self):
+        """Every call inside this block counts as a capture call (a recapture: its warm-up
+        runs execute the model eagerly, and are not steps either)."""
+        self._capture += 1
+        try:
+            yield self
+        finally:
+            self._capture -= 1
 
     def snapshot(self):
         return dict(self.counts)
@@ -38,19 +88,55 @@ class Witness:
         live = live_codes(suspended=suspendable(old))
         out = []
         for k in keys:
-            n = self.counts.get(k, 0)
+            n, cap = self.counts.get(k, 0), self.capture_counts.get(k, 0)
             if n:
                 continue
             running = [c for c in (old_codes or {}).get(k, ()) if c in live]
             if running:
                 out.append(F.finding("running_frame", "0 calls; a frame of the old code is "
                                      "still running", "calls of the new code", subject=k))
+            elif cap:
+                f = F.finding("zero_witness", f"0 live calls since the swap; {cap} calls while "
+                              "graphs were captured (a replay runs no Python)",
+                              "at least one live call, or a device-side probe that counts "
+                              "replays", subject=k)
+                f["actions"] = [{"action": "prove the replay with a device-side probe or an "
+                                 "output change", "cost": "seconds"}] + f["actions"]
+                out.append({**f, "route": "R1", "note": DEVICE_PROBE})
             else:
                 out.append(F.finding("zero_witness", "0 calls since the swap",
                                      "at least one call", subject=k))
-        res = F.ok(counts={k: self.counts.get(k, 0) for k in keys})
+        res = F.ok(counts={k: self.counts.get(k, 0) for k in keys},
+                   capture_counts={k: self.capture_counts.get(k, 0) for k in keys},
+                   ran={k: ran(self.capture_counts.get(k, 0), self.counts.get(k, 0))
+                        for k in keys})
         res["findings"] = out
         return res
+
+
+def _hook(witness):
+    def __fastrsi_hit__(key):
+        witness.hit(key)
+    return __fastrsi_hit__
+
+
+def trace_safe(fn):
+    """Mark a witness hook for Dynamo (see the module doc) once torch is loaded; idempotent.
+    The kernel imports no torch: without it there is nothing to mark. Returns whether fn is
+    marked."""
+    torch = sys.modules.get("torch")
+    if torch is None or getattr(fn, "_dynamo_marked_constant", False):
+        return getattr(fn, "_dynamo_marked_constant", False)
+    try:
+        torch._dynamo.assume_constant_result(fn)
+    except Exception:
+        return False
+    return getattr(fn, "_dynamo_marked_constant", True)
+
+
+def ran(capture, live):
+    """The proof's one line per key."""
+    return f"ran during capture {capture}, ran live {live}"
 
 
 SUSPENDABLE = (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
