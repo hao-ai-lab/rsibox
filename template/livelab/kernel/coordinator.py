@@ -60,6 +60,10 @@ A plan is plain data, so it can cross a process boundary:
                                      data): the caller's parse of the text the participant
                                      runs and of `source`, so stage does not parse again
      "repairs": [{"cell": python source, "declares": [names in the participant's scope]}],
+                 a cell runs at commit with the scope's names and `journal` (this
+                 participant's): `journal.record_attr(obj, name)` before assigning what the
+                 declared-object audit cannot undo (an nn.Module submodule, Parameter.data),
+                 `journal.record_call(undo_fn, label)` for an in-place re-init
      "accept": [check names] or "all",
      "undo_resets": ["R2" | "R3" | ...],   resets the undo runs after the code undo
      "recipes": [...], "predicted_resources": [...], "certainty": str}
@@ -358,7 +362,7 @@ class LocalParticipant(Participant):
                 audit = {n: o for n, o in self.scope.items() if n not in decl}
                 try:
                     with self.journal.repair(decl, audit) as rep:
-                        exec(code, dict(self.scope))
+                        exec(code, {**self.scope, "journal": self.journal})
                 except Exception as e:
                     u = self.journal.undo_to(mark)
                     return F.not_ok("repair failed", [F.finding(

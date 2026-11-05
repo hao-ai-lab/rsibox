@@ -10,7 +10,7 @@ Pure Python, standard library only; it imports no engine.
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
 | `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage(module, source)` with the targets omitted finds that same list from its own parse, so prepare needs no planner pass. `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. `stage(..., trees=(base, patch))` takes trees the caller already parsed (its own planner) instead of parsing again. New defaults and added methods are evaluated in a scratch class body that reads the live class's names (`_LiveBody`). |
-| `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, `removed`, `call`, `closures`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10); `record_attr` restores through `setattr` / `delattr` what is not a plain `__dict__` entry (descriptors, `nn.Module` submodules, `__doc__`). `record_call(undo_fn, label)` journals an in-place re-init by the function that undoes it. `record_closures` (called by `apply`) lets undo take back closures the new code made at run time; undo scans the heap only for the new nested codes that gained a reference since apply, so a swap that made no lasting closure undoes without the pass. |
+| `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, `removed`, `call`, `closures`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10; a plan's cell gets the participant's journal as `journal`); `record_attr` restores through `setattr` / `delattr` what is not a plain `__dict__` entry (descriptors, `nn.Module` submodules, `__doc__`). `record_call(undo_fn, label)` journals an in-place re-init by the function that undoes it. `record_closures` (called by `apply`) lets undo take back closures the new code made at run time; undo scans the heap only for the new nested codes that gained a reference since apply, so a swap that made no lasting closure undoes without the pass. |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
@@ -326,6 +326,7 @@ test_record_call_runs_in_reverse_order_and_a_failure_is_a_finding ... ok
 test_process_analysis_keeps_the_gil_free ... ok
 test_process_analysis_stages_the_same_code_and_findings ... ok
 test_removed_definition_is_a_finding_and_undo_restores_it ... ok
+test_repair_cell_journals_through_record_attr_and_record_call ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
@@ -349,7 +350,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 53 tests in 7.4s
+Ran 54 tests in 7.7s
 
 OK
 ```

@@ -539,6 +539,45 @@ class KernelTest(unittest.TestCase):
         self.assertNotIn("bias", vars(e))
         self.assertEqual(e.step(3), 17)
 
+    def test_repair_cell_journals_through_record_attr_and_record_call(self):
+        """Proves: a repair cell reaches the participant's journal as `journal`: it replaces an attribute kept by a custom `__setattr__` (as nn.Module keeps submodules) with `record_attr` and re-inits a list in place with `record_call`; the commit is ok with no finding, and undo restores both (the same object, the old contents). Before, a cell had only the scope's names, so `journal` was a NameError (repair_failed) and live tests could not journal a Parameter.data or submodule repair. Not: torch (the journal's own tests cover nn.Module and Parameter.data)."""
+        class Mod:                               # keeps attributes in _store, like nn.Module
+            def __init__(self):
+                object.__setattr__(self, "_store", {})
+
+            def __setattr__(self, k, v):
+                self._store[k] = v
+
+            def __getattr__(self, k):
+                try:
+                    return self._store[k]
+                except KeyError:
+                    raise AttributeError(k) from None
+
+        class Engine:
+            pass
+        e, buf = Engine(), Engine()                # buf: a device buffer stand-in
+        buf.data = [1, 2, 3]
+        e.head, e.cache = Mod(), buf
+        e.head.act = act = object()
+        p = C.LocalParticipant("core", scope={"engine": e})
+        cell = ("journal.record_attr(engine.head, 'act')\n"
+                "engine.head.act = 'new act'\n"
+                "saved = engine.cache.data[:]\n"
+                "journal.record_call(lambda: engine.cache.data.__setitem__(slice(None), saved), "
+                "'cache re-init')\n"
+                "engine.cache.data[:] = [0, 0, 0]\n")
+        plan = {"id": "cell", "repairs": [{"cell": cell, "declares": []}]}
+        self.assertTrue(p.prepare(plan)["ok"])
+        c = p.commit("cell")
+        self.assertTrue(c["ok"], c)
+        self.assertEqual(c["findings"], [])
+        self.assertEqual((e.head.act, e.cache.data), ("new act", [0, 0, 0]))
+        self.assertEqual([j["kind"] for j in c["journal"]], ["attr", "call"])
+        self.assertTrue(p.undo("cell")["ok"])
+        self.assertIs(e.head.act, act)
+        self.assertEqual(e.cache.data, [1, 2, 3])
+
     def test_repair_that_cannot_be_undone_is_a_finding(self):
         """Proves: in-place or undeclared mutations by a repair cell are repair_not_undoable findings, not exceptions. Not: deeper than one level."""
         name, eng, _ = fresh("repair2")
