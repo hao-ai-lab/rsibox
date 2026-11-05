@@ -145,6 +145,16 @@ class JitTargetTest(unittest.TestCase):
         self.assertEqual(k.scale_kernel[(1,)](1), 5)
         counts = {key.split(":")[1]: n for key, n in p.witness_check("jit")["counts"].items()}
         self.assertEqual(counts, {"helper": 2, "scale_kernel": 1})
+        # a chained edit of the same kernel: one launch counts once (its hook replaces the
+        # first edit's), and undo of the chain goes back to the first edit's kernel
+        self.assertTrue(p.prepare({"id": "jit2", "modules": {kern: {
+            "source": new.replace("x * 5", "x * 7")}}})["ok"])
+        self.assertTrue(p.commit("jit2")["ok"])
+        self.assertEqual(k.scale_kernel[(1,)](1), 7)
+        counts = {key.split(":")[1]: n for key, n in p.witness_check("jit2")["counts"].items()}
+        self.assertEqual(counts, {"scale_kernel": 1})
+        self.assertTrue(p.undo("jit2")["ok"])
+        self.assertEqual(k.scale_kernel[(1,)](1), 5)
         self.assertTrue(p.undo("jit")["ok"])
         self.assertEqual((k.kernel[(1,)](1), k.scale_kernel[(1,)](1)), (4, 3))
         self.assertEqual((k.kernel.device_caches, k.helper.device_caches,
@@ -325,6 +335,35 @@ class CellJournalTest(unittest.TestCase):
         self.assertEqual(checks[0], "repair_failed")
         self.assertIn("repair_not_undoable", checks)
         self.assertEqual((m.forward(), eng.graphs), ("base", ["g:base"]))
+
+    def test_a_cell_that_needs_a_rebuild_gets_it_outside_the_gap(self):
+        """Input: a host with an R1 rebuild; a cell that changes engine state only a rebuild
+        restores calls journal.need_rebuild("R1"). Expected: when the cell fails, the
+        transaction rolls back and R1 runs once from the base code (why rollback) after the
+        gap; when it succeeds, undo runs R1 (why undo) after the code undo, not inside it.
+        Fails before this change: need_rebuild did not exist; the alternative, an inverse that
+        recompiles inside undo, held the gap past the 5 s deadline and killed a live engine."""
+        name = f"kt_nr{next(_n)}"
+        text = "def forward():\n    return 'base'\n"
+        (m,) = temp_modules(self, {name: text})
+        calls = []
+
+        def r1(txn, why, deadline_at):
+            calls.append((why, m.forward()))
+            return {"ok": True, "findings": []}
+        p = C.LocalParticipant("workers")
+        co = C.Coordinator([p], phase2_deadline_s=None, rebuilds={"R1": r1})
+        edit = {name: {"source": text.replace("'base'", "'edit'")}}
+        cell = "journal.need_rebuild('R1')\n"
+        r = co.run({"id": "f", "modules": edit, "repairs": [
+            {"cell": cell + "raise RuntimeError('capture refused')", "declares": []}]})
+        self.assertEqual((r["outcome"], calls), ("rolled_back", [("rollback", "base")]))
+        del calls[:]
+        r = co.run({"id": "ok", "modules": edit, "repairs": [{"cell": cell, "declares": []}]})
+        self.assertEqual((r["outcome"], calls, r["receipt"]["actual_recipes"]),
+                         ("committed", [], ["R0 swap", "R10 repair", "R1 recapture"]))
+        self.assertTrue(co.undo("ok")["ok"])
+        self.assertEqual(calls, [("undo", "base")])
 
     def test_a_cell_only_transaction_does_not_prove_silently(self):
         """Input: a transaction made only of a repair cell. Expected: its proof has a

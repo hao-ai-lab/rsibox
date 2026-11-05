@@ -123,9 +123,13 @@ def reset(o):
         o.device_caches = type(d["device_caches"])(o.create_binder)
 
 
-def count_launches(o, hook):
-    """Add `hook` to the object's pre-run hooks (called at every launch), as a new list."""
+def count_launches(o, hook, key=None):
+    """Add `hook` to the object's pre-run hooks (called at every launch), as a new list. A
+    hook an earlier swap added for the same witness `key` is replaced, not kept beside it (a
+    chained edit of the same kernel counted every launch twice)."""
     if "pre_run_hooks" in vars(o):
-        o.pre_run_hooks = list(o.pre_run_hooks) + [hook]
+        hook._fastrsi_key = key
+        o.pre_run_hooks = [h for h in o.pre_run_hooks
+                           if key is None or getattr(h, "_fastrsi_key", None) != key] + [hook]
         return True
     return False

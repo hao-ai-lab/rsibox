@@ -1590,11 +1590,11 @@ def apply(st, journal, witness):
             for o in jits:
                 journal.record_call(JIT.snapshot(o), f"jit rebuild {k}")
                 JIT.rebuild(o, st.source, st.mod.__file__)
-                JIT.count_launches(o, _launch_hook(witness, k))
+                JIT.count_launches(o, _launch_hook(witness, k), k)
             for o in deps:                 # they inline the target when they compile
                 journal.record_call(JIT.snapshot(o), f"jit reset (calls {k})")
                 JIT.reset(o)
-                JIT.count_launches(o, _launch_hook(witness, k))
+                JIT.count_launches(o, _launch_hook(witness, k), k)
     except Exception as e:
         u = journal.undo_to(start)
         return F.not_ok(f"apply: {type(e).__name__}: {e}", u["findings"], undo=u)

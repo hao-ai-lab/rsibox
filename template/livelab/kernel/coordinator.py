@@ -454,7 +454,12 @@ class LocalParticipant(Participant):
                         "repair_failed", f"backfill of new fields: {type(e).__name__}: {e}",
                         "the new __init__'s statements run on every live instance")]
                         + u["findings"])
-            armed = []
+            armed, n_routes = [], len(self.journal.routes)
+
+            def routes():
+                rs = sorted(set(self.journal.routes[n_routes:]))
+                del self.journal.routes[n_routes:]
+                return rs
 
             def arm(key):
                 """A witness counter for what this cell changes (see witness.arm)."""
@@ -475,13 +480,15 @@ class LocalParticipant(Participant):
                     u = self.journal.undo_to(mark)
                     return F.not_ok("repair failed", [F.finding(
                         "repair_failed", f"{type(e).__name__}: {e}", "the cell runs")]
-                        + left + u["findings"])
+                        + left + u["findings"], rebuild_routes=routes())
                 fs += rep.findings
             d = F.decide([{**f, "participant": self.name} for f in fs], accept)
             fs = d["findings"]
+            rebuild_routes = routes()
             if not d["proceed"]:
                 u = self.journal.undo_to(mark)
-                return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"])
+                return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"],
+                                rebuild_routes=rebuild_routes)
             self._marks[txn] = mark
             self._done[txn] = staged
             self._sources[txn] = self._pending.pop(txn, {})
@@ -492,7 +499,8 @@ class LocalParticipant(Participant):
             self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
                         journal=self.journal.describe(mark),
-                        **({"backfill": filled} if filled is not None else {}))
+                        **({"backfill": filled} if filled is not None else {}),
+                        **({"rebuild_routes": rebuild_routes} if rebuild_routes else {}))
 
         try:
             return self.quiesce(do)
@@ -933,6 +941,17 @@ class Coordinator:
         tl["gap_end"] = now()
         return out
 
+    @staticmethod
+    def _cell_routes(res):
+        """Rebuild routes the repair cells asked for (journal.need_rebuild), from every
+        participant's commit reply and its ranks."""
+        out = set()
+        for r in res.values():
+            c = r.get("commit") or {}
+            for x in [c] + list(c.get("ranks") or []):
+                out.update(x.get("rebuild_routes") or [])
+        return sorted(out)
+
     def _routes(self, plan, res):
         """The routes to rebuild after the commit: the plan's `rebuild`, else the routes of
         accepted, non-advisory prepare findings that a registered rebuild serves."""
@@ -1007,7 +1026,7 @@ class Coordinator:
         rb = out["rebuild"] = self._rebuild_all(routes, txn, "commit", since=tl.get("gap_end"))
         tl["rebuilt"] = now()
         if rb["ok"]:
-            t["rebuilt"] = list(routes)
+            t["rebuilt"] = sorted(set(t.get("rebuilt", [])) | set(routes))
             return
         out["outcome"] = "rolled_back"
         out["extra"].append({**F.finding(
@@ -1104,6 +1123,20 @@ class Coordinator:
                 return {"ok": False, "outcome": "in-doubt", "txn": txn, "receipt": None,
                         "written": {"ok": False, "error": "in doubt: ask status(txn)"},
                         "error": f"{type(e).__name__}: {e}"}
+        cells = [r for r in self._cell_routes(t["res"]) if r in self.rebuilds]
+        if t["outcome"] == "committed":
+            # a cell's own rebuild (it released and recaptured graphs): undo rebuilds again
+            t["rebuilt"] = sorted(set(t.get("rebuilt", [])) | set(cells))
+        elif t["outcome"] == "rolled_back" and cells:
+            # a cell failed after changing what only a rebuild restores: rebuild from the base
+            # code now, outside the gap (the code is back)
+            t["out"]["rebuild"] = self._rebuild_all(cells, txn, "rollback",
+                                                    since=tl.get("gap_end"))
+            if not t["out"]["rebuild"]["ok"]:
+                t["out"]["extra"].append({**F.finding(
+                    "rebuild_failed", "rebuilding from the base code after a failed cell: "
+                    f"{self._rebuild_error(t['out']['rebuild'])}", "the base code's graphs "
+                    "again"), "subject": "rollback"})
         if t["outcome"] == "committed" and t["rebuild"]:
             self._after_commit(txn)       # post-commit phase, outside the gap
         return self._finish(txn)

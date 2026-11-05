@@ -203,6 +203,7 @@ class Journal:
         self.name = name
         self.entries = []
         self.marks = []          # [(label, position)]
+        self.routes = []         # rebuild routes asked for by cells (`need_rebuild`)
 
     # -- marks ---------------------------------------------------------------------------
     def mark(self, label=""):
@@ -275,6 +276,14 @@ class Journal:
             self.entries.insert(self.marks[-1][1], e)
         else:
             self.entries.append(e)
+
+    def need_rebuild(self, route):
+        """A repair cell changed engine state that only a rebuild can restore (it released
+        and recaptured graphs: R1). The participant reports the route with its commit, and the
+        host runs it again from the base code after an undo or a rollback, OUTSIDE the
+        phase-2 gap (a recompile takes seconds; in the gap it missed the deadline and killed a
+        live engine). Not an inverse: nothing runs at undo_to."""
+        self.routes.append(route)
 
     def record_closures(self, pairs):
         """Journal {id(new nested code): (new code, old code or None)} for the codes a swap
