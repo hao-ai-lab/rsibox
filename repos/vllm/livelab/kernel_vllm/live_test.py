@@ -130,6 +130,8 @@ def main():
     ap.add_argument("--restart-source", default="")
     ap.add_argument("--max-tokens", type=int, default=400)
     ap.add_argument("--out")
+    ap.add_argument("--scan", default="auto", choices=["auto", "always"],
+                    help="always: the pre-v2.2 locate (heap scans), for a before/after")
     a = ap.parse_args()
     url, m, res = a.url, a.model, {}
     baseline = ({"seconds": a.restart_s, "source": a.restart_source}
@@ -154,10 +156,10 @@ def main():
             "predicted_resources": ["code objects"], "certainty": "L2",
             "modules": {
                 PEN_MOD: {
-                    "on": ["worker"], "source": p_new, "base_hash": text_hash(p_src),
+                    "on": ["worker"], "source": p_new, "base_hash": text_hash(p_src), "scan": a.scan,
                     "targets": [["PenaltiesState.apply", line_of(p_src, "    def apply(self, logits")]]},
                 "vllm.v1.core.sched.scheduler": {
-                    "on": ["core"], "source": s_new, "base_hash": text_hash(s_src),
+                    "on": ["core"], "source": s_new, "base_hash": text_hash(s_src), "scan": a.scan,
                     "targets": [["Scheduler.schedule", line_of(s_src, "    def schedule(")]]}}}
     r1 = send(a.dir, {"op": "txn", "plan": plan, "edit_time": edit_time,
                       "baseline_restart": baseline})
@@ -178,6 +180,18 @@ def main():
                                 for tk in toks if tk in strs)
         times = [ts for ts, _ in o["chunks"]]
         max_gap = max([max_gap] + [b - x for x, b in zip(times, times[1:])])
+    # chunk gaps while the transaction prepared (a stall shows as the gap ending in it)
+    tl = rec.get("timeline") or {}
+    ps, pd = tl.get("prepare_start"), tl.get("prepared")
+    gaps_prep, gaps_before = [], []
+    for o in outs:
+        times = [ts for ts, _ in o["chunks"]]
+        for x, b in zip(times, times[1:]):
+            if ps and pd and ps <= b <= pd + 0.05:
+                gaps_prep.append(b - x)
+            elif ps and b < ps:
+                gaps_before.append(b - x)
+    gaps_before.sort()
     paris_before = sum(1 for o in outs for ts, toks in o["chunks"] if commit_t and ts < commit_t
                        for tk in toks if tk in strs)
     after_text = complete(url, m, SINGLE)
@@ -193,6 +207,14 @@ def main():
         "banned_tokens_streamed_before_commit": paris_before,
         "banned_tokens_streamed_after_commit": banned_after,
         "max_inter_chunk_gap_s": round(max_gap, 4),
+        "scan": a.scan,
+        "prepare_timings": {n: (p.get("prepare") or {}).get("timings") or [
+            r.get("timings") for r in (p.get("prepare") or {}).get("ranks", [])]
+            for n, p in rec.get("participants", {}).items()},
+        "chunk_gap_median_before_s": round(gaps_before[len(gaps_before) // 2], 4)
+        if gaps_before else None,
+        "chunk_gap_max_during_prepare_s": round(max(gaps_prep), 4) if gaps_prep else None,
+        "host_steps_prepare": r1.get("host", {}).get("steps_prepare"),
         "host_steps_before": r1.get("host", {}).get("steps_before"),
         "host_steps_during_txn": r1.get("host", {}).get("steps_during"),
         "held_steps": r1.get("host", {}).get("held_steps"),

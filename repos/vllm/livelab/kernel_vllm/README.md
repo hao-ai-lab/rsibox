@@ -81,15 +81,36 @@ engine-core edit adds a step counter to `Scheduler.schedule`.
 "identical_to_base": true`: the greedy single request gives the same text as before T1
 (" Paris. The capital of Italy is Rome. ...").
 
+**Locate without stalling (kernel v2.2), before / after, same engine session.** Our
+2026-11-05 runs of `live_test.py --scan always` (the old locate: heap scans for functions
+and suspended frames) and then the default (namespace locate), each a full T1-T3 pass:
+
+| T1 | before (`--scan always`) | after (default) |
+|---|---|---|
+| prepare_s | 1.158 | 0.210 |
+| max chunk gap across 6 streams during prepare | 248.7 ms | 37.2 ms |
+| median chunk gap before the transaction | 19.9 ms | 19.9 ms |
+| max engine step during prepare (host) | 206.6 ms | 26.3 ms |
+| edit_to_run_s / edit_to_finish_s | 1.186 / 5.958 | 0.248 / 5.279 |
+| gap_s | 0.0008 | 0.0004 |
+| worker stage: locate / frames / total | 0.355 / 0.279 / 0.648 s (heap) | 0.00008 / 0.0001 / 0.012 s (namespace) |
+| core stage: locate / frames / total | 0.168 / 0.169 / 0.469 s (heap) | 0.0004 / 0.0001 / 0.130 s (namespace) |
+
+After the change the longest chunk gap while preparing is 1.9x the median (the goal was
+about 2x). What core prepare still spends (0.13 s) is parsing and compiling
+`scheduler.py` (3800 lines, about 10 ms per C call). Both runs: no lost tokens, no banned
+token after the commit, witnesses on both sides, T2 aborted with nobody committed, T3
+identical to base.
+
 ## Findings from the live run
 
 - `apply_all_penalties` (the dashboard demo's target) never runs on vLLM 0.33: the default V2
   model runner applies penalties in `vllm.v1.worker.gpu.sample.penalties.PenaltiesState.apply`.
   The first run swapped `apply_all_penalties`; the kernel reported `zero_witness` on the
   workers, and "Paris" was still generated. The swap was never counted as a pass.
-- Phase 1 is not free on the engine: a heap scan in the engine-core or worker process slows
-  that process's steps while it runs (one 221 ms step here). A locate that does not scan the
-  whole heap is the next step.
+- Phase 1 was not free on the engine: a heap scan in the engine-core or worker process slowed
+  that process's steps while it ran (one 221 ms step in the first run). Fixed by the namespace
+  locate (table above). Nested targets (closures) still need one heap scan.
 - TP > 1 is not verified. With several ranks, the same code path sends every call with one
   collective_rpc from the busy loop, and the replies are merged (`ranks_agree` for hashes);
   this needs a run on a multi-GPU node.

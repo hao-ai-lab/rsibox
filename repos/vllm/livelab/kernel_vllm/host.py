@@ -92,6 +92,7 @@ def _merge(method, rs):
         out["ranks_agree"] = len(set(hs)) == 1
     elif method == "prepare_poll" and not out.get("pending"):
         out["staged"] = rs[0].get("staged") if rs else {}
+        out["timings"] = {f"rank{r.get('rank')}": r.get("timings") for r in rs}
         out["prepare_s"] = max((r.get("prepare_s") or 0) for r in rs) if rs else None
     return out
 
@@ -210,6 +211,11 @@ class Host:
         r["host"] = {"op": op, "seconds": round(t1 - t0, 6), "held_steps": self.held_steps - held0,
                      "steps_during": self.step_stats(t0, t1),
                      "steps_before": self.step_stats(t0 - 5.0, t0)}
+        tl = (r.get("receipt") or {}).get("timeline") or {}
+        if "prepare_start" in tl and "prepared" in tl:       # unix times -> perf_counter
+            off = time.time() - time.perf_counter()
+            r["host"]["steps_prepare"] = self.step_stats(tl["prepare_start"] - off,
+                                                         tl["prepared"] - off)
         return r
 
     def control(self):
