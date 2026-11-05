@@ -330,6 +330,8 @@ test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_journals_through_record_attr_and_record_call ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
+test_rank_split_names_the_ranks_and_whether_one_function_differs ... ok
+test_ranks_that_disagree_after_commit_are_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
 test_second_genexpr_edit_on_top_is_not_a_base_mismatch ... ok
 test_stage_compiles_only_the_changed_definitions ... ok
@@ -351,7 +353,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 55 tests in 7.7s
+Ran 57 tests in 7.7s
 
 OK
 ```
@@ -381,7 +383,11 @@ Each test's docstring says what it proves and what it does not.
   ranks whose counts differ by more than 1% of the largest (at least 1 call) are
   `witness_uneven` (ranks step together and are read between the same two steps, so code
   that runs on every rank counts the same). The txn receipt keeps each rank's code hashes and
-  `commit_hashes.ranks_agree` per group; `agree` is false if any comparison differs.
+  `commit_hashes.ranks_agree` per group; `agree` is false if any comparison differs. Ranks
+  that disagree are also a `ranks_disagree` finding in the receipt naming the split ("ranks 1
+  vs 0,2: <functions>"), blocking in `decisions`; not overridable when one function has
+  different hashes on different ranks (overridable when only some ranks hold a function).
+  The outcome stays what happened (committed): undo or respawn.
 - **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
   `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
   2 that had not started when the caller gave up is cancelled. Once undo ran on a participant,

@@ -870,6 +870,37 @@ class KernelTest(unittest.TestCase):
         h = ch["ranks"]["workers"]
         self.assertEqual((h["0"] == h["1"], h["1"] == h["2"]), (True, False))
 
+    def test_ranks_that_disagree_after_commit_are_a_finding(self):
+        """Proves: when rank 1 of a group runs other code for `Engine.step` right after commit, the txn receipt carries one ranks_disagree finding (participant "workers", the split "ranks 1 vs 0,2" and the function), not overridable, blocking in `decisions`; the outcome stays what happened (committed); ranks that agree give none. Seen live (Qwen3-8B TP2): ranks_agree false with findings [] and blocking [], so only a later proof's witness_uneven showed it. Not: what made the rank differ; ranks that hold different keys by design (that finding is overridable)."""
+        group, _ = self._ranks("agreef")
+        rec = C.Coordinator([group]).run({"modules": self.V1})["receipt"]
+        self.assertNotIn("ranks_disagree", [f["check"] for f in rec["findings"]])
+
+        def tamper(fn):
+            r = fn()
+            mod = sys.modules[p1.alias["toy"] + ".engine"]
+            mod.Engine.step.__code__ = mod.Engine.drain.__code__.replace(
+                co_name="step", co_qualname="Engine.step")
+            return r
+        group, ranks = self._ranks("disagreef", quiesce={1: tamper})
+        p1 = ranks[1][0]
+        rec = C.Coordinator([group]).run({"modules": self.V1})["receipt"]
+        fs = [f for f in rec["findings"] if f["check"] == "ranks_disagree"]
+        self.assertEqual([(f["participant"], f["subject"], f["overridable"]) for f in fs],
+                         [("workers", "workers", False)])
+        self.assertTrue(fs[0]["observed"].startswith("ranks 1 vs 0,2: "), fs[0]["observed"])
+        self.assertIn("Engine.step", fs[0]["observed"])
+        self.assertEqual(rec["outcome"], "committed")
+        self.assertIn("ranks_disagree", rec["decisions"]["blocking"])
+        self.assertFalse(F.decide(fs, "all")["proceed"])          # no accept overrides it
+
+    def test_rank_split_names_the_ranks_and_whether_one_function_differs(self):
+        """Proves: `_rank_split` groups ranks by their hashes and says whether a function held by several ranks differs (not overridable) or only some ranks hold a key (overridable). Not: the receipt (previous test)."""
+        same = {"0": {"m:f:1": ["a"]}, "1": {"m:f:1": ["b"]}, "2": {"m:f:1": ["a"]}}
+        only = {"0": {"m:f:1": ["a"], "m:g:9": ["c"]}, "1": {"m:f:1": ["a"]}}
+        self.assertEqual(C._rank_split(same), ("ranks 1 vs 0,2: m:f:1", True))
+        self.assertEqual(C._rank_split(only), ("ranks 0 vs 1: m:g:9", False))
+
     def test_hung_commit_ends_the_gap_at_the_deadline(self):
         """Proves: with steps running, a rank that hangs 0.6 s in commit does not stall the loop: the gap ends within the 0.2 s deadline, rank0's commit is undone in it, no step ever runs mixed versions (not even after the late commit arrives: it is refused), the outcome is definite (rolled back, state aborted) and the host and session are poisoned (install refused, undo allowed). Not: a participant stuck inside apply (its late switch is undone by the queued undo, after it ran)."""
         cl, ps, lps = self._cluster("deadline", gap_mode=True, slow={"rank1": {"commit": 0.6}})

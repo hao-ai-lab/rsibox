@@ -490,6 +490,25 @@ def _hashes_agree(hashes):
     return all(len(set(vs)) == 1 for vs in shared) if shared else None
 
 
+def _rank_split(rank_hashes):
+    """For ranks whose code hashes differ: ("ranks 0 vs 1,2: k1, ...", same_key) where
+    same_key says whether a function key held by several ranks has different hashes (as
+    opposed to only some ranks holding a key). Ranks are grouped by identical hashes."""
+    groups = {}
+    for r, h in rank_hashes.items():
+        groups.setdefault(json.dumps(h, sort_keys=True), []).append(str(r))
+    keys = set().union(*[set(h or {}) for h in rank_hashes.values()])
+    differ, same_key = [], False
+    for k in sorted(keys):
+        vals = [json.dumps((h or {}).get(k), sort_keys=True) for h in rank_hashes.values()]
+        held = [v for v, h in zip(vals, rank_hashes.values()) if k in (h or {})]
+        if len(set(vals)) > 1:
+            differ.append(k)
+            same_key = same_key or len(set(held)) > 1
+    split = " vs ".join(",".join(rs) for rs in sorted(groups.values(), key=len))
+    return f"ranks {split}: {', '.join(differ)[:300]}", same_key
+
+
 def _ranks_agree(rank_hashes):
     """Do the ranks of one group run the same code? None for a group of one (nothing to
     compare)."""
@@ -873,6 +892,14 @@ class Coordinator:
                     rank_hashes[p.name] = {str(x.get("rank")): x.get("hashes")
                                            for x in r["ranks"]}
                     ranks_agree[p.name] = _ranks_agree(rank_hashes[p.name])
+                    if ranks_agree[p.name] is False:     # never only a flag: a finding
+                        split, same_key = _rank_split(rank_hashes[p.name])
+                        out["extra"].append({**F.finding(
+                            "ranks_disagree", split,
+                            "every rank of the group runs the same code", subject=p.name),
+                            "participant": p.name,
+                            # the same function differs: no accept can make that safe
+                            **({"overridable": False} if same_key else {})})
         fs = [f for r in res.values() for x in r.values()
               for f in x.get("findings", [])] + out["extra"]
         modules = plan.get("modules", {})

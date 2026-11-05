@@ -90,6 +90,19 @@ CATALOG = {
          {"action": "if it runs only at startup: soft restart", "cost": "recipe R5"},
          {"action": "if it runs inside captured graphs: recapture", "cost": "recipe R1"}],
         "results are judged on code that never ran", ["Proving an edit applied"], True),
+    "ranks_disagree": (
+        "the ranks of one group run different code right after the commit: their code hashes "
+        "differ for the same function (something changed a rank outside this transaction, or a "
+        "rank did not switch), or only some ranks hold a function. Not overridable when the "
+        "same function differs",
+        [{"action": "read commit_hashes.ranks to find the rank that differs; undo this "
+                    "transaction, or undo the other change on that rank", "cost": "seconds"},
+         {"action": "respawn the worker group", "cost": "respawn"},
+         {"action": "accept only when the ranks hold different functions by design (no "
+                    "function differs)", "cost": "none"}],
+        "ranks of one tensor-parallel group compute different results or issue different "
+        "collectives: wrong outputs or a hang",
+        ["Proving an edit applied"], True),
     "witness_uneven": (
         "ranks of one group (they run the same steps and switched in the same gap) counted "
         "different numbers of calls of the new code: a rank took another path, or did not "
