@@ -134,6 +134,51 @@ class WorkerPrepareTest(unittest.TestCase):
         self.assertEqual([(s, sorted(v)) for s, v in side.vlog], [(2, [f"{m}:Engine.step"])])
 
 
+def _worker(cudagraph="FULL_AND_PIECEWISE", compile_mode="VLLM_COMPILE", eager=False):
+    """A stand-in for vLLM's Worker: only the config fields the side reads."""
+    from types import SimpleNamespace as NS
+    return NS(vllm_config=NS(model_config=NS(enforce_eager=eager), compilation_config=NS(
+        cudagraph_mode=NS(name=cudagraph), mode=NS(name=compile_mode))))
+
+
+class GraphModeTest(unittest.TestCase):
+
+    def _side(self, worker, prefix):
+        side = Side("worker", scope={"worker": worker}, rank=0)
+        side.captured_prefixes = (prefix,)         # the toy copy plays model code
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        return side
+
+    def test_model_code_in_graph_mode_is_a_captured_target(self):
+        """Proves: on a worker whose config runs CUDA graphs (FULL_AND_PIECEWISE, VLLM_COMPILE),
+        a target in model code is a `captured_target` finding at prepare (route R1) that votes
+        no; accepted by subject it commits, and a proof with no call gives zero_witness routed
+        to R1; the same plan on an eager worker gives no finding. Pain point: at TP2 a MoE
+        forward edit committed with no finding and its witness stayed 0/0 (graphs only). Not:
+        whether vLLM really calls the code (the proof's witness says)."""
+        p = plan("graph")
+        (m,) = p["modules"]
+        prefix = m.split(".")[0] + "."
+        side = self._side(_worker(), prefix)
+        r = side.dispatch("prepare", p)
+        self.assertEqual((r["ok"], [(f["check"], f.get("route")) for f in r["findings"]]),
+                         (False, [("captured_target", "R1")]))
+        self.assertIn("FULL_AND_PIECEWISE", r["findings"][0]["observed"])
+        subject = r["findings"][0]["subject"]
+        p2 = {**p, "id": p["id"] + "-acc",
+              "accept": [{"check": "captured_target", "subject": subject}]}
+        self.assertTrue(side.dispatch("prepare", p2)["ok"])
+        self.assertTrue(side.dispatch("commit", p2["id"])["ok"])
+        w = side.dispatch("witness_check", p2["id"])
+        self.assertEqual([(f["check"], f.get("route"), f["actions"][0]["cost"])
+                          for f in w["findings"]], [("zero_witness", "R1", "recipe R1")])
+        self.assertTrue(side.dispatch("undo", p2["id"])["ok"])
+        eager = self._side(_worker(eager=True), prefix)
+        r = eager.dispatch("prepare", plan("eager"))
+        self.assertEqual((r["ok"], r["findings"]), (True, []))
+
+
 class WatchDropTest(unittest.TestCase):
 
     def test_an_aborted_transaction_leaves_nothing_watched(self):

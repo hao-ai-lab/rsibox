@@ -52,13 +52,36 @@ METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "ab
            "status", "proof", "witness_check", "reset", "versions")
 
 
+# Model code: under torch.compile and CUDA graphs its Python runs only while tracing and
+# capturing, so a swap there commits and never runs (TP2 MoE run: witness 0/0 in graph mode).
+CAPTURED_PREFIXES = ("vllm.model_executor.models.", "vllm.model_executor.layers.")
+R1 = {"action": "recapture the graphs after the swap (recipe R1), or run eager",
+      "cost": "recipe R1"}
+
+
+def graph_mode(worker):
+    """{"cudagraph_mode", "compile_mode"} when this worker runs captured graphs or compiled
+    model code, from its vLLM config; None when it runs eager (or has no config)."""
+    cfg = getattr(worker, "vllm_config", None)
+    cc = getattr(cfg, "compilation_config", None)
+    if cc is None or getattr(getattr(cfg, "model_config", None), "enforce_eager", False):
+        return None
+    cg = getattr(getattr(cc, "cudagraph_mode", None), "name", None) or "NONE"
+    mode = getattr(getattr(cc, "mode", None), "name", None) or "NONE"
+    return None if cg == "NONE" and mode == "NONE" else {"cudagraph_mode": cg,
+                                                          "compile_mode": mode}
+
+
 class Side:
     def __init__(self, role, scope=None, resets=None, rank=None):
         self.role, self.rank = role, rank
+        self.scope = dict(scope or {})
+        self.captured_prefixes = CAPTURED_PREFIXES
         analyzer = None
         if os.environ.get("FASTRSI_KERNEL_ANALYZE", "process") == "process":
             analyzer = S.ProcessAnalyzer().start()
-        self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer)
+        self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer,
+                                     checks=[self._captured_check])
         self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None      # phase-2 calls with a deadline (kernel Lane)
@@ -87,6 +110,34 @@ class Side:
         Targets left to the kernel ("auto" or omitted) are watched from prepare's reply."""
         self._watch_targets({m: s.get("targets") for m, s in plan.get("modules", {}).items()
                              if isinstance(s.get("targets"), list)}, plan.get("id"))
+
+    def _graph(self):
+        w = self.scope.get("worker")
+        return graph_mode(w) if w is not None else None
+
+    def _captured(self, key_or_module):
+        return self._graph() is not None and key_or_module.startswith(self.captured_prefixes)
+
+    def _captured_check(self, module, items):
+        """Kernel check at prepare: a target in model code while the engine runs graphs or
+        compiled code is a `captured_target` finding (route R1)."""
+        g = self._graph()
+        if g is None or not module.startswith(self.captured_prefixes):
+            return []
+        return [{**F.finding("captured_target", f"the engine runs cudagraph_mode "
+                             f"{g['cudagraph_mode']}, compile mode {g['compile_mode']}, and "
+                             f"{module} is model code", "a target the engine runs in Python",
+                             subject=k), "route": "R1"} for k in items]
+
+    def _route_r1(self, r):
+        """Proof time: a zero_witness on model code while the engine runs graphs says why and
+        routes to R1 (recapture)."""
+        for f in (r.get("findings") or []) if isinstance(r, dict) else []:
+            if f.get("check") == "zero_witness" and self._captured(str(f.get("subject", ""))):
+                f["route"] = "R1"
+                f["observed"] += " (model code; the engine runs captured graphs or compiled code)"
+                f["actions"] = [R1] + list(f.get("actions", []))
+        return r
 
     def _drop_watch(self, txn):
         """The keys a transaction added stop being watched (it aborted or voted no): pending
@@ -253,6 +304,8 @@ class Side:
                 self._drop_watch(txn)          # vetoed (here or on another rank)
             else:
                 self._watch_txn.pop(txn, None)  # committed: its keys stay watched
+        if method == "witness_check":
+            return self._route_r1(self._local(method, payload))
         if deadline_at is None or method not in C.PHASE2:
             return self._fault(method, payload) or self._local(method, payload)
         if self._lane is None:
