@@ -75,10 +75,15 @@ class Side:
         return e[1]
 
     def _watch_plan(self, plan):
-        """Watch every target of the plan this side swaps (module namespace lookup)."""
-        for m, spec in plan.get("modules", {}).items():
+        """Watch every explicit target of the plan this side swaps (module namespace lookup).
+        Targets left to the kernel ("auto" or omitted) are watched from prepare's reply."""
+        self._watch_targets({m: s.get("targets") for m, s in plan.get("modules", {}).items()
+                             if isinstance(s.get("targets"), list)})
+
+    def _watch_targets(self, targets):
+        for m, ts in (targets or {}).items():
             mod = sys.modules.get(m) or importlib.import_module(m)
-            for qual, _line in spec.get("targets", []):
+            for qual, _line in ts:
                 obj = mod
                 try:
                     for part in qual.split("."):
@@ -123,7 +128,10 @@ class Side:
         """Prepare this role's sub-plan; abstain when the plan changes only other roles (a plan
         that changes nothing anywhere still goes to the kernel: empty_change)."""
         if plan["modules"] or not full.get("modules"):
-            return self.lp.prepare(plan)
+            r = self.lp.prepare(plan)
+            if isinstance(r, dict):
+                self._watch_targets(r.get("targets"))   # the kernel's targets when "auto"
+            return r
         self._abstain[plan["id"]] = "prepared"
         return F.ok(staged={}, abstain=True, note=f"no module for role {self.role}")
 

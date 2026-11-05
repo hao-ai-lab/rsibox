@@ -101,6 +101,19 @@ class WorkerPrepareTest(unittest.TestCase):
         (t,) = r["timings"].values()
         self.assertEqual(t["analyze"], "process", t)
 
+    def test_side_watches_targets_the_kernel_found(self):
+        """Proves: with targets left to the kernel ("auto"), the side still watches the changed
+        function (from prepare's reply), so version transitions are recorded. Pain point: a
+        plan without targets watched nothing. Not: the live step hook."""
+        side = self._side(0)
+        p = plan("auto")
+        (spec,) = p["modules"].values()
+        del spec["targets"]
+        r = side.dispatch("prepare", p)
+        self.assertTrue(r["ok"], r.get("error"))
+        (m,) = p["modules"]
+        self.assertIn(f"{m}:Engine.step", side.watch)
+
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
