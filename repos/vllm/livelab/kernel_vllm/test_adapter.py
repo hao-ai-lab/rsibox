@@ -134,6 +134,41 @@ class WorkerPrepareTest(unittest.TestCase):
         self.assertEqual([(s, sorted(v)) for s, v in side.vlog], [(2, [f"{m}:Engine.step"])])
 
 
+class WatchDropTest(unittest.TestCase):
+
+    def test_an_aborted_transaction_leaves_nothing_watched(self):
+        """Proves: a rank that prepared a plan (auto targets) and then got the abort of a
+        transaction another rank vetoed stops watching its targets: pending keys at once, a key
+        already joined at the next step start (never mid-step); a committed transaction's keys
+        stay. Pain point: at TP2 rank 1 kept watching Qwen3NextSparseMoeBlock.forward after an
+        aborted transaction, so the ranks' version logs differed. Not: the real abort RPC."""
+        side = Side("worker", rank=0)
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        a, b = plan("dropa"), plan("dropb")
+        for x in (a, b):
+            del next(iter(x["modules"].values()))["targets"]
+        self.assertTrue(side.dispatch("prepare", a)["ok"])
+        self.assertTrue(side.dispatch("abort", a["id"])["ok"])
+        side.tick(True)
+        self.assertEqual(side.watch, {})                    # pending: never joined
+        self.assertTrue(side.dispatch("prepare", b)["ok"])
+        side.tick(True)
+        (mb,) = b["modules"]
+        self.assertEqual(sorted(side.watch), [f"{mb}:Engine.step"])
+        self.assertTrue(side.dispatch("abort", b["id"])["ok"])
+        side.tick(False)
+        self.assertEqual(side.mid_step_changes, [])
+        side.tick(True)
+        self.assertEqual(side.watch, {})                    # joined: dropped at a step start
+        c = plan("dropc")
+        self.assertTrue(side.dispatch("prepare", c)["ok"])
+        self.assertTrue(side.dispatch("commit", c["id"])["ok"])
+        side.tick(True)
+        (mc,) = c["modules"]
+        self.assertEqual(sorted(side.watch), [f"{mc}:Engine.step"])
+
+
 class RanksDisagreeTest(unittest.TestCase):
 
     def test_host_receipt_names_ranks_that_run_different_code(self):

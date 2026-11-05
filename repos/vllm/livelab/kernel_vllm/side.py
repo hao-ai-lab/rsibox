@@ -66,6 +66,8 @@ class Side:
         self.watch = {}        # key -> function object whose __code__ is the live version
         self._watch_new = {}   # keys added since the last step start; joined at tick(first)
         self._watch_lock = threading.Lock()   # the prepare thread adds, the step thread joins
+        self._watch_txn = {}   # txn -> keys it added; dropped if the txn aborts
+        self._watch_drop = set()   # keys to drop at the next step start
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps = 0
         self.vlog = []         # [[step, {key: tag}]] at every version change
@@ -84,9 +86,18 @@ class Side:
         """Watch every explicit target of the plan this side swaps (module namespace lookup).
         Targets left to the kernel ("auto" or omitted) are watched from prepare's reply."""
         self._watch_targets({m: s.get("targets") for m, s in plan.get("modules", {}).items()
-                             if isinstance(s.get("targets"), list)})
+                             if isinstance(s.get("targets"), list)}, plan.get("id"))
 
-    def _watch_targets(self, targets):
+    def _drop_watch(self, txn):
+        """The keys a transaction added stop being watched (it aborted or voted no): pending
+        ones now, joined ones at the next step start."""
+        keys = self._watch_txn.pop(txn, set())
+        with self._watch_lock:
+            for k in keys:
+                if self._watch_new.pop(k, None) is None:
+                    self._watch_drop.add(k)
+
+    def _watch_targets(self, targets, txn=None):
         for m, ts in (targets or {}).items():
             act = self.lp._actual(m)            # the participant's module alias, if any
             mod = sys.modules.get(act) or importlib.import_module(act)
@@ -100,18 +111,23 @@ class Side:
                 k = f"{m}:{qual}"
                 if hasattr(obj, "__code__") and k not in self.watch:
                     with self._watch_lock:                # joined at the next step start
-                        self._watch_new.setdefault(k, obj)
+                        if k not in self._watch_new:
+                            self._watch_new[k] = obj
+                            self._watch_txn.setdefault(txn, set()).add(k)
 
     def tick(self, first=True):
         """Called at the start of a step (first=True) and again later in the same step
         (first=False, e.g. sample_tokens): records version changes per step. Keys added by a
         prepare (its thread, or an RPC between a step's two calls) join the watch set only at a
         step start, so a newly watched function is never logged as a mid-step change."""
-        if first and self._watch_new:
+        if first and (self._watch_new or self._watch_drop):
             with self._watch_lock:
                 new, self._watch_new = self._watch_new, {}
+                drop, self._watch_drop = self._watch_drop, set()
             for k, f in new.items():
                 self.watch.setdefault(k, f)
+            for k in drop:
+                self.watch.pop(k, None)
         if not self.watch:
             if first:
                 self.steps += 1
@@ -146,8 +162,10 @@ class Side:
         that changes nothing anywhere still goes to the kernel: empty_change)."""
         if plan["modules"] or plan["repairs"] or not (full.get("modules") or full.get("repairs")):
             r = self.lp.prepare(plan)
-            if isinstance(r, dict):
-                self._watch_targets(r.get("targets"))   # the kernel's targets when "auto"
+            if isinstance(r, dict) and r.get("ok"):
+                self._watch_targets(r.get("targets"), plan["id"])  # the kernel's when "auto"
+            else:
+                self._drop_watch(plan["id"])             # voted no: watch nothing of it
             return r
         self._abstain[plan["id"]] = "prepared"
         return F.ok(staged={}, abstain=True, note=f"no module for role {self.role}")
@@ -231,6 +249,10 @@ class Side:
         txn, deadline_at = C.txn_ref(payload)
         if method in ("commit", "abort", "undo") and isinstance(txn, str):
             self._jobs.pop(txn, None)          # the vote is over: drop the prepare result
+            if method == "abort":
+                self._drop_watch(txn)          # vetoed (here or on another rank)
+            else:
+                self._watch_txn.pop(txn, None)  # committed: its keys stay watched
         if deadline_at is None or method not in C.PHASE2:
             return self._fault(method, payload) or self._local(method, payload)
         if self._lane is None:
