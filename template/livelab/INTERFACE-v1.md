@@ -107,11 +107,18 @@ Every check returns findings, never an exception:
 `{check, observed, expected, why, actions: [{action, cost}], risk_if_ignored, lessons: [...],
 overridable}`, plus optional `subject` and `accepted`.
 
-The caller's `accept` list (check names, or `"all"`) decides: a transaction proceeds only if
+The caller's `accept` list (check names, accept records, or `"all"`) decides: a transaction proceeds only if
 every finding is accepted, and only overridable findings can be. Physical limits are not
 overridable: `patch_invalid`, `no_live_function`, `not_in_patch`, `closure_changed`,
 `changed_since_prepare`, `empty_change`, `repair_failed`, `participant_failed`, `reset_failed`,
 `undo_incomplete`, `tampered`, `session_poisoned`. Catalog: `kernel/findings.py`.
+
+An accept record `{check, by, reason, scope}` says who accepted a finding and why; `decide`
+returns the records it used (`accepts`) so the transaction record can carry them. Scope `txn` covers
+this transaction; `standing` also names `participant` and `code_hash` and covers a finding only while
+both still match, so it expires when the checked code changes. A check accepted on every run is a
+calibration bug in the check, not a standing accept. Writing accepts into receipts waits for the
+receipt writer's human owner.
 
 ## Receipts
 

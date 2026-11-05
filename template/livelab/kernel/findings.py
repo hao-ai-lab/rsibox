@@ -15,8 +15,17 @@ plus two optional annotations: "subject" (what was checked, e.g. a witness key) 
 "accepted" (set by `decide`). Nothing in the kernel raises to its caller for a check: every
 call returns an ok-dict `{"ok": bool, ..., "findings": [...]}`.
 
-One accept mechanism: a list of check names (or "all"). `decide(findings, accept)` says
-whether to proceed: every finding must be accepted, and only overridable ones can be.
+One accept mechanism: a list (or "all"). `decide(findings, accept)` says whether to proceed:
+every finding must be accepted, and only overridable ones can be. An item of the list is a
+check name, or an accept record that says who accepted it and why, for the transaction record:
+
+    {"check": str, "by": str, "reason": str,
+     "scope": "txn" | "standing",   # "txn": this transaction only (the default)
+     "participant": str, "code_hash": str}   # standing only: matches a finding only while the
+                                             # finding's participant and code_hash still equal
+                                             # these, so it expires when the checked code changes
+
+A check accepted on every run is a calibration bug in the check, not a standing accept.
 """
 
 RESTART = {"action": "warm restart of the engine", "cost": "recipe R9 (see kb/costs.md)"}
@@ -179,18 +188,34 @@ def finding(check, observed, expected, subject=None):
     return f
 
 
+def _matches(rec, f):
+    if rec.get("check") != f["check"]:
+        return False
+    if rec.get("scope", "txn") == "standing":
+        for k in ("participant", "code_hash"):
+            if k not in rec or f.get(k) != rec[k]:
+                return False
+    return True
+
+
 def decide(findings, accept=()):
-    """Proceed only if every finding is accepted. A finding is accepted when its check is in
-    `accept` (or accept == "all") and it is overridable. Returns
-    {"proceed": bool, "accepted": [check], "blocking": [check], "findings": [annotated]}."""
-    names = None if accept == "all" else set(accept or ())
-    out, accepted, blocking = [], [], []
+    """Proceed only if every finding is accepted. A finding is accepted when it is overridable
+    and `accept` is "all", names its check, or holds an accept record matching it. Returns
+    {"proceed": bool, "accepted": [check], "blocking": [check], "accepts": [record used],
+     "findings": [annotated]}. Records for name-only accepts have by/reason None."""
+    recs = None if accept == "all" else [
+        a if isinstance(a, dict) else {"check": a, "scope": "txn", "by": None, "reason": None}
+        for a in (accept or ())]
+    out, accepted, blocking, used = [], [], [], []
     for f in findings:
-        ok = f["overridable"] and (names is None or f["check"] in names)
+        rec = None if recs is None else next((r for r in recs if _matches(r, f)), None)
+        ok = f["overridable"] and (recs is None or rec is not None)
         out.append({**f, "accepted": ok})
         (accepted if ok else blocking).append(f["check"])
+        if ok and rec is not None and rec not in used:
+            used.append(rec)
     return {"proceed": not blocking, "accepted": sorted(set(accepted)),
-            "blocking": sorted(set(blocking)), "findings": out}
+            "blocking": sorted(set(blocking)), "accepts": used, "findings": out}
 
 
 def ok(**kw):

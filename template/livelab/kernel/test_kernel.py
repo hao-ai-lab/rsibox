@@ -895,5 +895,33 @@ def cached(x=lambda: 0):
                                      [L.content_hash(c) for c in whole[k]], k)
 
 
+class AcceptRecordTest(unittest.TestCase):
+    """Accept by name with a record. Pain point: a standing accept that silently keeps
+    covering a check after the checked code changed (DSv4.1 bound_shape_mismatch was accepted
+    on every soft restart; the same check must still catch a new stale buffer)."""
+
+    def _f(self, code_hash):
+        return {**F.finding("zero_witness", "o", "e"), "participant": "worker",
+                "code_hash": code_hash}
+
+    def test_standing_accept_expires_when_code_changes(self):
+        rec = {"check": "zero_witness", "scope": "standing", "by": "agent-e5",
+               "reason": "false positive on processed weights", "participant": "worker",
+               "code_hash": "h1"}
+        d = F.decide([self._f("h1")], [rec])
+        self.assertTrue(d["proceed"])
+        self.assertEqual(d["accepts"], [rec])      # who and why go to the transaction record
+        d = F.decide([self._f("h2")], [rec])       # checked code changed: no longer covered
+        self.assertFalse(d["proceed"])
+        self.assertEqual(d["blocking"], ["zero_witness"])
+
+    def test_name_and_txn_record_still_accept(self):
+        self.assertTrue(F.decide([self._f("h2")], ["zero_witness"])["proceed"])
+        rec = {"check": "zero_witness", "by": "agent", "reason": "rank-specific"}
+        d = F.decide([self._f("h2")], [rec])
+        self.assertTrue(d["proceed"])
+        self.assertEqual(d["accepts"], [rec])
+
+
 if __name__ == "__main__":
     unittest.main()
