@@ -88,7 +88,8 @@ test, because it misleads the reader.
 
 ## Where things go
 
-- `core/`: the skill and the agent prompts (developer, toolsmith offline and online). No code.
+- `core/`: the skill and the agent prompts (developer, toolsmith offline and online,
+  orchestrator). No code.
 - `template/livelab/`: the fixed live lab interface, a stub, and the conformance cases.
   Changing `INTERFACE.md` is a breaking change: bump its version and say so in the PR.
 - `repos/<engine>/`: everything about one engine: `kb/`, `livelab/`, `tools/`, `examples/`.
