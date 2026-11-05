@@ -61,7 +61,10 @@ class _Host:
 class WorkerPrepareTest(unittest.TestCase):
 
     def _side(self, rank):
-        return Side("worker", rank=rank)
+        side = Side("worker", rank=rank)
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        return side
 
     def test_ranks_that_finish_early_keep_their_vote(self):
         """Proves: with rank 3 preparing 0.3 s longer than ranks 0-2, the group keeps polling
@@ -86,6 +89,17 @@ class WorkerPrepareTest(unittest.TestCase):
         after = g._rpc("prepare_poll", p["id"])
         self.assertEqual([x["error"] for x in after["ranks"]],
                          [f"no prepare started for {p['id']}"] * 4)
+
+    def test_side_prepares_with_the_analysis_in_a_child_process(self):
+        """Proves: a Side stages through the kernel's ProcessAnalyzer by default, so the
+        parses and compare do not hold the engine process's GIL (timings say "process").
+        Not: the stall itself (measured live: kernel_vllm/README.md)."""
+        side = self._side(0)
+        p = plan("analyzer")
+        r = side.dispatch("prepare", p)
+        self.assertTrue(r["ok"], r.get("error"))
+        (t,) = r["timings"].values()
+        self.assertEqual(t["analyze"], "process", t)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,10 @@ whose method raises on one rank leaves the other ranks' replies queued, and ever
 is then read by the wrong call (kb/lessons.md).
 
 - Phase 1 runs in a background thread of this process (`prepare_start`, then `prepare_poll`),
-  so the engine keeps stepping while the side locates, compiles and stages. The heap scan
-  still holds the GIL while it runs, so steps of this process slow down meanwhile.
+  so the engine keeps stepping while the side locates, compiles and stages. The parses,
+  compiles and the outside-changes compare run in a child process (kernel `ProcessAnalyzer`,
+  started with the side; FASTRSI_KERNEL_ANALYZE=inline keeps them in this process), so they
+  do not hold this process's GIL. A heap scan (nested targets only) still does.
 - `prepare_poll` can be repeated: a finished rank keeps answering with its result until the
   transaction is committed, aborted or undone. The worker group polls every rank with one
   collective_rpc while any rank is pending, so a rank that finished early is asked again.
@@ -40,6 +42,7 @@ import traceback
 
 from kernel import coordinator as C
 from kernel import findings as F
+from kernel import swap as S
 
 METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "abort", "undo",
            "status", "proof", "witness_check", "reset", "versions")
@@ -48,7 +51,10 @@ METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "ab
 class Side:
     def __init__(self, role, scope=None, resets=None, rank=None):
         self.role, self.rank = role, rank
-        self.lp = C.LocalParticipant(role, scope=scope, resets=resets)
+        analyzer = None
+        if os.environ.get("FASTRSI_KERNEL_ANALYZE", "process") == "process":
+            analyzer = S.ProcessAnalyzer().start()
+        self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer)
         self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None      # phase-2 calls with a deadline (kernel Lane)

@@ -8,10 +8,10 @@ only so far.
 |---|---|
 | `host.py` | The engine-core host. Patches `EngineCoreProc` when imported with `FASTRSI_KERNEL_DIR` set: custom input-queue items run jobs on the busy-loop thread; a phase-2 job runs only when no batch is in flight (pause keep: `scheduler.has_requests` is shadowed to False while `batch_queue` drains). Runs the kernel's `StepGapCoordinator` over two participants (the workers, the engine core) and serves a file control channel. Records every step's duration. |
 | `worker_ext.py` | `KernelWorkerExtension` (`--worker-extension-cls`): the participant protocol on each worker rank, reached by `collective_rpc("fastrsi_kernel", args=(method, payload))` issued from the busy loop. |
-| `side.py` | One participant side (worker or core): a kernel `LocalParticipant`, prepare in a background thread (`prepare_start` / `prepare_poll`, repeatable until commit, abort or undo), per-role plan filtering (`"on": ["worker"]`), a fault hook for tests, and replies that never raise (collective_rpc reply desync, kb/lessons.md). |
+| `side.py` | One participant side (worker or core): a kernel `LocalParticipant` whose texts are analyzed in a child process (kernel `ProcessAnalyzer`; `FASTRSI_KERNEL_ANALYZE=inline` keeps them in-process), prepare in a background thread (`prepare_start` / `prepare_poll`, repeatable until commit, abort or undo), per-role plan filtering (`"on": ["worker"]`), a fault hook for tests, and replies that never raise (collective_rpc reply desync, kb/lessons.md). |
 | `client.py` | Sends one op over the file channel (`ctl.json` -> `reply/<seq>.json`): `txn`, `prove`, `undo`, `status`, `ping`. Replies carry the kernel's receipt records; receipts also go to `receipts.jsonl` next to the channel. |
 | `live_test.py` | The live golden tests below, against a running engine. |
-| `test_adapter.py` | CPU tests of the adapter's own logic (worker-group prepare polling): `PYTHONPATH=../../../template/livelab python3 -m unittest kernel_vllm.test_adapter -v` from `repos/vllm/livelab`. |
+| `test_adapter.py` | CPU tests of the adapter's own logic (worker-group prepare polling, the analyzer wiring): `PYTHONPATH=../../../template/livelab python3 -m unittest kernel_vllm.test_adapter -v` from `repos/vllm/livelab`. |
 
 ## How a transaction runs
 
@@ -22,6 +22,7 @@ client ── ctl.json ──► host thread (engine-core process)
              collective_rpc(prepare_poll) every 20 ms until every rank is done (a rank
              that finished keeps answering with its result)
     core:    prepare in the host thread
+    both:    parse, unit compile and outside-changes compare in a child process per side
   phase 2, one job on the busy loop, after in-flight batches land (pause keep):
     validate (workers + core) -> commit (workers + core), or abort; undo of a failed commit
     deadline D (default 5 s): each side answers by D/2 from its own lane thread
@@ -129,6 +130,25 @@ engine process, single C calls) and the outside-changes comparison (two `ast.dum
 TP4 (8.6 ms median step) that made the longest step during a core prepare 3.4-3.95x the
 median.
 
+**Prepare analyzes the texts in a child process (kernel `ProcessAnalyzer`).** Each side starts
+one child of its interpreter; `stage` sends it the two texts and gets back plain data and code
+objects, so the parses, the unit compile and the compare no longer hold the engine process's
+GIL. Our 2026-11-05 TP1 run, one engine session, 6 streams of 500 tokens, one transaction per
+row then undo, 4 alternating runs each; "in-process" is the same plan with `"analyze":
+"inline"` (the previous path):
+
+| 4 runs each, median gap before 20.1-20.2 ms | in-process | child process |
+|---|---|---|
+| core-only plan (`Scheduler.schedule`): max chunk gap during prepare | 27.7-48.8 ms (1.37-2.42x) | 21.7-22.9 ms (1.07-1.14x) |
+| core-only plan: max engine step during prepare (host) | 27.0-35.1 ms | 21.4-21.5 ms |
+| core-only plan: prepare_s | 0.152-0.186 s | 0.152-0.170 s |
+| worker-only plan (`PenaltiesState.add_request`): max chunk gap | 22.0-22.8 ms (1.09-1.13x) | 21.8-22.4 ms (1.08-1.11x) |
+
+No lost tokens, every transaction committed and undone. The same session's T1-T3 and T4n/T4
+passed as before (T1: max chunk gap during prepare 23.4 ms against a 20.2 ms median; both
+sides report `"analyze": "process"`). The worker's penalties module is small, so its prepare
+barely stretched steps either way. TP4 not rerun yet.
+
 T4n / T4 (`--tests T0,T4n,T4`): while 6 streams of 800 tokens run, the worker hangs 4 s in
 commit (fault hook, delay only):
 
@@ -141,7 +161,9 @@ commit (fault hook, delay only):
 | next txn / undo | aborted (stale base) / undone | refused (poisoned) / undone |
 
 Both: no lost tokens, still serving, 0 steps started in the gap, identical greedy text after
-undo. At TP1 there is one rank, so `ranks_agree` is null (nothing to compare) and
+undo. After the T4 undo every participant reports `undone`, the hung worker included (its late
+commit applied nothing). Before, a hung rank stayed `aborted`; in the 4-rank run the ranks
+that had committed said `undone` for the same transaction. At TP1 there is one rank, so `ranks_agree` is null (nothing to compare) and
 `witness_uneven` cannot fire; both are covered by the kernel's CPU tests, not live.
 
 ## Findings from the live run
