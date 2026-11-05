@@ -115,5 +115,31 @@ class WorkerPrepareTest(unittest.TestCase):
         self.assertIn(f"{m}:Engine.step", side.watch)
 
 
+class RepairCellTest(unittest.TestCase):
+
+    def test_a_repair_cell_runs_on_the_roles_in_its_on_list(self):
+        """Proves: a plan with only a repair cell `"on": ["worker"]` commits on a worker side
+        (the cell changes the worker's attribute; undo removes it) while the core side abstains.
+        Pain point: the side dropped every repair cell (`"repairs": []`), so the worker voted no
+        with `empty_change` and no live test could run a cell. Not: the cell's own journal calls
+        (kernel tests)."""
+        w = type("Worker", (), {})()
+        worker = Side("worker", scope={"worker": w}, rank=0)
+        core = Side("core", scope={"core": object()})
+        for s in (worker, core):
+            if s.lp.analyzer is not None:
+                self.addCleanup(s.lp.analyzer.close)
+        p = {"id": "cell-1", "modules": {},
+             "repairs": [{"cell": "worker.fastrsi_fixed = 1", "declares": ["worker"],
+                          "on": ["worker"]}]}
+        rw, rc = worker.dispatch("prepare", p), core.dispatch("prepare", p)
+        self.assertTrue(rw["ok"], rw.get("findings"))
+        self.assertEqual((rc["ok"], rc.get("abstain")), (True, True))
+        self.assertTrue(worker.dispatch("commit", "cell-1")["ok"])
+        self.assertEqual(vars(w), {"fastrsi_fixed": 1})
+        self.assertTrue(worker.dispatch("undo", "cell-1")["ok"])
+        self.assertEqual(vars(w), {})
+
+
 if __name__ == "__main__":
     sys.exit(unittest.main())

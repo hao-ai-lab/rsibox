@@ -14,9 +14,12 @@ is then read by the wrong call (kb/lessons.md).
   transaction is committed, aborted or undone. The worker group polls every rank with one
   collective_rpc while any rank is pending, so a rank that finished early is asked again.
 - A plan module runs only on the roles in its `"on"` list (default: every role), so one plan
-  can swap a worker function and an engine-core function. A role the plan gives no module
-  abstains: it votes yes, and its commit, abort and undo change nothing (the kernel would
-  call its empty sub-plan an `empty_change` and veto the transaction).
+  can swap a worker function and an engine-core function. Repair cells too
+  (`{"cell", "declares", "on"}`): a cell runs at commit with the role's scope (`worker`: this
+  rank's worker; `core`: the EngineCore) and the kernel's `journal`, so give it the role whose
+  names it uses. A role the plan gives no module and no cell abstains: it votes yes, and its
+  commit, abort and undo change nothing (the kernel would call its empty sub-plan an
+  `empty_change` and veto the transaction).
 - `plan["faults"] = {role or "role:rank": method or {"method", "delay_s", "fail"}}` makes that
   method return not-ok on that role (or on one rank of it), or delay its reply by `delay_s`
   first (`fail` false: delay only): a test hook for forced failures and slow ranks, named in
@@ -122,12 +125,13 @@ class Side:
             if isinstance(fault, str):
                 fault = {"method": fault}
             self._faults[plan["id"]] = {"delay_s": 0, "fail": True, **fault}
-        return {**plan, "modules": mods, "repairs": []}
+        reps = [r for r in plan.get("repairs", []) if self.role in r.get("on", [self.role])]
+        return {**plan, "modules": mods, "repairs": reps}
 
     def _prepare(self, plan, full):
         """Prepare this role's sub-plan; abstain when the plan changes only other roles (a plan
         that changes nothing anywhere still goes to the kernel: empty_change)."""
-        if plan["modules"] or not full.get("modules"):
+        if plan["modules"] or plan["repairs"] or not (full.get("modules") or full.get("repairs")):
             r = self.lp.prepare(plan)
             if isinstance(r, dict):
                 self._watch_targets(r.get("targets"))   # the kernel's targets when "auto"
