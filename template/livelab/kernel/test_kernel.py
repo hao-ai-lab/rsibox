@@ -185,6 +185,32 @@ class KernelTest(unittest.TestCase):
         self.assertEqual((d["proceed"], d["blocking"]), (False, ["closure_changed"]))
         self.assertEqual(e.step(3), 17)
 
+    def test_a_step_in_flight_at_prepare_is_advisory_and_the_gap_decides(self):
+        """Proves: a frame of `Engine.step` on another thread while prepare runs (a step in flight) is an advisory running_frame (accepted, prepare votes yes, no accept in the plan); validate while that step is still running is not ok (running_frame at the quiesce point); once the step returned, validate is ok and the commit runs the new code. Before, stage's one sample vetoed the edit (a MoE forward edit 4 of 5 tries at TP2, eager), though no forward frame was live in the gap. Not: suspended generators (they still block at stage)."""
+        name, eng, _ = fresh("inflight")
+        e, gate, entered = eng.Engine(), threading.Event(), threading.Event()
+        e.callbacks.append(lambda y: (entered.set(), gate.wait(5)))
+        th = threading.Thread(target=e.step, args=(1,), daemon=True)
+        th.start()
+        self.assertTrue(entered.wait(5))
+        p = C.LocalParticipant("core", alias={"toy": name})
+        plan = {"id": "f", "modules": {"toy.engine": {"source": edit(
+            ENG, ('self.ran.append("base")', 'self.ran.append("v1")')),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        r = p.prepare(plan)
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertEqual([(f["check"], f.get("advisory"), f["accepted"]) for f in r["findings"]],
+                         [("running_frame", True, True)])
+        v = p.validate("f")
+        self.assertEqual((v["ok"], [f["check"] for f in v["findings"]]), (False, ["running_frame"]))
+        gate.set()
+        th.join()
+        self.assertTrue(p.validate("f")["ok"])
+        self.assertTrue(p.commit("f")["ok"])
+        e.callbacks.pop()
+        e.step(1)
+        self.assertEqual(e.ran[-1], "v1")
+
     def test_running_frame_never_runs_the_new_code(self):
         """Proves: zero calls under a running loop frame give running_frame, an uncalled function zero_witness. Not: frames in C or other processes."""
         name, eng, _ = fresh("loop")

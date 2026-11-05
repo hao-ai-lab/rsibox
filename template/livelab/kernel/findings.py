@@ -246,7 +246,8 @@ def decide(findings, accept=()):
     out, accepted, blocking, used = [], [], [], []
     for f in findings:
         rec = None if recs is None else next((r for r in recs if _matches(r, f)), None)
-        ok = f["overridable"] and (recs is None or rec is not None)
+        # advisory: reported, never blocks (e.g. a frame seen while steps ran; the gap decides)
+        ok = bool(f.get("advisory")) or (f["overridable"] and (recs is None or rec is not None))
         out.append({**f, "accepted": ok})
         (accepted if ok else blocking).append(f["check"])
         if ok and rec is not None and rec not in used:

@@ -12,7 +12,7 @@ Pure Python, standard library only; it imports no engine.
 | `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage(module, source)` with the targets omitted finds that same list from its own parse, so prepare needs no planner pass. `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. `stage(..., trees=(base, patch))` takes trees the caller already parsed (its own planner) instead of parsing again. New defaults and added methods are evaluated in a scratch class body that reads the live class's names (`_LiveBody`). |
 | `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, `removed`, `call`, `closures`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10; a plan's cell gets the participant's journal as `journal`); `record_attr` restores through `setattr` / `delattr` what is not a plain `__dict__` entry (descriptors, `nn.Module` submodules, `__doc__`). `record_call(undo_fn, label)` journals an in-place re-init by the function that undoes it. `record_closures` (called by `apply`) lets undo take back closures the new code made at run time; undo scans the heap only for the new nested codes that gained a reference since apply, so a swap that made no lasting closure undoes without the pass. |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
-| `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
+| `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. Running frames: stage sees steps in flight (prepare runs while the engine steps), so a frame on a thread stack there is an advisory `running_frame` (reported, never blocks); `validate` checks the thread stacks again in the gap, and only a frame live at the quiesce point votes no (through the plan's accept). A suspended generator or coroutine still blocks at stage. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
 | `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails, a phase-2 deadline (`Lane`, `deadline_missed`, host poison); `prove` after the workload (witness counts per rank); `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process; `CallParticipant` is the shape an engine implements over its RPC. `GroupParticipant` / `merge_ranks`: several ranks reached by one call, with per-rank replies in `ranks`. |
 | `session.py` | The host's state machine for one lab: a stack of committed transactions, the code fingerprint each participant should show (content hash and code object id of every function the modules' namespaces reach), checked after every abort, rollback, undo and `status()`. Crash, hang, lost participant, a missed phase-2 deadline, failed undo or code changed outside the journal poison it; a poisoned session refuses install (undo stays allowed) until the lab respawns its workers. |
@@ -296,6 +296,7 @@ the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
 test_a_partial_undo_stays_partial_when_undone_again ... ok
+test_a_step_in_flight_at_prepare_is_advisory_and_the_gap_decides ... ok
 test_accept_list ... ok
 test_accept_record_with_a_subject_covers_only_that_subject ... ok
 test_auto_target_only_the_heap_finds_live ... ok
@@ -353,7 +354,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 57 tests in 7.7s
+Ran 58 tests in 7.7s
 
 OK
 ```

@@ -704,7 +704,12 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     susp = scan == "always" or W.suspendable(
         [o for *_, olds in todo for o in olds if o.co_name != "<genexpr>"])
     timings["suspended"] = bool(susp)
-    live = W.live_codes(suspended=susp)
+    # A frame on a thread stack now is a step in flight (prepare runs while steps go on): it
+    # is advisory here, and validate checks the stacks again in the gap, where only a frame
+    # live at the quiesce point blocks. A suspended generator / coroutine outlives the gap:
+    # that one blocks here.
+    on_stack = W.stack_codes()
+    live = W.live_codes(suspended=True) if susp else set(on_stack)
     timings["live_frames_s"] = round(time.perf_counter() - t, 6)
     plan, line_map = {}, a["line_map"]
     for q, line, r, k, olds in todo:
@@ -732,9 +737,15 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             plan.setdefault(o, (c, J.KEEP, J.KEEP))
         for o in olds:
             plan[o] = (plan[o][0], defaults, kwdefaults)
-            if o in live:
-                fs.append(F.finding("running_frame", "a frame of the old code is running now",
+            if o in live and o not in on_stack:
+                fs.append(F.finding("running_frame", "a suspended frame of the old code "
+                                    "(generator or coroutine) will resume on it",
                                     "no running frame", subject=k))
+            elif o in on_stack:
+                fs.append({**F.finding("running_frame", "a frame of the old code was on a "
+                                       "thread stack during prepare (a step in flight); "
+                                       "validate checks again in the gap",
+                                       "no running frame", subject=k), "advisory": True})
         st.keys.append(k)
         st.old_codes[k] = list(olds)
         st.functions[k] = [fn for o in olds for fn in held.get(o, [])]
@@ -1000,11 +1011,19 @@ class ProcessAnalyzer:
             self._err = None
 
 
-def validate(st):
+def validate(st, frames=True):
     """Phase 2, inside the gap: is what `stage` saw still true? Every function to swap must
     still run the exact code object staged against (identity and hash), and every name to add
-    must still be absent. Cheap: no heap scan, no compile. Never raises."""
+    must still be absent. With `frames`, no thread stack may hold a frame of an old code now
+    (`running_frame`: the quiesce point is where it matters; prepare saw steps in flight).
+    Cheap: no heap scan, no compile. Never raises."""
     fs = []
+    if frames:
+        on_stack = W.stack_codes()
+        for k, olds in st.old_codes.items():
+            if any(o in on_stack for o in olds):
+                fs.append(F.finding("running_frame", "a frame of the old code is running at "
+                                    "the quiesce point", "no running frame", subject=k))
     for fn, old, h in st.expect:
         now = fn.__code__
         if now is not old:

@@ -63,6 +63,16 @@ def suspendable(codes):
     return any(c.co_flags & SUSPENDABLE for c in codes)
 
 
+def stack_codes():
+    """Code objects with a frame on some thread's stack right now (cheap: no heap scan)."""
+    codes = set()
+    for fr in sys._current_frames().values():
+        while fr is not None:
+            codes.add(fr.f_code)
+            fr = fr.f_back
+    return codes
+
+
 def live_codes(suspended=True):
     """Code objects with a running frame: on any thread's stack and, with suspended=True, in
     a suspended generator / coroutine (an event loop waiting in `await` is on no thread's

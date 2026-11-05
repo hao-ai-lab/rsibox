@@ -249,13 +249,19 @@ class LocalParticipant(Participant):
         txn, _ = txn_ref(txn)
         if txn not in self._staged:
             return F.not_ok(f"nothing staged for {txn}")
-        staged, cells, _ = self._staged[txn]
+        staged, cells, accept = self._staged[txn]
         fs = []
         for st in staged:
             fs += S.validate(st)["findings"]
         fs = [{**f, "participant": self.name} for f in fs]
-        return F.ok(checked=sum(len(st.expect) for st in staged)) if not fs else \
-            F.not_ok("changed since prepare", fs)
+        # changed_since_prepare always votes no; a frame live at the quiesce point goes
+        # through the plan's accept, as it did at stage before
+        frames = F.decide([f for f in fs if f["check"] == "running_frame"], accept)
+        rest = [f for f in fs if f["check"] != "running_frame"]
+        if not rest and frames["proceed"]:
+            return F.ok(checked=sum(len(st.expect) for st in staged), findings=frames["findings"])
+        return F.not_ok("changed since prepare" if rest else "running frame at the gap",
+                        rest + frames["findings"])
 
     def _actual(self, module):
         for k, v in self.alias.items():
