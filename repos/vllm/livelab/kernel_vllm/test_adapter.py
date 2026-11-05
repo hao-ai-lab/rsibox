@@ -112,7 +112,26 @@ class WorkerPrepareTest(unittest.TestCase):
         r = side.dispatch("prepare", p)
         self.assertTrue(r["ok"], r.get("error"))
         (m,) = p["modules"]
+        side.tick(True)                                 # joins the watch set at a step start
         self.assertIn(f"{m}:Engine.step", side.watch)
+
+    def test_a_key_watched_mid_step_is_not_a_mid_step_change(self):
+        """Proves: a prepare that lands between a step's two calls (execute_model, then
+        sample_tokens) adds its target to the watch set only at the next step start: no
+        mid-step change is logged, and the next step's version log shows the key with its base
+        tag. Pain point: at TP4 with "auto" targets, rank 2 logged a mid-step change at step 10
+        that was only the base code appearing between two ticks. Not: the live step hooks."""
+        side = self._side(0)
+        p = plan("midstep")
+        (spec,) = p["modules"].values()
+        del spec["targets"]
+        side.tick(True)                                 # step 1: execute_model
+        self.assertTrue(side.dispatch("prepare", p)["ok"])
+        side.tick(False)                                # step 1: sample_tokens
+        side.tick(True)                                 # step 2
+        (m,) = p["modules"]
+        self.assertEqual(side.mid_step_changes, [])
+        self.assertEqual([(s, sorted(v)) for s, v in side.vlog], [(2, [f"{m}:Engine.step"])])
 
 
 class RepairCellTest(unittest.TestCase):

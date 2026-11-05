@@ -33,7 +33,8 @@ is then read by the wrong call (kb/lessons.md).
 - A per-step version log (`tick`): at every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as transitions
   `[step, {key: tag}]`, and counts steps whose version changed between the step's two calls
-  (execute_model and sample_tokens on a worker). Comparing the logs of all ranks shows whether
+  (execute_model and sample_tokens on a worker). Functions a prepare adds to the watch set join
+  it at the next step start, never between a step's two calls. Comparing the logs of all ranks shows whether
   any step ran mixed versions (`versions`).
 """
 import importlib
@@ -63,6 +64,8 @@ class Side:
         self._lane = None      # phase-2 calls with a deadline (kernel Lane)
         self._abstain = {}     # txn -> state, for plans that give this role no module
         self.watch = {}        # key -> function object whose __code__ is the live version
+        self._watch_new = {}   # keys added since the last step start; joined at tick(first)
+        self._watch_lock = threading.Lock()   # the prepare thread adds, the step thread joins
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps = 0
         self.vlog = []         # [[step, {key: tag}]] at every version change
@@ -93,12 +96,21 @@ class Side:
                         obj = getattr(obj, part)
                 except AttributeError:
                     continue
-                if hasattr(obj, "__code__"):
-                    self.watch.setdefault(f"{m}:{qual}", obj)
+                k = f"{m}:{qual}"
+                if hasattr(obj, "__code__") and k not in self.watch:
+                    with self._watch_lock:                # joined at the next step start
+                        self._watch_new.setdefault(k, obj)
 
     def tick(self, first=True):
         """Called at the start of a step (first=True) and again later in the same step
-        (first=False, e.g. sample_tokens): records version changes per step."""
+        (first=False, e.g. sample_tokens): records version changes per step. Keys added by a
+        prepare (its thread, or an RPC between a step's two calls) join the watch set only at a
+        step start, so a newly watched function is never logged as a mid-step change."""
+        if first and self._watch_new:
+            with self._watch_lock:
+                new, self._watch_new = self._watch_new, {}
+            for k, f in new.items():
+                self.watch.setdefault(k, f)
         if not self.watch:
             if first:
                 self.steps += 1
@@ -114,7 +126,7 @@ class Side:
 
     def versions(self, _payload=None):
         return F.ok(steps=self.steps, vlog=self.vlog, mid_step_changes=self.mid_step_changes,
-                    watch=sorted(self.watch))
+                    watch=sorted(self.watch), watch_pending=sorted(self._watch_new))
 
     def _subplan(self, plan):
         mods = {m: s for m, s in plan.get("modules", {}).items()
