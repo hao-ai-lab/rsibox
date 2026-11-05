@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FastRSI Live Lab</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: control bar, KPI strip, then two-column bench (startup | events, patch | try it) */
+:root{
+  --bg:#F3F5F7; --panel:#FFFFFF; --ink:#16202B; --muted:#5A6878; --line:#D9DFE6; --soft:#E9EDF1;
+  --ember:#D9502A; --ember-soft:#FBE6DE; --glacier:#2C6FB0; --glacier-soft:#E1ECF7;
+  --ok:#1E8A5A; --ok-soft:#DDF2E8; --bad:#C23B3B; --bad-soft:#F8E1E1; --warn:#A86A10; --warn-soft:#F7EBD5;
+  --display:"Bricolage Grotesque",system-ui,sans-serif; --body:"IBM Plex Sans",system-ui,sans-serif; --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0F151C; --panel:#17202A; --ink:#E6ECF2; --muted:#93A2B3; --line:#2A3542; --soft:#1E2833;
+  --ember:#F07A52; --ember-soft:#3A2219; --glacier:#6CA8E4; --glacier-soft:#16293B;
+  --ok:#4CC28A; --ok-soft:#14301F; --bad:#EE7272; --bad-soft:#3A1C1C; --warn:#E0A84A; --warn-soft:#352813; color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--body);padding:0 max(16px,env(safe-area-inset-left,0px))}
+.wrap{max-width:1180px;margin:0 auto;padding-block:20px 48px}
+h1{font:800 28px/1.1 var(--display);margin:0}
+h1 b{color:var(--ember)}
+h3{font:600 17px var(--display);margin:0}
+.muted{color:var(--muted)}.small{font-size:13px}.mono{font-family:var(--mono)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button{font:500 14px var(--body);color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:7px 13px;cursor:pointer}
+button:hover{border-color:var(--muted)}
+button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--glacier);outline-offset:2px}
+input{font:14px var(--body);color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:7px 10px;min-width:0}
+.pill{display:inline-block;font:500 12px var(--mono);padding:2px 8px;border-radius:999px;white-space:nowrap}
+.p-ok{background:var(--ok-soft);color:var(--ok)}.p-bad{background:var(--bad-soft);color:var(--bad)}.p-warn{background:var(--warn-soft);color:var(--warn)}
+.p-keep{background:var(--glacier-soft);color:var(--glacier)}.p-redo{background:var(--ember-soft);color:var(--ember)}.p-idle{background:var(--soft);color:var(--muted)}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:16px 0}
+.kv div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.kv span{display:block;font-size:12px;color:var(--muted)}
+.kv b{font:500 20px var(--mono);font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;margin-top:14px}
+@media (max-width:860px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.ph{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:8px;padding:7px 0;border-top:1px solid var(--line);font-size:14px}
+.ph:first-child{border-top:0}
+.ph .meta{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.bar{height:6px;background:var(--soft);border-radius:3px;overflow:hidden;margin-top:5px}
+.bar i{display:block;height:100%;background:var(--glacier)}
+.num{text-align:right;font:500 14px var(--mono);font-variant-numeric:tabular-nums}
+.log{font:12px/1.6 var(--mono);background:var(--soft);border-radius:8px;padding:10px;height:300px;overflow:auto;color:var(--muted);white-space:pre-wrap;word-break:break-word}
+.log .ev{color:var(--ink)}.log .er{color:var(--bad)}
+.diff{font:12px/1.55 var(--mono);background:var(--soft);border-radius:8px;padding:10px;overflow-x:auto;white-space:pre;margin:10px 0;min-height:44px}
+.add{color:var(--ok)}.del{color:var(--bad)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.row input{flex:1 1 180px}
+.out{border-top:1px solid var(--line);padding:9px 0;font-size:14px}
+.out:first-child{border-top:0}
+.out .txt{font-family:var(--mono);font-size:13px;margin-top:4px;white-space:pre-wrap;word-break:break-word}
+.note{font-size:12px;color:var(--muted);margin-top:8px}
+.err{color:var(--bad);font-size:13px;min-height:1em;margin-top:6px}
+.lane-h{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <div class="muted small mono">FastRSI live lab · vLLM adapter</div>
+      <h1>Fast<b>RSI</b> <span id="model">engine</span></h1>
+    </div>
+    <div class="btns">
+      <span class="pill p-idle" id="state">connecting</span>
+      <button class="primary" id="start" type="button">Start engine</button>
+      <button id="stop" type="button">Stop</button>
+    </div>
+  </div>
+
+  <div class="kv">
+    <div><span>Time to ready</span><b id="k-ready">–</b></div>
+    <div><span>New kernel cache files this start</span><b id="k-cache">–</b></div>
+    <div><span>Code in the engine</span><b id="k-code">–</b></div>
+    <div><span>Calls of the patched code</span><b id="k-wit">–</b></div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="lane-h"><h3>Startup, from the engine log</h3><span class="muted small" id="since"></span></div>
+      <div id="phases"><div class="muted small">Start the engine to see each phase as it ends.</div></div>
+      <p class="note">Each phase ends at a line vLLM prints. A cold cache root compiles kernels; the next start reuses them, so stop and start again to see the difference.</p>
+    </div>
+    <div class="panel">
+      <div class="lane-h"><h3>Event stream</h3><span class="muted small mono">/events</span></div>
+      <div class="log" id="log" role="log"></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <div class="lane-h"><h3>Hot patch the sampler</h3><span class="pill p-keep">group OP</span></div>
+      <div class="muted small">Edit <span class="mono">apply_all_penalties</span> in <span class="mono">vllm/v1/sample/ops/penalties.py</span> so the model can never pick a word. Nothing restarts.</div>
+      <div class="row">
+        <label for="word" class="small muted">Ban the word</label>
+        <input id="word" value="Paris" maxlength="40" autocomplete="off">
+        <button id="install" type="button">Install</button>
+        <button id="undo" type="button">Undo</button>
+      </div>
+      <div class="diff" id="diff"><span class="muted">The patch diff appears here after install.</span></div>
+      <div class="err" id="perr"></div>
+    </div>
+    <div class="panel">
+      <div class="lane-h"><h3>Try it</h3><span class="muted small">greedy, 32 tokens</span></div>
+      <div class="row" style="margin-top:0">
+        <input id="prompt" value="The capital of France is" maxlength="500" autocomplete="off" aria-label="Prompt">
+        <button class="primary" id="send" type="button">Send</button>
+      </div>
+      <div class="err" id="rerr"></div>
+      <div id="outs"><div class="muted small">Send once on the base code, install the patch, send again, then undo and send a third time. The third answer should match the first exactly.</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+const NAMES={engine_init:'Import and config',model_load:'Weights',graphmem_profile:'Profiling + KV memory',jit_warmup:'JIT warmup',autotune:'FlashInfer autotune',graph_capture:'CUDA graph capture',ready:'Server ready'};
+const KEPT={engine_init:'not kept yet',model_load:'page cache',graphmem_profile:'cache root',jit_warmup:'cache root',autotune:'cache root',graph_capture:'cache root',ready:'live process'};
+let last=-1,phases={},t0=null,timer=null;
+const esc=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+function state(t,c){$('state').textContent=t;$('state').className='pill '+c;}
+function line(html,cls){const d=document.createElement('div');if(cls)d.className=cls;d.innerHTML=html;const l=$('log');const stick=l.scrollTop+l.clientHeight>=l.scrollHeight-8;l.appendChild(d);while(l.children.length>600)l.removeChild(l.firstChild);if(stick)l.scrollTop=l.scrollHeight;}
+const hms=t=>new Date(t*1000).toTimeString().slice(0,8);
+function drawPhases(){const k=Object.keys(phases);if(!k.length)return;const max=Math.max(...k.map(n=>phases[n]),1);
+  $('phases').innerHTML=k.map(n=>`<div class="ph"><div><div class="meta"><span>${NAMES[n]||n}</span><span class="pill p-keep">${KEPT[n]||''}</span></div><div class="bar"><i style="width:${phases[n]/max*100}%"></i></div></div><span class="num">${phases[n].toFixed(1)} s</span></div>`).join('');}
+function diffHtml(d){return d.split('\n').filter(l=>!l.startsWith('---')&&!l.startsWith('+++')).map(l=>`<span class="${l[0]==='+'?'add':l[0]==='-'?'del':''}">${esc(l)}</span>`).join('\n');}
+function handle(e){
+  if(e.seq<=last)return;last=e.seq;
+  const ts=hms(e.t);
+  switch(e.type){
+    case 'log':line(`${esc(e.line)}`);return;
+    case 'engine.start':phases={};t0=e.t;$('phases').innerHTML='<div class="muted small">Waiting for the first phase…</div>';
+      $('model').textContent=e.model;state('starting','p-warn');$('k-ready').textContent='…';$('k-cache').textContent='…';$('k-code').textContent='base';$('k-wit').textContent='0';
+      clearInterval(timer);timer=setInterval(()=>{$('since').textContent=t0?`${Math.round(Date.now()/1000-t0)} s since start`:''},500);
+      line(`${ts} <span class="ev">engine.start</span> gpus=${e.gpus} cache_root_files=${e.cache_root_files} ${e.cold?'(cold)':'(warm)'}`,'ev');break;
+    case 'phase.end':phases[e.name]=e.total;drawPhases();line(`${ts} <span class="ev">phase.end</span> ${e.name} ${e.seconds}s`);break;
+    case 'cache.diff':$('k-cache').textContent=e.new_files==null?'?':e.new_files;line(`${ts} <span class="ev">cache.diff</span> new files=${e.new_files} ${esc(JSON.stringify(e.diff))}`);break;
+    case 'engine.ready':clearInterval(timer);$('since').textContent='';$('k-ready').textContent=e.seconds+' s';state('ready','p-ok');line(`${ts} <span class="ev">engine.ready</span> ${e.seconds}s`);break;
+    case 'engine.stop':case 'engine.exit':clearInterval(timer);state(e.type==='engine.exit'&&e.code?'exited '+e.code:'stopped','p-idle');line(`${ts} <span class="ev">${e.type}</span>`);break;
+    case 'engine.error':state('error','p-bad');line(`${ts} ${esc(e.line)}`,'er');break;
+    case 'patch.install':$('diff').innerHTML=diffHtml(e.diff);$('k-code').textContent=`patched (${e.ranks.map(r=>r.new_hash).join(',')})`;
+      line(`${ts} <span class="ev">patch.install</span> ${e.func} ban=${esc(e.word)} ids=${e.token_ids} ${e.ms}ms ranks=${e.ranks.length}`);break;
+    case 'patch.uninstall':$('k-code').textContent=`base (${e.ranks.map(r=>r.now_hash).join(',')})`;line(`${ts} <span class="ev">patch.uninstall</span> ${e.ms}ms`);break;
+    case 'witness':{const n=e.hits.map(h=>Object.values(h)[0]||0);$('k-wit').textContent=n.join(' / ');line(`${ts} <span class="ev">witness</span> calls=${n}`);break;}
+    case 'request.done':{const o=$('outs');if(o.firstElementChild&&o.firstElementChild.classList.contains('muted'))o.innerHTML='';
+      const same=e.same_as_base===null?'':e.same_as_base?'<span class="pill p-ok">same as base</span>':'<span class="pill p-redo">differs from base</span>';
+      const d=document.createElement('div');d.className='out';
+      d.innerHTML=`<div class="btns"><span class="pill ${e.arm==='base'?'p-keep':'p-redo'}">${e.arm}${e.banned?' · no "'+esc(e.banned)+'"':''}</span>${same}<span class="muted small mono">${e.seconds}s</span></div><div class="txt"><span class="muted">${esc(e.prompt)}</span>${esc(e.text)}</div>`;
+      o.prepend(d);line(`${ts} <span class="ev">request.done</span> arm=${e.arm} ${e.seconds}s`);break;}
+    case 'error':line(`${ts} error ${esc(e.message)}`,'er');break;
+  }
+}
+function connect(){const es=new EventSource('/events?since='+(last+1));
+  es.onopen=()=>{if($('state').textContent==='connecting'||$('state').textContent==='offline')state('idle','p-idle');};
+  es.onmessage=m=>handle(JSON.parse(m.data));
+  es.onerror=()=>{es.close();state('offline','p-bad');setTimeout(connect,2000);};}
+async function post(path,body,errEl){if(errEl)$(errEl).textContent='';
+  try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});const j=await r.json();if(!j.ok&&errEl)$(errEl).textContent=j.error;return j;}
+  catch(err){if(errEl)$(errEl).textContent='The lab server did not answer. Is it running?';}}
+$('start').onclick=()=>post('/engine/start');
+$('stop').onclick=()=>post('/engine/stop');
+$('install').onclick=()=>post('/patch/install',{word:$('word').value.trim()},'perr');
+$('undo').onclick=()=>post('/patch/uninstall',{},'perr');
+$('send').onclick=()=>{const b=$('send');b.disabled=true;post('/request',{prompt:$('prompt').value},'rerr').finally(()=>b.disabled=false);};
+$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter')$('send').click();});
+connect();
+})();
+</script>
+</body>
+</html>
