@@ -300,3 +300,85 @@ class RepairCellTest(unittest.TestCase):
 
 if __name__ == "__main__":
     sys.exit(unittest.main())
+
+
+class WarmStartTest(unittest.TestCase):
+    """Pain point: each worker rank created its side (and the side its analyzer child) at the
+    first fastrsi_kernel call, which is the first prepare, so the first edit after engine start
+    paid the child's spawn (1.5-2.2 s on an engine host, against 0.12 s for later prepares)."""
+
+    def test_engine_start_spawns_every_analyzer_before_the_first_prepare(self):
+        """Proves: the patched EngineCoreProc.run_busy_loop (the real _patch_core and Host,
+        with a one-rank executor that calls the real KernelWorkerExtension) has the worker
+        rank's side and the core side, each with a live analyzer child (spawns 1), before its
+        first step; the first worker prepare then spawns nothing and waits for no boot (no
+        analyze_spawned, no analyze_boot_wait_s in rank 0's timings; spawns still 1). Not:
+        the boot time in a vLLM process (the GPU job measures the first edit live)."""
+        import os
+        import tempfile
+        import types
+        from unittest import mock
+        from . import host as H
+        from . import worker_ext as WE
+
+        self.addCleanup(WE._SIDE.clear)
+        WE._SIDE.clear()
+
+        class Worker(WE.KernelWorkerExtension):
+            rank = 0
+
+            def execute_model(self, *a):
+                return "out"
+
+            def sample_tokens(self, *a):
+                return "tok"
+
+        class Executor:
+            def __init__(self):
+                self.worker = Worker()
+
+            def collective_rpc(self, name, timeout=None, args=()):
+                return [getattr(self.worker, name)(*args)]
+
+        seen = {}
+
+        class EngineCoreProc:               # vLLM's class, reduced to what the host patches
+            def __init__(self):
+                self.model_executor = Executor()
+
+            def _handle_client_request(self, request_type, request):
+                pass
+
+            def _process_engine_step(self):
+                pass
+
+            def run_busy_loop(self):        # the loop's first step: what exists by now?
+                side = WE._SIDE[0] if WE._SIDE else None
+                seen["worker"] = side and side.lp.analyzer.state()
+                seen["core"] = H._HOST[0].core_side.lp.analyzer.state()
+
+        mod = types.SimpleNamespace(EngineCoreProc=EngineCoreProc)
+        H._patch_core(mod)
+        tmp = tempfile.mkdtemp()
+        with mock.patch.dict(sys.modules, {"vllm": types.SimpleNamespace(__version__="cpu")}), \
+                mock.patch.object(H, "DIR", tmp), \
+                mock.patch.object(H.Host, "control", lambda self: None), \
+                mock.patch.object(H, "_HOST", []):
+            core = EngineCoreProc()
+            core.run_busy_loop()
+            h = H._HOST[0]
+            self.addCleanup(h.core_side.lp.analyzer.close)
+            self.addCleanup(lambda: WE._SIDE and WE._SIDE[0].lp.analyzer.close())
+            w, c = seen["worker"], seen["core"]
+            self.assertEqual((w and w["alive"], w and w["spawns"], c["alive"], c["spawns"]),
+                             (True, 1, True, 1))
+            self.assertTrue(h.analyzers(wait_s=30)["ready"])
+            r = H.WorkerGroup(h).prepare(plan("warm"))
+            self.assertTrue(r["ok"], r.get("error"))
+            (t,) = r["timings"]["rank0"].values()
+            self.assertEqual((t["analyze"], "analyze_spawned" in t, "analyze_boot_wait_s" in t,
+                              WE._SIDE[0].lp.analyzer.state()["spawns"]),
+                             ("process", False, False, 1))
+            self.assertEqual(h.started["workers"]["0"]["spawns"], 1)
+        import shutil
+        shutil.rmtree(tmp, True)

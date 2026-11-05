@@ -10,6 +10,10 @@ is then read by the wrong call (kb/lessons.md).
   compiles and the outside-changes compare run in a child process (kernel `ProcessAnalyzer`,
   started with the side; FASTRSI_KERNEL_ANALYZE=inline keeps them in this process), so they
   do not hold this process's GIL. A heap scan (nested targets only) still does.
+- The analyzer child starts with the side (kernel warm start), not in the first prepare: the
+  cold spawn cost the first edit 1.5-2.2 s on an engine host. `warm` reports it (`alive`,
+  `ready`, `spawns`, `boot_s`; `{"wait_s": s}` waits up to s for its boot). The host sends
+  `warm` to every worker at engine start, which creates each rank's side.
 - `prepare_poll` can be repeated: a finished rank keeps answering with its result until the
   transaction is committed, aborted or undone. The worker group polls every rank with one
   collective_rpc while any rank is pending, so a rank that finished early is asked again.
@@ -49,7 +53,7 @@ from kernel import findings as F
 from kernel import swap as S
 
 METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "abort", "undo",
-           "status", "proof", "witness_check", "reset", "versions")
+           "status", "proof", "witness_check", "reset", "versions", "warm")
 
 
 # Model code: under torch.compile and CUDA graphs its Python runs only while tracing and
@@ -79,7 +83,7 @@ class Side:
         self.captured_prefixes = CAPTURED_PREFIXES
         analyzer = None
         if os.environ.get("FASTRSI_KERNEL_ANALYZE", "process") == "process":
-            analyzer = S.ProcessAnalyzer().start()
+            analyzer = S.ProcessAnalyzer()     # the participant starts it (kernel warm start)
         self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer,
                                      checks=[self._captured_check])
         self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
@@ -196,6 +200,16 @@ class Side:
         return F.ok(steps=self.steps, vlog=self.vlog, mid_step_changes=self.mid_step_changes,
                     watch=sorted(self.watch), watch_pending=sorted(self._watch_new))
 
+    def warm(self, payload=None):
+        """This side's analyzer: started with the side; `{"wait_s": s}` waits for its boot."""
+        a = self.lp.analyzer
+        if a is None:
+            return F.ok(analyzer=None, note="analysis in this process (FASTRSI_KERNEL_ANALYZE)")
+        wait_s = (payload or {}).get("wait_s") if isinstance(payload, dict) else None
+        if wait_s:
+            a.wait_ready(float(wait_s))
+        return F.ok(analyzer=a.state(), analyzer_start=self.lp.analyzer_start)
+
     def _subplan(self, plan):
         mods = {m: s for m, s in plan.get("modules", {}).items()
                 if self.role in s.get("on", [self.role])}
@@ -297,6 +311,8 @@ class Side:
             return self.lp.reset(payload)
         if method == "versions":
             return self.versions()
+        if method == "warm":
+            return self.warm(payload)
         txn, deadline_at = C.txn_ref(payload)
         if method in ("commit", "abort", "undo") and isinstance(txn, str):
             self._jobs.pop(txn, None)          # the vote is over: drop the prepare result

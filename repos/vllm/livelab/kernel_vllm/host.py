@@ -9,8 +9,14 @@ How a transaction runs (kernel StepGapCoordinator, loop.md 4b):
 - Control: a file channel. A client writes <dir>/ctl.json `{"seq", "op", ...}`; a host thread
   in the engine-core process picks it up, runs it, and writes <dir>/reply/<seq>.json. Ops:
   `txn {plan, edit_time, baseline_restart}`, `prove {txn, golden}`, `undo {txn}`,
-  `status {txn}`, `ping`. Replies carry the kernel's receipt records; the receipts are also
-  appended to <dir>/receipts.jsonl by the kernel's writer.
+  `status {txn}`, `ping`, `warm {wait_s}`. Replies carry the kernel's receipt records; the
+  receipts are also appended to <dir>/receipts.jsonl by the kernel's writer.
+- Warm start: when the engine core starts its busy loop, the host creates the core side and
+  sends one `warm` collective_rpc to every worker (before the first step, outside any gap), so
+  every side and its analyzer child exist before the first prepare; a cold spawn cost the first
+  edit 1.5-2.2 s on an engine host. `warm {wait_s}` reports every side's analyzer (`alive`,
+  `ready`, `spawns`, `boot_s`), waiting up to wait_s for their boots, and the start-up call
+  (`started`).
 - Phase 1 (prepare) while the engine steps: the engine core prepares in the host thread; the
   workers prepare in a background thread each (`prepare_start`, then `prepare_poll`).
 - Every call to the workers is `model_executor.collective_rpc` issued FROM the busy loop
@@ -182,7 +188,8 @@ class Host:
         self.held_steps = 0
         self.gap_timeout = GAP_TIMEOUT_S        # per op: cmd["gap_timeout_s"]
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
-        self.core_side = Side("core", scope={"core": core})
+        self.core_side = Side("core", scope={"core": core})   # starts its analyzer child
+        self.started = None                 # the workers' warm call at engine start (warm())
         self.co = C.StepGapCoordinator(
             [WorkerGroup(self), C.CallParticipant("core", self.core_side.dispatch,
                                                   bounded=True)],
@@ -190,6 +197,43 @@ class Host:
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None})
+
+    def warm(self):
+        """At engine start, on the loop thread before the first step: one `warm` call to every
+        worker creates its side and starts its analyzer child. Never raises (the engine starts
+        either way; a worker that missed it creates its side at its first call)."""
+        t = time.perf_counter()
+        try:
+            rs = self.core.model_executor.collective_rpc("fastrsi_kernel", timeout=60.0,
+                                                         args=("warm", None))
+            r = _merge("warm", rs)
+        except Exception as e:
+            r = F.not_ok(f"warm: {type(e).__name__}: {e}")
+            if isinstance(e, TimeoutError):   # a late reply would be read by the next call
+                self.co.participants[0].broken = (f"collective_rpc warm timed out at engine "
+                                                  "start; a late reply stays in the "
+                                                  "executor's queue: respawn")
+        self.started = {"ok": r["ok"], "seconds": round(time.perf_counter() - t, 6),
+                        "at": time.time(), "error": r.get("error"),
+                        "workers": {str(x.get("rank")): x.get("analyzer")
+                                    for x in r.get("ranks", [])},
+                        "core": self.core_side.warm()["analyzer"]}
+        return self.started
+
+    def analyzers(self, wait_s=0.0):
+        """Every side's analyzer state; waits up to wait_s for all to be ready."""
+        end = time.monotonic() + float(wait_s or 0)
+        while True:
+            core = self.core_side.warm()
+            ws = self.co.participants[0]._rpc("warm", None)
+            states = [core.get("analyzer")] + [x.get("analyzer") for x in ws.get("ranks", [])]
+            ready = ws["ok"] and all(a is None or a.get("ready") for a in states)
+            if ready or time.monotonic() >= end:
+                return F.ok(ready=ready, core=core.get("analyzer"),
+                            workers={str(x.get("rank")): x.get("analyzer")
+                                     for x in ws.get("ranks", [])},
+                            error=None if ws["ok"] else ws.get("error"), started=self.started)
+            time.sleep(0.05)
 
     def in_loop(self, fn, gap=False, timeout=60.0):
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
@@ -237,6 +281,8 @@ class Host:
             elif op == "versions":            # per-rank and core version logs
                 r = F.ok(workers=self.co.participants[0].versions(),
                          core=self.core_side.versions())
+            elif op == "warm":                # analyzers of every side (alive, ready, spawns)
+                r = self.analyzers(cmd.get("wait_s", 0.0))
             elif op == "ping":
                 r = F.ok(pid=os.getpid(), poison=self.co.poison)
             else:
@@ -316,6 +362,7 @@ def _patch_core(mod):
         if DIR and not _HOST:
             h = Host(self, DIR)
             _HOST.append(h)
+            h.warm()                         # before the first step: no prepare spawns a child
             threading.Thread(target=h.control, daemon=True, name="fastrsi-kernel-host").start()
         return orig_loop(self)
 
