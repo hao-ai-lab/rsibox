@@ -336,6 +336,11 @@ class KernelTest(unittest.TestCase):
         self.assertEqual((rec["actual_recipes"], rec["commit_hashes"]["agree"], rec["outcome"]),
                          (["R0 swap"], True, "committed"))
         self.assertEqual(rec["engine"], {"name": "toy", "version": "0", "commit": None})
+        # agreement compares only targets several participants swapped (seen live: workers
+        # swap the sampler, the engine core the scheduler; nothing to compare is not "false")
+        self.assertEqual([C._hashes_agree(h) for h in (
+            {"workers": {"s:a:1": ["x"]}, "core": {"c:b:2": ["y"]}},
+            {"rank0": {"s:a:1": ["x"]}, "rank1": {"s:a:1": ["z"]}})], [None, False])
         self.assertEqual([e.step(3) for _, _, e in parts], [1800, 1800, 1800])
 
     def test_accept_list(self):

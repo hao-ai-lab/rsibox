@@ -305,6 +305,18 @@ def _call(p, method, arg):
     return r
 
 
+def _hashes_agree(hashes):
+    """Do participants that swapped the same target run the same code? Compares each witness
+    key across the participants that report it (participants may swap different modules, e.g.
+    workers the sampler and the engine core the scheduler). None when no key is shared."""
+    by_key = {}
+    for h in hashes.values():
+        for k, v in (h or {}).items():
+            by_key.setdefault(k, []).append(json.dumps(v, sort_keys=True))
+    shared = [vs for vs in by_key.values() if len(vs) > 1]
+    return all(len(set(vs)) == 1 for vs in shared) if shared else None
+
+
 class Coordinator:
     """The transaction host. Two phases:
 
@@ -477,7 +489,7 @@ class Coordinator:
         fs = [f for r in res.values() for x in r.values()
               for f in x.get("findings", [])] + out["extra"]
         modules = plan.get("modules", {})
-        hs = [json.dumps(h, sort_keys=True) for h in out["hashes"].values()]
+        agree = _hashes_agree(out["hashes"])
 
         def span(a, b):
             return round(tl[b] - tl[a], 6) if a in tl and b in tl else None
@@ -500,7 +512,7 @@ class Coordinator:
             if out["outcome"] == "committed" else [],
             "participants": res,
             "commit_hashes": {"participants": out["hashes"],
-                              "agree": (len(set(hs)) == 1) if hs else None},
+                              "agree": agree},
             "findings": fs,
             "decisions": {"accepted": sorted({f["check"] for f in fs if f.get("accepted")}),
                           "blocking": sorted({f["check"] for f in fs
