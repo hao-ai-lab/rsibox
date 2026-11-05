@@ -79,6 +79,14 @@ Signatures and plan format: `kernel/coordinator.py`.
 - Fields only the edited `__init__` sets and new code reads are a `new_fields` finding
   (blocking unless accepted). A plan with `"backfill": true` sets them at commit on the live
   instances found from the participant's scope (journaled).
+- A group participant may declare the ranks it must reach (`expected`, e.g. every rank of
+  every data-parallel group); a reply that lacks some is a blocking, not-overridable
+  `participant_missing` naming them.
+- `at_base()` (participant and coordinator): back at the start state? Pending transactions,
+  journal length, base and live code digests of every module a transaction touched, names and
+  scope attributes added and left, poison. Cheap: no heap scan.
+- A cell that changes engine state only a rebuild restores calls `journal.need_rebuild(route)`;
+  the host runs the route from the base code after a rollback or an undo, outside the gap.
 - A repair cell gets `journal`, `witness` and `arm(key)` (a counter for what it changes). A
   transaction whose witness has no key at all is a `no_witness_possible` finding at proof. A cell
   that changes engine state which must be rebuilt from the base code (released graphs) journals

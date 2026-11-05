@@ -100,6 +100,7 @@ import queue
 import sys
 import threading
 import time
+import types
 import uuid
 
 from . import fields as NF
@@ -158,6 +159,9 @@ class Participant:
     def fingerprint(self, modules):
         return F.not_ok("no fingerprint")
 
+    def at_base(self, _=None):
+        return F.not_ok("no at_base")
+
 
 class CallParticipant(Participant):
     """A participant in another process, reached through `call(method, payload) -> dict`."""
@@ -201,6 +205,9 @@ class CallParticipant(Participant):
 
     def fingerprint(self, modules):
         return self._do("fingerprint", modules)
+
+    def at_base(self, _=None):
+        return self._do("at_base", None)
 
 
 class LocalParticipant(Participant):
@@ -258,6 +265,8 @@ class LocalParticipant(Participant):
         self._opts = {}               # prepared txn -> {"backfill": bool, "cells": n}
         self._cell_keys = {}          # committed txn -> witness keys its cells armed
         self._backfills = {}          # committed txn -> what its backfill set
+        self._base = {}               # plan module -> (digest, names) when first touched
+        self._scope_keys = None       # scope objects' attribute names at the first prepare
 
     def _live_source(self, module):
         """The text the live module runs: the latest committed transaction's, else None."""
@@ -328,7 +337,54 @@ class LocalParticipant(Participant):
                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer,
                        overlay=overlay, trees=spec.get("trees"))
 
+    def _remember_base(self, plan):
+        """At the first prepare that touches a module: its code digest and namespace names;
+        at the first prepare at all: the scope objects' attribute names (and one level down),
+        so `at_base` can say what is still not at the start state. Cheap: the modules'
+        namespaces and the scope's attribute dicts, no heap scan."""
+        for m in plan.get("modules", {}):
+            if m not in self._base:
+                mod = sys.modules.get(self._actual(m))
+                fp = self.fingerprint([m])
+                if mod is not None and fp["ok"]:
+                    self._base[m] = (L.text_hash(json.dumps(fp["code"], sort_keys=True)),
+                                     set(vars(mod)))
+        if self._scope_keys is None:
+            self._scope_keys = _attr_names(self.scope)
+
+    def at_base(self, _=None):
+        """Is this participant back at its start state? {ok, pending_txns, journal_len,
+        modules: {module: [base digest, live digest]}, extra_names (module names added and
+        left), extra_attrs (scope attributes added and left), poisoned (an undo that could
+        not restore all)}. The witness global stays by design (a no-op stub after undo) and
+        is not an extra. For a warm engine pool: apply, undo, then check before the next job."""
+        pending = sorted(t for t, st in self._state.items()
+                         if st in ("prepared", "committed", "partial"))
+        mods, extra_names = {}, {}
+        for m, (digest, names) in self._base.items():
+            fp = self.fingerprint([m])
+            live = L.text_hash(json.dumps(fp["code"], sort_keys=True)) if fp["ok"] else None
+            mods[m] = [digest, live]
+            mod = sys.modules.get(self._actual(m))
+            extra = sorted(set(vars(mod)) - names - {W.HIT}) if mod is not None else []
+            if extra:
+                extra_names[m] = extra
+        extra_attrs = {}
+        if self._scope_keys is not None:
+            now = _attr_names(self.scope)
+            for path, keys in now.items():
+                new = sorted(keys - self._scope_keys.get(path, keys))
+                if new:
+                    extra_attrs[path] = new
+        poisoned = bool(self._partial)
+        ok = (not pending and not self.journal.entries and not extra_names
+              and not extra_attrs and not poisoned and all(a == b for a, b in mods.values()))
+        return F.ok(**{"ok": ok}, pending_txns=pending, journal_len=len(self.journal.entries),
+                    modules=mods, extra_names=extra_names, extra_attrs=extra_attrs,
+                    poisoned=poisoned)
+
     def prepare(self, plan):
+        self._remember_base(plan)
         txn, accept = plan["id"], plan.get("accept", ())
         fs, staged, items, ok, timings, targets = [], [], {}, True, {}, {}
         own = [c for cs in self._codes.values() for c in cs]
@@ -596,6 +652,23 @@ class LocalParticipant(Participant):
         return r
 
 
+def _attr_names(scope):
+    """{path: set of attribute names} of the scope's objects and of the objects their
+    attributes hold (one level down, as a repair cell's audit watches)."""
+    out = {}
+    for n, o in scope.items():
+        d = getattr(o, "__dict__", None)
+        if not isinstance(d, dict):
+            continue
+        out[n] = set(d)
+        for k, v in list(d.items()):
+            dv = getattr(v, "__dict__", None)
+            if isinstance(dv, dict) and not isinstance(v, (type, types.ModuleType,
+                                                           types.FunctionType)):
+                out[f"{n}.{k}"] = set(dv)
+    return out
+
+
 def _call(p, method, arg):
     try:
         r = getattr(p, method)(arg)
@@ -605,7 +678,29 @@ def _call(p, method, arg):
                          f"{method} returns an ok-dict"), "participant": p.name}])
     if not isinstance(r, dict) or "ok" not in r:
         return F.not_ok(f"{method}: bad reply {r!r}")
-    return r
+    return expect_ranks(p, method, r)
+
+
+def expect_ranks(p, method, r):
+    """A group participant that declares the ranks it must reach (`expected`: rank ids, e.g.
+    every rank of every data-parallel group, from the engine's parallel config) and whose
+    reply lacks some: the reply becomes not-ok with a blocking `participant_missing` naming
+    them. At DP>1 a vLLM client returned only DP rank 0's replies, and witness, receipt and
+    undo covered 1 of 4 groups with no word."""
+    exp = getattr(p, "expected", None)
+    if exp is None:
+        return r
+    got = {str(x.get("rank")) for x in (r.get("ranks") or [r])}
+    missing = [str(e) for e in exp if str(e) not in got]
+    if not missing:
+        return r
+    f = {**F.finding("participant_missing", f"{method}: no reply from {', '.join(missing)} "
+                     f"(replies from {', '.join(sorted(got)) or 'none'})",
+                     f"a reply from every expected rank: {', '.join(map(str, exp))}",
+                     subject=p.name), "participant": p.name, "missing": missing}
+    return {**r, "ok": False, "missing": missing,
+            "error": (f"{r.get('error')}; " if r.get("error") else "")
+            + f"no reply from {missing}", "findings": list(r.get("findings") or []) + [f]}
 
 
 def _hashes_agree(hashes):
@@ -735,6 +830,9 @@ class GroupParticipant(Participant):
 
     def reset(self, kind):
         return self._all("reset", kind)
+
+    def at_base(self, _=None):
+        return self._all("at_base", None)
 
 
 class Lane:
@@ -1264,6 +1362,15 @@ class Coordinator:
                "edit_to_finish_s": round(t - edit, 6) if edit is not None else None}
         return {"ok": all(r["ok"] for r in res.values()) and not fs, "receipt": rec,
                 "written": self._write(rec)}
+
+    def at_base(self):
+        """Every participant (every rank of a group) back at its start state? Cheap: no heap
+        scan, only the modules a transaction touched (LocalParticipant.at_base). Returns
+        {ok, participants: {name: reply}, poisoned, missing}."""
+        res = {p.name: _call(p, "at_base", None) for p in self.participants}
+        ok = all(r["ok"] for r in res.values()) and not self.poison
+        return F.ok(**{"ok": ok}, participants=res, poisoned=bool(self.poison),
+                    findings=[f for r in res.values() for f in r.get("findings", [])])
 
     def _undo_phases(self, txn, resets, tl):
         res = {p.name: {} for p in self.participants}

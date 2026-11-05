@@ -43,6 +43,7 @@ live half; `analyzer=None` runs it here. Both give the same staged code and find
 import ast
 import collections
 import copy
+import functools
 import importlib
 import importlib.util
 import marshal
@@ -305,8 +306,10 @@ class _LiveBody:
     live class, which is not touched before commit. The result is a scratch class holding
     only the new names."""
 
-    def __init__(self, live=None, imports=None):
-        self.maps = [vars(live)] if live is not None else []
+    def __init__(self, live=None, imports=None, added=None):
+        # added: members the patch adds to this class, built before this one (a property's
+        # @x.setter reads the x the patch added just above it)
+        self.maps = ([added] if added else []) + ([vars(live)] if live is not None else [])
         if imports:
             self.maps.append(imports)
 
@@ -352,9 +355,30 @@ def _defaults(mod, q, stub, imports=None):
     return obj.__defaults__, obj.__kwdefaults__
 
 
-def _set_class_cell(fn, cls):
-    if fn.__closure__ and "__class__" in fn.__code__.co_freevars:
-        fn.__closure__[fn.__code__.co_freevars.index("__class__")].cell_contents = cls
+def _member_functions(obj):
+    """The plain functions an added class member runs: a function itself, a staticmethod's or
+    classmethod's `__func__`, a property's getter, setter and deleter, a cached_property's
+    `func`. A member that holds no code (a constant, a nested class, any other descriptor)
+    has none."""
+    if isinstance(obj, property):
+        fns = (obj.fget, obj.fset, obj.fdel)
+    elif isinstance(obj, (staticmethod, classmethod)):
+        fns = (obj.__func__,)
+    elif isinstance(obj, functools.cached_property):
+        fns = (obj.func,)
+    else:
+        fns = (obj,)
+    return [f for f in fns if isinstance(f, types.FunctionType)]
+
+
+def _set_class_cell(obj, cls):
+    """Point the `__class__` cell (zero-argument super()) of an added member's functions at
+    the live class (they were built in a scratch class). An added @property crashed stage
+    here ("'property' object has no attribute '__closure__'", vLLM #62359)."""
+    for fn in _member_functions(obj):
+        code = fn.__code__
+        if fn.__closure__ and "__class__" in code.co_freevars:
+            fn.__closure__[code.co_freevars.index("__class__")].cell_contents = cls
 
 
 def analyze(base_src, source, targets, filename, key_module, live, compile="definitions",
@@ -845,17 +869,21 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         timings["compile_s"] = at["compile_s"]
         timings["parse_compile_s"] = round(timings["parse_s"] + timings["compile_s"], 6)
         # 5. added definitions, built in a scratch namespace
+        built = {}                         # class -> {name: member added so far}
         for ad in a["added"]:
             ns = dict(st.imports)
             if ad["cls"] is not None:      # decorators and defaults see the live class body
-                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), st.imports)
+                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), st.imports,
+                                          built.get(ad["cls"]))
             exec(_raise(ad), mod.__dict__, ns)
             q, cls_name, name = ad["q"], ad["cls"], ad["name"]
+            if cls_name is not None:
+                built.setdefault(cls_name, {})[name] = ns[cls_name].__dict__[name]
             if cls_name is None:
                 st.adds.append((mod.__dict__, name, ns[name]))
             else:
                 obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
-                _set_class_cell(getattr(obj, "__func__", obj), cls)
+                _set_class_cell(obj, cls)
                 st.adds.append((cls, name, obj))
             if ad["def"]:
                 k = L.key_of(kname, q, ad["line"])
@@ -879,7 +907,9 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     # live at the quiesce point blocks. A suspended generator / coroutine outlives the gap:
     # that one blocks here.
     on_stack = W.stack_codes()
-    live = W.live_codes(suspended=True) if susp else set(on_stack)
+    # suspended frames only of the target codes (their referrers), never a whole-heap pass
+    live = (W.live_codes(suspended=True) if scan == "always" else W.live_codes(
+        suspended=True, codes=[o for *_, olds in todo for o in olds])) if susp else set(on_stack)
     timings["live_frames_s"] = round(time.perf_counter() - t, 6)
     plan, line_map = {}, a["line_map"]
     for q, line, r, k, olds in todo:
@@ -1543,8 +1573,7 @@ def closure_pairs(st):
     for fn, code, _, _ in st.swaps:
         pair(fn.__code__, code)
     for _, _, obj in st.adds:
-        f = getattr(obj, "__func__", obj)
-        if isinstance(f, types.FunctionType):
+        for f in _member_functions(obj):
             pair(None, f.__code__)
     return pairs
 

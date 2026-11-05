@@ -430,6 +430,162 @@ class AddedMethodWitnessTest(unittest.TestCase):
         self.assertEqual(counts, {"A.run": 2, "A._refit": 2})
 
 
+class AddedMemberTest(unittest.TestCase):
+    BASE = "class B:\n    def v(self):\n        return 40\n\n\nclass C(B):\n    def w(self):\n        return 1\n"
+
+    def test_added_properties_and_descriptors_stage_and_work(self):
+        """Input (vLLM #62359's shape, which failed on every rank at stage with "'property'
+        object has no attribute '__closure__'"): a class gains a @property using zero-arg
+        super(), a property with setter and deleter, a staticmethod, a classmethod using
+        super(), a functools.cached_property, and a method whose decorator returns a constant
+        (a member with no code). Expected: stage ok with no finding, apply ok, every member
+        works on the live class; undo removes them all. Fails before this change: stage
+        raised on the property (patch_invalid)."""
+        name = f"kt_mem{next(_n)}"
+        (m,) = temp_modules(self, {name: "import functools\n\n\n" + self.BASE})
+        new = ("import functools\n\n\n" + self.BASE
+               + "\n    @property\n    def q(self):\n        return super().v() + 2\n"
+               "\n    @property\n    def r(self):\n        return self.__dict__.get('_r', 0)\n"
+               "\n    @r.setter\n    def r(self, v):\n        self._r = v\n"
+               "\n    @r.deleter\n    def r(self):\n        self.__dict__.pop('_r', None)\n"
+               "\n    @staticmethod\n    def s():\n        return 5\n"
+               "\n    @classmethod\n    def k(cls):\n        return cls.__name__\n"
+               "\n    @functools.cached_property\n    def cp(self):\n        return super().v() * 2\n"
+               "\n    @(lambda f: 11)\n    def const(self):\n        return 0\n")
+        r = S.stage(name, new)
+        self.assertTrue(r["ok"], r.get("error"))
+        self.assertEqual([f["check"] for f in r["findings"]], [])
+        j = J.Journal()
+        mark = j.mark("t")
+        self.assertTrue(S.apply(r["staged"], j, W.Witness())["ok"])
+        c = m.C()
+        c.r = 3
+        self.assertEqual((c.q, c.r, m.C.s(), m.C.k(), c.cp, m.C.const), (42, 3, 5, "C", 80, 11))
+        del c.r
+        self.assertEqual(c.r, 0)
+        self.assertTrue(j.undo_to(mark)["ok"])
+        self.assertFalse(any(hasattr(m.C, n) for n in ("q", "r", "s", "k", "cp", "const")))
+
+    def test_an_edited_property_getter_is_swapped(self):
+        """Input: a class with a property (getter and setter); the getter's body is edited.
+        Expected: the getter alone is the target, the namespace finds it (no heap scan), and
+        the live property returns the new value; undo returns the old. Not: a property
+        replaced by another object."""
+        name = f"kt_prop{next(_n)}"
+        text = ("class P:\n    @property\n    def x(self):\n        return 1\n\n"
+                "    @x.setter\n    def x(self, v):\n        pass\n")
+        (m,) = temp_modules(self, {name: text})
+        r = S.stage(name, text.replace("return 1", "return 2"))
+        self.assertEqual((r["ok"], r["targets"], r["timings"]["scan"]),
+                         (True, [["P.x", 2]], "namespace"))
+        j = J.Journal()
+        mark = j.mark("t")
+        self.assertTrue(S.apply(r["staged"], j, W.Witness())["ok"])
+        self.assertEqual(m.P().x, 2)
+        j.undo_to(mark)
+        self.assertEqual(m.P().x, 1)
+
+
+class GeneratorTargetTest(unittest.TestCase):
+    def test_a_generator_target_needs_no_heap_scan_and_a_suspended_one_still_blocks(self):
+        """Input: an edit of a generator function (as vLLM's safetensors_weights_iterator), first
+        with no generator of it alive, then with one suspended (started, not finished), with
+        the gc heap frozen as vLLM does. Expected: no whole-heap pass (`all_objects` is never
+        called) in either case; with none alive no finding; with one suspended a blocking
+        running_frame. Fails before this change: stage called all_objects (one get_objects
+        and a Python pass: 0.42 s of a 0.49 s stage per rank on DeepSeek-V4.1 TP4)."""
+        from unittest import mock
+        name = f"kt_gen{next(_n)}"
+        text = "def it(n):\n    for i in range(n):\n        yield i\n"
+        (m,) = temp_modules(self, {name: text})
+        new = text.replace("yield i", "yield i * 2")
+        gc.freeze()
+        self.addCleanup(gc.unfreeze)
+        scans = []
+        real = W.all_objects
+        with mock.patch.object(W, "all_objects", lambda: scans.append(1) or real()):
+            r = S.stage(name, new)
+            self.assertEqual((r["ok"], r["findings"], scans), (True, [], []))
+            g = m.it(3)
+            next(g)
+            gc.freeze()                    # the suspended generator is frozen too
+            r = S.stage(name, new)
+            self.assertEqual(([(f["check"], f.get("advisory", False)) for f in r["findings"]],
+                              scans), ([("running_frame", False)], []))
+            self.assertEqual(list(g), [1, 2])
+
+
+class ParticipantMissingTest(unittest.TestCase):
+    def test_a_dp_client_that_drops_replies_blocks_the_transaction(self):
+        """Input: a worker group of 2 data-parallel groups x 2 ranks (each rank its own copy of
+        a module), reached through a fake DP client that delivers every call to every rank
+        but returns only DP group 0's replies (as vLLM's DP client did at EP4DP4); the group
+        declares the 4 ranks it expects. Expected: the transaction aborts with a blocking,
+        not-overridable participant_missing naming dp1/0 and dp1/1, even with accept "all";
+        no rank runs the edit afterwards. Fails before this change: the transaction committed
+        on all 4 ranks while its witness, receipt and undo covered 2, with no finding."""
+        mods = []
+        for i in range(4):
+            name = f"kt_dp{next(_n)}"
+            (m,) = temp_modules(self, {name: "def f():\n    return 'base'\n"})
+            mods.append(m)
+        ranks = [(f"dp{i // 2}/{i % 2}", C.LocalParticipant(
+            "workers", alias={"pkg": mods[i].__name__})) for i in range(4)]
+
+        def dp_client(method, payload):
+            rs = [{**getattr(lp, method)(payload), "rank": rid} for rid, lp in ranks]
+            return C.merge_ranks(method, rs[:2])          # DP group 0's replies only
+        g = C.CallParticipant("workers", dp_client)
+        g.expected = [rid for rid, _ in ranks]
+        co = C.Coordinator([g], phase2_deadline_s=None)
+        r = co.run({"id": "dp", "accept": "all", "modules": {"pkg": {
+            "source": "def f():\n    return 'edit'\n"}}})
+        self.assertEqual(r["outcome"], "aborted")
+        fs = [f for f in r["receipt"]["findings"] if f["check"] == "participant_missing"]
+        self.assertEqual(sorted({f["observed"].split(":")[0] for f in fs}), ["abort", "prepare"])
+        self.assertEqual({(tuple(f["missing"]), f["overridable"]) for f in fs},
+                         {(("dp1/0", "dp1/1"), False)})
+        self.assertEqual([m.f() for m in mods], ["base"] * 4)
+
+
+class AtBaseTest(unittest.TestCase):
+    def test_apply_then_undo_is_at_base_and_a_leftover_is_not(self):
+        """Input (a warm engine pool: every job applies a PR live, then undoes it): a swap of
+        a module plus a repair cell, committed and undone. Expected: at_base ok (no pending
+        transaction, journal empty, the module's live code digest equal to its base one, no
+        extra names or attributes) on the participant and through the coordinator; while
+        committed it is not ok (pending, digests differ). Then a cell that sets an attribute
+        outside the journal (undeclared, its repair_not_undoable accepted) and an undo: not
+        ok, extra_attrs names it. Fails before this change: there was no at_base, so a pool
+        could not tell a clean engine from one an undo left dirty."""
+        class Engine:
+            pass
+        e = Engine()
+        name = f"kt_ab{next(_n)}"
+        (m,) = temp_modules(self, {name: "def f():\n    return 'base'\n"})
+        p = C.LocalParticipant("workers", scope={"engine": e})
+        co = C.Coordinator([p], phase2_deadline_s=None)
+        plan = {"id": "a", "modules": {name: {"source": "def f():\n    return 'edit'\n"}},
+                "repairs": [{"cell": "engine.x = 1", "declares": ["engine"]}]}
+        self.assertEqual(co.run(plan)["outcome"], "committed")
+        b = p.at_base()
+        self.assertEqual((b["ok"], b["pending_txns"]), (False, ["a"]))
+        self.assertNotEqual(*b["modules"][name])
+        self.assertTrue(co.undo("a")["ok"])
+        b = p.at_base()
+        self.assertEqual((b["ok"], b["pending_txns"], b["journal_len"], b["extra_attrs"],
+                          b["extra_names"]), (True, [], 0, {}, {}))
+        self.assertEqual(*b["modules"][name])
+        self.assertTrue(co.at_base()["ok"])
+        r = co.run({"id": "b", "accept": ["repair_not_undoable"], "repairs": [
+            {"cell": "engine.leftover = 1", "declares": []}]})
+        self.assertEqual(r["outcome"], "committed")
+        self.assertTrue(co.undo("b")["ok"])
+        b = co.at_base()
+        self.assertFalse(b["ok"])
+        self.assertEqual(b["participants"]["workers"]["extra_attrs"], {"engine": ["leftover"]})
+
+
 class StageAndApplyTest(unittest.TestCase):
     def test_a_loop_frame_live_at_apply_blocks_through_the_helper(self):
         """Input: the toy engine's run_loop running on a thread, and an edit of run_loop

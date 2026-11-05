@@ -33,12 +33,13 @@ pass:
 """
 import ast
 import contextlib
+import gc
 import inspect
 import sys
 import types
 
 from . import findings as F
-from .locate import all_objects, sliced
+from .locate import all_objects, sliced, unfrozen
 
 HIT = "__fastrsi_hit__"
 
@@ -103,7 +104,7 @@ class Witness:
         """keys: witness keys to prove. old_codes: {key: [code objects the swap replaced]}.
         Returns ok-dict with `counts` and one finding per key that did not run."""
         old = [c for cs in (old_codes or {}).values() for c in cs]
-        live = live_codes(suspended=suspendable(old))
+        live = live_codes(suspended=suspendable(old), codes=old)
         out = []
         for k in keys:
             n, cap = self.counts.get(k, 0), self.capture_counts.get(k, 0)
@@ -182,25 +183,49 @@ def stack_codes():
     return codes
 
 
-def live_codes(suspended=True):
+def _frame(o):
+    t = type(o)
+    return (o.cr_frame if t is types.CoroutineType else o.gi_frame
+            if t is types.GeneratorType else o.ag_frame
+            if t is types.AsyncGeneratorType else None)
+
+
+def live_codes(suspended=True, codes=None):
     """Code objects with a running frame: on any thread's stack and, with suspended=True, in
     a suspended generator / coroutine (an event loop waiting in `await` is on no thread's
-    stack). Thread stacks are cheap; suspended frames need a heap scan (one get_objects,
-    then a sliced pass), so callers ask for them only when a code can be suspended."""
-    codes = set()
+    stack). Thread stacks are cheap. codes: the codes the caller cares about; then suspended
+    frames are found from those codes' referrers (a suspended generator's frame refers to its
+    code: one C-level `gc.get_referrers` call over the unfrozen heap, no Python pass), and
+    only for the codes that can be suspended. Without codes, every suspended frame is found
+    with a heap scan (one get_objects, then a sliced pass): 0.42 s of a 0.49 s stage per rank
+    for a generator target in load-time code (DeepSeek-V4.1 TP4)."""
+    out = set()
     for fr in sys._current_frames().values():
         while fr is not None:
-            codes.add(fr.f_code)
+            out.add(fr.f_code)
             fr = fr.f_back
     if not suspended:
-        return codes
+        return out
+    if codes is not None:
+        want = [c for c in codes if c.co_flags & SUSPENDABLE]
+        if not want:
+            return out
+        with unfrozen():
+            refs = gc.get_referrers(*want)
+        try:
+            for o in refs:
+                fr = _frame(o)
+                while fr is not None:
+                    out.add(fr.f_code)
+                    fr = fr.f_back
+        finally:
+            del refs
+        return out
+    codes = out
     objs = all_objects()
     try:
         for o in sliced(objs):
-            t = type(o)
-            fr = (o.cr_frame if t is types.CoroutineType else o.gi_frame
-                  if t is types.GeneratorType else o.ag_frame
-                  if t is types.AsyncGeneratorType else None)
+            fr = _frame(o)
             while fr is not None:
                 codes.add(fr.f_code)
                 fr = fr.f_back

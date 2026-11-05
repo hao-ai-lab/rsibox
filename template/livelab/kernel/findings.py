@@ -271,6 +271,14 @@ CATALOG = {
          RESTART],
         "the engine dies at the first step that runs the new code",
         ["Keeping state across edits"], True),
+    "participant_missing": (
+        "a participant the host expects (a rank of a worker group, a data-parallel engine) "
+        "sent no reply: the transaction, its witness, receipt and undo would cover only the "
+        "ranks that answered, while the others run whatever they ran before",
+        [{"action": "reach every rank (every data-parallel group's workers), or run the "
+          "engine with one data-parallel group", "cost": "a different launch"}, RESTART],
+        "some ranks run the edit and others do not, and the receipt says nothing about them",
+        [], False),
     "no_witness_possible": (
         "the transaction swapped no code, so no counter can prove it ran: it ran only repair "
         "cells, and none armed a witness",

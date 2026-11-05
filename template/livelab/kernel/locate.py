@@ -16,6 +16,7 @@ dict. Swapping `__code__` on those objects reaches every holder at once: module 
 `from x import f` copies), class dicts, closure cells of decorator wrappers, bound methods
 saved as callbacks. `holders(fn)` lists them for the record.
 """
+import functools
 import gc
 import hashlib
 import importlib
@@ -155,6 +156,8 @@ def module_functions(mod):
             stack.append(o.__func__)
         elif isinstance(o, property):
             stack += [f for f in (o.fget, o.fset, o.fdel) if f is not None]
+        elif isinstance(o, functools.cached_property):
+            stack.append(o.func)
         elif isinstance(o, type) and o.__module__ == name:
             stack += list(vars(o).values())
         elif not isinstance(o, (type, types.ModuleType)):
