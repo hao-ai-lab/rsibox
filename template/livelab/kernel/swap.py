@@ -759,8 +759,10 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     targets = [[q, int(line)] for q, line in targets]
     for f in fs:        # what a standing accept matches on: the checked code
         item = st.items.get(f.get("subject")) if isinstance(f.get("subject"), str) else None
-        if item:
+        if item and "new_hash" in item:
             f["code_hash"] = item["new_hash"]
+        elif item:                           # an added definition: no staged code to name
+            continue
         elif f.get("subject") == kname:      # about the whole module: its new text
             f["code_hash"] = L.text_hash(source)
     return F.ok(staged=st, items=st.items, findings=fs, timings=timings, targets=targets)

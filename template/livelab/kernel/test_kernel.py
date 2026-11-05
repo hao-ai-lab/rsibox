@@ -490,6 +490,26 @@ class KernelTest(unittest.TestCase):
         e.drain()
         self.assertEqual(e.tokens, [])
 
+    def test_editing_a_deleted_definition_is_a_finding_not_a_crash(self):
+        """Proves: while an accepted edit has deleted `Engine.drain`, a plan that edits `drain` against the file (explicit target) is a vote no with findings (`base_mismatch`: the live text lacks it; `not_in_patch`: no such definition in the text that runs), not a KeyError out of prepare (the target's key is also an added definition, whose item has no `new_hash`; seen on our 2026-11-05 GPU run). After undo the same plan stages. Not: what an agent should do instead (undo first, or edit the text that runs)."""
+        name, eng, _ = fresh("removed2")
+        line = next(i for i, x in enumerate(ENG.splitlines(), 1) if "def drain" in x)
+        gone = edit(ENG, ("    def drain(self):\n        self.tokens.clear()\n\n", ""))
+        p = C.LocalParticipant("core", alias={"toy": name})
+        self.assertTrue(p.prepare({"id": "b", "modules": {"toy.engine": {"source": gone}},
+                                   "accept": ["removed_definition"]})["ok"])
+        self.assertTrue(p.commit("b")["ok"])
+        probe = {"toy.engine": {"source": edit(ENG, ("        self.tokens.clear()\n",
+                                                     "        del self.tokens[:]\n")),
+                                "base_hash": L.text_hash(ENG), "targets": [["Engine.drain", line]]}}
+        r = p.prepare({"id": "c", "modules": probe})
+        self.assertFalse(r["ok"])
+        self.assertEqual(sorted(f["check"] for f in r["findings"]), ["base_mismatch", "not_in_patch"])
+        self.assertTrue(p.undo("b")["ok"])
+        r = p.prepare({"id": "d", "modules": probe})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["staged"][f"toy.engine:Engine.drain:{line}"]["changed"])
+
     def test_repair_cell_sets_missing_field_and_undo_removes_it(self):
         """Proves (R10): a repair cell sets a field the new step needs, step works, and undo removes the field. Not: device memory repairs."""
         name, eng, _ = fresh("repair")

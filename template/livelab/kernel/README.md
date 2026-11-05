@@ -309,6 +309,7 @@ test_closure_with_no_base_version_is_a_finding ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
 test_edit_that_changes_no_code_is_refused ... ok
+test_editing_a_deleted_definition_is_a_finding_not_a_crash ... ok
 test_fallback_to_in_process_is_a_finding ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
 test_group_proof_reports_ranks_agree ... ok
@@ -348,7 +349,7 @@ test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 52 tests in 7.4s
+Ran 53 tests in 7.4s
 
 OK
 ```
