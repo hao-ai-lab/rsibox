@@ -255,7 +255,9 @@ Each test's docstring says what it proves and what it does not.
   `commit_hashes.ranks_agree` per group; `agree` is false if any comparison differs.
 - **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
   `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
-  2 that had not started when the caller gave up is cancelled.
+  2 that had not started when the caller gave up is cancelled. Once undo ran on a participant,
+  its state is `undone` whether it had committed or not (a rank whose late commit applied
+  nothing too), so every rank of an undone transaction says the same.
 - **An edit that changes nothing is refused.** A plan whose targets are all unchanged (a
   comment, or a module constant whose `outside_changes` was accepted), with nothing added,
   deleted or repaired, is an `empty_change` finding, not a commit that reports success.

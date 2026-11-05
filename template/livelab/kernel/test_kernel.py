@@ -252,7 +252,8 @@ class KernelTest(unittest.TestCase):
         res = C.Coordinator([self._group(ranks, fail_commit=1), parts[2][0]]).run(
             {"modules": {"toy.engine": spec}})
         self.assertEqual(res["outcome"], "rolled_back")
-        self.assertEqual([p._state[res["txn"]] for p, _, _ in ranks], ["undone", "aborted"])
+        # one state for the group: the rank that never committed got the group's undo too
+        self.assertEqual([p._state[res["txn"]] for p, _, _ in ranks], ["undone", "undone"])
         self.assertEqual([(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))
                           for _, eng, _ in ranks], base)
 
@@ -837,10 +838,24 @@ class KernelTest(unittest.TestCase):
         self.assertLess(cl.longest_stall(), 0.2 + 0.05)  # measured by the loop itself
         self.assertEqual(set(cl.log), {("base",) * 3})    # never v1 anywhere, never mixed
         self.assertEqual([p.status(res["txn"])["state"] for p in lps],
-                         ["undone", "aborted", "aborted"])
+                         ["undone", "undone", "aborted"])   # rank1: its queued undo ran
         self.assertEqual(lps[1].journal.entries, [])     # the late commit applied nothing
         self.assertTrue(sess.uninstall()["ok"])          # undo stays allowed while poisoned
         self.assertEqual(sess.state(), "poisoned")
+
+    def test_undo_after_a_deadline_rollback_leaves_every_rank_undone(self):
+        """Proves: after a deadline rollback (rank1 hangs in commit, its late commit applies nothing) and then an undo of the transaction, every rank reports "undone", as the host does; before the fix the late rank said "aborted" and the others "undone" (4-rank live run, T4). Not: a rank whose late commit lands (the queued undo undoes it)."""
+        cl, ps, lps = self._cluster("t4undo", gap_mode=True, slow={"rank1": {"commit": 0.4}})
+        co = C.StepGapCoordinator(ps, cl.at_gap, phase2_deadline_s=0.1)
+        self._start(cl)
+        res = co.run({"modules": self.V1})
+        self.assertEqual(res["outcome"], "rolled_back")
+        wait_for(lambda: lps[1].status(res["txn"])["state"] != "prepared")
+        time.sleep(0.05)                                   # the queued undo and abort run
+        self.assertTrue(co.undo(res["txn"])["ok"])
+        self.assertEqual([p.status(res["txn"])["state"] for p in lps] +
+                         [co.status(res["txn"])["state"]], ["undone"] * 4)
+        self.assertEqual(lps[1].journal.entries, [])      # the late rank never applied
 
     TRICKY = '''from __future__ import annotations
 import functools

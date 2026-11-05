@@ -20,6 +20,7 @@ is not an ok-dict counts as not-ok):
     prepare(plan) -> {"ok", "staged", "findings"}     phase 1; ok is the vote
     validate(ref) -> {"ok", "findings"}              phase 2: staged identities still hold
     status(txn)   -> {"ok", "state"}                 prepared, committed, aborted, undone
+                                                     (undone once undo ran, committed or not)
     commit(ref)   -> {"ok", ...}                     at the participant's quiesce point
     abort(ref)    -> {"ok"}                          drop staged state
     undo(ref)     -> {"ok", ...}                     journal.undo_to(the txn's mark)
@@ -357,6 +358,14 @@ class LocalParticipant(Participant):
     def undo(self, txn):
         txn, _ = txn_ref(txn)
         if txn not in self._marks:
+            # Nothing of txn is installed here (never committed, or a late commit after a
+            # deadline applied nothing). Drop what is staged, so a commit arriving after this
+            # applies nothing, and record the undo: every participant (every rank) of an undone
+            # transaction then says "undone", not some "aborted" and some "undone".
+            if txn in self._state:
+                self._staged.pop(txn, None)
+                self._pending.pop(txn, None)
+                self._state[txn] = "undone"
             return F.ok(undone=0, note="nothing committed")
         mark = self._marks[txn]
         # The journal undoes back to the mark, so it also undoes every transaction committed
