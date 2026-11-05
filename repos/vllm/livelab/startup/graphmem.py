@@ -41,7 +41,7 @@ def wrap(cls):
     @functools.wraps(orig)
     def profile_cudagraph_memory(self, *a, **k):
         from vllm.logger import init_logger
-        log = init_logger("fastrsi.graphmem")
+        log = init_logger("vllm.fastrsi.graphmem")   # must sit under vllm.*, or vLLM drops INFO lines
         key, ident = _key(self)
         path = Path(os.environ.get("FASTRSI_GRAPHMEM_DIR", "/tmp/fastrsi-graphmem")) / f"{key}.json"
         if path.exists():

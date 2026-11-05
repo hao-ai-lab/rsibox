@@ -98,6 +98,37 @@ class LabExtension:
         return {"rank": _rank(), "uninstalled": f"{module_name}.{func_name}",
                 "now_hash": _code_hash(target.__code__)}
 
+    def fastrsi_capture(self, sizes_json):
+        """Capture CUDA graphs for exactly these batch sizes (tokens per step), now.
+
+        Start the engine with few or no capture sizes, then capture only what the experiment
+        runs: e.g. "[1, 128, 2048]". vLLM's capture_model() captures the sizes listed in
+        compilation_config.cudagraph_capture_sizes at call time. Runs between engine steps
+        (collective_rpc), on every rank. Returns seconds taken and the sizes now captured.
+        """
+        import json, time
+        runner = self.model_runner
+        cc = runner.vllm_config.compilation_config
+        before = list(cc.cudagraph_capture_sizes or [])
+        sizes = sorted({int(s) for s in json.loads(sizes_json)} | set(before))
+        if max(sizes) > (cc.max_cudagraph_capture_size or 0):
+            raise ValueError(f"size {max(sizes)} is above the engine's max capture size "
+                             f"{cc.max_cudagraph_capture_size}; buffers are sized at start")
+        cc.cudagraph_capture_sizes = sizes
+        # The graph manager plans its captures once at init (_init_candidates). Re-plan for the
+        # union of old and new sizes (so dispatch knows them all), then capture only the graphs
+        # that do not exist yet.
+        mgr = runner.cudagraph_manager
+        mgr._candidates, mgr._capture_descs = {}, {}
+        mgr._init_candidates()
+        for mode, descs in mgr._capture_descs.items():
+            mgr._capture_descs[mode] = [d for d in descs if d not in mgr.graphs]
+        mgr._graphs_captured = False
+        t = time.time()
+        runner.capture_model()
+        return {"rank": _rank(), "captured": sizes, "previous_sizes": before,
+                "seconds": round(time.time() - t, 3)}
+
     def fastrsi_witness(self, module_name):
         mod = importlib.import_module(module_name)
         return {"rank": _rank(), "pid": os.getpid(), "hits": dict(mod.__dict__.get(HITS, {}))}

@@ -112,25 +112,38 @@ warm = same cache root, second start. Data: `measurements/2026-11-05-startup-D1.
 
 ![Cold vs warm start](figures/startup-cold-vs-warm.png)
 
-| Phase (s) | Cold | Warm |
-|---|---:|---:|
-| Import and config | 34 | 23 |
-| Weights | 246 | 128 |
-| Profiling run + first-use kernel compiles | 944 | 13 |
-| JIT warmup | 67 | 27 |
-| FlashInfer autotune | 687 | 0 |
-| CUDA graph capture | 106 | 91 |
-| Server ready | 8 | 5 |
-| **Total** | **2092** | **287** |
+| Phase (s) | Cold (D1) | Warm, 83 sizes (D2) | Warm, 2 sizes + graphmem (F4) |
+|---|---:|---:|---:|
+| Import and config | 34 | 23 | 19 |
+| Weights | 246 | 128 | 106 |
+| Profiling run + first-use kernel compiles | 944 | 13 | 12 |
+| JIT warmup | 67 | 27 | 26 |
+| FlashInfer autotune | 687 | 0 | 0 |
+| CUDA graph capture | 106 | 91 | 35 |
+| Server ready | 8 | 5 | 4 |
+| **Total** | **2092** | **287** | **202** |
+
+F4 captures only the batch sizes the experiment uses at start (`cudagraph_capture_sizes: [1, 2048]`;
+vLLM requires the largest size to be captured, because buffers are sized by it) and adds more
+sizes later with the lab hook `fastrsi_capture`: capturing size 128 on the running engine took
+4.1 s on each of the 4 ranks. Graph-memory reuse worked on all 4 ranks (F4 logs it; in D2 it
+worked too but the log line was dropped, now fixed).
 
 What the warm start saved and why:
 - Autotune: all 44 tuning passes of the cold start were skipped; results came from the cache.
 - First-use compiles: the cold start wrote 1,449 Triton, 426 FlashInfer, 93 TileLang and 125 vLLM
   cache files; the warm start wrote none.
-- Weights: 246 → 128 s from the OS page cache only. Weight IPC (keeping weights on the GPUs) does
-  not work for this model with stock vLLM yet: CPU-resident Engram tables exceed the transfer
-  limit, and the MXFP8 batched-matmul kernel refuses pre-processed weights.
-- Graph-memory reuse (`startup/graphmem.py`) did not load in either start (no log lines), so it is
-  not measured; the 13 s warm profiling phase is with stock profiling.
+- Weights: 246 → 106-128 s from the OS page cache only. Weight IPC, status:
+  - Engram tables must be on the GPU (`--engram-config '{"cpu_offload": false}'`): host tensors
+    are sent by value and exceed the 16 GiB message limit.
+  - The MXFP8 batched-matmul kernel needs `patches/ipc-mxfp8-bmm.patch` (one line) to accept
+    the daemon's already-processed weights. With it, weights map in 5.4-5.7 s.
+  - The engine then crashes in its first forward pass (illegal address, zero-copy). Leading
+    guess, not proven: Engram builds a table of raw GPU addresses for cross-GPU reads, and
+    addresses of memory borrowed from the daemon are not valid that way. Copy mode does not fit
+    (daemon 130 GB/GPU plus the engine's copy).
+- Autotune: sharing one cache root between preload daemons and engines, plus pinning the
+  autotune cache key (`startup/autotune_key.py`, `--autotune-key`), keeps it at 0 tuning passes
+  even when the config hash changes.
 
-Still left in a warm start (287 s): weights 128, graph capture 91, JIT warmup 27, import 23.
+Still left in a warm start (F4, 202 s): weights 106, graph capture 35, JIT warmup 26, import 19.

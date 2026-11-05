@@ -14,7 +14,7 @@ Usage:
   python3 engine.py report --log serve.log --cache-root C
 Writes only --log, <log>.cache_before.json and files under --cache-root.
 """
-import argparse, json, os, subprocess, sys, time, urllib.request
+import argparse, json, os, re, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent          # repos/vllm/livelab
@@ -33,6 +33,8 @@ def start(a, extra):
         env["FASTRSI_GRAPHMEM_DIR"] = str(Path(a.cache_root) / "graphmem")
     if a.hooks:
         env["FASTRSI_HOOKS"] = a.hooks
+    if a.autotune_key:
+        env["FASTRSI_AUTOTUNE_KEY"] = a.autotune_key
     cmd = [a.vllm, "serve", a.model, "--load-format", a.load_format, "--host", "127.0.0.1",
            "--port", str(a.port), "--tensor-parallel-size", str(a.tp),
            "--max-model-len", str(a.max_model_len),
@@ -41,7 +43,7 @@ def start(a, extra):
         # By default ipc_cache quietly reads weights from disk when the preload process is missing
         # or does not match. With fallback off the engine refuses to start instead, so every
         # engine that runs is known to use the preloaded weights; nothing to check at run time.
-        cmd += ["--model-loader-extra-config", json.dumps({"fallback": False})]
+        cmd += ["--model-loader-extra-config", json.dumps({"fallback": False, "mode": a.ipc_mode})]
     before = caches.snapshot(a.cache_root)
     Path(a.log + ".cache_before.json").write_text(json.dumps(before))
     p = subprocess.Popen(cmd, stdout=open(a.log, "w"), stderr=subprocess.STDOUT, env=env,
@@ -78,6 +80,8 @@ def report(a):
     out["cache_growth"] = caches.diff(before, caches.snapshot(a.cache_root))
     text = open(a.log, errors="replace").read()
     out["graphmem_reused"] = text.count("fastrsi graphmem: reused")
+    # Autotune must come from the cache on a warm start; any tuned op here is a cache miss.
+    out["autotune_ops_tuned"] = sorted(set(re.findall(r"\[AutoTuner\]: Tuning ((?:\w+::)?\w+)", text)))
     # No weights-from-IPC check: start() runs ipc_cache with fallback off (see there).
     return out
 
@@ -90,6 +94,9 @@ if __name__ == "__main__":
     p.add_argument("--cache-root", required=True); p.add_argument("--log", required=True)
     p.add_argument("--load-format", default="ipc_cache"); p.add_argument("--vllm", default="vllm")
     p.add_argument("--graphmem", action="store_true"); p.add_argument("--hooks", default="")
+    p.add_argument("--autotune-key", default="", help="share autotune results across configs")
+    p.add_argument("--ipc-mode", default="zero_copy", choices=["zero_copy", "copy"],
+                   help="zero_copy: share the daemon's GPU memory; copy: clone it into the engine")
     a, extra = p.parse_known_args()
     extra = [x for x in extra if x != "--"]
     if a.cmd == "start":

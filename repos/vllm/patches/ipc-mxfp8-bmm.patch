@@ -1,0 +1,16 @@
+--- a/vllm/model_executor/kernels/linear/mxfp8/deep_gemm.py
++++ b/vllm/model_executor/kernels/linear/mxfp8/deep_gemm.py
+@@ -21,6 +21,13 @@
+ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
+     """Grouped MXFP8 einsum with per-row, 32-element weight scales."""
+ 
++    # Post-processing is a pure tensor transform (2-D -> 3-D weight, scale layout), so the
++    # transformed tensors a weight-cache daemon ships over IPC are already in final form, and
++    # process_weights_after_loading returns early on 3-D weights. The only non-tensor state it
++    # sets, layer.weight_block_size = [1, 32], is already set when the layer creates its weights.
++    # Lets `--load-format ipc_cache` start DeepSeek-V4.1 (which uses this kernel).
++    supports_pre_processed_weights = True
++
+     def __init__(self, config: Mxfp8LinearLayerConfig):
+         super().__init__(config)
+         self.recipe = (1, 1, 32)
