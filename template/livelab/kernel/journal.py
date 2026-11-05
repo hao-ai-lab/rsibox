@@ -32,8 +32,14 @@ Closures made at run time. A swapped function's new code can create function obj
 is installed (a closure it returns, a callback it registers); they are in no journal entry and
 would keep running the new inner code after undo. `apply` records the (new nested code, old
 nested code) pairs of every code it installs (`record_closures`), first, so the entry is undone
-last. Only at undo, and only when there are pairs, one heap pass finds the functions that run a
-new nested code (by identity; `gc.get_referrers` of those codes) and gives each its old code.
+last. Only at undo, and only for the new nested codes that gained a reference since apply (a
+function object made from a code holds one; `sys.getrefcount` against the count taken when
+the entry was recorded), one heap pass finds the functions that run them (by identity;
+`gc.get_referrers` of those codes) and gives each its old code. When no code gained a
+reference, nothing was made that outlives the call and the pass is skipped: on a loaded vLLM
+engine core the pass costs 0.1-0.15 s in the undo gap. A reference count that went down as
+another came up could hide a function; the kernel's own holders of these codes (the entry, the
+staged swap that installed them) stay until the undo is over.
 Generator expressions are left out: no function object of theirs outlives the call. A function
 whose new code has no old counterpart (a nested definition the edit added, or other free
 variables) cannot go back: it is a `closure_not_restored` finding with the count, and the undo
@@ -47,6 +53,7 @@ undo (an attribute changed on an object the cell did not declare, or a list/dict
 changed in place) becomes a `repair_not_undoable` finding in `r.findings`, not an exception.
 """
 import gc
+import sys
 import time
 import types
 
@@ -139,16 +146,28 @@ class Entry:
         if self.kind == "call":
             return {"kind": "call", "target": str(self.name), "name": str(self.name)}
         if self.kind == "closures":
-            return {"kind": "closures", "target": "nested codes", "name": str(len(self.old))}
+            return {"kind": "closures", "target": "nested codes", "name": str(len(self.old[0]))}
         return {"kind": "added" if self.kind == "getattr_added" else self.kind,
                 "target": _label(self.target), "name": str(self.name)}
 
 
-def _restore_closures(pairs):
-    """pairs: {id(new nested code): (new code, old code or None)}. One heap pass
-    (`gc.get_referrers` of the new codes, frozen objects included): every function whose
-    `__code__` is one of the new codes gets its old code back when the free variables match;
-    the rest are counted in a `closure_not_restored` finding."""
+def _refs(pairs):
+    """{id(new code): its reference count}, taken the same way at record and at undo."""
+    return {k: sys.getrefcount(p[0]) for k, p in pairs.items()}
+
+
+def _restore_closures(entry):
+    """entry: (pairs, refs at record). pairs: {id(new nested code): (new code, old code or
+    None)}. Only the new codes that gained a reference since the entry was recorded can have
+    a function object; when none did, no pass runs. Else one heap pass (`gc.get_referrers`
+    of those codes, frozen objects included): every function whose `__code__` is one of them
+    gets its old code back when the free variables match; the rest are counted in a
+    `closure_not_restored` finding."""
+    pairs, base = entry
+    now = _refs(pairs)
+    pairs = {k: p for k, p in pairs.items() if now[k] != base[k]}
+    if not pairs:
+        return {"closures_restored": 0, "closure_codes_scanned": 0}
     t0 = time.perf_counter()
     restored, kept = 0, {}
     with L.unfrozen():
@@ -168,7 +187,8 @@ def _restore_closures(pairs):
                 kept[new.co_qualname] = kept.get(new.co_qualname, 0) + 1
     finally:
         del refs
-    out = {"closures_restored": restored, "closure_scan_s": round(time.perf_counter() - t0, 6)}
+    out = {"closures_restored": restored, "closure_codes_scanned": len(pairs),
+           "closure_scan_s": round(time.perf_counter() - t0, 6)}
     if kept:
         out["findings"] = [F.finding(
             "closure_not_restored",
@@ -249,10 +269,12 @@ class Journal:
 
     def record_closures(self, pairs):
         """Journal {id(new nested code): (new code, old code or None)} for the codes a swap
-        installs; undo gives every function made from a new code its old one (one heap
-        pass, only at undo). Nothing is recorded when `pairs` is empty."""
+        installs, with each new code's reference count now; undo gives every function made
+        from a new code its old one (one heap pass, only at undo, only for the codes that
+        gained a reference). Nothing is recorded when `pairs` is empty."""
         if pairs:
-            self.entries.append(Entry("closures", None, "closures", dict(pairs)))
+            pairs = dict(pairs)
+            self.entries.append(Entry("closures", None, "closures", (pairs, _refs(pairs))))
 
     def set_attr(self, obj, name, value):
         self.record_attr(obj, name)

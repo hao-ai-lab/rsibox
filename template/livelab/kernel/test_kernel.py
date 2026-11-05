@@ -1583,7 +1583,22 @@ class RuntimeClosureUndoTest(unittest.TestCase):
         u = j.undo_to(0)
         self.assertTrue(u["ok"], u)
         self.assertEqual((held(1), e.shift(1), ops.make_shift(1)(1)), (2, 11, 2))
-        self.assertEqual(u["closures_restored"], 1)
+        self.assertEqual((u["closures_restored"], u["closure_codes_scanned"]), (1, 1))
+
+    def test_undo_skips_the_heap_pass_when_no_closure_outlives_the_call(self):
+        """Proves: when the new `make_shift` made no closure that is still alive (one made and dropped, none kept), undo runs no heap pass (`closure_codes_scanned` 0, no `closure_scan_s`) and still restores the code, the engine's pre-swap closure included. On a loaded vLLM engine core the pass took 0.11-0.15 s inside the undo gap for a `Scheduler.schedule` swap that made no closure (our 2026-11-05 GPU run). Not: a reference count that drops elsewhere while a closure is made (the kernel's own holders stay until the undo is over)."""
+        _, eng, ops = fresh("rtclosure3")
+        e = eng.Engine()
+        new = edit(OPS, ("        return x + k\n", "        return x + k + 100\n"))
+        j = J.Journal()
+        r, d, a = install(ops.__name__, new, "auto", j, W.Witness())
+        self.assertTrue(a and a["ok"], (r["findings"], d))
+        self.assertEqual((ops.make_shift(1)(1), e.shift(1)), (102, 111))   # made and dropped
+        u = j.undo_to(0)
+        self.assertTrue(u["ok"], u)
+        self.assertEqual((u["closures_restored"], u["closure_codes_scanned"]), (0, 0))
+        self.assertNotIn("closure_scan_s", u)
+        self.assertEqual((e.shift(1), ops.make_shift(1)(1)), (11, 2))
 
     def test_closure_with_no_base_version_is_a_finding(self):
         """Proves: a closure from a nested def the edit added (`shift2`) cannot go back to base code; undo restores `make_shift` and reports `closure_not_restored` with the count and the qualname, and is not ok. Not: what the holder should do next (rebuild or drop it)."""
