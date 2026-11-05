@@ -150,6 +150,9 @@ class WorkerGroup(C.Participant):
     def reset(self, kind):
         return self._rpc("reset", kind)
 
+    def versions(self, _=None):
+        return self._rpc("versions", None)
+
 
 class Host:
     def __init__(self, core, root):
@@ -158,11 +161,12 @@ class Host:
         self.loop_thread = threading.current_thread()
         self.pending = []                   # phase-2 jobs waiting for in-flight batches
         self.held_steps = 0
+        self.gap_timeout = GAP_TIMEOUT_S        # per op: cmd["gap_timeout_s"]
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
         self.core_side = Side("core", scope={"core": core})
         self.co = C.StepGapCoordinator(
             [WorkerGroup(self), C.CallParticipant("core", self.core_side.dispatch)],
-            gap=lambda fn: self.in_loop(fn, gap=True, timeout=GAP_TIMEOUT_S),
+            gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None})
 
@@ -189,6 +193,7 @@ class Host:
     # -- control channel -----------------------------------------------------------------
     def handle(self, cmd):
         op = cmd.get("op")
+        self.gap_timeout = float(cmd.get("gap_timeout_s") or GAP_TIMEOUT_S)
         t0 = time.perf_counter()
         held0 = self.held_steps
         try:
@@ -201,6 +206,12 @@ class Host:
                 r = self.co.undo(cmd["txn"])
             elif op == "status":
                 r = self.co.status(cmd["txn"])
+            elif op == "pstatus":             # each participant's own state (per rank)
+                r = F.ok(workers=self.co.participants[0].status(cmd["txn"]),
+                         core=self.core_side.dispatch("status", cmd["txn"]))
+            elif op == "versions":            # per-rank and core version logs
+                r = F.ok(workers=self.co.participants[0].versions(),
+                         core=self.core_side.versions())
             elif op == "ping":
                 r = F.ok(pid=os.getpid())
             else:
@@ -216,6 +227,11 @@ class Host:
             off = time.time() - time.perf_counter()
             r["host"]["steps_prepare"] = self.step_stats(tl["prepare_start"] - off,
                                                          tl["prepared"] - off)
+        if "gap_start" in tl and "gap_end" in tl:            # did any step start in the gap?
+            off = time.time() - time.perf_counter()
+            a, b = tl["gap_start"] - off, tl["gap_end"] - off
+            r["host"]["steps_started_in_gap"] = sum(1 for st, _ in list(self.steps)
+                                                    if a <= st <= b)
         return r
 
     def control(self):
@@ -257,6 +273,8 @@ def _patch_core(mod):
         if hold:                                 # pause keep: schedule nothing new
             self.scheduler.has_requests = lambda: False
             h.held_steps += 1
+        if h is not None:
+            h.core_side.tick(True)
         t = time.perf_counter()
         try:
             r = orig_step(self)
