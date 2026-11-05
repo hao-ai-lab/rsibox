@@ -278,8 +278,9 @@ class LocalParticipant(Participant):
             fs.append(F.finding("empty_change", f"{len(items)} target(s), none changed; no "
                                 "definition added or deleted; no repair cell",
                                 "at least one change to install"))
-        d = F.decide(fs, accept)
-        out_fs = [{**f, "participant": self.name} for f in d["findings"]]
+        # tag before deciding: a standing accept matches on participant and code_hash
+        d = F.decide([{**f, "participant": self.name} for f in fs], accept)
+        out_fs = d["findings"]
         if not (ok and d["proceed"]):
             self._state[txn] = "aborted"
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
@@ -327,8 +328,8 @@ class LocalParticipant(Participant):
                         "repair_failed", f"{type(e).__name__}: {e}", "the cell runs")]
                         + u["findings"])
                 fs += rep.findings
-            d = F.decide(fs, accept)
-            fs = [{**f, "participant": self.name} for f in d["findings"]]
+            d = F.decide([{**f, "participant": self.name} for f in fs], accept)
+            fs = d["findings"]
             if not d["proceed"]:
                 u = self.journal.undo_to(mark)
                 return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"])

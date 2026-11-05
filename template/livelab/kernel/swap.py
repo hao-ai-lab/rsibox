@@ -469,6 +469,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         item = st.items.get(f.get("subject")) if isinstance(f.get("subject"), str) else None
         if item:
             f["code_hash"] = item["new_hash"]
+        elif f.get("subject") == kname:      # about the whole module: its new text
+            f["code_hash"] = L.text_hash(source)
     return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
 
 

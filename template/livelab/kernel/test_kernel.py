@@ -404,6 +404,19 @@ class KernelTest(unittest.TestCase):
         self.assertTrue(p.commit("b")["ok"])
         self.assertEqual((ops.scale(3), ops.STEP_SCALE), (7, 2))   # body new, constant old
 
+        # a standing accept for this participant and this text covers the same finding again;
+        # for another participant, or once the text changes, it does not
+        name2, _, _ = fresh("accept2")
+        q = C.LocalParticipant("rank0", alias={"toy": name2})
+        rec = {"check": "outside_changes", "scope": "standing", "by": "t", "reason": "r",
+               "participant": "rank0", "code_hash": L.text_hash(new)}
+        r = q.prepare({"id": "s1", "modules": mods, "accept": [rec]})
+        self.assertTrue(r["ok"], r["findings"])
+        q.abort("s1")
+        r = C.LocalParticipant("rank1", alias={"toy": name2}).prepare(
+            {"id": "s2", "modules": mods, "accept": [rec]})
+        self.assertFalse(r["ok"])
+
         # on top of what b installed (the participant now stages against b's text)
         bad = {"toy.ops": {"source": edit(new, ("return x + k", "return x + k + bias")),
                            "targets": [["make_shift.<locals>.shift", at(OPS, "def shift")]]}}
