@@ -96,6 +96,12 @@ CATALOG = {
         [{"action": "inspect the participant (REPL) and retry", "cost": "seconds"}, RESTART],
         "participants run different code: every collective of the next step is suspect",
         [], False),
+    "reset_failed": (
+        "the data reset the undo plan declares did not run; undo restored the code, but data "
+        "the new code wrote (requests, cache entries) stays",
+        [{"action": "run the reset by hand (REPL) or add the hook", "cost": "ms to seconds"},
+         RESTART],
+        "later results read data written by code that is no longer installed", [], False),
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),

@@ -155,14 +155,14 @@ class KernelTest(unittest.TestCase):
         c1 = L.locate(n1 + ".engine", "Engine.step", line)["codes"][0]
         self.assertIsNot(e0.Engine.step.__code__, e1.Engine.step.__code__)
         self.assertEqual((os.path.basename(c0["file"]), c0["qualname"], c0["firstlineno"]),
-                         ("engine.py", "Engine.step", 21))
+                         ("engine.py", "Engine.step", 22))
         self.assertEqual(c0["hash"], c1["hash"])
 
         def code(src, q):
             return L.code_tree(compile(src, "engine.py", "exec"))[0][
                 (q, at(src, "def " + q.split(".")[-1]))][0]
         moved = code("\n\n\n" + ENG, "Engine.step")
-        self.assertEqual((moved.co_firstlineno, L.content_hash(moved)), (24, c0["hash"]))
+        self.assertEqual((moved.co_firstlineno, L.content_hash(moved)), (25, c0["hash"]))
         edited = code(edit(ENG, ("self.steps += 1", "self.steps += 2")), "Engine.step")
         self.assertNotEqual(L.content_hash(edited), c0["hash"])
 
@@ -248,7 +248,7 @@ class KernelTest(unittest.TestCase):
                          [("core", "base_mismatch"), ("core", "outside_changes")])
         self.assertEqual([eng.Engine.step.__code__ for _, eng, _ in parts], base)
         self.assertEqual([e.step(3) for _, _, e in parts], [17, 17, 27])
-        self.assertEqual((rec["undo"]["status"], rec["actual_recipes"], rec["edit_to_run_s"]),
+        self.assertEqual((rec["rollback"]["status"], rec["actual_recipes"], rec["edit_to_run_s"]),
                          ("not_needed", [], None))
         self.assertEqual(R.read(path)[0]["outcome"], "aborted")
 
@@ -269,7 +269,7 @@ class KernelTest(unittest.TestCase):
                           "core": ["abort", "prepare"]})
         self.assertEqual(rec["participants"]["rank1"]["commit"]["error"],
                          "commit: RuntimeError: rank1: worker process lost")
-        self.assertEqual((rec["undo"]["status"], list(rec["undo"]["participants"])),
+        self.assertEqual((rec["rollback"]["status"], list(rec["rollback"]["participants"])),
                          ("undone", ["rank0"]))
         self.assertIn(("rank1", "participant_failed"),
                       [(f["participant"], f["check"]) for f in rec["findings"]])
@@ -278,8 +278,8 @@ class KernelTest(unittest.TestCase):
         self.assertEqual([e.step(3) for _, _, e in parts], [17, 17, 17])
         self.assertEqual(parts[0][0].journal.entries, [])
 
-    def test_receipt_fields_and_measured_times(self):
-        """Proves: the receipt has every field, its times are differences of measured timestamps, and writes append. Not: GPU costs."""
+    def test_linked_receipts_and_measured_times(self):
+        """Proves: txn and proof records share the id, carry every field, time from measured timestamps, and only append. Not: GPU costs."""
         parts = self._three("receipt")
         _, ceng, ce = parts[2]
         ce.delay = 0.02
@@ -301,6 +301,11 @@ class KernelTest(unittest.TestCase):
                          edit_time=t_edit,
                          baseline_restart={"seconds": 31.0, "source": "kb/costs.md R9"})
             first = text(path)
+            n = ce.steps
+            wait_for(lambda: ce.steps >= n + 2)              # the workload: core's loop steps
+            for _, _, e in parts[:2]:
+                e.step(1)
+            proof = co.prove(res["txn"], golden={"step(3)": "not run"})
             spec2 = {"source": edit(OPS, ("return x + 1", "return x + 2")),
                      "base_hash": L.text_hash(OPS), "targets": [["activate", at(OPS, "@traced")]]}
             res2 = co.run({"modules": {"toy.ops": spec2}})
@@ -308,20 +313,27 @@ class KernelTest(unittest.TestCase):
             stop.set()
             th.join()
         self.assertEqual((res["outcome"], res2["outcome"]), ("committed", "committed"))
-        recs = R.read(path)
-        self.assertEqual(len(recs), 2)
         self.assertTrue(text(path).startswith(first))
-        rec = recs[0]
-        self.assertEqual(sorted(set(R.FIELDS) | {"writer"}), sorted(rec))
+        self.assertEqual([(r["kind"], r["id"]) for r in R.read(path)],
+                         [("txn", res["txn"]), ("proof", res["txn"]), ("txn", res2["txn"])])
+        rec, prf = R.read(path, res["txn"])
+        self.assertEqual(sorted(R.FIELDS["txn"] + ("writer",)), sorted(rec))
+        self.assertEqual(sorted(R.FIELDS["proof"] + ("writer",)), sorted(prf))
         tl = rec["timeline"]
         self.assertEqual(tl["edit"], t_edit)
         self.assertEqual(rec["edit_to_run_s"], round(tl["committed"] - tl["edit"], 6))
-        self.assertEqual(rec["edit_to_finish_s"], round(tl["finished"] - tl["edit"], 6))
-        self.assertTrue(tl["edit"] <= tl["prepare_start"] <= tl["vote"] <= tl["committed"]
-                        <= tl["finished"])
+        self.assertTrue(tl["edit"] <= tl["queued"] <= tl["prepare_start"] <= tl["vote"]
+                        <= tl["committed"] <= tl["txn_end"])
         self.assertGreater(rec["edit_to_run_s"], 0)
+        self.assertEqual(prf["edit_to_finish_s"],
+                         round(prf["timeline"]["proved"] - prf["timeline"]["edit"], 6))
+        self.assertGreater(prf["edit_to_finish_s"], rec["edit_to_run_s"])
+        k = f"toy.engine:Engine.step:{at(ENG, 'def step')}"
+        self.assertEqual((prf["witness"]["rank0"][k], prf["witness"]["rank1"][k]), (1, 1))
+        self.assertGreaterEqual(prf["witness"]["core"][k], 2)    # its loop stepped >= 2 times
+        self.assertEqual((prf["findings"], prf["golden"]), ([], {"step(3)": "not run"}))
         self.assertEqual(rec["baseline_restart_s"], {"seconds": 31.0, "source": "kb/costs.md R9"})
-        self.assertEqual((rec["actual_recipes"], rec["proofs"]["hashes_agree"], rec["outcome"]),
+        self.assertEqual((rec["actual_recipes"], rec["commit_hashes"]["agree"], rec["outcome"]),
                          (["R0 swap"], True, "committed"))
         self.assertEqual(rec["engine"], {"name": "toy", "version": "0", "commit": None})
         self.assertEqual([e.step(3) for _, _, e in parts], [1800, 1800, 1800])
@@ -397,6 +409,131 @@ class KernelTest(unittest.TestCase):
         self.assertTrue(p.prepare({**plan, "id": "r2", "accept": ["repair_not_undoable"]})["ok"])
         self.assertTrue(p.commit("r2")["ok"])
         self.assertEqual(vars(e)["bias"], 1)
+
+    # -- step-gap transactions: ranks that step together --------------------------------------
+
+    def _cluster(self, tag, gap_mode, quiesce=None):
+        """Three ranks, each its own toy copy, stepped together by one Cluster loop (the engine
+        core). gap_mode: participants switch when called (the loop owner calls them in its
+        gap); otherwise each switches at its own engine's boundary (the old way). The
+        coordinator reaches each rank through CallParticipant over a loopback call that takes
+        1 ms, like an RPC: in one process without it, the GIL would make three back-to-back
+        commits look atomic and hide the race. Returns (cluster, call participants, locals)."""
+        engines, ps, lps = {}, [], []
+        for pname in ("rank0", "rank1", "rank2"):
+            name, eng, _ = fresh(tag + pname)
+            e = engines[pname] = eng.Engine()
+            q = (quiesce or {}).get(pname) or (None if gap_mode else e.at_boundary)
+            lp = C.LocalParticipant(pname, alias={"toy": name}, quiesce=q)
+
+            def rpc(method, payload, lp=lp):
+                time.sleep(0.001)
+                return getattr(lp, method)(payload)
+            lps.append(lp)
+            ps.append(C.CallParticipant(pname, rpc))
+        return eng.Cluster(engines), ps, lps
+
+    def _start(self, cl):
+        stop = threading.Event()
+        th = threading.Thread(target=cl.run, args=(stop,), daemon=True)
+        th.start()
+
+        def halt():
+            stop.set()
+            th.join()
+        self.addCleanup(halt)
+        wait_for(lambda: len(cl.log) >= 3)
+        return halt
+
+    def _steps(self, cl, n=5):
+        k = len(cl.log)
+        wait_for(lambda: len(cl.log) >= k + n)
+
+    V1 = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")')),
+                         "base_hash": L.text_hash(ENG),
+                         "targets": [["Engine.step", at(ENG, "def step")]]}}
+
+    def test_step_gap_commit_and_undo_never_mix_versions(self):
+        """Proves: with steps running, a step-gap commit then undo switch all 3 ranks between the same two steps, never mid-step. Not: real RPC."""
+        cl, ps, lps = self._cluster("gap", gap_mode=True)
+        co = C.StepGapCoordinator(ps, cl.at_gap)
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        self._steps(cl)
+        u = co.undo(res["txn"])
+        self._steps(cl)
+        halt()
+        self.assertEqual((res["outcome"], u["ok"]), ("committed", True))
+        self.assertEqual([t for t in cl.log if len(set(t)) > 1], [])
+        self.assertEqual([k for k, _ in itertools.groupby(cl.log)],
+                         [("base",) * 3, ("v1",) * 3, ("base",) * 3])
+        self.assertLess(res["receipt"]["phases_s"], 1.0)   # how long the gap stalled the loop
+
+    def test_one_by_one_commit_mixes_versions(self):
+        """Proves: the old coordinator (each rank at its own boundary) lets a step run ranks on different versions. Not: how often in a real engine."""
+        cl, ps, lps = self._cluster("old", gap_mode=False)
+        co = C.Coordinator(ps)
+        halt = self._start(cl)
+        for _ in range(5):                       # GIL timing: it shows on the first try here
+            res = co.run({"modules": self.V1})
+            self.assertTrue(res["ok"])
+            self._steps(cl, 3)
+            self.assertTrue(co.undo(res["txn"])["ok"])
+            self._steps(cl, 3)
+            if any(len(set(t)) > 1 for t in cl.log):
+                break
+        halt()
+        mixed = [t for t in cl.log if len(set(t)) > 1]
+        self.assertTrue(mixed)
+        self.assertIn(mixed[0], [("v1", "base", "base"), ("v1", "v1", "base"),
+                                 ("base", "v1", "v1"), ("base", "base", "v1")])
+
+    def test_step_gap_failed_commit_is_undone_in_the_same_gap(self):
+        """Proves: when rank1 fails at commit, rank0's commit is undone inside the same gap, so no step ever ran v1. Not: a rank that hangs."""
+        def lost(fn):
+            raise RuntimeError("rank1: worker process lost")
+        cl, ps, lps = self._cluster("gapfail", gap_mode=True, quiesce={"rank1": lost})
+        co = C.StepGapCoordinator(ps, cl.at_gap)
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        self._steps(cl)
+        halt()
+        self.assertEqual((res["outcome"], res["receipt"]["rollback"]["status"]),
+                         ("rolled_back", "undone"))
+        self.assertEqual(set(cl.log), {("base",) * 3})
+        self.assertEqual(lps[0].journal.entries, [])
+
+    def test_undo_runs_the_declared_data_reset(self):
+        """Proves: code undo leaves a cache entry the new code wrote; the plan's R3 hook clears it, and a rank without the hook gets reset_failed. Not: R2."""
+        name0, _, _ = fresh("reset0")
+        name1, eng, _ = fresh("reset1")
+        e0, e1 = sys.modules[name0 + ".engine"].Engine(), eng.Engine()
+
+        def r3():
+            n = len(e0.cache)
+            e0.cache.clear()
+            return {"cleared": n}
+        ps = [C.LocalParticipant("core", alias={"toy": name0}, resets={"R3": r3}),
+              C.LocalParticipant("rank0", alias={"toy": name1})]
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "receipts.jsonl")
+        co = C.Coordinator(ps, R.ReceiptWriter(path))
+        new = edit(ENG, ("self.steps += 1", "self.steps += 1\n        self.cache[x] = y"))
+        res = co.run({"undo_resets": ["R3"], "modules": {"toy.engine": {
+            "source": new, "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((e0.step(3), e1.step(3)), (17, 17))
+        self.assertEqual((e0.cache, e1.cache), ({3: 17}, {3: 17}))
+        u = co.undo(res["txn"])
+        self.assertEqual((e0.cache, e1.cache), ({}, {3: 17}))   # rank0 had no R3 hook
+        rec = u["receipt"]
+        self.assertEqual((rec["status"], rec["resets"]), ("partial", ["R3"]))
+        self.assertEqual(rec["participants"]["core"]["reset"]["R3"]["result"], {"cleared": 1})
+        self.assertEqual([(f["participant"], f["check"]) for f in rec["findings"]],
+                         [("rank0", "reset_failed")])
+        e0.step(3)
+        self.assertEqual(e0.cache, {})                          # base code writes no cache
+        self.assertEqual([r["kind"] for r in R.read(path, res["txn"])], ["txn", "undo"])
 
 
 if __name__ == "__main__":

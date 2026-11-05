@@ -1,31 +1,24 @@
-"""Receipt: one record per transaction, written by one writer to an append-only JSON-lines file.
+"""Receipt: linked records per transaction, written by one writer to an append-only JSON-lines file.
+
+PROPOSAL, NEEDS A HUMAN OWNER. AGENTS.md ("Trust") says agents never write the code that
+writes receipts. This file was written by an agent as a proposal for review; until a human
+owns it, receipts it writes are drafts, not trust anchors.
 
 This is the only code that writes receipts. Engine code, mechanisms and agents hand it a
 record; they never write the file. Each record is one JSON object on one line; the writer
 opens the file in append mode under an exclusive lock and never rewrites a line.
 
-Schema (`SCHEMA`, proposed for INTERFACE v1; see template/livelab/INTERFACE.md):
+A transaction leaves up to three records that share its `id` (schema proposed for INTERFACE
+v1; see template/livelab/INTERFACE.md):
 
-| field | type | meaning |
-|---|---|---|
-| schema | str | "fastrsi-receipt/proposed-v1" |
-| id | str | transaction id |
-| interface_version | str | live lab INTERFACE version the lab implements |
-| engine | {name, version, commit} | the engine under change |
-| base_hash, patch_hash | str | text_hash of the base and patched sources (and repair cells) |
-| plan | {targets, predicted_resources, recipes, certainty, accept} | what the planner predicted |
-| actual_recipes | [str] | recipes that ran (e.g. R0 swap, R10 repair) |
-| participants | {name: {prepare, commit, abort, undo}} | each call's ok-dict |
-| proofs | {participants: {name: {hashes, witness}}, hashes_agree: bool} | after commit |
-| findings | [finding + participant] | every finding of every phase |
-| decisions | {accepted: [check], blocking: [check]} | how the accept list was applied |
-| outcome | "committed" / "aborted" / "rolled_back" | |
-| timeline | {edit, prepare_start, vote, committed, finished} | unix seconds, measured |
-| edit_to_run_s | float or null | timeline.committed - timeline.edit (null if not committed) |
-| edit_to_finish_s | float | timeline.finished - timeline.edit |
-| baseline_restart_s | {seconds, source} or null | the warm restart this replaces |
-| undo | {status, participants} | status: "not_needed", "undone", "partial" |
-| writer | {pid, written_at} | added by the writer |
+- `txn` (from Coordinator.run): plan, each participant's prepare / commit / abort replies,
+  the vote outcome, in-transaction rollback, findings and decisions, edit_to_run_s.
+- `proof` (from Coordinator.prove, after the workload ran): witness counts per participant,
+  their findings (zero_witness, running_frame), the caller's golden results, edit_to_finish_s.
+- `undo` (from Coordinator.undo, whenever it happens): code undo per participant, then the
+  data resets the plan declared (`undo_resets`: R2, R3, ...), status, undo_s.
+
+Every record also has `schema` and `kind`; the writer adds `writer: {pid, written_at}`.
 """
 import fcntl
 import json
@@ -33,10 +26,31 @@ import os
 import time
 
 SCHEMA = "fastrsi-receipt/proposed-v1"
-FIELDS = ("schema", "id", "interface_version", "engine", "base_hash", "patch_hash", "plan",
-          "actual_recipes", "participants", "proofs", "findings", "decisions", "outcome",
-          "timeline", "edit_to_run_s", "edit_to_finish_s", "baseline_restart_s", "undo")
+FIELDS = {
+    "txn": ("schema", "kind", "id", "interface_version", "engine", "base_hash", "patch_hash",
+            "plan", "actual_recipes", "participants", "commit_hashes", "findings", "decisions",
+            "outcome", "timeline", "edit_to_run_s", "phases_s", "baseline_restart_s",
+            "rollback"),
+    "proof": ("schema", "kind", "id", "witness", "findings", "golden", "timeline",
+              "edit_to_finish_s"),
+    "undo": ("schema", "kind", "id", "participants", "resets", "status", "findings",
+             "timeline", "undo_s"),
+}
 OUTCOMES = ("committed", "aborted", "rolled_back")
+
+
+def _invalid(record):
+    kind = record.get("kind")
+    if kind not in FIELDS:
+        return f"unknown kind {kind!r}"
+    missing = [f for f in FIELDS[kind] if f not in record]
+    if missing:
+        return f"{kind}: missing {missing}"
+    if record["schema"] != SCHEMA:
+        return f"schema {record['schema']!r}"
+    if kind == "txn" and record["outcome"] not in OUTCOMES:
+        return f"outcome {record['outcome']!r}"
+    return None
 
 
 class ReceiptWriter:
@@ -46,11 +60,9 @@ class ReceiptWriter:
     def append(self, record):
         """Validate and append one record. Returns {"ok", "line"} or {"ok": False, "error"};
         never raises."""
-        missing = [f for f in FIELDS if f not in record]
-        if missing or record.get("schema") != SCHEMA or record.get("outcome") not in OUTCOMES:
-            return {"ok": False, "error": f"invalid receipt: missing {missing}, schema "
-                                          f"{record.get('schema')!r}, outcome "
-                                          f"{record.get('outcome')!r}"}
+        bad = _invalid(record)
+        if bad:
+            return {"ok": False, "error": f"invalid receipt: {bad}"}
         rec = {**record, "writer": {"pid": os.getpid(), "written_at": time.time()}}
         try:
             line = json.dumps(rec, sort_keys=True, default=str)
@@ -67,6 +79,8 @@ class ReceiptWriter:
         return {"ok": True, "path": self.path, "line": line}
 
 
-def read(path):
+def read(path, txn=None):
+    """All records, or the linked records of one transaction, in file order."""
     with open(path) as f:
-        return [json.loads(x) for x in f if x.strip()]
+        recs = [json.loads(x) for x in f if x.strip()]
+    return recs if txn is None else [r for r in recs if r["id"] == txn]

@@ -51,29 +51,55 @@ measurements, and the cost of each call.
 ## Proposed for v1: receipt schema (not part of version 0)
 
 > **Proposal.** Not binding for version 0 labs. Adopting it is the v1 bump. The writer is
-> `kernel/receipt.py` (`ReceiptWriter`), the only code that writes receipts: one JSON object
-> per line, appended under an exclusive lock, never rewritten. One record per transaction.
+> `kernel/receipt.py` (`ReceiptWriter`): one JSON object per line, appended under an exclusive
+> lock, never rewritten. It was written by an agent and **needs a human owner** before its
+> receipts count (see "Trust" in AGENTS.md).
+
+A transaction leaves linked records that share its `id`, appended to one file: `txn` when it
+runs, `proof` after the workload ran, `undo` whenever it is undone. Every record has
+`schema` (`fastrsi-receipt/proposed-v1`), `kind`, `id`, and `writer: {pid, written_at}` added
+by the writer.
+
+`txn`: the transaction (prepare, vote, commit or abort, rollback of a failed commit).
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | str | `fastrsi-receipt/proposed-v1` |
-| `id` | str | transaction id |
 | `interface_version` | str | the INTERFACE version the lab implements |
 | `engine` | `{name, version, commit}` | the engine under change |
 | `base_hash`, `patch_hash` | str | hash of the base sources, and of the patched sources plus repair cells |
-| `plan` | `{targets, predicted_resources, recipes, certainty, accept}` | what the planner predicted, and the accepted check names |
+| `plan` | `{targets, predicted_resources, recipes, certainty, accept, undo_resets}` | what the planner predicted, the accepted check names, the resets an undo must run |
 | `actual_recipes` | [str] | recipes that ran (empty unless committed) |
 | `participants` | `{name: {prepare, commit, abort, undo}}` | each call's `{"ok": bool, ...}` reply |
-| `proofs` | `{participants: {name: {hashes, witness}}, hashes_agree}` | code hashes and witness counts after commit |
-| `findings` | [finding + `participant`] | every finding of every phase, in the findings schema |
+| `commit_hashes` | `{participants: {name: {key: [hash]}}, agree}` | code hashes right after commit, and whether all participants agree |
+| `findings` | [finding + `participant`] | every finding of the transaction, in the findings schema |
 | `decisions` | `{accepted: [check], blocking: [check]}` | how the accept list was applied |
-| `outcome` | `committed` \| `aborted` \| `rolled_back` | all switched, none switched, or switched and undone |
-| `timeline` | `{edit, prepare_start, vote, committed, finished}` | measured unix seconds |
+| `outcome` | `committed` \| `aborted` \| `rolled_back` | all switched, none switched, or switched and undone in the same transaction |
+| `timeline` | `{edit, queued, prepare_start, vote, committed, txn_end}` | measured unix seconds |
 | `edit_to_run_s` | float \| null | `committed - edit`; null if nothing committed |
-| `edit_to_finish_s` | float | `finished - edit` |
+| `phases_s` | float | `txn_end - queued`: for a step-gap transaction, how long the engine's loop stalled |
 | `baseline_restart_s` | `{seconds, source}` \| null | the warm restart this transaction replaces |
-| `undo` | `{status, participants}` | `not_needed`, `undone` or `partial`, with each undo reply |
-| `writer` | `{pid, written_at}` | added by the writer |
+| `rollback` | `{status, participants}` | undo of a failed commit: `not_needed`, `undone` or `partial` |
+
+`proof`: what the workload showed after the transaction.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `witness` | `{name: {key: calls}}` | calls of each swapped target per participant |
+| `findings` | [finding + `participant`] | `zero_witness`, `running_frame`, ... |
+| `golden` | any | the caller's golden-check results, recorded as given |
+| `timeline` | `{edit, proved}` | measured unix seconds |
+| `edit_to_finish_s` | float \| null | `proved - edit` |
+
+`undo`: a later undo of a committed transaction.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `participants` | `{name: {undo, reset: {kind: reply}}}` | code undo, then each declared data reset |
+| `resets` | [str] | the plan's `undo_resets` (R2 request state, R3 cached data, R8 snapshot) |
+| `status` | `undone` \| `partial` | `partial` if any undo or reset failed |
+| `findings` | [finding + `participant`] | e.g. `reset_failed`, `undo_incomplete` |
+| `timeline` | `{queued, code_undone, undo_end}` | measured unix seconds |
+| `undo_s` | float | `undo_end - queued` |
 
 Findings schema: `{check, observed, expected, why, actions: [{action, cost}], risk_if_ignored,
 lessons: [...], overridable}`, plus optional `subject` and `accepted`.
