@@ -134,6 +134,64 @@ class WorkerPrepareTest(unittest.TestCase):
         self.assertEqual([(s, sorted(v)) for s, v in side.vlog], [(2, [f"{m}:Engine.step"])])
 
 
+class RanksDisagreeTest(unittest.TestCase):
+
+    def test_host_receipt_names_ranks_that_run_different_code(self):
+        """Proves: through the adapter's own pieces (two worker Sides behind a WorkerGroup and
+        the engine-core Side, as the host wires them into the kernel's StepGapCoordinator), a
+        commit after which rank 1 runs other code for `Engine.step` gives a txn receipt with a
+        not-overridable `ranks_disagree` finding for "workers" naming the split, blocking in
+        `decisions`; the same plan with both ranks switched gives none. Pain point: at TP2 the
+        receipt said ranks_agree false with findings []. Not: real ranks in separate processes
+        (needs TP4: the kernel's live receipt there)."""
+        from kernel import coordinator as C
+
+        def run(tag, tamper_rank=None):
+            sides = []
+            for r in range(2):
+                name = f"kvr{next(_n)}_{tag}{r}"
+                toy.load_copy(name)
+                s = Side("worker", rank=r)
+                s.lp.alias = {"toy": name}          # each rank its own module, as in a process
+                if s.lp.analyzer is not None:
+                    self.addCleanup(s.lp.analyzer.close)
+                if r == tamper_rank:
+                    commit = s.lp.commit
+
+                    def tampered(txn, commit=commit, name=name):
+                        out = commit(txn)
+                        eng = sys.modules[name + ".engine"]
+                        eng.Engine.step.__code__ = eng.Engine.drain.__code__.replace(
+                            co_name="step", co_qualname="Engine.step")
+                        return out
+                    s.lp.commit = tampered
+                sides.append(s)
+            core = Side("core", scope={})
+            if core.lp.analyzer is not None:
+                self.addCleanup(core.lp.analyzer.close)
+            co = C.StepGapCoordinator(
+                [WorkerGroup(_Host(sides)), C.CallParticipant("core", core.dispatch, bounded=True)],
+                gap=lambda fn: fn(), phase2_deadline_s=None)
+            line = next(i for i, x in enumerate(ENG.splitlines(), 1) if "def step" in x)
+            plan = {"modules": {"toy.engine": {
+                "on": ["worker"], "base_hash": L.text_hash(ENG),
+                "source": ENG.replace('self.ran.append("base")', 'self.ran.append("v1")'),
+                "targets": [["Engine.step", line]]}}}
+            return co.run(plan)["receipt"]
+
+        ok = run("agree")
+        self.assertEqual((ok["outcome"], ok["commit_hashes"]["ranks_agree"], ok["findings"]),
+                         ("committed", {"workers": True}, []))
+        bad = run("split", tamper_rank=1)
+        fs = [f for f in bad["findings"] if f["check"] == "ranks_disagree"]
+        self.assertEqual((bad["outcome"], bad["commit_hashes"]["ranks_agree"]),
+                         ("committed", {"workers": False}))
+        self.assertEqual([(f["participant"], f["overridable"]) for f in fs], [("workers", False)])
+        self.assertTrue(fs[0]["observed"].startswith("ranks "), fs[0]["observed"])
+        self.assertIn("Engine.step", fs[0]["observed"])
+        self.assertIn("ranks_disagree", bad["decisions"]["blocking"])
+
+
 class RepairCellTest(unittest.TestCase):
 
     def test_a_repair_cell_runs_on_the_roles_in_its_on_list(self):

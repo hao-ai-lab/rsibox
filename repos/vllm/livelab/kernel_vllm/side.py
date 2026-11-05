@@ -88,7 +88,8 @@ class Side:
 
     def _watch_targets(self, targets):
         for m, ts in (targets or {}).items():
-            mod = sys.modules.get(m) or importlib.import_module(m)
+            act = self.lp._actual(m)            # the participant's module alias, if any
+            mod = sys.modules.get(act) or importlib.import_module(act)
             for qual, _line in ts:
                 obj = mod
                 try:
