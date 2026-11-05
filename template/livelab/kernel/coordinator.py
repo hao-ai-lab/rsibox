@@ -119,7 +119,8 @@ def txn_ref(ref):
 
 
 PHASE2 = ("validate", "commit", "abort", "undo")
-REBUILD_RECIPES = {"R1": "R1 recapture"}      # receipt names of the rebuild routes
+REBUILD_RECIPES = {"R1": "R1 recapture",     # receipt names of the rebuild routes
+                   "R6": "R6 weight reload"}
 
 
 class Participant:
