@@ -3,7 +3,10 @@
 The swap injects `__fastrsi_hit__("<key>")` as the first statement of each new body (after
 the docstring), as `fastrsi_lab_cov.install_batch` does. `__fastrsi_hit__` is a global of the
 module, bound to the participant's `Witness.hook` (a plain function that calls `hit`); the
-swap adds it through the journal, so undo removes it and the counter keys with it.
+swap binds it through the journal. Undo never deletes the global: code that Dynamo transformed
+or a graph captured while the edit was installed may still name it, and a deleted global killed
+an engine with NameError at the next step (a live graph-mode run). Undo binds the no-op `stub`
+instead (where the swap added the name) and drops the counter keys.
 
 Calls made while the engine records a graph (CUDA graph capture, and the warm-up runs of a
 recapture) are counted apart, in `capture_counts`: a graph replay runs no Python, so those
@@ -78,6 +81,21 @@ class Witness:
         finally:
             self._capture -= 1
 
+    def arm(self, key, journal=None):
+        """A counter for something a repair cell changed (a kernel it rebuilt, a cache it
+        re-made): sets counts[key] to 0 (through `journal` when given) and returns a hook
+        that counts one call of `key` per call, whatever its arguments (usable as a Triton
+        pre_run_hook)."""
+        if journal is not None:
+            journal.set_item(self.counts, key, 0)
+        else:
+            self.counts[key] = 0
+        self.capture_counts[key] = 0
+
+        def hook(*_a, **_k):
+            self.hit(key)
+        return hook
+
     def snapshot(self):
         return dict(self.counts)
 
@@ -112,6 +130,11 @@ class Witness:
                         for k in keys})
         res["findings"] = out
         return res
+
+
+def stub(key):
+    """What `__fastrsi_hit__` is bound to after undo: counts nothing, raises nothing."""
+    return None
 
 
 def _hook(witness):

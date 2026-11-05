@@ -129,7 +129,8 @@ def module_functions(mod):
     module-level functions, methods of classes defined in the module (also static and class
     methods, properties, nested classes), decorator wrappers' originals (closure cells and
     `__wrapped__`), bound methods. Pure Python over the module, so it never holds the GIL
-    long. Swapping `__code__` on these objects reaches every holder of them (from-import
+    long. Also the `.fn` of wrapper objects (Triton's @jit kernels and their autotune /
+    heuristics wrappers). Swapping `__code__` on these objects reaches every holder of them (from-import
     copies, bound methods saved as callbacks). It misses closures made at run time and
     functions defined in the module but referenced only elsewhere: `stage` scans the heap
     for nested targets and for targets this does not find."""
@@ -156,6 +157,15 @@ def module_functions(mod):
             stack += [f for f in (o.fget, o.fset, o.fdel) if f is not None]
         elif isinstance(o, type) and o.__module__ == name:
             stack += list(vars(o).values())
+        elif not isinstance(o, (type, types.ModuleType)):
+            # a wrapper object that keeps the function in `.fn` (a Triton @jit kernel, its
+            # autotune / heuristics wrappers): found here, not by a heap scan
+            try:
+                d = object.__getattribute__(o, "__dict__")
+            except Exception:
+                continue
+            if isinstance(d, dict) and "fn" in d:
+                stack.append(d["fn"])
     return list(out.values())
 
 

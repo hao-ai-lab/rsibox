@@ -261,11 +261,20 @@ class Journal:
         self.entries.append(Entry("getattr_added", obj, name, None) if old is MISSING
                             else Entry("attr", obj, name, old))
 
-    def record_call(self, undo_fn, label):
+    def record_call(self, undo_fn, label, after_code=False):
         """Journal a change only a function can undo (a Triton kernel rebuilt in place):
         undo calls `undo_fn()` at this entry's place, newest first with the others. If it
-        raises, the undo reports `undo_incomplete` naming `label` and goes on."""
-        self.entries.append(Entry("call", undo_fn, label, None))
+        raises, the undo reports `undo_incomplete` naming `label` and goes on.
+        after_code=True: the entry goes to the start of the current transaction (the last
+        mark), so undo calls it after every other inverse of the transaction, once the code
+        is back at base. For engine state that must be rebuilt FROM the base code: a cell
+        that released captured graphs records "recapture" this way, so a rollback recaptures
+        the base code's graphs, not the edit's."""
+        e = Entry("call", undo_fn, label, None)
+        if after_code and self.marks:
+            self.entries.insert(self.marks[-1][1], e)
+        else:
+            self.entries.append(e)
 
     def record_closures(self, pairs):
         """Journal {id(new nested code): (new code, old code or None)} for the codes a swap
@@ -286,8 +295,14 @@ class Journal:
         else:
             self.entries.append(Entry("added", container, key, None))
 
-    def set_item(self, container, key, value):
-        self.record_item(container, key)
+    def set_item(self, container, key, value, absent=MISSING):
+        """container[key] = value. absent: what undo puts there when the key did not exist
+        (default: undo deletes it). The witness global uses it: undo binds a no-op stub, since
+        compiled code may still name it."""
+        if absent is not MISSING and key not in container:
+            self.entries.append(Entry("object", container, key, absent))
+        else:
+            self.record_item(container, key)
         container[key] = value
 
     def delete(self, owner, name):

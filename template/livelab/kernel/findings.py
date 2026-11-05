@@ -249,6 +249,35 @@ CATALOG = {
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),
+    "jit_rebuild": (
+        "the target is the Python function inside a JIT object (a Triton @jit kernel): the "
+        "engine runs what the JIT compiled from the source text, never the function's "
+        "bytecode, so a code swap alone leaves the GPU on the old kernel. The swap rebuilds "
+        "the JIT object in place from the new text (journaled: undo restores the old compiled "
+        "kernels), resets the module's JIT objects that call it, and counts launches as the "
+        "witness",
+        [{"action": "go on: the next launch compiles the new kernel", "cost": "one JIT "
+          "compile per specialization (seconds), on the first launch after the commit"}],
+        "none if the rebuild runs; kernels in other modules that inline this one keep the old "
+        "compiled code", ["Proving an edit applied"], True),
+    "new_fields": (
+        "the new code of a method reads an attribute that only the edited __init__ sets; "
+        "every live instance was built by the old __init__ and lacks it, so the first call of "
+        "the new code raises AttributeError (a live run killed the engine this way)",
+        [{"action": "accept with a backfill (plan \"backfill\": true): run the new "
+          "__init__'s assignment of each field on the live instances found from the "
+          "participant's scope (journaled: undo removes the fields)", "cost": "ms"},
+         {"action": "a repair cell that sets the fields (journal.record_attr)", "cost": "ms"},
+         RESTART],
+        "the engine dies at the first step that runs the new code",
+        ["Keeping state across edits"], True),
+    "no_witness_possible": (
+        "the transaction swapped no code, so no counter can prove it ran: it ran only repair "
+        "cells, and none armed a witness",
+        [{"action": "arm a counter from the cell (`hook = arm(key)`, call hook() where the "
+          "changed thing runs, e.g. a Triton pre_run_hook)", "cost": "none"},
+         {"action": "prove it by an output change of the workload", "cost": "seconds"}],
+        "a cell that changed nothing reads as a pass", ["Proving an edit applied"], True),
 }
 
 

@@ -65,6 +65,24 @@ Signatures and plan format: `kernel/coordinator.py`.
   finding, and the undo is not ok.
 - A participant in the caller's process may take the caller's own parse of the two texts
   (`trees`), so a caller that plans with its own parser does not make prepare parse again.
+- `validate` must run at the apply point. Stage sees steps in flight, so a frame of the old
+  code on a thread stack is only an advisory `running_frame` there; the blocking frame check is
+  validate's, at the quiesce point. A caller with no two-phase host (stage and apply in one
+  call) uses `swap.stage_and_apply`, which runs stage, decide, validate and apply in that order;
+  calling `stage` then `apply` skips the check, and a loop that never returns keeps the old
+  code with no blocking finding.
+- The witness global (`__fastrsi_hit__`) is never deleted: code compiled or captured while an
+  edit was installed may still call it. Undo binds a no-op stub.
+- JIT targets (a Triton `@jit` kernel) are rebuilt in place from the new text at commit
+  (`jit_rebuild`, advisory), with the module's JIT objects that call them reset; their witness
+  is their launches; undo restores the old compiled kernels.
+- Fields only the edited `__init__` sets and new code reads are a `new_fields` finding
+  (blocking unless accepted). A plan with `"backfill": true` sets them at commit on the live
+  instances found from the participant's scope (journaled).
+- A repair cell gets `journal`, `witness` and `arm(key)` (a counter for what it changes). A
+  transaction whose witness has no key at all is a `no_witness_possible` finding at proof. A cell
+  that changes engine state which must be rebuilt from the base code (released graphs) journals
+  the rebuild with `record_call(fn, label, after_code=True)`, so undo runs it after the code.
 
 ## Verbs
 

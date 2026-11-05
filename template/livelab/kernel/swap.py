@@ -57,6 +57,7 @@ import time
 import types
 
 from . import findings as F
+from . import jit as JIT
 from . import journal as J
 from . import locate as L
 from . import witness as W
@@ -159,6 +160,11 @@ def _blank(tree, targets, added, undo):
         else:
             _set(undo, n, body=ast.Constant(None),
                  args=ast.arguments([], [], None, [], [], None, []))
+
+    for n in ast.walk(tree):      # docstrings change no behaviour (see _dump_code)
+        b = getattr(n, "body", None)
+        if isinstance(n, (*_DEF, ast.ClassDef, ast.Module)) and isinstance(b, list) and _doc(b):
+            _set(undo, n, body=b[1:] or [ast.Pass()])
 
     def strip(body, pre):
         out = []
@@ -273,6 +279,9 @@ class Staged:
         self.removes = []        # (owner: module dict or class, name) the edit deletes
         self.items = {}          # key -> JSON summary
         self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
+        self.jits = []           # (key, [JIT objects holding it], [JIT objects calling it])
+        self.source = None       # the patched module text (a JIT rebuild reads it)
+        self.new_fields = []     # fields only the new __init__ sets (analysis + live check)
 
 
 _compile = compile          # `stage` has a parameter named compile
@@ -489,6 +498,17 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
                 != ast.dump(ast.Tuple(pnode.args.defaults + pnode.args.kw_defaults))):
             r["defaults"] = _defaults_stub(q, pnode)
 
+    # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
+    meths = {}
+    for q, i in todo:
+        parts = q.split(".")
+        if len(parts) == 2 and isinstance(pq[q][i], _DEF):
+            meths.setdefault(parts[0], []).append(pq[q][i])
+    for q, cls_name, n in added:
+        if cls_name is not None and isinstance(n, _DEF):
+            meths.setdefault(cls_name, []).append(n)
+    new_fields = _new_fields(base_tree, tree, meths, filename) if meths else []
+
     # 7. anything else changed? Last, because blanking edits the two trees (logged in undo).
     t = time.perf_counter()
     outside = _blank(base_tree, todo, set(removed), undo) != _blank(
@@ -498,7 +518,118 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
             "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
             "imports": imports, "outside_changes": outside, "timings": timings,
-            "aliases": aliases}
+            "aliases": aliases, "new_fields": new_fields}
+
+
+def _self_name(fn):
+    args = fn.args.posonlyargs + fn.args.args
+    return args[0].arg if args else None
+
+
+def _self_attrs(node, me, ctx):
+    """Attribute names X of `me.X` in node with the given context (ast.Load / ast.Store)."""
+    if me is None:
+        return set()
+    return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name) and n.value.id == me and isinstance(n.ctx, ctx)}
+
+
+def _class_names(cls):
+    out = set()
+    for n in cls.body:
+        if isinstance(n, (*_DEF, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, ast.Assign):
+            out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+    return out
+
+
+def _field_stmt(st, me):
+    """X when `st` is a top-level `me.X = value` (or annotated) statement, else None."""
+    t = st.targets[0] if isinstance(st, ast.Assign) and len(st.targets) == 1 else \
+        st.target if isinstance(st, ast.AnnAssign) and st.value is not None else None
+    if isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == me:
+        return t.attr
+    return None
+
+
+def _loads(node):
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+
+
+def _backfill_code(cls_name, init, i, filename):
+    """The new __init__'s statement i (`self.X = ...`) and the earlier top-level statements
+    that bind the local names it reads, compiled as `__fastrsi_backfill__(self, *, params)`
+    inside a scratch class named like the class (same name mangling). Params: the __init__
+    parameters the statements read, with the __init__'s defaults."""
+    me = _self_name(init)
+    body, need = [init.body[i]], _loads(init.body[i].value) - {me}
+    for st in reversed(init.body[:i]):
+        if isinstance(st, (ast.Assign, ast.AnnAssign)):
+            tg = st.targets if isinstance(st, ast.Assign) else [st.target]
+            bound = {n.id for t in tg for n in ast.walk(t) if isinstance(n, ast.Name)}
+            if bound & need and st.value is not None:
+                body.insert(0, st)
+                need = (need - bound) | (_loads(st.value) - {me})
+    a = init.args
+    pos = a.posonlyargs + a.args
+    defaults = dict(zip([x.arg for x in pos[len(pos) - len(a.defaults):]], a.defaults))
+    defaults.update({x.arg: d for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None})
+    names = [x.arg for x in pos[1:] + a.kwonlyargs]
+    params = [n for n in names if n in need]
+    fn = ast.FunctionDef(
+        "__fastrsi_backfill__", ast.arguments(
+            [], [ast.arg(me)], None, [ast.arg(p) for p in params],
+            [copy.deepcopy(defaults[p]) if p in defaults else None for p in params], None, []),
+        [copy.deepcopy(x) for x in body] + [ast.Return(ast.Constant(None))], [], None,
+        type_params=[])
+    ast.copy_location(fn, init)
+    cls = ast.ClassDef(cls_name, [], [], [fn], [], type_params=[])
+    ast.copy_location(cls, init)
+    return {"params": params, "defaults": [p for p in params if p in defaults],
+            "statements": [ast.unparse(x) for x in body],
+            **_try_compile(ast.fix_missing_locations(ast.Module([cls], [])), filename)}
+
+
+def _new_fields(base_tree, tree, meths, filename):
+    """[{cls, field, readers, init_line, backfill}] for each attribute that a changed or added
+    method of a top-level class reads on `self`, that the edited __init__ sets, and that no
+    method of the base class sets nor any class body defines. backfill: the compiled
+    statements (`_backfill_code`), or {"error"} when the field is not set by a top-level
+    statement of the new __init__."""
+    bcls = {n.name: n for n in base_tree.body if isinstance(n, ast.ClassDef)}
+    pcls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    out = []
+    for c, nodes in meths.items():
+        b, p = bcls.get(c), pcls.get(c)
+        init = next((m for m in (p.body if p else ()) if isinstance(m, _DEF)
+                     and m.name == "__init__"), None)
+        if b is None or init is None:
+            continue
+        old = set()
+        for m in b.body:
+            if isinstance(m, _DEF):
+                old |= _self_attrs(m, _self_name(m), ast.Store)
+        old |= _class_names(b) | _class_names(p)
+        me = _self_name(init)
+        sets = _self_attrs(init, me, ast.Store)
+        readers = {}
+        for m in nodes:
+            if m.name == "__init__":
+                continue
+            for x in _self_attrs(m, _self_name(m), ast.Load):
+                if x in sets and x not in old:
+                    readers.setdefault(x, []).append(f"{c}.{m.name}")
+        for x in sorted(readers):
+            i = next((j for j, st in enumerate(init.body) if _field_stmt(st, me) == x), None)
+            out.append({"cls": c, "field": x, "readers": sorted(set(readers[x])),
+                        "init_line": first_line(init),
+                        "backfill": {"error": f"{c}.__init__ sets {x} inside a block, not in a "
+                                     "top-level statement"} if i is None
+                        else _backfill_code(c, init, i, filename)})
+    return out
 
 
 def _try_compile(mod, filename):
@@ -644,6 +775,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         timings["trees"] = at["trees"]
     st = Staged(mod)
     st.line_map = a["line_map"]
+    st.source = source
     if base_hash is not None and L.text_hash(base_src) != base_hash:
         fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
                             f"plan base hash {base_hash}", subject=kname))
@@ -792,10 +924,42 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                        "new_hash": L.content_hash(new),
                        "functions": sum(len(held.get(o, [])) for o in olds),
                        "via": sum(len(held.get(o, [])) for o, _ in chain)}
+        jits = JIT.holders(mod, st.functions[k]) if st.functions[k] else []
+        if jits:
+            # the engine runs what the JIT compiled from the text, not this bytecode: apply
+            # rebuilds the JIT object in place (jit.py) and counts its launches
+            deps = JIT.dependents(mod, q.rsplit(".", 1)[-1], skip=jits)
+            st.jits.append((k, jits, deps))
+            st.items[k]["jit"] = {"holders": [JIT.kind(o) for o in jits],
+                                  "dependents": len(deps), "witness": "launches"}
+            fs.append({**F.finding(
+                "jit_rebuild", f"{len(jits)} JIT object(s) ({JIT.kind(jits[0])}) run this "
+                f"function; {len(deps)} other JIT object(s) of the module call it",
+                "a function the engine runs as Python bytecode", subject=k), "advisory": True})
     for o, (c, d, kw) in plan.items():
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
+
+    # 6b. fields only the new __init__ sets, read by new code: live instances lack them
+    for nf in a.get("new_fields") or ():
+        cls = getattr(mod, nf["cls"], None)
+        x = nf["field"]
+        attr = f"_{nf['cls'].lstrip('_')}{x}" if x.startswith("__") and not x.endswith("__") \
+            else x
+        if not isinstance(cls, type) or hasattr(cls, attr):
+            continue                       # a class-level default covers old instances
+        bf = nf["backfill"]
+        how = (f"backfill offered: {'; '.join(bf['statements'])}" + (
+            f" (with {', '.join(bf['params'])} resolved from each instance or its owners)"
+            if bf["params"] else "")) if "code" in bf else \
+            f"no backfill: {bf.get('error')}"
+        fs.append(F.finding(
+            "new_fields", f"{', '.join(nf['readers'])} read self.{x}, which only the edited "
+            f"{nf['cls']}.__init__ sets; instances built before the swap lack it; {how}",
+            f"every live {nf['cls']} has {x}", subject=f"{kname}:{nf['cls']}.{x}"))
+        st.new_fields.append({**nf, "cls_obj": cls, "attr": attr,
+                              "subject": f"{kname}:{nf['cls']}.{x}"})
 
     # 7. anything else changed? (compared by the analysis)
     if a["outside_changes"]:
@@ -1059,10 +1223,10 @@ class ProcessAnalyzer:
             return ""
 
     def start(self):
-        """Spawn the child now, if none is alive; does not wait for its boot."""
+        """Spawn the child now, if none is alive; does not wait for its boot. Returns True
+        when this call spawned a child, False when a live one was kept (callers record it)."""
         with self._lock:
-            self._spawn()
-        return self
+            return self._spawn()
 
     def wait_ready(self, timeout_s=None):
         """Start the child if needed and wait until it is ready (at most `timeout_s`, default
@@ -1200,6 +1364,34 @@ def validate(st, frames=True):
     return F.ok(checked=len(st.expect)) if not fs else F.not_ok("changed since prepare", fs)
 
 
+def stage_and_apply(module, source, journal, witness, targets="auto", accept=(), **stage_kw):
+    """For callers that stage and apply in one call (no two-phase host): stage -> decide ->
+    validate -> apply. Since stage reports a frame on a thread stack only as advisory (prepare
+    sees steps in flight), the blocking frame check is `validate`, and it must run at the
+    apply point: a caller that applies right after stage without it loses the loop-frame
+    blocker and swaps code a running loop never leaves. Here validate runs right before
+    apply; its running_frame goes through `accept` (as in the gap), changed_since_prepare
+    always blocks. Returns {"ok", "stage", "validate", "decision", "apply", "findings"}; ok is
+    True only when applied. Never raises."""
+    r = stage(module, source, targets, **stage_kw)
+    out = {"ok": False, "stage": r, "validate": None, "apply": None}
+    d = F.decide(r["findings"], accept)
+    out["decision"], out["findings"] = d, d["findings"]
+    if not (r["ok"] and d["proceed"]):
+        return out
+    v = validate(r["staged"])
+    frames = F.decide([f for f in v["findings"] if f["check"] == "running_frame"], accept)
+    rest = [f for f in v["findings"] if f["check"] != "running_frame"]
+    out["validate"] = v
+    out["findings"] = d["findings"] + rest + frames["findings"]
+    if rest or not frames["proceed"]:
+        return out
+    a = apply(r["staged"], journal, witness)
+    out["apply"], out["ok"] = a, a["ok"]
+    out["findings"] += a.get("findings", [])
+    return out
+
+
 def changed_targets(base_src, new_src, trees=None):
     """Planning helper: [[qualname, first line in base_src]] of every definition (function,
     method, nested function, lambda, generator expression) whose AST differs, for qualnames
@@ -1237,8 +1429,31 @@ def _changed(base_src, bq, new_src, pq):
         pn = pq.get(q, [])
         if len(pn) == len(bn):
             out += [[q, first_line(b)] for b, p in zip(bn, pn)
-                    if _segment(bl, b) != _segment(pl, p) and ast.dump(b) != ast.dump(p)]
+                    if _segment(bl, b) != _segment(pl, p) and _dump_code(b) != _dump_code(p)]
     return sorted(out, key=lambda t: t[1])
+
+
+def _doc(body):
+    """The docstring statement heading `body`, or None."""
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) \
+            and isinstance(body[0].value.value, str):
+        return body[0]
+    return None
+
+
+def _dump_code(node):
+    """ast.dump of a definition without its own docstring: an edit of the docstring alone
+    changes no behaviour, so it is not a target (a live run swapped one and then reported a
+    false zero_witness)."""
+    body = getattr(node, "body", None)
+    d = _doc(body) if isinstance(body, list) else None
+    if d is None:
+        return ast.dump(node)
+    node.body = body[1:] or [ast.Pass()]
+    try:
+        return ast.dump(node)
+    finally:
+        node.body = body
 
 
 def removed_definitions(base_tree, tree):
@@ -1334,6 +1549,13 @@ def closure_pairs(st):
     return pairs
 
 
+def _launch_hook(witness, key):
+    """A JIT pre-run hook: one witness call of `key` per launch."""
+    def hook(*_a, **_k):
+        witness.hit(key)
+    return hook
+
+
 def apply(st, journal, witness):
     """Make a staged swap visible, every change through the journal. Never raises: on an
     error it undoes its own entries and returns not-ok. First it journals the nested-code
@@ -1348,7 +1570,10 @@ def apply(st, journal, witness):
         hook = getattr(witness, "hook", None) or witness.hit
         if g.get(W.HIT) is not hook:
             W.trace_safe(hook)         # torch.compile calls it while tracing, never traces it
-            journal.set_item(g, W.HIT, hook)
+            W.trace_safe(W.stub)
+            # undo binds the no-op stub, never deletes the name: code compiled or captured
+            # while the edit was installed may still call it (NameError killed an engine)
+            journal.set_item(g, W.HIT, hook, absent=W.stub)
         for k in st.keys:
             journal.set_item(witness.counts, k, 0)
             witness.capture_counts[k] = 0   # read only for committed keys: not journaled
@@ -1361,6 +1586,15 @@ def apply(st, journal, witness):
                 journal.set_attr(owner, name, obj)
         for owner, name in st.removes:     # only reached when removed_definition was accepted
             journal.delete(owner, name)
+        for k, jits, deps in st.jits:      # JIT targets: rebuild from the new text, in place
+            for o in jits:
+                journal.record_call(JIT.snapshot(o), f"jit rebuild {k}")
+                JIT.rebuild(o, st.source, st.mod.__file__)
+                JIT.count_launches(o, _launch_hook(witness, k))
+            for o in deps:                 # they inline the target when they compile
+                journal.record_call(JIT.snapshot(o), f"jit reset (calls {k})")
+                JIT.reset(o)
+                JIT.count_launches(o, _launch_hook(witness, k))
     except Exception as e:
         u = journal.undo_to(start)
         return F.not_ok(f"apply: {type(e).__name__}: {e}", u["findings"], undo=u)

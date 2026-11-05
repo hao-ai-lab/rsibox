@@ -102,6 +102,7 @@ import threading
 import time
 import uuid
 
+from . import fields as NF
 from . import findings as F
 from . import journal as J
 from . import locate as L
@@ -231,11 +232,12 @@ class LocalParticipant(Participant):
         self.checks = list(checks or ())   # engine checks: fn(module, items) -> [findings]
         self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
         self.analyzer_start = None    # why the analyzer did not start here (then: at first use)
+        self.analyzer_spawned = None  # did creating this participant spawn the child?
         if hasattr(analyzer, "start"):
             # warm start: the child boots now, not inside the first prepare (idempotent; a
             # child that dies later is respawned lazily, by the next prepare)
             try:
-                analyzer.start()
+                self.analyzer_spawned = analyzer.start()
             except Exception as e:
                 self.analyzer_start = f"{type(e).__name__}: {e}"
         self.resets = dict(resets or {})
@@ -252,6 +254,9 @@ class LocalParticipant(Participant):
         self._pending = {}            # prepared txn -> {plan module: source}
         self._maps = {}               # committed txn -> {plan module: line map of its swap}
         self._pending_maps = {}       # prepared txn -> the same, until commit
+        self._opts = {}               # prepared txn -> {"backfill": bool, "cells": n}
+        self._cell_keys = {}          # committed txn -> witness keys its cells armed
+        self._backfills = {}          # committed txn -> what its backfill set
 
     def _live_source(self, module):
         """The text the live module runs: the latest committed transaction's, else None."""
@@ -359,6 +364,22 @@ class LocalParticipant(Participant):
                     fs.append({**F.finding("patch_invalid", f"engine check {check!r}: "
                                            f"{type(e).__name__}: {e}", "the check runs",
                                            subject=m), "advisory": True})
+        nfs = [nf for st in staged for nf in st.new_fields]
+        if nfs:                               # who lacks the field, and can a backfill run?
+            try:
+                info, walk = NF.survey(nfs, self.scope)
+            except Exception as e:
+                info, walk = {}, {"error": f"{type(e).__name__}: {e}"}
+            timings["new_fields"] = walk
+            for f in fs:
+                i = info.get(f.get("subject")) if f["check"] == "new_fields" else None
+                if i is not None:
+                    f["observed"] += (
+                        f"; {i['lacking']} of {i['instances']} live instance(s) found from "
+                        f"{sorted(self.scope) or 'no scope'} lack it {i['paths']}"
+                        + (f"; parameters {i['params']}" if any(i["params"].values()) else "")
+                        + (f"; unresolved {i['missing']}" if i["missing"] else ""))
+                    f["backfill"] = i
         cells = []
         for rep in plan.get("repairs", []):
             missing = [n for n in rep["declares"] if n not in self.scope]
@@ -385,6 +406,7 @@ class LocalParticipant(Participant):
             self._state[txn] = "aborted"
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
+        self._opts[txn] = {"backfill": bool(plan.get("backfill"))}
         self._pending[txn] = {m: spec["source"] for m, spec in plan.get("modules", {}).items()}
         self._pending_maps[txn] = {m: r["staged"].line_map for m, r in res.items()
                                    if r["staged"] is not None}
@@ -399,6 +421,7 @@ class LocalParticipant(Participant):
         if txn not in self._staged:
             return F.not_ok(f"nothing staged for {txn}")
         staged, cells, accept = self._staged.pop(txn)
+        opts = self._opts.pop(txn, {})
         self._state[txn] = "aborted"  # until the commit below succeeds
         gone = []                     # set if the quiesce call gave up: the job must not run
 
@@ -417,18 +440,41 @@ class LocalParticipant(Participant):
                 if not r["ok"]:
                     self.journal.undo_to(mark)
                     return r
-            fs = []
+            fs, filled = [], None
+            nfs = [nf for st in staged for nf in st.new_fields]
+            if nfs and opts.get("backfill"):   # accepted new_fields: set them on live objects
+                try:
+                    filled = NF.backfill(nfs, lambda nf: next(
+                        st.mod for st in staged if nf in st.new_fields), self.scope,
+                        self.journal)
+                except Exception as e:
+                    u = self.journal.undo_to(mark)
+                    return F.not_ok("backfill failed", [F.finding(
+                        "repair_failed", f"backfill of new fields: {type(e).__name__}: {e}",
+                        "the new __init__'s statements run on every live instance")]
+                        + u["findings"])
+            armed = []
+
+            def arm(key):
+                """A witness counter for what this cell changes (see witness.arm)."""
+                armed.append(key)
+                return self.witness.arm(key, self.journal)
             for code, declares in cells:
                 decl = {n: self.scope[n] for n in declares}
                 audit = {n: o for n, o in self.scope.items() if n not in decl}
+                rep = None
                 try:
                     with self.journal.repair(decl, audit) as rep:
-                        exec(code, {**self.scope, "journal": self.journal})
+                        exec(code, {**self.scope, "journal": self.journal, "arm": arm,
+                                    "witness": self.witness})
                 except Exception as e:
+                    # what the cell changed outside the journal stays: say so (the audit's
+                    # findings), so a rolled-back cell is never read as a clean rollback
+                    left = list(rep.findings) if rep is not None else []
                     u = self.journal.undo_to(mark)
                     return F.not_ok("repair failed", [F.finding(
                         "repair_failed", f"{type(e).__name__}: {e}", "the cell runs")]
-                        + u["findings"])
+                        + left + u["findings"])
                 fs += rep.findings
             d = F.decide([{**f, "participant": self.name} for f in fs], accept)
             fs = d["findings"]
@@ -440,9 +486,12 @@ class LocalParticipant(Participant):
             self._sources[txn] = self._pending.pop(txn, {})
             self._maps[txn] = self._pending_maps.pop(txn, {})
             self._codes[txn] = [c for st in staged for _, c, _, _ in st.swaps]
+            self._cell_keys[txn] = armed
+            self._backfills[txn] = filled
             self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
-                        journal=self.journal.describe(mark))
+                        journal=self.journal.describe(mark),
+                        **({"backfill": filled} if filled is not None else {}))
 
         try:
             return self.quiesce(do)
@@ -454,6 +503,7 @@ class LocalParticipant(Participant):
         txn, _ = txn_ref(txn)
         self._pending.pop(txn, None)
         self._pending_maps.pop(txn, None)
+        self._opts.pop(txn, None)
         if self._staged.pop(txn, None) is not None or self._state.get(txn) == "prepared":
             self._state[txn] = "aborted"
         return F.ok()
@@ -489,7 +539,8 @@ class LocalParticipant(Participant):
         # reported), and it undid every later transaction too.
         for t in [txn] + later:
             self._marks.pop(t, None)
-            for d in (self._done, self._sources, self._codes, self._maps):
+            for d in (self._done, self._sources, self._codes, self._maps, self._cell_keys,
+                      self._backfills):
                 d.pop(t, None)
             self._state[t] = "undone" if r["ok"] else "partial"
         if not r["ok"]:
@@ -502,7 +553,7 @@ class LocalParticipant(Participant):
         return r
 
     def proof(self, txn):
-        hashes, keys = {}, []
+        hashes, keys = {}, list(self._cell_keys.get(txn, []))
         for st in self._done.get(txn, []):
             keys += st.keys
             for k, fns in st.functions.items():
@@ -525,9 +576,15 @@ class LocalParticipant(Participant):
         """After the workload ran: did every swapped target run? Findings, never a pass."""
         keys, old = [], {}
         for st in self._done.get(txn, []):
-            keys += [k for k in st.keys if k in st.old_codes]
+            keys += st.keys                # added definitions too: they get a witness
             old.update(st.old_codes)
-        return self.witness.check(keys, old)
+        keys += self._cell_keys.get(txn, [])      # counters the repair cells armed
+        r = self.witness.check(keys, old)
+        if not keys and self._state.get(txn) == "committed":
+            r["findings"].append(F.finding(
+                "no_witness_possible", "the transaction swapped no code and its cells armed "
+                "no counter: an empty witness proves nothing", "at least one witness key"))
+        return r
 
 
 def _call(p, method, arg):

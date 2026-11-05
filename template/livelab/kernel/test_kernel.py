@@ -119,7 +119,7 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(w.counts[f"{name}.ops:scale:{at(OPS, 'def scale')}"], 2)
 
     def test_undo_restores_exact_base(self):
-        """Proves: undo_to(mark) restores the same code objects and removes added methods, imports and witness keys. Not: data the new code wrote."""
+        """Proves: undo_to(mark) restores the same code objects and removes added methods, imports and witness keys; the witness global stays, bound to the no-op stub (compiled code may still call it). Not: data the new code wrote."""
         name, eng, _ = fresh("undo")
         e = eng.Engine()
         base_code, base_hash = eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__)
@@ -138,13 +138,15 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(sorted(set(vars(eng)) - mod_keys), ["__fastrsi_hit__", "statistics"])
         self.assertEqual(sorted(set(vars(eng.Engine)) - cls_keys), ["mean_token"])
         self.assertEqual([x["kind"] for x in j.describe()],
-                         ["added", "added", "added", "added", "code", "added"])
+                         ["added", "object", "added", "added", "code", "added"])
 
         u = j.undo_to(mark)
         self.assertEqual((u["ok"], u["undone"], j.entries), (True, 6, []))
         self.assertIs(eng.Engine.step.__code__, base_code)
         self.assertEqual(L.content_hash(eng.Engine.step.__code__), base_hash)
-        self.assertEqual((set(vars(eng)), set(vars(eng.Engine))), (mod_keys, cls_keys))
+        self.assertEqual((set(vars(eng)), set(vars(eng.Engine))),
+                         (mod_keys | {"__fastrsi_hit__"}, cls_keys))
+        self.assertIs(eng.__fastrsi_hit__, W.stub)
         self.assertFalse(hasattr(e, "mean_token"))
         self.assertEqual(w.counts, {})
         e.step(1)
@@ -569,13 +571,16 @@ class KernelTest(unittest.TestCase):
                                "targets": [["Engine.__init__", at(ENG, "def __init__")],
                                            ["Engine.step", at(ENG, "def step")]]}}
         p = C.LocalParticipant("core", alias={"toy": name}, scope={"engine": e})
-        self.assertTrue(p.prepare({"id": "swap-only", "modules": mods})["ok"])
+        r = p.prepare({"id": "swap-only", "modules": mods})     # new_fields blocks it now
+        self.assertEqual((r["ok"], [f["check"] for f in r["findings"]]), (False, ["new_fields"]))
+        r = p.prepare({"id": "swap-only", "modules": mods, "accept": ["new_fields"]})
+        self.assertTrue(r["ok"])                     # accepted, no backfill: the agent's call
         self.assertTrue(p.commit("swap-only")["ok"])
         with self.assertRaisesRegex(AttributeError, "bias"):
             e.step(3)
         self.assertTrue(p.undo("swap-only")["ok"])
 
-        plan = {"id": "swap+repair", "modules": mods,
+        plan = {"id": "swap+repair", "modules": mods, "accept": ["new_fields"],
                 "repairs": [{"cell": "engine.bias = 5", "declares": ["engine"]}]}
         self.assertTrue(p.prepare(plan)["ok"])
         c = p.commit("swap+repair")
@@ -1070,7 +1075,8 @@ class ProcessAnalyzerTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.A = S.ProcessAnalyzer().start()
+        cls.A = S.ProcessAnalyzer()
+        cls.A.start()
 
     @classmethod
     def tearDownClass(cls):
@@ -1215,7 +1221,8 @@ class AnalyzerFallbackTest(unittest.TestCase):
                                  if k == pkg or k.startswith(pkg + ".")])
         RS = importlib.import_module(pkg + ".swap")
         self.assertNotEqual(RS.__name__, S.__name__)
-        A = RS.ProcessAnalyzer().start()
+        A = RS.ProcessAnalyzer()
+        A.start()
         self.addCleanup(A.close)
         _, eng, _ = fresh("renamed")
         new = edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")'))
@@ -1375,7 +1382,8 @@ class AutoTargetsTest(unittest.TestCase):
 
     def test_auto_targets_stage_like_explicit_ones(self):
         """Proves: for toy edits (method, closure, decorated, defaults, added and removed definitions, outside change, generator expression, comment only, two methods at once), stage with targets omitted resolves the same targets as `changed_targets` and stages the same findings, items and code objects as with them passed, in-process and in the analyzer child. Not: vLLM modules (checked on CPU against the installed vLLM; numbers in the kernel README)."""
-        A = S.ProcessAnalyzer().start()
+        A = S.ProcessAnalyzer()
+        A.start()
         self.addCleanup(A.close)
         E, O = toy.source("engine"), toy.source("ops")
         cases = {
