@@ -22,7 +22,15 @@ client ── ctl.json ──► host thread (engine-core process)
     core:    prepare in the host thread
   phase 2, one job on the busy loop, after in-flight batches land (pause keep):
     validate (workers + core) -> commit (workers + core), or abort; undo of a failed commit
+    deadline D (default 5 s): each side answers by D/2 from its own lane thread
+    (deadline_missed if the call still runs); a miss rolls the others back by D and
+    poisons the host (txn refused, undo allowed); collective_rpc timeout = time left + 2 s
 ```
+
+A role the plan gives no module (a worker-only edit, on the engine core) abstains: it votes
+yes and its commit changes nothing. Group replies keep every rank (`ranks`), so proofs carry
+witness counts per rank (`workers/rank0`, ...) and the txn receipt carries each rank's code
+hashes and `commit_hashes.ranks_agree` (kernel README).
 
 Run the engine with the host and the extension (the module and `kernel` on PYTHONPATH, a
 sitecustomize that imports `kernel_vllm.host` when `FASTRSI_KERNEL_DIR` is set):
@@ -102,6 +110,38 @@ about 2x). What core prepare still spends (0.13 s) is parsing and compiling
 token after the commit, witnesses on both sides, T2 aborted with nobody committed, T3
 identical to base.
 
+**Prepare compiles only the changed definitions; a hung commit has a deadline.** Our
+2026-11-05 TP1 runs (same engine setup, control channel on a node-local tmpfs), three
+alternating full T1-T3 passes per mode, `--compile module` (the whole `scheduler.py` and
+penalties module, as before) against the default per-definition units:
+
+| T1, engine-core side, 3 runs each | whole module | per definition |
+|---|---|---|
+| core parse + compile (stage timings) | 52.7-77.7 ms | 37.5-38.1 ms |
+| core stage total | 105.6-174.2 ms | 86.7-89.1 ms |
+| max chunk gap during prepare / median 19.9-22.6 ms | 31.8-57.0 ms (1.6-2.5x) | 30.3-37.1 ms (1.5-1.9x) |
+| max engine step during prepare (host) | 29.3-45.8 ms | 29.9-34.0 ms |
+
+What is left is one parse of the base and one of the patched text (about 14 ms each in the
+engine process, single C calls) and the outside-changes comparison (two `ast.dump` calls). At
+TP1 the median step is 20 ms, so the stall stays under 2x; at TP4 (8.6 ms median step) one
+14 ms parse alone would still be about 2.6x (not measured at TP4 yet).
+
+T4n / T4 (`--tests T0,T4n,T4`): while 6 streams of 800 tokens run, the worker hangs 4 s in
+commit (fault hook, delay only):
+
+| | no deadline (T4n) | deadline 1 s (T4) |
+|---|---|---|
+| outcome / host state | committed / committed | rolled_back / aborted, poisoned |
+| gap_s / caller waited | 4.002 / 4.229 s | 0.501 / 0.632 s |
+| max chunk gap during the txn (median 20.6 ms) | 4.027 s | 0.525 s |
+| worker version log | switched (then undone) | never switched; late commit applied nothing |
+| next txn / undo | aborted (stale base) / undone | refused (poisoned) / undone |
+
+Both: no lost tokens, still serving, 0 steps started in the gap, identical greedy text after
+undo. At TP1 there is one rank, so `ranks_agree` is null (nothing to compare) and
+`witness_uneven` cannot fire; both are covered by the kernel's CPU tests, not live.
+
 ## Findings from the live run
 
 - `apply_all_penalties` (the dashboard demo's target) never runs on vLLM 0.33: the default V2
@@ -111,8 +151,17 @@ identical to base.
 - Phase 1 was not free on the engine: a heap scan in the engine-core or worker process slowed
   that process's steps while it ran (one 221 ms step in the first run). Fixed by the namespace
   locate (table above). Nested targets (closures) still need one heap scan.
-- TP > 1 is not verified. With several ranks, the same code path sends every call with one
-  collective_rpc from the busy loop, and the replies are merged (`ranks_agree` for hashes);
-  this needs a run on a multi-GPU node.
+- TP 4 ran once (2026-11-05, 4x GB200): the step-gap commit switched all ranks at the same
+  worker step. It found a half-committed worker group, an undo cascade, witness counts summed
+  across ranks, `ranks_agree` dropped from the receipt, and an 8 s engine stall from one slow
+  rank; all four are fixed in the kernel now, but the fixes are not yet rerun at TP 4.
+- A worker process that cannot answer at all (stuck in C code, dead) is caught only by the
+  collective_rpc timeout. That leaves its late reply in the executor's response queue, where
+  the next call reads it; the worker group then refuses every call, but the engine's own next
+  step can still read the stray reply. Respawn the engine. Not exercised live.
+- Before this change T2 aborted in prepare, not at the injected validate fault: the engine
+  core voted no (`empty_change`, it had no module) and the workers were staged against the
+  file while T1's text was live (`base_mismatch`). T2 now stages against T1's text and the
+  core abstains; it aborts at validate (`participant_failed` on the worker).
 - The receipt writer (`kernel/receipt.py`) is still a proposal that needs a human owner
   (AGENTS.md, Trust).

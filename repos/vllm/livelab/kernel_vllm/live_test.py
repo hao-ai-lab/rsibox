@@ -2,6 +2,7 @@
 
     python3 -m kernel_vllm.live_test --url http://127.0.0.1:<port> --dir <channel dir> \
         [--restart-s <warm restart seconds> --restart-source <how it was measured>] [--out <json>]
+        [--compile definitions|module] [--tests T0,T1,T2,T3,T4n,T4]
 
 The engine must run with the host (FASTRSI_KERNEL_DIR) and the worker extension, greedy and
 batch-invariant (VLLM_BATCH_INVARIANT=1). Standard library only; reads vLLM's base sources
@@ -17,6 +18,12 @@ T1  while 6 streaming requests run, one transaction swaps a worker function
 T2  a forced failure on the workers during validate: nobody commits, the engine keeps serving,
     the receipt says so.
 T3  undo of T1: status undone, and T0's request gives the identical text again.
+T4n / T4  while 6 streaming requests run, the worker hangs `--hang-s` in commit (fault hook,
+    delay only). T4n: no phase-2 deadline, so the engine stalls for the whole hang. T4: a
+    deadline of `--deadline-s`: the gap ends by then, nobody switches (the late commit is
+    refused), the outcome is definite (aborted state) and the host is poisoned: the next txn
+    is refused, undo is allowed. Run T4 last: a poisoned host refuses every later txn until
+    the engine is restarted.
 """
 import argparse
 import importlib.util
@@ -121,6 +128,78 @@ def text_hash(s):
     return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
+def add_request_patch():
+    src = vllm_src(PEN)
+    old = "        do_penalty = use_penalty(sampling_params)\n"
+    assert src.count(old) == 1
+    return src, src.replace(old, old + "        do_penalty = bool(do_penalty)\n")
+
+
+def hang_test(a, url, m, base_text, deadline):
+    """T4n / T4: the worker hangs in commit while 6 streams run (see the module docstring)."""
+    src, new = add_request_patch()
+    outs = [{} for _ in PROMPTS]
+    ths = [threading.Thread(target=stream, args=(url, m, p, a.max_tokens, o))
+           for p, o in zip(PROMPTS, outs)]
+    for t in ths:
+        t.start()
+    time.sleep(3.0)
+    txn = f"t4{'n' if deadline is None else ''}-{int(time.time())}"
+    plan = {"id": txn, "faults": {"worker": {"method": "commit", "delay_s": a.hang_s,
+                                             "fail": False}},
+            "modules": {PEN_MOD: {"on": ["worker"], "source": new, "base_hash": text_hash(src),
+                                  "targets": [["PenaltiesState.add_request",
+                                               line_of(src, "    def add_request(self, req_idx")]]}}}
+    t0 = time.time()
+    r = send(a.dir, {"op": "txn", "plan": plan, "phase2_deadline_s": deadline,
+                     "gap_timeout_s": a.hang_s + 30})
+    t1 = time.time()
+    st = send(a.dir, {"op": "status", "txn": txn})
+    serving = complete(url, m, SINGLE)
+    for t in ths:
+        t.join()
+    time.sleep(max(0.0, t0 + a.hang_s + 1.0 - time.time()))     # the hung commit returns
+    pst = send(a.dir, {"op": "pstatus", "txn": txn})
+    vers = send(a.dir, {"op": "versions"})
+    nxt = send(a.dir, {"op": "txn", "plan": {**plan, "id": txn + "-again", "faults": {}}})
+    rec = r.get("receipt") or {}
+    gaps_all, gaps_txn, lost = [], [], []
+    for o in outs:
+        n = sum(len(tk) for _, tk in o["chunks"])
+        u = (o["usage"] or {}).get("completion_tokens")
+        if o["error"] or n != u or u != a.max_tokens or o["finish"] != "length":
+            lost.append({"streamed": n, "usage": u, "finish": o["finish"], "error": o["error"]})
+        times = [ts for ts, _ in o["chunks"]]
+        for x, b in zip(times, times[1:]):
+            gaps_all.append(b - x)
+            if t0 <= b <= t1 + 0.05:
+                gaps_txn.append(b - x)
+    gaps_all.sort()
+    out = {"phase2_deadline_s": deadline, "hang_s": a.hang_s, "outcome": r.get("outcome"),
+           "caller_s": round(t1 - t0, 3), "gap_s": rec.get("gap_s"),
+           "status": {k: st.get(k) for k in ("state", "outcome", "poisoned", "missed")},
+           "rollback": rec.get("rollback"),
+           "findings": [(f.get("participant"), f.get("rank"), f["check"])
+                        for f in rec.get("findings", [])],
+           "commit_replies": {n: (p.get("commit") or {}).get("error")
+                              for n, p in rec.get("participants", {}).items()},
+           "pstatus_after_hang": {"workers": [(x.get("rank"), x.get("state")) for x in
+                                              (pst.get("workers") or {}).get("ranks", [])],
+                                  "core": (pst.get("core") or {}).get("state")},
+           "worker_versions": {f"rank{x.get('rank')}": x.get("vlog")
+                               for x in (vers.get("workers") or {}).get("ranks", [])},
+           "steps_started_in_gap": (r.get("host") or {}).get("steps_started_in_gap"),
+           "chunk_gap_median_s": round(gaps_all[len(gaps_all) // 2], 4) if gaps_all else None,
+           "chunk_gap_max_during_txn_s": round(max(gaps_txn), 4) if gaps_txn else None,
+           "lost_token_streams": lost, "serving_after": serving == base_text,
+           "next_txn": {"outcome": nxt.get("outcome"), "error": nxt.get("error")}}
+    if r.get("outcome") == "committed" or (st.get("state") == "aborted"):
+        u = send(a.dir, {"op": "undo", "txn": txn})
+        out["undo"] = {"ok": u.get("ok"), "status": (u.get("receipt") or {}).get("status")}
+        out["after_undo_identical"] = complete(url, m, SINGLE) == base_text
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", required=True)
@@ -132,8 +211,14 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--scan", default="auto", choices=["auto", "always"],
                     help="always: the pre-v2.2 locate (heap scans), for a before/after")
+    ap.add_argument("--compile", default="definitions", choices=["definitions", "module"],
+                    help="module: compile the whole module in prepare, for a before/after")
+    ap.add_argument("--tests", default="T0,T1,T2,T3")
+    ap.add_argument("--hang-s", type=float, default=4.0)
+    ap.add_argument("--deadline-s", type=float, default=1.0)
     a = ap.parse_args()
     url, m, res = a.url, a.model, {}
+    tests = set(a.tests.split(","))
     baseline = ({"seconds": a.restart_s, "source": a.restart_source}
                 if a.restart_s is not None else None)
     print("ping:", send(a.dir, {"op": "ping"})["ok"])
@@ -141,6 +226,15 @@ def main():
     # T0
     base_text = complete(url, m, SINGLE)
     print("T0 base:", repr(base_text))
+    if "T1" not in tests:
+        for t in ("T4n", "T4"):
+            if t in tests:
+                res[t] = hang_test(a, url, m, base_text, None if t == "T4n" else a.deadline_s)
+                print(t + ":", json.dumps(res[t], indent=1))
+        if a.out:
+            with open(a.out, "w") as f:
+                json.dump(res, f, indent=1)
+        return
 
     # T1
     p_src, p_new, ids, strs = ban_patch(url, m, "Paris")
@@ -157,9 +251,11 @@ def main():
             "modules": {
                 PEN_MOD: {
                     "on": ["worker"], "source": p_new, "base_hash": text_hash(p_src), "scan": a.scan,
+                    "compile": a.compile,
                     "targets": [["PenaltiesState.apply", line_of(p_src, "    def apply(self, logits")]]},
                 "vllm.v1.core.sched.scheduler": {
                     "on": ["core"], "source": s_new, "base_hash": text_hash(s_src), "scan": a.scan,
+                    "compile": a.compile,
                     "targets": [["Scheduler.schedule", line_of(s_src, "    def schedule(")]]}}}
     r1 = send(a.dir, {"op": "txn", "plan": plan, "edit_time": edit_time,
                       "baseline_restart": baseline})
@@ -207,7 +303,7 @@ def main():
         "banned_tokens_streamed_before_commit": paris_before,
         "banned_tokens_streamed_after_commit": banned_after,
         "max_inter_chunk_gap_s": round(max_gap, 4),
-        "scan": a.scan,
+        "scan": a.scan, "compile": a.compile,
         "prepare_timings": {n: (p.get("prepare") or {}).get("timings") or [
             r.get("timings") for r in (p.get("prepare") or {}).get("ranks", [])]
             for n, p in rec.get("participants", {}).items()},
@@ -220,12 +316,13 @@ def main():
         "held_steps": r1.get("host", {}).get("held_steps"),
         "single_after_commit": after_text, "banned_ids": ids, "banned_strs": sorted(strs),
         "commit_hashes_agree": (rec.get("commit_hashes") or {}).get("agree"),
+        "commit_hashes_ranks_agree": (rec.get("commit_hashes") or {}).get("ranks_agree"),
         "findings": [(f.get("participant"), f["check"], f.get("accepted")) for f in
                      rec.get("findings", [])]}
     print("T1:", json.dumps(res["T1"], indent=1))
 
     # T2
-    c_src = p_src
+    c_src = p_new                       # what T1 installed on the workers: a chained edit
     old = "        do_penalty = use_penalty(sampling_params)\n"
     assert c_src.count(old) == 1
     c_new = c_src.replace(old, old + "        do_penalty = bool(do_penalty)\n")
@@ -255,6 +352,10 @@ def main():
                  "undo_s": (u.get("receipt") or {}).get("undo_s"),
                  "identical_to_base": again == base_text, "base": base_text, "after_undo": again}
     print("T3:", json.dumps(res["T3"], indent=1))
+    for t in ("T4n", "T4"):
+        if t in tests:
+            res[t] = hang_test(a, url, m, base_text, None if t == "T4n" else a.deadline_s)
+            print(t + ":", json.dumps(res[t], indent=1))
     if a.out:
         with open(a.out, "w") as f:
             json.dump(res, f, indent=1)

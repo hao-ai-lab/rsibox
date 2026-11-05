@@ -9,11 +9,19 @@ is then read by the wrong call (kb/lessons.md).
   so the engine keeps stepping while the side locates, compiles and stages. The heap scan
   still holds the GIL while it runs, so steps of this process slow down meanwhile.
 - A plan module runs only on the roles in its `"on"` list (default: every role), so one plan
-  can swap a worker function and an engine-core function.
+  can swap a worker function and an engine-core function. A role the plan gives no module
+  abstains: it votes yes, and its commit, abort and undo change nothing (the kernel would
+  call its empty sub-plan an `empty_change` and veto the transaction).
 - `plan["faults"] = {role or "role:rank": method or {"method", "delay_s", "fail"}}` makes that
   method return not-ok on that role (or on one rank of it), or delay its reply by `delay_s`
   first (`fail` false: delay only): a test hook for forced failures and slow ranks, named in
   the reply and the receipt.
+- Phase-2 calls with a deadline (`{"txn", "deadline_at"}`: validate, commit, abort, undo) run
+  on this side's lane thread (kernel `Lane`, calls in order) and the side answers by the
+  deadline: `deadline_missed` if the call is still running. So the process keeps stepping
+  while a commit hangs, and the RPC reply never comes late. The late call keeps the lane; a
+  commit that starts after its deadline applies nothing (kernel LocalParticipant), and the
+  calls queued behind it (the host's undo) run after it.
 - A per-step version log (`tick`): at every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as transitions
   `[step, {key: tag}]`, and counts steps whose version changed between the step's two calls
@@ -40,6 +48,8 @@ class Side:
         self.lp = C.LocalParticipant(role, scope=scope, resets=resets)
         self._jobs = {}        # txn -> {"thread", "result", "t0"}
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
+        self._lane = None      # phase-2 calls with a deadline (kernel Lane)
+        self._abstain = {}     # txn -> state, for plans that give this role no module
         self.watch = {}        # key -> function object whose __code__ is the live version
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps = 0
@@ -100,7 +110,32 @@ class Side:
             self._faults[plan["id"]] = {"delay_s": 0, "fail": True, **fault}
         return {**plan, "modules": mods, "repairs": []}
 
+    def _prepare(self, plan, full):
+        """Prepare this role's sub-plan; abstain when the plan changes only other roles (a plan
+        that changes nothing anywhere still goes to the kernel: empty_change)."""
+        if plan["modules"] or not full.get("modules"):
+            return self.lp.prepare(plan)
+        self._abstain[plan["id"]] = "prepared"
+        return F.ok(staged={}, abstain=True, note=f"no module for role {self.role}")
+
+    def _local(self, method, payload):
+        """The kernel participant's method, or the abstaining role's answer."""
+        txn, _ = C.txn_ref(payload)
+        if not isinstance(txn, str) or txn not in self._abstain:
+            return getattr(self.lp, method)(payload)
+        nxt = {"commit": "committed", "abort": "aborted", "undo": "undone"}.get(method)
+        if nxt and not (method == "abort" and self._abstain[txn] == "committed"):
+            self._abstain[txn] = nxt
+        if method == "status":
+            return F.ok(txn=txn, state=self._abstain[txn], abstain=True)
+        if method == "proof":
+            return F.ok(hashes={}, witness={}, abstain=True)
+        if method == "witness_check":
+            return F.ok(counts={}, abstain=True)
+        return F.ok(abstain=True)
+
     def _fault(self, method, txn):
+        txn, _ = C.txn_ref(txn)
         f = self._faults.get(txn)
         if not f or f["method"] != method:
             return None
@@ -133,14 +168,14 @@ class Side:
         if method == "prepare":
             plan = self._subplan(payload)
             self._watch_plan(plan)
-            return self._fault("prepare", plan["id"]) or self.lp.prepare(plan)
+            return self._fault("prepare", plan["id"]) or self._prepare(plan, payload)
         if method == "prepare_start":
             plan = self._subplan(payload)
             self._watch_plan(plan)
             job = {"t0": time.perf_counter(), "result": None}
 
             def run():
-                r = self._fault("prepare", plan["id"]) or self.lp.prepare(plan)
+                r = self._fault("prepare", plan["id"]) or self._prepare(plan, payload)
                 r["prepare_s"] = round(time.perf_counter() - job["t0"], 6)
                 job["result"] = r
             job["thread"] = threading.Thread(target=run, daemon=True,
@@ -159,4 +194,18 @@ class Side:
             return self.lp.reset(payload)
         if method == "versions":
             return self.versions()
-        return self._fault(method, payload) or getattr(self.lp, method)(payload)
+        _, deadline_at = C.txn_ref(payload)
+        if deadline_at is None or method not in C.PHASE2:
+            return self._fault(method, payload) or self._local(method, payload)
+        if self._lane is None:
+            self._lane = C.Lane(f"{self.role}{'' if self.rank is None else self.rank}")
+        done, r = self._lane.call(
+            lambda: self._fault(method, payload) or self._local(method, payload),
+            deadline_at)
+        if done:
+            return r
+        who = self.role if self.rank is None else f"{self.role} rank {self.rank}"
+        return F.not_ok(f"{method}: no answer by the deadline on {who}", [{**F.finding(
+            "deadline_missed", f"{method} still running on {who} at the deadline (or queued "
+            "behind a call that is)", f"{method} answers by the deadline"),
+            "participant": self.role, "rank": self.rank}])

@@ -17,6 +17,15 @@ How a transaction runs (kernel StepGapCoordinator, loop.md 4b):
   (a job put on the engine core's input queue as a custom item), never from another thread:
   the executor's message queue is not thread-safe, and from the loop every rank handles the
   call between the same two steps.
+- Phase 2 has a deadline (kernel `phase2_deadline_s`; FASTRSI_KERNEL_PHASE2_DEADLINE, default
+  5 s, or `phase2_deadline_s` per op; 0 turns it off). Each side runs its phase-2 calls on its
+  own lane thread and answers by the deadline (`deadline_missed` if the call is still
+  running), so a rank that hangs in commit does not hold the engine; the kernel then undoes
+  the others in the gap and poisons the host (txn refused; undo allowed). collective_rpc gets
+  `timeout` = the time left + FASTRSI_KERNEL_RPC_GRACE (default 2 s) as a backstop for a
+  worker process that cannot answer at all. That timeout leaves the late reply in the
+  executor's response queue, where the next call would read it, so after it the worker group
+  refuses every call (respawn the engine).
 - Phase 2 (validate, commit or abort, undo of a failed commit) is one job that runs only when
   no batch is in flight. While it waits, the loop schedules nothing new ("pause keep":
   `scheduler.has_requests` is shadowed to False while `batch_queue` drains), as in the
@@ -44,6 +53,8 @@ from .side import Side
 TAG = "FASTRSI_KERNEL"
 DIR = os.environ.get("FASTRSI_KERNEL_DIR")
 GAP_TIMEOUT_S = float(os.environ.get("FASTRSI_KERNEL_GAP_TIMEOUT", "30"))
+PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5")) or None
+RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
 
@@ -69,28 +80,14 @@ class _Job:
 
 
 def _merge(method, rs):
-    """One reply for the worker group from the per-rank replies of a collective_rpc."""
-    rs = [r if isinstance(r, dict) else F.not_ok(f"bad reply {r!r}") for r in rs]
-    out = {"ok": all(r.get("ok") for r in rs), "ranks": rs,
-           "findings": [{**f, "rank": r.get("rank")} for r in rs for f in r.get("findings", [])]}
+    """One reply for the worker group from the per-rank replies of a collective_rpc: the
+    kernel's group reply (every rank's reply in `ranks`, so receipts keep per-rank witness
+    counts and code hashes), plus prepare_poll's pending flag and timings."""
+    out = C.merge_ranks(method, rs)
+    rs = out["ranks"]
     if any(r.get("pending") for r in rs):
         out["pending"] = True
-    if not out["ok"]:
-        out["error"] = "; ".join(f"rank {r.get('rank')}: {r.get('error')}" for r in rs
-                                 if not r.get("ok"))
-    if method == "status":
-        states = {r.get("state") for r in rs}
-        out["state"] = states.pop() if len(states) == 1 else "mixed"
-    elif method == "witness_check":
-        counts = collections.Counter()
-        for r in rs:
-            counts.update(r.get("counts", {}))
-        out["counts"] = dict(counts)
-    elif method == "proof":
-        hs = [json.dumps(r.get("hashes"), sort_keys=True) for r in rs]
-        out["hashes"] = rs[0].get("hashes") if rs else {}
-        out["ranks_agree"] = len(set(hs)) == 1
-    elif method == "prepare_poll" and not out.get("pending"):
+    if method == "prepare_poll" and not out.get("pending"):
         out["staged"] = rs[0].get("staged") if rs else {}
         out["timings"] = {f"rank{r.get('rank')}": r.get("timings") for r in rs}
         out["prepare_s"] = max((r.get("prepare_s") or 0) for r in rs) if rs else None
@@ -98,19 +95,41 @@ def _merge(method, rs):
 
 
 class WorkerGroup(C.Participant):
-    """All worker ranks as one participant: each call is one collective_rpc from the loop."""
+    """All worker ranks as one participant: each call is one collective_rpc from the loop.
+    Bounded: the ranks answer phase-2 calls by their deadline, and collective_rpc gets a
+    timeout as a backstop (see the module docstring)."""
     name = "workers"
+    bounded = True
 
     def __init__(self, host):
         self.host = host
+        self.broken = None       # set when a collective_rpc timed out: replies are misaligned
 
     def _rpc(self, method, payload):
+        if self.broken:
+            return F.not_ok(f"worker group unusable: {self.broken}", [{**F.finding(
+                "deadline_missed", self.broken, "a worker group whose replies line up"),
+                "participant": self.name}])
         ex = self.host.core.model_executor
+        _, deadline_at = C.txn_ref(payload)
+        timeout = None if deadline_at is None else \
+            max(0.0, deadline_at - time.time()) + RPC_GRACE_S
+        def call():                       # in the loop; its TimeoutError is the RPC's own
+            try:
+                return ex.collective_rpc("fastrsi_kernel", timeout=timeout,
+                                         args=(method, payload))
+            except TimeoutError as e:
+                return e
         try:
-            rs = self.host.in_loop(lambda: ex.collective_rpc("fastrsi_kernel",
-                                                             args=(method, payload)))
-        except Exception as e:
+            rs = self.host.in_loop(call)
+        except Exception as e:            # includes the loop not running the job in time
             return F.not_ok(f"collective_rpc {method}: {type(e).__name__}: {e}")
+        if isinstance(rs, TimeoutError):
+            self.broken = (f"collective_rpc {method} timed out after {timeout} s; a late "
+                           "reply stays in the executor's queue: respawn")
+            return F.not_ok(f"collective_rpc {method}: TimeoutError: {rs}", [{**F.finding(
+                "deadline_missed", self.broken, f"{method} answers within {timeout} s"),
+                "participant": self.name}])
         return _merge(method, rs)
 
     def prepare(self, plan):
@@ -165,8 +184,10 @@ class Host:
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
         self.core_side = Side("core", scope={"core": core})
         self.co = C.StepGapCoordinator(
-            [WorkerGroup(self), C.CallParticipant("core", self.core_side.dispatch)],
+            [WorkerGroup(self), C.CallParticipant("core", self.core_side.dispatch,
+                                                  bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
+            phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None})
 
@@ -194,6 +215,10 @@ class Host:
     def handle(self, cmd):
         op = cmd.get("op")
         self.gap_timeout = float(cmd.get("gap_timeout_s") or GAP_TIMEOUT_S)
+        if "phase2_deadline_s" in cmd:        # per op; null or 0 turns the deadline off
+            self.co.phase2_deadline_s = cmd["phase2_deadline_s"] or None
+        else:
+            self.co.phase2_deadline_s = PHASE2_DEADLINE_S
         t0 = time.perf_counter()
         held0 = self.held_steps
         try:
@@ -213,7 +238,7 @@ class Host:
                 r = F.ok(workers=self.co.participants[0].versions(),
                          core=self.core_side.versions())
             elif op == "ping":
-                r = F.ok(pid=os.getpid())
+                r = F.ok(pid=os.getpid(), poison=self.co.poison)
             else:
                 r = F.not_ok(f"unknown op {op!r}")
         except Exception as e:
