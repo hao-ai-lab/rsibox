@@ -9,7 +9,7 @@ Pure Python, standard library only; it imports no engine.
 | File | What it does |
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
-| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. |
+| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage(module, source)` with the targets omitted finds that same list from its own parse, so prepare needs no planner pass. `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. |
 | `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10). |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
@@ -148,6 +148,33 @@ Same staged code (new hash `73d9f00e04cc058d`) and the same findings (none) in a
 `test_process_analysis_stages_the_same_code_and_findings` checks code objects (`==`: bytecode,
 constants, names, line tables) and findings for 14 kinds of edit.
 
+Targets found by the analysis. A plan module may omit `targets` (or say `"auto"`): the
+analysis then diffs the running text against the patch from the two trees it parses anyway
+and takes every def, lambda and generator expression whose AST differs as a target (added and
+removed definitions are found as before), the same list as `changed_targets`. Most
+definitions are settled by comparing their source bytes (equal text, equal AST); only those
+whose text differs pay an `ast.dump` compare. The live side gives the analysis every live
+code key of the module (no target list yet), and re-analyzes with the explicit list in the
+rare case where the heap scan then finds a live closure the namespace did not
+(`timings["analyze_again"]`). Prepare of `vllm/v1/core/sched/scheduler.py` (vLLM 0.33,
+3,783 lines) on CPU, 15 runs each, median wall time of planning plus `prepare` (our
+2026-11-05 CPU run):
+
+| Edit | before: `changed_targets` + prepare | explicit targets (new planner) | targets omitted |
+|---|---|---|---|
+| 1 function, in-process analysis | 126.8 ms | 114.5 ms | 76.2 ms |
+| 1 function, `ProcessAnalyzer` | 136.2 ms | 123.7 ms | 84.9 ms |
+| 3 functions, in-process analysis | 127.6 ms | 114.7 ms | 75.8 ms |
+| 3 functions, `ProcessAnalyzer` | 135.7 ms | 124.1 ms | 87.1 ms |
+
+The planner alone took 51.6 ms before and 38.8 ms with the text shortcut; omitting the targets
+removes it, and finding them inside the analysis costs about 5 ms. What remains of the 76 ms is
+the analysis (two parses 21 ms, the outside-changes compare 27 ms, unit compiles 8 ms).
+Across 54 generated edits of 9 vLLM 0.33 modules (one body, three bodies, a lambda, a generator
+expression, a comment, an added function, a removed method), the targets equal an
+`ast.dump`-only reference and the staged findings, items and code objects equal those of
+explicit targets, in-process and in the child.
+
 Several modules in one transaction. A participant stages a plan's modules so that each sees
 the names the others' patches add (`overlay`, from `swap.staged_names`): module B's
 `from .a import new_helper`, where A's patch adds `new_helper`, takes A's staged object, and B's
@@ -228,12 +255,15 @@ nothing; the host is poisoned, so the next transaction is refused (undo is still
 ## Golden tests
 
 `python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 5 s; one
-test builds a 2.5 M-object heap, one waits out a 0.6 s hang, four use an analyzer child). `python3 -m unittest` also runs the conformance cases on
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang, five use an analyzer child). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
 test_accept_list ... ok
+test_auto_target_only_the_heap_finds_live ... ok
+test_auto_targets_stage_like_explicit_ones ... ok
 test_chained_edit_stages_against_the_installed_text ... ok
+test_changed_targets_match_the_ast_reference ... ok
 test_child_runs_when_the_kernel_has_another_package_name ... ok
 test_closure_change_is_a_finding_not_an_exception ... ok
 test_code_identity_and_hash ... ok
@@ -272,7 +302,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 39 tests in 5.4s
+Ran 42 tests in 5.4s
 
 OK
 ```

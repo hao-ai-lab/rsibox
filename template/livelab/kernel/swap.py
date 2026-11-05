@@ -1,7 +1,9 @@
 """Swap: one code-swap primitive, in two steps.
 
 `stage(module, source, targets)` parses the patched module source, compiles only the
-definitions it swaps, and plans the swap, with no visible change: for each target it finds the new code object (by qualname and its ordinal
+definitions it swaps, and plans the swap, with no visible change. Targets omitted ("auto"):
+the analysis takes every definition whose AST changed, from its own parse. For each target it
+finds the new code object (by qualname and its ordinal
 among same-named definitions, so a patch may move lines), adds the witness, and pairs every
 running code object of the target and of its enclosing functions with its new version (so
 closures made later run the new code too). It runs the checks and returns findings:
@@ -278,10 +280,13 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
     which targets have a live function (`live`: {(qualname, line): bool}). It parses both
     texts, matches targets, adds the witness, compiles the units, finds added, removed and
     imported names, and compares the blanked trees. It touches no live object, so it can run
-    in another process (`ProcessAnalyzer`). Returns plain data and code objects (marshal can
-    carry them): {"error"} when a text does not parse, else
-    {"targets": [per-target dict in order], "base_units", "new_units", "compiled",
-     "new_error", "line_map", "added", "removed", "imports", "outside_changes", "timings"}."""
+    in another process (`ProcessAnalyzer`). targets "auto" (or None): the changed definitions
+    of the two texts, found from the trees parsed here (as `changed_targets`), so the caller
+    needs no parse of its own; `live` then holds every live (qualname, line) of the module.
+    Returns plain data and code objects (marshal can carry them): {"error"} when a text does
+    not parse, else {"targets": [per-target dict in order], "resolved": [[qualname, line]]
+    (the targets analyzed), "base_units", "new_units", "compiled", "new_error", "line_map",
+    "added", "removed", "imports", "outside_changes", "timings"}."""
     timings, t0 = {}, time.perf_counter()
     try:
         base_tree = ast.parse(base_src, filename)
@@ -290,6 +295,11 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
         return {"error": f"{type(e).__name__}: {e}", "timings": timings}
     timings["parse_s"] = round(time.perf_counter() - t0, 6)
     bq, pq = qual_index(base_tree), qual_index(tree)
+    auto = targets is None or targets == "auto"
+    if auto:                 # every target found here differs by AST: no dump per target below
+        t = time.perf_counter()
+        targets = _changed(base_src, bq, source, pq)
+        timings["targets_s"] = round(time.perf_counter() - t, 6)
     whole = compile == "module"
     t = time.perf_counter()
     if whole:
@@ -321,7 +331,7 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
             tres.append({"status": "count", "patch": len(pq.get(q, [])), "base": len(bq[q])})
             continue
         node = pq[q][i]
-        changed = ast.dump(bq[q][i]) != ast.dump(node)
+        changed = auto or ast.dump(bq[q][i]) != ast.dump(node)
         W.inject(node, k)
         todo.append((q, i))
         tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node)})
@@ -387,7 +397,8 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
     t = time.perf_counter()
     outside = _blank(base_tree, todo, set(removed)) != _blank(tree, todo, {q for q, _, _ in added})
     timings["compare_s"] = round(time.perf_counter() - t, 6)
-    return {"targets": tres, "base_units": base_units, "new_units": new_units,
+    return {"targets": tres, "resolved": [[q, int(line)] for q, line in targets],
+            "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
             "imports": imports, "outside_changes": outside, "timings": timings}
 
@@ -416,10 +427,13 @@ def _err(e):
     return str(e) if isinstance(e, _Failed) else f"{type(e).__name__}: {e}"
 
 
-def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
+def stage(module, source, targets="auto", base_hash=None, key_module=None, scan="auto",
           base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None):
     """module: the live module's name; source: the full patched module text; targets:
-    [(qualname, firstlineno in the base)]; base_hash: text_hash of the source the patch was
+    [(qualname, firstlineno in the base)], or "auto" (the default; None too): the analysis
+    finds the changed definitions itself from its one parse of the two texts (the same list
+    as `changed_targets(base text, source)`, so the caller does not parse to plan), and the
+    result's `targets` says which; base_hash: text_hash of the source the patch was
     made against (checked against the base text); base_source: the text the live module runs
     now, when an earlier transaction changed it (default: the module's file); own_codes: code
     objects this participant installed itself (with their witness), which match base_source
@@ -436,8 +450,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     overlay: {module name: {name: object}}, names that modules staged earlier in the same
     transaction add (`staged_names`): a `from m import name` of this patch takes the staged
     object when the live module m does not have the name yet. Nothing is made visible.
-    Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
-    can be staged (bad patch, import error). Each target's item says whether its definition
+    Returns {"ok", "staged", "items", "findings", "timings", "targets"}; ok is False only
+    when nothing can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
     kname = key_module or module
     fs, timings, t0 = [], {}, time.perf_counter()
@@ -454,23 +468,37 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     # functions and methods); scan (one get_objects + a sliced pass) only for nested targets
     # or targets the namespace does not hold.
     t = time.perf_counter()
+    auto = targets is None or targets == "auto"
     run, held = L.index_module(mod, None if scan == "always" else L.module_functions(mod))
     timings["scan"] = "heap" if scan == "always" else "namespace"
-    if scan == "auto" and any(_needs_heap(run.get((q, int(line)), ()), run, held)
-                              for q, line in targets):
+    if not auto and scan == "auto" and any(_needs_heap(run.get((q, int(line)), ()), run, held)
+                                           for q, line in targets):
         run, held = L.index_module(mod)
         timings["scan"] = "heap"
     timings["locate_s"] = round(time.perf_counter() - t, 6)
-    live = {}
-    for q, line in targets:
-        olds = run.get((q, int(line)), [])
-        live[(q, int(line))] = any(held.get(o) for o in olds) or any(
-            held.get(p) for o in olds for p in _enclosing(o, run))
+    # auto: the targets are known only after the analysis, so it gets every live key
+    live = _live_keys(held) if auto else _live_of(targets, run, held)
     req = {"base_src": base_src, "source": source,
-           "targets": [[q, int(line)] for q, line in targets], "filename": mod.__file__,
-           "key_module": kname, "live": live, "compile": compile}
+           "targets": "auto" if auto else [[q, int(line)] for q, line in targets],
+           "filename": mod.__file__, "key_module": kname, "live": live, "compile": compile}
     t = time.perf_counter()
     a = _analyze(req, analyzer, timings, fs, kname)
+    if auto and "error" not in a:
+        targets = a["resolved"]
+        timings["targets_s"] = a["timings"]["targets_s"]
+        if scan == "auto" and any(_needs_heap(run.get((q, line), ()), run, held)
+                                  for q, line in targets):
+            t2 = time.perf_counter()
+            run, held = L.index_module(mod)
+            timings["scan"] = "heap"
+            timings["locate_s"] = round(timings["locate_s"] + time.perf_counter() - t2, 6)
+            heap_live = _live_of(targets, run, held)
+            if any(heap_live[k] != bool(live.get(k)) for k in heap_live):
+                # the heap found a live function the namespace did not: analyze again with
+                # the explicit targets, exactly as a caller passing them would
+                req = {**req, "targets": targets, "live": heap_live}
+                a = _analyze(req, analyzer, timings, fs, kname)
+                timings["analyze_again"] = True
     timings["analyze_s"] = round(time.perf_counter() - t, 6)
     at = a["timings"]
     if "error" in a:
@@ -625,13 +653,36 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
                             subject=kname))
     timings["compare_s"] = at["compare_s"]
     timings["stage_s"] = round(time.perf_counter() - t0, 6)
+    targets = [[q, int(line)] for q, line in targets]
     for f in fs:        # what a standing accept matches on: the checked code
         item = st.items.get(f.get("subject")) if isinstance(f.get("subject"), str) else None
         if item:
             f["code_hash"] = item["new_hash"]
         elif f.get("subject") == kname:      # about the whole module: its new text
             f["code_hash"] = L.text_hash(source)
-    return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
+    return F.ok(staged=st, items=st.items, findings=fs, timings=timings, targets=targets)
+
+
+def _live_of(targets, run, held):
+    """{(qualname, line): does a function object run this code, or directly enclose it?}"""
+    live = {}
+    for q, line in targets:
+        olds = run.get((q, int(line)), [])
+        live[(q, int(line))] = any(held.get(o) for o in olds) or any(
+            held.get(p) for o in olds for p in _enclosing(o, run))
+    return live
+
+
+def _live_keys(held):
+    """`_live_of` for every code of the module at once: a held code and the codes it
+    directly contains."""
+    live = {}
+    for o in held:
+        live[(o.co_qualname, o.co_firstlineno)] = True
+        for c in o.co_consts:
+            if hasattr(c, "co_code"):
+                live[(c.co_qualname, c.co_firstlineno)] = True
+    return live
 
 
 def _analyze(req, analyzer, timings, fs, kname):
@@ -869,15 +920,40 @@ def validate(st):
 
 def changed_targets(base_src, new_src):
     """Planning helper: [[qualname, first line in base_src]] of every definition (function,
-    method, nested function, lambda) whose AST differs, for qualnames defined as many times in
-    both texts. An enclosing function of a changed one is listed too. Added and removed
-    definitions are not targets: `stage` finds them. Raises SyntaxError on a bad text."""
-    bq, pq = qual_index(ast.parse(base_src)), qual_index(ast.parse(new_src))
+    method, nested function, lambda, generator expression) whose AST differs, for qualnames
+    defined as many times in both texts. An enclosing function of a changed one is listed too.
+    Added and removed definitions are not targets: `stage` finds them. Raises SyntaxError on a
+    bad text. `stage(..., targets="auto")` finds the same list from its own parse."""
+    return _changed(base_src, qual_index(ast.parse(base_src)), new_src,
+                    qual_index(ast.parse(new_src)))
+
+
+def _segment(lines, node):
+    """The node's source bytes (from its first decorator), from UTF-8 lines (ast columns
+    are byte offsets)."""
+    if isinstance(node, (*_DEF, ast.ClassDef)) and node.decorator_list:
+        start = node.decorator_list[0]
+    else:
+        start = node
+    sl, sc, el, ec = start.lineno, start.col_offset, node.end_lineno, node.end_col_offset
+    if sl == el:
+        return lines[sl - 1][sc:ec]
+    return b"".join([lines[sl - 1][sc:], *lines[sl:el - 1], lines[el - 1][:ec]])
+
+
+def _changed(base_src, bq, new_src, pq):
+    """`changed_targets` from qual_index of both texts. Equal source text means equal AST, so
+    only definitions whose text differs (edited, or with edited comments or layout) pay an
+    `ast.dump` compare; on a one-function edit of a large module that is a handful of dumps
+    instead of one per definition."""
+    bl = base_src.encode().splitlines(keepends=True)
+    pl = new_src.encode().splitlines(keepends=True)
     out = []
     for q, bn in bq.items():
         pn = pq.get(q, [])
         if len(pn) == len(bn):
-            out += [[q, first_line(b)] for b, p in zip(bn, pn) if ast.dump(b) != ast.dump(p)]
+            out += [[q, first_line(b)] for b, p in zip(bn, pn)
+                    if _segment(bl, b) != _segment(pl, p) and ast.dump(b) != ast.dump(p)]
     return sorted(out, key=lambda t: t[1])
 
 

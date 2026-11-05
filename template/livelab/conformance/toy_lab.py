@@ -6,8 +6,9 @@ loop thread (the engine core, loaded as a third copy). The host is a `StepGapCoo
 `Session` (base / edited / poisoned). Ranks are reached through `CallParticipant` over a
 loopback call, as an engine reaches its workers over RPC.
 
-The planner is the smallest one that works for the toy: the targets of a module are the
-definitions whose AST changed against the text the module runs now (`swap.changed_targets`).
+There is no planner: a plan omits the targets, and each participant's prepare finds the
+definitions whose AST changed against the text the module runs now from its one parse of the
+two texts (`swap.stage(..., targets="auto")`).
 The workload runs inside the loop, between steps: every rank steps once per input.
 """
 import itertools
@@ -24,7 +25,6 @@ from kernel import coordinator as C
 from kernel import locate as L
 from kernel import receipt as R
 from kernel import session as SS
-from kernel import swap as S
 from kernel import toy
 
 LIVELAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -112,12 +112,8 @@ class ToyLab:
         t0 = time.perf_counter()
         base = self.live_text[-1]
         modules = {}
-        for m, new in patch["files"].items():
-            try:
-                targets = S.changed_targets(base[m], new)
-            except SyntaxError:
-                targets = []                  # stage reports patch_invalid
-            modules[m] = {"source": new, "base_hash": L.text_hash(base[m]), "targets": targets}
+        for m, new in patch["files"].items():    # targets: "auto" (stage finds them)
+            modules[m] = {"source": new, "base_hash": L.text_hash(base[m])}
         plan = {"modules": modules, "accept": patch.get("accept", []),
                 "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
         res = self.session.install(plan, edit_time=patch.get("edit_time"))

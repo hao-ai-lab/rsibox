@@ -68,7 +68,9 @@ Signatures and plan format: `kernel/coordinator.py`.
 | `status()` / `status(id)` | none | `base`, `edited` or `poisoned`; live ids; code fingerprint; poison findings / one transaction's host state |
 
 A patch is `{"files": {module: full patched text}, "accept": [check], "undo_resets": [...]}`.
-A patch may change several
+The lab needs no planner: each participant's prepare finds the changed definitions (every
+def, lambda and generator expression whose AST differs, plus added and removed definitions)
+from its one parse of the running text and the patched text. A patch may change several
 modules at once: one module's patch can import a name another module's patch adds. The
 modules are staged together and nothing is visible before the commit, which applies them all
 or none.

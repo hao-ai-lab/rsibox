@@ -53,7 +53,8 @@ A plan is plain data, so it can cross a process boundary:
 
     {"id": str (optional),
      "modules": {module: {"source": patched text, "base_hash": text_hash of the base,
-                          "targets": [[qualname, first line in the base]],
+                          "targets": [[qualname, first line in the base]] or "auto"
+                                     (default: the definitions that changed, found by stage),
                           "scan": "auto" | "always", "compile": "definitions" | "module"}},
      "repairs": [{"cell": python source, "declares": [names in the participant's scope]}],
      "accept": [check names] or "all",
@@ -189,7 +190,8 @@ class LocalParticipant(Participant):
 
     Several modules in one plan are staged so that each sees the module-level names the
     others' patches add (`swap.staged_names` as stage's `overlay`), in any plan order; nothing
-    is visible before commit."""
+    is visible before commit. A plan module without `targets` lets stage find them; the reply's
+    `targets` says which it staged."""
 
     def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None):
         self.name = name
@@ -254,7 +256,7 @@ class LocalParticipant(Participant):
         return module
 
     def _stage(self, m, spec, own, overlay):
-        return S.stage(self._actual(m), spec["source"], spec["targets"],
+        return S.stage(self._actual(m), spec["source"], spec.get("targets", "auto"),
                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
                        base_source=self._live_source(m), own_codes=own,
                        compile=spec.get("compile", "definitions"),
@@ -263,7 +265,7 @@ class LocalParticipant(Participant):
 
     def prepare(self, plan):
         txn, accept = plan["id"], plan.get("accept", ())
-        fs, staged, items, ok, timings = [], [], {}, True, {}
+        fs, staged, items, ok, timings, targets = [], [], {}, True, {}, {}
         own = [c for cs in self._codes.values() for c in cs]
         # The modules of one transaction see each other's staged names (`overlay`): module B's
         # `from a import new` finds what A's patch adds, though A is applied only at commit.
@@ -289,6 +291,8 @@ class LocalParticipant(Participant):
                 staged.append(r["staged"])
             items.update(r["items"])
             timings[m] = r.get("timings", {})
+            if "targets" in r:
+                targets[m] = r["targets"]
         cells = []
         for rep in plan.get("repairs", []):
             missing = [n for n in rep["declares"] if n not in self.scope]
@@ -317,7 +321,7 @@ class LocalParticipant(Participant):
         self._staged[txn] = (staged, cells, accept)
         self._pending[txn] = {m: spec["source"] for m, spec in plan.get("modules", {}).items()}
         self._state[txn] = "prepared"
-        return F.ok(staged=items, findings=out_fs, timings=timings)
+        return F.ok(staged=items, findings=out_fs, timings=timings, targets=targets)
 
     def commit(self, txn):
         """Apply the staged transaction at the quiesce point. With a deadline (`txn` is
@@ -873,7 +877,7 @@ class Coordinator:
                 {"modules": {m: L.text_hash(str(s.get("source", "")))
                              for m, s in modules.items()},
                  "repairs": plan.get("repairs", [])}, sort_keys=True)),
-            "plan": {"targets": {m: s.get("targets", []) for m, s in modules.items()},
+            "plan": {"targets": {m: s.get("targets", "auto") for m, s in modules.items()},
                      "predicted_resources": plan.get("predicted_resources", []),
                      "recipes": plan.get("recipes", []), "certainty": plan.get("certainty"),
                      "accept": plan.get("accept", []),

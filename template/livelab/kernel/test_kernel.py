@@ -8,6 +8,7 @@ shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy 
 """
 import ast
 import gc
+import importlib
 import itertools
 import os
 import shutil
@@ -1097,8 +1098,7 @@ class AnalyzerFallbackTest(unittest.TestCase):
         name, eng, _ = fresh("fallback")
         p = C.LocalParticipant("rank0", alias={"toy": name}, analyzer=A)
         mods = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")',
-                                                    'self.ran.append("v1")')),
-                               "targets": [["Engine.step", at(ENG, "def step")]]}}
+                                                    'self.ran.append("v1")'))}}
         r = p.prepare({"id": "f1", "modules": mods})
         self.assertFalse(r["ok"])
         f, = r["findings"]
@@ -1136,10 +1136,11 @@ class CrossModuleTest(unittest.TestCase):
             name, eng, ops = fresh("xmod")
             p = C.LocalParticipant("rank0", alias={"toy": name})
             src = {"toy.ops": A_SRC, "toy.engine": B_SRC}
-            tg = {"toy.ops": [], "toy.engine": [["Engine.step", at(ENG, "def step")]]}
-            r = p.prepare({"id": "x", "modules": {m: {"source": src[m], "targets": tg[m]}
-                                                  for m in order}})
+            r = p.prepare({"id": "x", "modules": {m: {"source": src[m]} for m in order}})
             self.assertEqual((r["ok"], r["findings"]), (True, []), order)
+            self.assertEqual(r["targets"], {"toy.engine": [["Engine.step",
+                                                            at(ENG, "def step")]],
+                                            "toy.ops": []}, order)
             # staged, not visible: neither module has the new names yet
             self.assertEqual([n for n in ("double", "twice") if n in vars(ops) or n in vars(eng)],
                              [], order)
@@ -1152,6 +1153,111 @@ class CrossModuleTest(unittest.TestCase):
             self.assertEqual([n for n in ("double", "twice") if n in vars(ops) or n in vars(eng)],
                              [], order)
             self.assertEqual(eng.Engine().step(3), 17)
+
+
+class AutoTargetsTest(unittest.TestCase):
+    """Pain point: prepare parsed every text twice, once in the caller's planner
+    (`changed_targets`) and once in `analyze`. With targets omitted, analyze finds them."""
+
+    @staticmethod
+    def _reference(base, new):
+        """The changed definitions by ast.dump alone (no text shortcut)."""
+        bq, pq = S.qual_index(ast.parse(base)), S.qual_index(ast.parse(new))
+        return sorted([[q, S.first_line(b)] for q, bn in bq.items()
+                       if len(pq.get(q, [])) == len(bn)
+                       for b, p in zip(bn, pq[q]) if ast.dump(b) != ast.dump(p)],
+                      key=lambda t: t[1])
+
+    def test_changed_targets_match_the_ast_reference(self):
+        """Proves: the text shortcut in `changed_targets` gives the same list as comparing every definition's ast.dump, on edits that trip a naive text compare: a comment-only change (no target), a lambda edit two lambdas share a line with, ordinals shifted by a lambda added above and one removed below, a decorator edit, non-ASCII text before an edited lambda (byte columns). Not: every Python grammar construct."""
+        base = ("import functools\n\n\ndef f(x):\n    a = (lambda: 1, lambda: 2)\n"
+                "    b = lambda: 3\n    return a\n\n\n"
+                "@functools.lru_cache(maxsize=1)\ndef h(x):\n    return [y for y in x]\n\n\n"
+                "def u():\n    s = 'é'; return (lambda: s, (z for z in s))\n")
+        edits = {
+            "comment": edit(base, ("    return a\n", "    return a  # same\n")),
+            "same_line": edit(base, ("lambda: 2)", "lambda: 22)")),
+            "shifted": edit(base, ("def f(x):\n", "def f(x):\n    q = lambda: 0\n"),
+                            ("b = lambda: 3", "b = 3")),
+            "decorator": edit(base, ("maxsize=1", "maxsize=2")),
+            "utf8": edit(base, ("lambda: s,", "lambda: s + s,"), ("z for z", "z * 2 for z")),
+        }
+        got = {k: S.changed_targets(base, v) for k, v in edits.items()}
+        self.assertEqual(got, {k: self._reference(base, v) for k, v in edits.items()})
+        self.assertEqual(got["comment"], [])
+        self.assertEqual(got["shifted"], [["f", 4], ["f.<locals>.<lambda>", 5],
+                                          ["f.<locals>.<lambda>", 5],
+                                          ["f.<locals>.<lambda>", 6]])
+        self.assertEqual(got["utf8"], [["u", 15], ["u.<locals>.<lambda>", 16],
+                                       ["u.<locals>.<genexpr>", 16]])
+
+    def test_auto_targets_stage_like_explicit_ones(self):
+        """Proves: for toy edits (method, closure, decorated, defaults, added and removed definitions, outside change, generator expression, comment only, two methods at once), stage with targets omitted resolves the same targets as `changed_targets` and stages the same findings, items and code objects as with them passed, in-process and in the analyzer child. Not: vLLM modules (checked on CPU against the installed vLLM; numbers in the kernel README)."""
+        A = S.ProcessAnalyzer().start()
+        self.addCleanup(A.close)
+        E, O = toy.source("engine"), toy.source("ops")
+        cases = {
+            "method": ("engine", edit(E, ('self.ran.append("base")', 'self.ran.append("v1")'))),
+            "closure": ("ops", edit(O, ("return x + k", "return x + k * 1"))),
+            "decorated": ("ops", edit(O, ("return x + 1", "return x + 2"))),
+            "defaults": ("ops", edit(O, ("def scale(x):", "def scale(x, m=STEP_SCALE):"))),
+            "added": ("engine", edit(E, ("class Gap:", "def helper(x):\n    return x\n\n\n"
+                                         "class Gap:"),
+                                     ('self.ran.append("base")',
+                                      'self.ran.append(str(helper(1)))'))),
+            "removed": ("engine", edit(E, ("    def drain(self):\n        self.tokens.clear()"
+                                           "\n\n", ""))),
+            "outside": ("ops", edit(O, ("STEP_SCALE = 2", "STEP_SCALE = 3"),
+                                    ("return x * STEP_SCALE", "return x * STEP_SCALE * 1"))),
+            "genexpr": ("engine", edit(E, ("(b - a for a, b in", "(2 * (b - a) for a, b in"))),
+            "comment": ("ops", edit(O, ("def scale(x):", "def scale(x):  # faster"))),
+            "two": ("engine", edit(E, ('self.ran.append("base")', 'self.ran.append("v1")'),
+                                   ("self.tokens.clear()", "self.tokens.clear()\n"
+                                    "        self.steps += 0"))),
+        }
+        _summary = ProcessAnalyzerTest._summary
+        for case, (m, src) in cases.items():
+            _, eng, ops = fresh("auto")
+            mod = (eng if m == "engine" else ops).__name__
+            base = E if m == "engine" else O
+            explicit = S.changed_targets(base, src)
+            self.assertEqual(explicit, self._reference(base, src), case)
+            want = _summary(S.stage(mod, src, explicit))
+            for kw in ({}, {"analyzer": A}):
+                r = S.stage(mod, src, **kw)
+                self.assertEqual(r["targets"], explicit, case)
+                self.assertEqual(_summary(r), want, case)
+                self.assertIn("targets_s", r["timings"])
+        self.assertEqual(S.changed_targets(E, cases["two"][1]),
+                         [["Engine.step", at(E, "def step")],
+                          ["Engine.drain", at(E, "def drain")]])
+
+    def test_auto_target_only_the_heap_finds_live(self):
+        """Proves: a changed lambda inside a closure that only the heap holds (the namespace scan calls it not live) is re-analyzed after the heap scan, so auto stages it like explicit targets do (`analyze_again`), and the closure runs the new lambda. Not: deeper nesting."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        base = ("def make(k):\n    def f(x):\n        return (lambda: x + k)()\n    return f\n\n\n"
+                "HOLD = [make(1)]\n")
+        new = base.replace("lambda: x + k", "lambda: x + k + 100")
+        name = f"kt_heaponly{next(_n)}"
+        with open(os.path.join(tmp, name + ".py"), "w") as f:
+            f.write(base)
+        sys.path.insert(0, tmp)
+        self.addCleanup(sys.path.remove, tmp)
+        self.addCleanup(sys.modules.pop, name, None)
+        mod = importlib.import_module(name)
+        _summary = ProcessAnalyzerTest._summary
+        explicit = S.changed_targets(base, new)
+        self.assertEqual([q for q, _ in explicit], ["make", "make.<locals>.f",
+                                                    "make.<locals>.f.<locals>.<lambda>"])
+        want = _summary(S.stage(name, new, explicit))
+        r = S.stage(name, new)
+        self.assertEqual((r["timings"]["scan"], r["timings"].get("analyze_again")),
+                         ("heap", True))
+        self.assertEqual(_summary(r), want)
+        self.assertEqual(r["findings"], [])
+        self.assertTrue(S.apply(r["staged"], J.Journal(), W.Witness())["ok"])
+        self.assertEqual(mod.HOLD[0](2), 103)
 
 
 class AcceptRecordTest(unittest.TestCase):
