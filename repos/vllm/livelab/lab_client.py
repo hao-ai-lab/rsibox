@@ -1,4 +1,5 @@
-"""Drive a running `vllm serve` as a live lab: install, witness, uninstall, and time prefills.
+"""Measure a code change on a running `vllm serve`: time prefills on the original code, swap in
+the change on every GPU worker, check that the new code ran, time again, then restore the original.
 
 The server must run with VLLM_SERVER_DEV_MODE=1 and
 `--worker-extension-cls fastrsi_lab_ext.LabExtension`, and listen on localhost only:
@@ -40,12 +41,22 @@ def prefill(url, model, tokens):
 
 
 def ab(a):
+    t_exp = time.time()
+    steps = {}
+
+    def timed(name, fn, *args):
+        t = time.time(); r = fn(*args); steps[name] = round(time.time() - t, 4); return r
+
     rng = random.Random(a.seed)
-    prefix = [rng.randrange(1000, 100000) for _ in range(a.prefix)]
-    news = [[rng.randrange(1000, 100000) for _ in range(a.new)] for _ in range(a.reps)]
+    prefix = [rng.randrange(1000, a.max_token_id) for _ in range(a.prefix)]
+    news = [[rng.randrange(1000, a.max_token_id) for _ in range(a.new)] for _ in range(a.reps)]
     src = open(a.patched).read()
 
     def arm(name):
+        # Reset the prefix cache and re-cache only the shared prefix, so every arm computes the
+        # new tokens itself (otherwise later arms hit KV computed by earlier arms).
+        post(a.url, "/reset_prefix_cache", {})
+        prefill(a.url, a.model, prefix)
         times, toks = [], []
         for i, new in enumerate(news):          # the same prompts in every arm
             dt, tok = prefill(a.url, a.model, prefix + new)
@@ -53,25 +64,34 @@ def ab(a):
             log(event="prefill", arm=name, i=i, seconds=round(dt, 4), token=tok)
         return statistics.median(times), toks
 
-    post(a.url, "/reset_prefix_cache", {})
-    prefill(a.url, a.model, prefix)             # cache the prefix
-    for _ in range(2):
-        prefill(a.url, a.model, prefix + news[0])
-    base, base_toks = arm("base")
+    timed("reset_prefix_cache", post, a.url, "/reset_prefix_cache", {})
+    timed("cache_prefix", prefill, a.url, a.model, prefix)
+    warm = [rng.randrange(1000, a.max_token_id) for _ in range(a.new)]   # not used by any arm
+    timed("warmup", lambda: [prefill(a.url, a.model, prefix + warm) for _ in range(2)])
+    base, base_toks = timed("arm_base", arm, "base")
     out, dt = rpc(a.url, "fastrsi_install", a.module, a.func, src)
     log(event="install", seconds=round(dt, 4), ranks=out)
-    log(event="witness_before", ranks=rpc(a.url, "fastrsi_witness", a.module)[0])
-    edited, edit_toks = arm("edited")
-    log(event="witness_after", ranks=rpc(a.url, "fastrsi_witness", a.module)[0])
-    out, dt = rpc(a.url, "fastrsi_uninstall", a.module, a.func)
-    log(event="uninstall", seconds=round(dt, 4), ranks=out)
-    again, again_toks = arm("base_again")
+    try:
+        log(event="witness_before", ranks=rpc(a.url, "fastrsi_witness", a.module)[0])
+        edited, edit_toks = timed("arm_edited", arm, "edited")
+        after = rpc(a.url, "fastrsi_witness", a.module)[0]
+        log(event="witness_after", ranks=after)
+        key = f"{a.module}.{a.func}"
+        hits = [r["hits"].get(key, 0) for r in after["results"]]
+        if min(hits) == 0:      # the edited arm did not run the new code on some rank
+            raise SystemExit(f"witness: no calls of the new code on some rank: {hits}")
+    finally:
+        out, dt = rpc(a.url, "fastrsi_uninstall", a.module, a.func)
+        log(event="uninstall", seconds=round(dt, 4), ranks=out)
+    again, again_toks = timed("arm_base_again", arm, "base_again")
     log(event="summary", prefix=a.prefix, new=a.new, base_median=round(base, 4),
         edited_median=round(edited, 4), base_again_median=round(again, 4),
         speedup_pct=round(100 * (base / edited - 1), 1),
         same_tokens_edited_vs_base=sum(x == y for x, y in zip(base_toks, edit_toks)),
         same_tokens_base_again_vs_base=sum(x == y for x, y in zip(base_toks, again_toks)),
         reps=a.reps)
+    # Per request, "seconds" in each prefill line is time to first token (max_tokens=1).
+    log(event="timing", experiment_seconds=round(time.time() - t_exp, 2), steps=steps)
 
 
 if __name__ == "__main__":
@@ -86,4 +106,5 @@ if __name__ == "__main__":
     p.add_argument("--new", type=int, default=8192)
     p.add_argument("--reps", type=int, default=5)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--max-token-id", type=int, default=100000, help="below the model's vocab size")
     ab(p.parse_args())

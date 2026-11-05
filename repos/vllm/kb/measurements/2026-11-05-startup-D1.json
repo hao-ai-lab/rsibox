@@ -1,0 +1,60 @@
+{
+ "phases": {
+  "start_t": 440071,
+  "engine_init": {
+   "seconds": 34,
+   "detail": null
+  },
+  "model_load": {
+   "seconds": 246,
+   "detail": [
+    "78.66",
+    "225.543082"
+   ]
+  },
+  "graphmem_profile": {
+   "seconds": 944,
+   "detail": null
+  },
+  "jit_warmup": {
+   "seconds": 67,
+   "detail": [
+    "65.71"
+   ]
+  },
+  "autotune": {
+   "seconds": 687,
+   "detail": null
+  },
+  "graph_capture": {
+   "seconds": 106,
+   "detail": [
+    "60"
+   ]
+  },
+  "ready": {
+   "seconds": 8,
+   "detail": null
+  },
+  "total_seconds": 2092
+ },
+ "cache_growth": {
+  "vllm": {
+   "new_files": 125,
+   "new_bytes": 2664708
+  },
+  "triton": {
+   "new_files": 1449,
+   "new_bytes": 20748147
+  },
+  "tilelang": {
+   "new_files": 93,
+   "new_bytes": 8490148
+  },
+  "flashinfer": {
+   "new_files": 426,
+   "new_bytes": 192308836
+  }
+ },
+ "graphmem_reused": 0
+}

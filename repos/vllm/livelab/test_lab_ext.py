@@ -6,7 +6,7 @@ wrapper object, the way `direct_register_custom_op` does.
 
 Run: python3 repos/vllm/livelab/test_lab_ext.py -v
 """
-import functools, sys, types, unittest
+import functools, sys, tempfile, types, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -41,8 +41,10 @@ def indexer(x):
 
 def fresh_module():
     mod = types.ModuleType("toy_engine")
-    mod.__file__ = "toy_engine.py"
-    exec(BASE, mod.__dict__)
+    f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False)
+    f.write(BASE); f.close()
+    mod.__file__ = f.name                # the lab compares a patch against the running file
+    exec(compile(BASE, f.name, "exec"), mod.__dict__)
     sys.modules["toy_engine"] = mod
     registered_op = mod.indexer          # what the op registry keeps: the wrapper object
     return mod, registered_op
@@ -77,6 +79,13 @@ class Install(unittest.TestCase):
         self.lab.fastrsi_install("toy_engine", "indexer", PATCHED)
         self.lab.fastrsi_uninstall("toy_engine", "indexer")
         self.assertEqual(self.op(16), 17)
+
+    def test_patch_that_changes_more_than_the_function_is_refused(self):
+        """Fail closed: a patch that also changes the decorator is not half-installed."""
+        changed = PATCHED.replace("return fn(*a, **k)", "return fn(*a, **k) * 2")
+        with self.assertRaises(ValueError):
+            self.lab.fastrsi_install("toy_engine", "indexer", changed)
+        self.assertEqual(self.op(16), 17)          # nothing was installed
 
     def test_swapping_the_wrapper_would_be_a_silent_noop(self):
         """Why the rule exists: rebinding the module attribute leaves the op on old code."""

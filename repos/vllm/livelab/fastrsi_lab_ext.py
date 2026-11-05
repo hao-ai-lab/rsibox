@@ -4,10 +4,11 @@ Load it with `LLM(..., worker_extension_cls="fastrsi_lab_ext.LabExtension")` and
 methods with `llm.collective_rpc("fastrsi_install", args=(...))`, so every rank applies the
 same change in the same step. Standard library only.
 
-Install rule for OP edits (see repos/vllm/kb/mechanisms.md): swap the code of the innermost
-function under any decorators. Decorators such as `@eager_break_during_capture` close over
-that inner function, and the registered custom op calls the outer wrapper, so swapping the
-wrapper or rebinding the module attribute would change nothing.
+How install works: it replaces the code of the innermost function under any decorators.
+Decorators such as `@eager_break_during_capture` keep a reference to that inner function, and
+vLLM's registered op calls the outer wrapper, so replacing only the module attribute would not
+change what the engine runs. A patch that changes anything besides this one function and its
+imports is refused.
 """
 import ast
 import hashlib
@@ -26,7 +27,11 @@ def _innermost(fn):
 
 
 def _code_hash(code):
-    return hashlib.sha256(code.co_code + repr(code.co_consts).encode()).hexdigest()[:12]
+    """Fingerprint of a code object: bytecode, names and constants, nested code included."""
+    h = hashlib.sha256(code.co_code + repr(code.co_names).encode())
+    for c in code.co_consts:
+        h.update(_code_hash(c).encode() if hasattr(c, "co_code") else repr(c).encode())
+    return h.hexdigest()[:12]
 
 
 def _rank():
@@ -38,6 +43,17 @@ class LabExtension:
         """Compile `func_name` from the patched module source and swap it in."""
         mod = importlib.import_module(module_name)
         tree = ast.parse(patched_source, filename=mod.__file__)
+        # Fail closed: this installs one function. If the patch also changes any other top-level
+        # definition or assignment, refuse instead of silently ignoring it.
+        base = ast.parse(open(mod.__file__).read())
+        def others(t):
+            return {ast.dump(n) for n in t.body
+                    if not isinstance(n, (ast.Import, ast.ImportFrom))
+                    and getattr(n, "name", None) != func_name}
+        extra = others(tree) - others(base)
+        if extra:
+            raise ValueError(f"{func_name}: the patch changes {len(extra)} other top-level "
+                             "statement(s); install them too or restart")
         # Bring in names the patched module imports and this module does not have yet.
         for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):

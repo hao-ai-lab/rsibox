@@ -1,0 +1,44 @@
+{
+ "phases": {
+  "start_t": 442224,
+  "engine_init": {
+   "seconds": 23,
+   "detail": null
+  },
+  "model_load": {
+   "seconds": 128,
+   "detail": [
+    "78.66",
+    "104.620900"
+   ]
+  },
+  "graphmem_profile": {
+   "seconds": 13,
+   "detail": null
+  },
+  "jit_warmup": {
+   "seconds": 27,
+   "detail": [
+    "26.09"
+   ]
+  },
+  "graph_capture": {
+   "seconds": 91,
+   "detail": [
+    "75"
+   ]
+  },
+  "ready": {
+   "seconds": 5,
+   "detail": null
+  },
+  "total_seconds": 287
+ },
+ "cache_growth": {
+  "flashinfer": {
+   "new_files": 0,
+   "new_bytes": 23828
+  }
+ },
+ "graphmem_reused": 0
+}

@@ -102,3 +102,35 @@ requests, so its median is not usable; base again matches edited. The witness sh
 function ran (4 calls per request), but not whether its DeepSelect branch was taken; that needs
 a branch-level witness. Dummy weights make outputs irreproducible (base vs base again: 0 of 5
 tokens equal), so output equality needs real weights.
+
+## Cold vs warm engine start with the startup services (2026-11-05)
+
+DeepSeek-V4.1-Flash (real weights, read from shared storage), 4× GB200 with IMEX, TP4,
+`--max-model-len 163840`, same node and settings for both starts. Cold = empty cache root;
+warm = same cache root, second start. Data: `measurements/2026-11-05-startup-D1.json` (cold),
+`-D2.json` (warm); parsed from the engine log by `livelab/startup/phases.py`.
+
+![Cold vs warm start](figures/startup-cold-vs-warm.png)
+
+| Phase (s) | Cold | Warm |
+|---|---:|---:|
+| Import and config | 34 | 23 |
+| Weights | 246 | 128 |
+| Profiling run + first-use kernel compiles | 944 | 13 |
+| JIT warmup | 67 | 27 |
+| FlashInfer autotune | 687 | 0 |
+| CUDA graph capture | 106 | 91 |
+| Server ready | 8 | 5 |
+| **Total** | **2092** | **287** |
+
+What the warm start saved and why:
+- Autotune: all 44 tuning passes of the cold start were skipped; results came from the cache.
+- First-use compiles: the cold start wrote 1,449 Triton, 426 FlashInfer, 93 TileLang and 125 vLLM
+  cache files; the warm start wrote none.
+- Weights: 246 → 128 s from the OS page cache only. Weight IPC (keeping weights on the GPUs) does
+  not work for this model with stock vLLM yet: CPU-resident Engram tables exceed the transfer
+  limit, and the MXFP8 batched-matmul kernel refuses pre-processed weights.
+- Graph-memory reuse (`startup/graphmem.py`) did not load in either start (no log lines), so it is
+  not measured; the 13 s warm profiling phase is with stock profiling.
+
+Still left in a warm start (287 s): weights 128, graph capture 91, JIT warmup 27, import 23.
