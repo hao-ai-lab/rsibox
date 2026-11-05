@@ -34,6 +34,10 @@ is then read by the wrong call (kb/lessons.md).
   while a commit hangs, and the RPC reply never comes late. The late call keeps the lane; a
   commit that starts after its deadline applies nothing (kernel LocalParticipant), and the
   calls queued behind it (the host's undo) run after it.
+- R1 (`rebuild`, from the host's post-commit phase): a worker recompiles or recaptures by engine
+  mode (rebuild.py) and says `how`; calls of swapped code meanwhile count as capture. The
+  witness also asks torch whether the current stream is capturing at every call, so a capture
+  outside R1 is not counted as a run either.
 - A per-step version log (`tick`): at every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as transitions
   `[step, {key: tag}]`, and counts steps whose version changed between the step's two calls
@@ -52,28 +56,29 @@ from kernel import coordinator as C
 from kernel import findings as F
 from kernel import swap as S
 
+from . import graphs as G
+
 METHODS = ("prepare", "prepare_start", "prepare_poll", "validate", "commit", "abort", "undo",
-           "status", "proof", "witness_check", "reset", "versions", "warm")
+           "status", "proof", "witness_check", "reset", "versions", "warm", "rebuild")
 
 
 # Model code: under torch.compile and CUDA graphs its Python runs only while tracing and
-# capturing, so a swap there commits and never runs (TP2 MoE run: witness 0/0 in graph mode).
+# capturing, except the ops that split the graph (graphs.py), so a swap there may commit and
+# never run (TP2 MoE run: witness 0/0 in graph mode).
 CAPTURED_PREFIXES = ("vllm.model_executor.models.", "vllm.model_executor.layers.")
 R1 = {"action": "recapture the graphs after the swap (recipe R1), or run eager",
       "cost": "recipe R1"}
+graph_mode = G.graph_mode
 
 
-def graph_mode(worker):
-    """{"cudagraph_mode", "compile_mode"} when this worker runs captured graphs or compiled
-    model code, from its vLLM config; None when it runs eager (or has no config)."""
-    cfg = getattr(worker, "vllm_config", None)
-    cc = getattr(cfg, "compilation_config", None)
-    if cc is None or getattr(getattr(cfg, "model_config", None), "enforce_eager", False):
-        return None
-    cg = getattr(getattr(cc, "cudagraph_mode", None), "name", None) or "NONE"
-    mode = getattr(getattr(cc, "mode", None), "name", None) or "NONE"
-    return None if cg == "NONE" and mode == "NONE" else {"cudagraph_mode": cg,
-                                                          "compile_mode": mode}
+def stream_capturing():
+    """Is this thread's current CUDA stream recording a graph? The worker witness's probe: a
+    call made then is counted as capture, not as a run (kernel witness)."""
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return False
+    cuda = torch.cuda
+    return cuda.is_initialized() and cuda.is_current_stream_capturing()
 
 
 class Side:
@@ -85,7 +90,9 @@ class Side:
         if os.environ.get("FASTRSI_KERNEL_ANALYZE", "process") == "process":
             analyzer = S.ProcessAnalyzer()     # the participant starts it (kernel warm start)
         self.lp = C.LocalParticipant(role, scope=scope, resets=resets, analyzer=analyzer,
-                                     checks=[self._captured_check])
+                                     checks=[self._captured_check],
+                                     capturing=stream_capturing if role == "worker" else None)
+        self.rebuild_fn = None   # R1 on this worker: rebuild.run (vLLM); tests may set it
         self._jobs = {}        # txn -> {"thread", "result", "t0"}, until commit/abort/undo
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None      # phase-2 calls with a deadline (kernel Lane)
@@ -123,15 +130,51 @@ class Side:
         return self._graph() is not None and key_or_module.startswith(self.captured_prefixes)
 
     def _captured_check(self, module, items):
-        """Kernel check at prepare: a target in model code while the engine runs graphs or
-        compiled code is a `captured_target` finding (route R1)."""
+        """Kernel check at prepare, for a target in model code while the engine runs graphs
+        or compiled code (graphs.py says where it runs):
+        - Python on every step (reached only through ops that split the graph, in a
+          piecewise mode): no finding;
+        - Python on prefill, inside full graphs on decode: `captured_partly`, advisory,
+          route R1 (decode runs the new code only after R1);
+        - Python nowhere, or undecided: `captured_target`, blocking, route R1."""
         g = self._graph()
         if g is None or not module.startswith(self.captured_prefixes):
             return []
-        return [{**F.finding("captured_target", f"the engine runs cudagraph_mode "
-                             f"{g['cudagraph_mode']}, compile mode {g['compile_mode']}, and "
-                             f"{module} is model code", "a target the engine runs in Python",
-                             subject=k), "route": "R1"} for k in items]
+        mode = f"cudagraph_mode {g['cudagraph_mode']}, compile mode {g['compile_mode']}"
+        try:
+            mod = sys.modules.get(self.lp._actual(module)) or importlib.import_module(
+                self.lp._actual(module))
+            src = self.lp._live_source(module)
+            if src is None:
+                with open(mod.__file__) as fh:
+                    src = fh.read()
+            roots, err = G.split_roots(mod, g), None
+        except Exception as e:
+            src, roots, err = None, [], f"{type(e).__name__}: {e}"
+        out = []
+        for k in items:
+            qual = k.split(":")[1]
+            kind, detail = G.reach(src, roots, qual) if src is not None else \
+                ("unknown", f"the module source could not be read ({err})")
+            where = G.where(g, kind)
+            if where["prefill"] and where["decode"]:
+                continue
+            if where["prefill"]:
+                out.append({**F.finding(
+                    "captured_partly", f"the engine runs {mode}; {detail}: the new code runs "
+                    "in Python on prefill and mixed steps now, and on decode steps (full "
+                    "graphs) only after R1", "a target the engine runs in Python on every step",
+                    subject=k), "route": "R1", "advisory": True})
+                continue
+            why = (f"; could not decide statically, so this stays blocking: {detail}"
+                   if kind == "unknown" else f"; {detail}")
+            big = (f"; steps above the largest capture size ({g['max_capture']} tokens) run "
+                   "with no graph" if g.get("max_capture") and g["compile_mode"] == "NONE"
+                   else "")
+            out.append({**F.finding(
+                "captured_target", f"the engine runs {mode}, and {module} is model code{why}"
+                f"{big}", "a target the engine runs in Python", subject=k), "route": "R1"})
+        return out
 
     def _route_r1(self, r):
         """Proof time: a zero_witness on model code while the engine runs graphs says why and
@@ -199,6 +242,28 @@ class Side:
     def versions(self, _payload=None):
         return F.ok(steps=self.steps, vlog=self.vlog, mid_step_changes=self.mid_step_changes,
                     watch=sorted(self.watch), watch_pending=sorted(self._watch_new))
+
+    def rebuild(self, payload):
+        """R1 on this side, after the kernel's commit (why "commit"), undo ("undo") or a
+        failed R1 ("rollback"): rebuild.run on a worker (recompile or recapture by engine
+        mode, `how` in the reply). Calls of swapped code meanwhile count as capture. The core
+        side has no graphs: it answers how "none"."""
+        txn, _ = C.txn_ref(payload)
+        why = payload.get("why") if isinstance(payload, dict) else None
+        w = self.scope.get("worker")
+        if w is None:
+            return F.ok(how="none", note=f"no graphs on the {self.role} side")
+        if why == "commit":              # the fault hook fails the first R1 only
+            f = self._fault("rebuild", txn)
+            if f is not None:
+                return f
+        fn = self.rebuild_fn
+        if fn is None:
+            from . import rebuild as RB
+            fn = RB.run
+        with self.lp.witness.capture():
+            r = fn(w)
+        return F.ok(**r, why=why)
 
     def warm(self, payload=None):
         """This side's analyzer: started with the side; `{"wait_s": s}` waits for its boot."""
@@ -313,6 +378,8 @@ class Side:
             return self.versions()
         if method == "warm":
             return self.warm(payload)
+        if method == "rebuild":
+            return self.rebuild(payload)
         txn, deadline_at = C.txn_ref(payload)
         if method in ("commit", "abort", "undo") and isinstance(txn, str):
             self._jobs.pop(txn, None)          # the vote is over: drop the prepare result

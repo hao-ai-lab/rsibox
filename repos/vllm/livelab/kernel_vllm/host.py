@@ -37,6 +37,20 @@ How a transaction runs (kernel StepGapCoordinator, loop.md 4b):
   `scheduler.has_requests` is shadowed to False while `batch_queue` drains), as in the
   engine-core transaction prototype.
 
+- R1 (recapture or recompile) is the transaction's post-commit phase (kernel `rebuilds`): when
+  the plan says `"recapture": true` (or `"rebuild": ["R1"]`), or prepare returned an accepted
+  `captured_target`, the host sends `rebuild` to every worker right after the commit gap, as
+  its own job of the busy loop under its own deadline (FASTRSI_KERNEL_REBUILD_DEADLINE, default
+  600 s; a recompile takes tens of seconds, far over the phase-2 deadline and the gap timeout).
+  Each worker recompiles when the engine uses torch.compile and recaptures in pure CUDA-graph
+  modes (`how` per rank in the receipt's `rebuild.results.R1.ranks`). The engine is paused
+  while R1 runs (it holds the loop); steps that start between the commit and R1 run the new
+  Python on eager paths and the old graphs elsewhere (`steps_between` / `steps_during` in the
+  receipt). A failed R1 undoes the transaction and runs R1 again from the base code; undo of
+  such a transaction runs R1 too. `"recapture": false` turns the automatic R1 off.
+- A loop job waits `gap_timeout` to start; once started it may run until its own run timeout
+  (phase 2: the same again; R1: its deadline), so a long R1 is not taken for a lost gap.
+
 The host records every step's duration, so a reply can say how long steps stalled.
 """
 import collections
@@ -61,6 +75,7 @@ DIR = os.environ.get("FASTRSI_KERNEL_DIR")
 GAP_TIMEOUT_S = float(os.environ.get("FASTRSI_KERNEL_GAP_TIMEOUT", "30"))
 PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5")) or None
 RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
+REBUILD_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_REBUILD_DEADLINE", "600"))
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
 
@@ -71,11 +86,19 @@ class _Job:
     def __init__(self, fn, gap):
         self.fn, self.gap = fn, gap
         self.done = threading.Event()
+        self.started = threading.Event()
+        self.lock = threading.Lock()
+        self.cancelled = False         # the caller stopped waiting before it started
         self.value = self.error = None
         self.t_queued = time.perf_counter()
         self.t_start = self.t_end = None
 
     def run(self):
+        with self.lock:
+            if self.cancelled:
+                self.done.set()
+                return
+            self.started.set()
         self.t_start = time.perf_counter()
         try:
             self.value = self.fn()
@@ -93,6 +116,9 @@ def _merge(method, rs):
     rs = out["ranks"]
     if any(r.get("pending") for r in rs):
         out["pending"] = True
+    if method == "rebuild":
+        out["how"] = sorted({str(r.get("how")) for r in rs})
+        out["seconds"] = max((r.get("seconds") or 0) for r in rs) if rs else None
     if method == "prepare_poll" and not out.get("pending"):
         out["staged"] = rs[0].get("staged") if rs else {}
         out["timings"] = {f"rank{r.get('rank')}": r.get("timings") for r in rs}
@@ -178,6 +204,9 @@ class WorkerGroup(C.Participant):
     def versions(self, _=None):
         return self._rpc("versions", None)
 
+    def rebuild(self, payload):
+        return self._rpc("rebuild", payload)
+
 
 class Host:
     def __init__(self, core, root):
@@ -195,8 +224,23 @@ class Host:
                                                   bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             phase2_deadline_s=PHASE2_DEADLINE_S,
+            rebuilds={"R1": self._r1}, rebuild_deadline_s=REBUILD_DEADLINE_S,
+            rebuild_job=lambda fn: self.in_loop(
+                fn, gap=True, timeout=self.gap_timeout,
+                run_timeout=(REBUILD_DEADLINE_S or 3600.0) + RPC_GRACE_S + 5.0),
+            steps=self.steps_between,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None})
+
+    def _r1(self, txn, why, deadline_at):
+        """R1 on every worker (kernel rebuild route), from the busy loop."""
+        return self.co.participants[0].rebuild({"txn": txn, "why": why,
+                                                "deadline_at": deadline_at})
+
+    def steps_between(self, t0, t1):
+        """Steps that started between two unix times (kernel `steps`)."""
+        off = time.time() - time.perf_counter()
+        return sum(1 for st, _ in list(self.steps) if t0 - off <= st <= t1 - off)
 
     def warm(self):
         """At engine start, on the loop thread before the first step: one `warm` call to every
@@ -235,15 +279,23 @@ class Host:
                             error=None if ws["ok"] else ws.get("error"), started=self.started)
             time.sleep(0.05)
 
-    def in_loop(self, fn, gap=False, timeout=60.0):
+    def in_loop(self, fn, gap=False, timeout=60.0, run_timeout=None):
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
-        in flight) and return its result."""
+        in flight) and return its result. The loop must start the job within `timeout` (else
+        it is cancelled and never runs); once started it may run `run_timeout` more seconds
+        (default: `timeout`)."""
         if threading.current_thread() is self.loop_thread:
             return fn()
         job = _Job(fn, gap)
         self.core.input_queue.put_nowait((TAG, job))
-        if not job.done.wait(timeout):
-            raise TimeoutError(f"the engine loop did not run the job within {timeout} s")
+        if not job.started.wait(timeout):
+            with job.lock:
+                if not job.started.is_set():
+                    job.cancelled = True
+                    raise TimeoutError(f"the engine loop did not run the job within {timeout} s")
+        if not job.done.wait(timeout if run_timeout is None else run_timeout):
+            raise TimeoutError(f"the engine loop started the job but it did not finish within "
+                               f"{timeout if run_timeout is None else run_timeout} s")
         if job.error is not None:
             raise job.error
         return job.value
@@ -267,7 +319,10 @@ class Host:
         held0 = self.held_steps
         try:
             if op == "txn":
-                r = self.co.run(cmd["plan"], edit_time=cmd.get("edit_time"),
+                plan = cmd["plan"]
+                if "recapture" in plan and "rebuild" not in plan:   # R1 by flag, or never
+                    plan = {**plan, "rebuild": ["R1"] if plan["recapture"] else []}
+                r = self.co.run(plan, edit_time=cmd.get("edit_time"),
                                 baseline_restart=cmd.get("baseline_restart"))
             elif op == "prove":
                 r = self.co.prove(cmd["txn"], golden=cmd.get("golden"))

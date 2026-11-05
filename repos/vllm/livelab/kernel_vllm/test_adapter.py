@@ -179,6 +179,245 @@ class GraphModeTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["findings"]), (True, []))
 
 
+def _worker2(cudagraph, compile_mode, splitting_ops=()):
+    """`_worker` with splitting_ops and a max capture size (graphs.graph_mode reads them)."""
+    w = _worker(cudagraph, compile_mode)
+    w.vllm_config.compilation_config.splitting_ops = list(splitting_ops)
+    w.vllm_config.compilation_config.max_cudagraph_capture_size = 512
+    return w
+
+
+GDN = '''"""A stand-in for a vLLM layer module: a custom op that splits the graph (decorated as
+vLLM's breakable graphs mark it) calls the layer's core; the MoE block has no split op."""
+import functools
+
+
+def eager_break_during_capture(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+class Attn:
+    def forward(self, x):
+        out = [0]
+        gdn_core(x, out, self)
+        return self.proj(out[0]) + self.helper(x)
+
+    def proj(self, y):
+        return y + 1
+
+    def helper(self, x):
+        return 0
+
+    def _forward_core(self, x, out):
+        out[0] = x * 2 + self.helper(x)
+
+
+@eager_break_during_capture
+def gdn_core(x, out, layer):
+    self = layer
+    self._forward_core(x, out)
+
+
+class MoE:
+    def forward(self, x):
+        return x * 3
+'''
+
+
+class CapturedSplitTest(unittest.TestCase):
+    """Pain point: at TP2 (Qwen3.5-35B-A3B-FP8, FULL_AND_PIECEWISE, breakable graphs)
+    captured_target vetoed the GDN core `_forward_core`, which runs in Python on prefill
+    through the eager-break op and only inside full graphs on decode: accepted by name, it read
+    120 calls per rank after 4 prefills."""
+
+    def setUp(self):
+        import importlib
+        import os
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.pkg = f"kvsplit{next(_n)}"
+        os.makedirs(os.path.join(d, self.pkg))
+        open(os.path.join(d, self.pkg, "__init__.py"), "w").close()
+        with open(os.path.join(d, self.pkg, "gdn.py"), "w") as f:
+            f.write(GDN)
+        sys.path.insert(0, d)
+        self.addCleanup(sys.path.remove, d)
+        importlib.import_module(self.pkg + ".gdn")
+
+    def _findings(self, worker, qual):
+        """The worker side's prepare-time check for one target of the stand-in module:
+        [(check, route, advisory, observed)]."""
+        side = Side("worker", scope={"worker": worker}, rank=0)
+        side.captured_prefixes = (self.pkg + ".",)     # plays vLLM model code
+        if side.lp.analyzer is not None:
+            self.addCleanup(side.lp.analyzer.close)
+        m = self.pkg + ".gdn"
+        cls, fn = qual.split(".")
+        lines = GDN.splitlines()
+        start = next(i for i, x in enumerate(lines) if x.startswith(f"class {cls}:"))
+        line = next(i for i, x in enumerate(lines, 1)
+                    if i > start and x.strip().startswith(f"def {fn}("))
+        r = side._captured_check(m, [f"{m}:{qual}:{line}"])
+        return [(f["check"], f.get("route"), bool(f.get("advisory")), f["observed"]) for f in r]
+
+    def test_split_op_target_is_advisory_and_captured_only_stays_blocking(self):
+        """Input: breakable graphs (FULL_AND_PIECEWISE, compile NONE). Expected:
+        `Attn._forward_core` (reached only through the eager-break op `gdn_core`) is an
+        advisory `captured_partly` (route R1) saying it runs on prefill now and on decode only
+        after R1; `MoE.forward` (no split op) stays a blocking `captured_target`;
+        `Attn.helper` (called from `_forward_core` and from `forward`, which no split op
+        reaches) stays blocking and says it could not decide. In PIECEWISE mode
+        `_forward_core` gets no finding (Python on every step); with torch.compile and the op
+        in splitting_ops it is advisory again. Not: vLLM's real dispatch (the GPU queue job
+        checks the witness on prefill and, after R1, on decode)."""
+        bk = _worker2("FULL_AND_PIECEWISE", "NONE")
+        (core,) = self._findings(bk, "Attn._forward_core")
+        self.assertEqual(core[:3], ("captured_partly", "R1", True))
+        self.assertIn("prefill", core[3])
+        self.assertIn("only after R1", core[3])
+        self.assertIn("gdn_core", core[3])
+        (moe,) = self._findings(bk, "MoE.forward")
+        self.assertEqual(moe[:3], ("captured_target", "R1", False))
+        (helper,) = self._findings(bk, "Attn.helper")
+        self.assertEqual(helper[:3], ("captured_target", "R1", False))
+        self.assertIn("could not decide", helper[3])
+        self.assertEqual(self._findings(_worker2("PIECEWISE", "NONE"), "Attn._forward_core"),
+                         [])
+        comp = _worker2("FULL_AND_PIECEWISE", "VLLM_COMPILE", ["vllm::gdn_core"])
+        self.assertEqual(self._findings(comp, "Attn._forward_core")[0][:3],
+                         ("captured_partly", "R1", True))
+        self.assertEqual(self._findings(comp, "MoE.forward")[0][:3],
+                         ("captured_target", "R1", False))
+
+
+class RebuildTest(unittest.TestCase):
+    """Pain point: the adapter had no R1. After a graph-mode commit the lab called the live
+    lab's recapture over another RPC: commit and recapture were not one transaction, a failed
+    recapture left the edit in, and the witness then counted capture calls as runs."""
+
+    def _host(self, tag, ranks=2, worker=None):
+        """The real Host (kernel StepGapCoordinator, WorkerGroup, core Side) over in-process
+        worker Sides; each side's R1 is a recorder that runs the swapped toy step twice, as a
+        capture runs the model code."""
+        import shutil
+        import tempfile
+        import types
+        from unittest import mock
+        from . import host as H
+        calls, sides, names = [], [], []
+        for r in range(ranks):
+            name = f"kvb{next(_n)}_{tag}{r}"
+            toy.load_copy(name)                       # each rank its own module, as a process
+            names.append(name)
+            s = Side("worker", scope={"worker": worker or object()}, rank=r)
+            s.lp.alias = {"toy": name}
+            if s.lp.analyzer is not None:
+                self.addCleanup(s.lp.analyzer.close)
+            if worker is not None:
+                s.captured_prefixes = ("toy.",)       # the toy engine plays model code
+
+            def r1(w, r=r, name=name):
+                eng = sys.modules[name + ".engine"].Engine()
+                eng.step(1)
+                eng.step(1)
+                calls.append((r, eng.ran[-1]))
+                return {"how": "recapture", "graphs": 2}
+            s.rebuild_fn = r1
+            sides.append(s)
+        core = types.SimpleNamespace(model_executor=_Executor(sides))
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with mock.patch.dict(sys.modules, {"vllm": types.SimpleNamespace(__version__="cpu")}):
+            h = H.Host(core, d)
+        if h.core_side.lp.analyzer is not None:
+            self.addCleanup(h.core_side.lp.analyzer.close)
+        return h, names, calls, sides
+
+    def _plan(self, tid, **kw):
+        line = next(i for i, x in enumerate(ENG.splitlines(), 1) if "def step" in x)
+        return {"id": tid, **kw, "modules": {"toy.engine": {
+            "on": ["worker"], "base_hash": L.text_hash(ENG),
+            "source": ENG.replace('self.ran.append("base")', 'self.ran.append("v1")'),
+            "targets": [["Engine.step", line]]}}}
+
+    def test_recapture_flag_runs_r1_on_every_rank_after_the_commit_and_after_undo(self):
+        """Input: a plan with "recapture": true through the host's txn op, two worker ranks.
+        Expected: committed; R1 ran once per rank right after the commit and saw the new code
+        (v1); the receipt has rebuild.ok, how ["recapture"], recapture_s, "R1 recapture",
+        edit_to_run_s >= edit_to_commit_s, steps_during 0. The witness counts R1's calls as
+        capture (live 0, zero_witness routed to R1 with a device-probe note) until a live
+        call. Undo runs R1 on both ranks from the base code. Not: vLLM's capture itself
+        (rebuild.py; the GPU queue job)."""
+        h, names, calls, sides = self._host("flag")
+        r = h.handle({"op": "txn", "plan": self._plan("fl", recapture=True)})
+        rec = r["receipt"]
+        self.assertEqual((r["outcome"], calls), ("committed", [(0, "v1"), (1, "v1")]))
+        rb = rec["rebuild"]
+        self.assertEqual((rb["ok"], rb["results"]["R1"]["how"], rb.get("steps_during")),
+                         (True, ["recapture"], 0))
+        self.assertIn("paused", rb["while"])
+        self.assertIsNotNone(rec["recapture_s"])
+        self.assertIn("R1 recapture", rec["actual_recipes"])
+        self.assertGreaterEqual(rec["edit_to_run_s"], rec["edit_to_commit_s"])
+        pr = h.handle({"op": "prove", "txn": "fl"})["receipt"]
+        (k,) = pr["witness"]["workers/rank0"]
+        self.assertEqual((pr["witness"]["workers/rank0"][k],
+                          pr["witness_capture"]["workers/rank0"][k]), (0, 2))
+        self.assertEqual(pr["ran"]["workers/rank1"][k], "ran during capture 2, ran live 0")
+        zw = [f for f in pr["findings"] if f["check"] == "zero_witness"]
+        self.assertEqual([(f["rank"], f["route"]) for f in zw], [(0, "R1"), (1, "R1")])
+        self.assertIn("device-side probe", zw[0]["note"])
+        sys.modules[names[0] + ".engine"].Engine().step(1)    # a live run on rank 0
+        pr = h.handle({"op": "prove", "txn": "fl"})["receipt"]
+        self.assertEqual(pr["ran"]["workers/rank0"][k], "ran during capture 2, ran live 1")
+        del calls[:]
+        u = h.handle({"op": "undo", "txn": "fl"})
+        self.assertEqual((u["ok"], calls), (True, [(0, "base"), (1, "base")]))
+        self.assertEqual(u["receipt"]["rebuild"]["why"], "undo")
+
+    def test_failed_r1_rolls_back_and_recaptures_the_base(self):
+        """Input: the same plan with R1 failing on rank 1 after the commit (fault hook).
+        Expected: outcome rolled_back, a not-overridable rebuild_failed finding, both ranks
+        back at the base code (status undone), and R1 run again on both ranks from the base
+        code (why rollback). Not: a real capture error."""
+        h, names, calls, sides = self._host("fail")
+        p = self._plan("ff", recapture=True, faults={"worker:1": "rebuild"})
+        r = h.handle({"op": "txn", "plan": p})
+        rec = r["receipt"]
+        self.assertEqual(r["outcome"], "rolled_back")
+        self.assertEqual([(f["subject"], f["overridable"]) for f in rec["findings"]
+                          if f["check"] == "rebuild_failed"], [("commit", False)])
+        self.assertEqual(calls, [(0, "v1"), (0, "base"), (1, "base")])
+        self.assertEqual((rec["rollback"]["status"], rec["rebuild"]["back"]["ok"]),
+                         ("undone", True))
+        st = h.handle({"op": "pstatus", "txn": "ff"})
+        self.assertEqual([x["state"] for x in st["workers"]["ranks"]], ["undone", "undone"])
+
+    def test_an_accepted_captured_target_runs_r1_without_the_flag(self):
+        """Input: a graph-mode worker (FULL_AND_PIECEWISE, VLLM_COMPILE), the toy step as model
+        code, captured_target accepted, no recapture flag. Expected: R1 runs after the commit
+        (auto); with "recapture": false it does not. And rebuild.how picks recompile under
+        torch.compile, recapture for pure CUDA graphs, none when eager. Not: the recompile."""
+        from . import rebuild as RB
+        h, names, calls, _ = self._host("auto", ranks=1, worker=_worker())
+        r = h.handle({"op": "txn", "plan": self._plan("au", accept=["captured_target"])})
+        self.assertEqual((r["outcome"], calls), ("committed", [(0, "v1")]))
+        self.assertTrue(h.handle({"op": "undo", "txn": "au"})["ok"])
+        del calls[:]
+        r = h.handle({"op": "txn", "plan": self._plan("au2", accept=["captured_target"],
+                                                      recapture=False)})
+        self.assertEqual((r["outcome"], calls, r["receipt"]["rebuild"]),
+                         ("committed", [], None))
+        self.assertEqual([RB.how(_worker("FULL_AND_PIECEWISE", "VLLM_COMPILE")),
+                          RB.how(_worker("FULL_AND_PIECEWISE", "NONE")),
+                          RB.how(_worker("NONE", "NONE")), RB.how(_worker(eager=True))],
+                         ["recompile", "recapture", "none", "none"])
+
 class WatchDropTest(unittest.TestCase):
 
     def test_an_aborted_transaction_leaves_nothing_watched(self):
