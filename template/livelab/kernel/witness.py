@@ -39,7 +39,7 @@ import sys
 import types
 
 from . import findings as F
-from .locate import all_objects, sliced, unfrozen
+from .locate import all_objects, sliced
 
 HIT = "__fastrsi_hit__"
 
@@ -195,8 +195,11 @@ def live_codes(suspended=True, codes=None):
     a suspended generator / coroutine (an event loop waiting in `await` is on no thread's
     stack). Thread stacks are cheap. codes: the codes the caller cares about; then suspended
     frames are found from those codes' referrers (a suspended generator's frame refers to its
-    code: one C-level `gc.get_referrers` call over the unfrozen heap, no Python pass), and
-    only for the codes that can be suspended. Without codes, every suspended frame is found
+    code), only for the codes that can be suspended, with one C-level `gc.get_referrers` call
+    over the objects made since the engine's `gc.freeze()` (vLLM freezes after start-up). A
+    generator made before the freeze and still suspended is not seen: the price of not
+    traversing the whole heap (with the frozen heap included, the call alone took 0.2-0.3 s
+    per stage on a loaded Qwen3-8B worker). Without codes, every suspended frame is found
     with a heap scan (one get_objects, then a sliced pass): 0.42 s of a 0.49 s stage per rank
     for a generator target in load-time code (DeepSeek-V4.1 TP4)."""
     out = set()
@@ -210,8 +213,7 @@ def live_codes(suspended=True, codes=None):
         want = [c for c in codes if c.co_flags & SUSPENDABLE]
         if not want:
             return out
-        with unfrozen():
-            refs = gc.get_referrers(*want)
+        refs = gc.get_referrers(*want)     # objects made since gc.freeze() (see above)
         try:
             for o in refs:
                 fr = _frame(o)

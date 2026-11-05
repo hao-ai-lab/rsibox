@@ -492,7 +492,8 @@ class GeneratorTargetTest(unittest.TestCase):
         with no generator of it alive, then with one suspended (started, not finished), with
         the gc heap frozen as vLLM does. Expected: no whole-heap pass (`all_objects` is never
         called) in either case; with none alive no finding; with one suspended a blocking
-        running_frame. Fails before this change: stage called all_objects (one get_objects
+        running_frame. Not: a generator made before gc.freeze() and still suspended (only objects
+        made since the freeze are looked at). Fails before this change: stage called all_objects (one get_objects
         and a Python pass: 0.42 s of a 0.49 s stage per rank on DeepSeek-V4.1 TP4)."""
         from unittest import mock
         name = f"kt_gen{next(_n)}"
@@ -507,8 +508,7 @@ class GeneratorTargetTest(unittest.TestCase):
             r = S.stage(name, new)
             self.assertEqual((r["ok"], r["findings"], scans), (True, [], []))
             g = m.it(3)
-            next(g)
-            gc.freeze()                    # the suspended generator is frozen too
+            next(g)                        # made after the freeze, as at serving time
             r = S.stage(name, new)
             self.assertEqual(([(f["check"], f.get("advisory", False)) for f in r["findings"]],
                               scans), ([("running_frame", False)], []))
