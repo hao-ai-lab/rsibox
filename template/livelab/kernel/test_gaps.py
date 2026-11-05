@@ -271,6 +271,97 @@ class NewFieldsTest(unittest.TestCase):
             self.assertEqual([f["check"] for f in r["findings"]], [])
 
 
+class RecipeRebuildsTest(unittest.TestCase):
+    def test_a_recipe_that_rebuilds_the_class_resolves_its_new_fields(self):
+        """Input (vLLM #63827's shape through core_txn's U4): Estimator.__init__ gains
+        `self._block`, step() reads it, a live estimator exists; the plan says its recipe
+        builds every live Estimator again with the edited __init__ (`"rebuilds":
+        ["Estimator"]`, as U4 / R4 does for the scheduler, R5 / R5m for model objects).
+        Expected: prepare ok with no accept; new_fields is advisory, resolved_by "recipe", and
+        no backfill is planned (commit sets nothing on the live estimator); without
+        "rebuilds" the same plan still votes no. Fails before this change: the plan voted no
+        with new_fields although the rebuild sets the field (tip-63827 needed accept)."""
+        name = f"kt_est{next(_n)}"
+        (m,) = temp_modules(self, {name: ESTIMATOR})
+        worker = m.Runner()
+        p = C.LocalParticipant("workers", scope={"worker": worker})
+        plan = {"id": "rb", "modules": {name: {"source": ESTIMATOR_NEW,
+                                                "rebuilds": ["Estimator"]}}}
+        r = p.prepare(plan)
+        self.assertTrue(r["ok"], r)
+        (f,) = [f for f in r["findings"] if f["check"] == "new_fields"]
+        self.assertEqual((f["subject"], f["advisory"], f["resolved_by"], f["accepted"]),
+                         (f"{name}:Estimator._block", True, "recipe", True))
+        c = p.commit("rb")
+        self.assertTrue(c["ok"], c)
+        self.assertFalse(c.get("backfill"))
+        self.assertNotIn("_block", vars(worker.speculator.acceptance_estimator))
+        self.assertTrue(p.undo("rb")["ok"])
+        other = {"id": "rb2", "modules": {name: {"source": ESTIMATOR_NEW,
+                                                 "rebuilds": ["Speculator"]}}}
+        self.assertFalse(p.prepare(other)["ok"])
+
+
+TRITON_VLLM_SHAPE = """import triton
+import triton.language as tl
+
+
+@triton.jit
+def _helper(x):
+    return x + 1
+
+
+@triton.jit(do_not_specialize_on_alignment=["BATCH_SIZE"])
+def _mask_kernel(x_ptr, BATCH_SIZE, BLOCK: tl.constexpr):
+    i = tl.program_id(0)
+    tl.store(x_ptr + i, _helper(tl.load(x_ptr + i)))
+
+
+def launcher(x):
+    return _mask_kernel
+
+
+class Sampler:
+    def run(self, x):
+        return launcher(x)
+"""
+
+
+class TritonAutoTargetsTest(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("triton"), "triton is not installed")
+    def test_triton_only_edits_are_staged_by_auto_targets(self):
+        """Input: a module shaped like vLLM's topk_topp_triton.py (a @triton.jit helper, a
+        kernel decorated `@triton.jit(do_not_specialize_on_alignment=[...])`, Python
+        launchers), an edit that touches only the two @triton.jit bodies, targets left to the
+        kernel (no "targets": auto). Expected: both JIT functions are the staged targets
+        (keys at their decorator lines), each with a jit_rebuild finding; after commit the
+        kernel's src holds the edit and its cache key changed. Not: a launch (GPU receipts).
+        The NVL runs saw "targets 0" because the lab's live patch takes @triton.jit
+        definitions out of the targets it hands the kernel (its own Triton path), not
+        because auto staging misses them."""
+        name = f"kt_trauto{next(_n)}"
+        (m,) = temp_modules(self, {name: TRITON_VLLM_SHAPE})
+        new = TRITON_VLLM_SHAPE.replace("x + 1", "x + 7").replace(
+            "tl.store(x_ptr + i, _helper", "tl.store(x_ptr + i + 0, _helper")
+        old_key = m._mask_kernel.cache_key
+        p = C.LocalParticipant("workers")
+        r = p.prepare({"id": "ta", "modules": {name: {"source": new}}})
+        self.assertTrue(r["ok"], r)
+        lines = TRITON_VLLM_SHAPE.splitlines()
+        deco = {q: 1 + next(i for i, s in enumerate(lines) if s.startswith(f"def {q}(")) - 1
+                for q in ("_helper", "_mask_kernel")}
+        self.assertEqual(sorted(map(tuple, r["targets"][name])),
+                         sorted((q, ln) for q, ln in deco.items()))
+        self.assertEqual(sorted(f["subject"] for f in r["findings"]
+                                if f["check"] == "jit_rebuild"),
+                         sorted(f"{name}:{q}:{ln}" for q, ln in deco.items()))
+        self.assertTrue(p.commit("ta")["ok"])
+        self.assertIn("i + 0", m._mask_kernel.src)
+        self.assertNotEqual(m._mask_kernel.cache_key, old_key)
+        self.assertTrue(p.undo("ta")["ok"])
+        self.assertEqual(m._mask_kernel.cache_key, old_key)
+
+
 class WitnessStubTest(unittest.TestCase):
     def test_code_compiled_while_installed_still_runs_after_undo(self):
         """Input: a swap, then code made while it is installed that calls __fastrsi_hit__ (as
@@ -409,7 +500,88 @@ class DocstringTest(unittest.TestCase):
         p = C.LocalParticipant("x")
         r = p.prepare({"id": "d", "modules": {name: {"source": text.replace("Old doc.",
                                                                            "New doc.")}}})
+        self.assertEqual([(f["check"], f["advisory"]) for f in r["findings"]],
+                         [("docstring_only", True)])
+
+    def test_class_and_module_docstring_edits_are_advisory_no_ops(self):
+        """Input (#51899's shape, kv_events through core_txn): an edit of a class docstring
+        only, then of the module docstring only. Expected: prepare ok with one advisory
+        docstring_only finding each, commit swaps nothing (no code entry in the journal, the
+        same code objects).
+        A comment-only edit is still empty_change (no docstring differs). Fails before this
+        change: the class docstring edit was refused (empty_change, or outside_changes
+        through core_txn's planner)."""
+        name = f"kt_cdoc{next(_n)}"
+        text = ('"""Module doc."""\n\n\nclass Ev:\n    """Old class doc."""\n\n'
+                '    def go(self):\n        return 1\n')
+        (m,) = temp_modules(self, {name: text})
+        code = m.Ev.go.__code__
+        for i, new in enumerate((text.replace("Old class doc.", "New class doc."),
+                                 text.replace("Module doc.", "Module doc, edited."))):
+            p = C.LocalParticipant("x")
+            r = p.prepare({"id": f"c{i}", "modules": {name: {"source": new}}})
+            self.assertTrue(r["ok"], r)
+            self.assertEqual([(f["check"], f["advisory"]) for f in r["findings"]],
+                             [("docstring_only", True)])
+            c = p.commit(f"c{i}")
+            self.assertEqual((c["ok"], [e for e in c["journal"] if e["kind"] == "code"]),
+                             (True, []))
+            self.assertIs(m.Ev.go.__code__, code)
+        r = C.LocalParticipant("x").prepare({"id": "cm", "modules": {name: {
+            "source": text.replace("        return 1", "        return 1  # same")}}})
         self.assertEqual([f["check"] for f in r["findings"]], ["empty_change"])
+
+
+FUTURE = '''from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections import OrderedDict
+
+
+def f(r: OrderedDict) -> int:
+    return 1
+'''
+
+
+class FutureAnnotationsTest(unittest.TestCase):
+    def test_future_annotations_and_type_checking_imports_stage(self):
+        """Input (#62591's shape): a module with `from __future__ import annotations`; the
+        edit adds a TYPE_CHECKING-only import (Counter), an added function annotated with it,
+        and f() now calls that function. Expected: prepare ok with no finding (the new
+        TYPE_CHECKING import counts as an import, the added unit keeps the annotations
+        future), commit, f(None) == 7. Fails before this change: patch_invalid NameError
+        'Counter' (the added unit compiled without the future) and outside_changes (the
+        TYPE_CHECKING block)."""
+        name = f"kt_fut{next(_n)}"
+        (m,) = temp_modules(self, {name: FUTURE})
+        new = FUTURE.replace("    from collections import OrderedDict\n",
+                             "    from collections import Counter, OrderedDict\n").replace(
+            "    return 1\n", "    return helper(r)\n\n\ndef helper(r: Counter) -> int:\n"
+            "    return 7\n")
+        p = C.LocalParticipant("x")
+        r = p.prepare({"id": "f", "modules": {name: {"source": new}}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["findings"], [])
+        self.assertTrue(p.commit("f")["ok"])
+        self.assertEqual(m.f(None), 7)
+
+
+DECORATED = "import functools\n\n\nclass A:\n    @functools.lru_cache\n    def f(self):\n        return 1\n"
+
+
+class DecoratedKeyMessageTest(unittest.TestCase):
+    def test_not_in_patch_names_the_decorator_line(self):
+        """Input: a decorated method targeted at its `def` line (6) instead of its key (the
+        decorator line, 5). Expected: not_in_patch says A.f is keyed at line [5] and why.
+        Fails before this change: 'no definition at this line in the base file' only."""
+        name = f"kt_dec{next(_n)}"
+        temp_modules(self, {name: DECORATED})
+        r = S.stage(name, DECORATED.replace("return 1", "return 2"), [["A.f", 6]])
+        (f,) = [f for f in r["findings"] if f["check"] == "not_in_patch"]
+        self.assertIn("keyed at line(s) [5]", f["observed"])
+        self.assertIn("first decorator", f["observed"])
 
 
 class AddedMethodWitnessTest(unittest.TestCase):

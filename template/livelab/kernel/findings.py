@@ -213,6 +213,14 @@ CATALOG = {
          {"action": "if the edit is outside function bodies: soft or warm restart",
           "cost": "recipe R5 or R9"}],
         "a silent no-op install reads as a success", ["Proving an edit applied"], False),
+    "docstring_only": (
+        "the edit changes only docstrings (module, class or function): the engine runs the "
+        "same code, so nothing is swapped and the transaction commits as a no-op; a live "
+        "object's __doc__ keeps the old text",
+        [{"action": "none", "cost": "0"},
+         {"action": "if a docstring is read at run time (rare): a repair cell that sets "
+                    "__doc__", "cost": "ms"}],
+        "none for behaviour; __doc__ read at run time stays old", [], True),
     "tampered": (
         "a participant runs code that no committed transaction installed (a REPL or another "
         "tool changed it outside the journal), or it did not answer",

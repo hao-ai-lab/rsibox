@@ -75,6 +75,10 @@ A plan is plain data, so it can cross a process boundary:
                           "targets": [[qualname, first line in the base]] or "auto"
                                      (default: the definitions that changed, found by stage),
                           "scan": "auto" | "always", "compile": "definitions" | "module",
+                          "rebuilds": [class names],  classes of the module whose live
+                                     instances the plan's recipe builds again with the
+                                     edited __init__ (R4 engine-core rebuild, R5 / R5m soft
+                                     restart): their new fields are resolved by the recipe
                           "trees": (base AST, patch AST)}},  in-process only (not plain
                                      data): the caller's parse of the text the participant
                                      runs and of `source`, so stage does not parse again
@@ -338,7 +342,24 @@ class LocalParticipant(Participant):
                        line_maps=self._line_maps(m),
                        compile=spec.get("compile", "definitions"),
                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer,
-                       overlay=overlay, trees=spec.get("trees"))
+                       overlay=overlay, trees=spec.get("trees"),
+                       rebuilds=spec.get("rebuilds") or ())
+
+    def _docstring_only(self, plan):
+        """The plan modules whose text differs from the one the participant runs only in
+        docstrings (swap.docstring_only)."""
+        out = []
+        for m, spec in plan.get("modules", {}).items():
+            base = self._live_source(m)
+            try:
+                if base is None:
+                    with open(sys.modules[self._actual(m)].__file__) as fh:
+                        base = fh.read()
+            except Exception:
+                return []
+            if S.docstring_only(base, spec.get("source", "")):
+                out.append(m)
+        return out
 
     def _remember_base(self, plan):
         """At the first prepare that touches a module: its code digest and namespace names;
@@ -462,9 +483,15 @@ class LocalParticipant(Participant):
         if ok and not cells and all(f["overridable"] for f in fs) and not any(
                 it.get("changed") or it.get("added") for it in items.values()) \
                 and not any(st.removes for st in staged):
-            fs.append(F.finding("empty_change", f"{len(items)} target(s), none changed; no "
-                                "definition added or deleted; no repair cell",
-                                "at least one change to install"))
+            docs = self._docstring_only(plan)
+            if docs and len(docs) == len(plan.get("modules", {})):
+                fs.append({**F.finding(
+                    "docstring_only", f"{docs}: only docstrings differ (module, class or "
+                    "function); nothing is swapped", "a change to code"), "advisory": True})
+            else:
+                fs.append(F.finding("empty_change", f"{len(items)} target(s), none changed; "
+                                    "no definition added or deleted; no repair cell",
+                                    "at least one change to install"))
         # tag before deciding: a standing accept matches on participant and code_hash
         d = F.decide([{**f, "participant": self.name} for f in fs], accept)
         out_fs = d["findings"]

@@ -172,6 +172,10 @@ def _blank(tree, targets, added, undo):
         for n in body:
             if isinstance(n, (ast.Import, ast.ImportFrom)) and not pre:
                 continue
+            if isinstance(n, ast.If) and not pre and _type_checking(n.test):
+                if not n.orelse:          # `if TYPE_CHECKING:` never runs: like an import
+                    continue
+                _set(undo, n, body=[ast.Pass()])
             if isinstance(n, (*_DEF, ast.ClassDef)) and pre + n.name in added:
                 continue
             if isinstance(n, ast.ClassDef):
@@ -181,6 +185,12 @@ def _blank(tree, targets, added, undo):
 
     _set(undo, tree, body=strip(tree.body, ""))
     return ast.dump(tree)
+
+
+def _type_checking(test):
+    """Is an `if` test `TYPE_CHECKING` or `typing.TYPE_CHECKING` (False at run time)?"""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
 
 
 def _holder(body, node):
@@ -235,8 +245,7 @@ def _module_imports(tree):
 
 def _unit_codes(tree, nodes, filename):
     """The compiled module code of each unit that holds one of `nodes`, and the unit names."""
-    futures = [n for n in tree.body
-               if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+    futures = _futures(tree)
     codes, seen, names = [], set(), []
     imports = _module_imports(tree)
     for node in nodes:
@@ -330,7 +339,14 @@ def _live_class(mod, path):
     return obj if path else None
 
 
-def _defaults_stub(q, node):
+def _futures(tree):
+    """The module's `from __future__` statements: every unit compiled apart carries them, or
+    `from __future__ import annotations` stops applying (annotations naming TYPE_CHECKING-only
+    imports raise NameError when the unit runs)."""
+    return [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+
+
+def _defaults_stub(q, node, futures=()):
     """The def with an empty body, inside a scratch class named like the innermost class of
     the qualname (same name mangling; a class body sees only its own class's names), whose
     body reads the live class (`_shell`), compiled: running it in the module's globals
@@ -339,7 +355,8 @@ def _defaults_stub(q, node):
     stub.body, stub.decorator_list = [ast.Pass()], []
     parts = q.split(".")
     body = [stub] if len(parts) == 1 else [_shell(parts[-2], [stub])]
-    return _try_compile(ast.fix_missing_locations(ast.Module(body, [])), "<defaults>")
+    return _try_compile(ast.fix_missing_locations(ast.Module(list(futures) + body, [])),
+                        "<defaults>")
 
 
 def _defaults(mod, q, stub, imports=None):
@@ -509,18 +526,20 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
         timings["compiled"] = compiled
     # 5. added definitions, compiled for the caller's scratch namespace
     adds = []
+    futures = _futures(tree)       # the module's `from __future__` flags (annotations)
     for q, cls_name, n in added:
         body = [n] if cls_name is None else [_shell(cls_name, [n])]
         adds.append({"q": q, "cls": cls_name, "name": n.name, "def": isinstance(n, _DEF),
                      "line": first_line(n),
-                     **_try_compile(ast.fix_missing_locations(ast.Module(body, [])), filename)})
+                     **_try_compile(ast.fix_missing_locations(ast.Module(futures + body, [])),
+                                    filename)})
     # 6. new defaults: a stub the caller evaluates in the module's globals
     for (q, i), r in zip(todo, [r for r in tres if r["status"] == "ok"]):
         bnode, pnode = bq[q][i], pq[q][i]
         if "<locals>" not in q and isinstance(pnode, _DEF) and (
                 ast.dump(ast.Tuple(bnode.args.defaults + bnode.args.kw_defaults))
                 != ast.dump(ast.Tuple(pnode.args.defaults + pnode.args.kw_defaults))):
-            r["defaults"] = _defaults_stub(q, pnode)
+            r["defaults"] = _defaults_stub(q, pnode, futures)
 
     # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
     meths = {}
@@ -683,7 +702,7 @@ def _err(e):
 def stage(module, source, targets="auto", base_hash=None, key_module=None, scan="auto",
           base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None,
           line_maps=(),
-          trees=None):
+          trees=None, rebuilds=()):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)], or "auto" (the default; None too): the analysis
     finds the changed definitions itself from its one parse of the two texts (the same list
@@ -719,6 +738,11 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     to that text (`timings["line_map_aliases"]`). Without a map that leads there, the one live
     code with the target's qualname is taken as it: a `line_aliased` finding (advisory; the
     content check against the base text still guards it).
+    rebuilds: names of classes of this module ("Cls") whose live instances the caller's recipe
+    builds again with the edited constructor after the commit (an engine-core rebuild, a soft
+    restart). A field only the new __init__ sets is then no block for those classes: the
+    rebuild sets it. It is reported as an advisory `new_fields` with `resolved_by` "recipe"
+    and no backfill is planned.
     Returns {"ok", "staged", "items", "findings", "timings", "targets"}; ok is False only
     when nothing can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -816,7 +840,11 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         k = L.key_of(kname, q, line)
         olds = run.get((q, line), [])
         if r["status"] == "no_definition":
-            fs.append(F.finding("not_in_patch", "no definition at this line in the base file",
+            alts = sorted({ln for (qq, ln) in run if qq == q and ln != line})
+            hint = (f"; {q} is keyed at line(s) {alts}: a decorated definition's key is the "
+                    "line of its first decorator, not the `def` line" if alts else "")
+            fs.append(F.finding("not_in_patch", f"no definition of {q} at line {line} in "
+                                f"the base file{hint}",
                                 "one definition with this qualname and line", subject=k))
             continue
         if r["status"] == "no_live_function":
@@ -972,6 +1000,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             st.expect.append((fn, o, L.content_hash(o)))
 
     # 6b. fields only the new __init__ sets, read by new code: live instances lack them
+    rebuilt = {str(c).rsplit(":", 1)[-1] for c in rebuilds or ()}
     for nf in a.get("new_fields") or ():
         cls = getattr(mod, nf["cls"], None)
         x = nf["field"]
@@ -979,6 +1008,14 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             else x
         if not isinstance(cls, type) or hasattr(cls, attr):
             continue                       # a class-level default covers old instances
+        if nf["cls"] in rebuilt:           # the recipe builds them again with the new __init__
+            fs.append({**F.finding(
+                "new_fields", f"{', '.join(nf['readers'])} read self.{x}, which only the "
+                f"edited {nf['cls']}.__init__ sets; resolved by the recipe: it builds every "
+                f"live {nf['cls']} again with the edited __init__",
+                f"every live {nf['cls']} has {x}", subject=f"{kname}:{nf['cls']}.{x}"),
+                "advisory": True, "resolved_by": "recipe"})
+            continue
         bf = nf["backfill"]
         how = (f"backfill offered: {'; '.join(bf['statements'])}" + (
             f" (with {', '.join(bf['params'])} resolved from each instance or its owners)"
@@ -1461,6 +1498,26 @@ def _changed(base_src, bq, new_src, pq):
             out += [[q, first_line(b)] for b, p in zip(bn, pn)
                     if _segment(bl, b) != _segment(pl, p) and _dump_code(b) != _dump_code(p)]
     return sorted(out, key=lambda t: t[1])
+
+
+def docstring_only(base_src, source):
+    """True when the two texts differ and their trees differ only in docstrings (module,
+    class or function): nothing to swap."""
+    if base_src == source:
+        return False
+    try:
+        a, b = ast.parse(base_src), ast.parse(source)
+    except SyntaxError:
+        return False
+    if ast.dump(a) == ast.dump(b):
+        return False                      # formatting or comments only, not a docstring
+    for t in (a, b):
+        for n in ast.walk(t):
+            body = getattr(n, "body", None)
+            if isinstance(n, (*_DEF, ast.ClassDef, ast.Module)) and isinstance(body, list) \
+                    and _doc(body):
+                n.body = body[1:] or [ast.Pass()]
+    return ast.dump(a) == ast.dump(b)
 
 
 def _doc(body):
