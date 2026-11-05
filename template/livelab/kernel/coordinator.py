@@ -235,8 +235,11 @@ class LocalParticipant(Participant):
     `targets` says which it staged."""
 
     def __init__(self, name, alias=None, quiesce=None, scope=None, resets=None, analyzer=None,
-                 checks=None, capturing=None):
+                 checks=None, capturing=None, engine_names=None):
         self.name = name
+        # at_base: module names the engine adds itself (a compiler's generated globals), not
+        # left by an edit: fn(name) -> True, listed apart (`engine_names`)
+        self.engine_names = engine_names
         self.checks = list(checks or ())   # engine checks: fn(module, items) -> [findings]
         self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
         self.analyzer_start = None    # why the analyzer did not start here (then: at first use)
@@ -360,13 +363,19 @@ class LocalParticipant(Participant):
         is not an extra. For a warm engine pool: apply, undo, then check before the next job."""
         pending = sorted(t for t, st in self._state.items()
                          if st in ("prepared", "committed", "partial"))
-        mods, extra_names = {}, {}
+        mods, extra_names, engine = {}, {}, {}
         for m, (digest, names) in self._base.items():
             fp = self.fingerprint([m])
             live = L.text_hash(json.dumps(fp["code"], sort_keys=True)) if fp["ok"] else None
             mods[m] = [digest, live]
             mod = sys.modules.get(self._actual(m))
-            extra = sorted(set(vars(mod)) - names - {W.HIT}) if mod is not None else []
+            # the witness global stays by design, and so do aliases a tracer made of it
+            extra = sorted(n for n in (set(vars(mod)) - names if mod is not None else ())
+                           if W.HIT not in n)
+            eng = [n for n in extra if self.engine_names and self.engine_names(n)]
+            if eng:
+                engine[m] = eng
+            extra = [n for n in extra if n not in eng]
             if extra:
                 extra_names[m] = extra
         extra_attrs = {}
@@ -381,7 +390,7 @@ class LocalParticipant(Participant):
               and not extra_attrs and not poisoned and all(a == b for a, b in mods.values()))
         return F.ok(**{"ok": ok}, pending_txns=pending, journal_len=len(self.journal.entries),
                     modules=mods, extra_names=extra_names, extra_attrs=extra_attrs,
-                    poisoned=poisoned)
+                    engine_names=engine, poisoned=poisoned)
 
     def prepare(self, plan):
         self._remember_base(plan)

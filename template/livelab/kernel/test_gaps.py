@@ -578,6 +578,14 @@ class AtBaseTest(unittest.TestCase):
                           b["extra_names"]), (True, [], 0, {}, {}))
         self.assertEqual(*b["modules"][name])
         self.assertTrue(co.at_base()["ok"])
+        setattr(m, "__compiled_fn_1", object())    # a tracer's own global: apart, not left over
+        m.sub__fastrsi_hit__ = W.stub
+        p.engine_names = lambda n: n.startswith("__compiled_fn")
+        b = p.at_base()
+        self.assertEqual((b["ok"], b["engine_names"]), (True, {name: ["__compiled_fn_1"]}))
+        m.stray = 1
+        self.assertEqual(p.at_base()["extra_names"], {name: ["stray"]})
+        del m.stray
         r = co.run({"id": "b", "accept": ["repair_not_undoable"], "repairs": [
             {"cell": "engine.leftover = 1", "declares": []}]})
         self.assertEqual(r["outcome"], "committed")
