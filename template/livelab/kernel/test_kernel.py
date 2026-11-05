@@ -1104,6 +1104,24 @@ class GenexprTargetTest(unittest.TestCase):
         self.assertTrue(d["proceed"], d["blocking"])
         self.assertTrue(a["ok"], a)
         self.assertEqual(c.longest_stall(), 4.0)      # the new expression runs
+        self.assertEqual(r["timings"]["scan"], "namespace")   # found via the enclosing method
+        self.assertEqual(r["timings"].get("suspended"), False)  # no heap pass for frames either
+
+    def test_second_genexpr_edit_on_top_is_not_a_base_mismatch(self):
+        """Pain point: an undo rebuild hit base_mismatch on the kernel's own instrumented
+        generator expression (a code nested in a code this participant installed)."""
+        name, _, _ = fresh("genexpr2")
+        p = C.LocalParticipant("rank0", alias={"toy": name})
+        line = at(ENG, "(b - a for a, b in")
+        tq = [["Cluster.longest_stall.<locals>.<genexpr>", line]]
+        one = edit(ENG, ("(b - a for a, b in", "(2 * (b - a) for a, b in"))
+        two = edit(ENG, ("(b - a for a, b in", "(3 * (b - a) for a, b in"))
+        r = p.prepare({"id": "g1", "modules": {"toy.engine": {"source": one, "targets": tq}}})
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertTrue(p.commit("g1")["ok"])
+        r = p.prepare({"id": "g2", "modules": {"toy.engine": {"source": two, "targets": tq}}})
+        self.assertNotIn("base_mismatch", [f["check"] for f in r["findings"]])
+        self.assertTrue(r["ok"], r["findings"])
 
 
     def test_stage_findings_carry_the_checked_code_hash(self):

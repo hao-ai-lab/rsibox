@@ -446,8 +446,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     t = time.perf_counter()
     run, held = L.index_module(mod, None if scan == "always" else L.module_functions(mod))
     timings["scan"] = "heap" if scan == "always" else "namespace"
-    if scan == "auto" and any("<locals>" in q or not any(
-            held.get(o) for o in run.get((q, int(line)), ())) for q, line in targets):
+    if scan == "auto" and any(_needs_heap(run.get((q, int(line)), ()), run, held)
+                              for q, line in targets):
         run, held = L.index_module(mod)
         timings["scan"] = "heap"
     timings["locate_s"] = round(time.perf_counter() - t, 6)
@@ -484,7 +484,9 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         L.code_tree(c, None, (base_idx, {}))
 
     # 1. targets: the live checks, in the order of the analysis
-    todo, changed, own = [], {}, {id(c) for c in own_codes}
+    # this participant's own installed code, nested codes included (generator expressions and
+    # lambdas inside a swapped function carry its witness, so they differ from the file)
+    todo, changed, own = [], {}, {id(c) for c in _nested(own_codes)}
     for (q, line), r in zip(targets, a["targets"]):
         line = int(line)
         k = L.key_of(kname, q, line)
@@ -561,8 +563,13 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
 
     # 6. pair old and new code: the target and every enclosing function with live holders
     t = time.perf_counter()
-    live = W.live_codes(suspended=scan == "always" or W.suspendable(
-        [o for *_, olds in todo for o in olds]))
+    # A generator expression's generator lives as long as its consumer, which is almost always
+    # inside the enclosing call (on a thread stack, checked here). Suspended ones (stored for
+    # later) are looked for only with scan="always": in "auto" they finish on the old code.
+    susp = scan == "always" or W.suspendable(
+        [o for *_, olds in todo for o in olds if o.co_name != "<genexpr>"])
+    timings["suspended"] = bool(susp)
+    live = W.live_codes(suspended=susp)
     timings["live_frames_s"] = round(time.perf_counter() - t, 6)
     plan, line_map = {}, a["line_map"]
     for q, line, r, k, olds in todo:
@@ -783,6 +790,34 @@ def removed_definitions(base_tree, tree):
         return out
     gone = defs(base_tree) - defs(tree)
     return sorted(q for q in gone if "." not in q or q.split(".")[0] not in gone)
+
+
+def _nested(codes):
+    out, stack = [], list(codes)
+    while stack:
+        c = stack.pop()
+        out.append(c)
+        stack.extend(x for x in c.co_consts if hasattr(x, "co_code"))
+    return out
+
+
+def _needs_heap(olds, run, held):
+    """Locate needs a heap scan unless a namespace-held function runs the code, or the code is
+    a generator expression (no function object ever holds one) inside such a function, at any
+    depth of generator expressions. Nested defs and lambdas create function objects at run
+    time that others may hold, so they still need the scan."""
+    if not olds:
+        return True
+    for o in olds:
+        c = o
+        while not held.get(c):
+            if c.co_name != "<genexpr>":
+                return True
+            up = _enclosing(c, run)
+            if len(up) != 1:
+                return True
+            c = up[0]
+    return False
 
 
 def _enclosing(code, run):
