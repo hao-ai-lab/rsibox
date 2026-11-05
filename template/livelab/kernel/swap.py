@@ -43,6 +43,7 @@ import select
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -425,7 +426,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     whole base and patched modules, as before).
     analyzer: runs `analyze` (the text half: parse, compile, compare); None runs it here,
     a `ProcessAnalyzer` in a child process, so this process holds the GIL only for the live
-    half. Both give the same staged code and findings.
+    half. Both give the same staged code and findings. When the analyzer fails, the analysis
+    runs here and an `analyze_fallback` finding says why and what it cost.
     Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
     can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -460,16 +462,7 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
            "targets": [[q, int(line)] for q, line in targets], "filename": mod.__file__,
            "key_module": kname, "live": live, "compile": compile}
     t = time.perf_counter()
-    a = None
-    if analyzer is not None:
-        try:
-            a = analyzer(req)
-            timings["analyze"] = "process"
-        except Exception as e:           # the child is gone: analyze here, and say so
-            timings["analyze_fallback"] = f"{type(e).__name__}: {e}"
-    if a is None:
-        a = analyze(**req)
-        timings["analyze"] = "inline"
+    a = _analyze(req, analyzer, timings, fs, kname)
     timings["analyze_s"] = round(time.perf_counter() - t, 6)
     at = a["timings"]
     if "error" in a:
@@ -630,15 +623,45 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
 
 
+def _analyze(req, analyzer, timings, fs, kname):
+    """Run the analysis with `analyzer`; if it fails, here, with an `analyze_fallback`
+    finding that says why and what it cost."""
+    if analyzer is not None:
+        try:
+            a = analyzer(req)
+            timings["analyze"] = "process"
+            return a
+        except Exception as e:           # the child is gone: analyze here, and say so
+            timings["analyze_fallback"] = why = f"{type(e).__name__}: {e}"
+            t = time.perf_counter()
+            a = analyze(**req)
+            timings["analyze"] = "inline"
+            cost = time.perf_counter() - t
+            fs.append(F.finding(
+                "analyze_fallback", f"the analyzer failed ({why}); analyzed in this process "
+                f"instead, holding its GIL for {cost * 1e3:.1f} ms of parse, compile and "
+                "compare", "the analysis in the analyzer's child process", subject=kname))
+            return a
+    timings["analyze"] = "inline"
+    return analyze(**req)
+
+
 def _invalid(msg, kname):
     return F.not_ok(msg, [F.finding("patch_invalid", msg, "an importable module and a patch "
                                     "that parses", subject=kname)], staged=None, items={})
 
 
 _CHILD = r"""
-import importlib, marshal, struct, sys, traceback
-sys.path.insert(0, sys.argv[1])
-S = importlib.import_module(sys.argv[2] + ".swap")
+import importlib, importlib.util, marshal, os, struct, sys, traceback
+# the kernel by file location, under a private name: the parent may have loaded it under any
+# package name (or from a directory of another name), which the child cannot import by name
+_d = sys.argv[1]
+_spec = importlib.util.spec_from_file_location(
+    "_fastrsi_analyzer_kernel", os.path.join(_d, "__init__.py"), submodule_search_locations=[_d])
+_pkg = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _pkg
+_spec.loader.exec_module(_pkg)
+S = importlib.import_module(_spec.name + ".swap")
 inp, out = sys.stdin.buffer, sys.stdout.buffer
 def read(n):
     b = bytearray()
@@ -669,24 +692,38 @@ class ProcessAnalyzer:
     do not hold this process's GIL: the engine loop keeps stepping. Requests and replies go
     over pipes as `marshal` data (code objects included). Thread-safe (one request at a time).
     The child exits when this process closes the pipe. `start()` spawns it ahead of the first
-    prepare; a call also spawns it when needed. A failed call (child gone, or no answer within
-    `timeout_s`: the child is killed) raises; `stage` then analyzes in-process and records
-    `analyze_fallback` in its timings."""
+    prepare; a call also spawns it when needed. The child loads the kernel from this file's
+    directory under a private name, whatever package name the parent loaded it as. A failed
+    call (child gone, or no answer within `timeout_s`: the child is killed) raises, with the
+    child's last stderr line when it died; `stage` then analyzes in-process and reports an
+    `analyze_fallback` finding (and the reason in its timings)."""
 
     def __init__(self, python=None, timeout_s=60.0):
         self.python = python or sys.executable
         self.timeout_s = timeout_s     # a child that does not answer by then is killed
         self._p = None
+        self._err = None
         self._lock = threading.Lock()
 
     def _spawn(self):
         if self._p is not None and self._p.poll() is None:
             return
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        pkg = __name__.rpartition(".")[0]
+        kernel_dir = os.path.dirname(os.path.abspath(__file__))
+        # stderr to a file, not a pipe: a child that warns a lot (SyntaxWarning while
+        # compiling a patch) must never block on a full pipe; its tail explains a death
+        self._err = tempfile.TemporaryFile()
         self._p = subprocess.Popen(
-            [self.python, "-I", *["-O"] * sys.flags.optimize, "-c", _CHILD, root, pkg],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, close_fds=True)
+            [self.python, "-I", *["-O"] * sys.flags.optimize, "-c", _CHILD, kernel_dir],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, close_fds=True)
+
+    def _stderr_tail(self):
+        try:
+            self._err.seek(0, os.SEEK_END)
+            self._err.seek(max(0, self._err.tell() - 2000))
+            lines = self._err.read().decode(errors="replace").strip().splitlines()
+            return lines[-1] if lines else ""
+        except Exception:
+            return ""
 
     def start(self):
         with self._lock:
@@ -704,6 +741,15 @@ class ProcessAnalyzer:
                 end = time.monotonic() + self.timeout_s
                 n = struct.unpack("<Q", self._read(p, 8, end))[0]
                 body = self._read(p, n, end)
+            except (EOFError, BrokenPipeError) as e:    # the child died: say what it said
+                try:
+                    p.wait(1)
+                except Exception:
+                    pass
+                tail = self._stderr_tail()
+                self._kill()
+                raise EOFError(f"the analyzer child exited (code {p.returncode})"
+                               + (f": {tail}" if tail else "")) from e
             except Exception:
                 self._kill()
                 raise
@@ -730,6 +776,14 @@ class ProcessAnalyzer:
         if p is not None:
             p.kill()
             p.wait()
+            for f in (p.stdin, p.stdout):
+                try:
+                    f.close()
+                except Exception:
+                    pass
+        if self._err is not None:
+            self._err.close()
+            self._err = None
 
     def close(self):
         with self._lock:
@@ -737,6 +791,10 @@ class ProcessAnalyzer:
         if p is not None:
             p.stdin.close()
             p.wait()
+            p.stdout.close()
+        if self._err is not None:
+            self._err.close()
+            self._err = None
 
 
 def validate(st):

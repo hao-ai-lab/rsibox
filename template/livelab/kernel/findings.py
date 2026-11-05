@@ -171,6 +171,17 @@ CATALOG = {
         [{"action": "respawn the worker group (reset kind respawn)", "cost": "respawn"},
          RESTART],
         "a change installed now would be measured against an unknown base", [], False),
+    "analyze_fallback": (
+        "prepare's text half (parse, compile, compare) was meant to run in the analyzer's "
+        "child process but ran in this one: the child could not start, died or did not "
+        "answer. The staged code is the same; the cost is that this process held its GIL "
+        "for the whole analysis, so the engine loop could not step meanwhile",
+        [{"action": "read the reason (the child's last stderr line) and fix the analyzer, "
+          "e.g. a kernel the child cannot load", "cost": "seconds"},
+         {"action": "accept: analyze in-process", "cost": "the GIL time in `observed`, on "
+          "every prepare until fixed"}],
+        "every prepare stalls the engine loop for its parse and compare, silently "
+        "(tens of ms per module on a 3,800-line file)", [], True),
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),

@@ -112,6 +112,9 @@ every finding is accepted, and only overridable findings can be. Physical limits
 overridable: `patch_invalid`, `no_live_function`, `not_in_patch`, `closure_changed`,
 `changed_since_prepare`, `empty_change`, `repair_failed`, `participant_failed`, `reset_failed`,
 `undo_incomplete`, `tampered`, `session_poisoned`. Catalog: `kernel/findings.py`.
+A check that could not run as designed says so as a finding too: a prepare whose analysis
+fell back from its child process to the engine's own process reports `analyze_fallback`
+(overridable) with the reason and the time it held the engine's GIL.
 
 An accept record `{check, by, reason, scope}` says who accepted a finding and why; `decide`
 returns the records it used (`accepts`) so the transaction record can carry them. Scope `txn` covers

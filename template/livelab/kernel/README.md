@@ -128,8 +128,13 @@ the base check against running code, exec of imports, added definitions and defa
 pairing and the running-frame check stay in the engine process. `LocalParticipant(analyzer=
 swap.ProcessAnalyzer())` runs `analyze` in one long-lived child of the same interpreter (same
 `-O` level; requests and replies are `marshal` data, code objects included); a plan module with
-`"analyze": "inline"` runs it in-process (for a before/after). If the child fails, `stage`
-analyzes in-process and says so in `timings["analyze_fallback"]`. The same edit of
+`"analyze": "inline"` runs it in-process (for a before/after). The child loads the kernel
+from its directory under a private package name, so it works whatever name the parent loaded
+the kernel as (the vLLM adapter's `fastrsi_kernel` from a directory named `kernel` killed the
+old child on import, and every prepare analyzed in-process without a word). If the child fails,
+`stage` analyzes in-process and reports an `analyze_fallback` finding (overridable) with the
+reason, the child's last stderr line, and the time the analysis held this process's GIL; the
+reason is also in `timings["analyze_fallback"]`. The same edit of
 `Scheduler.schedule` on CPU, prepared by a core `LocalParticipant` in a background thread while
 the main thread ticks every 0.5 ms (9 runs each; our 2026-11-05 CPU run):
 
@@ -214,16 +219,18 @@ nothing; the host is poisoned, so the next transaction is refused (undo is still
 ## Golden tests
 
 `python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 5 s; one
-test builds a 2.5 M-object heap, one waits out a 0.6 s hang, two start an analyzer child). `python3 -m unittest` also runs the conformance cases on
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang, four use an analyzer child). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
 test_accept_list ... ok
 test_chained_edit_stages_against_the_installed_text ... ok
+test_child_runs_when_the_kernel_has_another_package_name ... ok
 test_closure_change_is_a_finding_not_an_exception ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
 test_edit_that_changes_no_code_is_refused ... ok
+test_fallback_to_in_process_is_a_finding ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
 test_group_proof_reports_ranks_agree ... ok
 test_group_witness_is_kept_per_rank_and_uneven_is_a_finding ... ok
@@ -239,6 +246,7 @@ test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
+test_second_genexpr_edit_on_top_is_not_a_base_mismatch ... ok
 test_stage_compiles_only_the_changed_definitions ... ok
 test_stage_findings_carry_the_checked_code_hash ... ok
 test_standing_accept_expires_when_code_changes ... ok
@@ -254,7 +262,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 35 tests in 5.1s
+Ran 38 tests in 5.4s
 
 OK
 ```
@@ -322,7 +330,9 @@ Each test's docstring says what it proves and what it does not.
 - The host's transaction table lives in memory: a host crash loses `status`.
 - The analyzer child is this interpreter, started with the same `-O` level; equivalence is
   tested for that case only. A child that dies or does not answer within `timeout_s` is
-  killed and the prepare analyzes in-process (`analyze_fallback`), holding the GIL as before.
+  killed and the prepare analyzes in-process, holding the GIL as before; the
+  `analyze_fallback` finding blocks the vote until accepted, and each later prepare tries a
+  new child first.
 - A chained edit of a function the earlier edit did not touch, when the earlier edit moved
   lines above it: the function's running code keeps the file's line, the text the
   participant stages against has another, and the target is not found (`no_live_function`).

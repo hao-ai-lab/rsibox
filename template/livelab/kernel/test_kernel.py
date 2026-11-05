@@ -1057,6 +1057,67 @@ class ProcessAnalyzerTest(unittest.TestCase):
         self.assertLess(there, budget, f"in-process: {inline:.3f} s")
 
 
+class AnalyzerFallbackTest(unittest.TestCase):
+    """Pain point: when the kernel was loaded under another package name (the vLLM adapter
+    loads it as `fastrsi_kernel` from a directory named `kernel`), the analyzer child died on
+    import and every prepare quietly analyzed in-process, holding the engine's GIL."""
+
+    def test_child_runs_when_the_kernel_has_another_package_name(self):
+        """Proves: a kernel loaded as package `fastrsi_kernel_<n>` from its `kernel` directory stages a toy edit with the analysis really in the child (timings "process", no analyze_fallback, no findings). Not: a kernel directory the child cannot read."""
+        import importlib.util
+        here = os.path.dirname(os.path.abspath(__file__))
+        pkg = f"fastrsi_kernel_{next(_n)}"
+        spec = importlib.util.spec_from_file_location(
+            pkg, os.path.join(here, "__init__.py"), submodule_search_locations=[here])
+        sys.modules[pkg] = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sys.modules[pkg])
+        self.addCleanup(lambda: [sys.modules.pop(k) for k in list(sys.modules)
+                                 if k == pkg or k.startswith(pkg + ".")])
+        RS = importlib.import_module(pkg + ".swap")
+        self.assertNotEqual(RS.__name__, S.__name__)
+        A = RS.ProcessAnalyzer().start()
+        self.addCleanup(A.close)
+        _, eng, _ = fresh("renamed")
+        new = edit(ENG, ('self.ran.append("base")', 'self.ran.append("v1")'))
+        r = RS.stage(eng.__name__, new, [["Engine.step", at(ENG, "def step")]], analyzer=A)
+        self.assertEqual((r["ok"], r["findings"], r["timings"]["analyze"],
+                          "analyze_fallback" in r["timings"]), (True, [], "process", False))
+
+    def test_fallback_to_in_process_is_a_finding(self):
+        """Proves: an analyzer child that dies at start (here: a stand-in interpreter that prints an import error and exits 1) makes prepare vote no with an analyze_fallback finding that carries the child's reason and the in-process cost; accepting it stages the same edit in-process and commits. Not: a child that hangs (the timeout path raises the same way)."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        fake = os.path.join(tmp, "python")
+        with open(fake, "w") as f:
+            f.write("#!/bin/sh\necho 'ModuleNotFoundError: No module named fastrsi_kernel' >&2"
+                    "\nexit 1\n")
+        os.chmod(fake, 0o755)
+        A = S.ProcessAnalyzer(python=fake)
+        self.addCleanup(A.close)
+        name, eng, _ = fresh("fallback")
+        p = C.LocalParticipant("rank0", alias={"toy": name}, analyzer=A)
+        mods = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")',
+                                                    'self.ran.append("v1")')),
+                               "targets": [["Engine.step", at(ENG, "def step")]]}}
+        r = p.prepare({"id": "f1", "modules": mods})
+        self.assertFalse(r["ok"])
+        f, = r["findings"]
+        self.assertEqual((f["check"], f["overridable"], f["accepted"]),
+                         ("analyze_fallback", True, False))
+        self.assertIn("(code 1): ModuleNotFoundError: No module named fastrsi_kernel",
+                      f["observed"])
+        self.assertRegex(f["observed"], r"holding its GIL for [0-9.]+ ms")
+        r = p.prepare({"id": "f2", "modules": mods, "accept": ["analyze_fallback"]})
+        self.assertTrue(r["ok"], r["findings"])
+        t = r["timings"]["toy.engine"]
+        self.assertEqual(t["analyze"], "inline")
+        self.assertIn("No module named fastrsi_kernel", t["analyze_fallback"])
+        self.assertTrue(p.commit("f2")["ok"])
+        e = eng.Engine()
+        e.step(3)
+        self.assertEqual(e.ran, ["v1"])
+
+
 class AcceptRecordTest(unittest.TestCase):
     """Accept by name with a record. Pain point: a standing accept that silently keeps
     covering a check after the checked code changed (DSv4.1 bound_shape_mismatch was accepted
