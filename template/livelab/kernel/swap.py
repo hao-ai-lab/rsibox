@@ -18,6 +18,7 @@ The caller decides from the findings (findings.decide) whether to apply at all.
 import ast
 import copy
 import importlib
+import time
 
 from . import findings as F
 from . import journal as J
@@ -138,15 +139,17 @@ def _set_class_cell(fn, cls):
         fn.__closure__[fn.__code__.co_freevars.index("__class__")].cell_contents = cls
 
 
-def stage(module, source, targets, base_hash=None, key_module=None):
+def stage(module, source, targets, base_hash=None, key_module=None, scan="auto"):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base file)]; base_hash: text_hash of the source the patch
     was made against (checked against this module's file); key_module: the module name used in
-    witness keys (participants that load a module under another name pass the shared one).
-    Returns {"ok", "staged", "items", "findings"}; ok is False only when nothing can be staged
-    (bad patch, import error). Never raises."""
+    witness keys (participants that load a module under another name pass the shared one);
+    scan: "auto" (heap scan only when the module namespace cannot find a target, suspended
+    frames only for generator / coroutine targets) or "always" (both scans, as before v2.2).
+    Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
+    can be staged (bad patch, import error). Never raises."""
     kname = key_module or module
-    fs = []
+    fs, timings, t0 = [], {}, time.perf_counter()
     try:
         mod = importlib.import_module(module)
         with open(mod.__file__) as fh:
@@ -162,7 +165,18 @@ def stage(module, source, targets, base_hash=None, key_module=None):
         fs.append(F.finding("base_mismatch", f"module file hash {L.text_hash(base_src)}",
                             f"plan base hash {base_hash}", subject=kname))
     base_idx = L.code_tree(compile(base_tree, mod.__file__, "exec", dont_inherit=True))[0]
-    run, held = L.index_module(mod)
+    timings["parse_compile_s"] = round(time.perf_counter() - t0, 6)
+    # Locate without a heap scan when the module namespace finds every target (top-level
+    # functions and methods); scan (one get_objects + a sliced pass) only for nested targets
+    # or targets the namespace does not hold.
+    t = time.perf_counter()
+    run, held = L.index_module(mod, None if scan == "always" else L.module_functions(mod))
+    timings["scan"] = "heap" if scan == "always" else "namespace"
+    if scan == "auto" and any("<locals>" in q or not any(
+            held.get(o) for o in run.get((q, int(line)), ())) for q, line in targets):
+        run, held = L.index_module(mod)
+        timings["scan"] = "heap"
+    timings["locate_s"] = round(time.perf_counter() - t, 6)
     bq, pq = qual_index(base_tree), qual_index(tree)
     line_map = {}
     for q, nodes in pq.items():
@@ -273,7 +287,10 @@ def stage(module, source, targets, base_hash=None, key_module=None):
         return F.not_ok(f"{type(e).__name__}: {e}", fs, staged=None, items={})
 
     # 6. pair old and new code: the target and every enclosing function with live holders
-    live = W.live_codes()
+    t = time.perf_counter()
+    live = W.live_codes(suspended=scan == "always" or W.suspendable(
+        [o for *_, olds in todo for o in olds]))
+    timings["live_frames_s"] = round(time.perf_counter() - t, 6)
     plan = {}
     for q, line, i, k, olds in todo:
         new = new_idx[(q, first_line(pq[q][i]))][0]
@@ -317,7 +334,8 @@ def stage(module, source, targets, base_hash=None, key_module=None):
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
-    return F.ok(staged=st, items=st.items, findings=fs)
+    timings["stage_s"] = round(time.perf_counter() - t0, 6)
+    return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
 
 
 def validate(st):

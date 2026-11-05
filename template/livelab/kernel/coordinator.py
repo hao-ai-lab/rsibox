@@ -169,15 +169,16 @@ class LocalParticipant(Participant):
 
     def prepare(self, plan):
         txn, accept = plan["id"], plan.get("accept", ())
-        fs, staged, items, ok = [], [], {}, True
+        fs, staged, items, ok, timings = [], [], {}, True, {}
         for m, spec in plan.get("modules", {}).items():
             r = S.stage(self._actual(m), spec["source"], spec["targets"],
-                        spec.get("base_hash"), key_module=m)
+                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"))
             fs += r["findings"]
             ok = ok and r["ok"]
             if r["staged"] is not None:
                 staged.append(r["staged"])
             items.update(r["items"])
+            timings[m] = r.get("timings", {})
         cells = []
         for rep in plan.get("repairs", []):
             missing = [n for n in rep["declares"] if n not in self.scope]
@@ -198,7 +199,7 @@ class LocalParticipant(Participant):
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
         self._state[txn] = "prepared"
-        return F.ok(staged=items, findings=out_fs)
+        return F.ok(staged=items, findings=out_fs, timings=timings)
 
     def commit(self, txn):
         if txn not in self._staged:

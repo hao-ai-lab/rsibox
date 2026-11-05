@@ -520,6 +520,29 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(sorted(k["res"]["rank0"]), ["commit", "prepare", "validate"])
         self.assertTrue(tl["prepare_start"] < tl["prepared"] <= tl["gap_start"] < tl["gap_end"])
 
+    def test_prepare_never_holds_the_loop_longer_than_the_budget(self):
+        """Proves: preparing a method target on a 2.5M-object heap stalls the step loop under 10 ms (namespace locate, no heap scan). Not: nested targets."""
+        budget = 0.010
+        ballast = [[] for _ in range(2_500_000)]            # a loaded engine's heap
+        self.addCleanup(ballast.clear)
+        t = time.perf_counter()
+        L.all_objects()                                     # what one heap scan holds
+        full = time.perf_counter() - t
+        if full < 2 * budget:
+            self.skipTest(f"one heap scan takes {full:.3f} s here: too fast to tell")
+        name, eng, _ = fresh("budget")
+        cl = eng.Cluster({"r0": eng.Engine()})
+        p = C.LocalParticipant("r0", alias={"toy": name})
+        self._start(cl)
+        t0 = time.perf_counter()
+        r = p.prepare({"id": "b", "modules": self.V1})
+        t1 = time.perf_counter()
+        self._steps(cl, 3)
+        stalls = [b - a for a, b in zip(cl.ends, cl.ends[1:]) if t0 <= b <= t1 + 0.005]
+        self.assertTrue(r["ok"])
+        self.assertLess(max(stalls, default=0.0), budget, f"one heap scan: {full:.3f} s")
+        self.assertEqual(r["timings"]["toy.engine"]["scan"], "namespace")
+
     def test_validate_catches_a_change_between_prepare_and_gap(self):
         """Proves: a REPL edit of rank1's target after prepare is caught by validate in the gap, and no rank commits. Not: changes to data."""
         cl, ps, lps = self._cluster("validate", gap_mode=True)

@@ -11,12 +11,12 @@ removes it and the counter keys with it.
 - `zero_witness`: zero calls otherwise.
 """
 import ast
-import gc
+import inspect
 import sys
 import types
 
 from . import findings as F
-from .locate import unfrozen
+from .locate import all_objects, sliced
 
 HIT = "__fastrsi_hit__"
 
@@ -34,7 +34,8 @@ class Witness:
     def check(self, keys, old_codes=None):
         """keys: witness keys to prove. old_codes: {key: [code objects the swap replaced]}.
         Returns ok-dict with `counts` and one finding per key that did not run."""
-        live = live_codes()
+        old = [c for cs in (old_codes or {}).values() for c in cs]
+        live = live_codes(suspended=suspendable(old))
         out = []
         for k in keys:
             n = self.counts.get(k, 0)
@@ -52,16 +53,31 @@ class Witness:
         return res
 
 
-def live_codes():
-    """Code objects with a running frame: on any thread's stack, or in a suspended
-    generator / coroutine (an event loop waiting in `await` is on no thread's stack)."""
+SUSPENDABLE = (inspect.CO_GENERATOR | inspect.CO_COROUTINE | inspect.CO_ASYNC_GENERATOR
+               | inspect.CO_ITERABLE_COROUTINE)
+
+
+def suspendable(codes):
+    """Can a frame of any of these codes be suspended (generator, coroutine)? Only then can
+    it be running without being on a thread's stack."""
+    return any(c.co_flags & SUSPENDABLE for c in codes)
+
+
+def live_codes(suspended=True):
+    """Code objects with a running frame: on any thread's stack and, with suspended=True, in
+    a suspended generator / coroutine (an event loop waiting in `await` is on no thread's
+    stack). Thread stacks are cheap; suspended frames need a heap scan (one get_objects,
+    then a sliced pass), so callers ask for them only when a code can be suspended."""
     codes = set()
     for fr in sys._current_frames().values():
         while fr is not None:
             codes.add(fr.f_code)
             fr = fr.f_back
-    with unfrozen():
-        for o in gc.get_objects():
+    if not suspended:
+        return codes
+    objs = all_objects()
+    try:
+        for o in sliced(objs):
             t = type(o)
             fr = (o.cr_frame if t is types.CoroutineType else o.gi_frame
                   if t is types.GeneratorType else o.ag_frame
@@ -69,6 +85,8 @@ def live_codes():
             while fr is not None:
                 codes.add(fr.f_code)
                 fr = fr.f_back
+    finally:
+        del objs
     return codes
 
 

@@ -86,13 +86,32 @@ process still stalls the loop. On this machine, with 5 million extra objects, a 
 stalled the loop thread 53 ms. Phase 1 is free only in another process, or once locate stops
 scanning the whole heap.
 
+So locate no longer scans by default. It walks the module's own namespace (functions,
+classes, static and class methods, properties, decorator wrappers' originals), which finds
+top-level and method targets in microseconds; swapping `__code__` on those objects still
+reaches every holder. It scans the heap only for nested targets (closures made at run time)
+or targets the namespace does not hold, and looks for suspended frames only when a target
+is a generator or coroutine (no other frame can be suspended off a thread's stack). A scan
+refreezes the heap right after its one `get_objects` call and then filters in 2 ms slices.
+On the toy, with 2.0 M objects (one `get_objects` takes 22 ms) and a median step of 0.56 ms:
+
+| Locate | prepare | step stall p99 | max |
+|---|---|---|---|
+| before: two heap scans, unsliced | 0.30 s | 17.5 ms | 21.4 ms |
+| two heap scans, sliced | 0.32 s | 12.7 ms | 15.0 ms |
+| namespace, no scan (method target) | 0.008 s | 2.8 ms | 6.1 ms |
+| nested target: one sliced scan | 0.16 s | 17.2 ms | 18.5 ms |
+
+Slicing barely helps: what remains is the single `get_objects` call. Nested targets still pay
+it once.
+
 With the one-by-one `Coordinator` instead (each rank switching at its own boundary), the same
 commit and undo gave at least one step with mixed versions in 20 of 20 runs on CPU; the
 step-gap coordinator gave none in 20 of 20.
 
 ## Golden tests
 
-`python3 -m unittest -v` from `template/livelab` (CPU, about 1.3 s):
+`python3 -m unittest -v` from `template/livelab` (CPU, about 1.5 s; one test builds a 2.5 M-object heap):
 
 ```
 test_accept_list ... ok
@@ -102,6 +121,7 @@ test_commit_failure_undoes_the_committed ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
 test_linked_receipts_and_measured_times ... ok
 test_one_by_one_commit_mixes_versions ... ok
+test_prepare_never_holds_the_loop_longer_than_the_budget ... ok
 test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
@@ -115,7 +135,7 @@ test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 19 tests in 1.339s
+Ran 20 tests in 1.49s
 
 OK
 ```
@@ -151,8 +171,9 @@ Each test's docstring says what it proves and what it does not.
 
 ## Not covered yet
 
-- A locate that does not scan the whole heap: in the same process the scan stalls the loop
-  through the GIL even outside the gap.
+- Nested targets (closures) still need one heap scan, whose `get_objects` call holds the GIL
+  in one piece. Copies of a function object made with `types.FunctionType(code, ...)` are not
+  found by the namespace path.
 - The host's transaction table lives in memory: a host crash loses `status`.
 - A second edit on top of a committed one, when the edit moved the target's first line: the
   running code then has the patch's line, and the target is not found (`no_live_function`).

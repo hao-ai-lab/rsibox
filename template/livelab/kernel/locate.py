@@ -20,6 +20,7 @@ import gc
 import hashlib
 import importlib
 import sys
+import time
 import types
 
 
@@ -88,10 +89,74 @@ class unfrozen:
             gc.freeze()
 
 
-def heap_functions():
-    """Every function object in the process."""
+SLICE_S = 0.002     # longest stretch a scan keeps the GIL before it sleeps (see `sliced`)
+
+
+def all_objects():
+    """Every gc-tracked object. `gc.get_objects()` is one C call that holds the GIL for its
+    whole run (34 ms for 0.86 M objects in a process that imported vLLM's worker; more on a
+    loaded engine): the only part of a scan that cannot be sliced. The heap is frozen again
+    right after it, so no engine step runs with an unfrozen heap (a full collection of it
+    would stall far longer)."""
     with unfrozen():
-        return [o for o in gc.get_objects() if type(o) is types.FunctionType]
+        return gc.get_objects()
+
+
+def sliced(seq, budget_s=None):
+    """Iterate seq, sleeping briefly after every `budget_s` of work so a busy loop in another
+    thread gets the GIL. Without it a Python-level scan hands the GIL back only at the
+    interpreter's switch interval (5 ms) each time the loop releases it."""
+    budget_s = SLICE_S if budget_s is None else budget_s
+    t = time.perf_counter()
+    for i, x in enumerate(seq):
+        yield x
+        if not i & 1023 and time.perf_counter() - t > budget_s:
+            time.sleep(0.0002)
+            t = time.perf_counter()
+
+
+def heap_functions():
+    """Every function object in the process: one get_objects, then a sliced filter."""
+    objs = all_objects()
+    try:
+        return [o for o in sliced(objs) if type(o) is types.FunctionType]
+    finally:
+        del objs
+
+
+def module_functions(mod):
+    """Function objects reachable from the module's own namespace, without a heap scan:
+    module-level functions, methods of classes defined in the module (also static and class
+    methods, properties, nested classes), decorator wrappers' originals (closure cells and
+    `__wrapped__`), bound methods. Pure Python over the module, so it never holds the GIL
+    long. Swapping `__code__` on these objects reaches every holder of them (from-import
+    copies, bound methods saved as callbacks). It misses closures made at run time and
+    functions defined in the module but referenced only elsewhere: `stage` scans the heap
+    for nested targets and for targets this does not find."""
+    g, name = mod.__dict__, mod.__name__
+    out, seen, stack = {}, set(), list(g.values())
+    while stack:
+        o = stack.pop()
+        if id(o) in seen:
+            continue
+        seen.add(id(o))
+        if isinstance(o, types.FunctionType):
+            if o.__globals__ is g:
+                out[id(o)] = o
+            for c in o.__closure__ or ():
+                try:
+                    stack.append(c.cell_contents)
+                except ValueError:            # empty cell
+                    pass
+            if "__wrapped__" in o.__dict__:
+                stack.append(o.__dict__["__wrapped__"])
+        elif isinstance(o, (staticmethod, classmethod, types.MethodType)):
+            stack.append(o.__func__)
+        elif isinstance(o, property):
+            stack += [f for f in (o.fget, o.fset, o.fdel) if f is not None]
+        elif isinstance(o, type) and o.__module__ == name:
+            stack += list(vars(o).values())
+    return list(out.values())
 
 
 def index_module(mod, functions=None):
