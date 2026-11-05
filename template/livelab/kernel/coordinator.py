@@ -55,7 +55,10 @@ A plan is plain data, so it can cross a process boundary:
      "modules": {module: {"source": patched text, "base_hash": text_hash of the base,
                           "targets": [[qualname, first line in the base]] or "auto"
                                      (default: the definitions that changed, found by stage),
-                          "scan": "auto" | "always", "compile": "definitions" | "module"}},
+                          "scan": "auto" | "always", "compile": "definitions" | "module",
+                          "trees": (base AST, patch AST)}},  in-process only (not plain
+                                     data): the caller's parse of the text the participant
+                                     runs and of `source`, so stage does not parse again
      "repairs": [{"cell": python source, "declares": [names in the participant's scope]}],
      "accept": [check names] or "all",
      "undo_resets": ["R2" | "R3" | ...],   resets the undo runs after the code undo
@@ -261,7 +264,7 @@ class LocalParticipant(Participant):
                        base_source=self._live_source(m), own_codes=own,
                        compile=spec.get("compile", "definitions"),
                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer,
-                       overlay=overlay)
+                       overlay=overlay, trees=spec.get("trees"))
 
     def prepare(self, plan):
         txn, accept = plan["id"], plan.get("accept", ())

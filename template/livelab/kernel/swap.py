@@ -10,7 +10,11 @@ closures made later run the new code too). It runs the checks and returns findin
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
 (free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`.
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
-classes are built in a scratch namespace (methods get the real class for `super()`).
+classes are built in a scratch namespace (methods get the real class for `super()`). New
+methods and new defaults of methods are evaluated in a scratch class body that reads the live
+class's names (read-only; `_LiveBody`), so `def f(self, x=CONST)` with CONST in the class body,
+or a decorator defined in the class, works as in the file; the live class is not touched
+before commit.
 
 `apply(staged, journal, witness)` makes it visible. Every change goes through the journal:
 added imports and the witness hook (module dict), counter keys, `__code__`, `__defaults__`,
@@ -37,6 +41,7 @@ interpreter (code objects travel by `marshal`), so this process holds the GIL on
 live half; `analyzer=None` runs it here. Both give the same staged code and findings.
 """
 import ast
+import collections
 import copy
 import importlib
 import importlib.util
@@ -49,6 +54,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 
 from . import findings as F
 from . import journal as J
@@ -109,25 +115,50 @@ def qual_index(tree):
     return idx
 
 
+def _inject(node, key, undo):
+    """`witness.inject` on a copy of the node's body list (or expression), logging the old
+    one in `undo`: the caller's tree comes back unchanged after `_restore`."""
+    f = "elt" if isinstance(node, ast.GeneratorExp) else "body"
+    v = getattr(node, f)
+    _set(undo, node, **{f: list(v) if isinstance(v, list) else v})
+    W.inject(node, key)
+
+
 def _ordinal(idx, q, line):
     hits = [i for i, n in enumerate(idx.get(q, [])) if first_line(n) == line]
     return hits[0] if len(hits) == 1 else None
 
 
-def _blank(tree, targets, added):
+def _set(undo, node, **fields):
+    """Set node fields, logging the old values in `undo` so `_restore` can put them back."""
+    for f, v in fields.items():
+        undo.append((node, f, getattr(node, f)))
+        setattr(node, f, v)
+
+
+def _restore(undo):
+    while undo:
+        node, f, v = undo.pop()
+        setattr(node, f, v)
+
+
+def _blank(tree, targets, added, undo):
     """The module AST with target bodies and signatures, added defs and imports removed: two
-    blanked trees differ only if the patch changes something a code swap does not apply."""
+    blanked trees differ only if the patch changes something a code swap does not apply.
+    Every edit of the tree is logged in `undo` (`_restore` takes them back)."""
     idx = qual_index(tree)
     for q, i in targets:
         n = idx[q][i]
         if isinstance(n, _DEF):
-            n.body, n.args = [ast.Pass()], ast.arguments([], [], None, [], [], None, [])
+            _set(undo, n, body=[ast.Pass()],
+                 args=ast.arguments([], [], None, [], [], None, []))
         elif isinstance(n, ast.GeneratorExp):    # keep the first iterable (enclosing code)
             g = n.generators[0]
-            n.elt, n.generators = ast.Constant(None), [
-                ast.comprehension(ast.Name("_", ast.Store()), g.iter, [], 0)]
+            _set(undo, n, elt=ast.Constant(None), generators=[
+                ast.comprehension(ast.Name("_", ast.Store()), g.iter, [], 0)])
         else:
-            n.body, n.args = ast.Constant(None), ast.arguments([], [], None, [], [], None, [])
+            _set(undo, n, body=ast.Constant(None),
+                 args=ast.arguments([], [], None, [], [], None, []))
 
     def strip(body, pre):
         out = []
@@ -137,11 +168,11 @@ def _blank(tree, targets, added):
             if isinstance(n, (*_DEF, ast.ClassDef)) and pre + n.name in added:
                 continue
             if isinstance(n, ast.ClassDef):
-                n.body = strip(n.body, pre + n.name + ".")
+                _set(undo, n, body=strip(n.body, pre + n.name + "."))
             out.append(n)
         return out
 
-    tree.body = strip(tree.body, "")
+    _set(undo, tree, body=strip(tree.body, ""))
     return ast.dump(tree)
 
 
@@ -246,27 +277,68 @@ class Staged:
 _compile = compile          # `stage` has a parameter named compile
 
 
+LIVE_BODY = "__fastrsi_class_body__"
+
+
+def _shell(name, body):
+    """A scratch class statement whose body reads the live class's names: its metaclass is
+    the `LIVE_BODY` name, which the live half binds to a `_LiveBody`."""
+    return ast.ClassDef(name, [], [ast.keyword("metaclass", ast.Name(LIVE_BODY, ast.Load()))],
+                        body, [], type_params=[])
+
+
+class _LiveBody:
+    """Stands in for the metaclass of a scratch class (`_shell`), so new defaults, decorators
+    and methods are evaluated as in the live class body: the body's namespace is a ChainMap
+    whose reads see the live class's names, then the patch's new imports (then, as in any
+    class body, the module globals and builtins). Writes go to a fresh dict, never to the
+    live class, which is not touched before commit. The result is a scratch class holding
+    only the new names."""
+
+    def __init__(self, live=None, imports=None):
+        self.maps = [vars(live)] if live is not None else []
+        if imports:
+            self.maps.append(imports)
+
+    def __prepare__(self, name, bases, **kw):
+        return collections.ChainMap({}, *self.maps)
+
+    def __call__(self, name, bases, ns, **kw):
+        return type(name, bases, dict(ns.maps[0]))
+
+
+def _live_class(mod, path):
+    """The live class at dotted `path` in `mod`, or None."""
+    obj = mod
+    for p in path.split(".") if path else ():
+        obj = getattr(obj, p, None)
+        if not isinstance(obj, type):
+            return None
+    return obj if path else None
+
+
 def _defaults_stub(q, node):
-    """The def with an empty body inside scratch classes for the qualname's class part,
-    compiled: running it in the module's globals evaluates the new defaults."""
+    """The def with an empty body, inside a scratch class named like the innermost class of
+    the qualname (same name mangling; a class body sees only its own class's names), whose
+    body reads the live class (`_shell`), compiled: running it in the module's globals
+    evaluates the new defaults as the live class body would."""
     stub = copy.deepcopy(node)
     stub.body, stub.decorator_list = [ast.Pass()], []
-    body = [stub]
-    for cls in reversed(q.split(".")[:-1]):
-        body = [ast.ClassDef(cls, [], [], body, [], type_params=[])]
+    parts = q.split(".")
+    body = [stub] if len(parts) == 1 else [_shell(parts[-2], [stub])]
     return _try_compile(ast.fix_missing_locations(ast.Module(body, [])), "<defaults>")
 
 
 def _defaults(mod, q, stub, imports=None):
-    """Evaluate a def's new defaults in a scratch namespace (module globals; a top-level
-    def's defaults also see the patch's new `imports`). Returns (defaults, kwdefaults) or
-    raises."""
-    ns = dict(imports or {})
-    exec(_raise(stub), mod.__dict__, ns)
+    """Evaluate a def's new defaults in a scratch namespace: the module globals, the patch's
+    new `imports`, and for a method the live class's names (read-only, `_LiveBody`). Returns
+    (defaults, kwdefaults) or raises."""
     parts = q.split(".")
-    obj = ns[parts[0]]
-    for p in parts[1:]:
-        obj = obj.__dict__[p]
+    cls = ".".join(parts[:-1])
+    ns = dict(imports or {})
+    ns[LIVE_BODY] = _LiveBody(_live_class(mod, cls), imports)
+    exec(_raise(stub), mod.__dict__, ns)
+    obj = ns[parts[0]] if len(parts) == 1 else ns[parts[-2]].__dict__[parts[-1]]
     return obj.__defaults__, obj.__kwdefaults__
 
 
@@ -275,7 +347,8 @@ def _set_class_cell(fn, cls):
         fn.__closure__[fn.__code__.co_freevars.index("__class__")].cell_contents = cls
 
 
-def analyze(base_src, source, targets, filename, key_module, live, compile="definitions"):
+def analyze(base_src, source, targets, filename, key_module, live, compile="definitions",
+            trees=None):
     """The text half of `stage`: everything that needs only the two texts, the targets and
     which targets have a live function (`live`: {(qualname, line): bool}). It parses both
     texts, matches targets, adds the witness, compiles the units, finds added, removed and
@@ -286,14 +359,32 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
     Returns plain data and code objects (marshal can carry them): {"error"} when a text does
     not parse, else {"targets": [per-target dict in order], "resolved": [[qualname, line]]
     (the targets analyzed), "base_units", "new_units", "compiled", "new_error", "line_map",
-    "added", "removed", "imports", "outside_changes", "timings"}."""
+    "added", "removed", "imports", "outside_changes", "timings"}.
+    trees: (base tree, patch tree) the caller already parsed from exactly these two texts
+    (`ast.parse`), used instead of parsing again; they come back unchanged (every edit the
+    analysis makes to them is taken back before it returns)."""
     timings, t0 = {}, time.perf_counter()
+    if trees is not None:
+        base_tree, tree = trees
+        timings["parse_s"] = 0.0
+        timings["trees"] = "caller"
+    else:
+        try:
+            base_tree = ast.parse(base_src, filename)
+            tree = ast.parse(source, filename)
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}", "timings": timings}
+        timings["parse_s"] = round(time.perf_counter() - t0, 6)
+    undo = []
     try:
-        base_tree = ast.parse(base_src, filename)
-        tree = ast.parse(source, filename)
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "timings": timings}
-    timings["parse_s"] = round(time.perf_counter() - t0, 6)
+        return _analyze_trees(base_src, source, targets, filename, key_module, live, compile,
+                              base_tree, tree, timings, undo)
+    finally:
+        _restore(undo)
+
+
+def _analyze_trees(base_src, source, targets, filename, key_module, live, compile,
+                   base_tree, tree, timings, undo):
     bq, pq = qual_index(base_tree), qual_index(tree)
     auto = targets is None or targets == "auto"
     if auto:                 # every target found here differs by AST: no dump per target below
@@ -332,7 +423,7 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
             continue
         node = pq[q][i]
         changed = auto or ast.dump(bq[q][i]) != ast.dump(node)
-        W.inject(node, k)
+        _inject(node, k, undo)
         todo.append((q, i))
         tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node)})
 
@@ -349,7 +440,7 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
                       if isinstance(m, _DEF) and m.name not in bnames]
     for q, _, n in added:
         if isinstance(n, _DEF):
-            W.inject(n, L.key_of(key_module, q, first_line(n)))
+            _inject(n, L.key_of(key_module, q, first_line(n)), undo)
 
     # 2b. removed definitions
     removed = removed_definitions(base_tree, tree)
@@ -380,8 +471,7 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
     # 5. added definitions, compiled for the caller's scratch namespace
     adds = []
     for q, cls_name, n in added:
-        body = [n] if cls_name is None else [ast.ClassDef(cls_name, [], [], [n], [],
-                                                          type_params=[])]
+        body = [n] if cls_name is None else [_shell(cls_name, [n])]
         adds.append({"q": q, "cls": cls_name, "name": n.name, "def": isinstance(n, _DEF),
                      "line": first_line(n),
                      **_try_compile(ast.fix_missing_locations(ast.Module(body, [])), filename)})
@@ -393,9 +483,10 @@ def analyze(base_src, source, targets, filename, key_module, live, compile="defi
                 != ast.dump(ast.Tuple(pnode.args.defaults + pnode.args.kw_defaults))):
             r["defaults"] = _defaults_stub(q, pnode)
 
-    # 7. anything else changed? Last, because blanking edits the two trees in place.
+    # 7. anything else changed? Last, because blanking edits the two trees (logged in undo).
     t = time.perf_counter()
-    outside = _blank(base_tree, todo, set(removed)) != _blank(tree, todo, {q for q, _, _ in added})
+    outside = _blank(base_tree, todo, set(removed), undo) != _blank(
+        tree, todo, {q for q, _, _ in added}, undo)
     timings["compare_s"] = round(time.perf_counter() - t, 6)
     return {"targets": tres, "resolved": [[q, int(line)] for q, line in targets],
             "base_units": base_units, "new_units": new_units,
@@ -428,7 +519,8 @@ def _err(e):
 
 
 def stage(module, source, targets="auto", base_hash=None, key_module=None, scan="auto",
-          base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None):
+          base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None,
+          trees=None):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)], or "auto" (the default; None too): the analysis
     finds the changed definitions itself from its one parse of the two texts (the same list
@@ -450,6 +542,13 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     overlay: {module name: {name: object}}, names that modules staged earlier in the same
     transaction add (`staged_names`): a `from m import name` of this patch takes the staged
     object when the live module m does not have the name yet. Nothing is made visible.
+    trees: (base tree, patch tree), `ast.parse` of exactly the base text (`base_source`, or
+    the module's file) and `source`, for a caller that parsed them already (its own planner):
+    the analysis uses them instead of parsing again and leaves them unchanged. Used when the
+    analysis runs in this process (analyzer None, or a fallback); a `ProcessAnalyzer` child
+    parses its own copy (trees cannot cross the pipe, and that parse holds no GIL here).
+    With `changed_targets(..., trees=)` a caller can also pick a subset of the changed
+    definitions and pass them as explicit targets, still without a parse.
     Returns {"ok", "staged", "items", "findings", "timings", "targets"}; ok is False only
     when nothing can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -482,7 +581,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
            "targets": "auto" if auto else [[q, int(line)] for q, line in targets],
            "filename": mod.__file__, "key_module": kname, "live": live, "compile": compile}
     t = time.perf_counter()
-    a = _analyze(req, analyzer, timings, fs, kname)
+    a = _analyze(req, analyzer, timings, fs, kname, trees)
     if auto and "error" not in a:
         targets = a["resolved"]
         timings["targets_s"] = a["timings"]["targets_s"]
@@ -497,13 +596,15 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                 # the heap found a live function the namespace did not: analyze again with
                 # the explicit targets, exactly as a caller passing them would
                 req = {**req, "targets": targets, "live": heap_live}
-                a = _analyze(req, analyzer, timings, fs, kname)
+                a = _analyze(req, analyzer, timings, fs, kname, trees)
                 timings["analyze_again"] = True
     timings["analyze_s"] = round(time.perf_counter() - t, 6)
     at = a["timings"]
     if "error" in a:
         return _invalid(a["error"], kname)
     timings["parse_s"] = at["parse_s"]
+    if "trees" in at:
+        timings["trees"] = at["trees"]
     st = Staged(mod)
     if base_hash is not None and L.text_hash(base_src) != base_hash:
         fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
@@ -576,6 +677,8 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         # 5. added definitions, built in a scratch namespace
         for ad in a["added"]:
             ns = dict(st.imports)
+            if ad["cls"] is not None:      # decorators and defaults see the live class body
+                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), st.imports)
             exec(_raise(ad), mod.__dict__, ns)
             q, cls_name, name = ad["q"], ad["cls"], ad["name"]
             if cls_name is None:
@@ -685,9 +788,10 @@ def _live_keys(held):
     return live
 
 
-def _analyze(req, analyzer, timings, fs, kname):
+def _analyze(req, analyzer, timings, fs, kname, trees=None):
     """Run the analysis with `analyzer`; if it fails, here, with an `analyze_fallback`
-    finding that says why and what it cost."""
+    finding that says why and what it cost. `trees` (the caller's parse) are used only
+    here, in this process."""
     if analyzer is not None:
         try:
             a = analyzer(req)
@@ -696,7 +800,7 @@ def _analyze(req, analyzer, timings, fs, kname):
         except Exception as e:           # the child is gone: analyze here, and say so
             timings["analyze_fallback"] = why = f"{type(e).__name__}: {e}"
             t = time.perf_counter()
-            a = analyze(**req)
+            a = analyze(**req, trees=trees)
             timings["analyze"] = "inline"
             cost = time.perf_counter() - t
             fs.append(F.finding(
@@ -705,7 +809,7 @@ def _analyze(req, analyzer, timings, fs, kname):
                 "compare", "the analysis in the analyzer's child process", subject=kname))
             return a
     timings["analyze"] = "inline"
-    return analyze(**req)
+    return analyze(**req, trees=trees)
 
 
 def staged_names(st):
@@ -918,14 +1022,16 @@ def validate(st):
     return F.ok(checked=len(st.expect)) if not fs else F.not_ok("changed since prepare", fs)
 
 
-def changed_targets(base_src, new_src):
+def changed_targets(base_src, new_src, trees=None):
     """Planning helper: [[qualname, first line in base_src]] of every definition (function,
     method, nested function, lambda, generator expression) whose AST differs, for qualnames
     defined as many times in both texts. An enclosing function of a changed one is listed too.
     Added and removed definitions are not targets: `stage` finds them. Raises SyntaxError on a
-    bad text. `stage(..., targets="auto")` finds the same list from its own parse."""
-    return _changed(base_src, qual_index(ast.parse(base_src)), new_src,
-                    qual_index(ast.parse(new_src)))
+    bad text. `stage(..., targets="auto")` finds the same list from its own parse. trees:
+    (base tree, new tree), the caller's `ast.parse` of the two texts, used instead of
+    parsing (not changed)."""
+    bt, nt = trees if trees is not None else (ast.parse(base_src), ast.parse(new_src))
+    return _changed(base_src, qual_index(bt), new_src, qual_index(nt))
 
 
 def _segment(lines, node):
@@ -1006,12 +1112,59 @@ def _enclosing(code, run):
             if any(c is code for c in o.co_consts)]
 
 
+def _nested_in_order(code):
+    """Nested code objects of `code`, depth-first in constant order (not `code` itself)."""
+    out = []
+    for c in code.co_consts:
+        if isinstance(c, types.CodeType):
+            out.append(c)
+            out += _nested_in_order(c)
+    return out
+
+
+def closure_pairs(st):
+    """{id(new nested code): (new code, old code or None)} for every code `apply` installs:
+    the nested codes from which the new code makes function objects at run time (closures,
+    lambdas; not generator expressions, whose function never outlives the call). A new
+    nested code is paired with the old one of the same qualname and ordinal
+    when both have as many of that qualname; else (a nested def the edit adds) with None.
+    Added functions' nested codes have no old version."""
+    pairs = {}
+
+    def pair(old, new):
+        olds = {}
+        for c in _nested_in_order(old) if old is not None else ():
+            olds.setdefault(c.co_qualname, []).append(c)
+        news = [c for c in _nested_in_order(new) if c.co_name != "<genexpr>"]
+        count, seen = {}, {}
+        for c in news:
+            count[c.co_qualname] = count.get(c.co_qualname, 0) + 1
+        for c in news:
+            q = c.co_qualname
+            i = seen[q] = seen.get(q, -1) + 1
+            same = olds.get(q, [])
+            o = same[i] if len(same) == count[q] else None
+            if o is not c:
+                pairs.setdefault(id(c), (c, o))
+
+    for fn, code, _, _ in st.swaps:
+        pair(fn.__code__, code)
+    for _, _, obj in st.adds:
+        f = getattr(obj, "__func__", obj)
+        if isinstance(f, types.FunctionType):
+            pair(None, f.__code__)
+    return pairs
+
+
 def apply(st, journal, witness):
     """Make a staged swap visible, every change through the journal. Never raises: on an
-    error it undoes its own entries and returns not-ok."""
+    error it undoes its own entries and returns not-ok. First it journals the nested-code
+    pairs (`closure_pairs`), so undo, which runs last for it, also takes back closures the new
+    code made while installed."""
     start = len(journal.entries)
     g = st.mod.__dict__
     try:
+        journal.record_closures(closure_pairs(st))
         for name, value in st.imports.items():
             journal.set_item(g, name, value)
         if getattr(g.get(W.HIT), "__self__", None) is not witness:

@@ -9,6 +9,7 @@ shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy 
 import ast
 import gc
 import importlib
+import importlib.util
 import itertools
 import os
 import shutil
@@ -1352,6 +1353,255 @@ class GenexprTargetTest(unittest.TestCase):
         fs = [f for f in r["findings"] if f["check"] == "base_mismatch"]
         self.assertTrue(fs, r["findings"])
         self.assertEqual(fs[0]["code_hash"], r["items"][k]["new_hash"])
+
+
+def temp_module(test, tag, text):
+    """Write `text` as a new module in a temp directory and import it: (name, module)."""
+    tmp = tempfile.mkdtemp()
+    test.addCleanup(shutil.rmtree, tmp, True)
+    name = f"kt_{tag}{next(_n)}"
+    with open(os.path.join(tmp, name + ".py"), "w") as f:
+        f.write(text)
+    sys.path.insert(0, tmp)
+    test.addCleanup(sys.path.remove, tmp)
+    test.addCleanup(sys.modules.pop, name, None)
+    return name, importlib.import_module(name)
+
+
+class RecordAttrTest(unittest.TestCase):
+    """Pain point: `record_attr` read and restored only `__dict__` entries, so a repair that
+    set a function's `__doc__`, a descriptor (torch `Parameter.data`) or an `nn.Module`
+    submodule (kept in `_modules` by its `__setattr__`) was journaled as "added" and undo left
+    the new value in place."""
+
+    class Prop:
+        def __init__(self):
+            self._v = "old"
+
+        @property
+        def val(self):
+            return self._v
+
+        @val.setter
+        def val(self, v):
+            self._v = v
+
+    class Side:
+        """Stores attributes in a side dict through `__setattr__`, like nn.Module."""
+
+        def __init__(self):
+            object.__setattr__(self, "_side", {"sub": "old sub"})
+
+        def __getattr__(self, n):
+            try:
+                return self.__dict__["_side"][n]
+            except KeyError:
+                raise AttributeError(n) from None
+
+        def __setattr__(self, n, v):
+            self._side[n] = v
+
+        def __delattr__(self, n):
+            del self._side[n]
+
+    def test_undo_restores_descriptor_side_dict_and_doc(self):
+        """Proves: a property, a name kept by a custom `__setattr__` (replaced and added), a function's `__doc__`, and a plain `__dict__` entry (replaced and added) all come back exactly after `record_attr` + assign + undo. Not: torch (next test)."""
+        def fn():
+            """old doc"""
+        p, sd = self.Prop(), self.Side()
+
+        class Plain:
+            pass
+        pl = Plain()
+        pl.x = old_x = ["x"]
+        j = J.Journal()
+        for obj, name, value in [(p, "val", "new"), (sd, "sub", "new sub"),
+                                 (sd, "extra", "added"), (fn, "__doc__", "new doc"),
+                                 (pl, "x", ["new"]), (pl, "y", "added")]:
+            j.record_attr(obj, name)
+            setattr(obj, name, value)
+        self.assertEqual((p.val, sd.sub, sd.extra, fn.__doc__, pl.y),
+                         ("new", "new sub", "added", "new doc", "added"))
+        u = j.undo_to(0)
+        self.assertTrue(u["ok"], u)
+        self.assertEqual((p.val, sd.sub, fn.__doc__), ("old", "old sub", "old doc"))
+        self.assertEqual(sd._side, {"sub": "old sub"})        # the added name is gone
+        self.assertIs(pl.x, old_x)
+        self.assertNotIn("y", vars(pl))
+
+    @unittest.skipUnless(importlib.util.find_spec("torch"), "torch is not installed")
+    def test_undo_restores_parameter_data_and_module_submodules(self):
+        """Proves (CPU torch): `Parameter.data` swapped to another tensor comes back to the old storage and values, a replaced `nn.Module` submodule comes back as the same object, an added one is removed from `_modules`. Not: CUDA tensors, buffers."""
+        import torch
+        from torch import nn
+        m = nn.Module()
+        m.lin = old_lin = nn.Linear(2, 2)
+        w = m.lin.weight
+        ptr, old_vals = w.data_ptr(), w.detach().clone()
+        j = J.Journal()
+        j.record_attr(w, "data")
+        w.data = torch.full((2, 2), 7.0)
+        j.record_attr(m, "lin")
+        m.lin = nn.Linear(2, 2)
+        j.record_attr(m, "extra")
+        m.extra = nn.ReLU()
+        self.assertTrue(j.undo_to(0)["ok"])
+        self.assertEqual(w.data_ptr(), ptr)
+        self.assertTrue(torch.equal(w.detach(), old_vals))
+        self.assertIs(m.lin, old_lin)
+        self.assertEqual(list(m._modules), ["lin"])
+
+
+class LiveClassBodyTest(unittest.TestCase):
+    """Pain point: new defaults and added methods were evaluated in empty scratch classes, so a
+    default naming a class-level constant got the module's value of the same name (or a
+    NameError), and a method decorated by a helper defined in the class did not stage."""
+
+    BASE = ('SCALE = 1\n\n\nclass K:\n    SCALE = 5\n    ONLY = 9\n\n'
+            '    def _twice(fn):\n        def w(*a):\n            return 2 * fn(*a)\n'
+            '        return w\n\n'
+            '    def f(self, x=1):\n        return x\n\n'
+            '    def g(self, y=2):\n        return y\n')
+
+    def test_new_defaults_see_the_live_class_body(self):
+        """Proves: `def f(self, x=SCALE)` takes the class's SCALE (5), not the module's (1), and `def g(self, y=ONLY)` (a name only the class has) evaluates instead of a defaults_not_evaluated finding; stage does not touch the live class. Not: defaults that read names defined below them in the class (the live class has every name)."""
+        name, mod = temp_module(self, "defaults", self.BASE)
+        new = edit(self.BASE, ("x=1", "x=SCALE"), ("y=2", "y=ONLY"))
+        before = dict(vars(mod.K))
+        r = S.stage(name, new)
+        self.assertEqual(dict(vars(mod.K)), before)
+        self.assertEqual(r["findings"], [])
+        self.assertTrue(S.apply(r["staged"], J.Journal(), W.Witness())["ok"])
+        self.assertEqual((mod.K().f(), mod.K().g()), (5, 9))
+
+    def test_added_method_uses_a_decorator_defined_in_the_class(self):
+        """Proves: an added method decorated by `_twice`, a function of the class body, stages without a finding, the class is unchanged until apply, and after apply it runs through the decorator (3 * 2 = 6). Not: decorators that mutate class-level objects in place (they run at stage)."""
+        name, mod = temp_module(self, "deco", self.BASE)
+        new = self.BASE + "\n    @_twice\n    def h(self):\n        return 3\n"
+        before = dict(vars(mod.K))
+        r = S.stage(name, new)
+        self.assertEqual(dict(vars(mod.K)), before)
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertEqual(r["findings"], [])
+        self.assertTrue(S.apply(r["staged"], J.Journal(), W.Witness())["ok"])
+        self.assertEqual(mod.K().h(), 6)
+
+
+class CallerTreesTest(unittest.TestCase):
+    """Pain point: a caller with its own planner (constants, fields) parses both texts, then
+    stage parses them again. `stage(..., trees=(base, patch))` takes the caller's trees."""
+
+    def test_stage_with_the_callers_trees_parses_nothing_and_stages_the_same(self):
+        """Proves: for the toy edits of AutoTargetsTest, stage with the caller's trees calls `ast.parse` zero times, stages the same findings, items and code objects as with explicit targets (targets omitted, and a subset picked with `changed_targets(trees=)`), and gives the trees back unchanged (the same tree staged twice gives the same result). Not: the analyzer child (it parses its own copy)."""
+        E, O = toy.source("engine"), toy.source("ops")
+        cases = {
+            "method": ("engine", edit(E, ('self.ran.append("base")', 'self.ran.append("v1")'),
+                                      ("self.tokens.clear()", "self.tokens.clear()\n"
+                                       "        self.steps += 0"))),
+            "closure": ("ops", edit(O, ("return x + k", "return x + k * 1"))),
+            "defaults": ("ops", edit(O, ("def scale(x):", "def scale(x, m=STEP_SCALE):"))),
+            "added": ("engine", edit(E, ("class Gap:", "def helper(x):\n    return x\n\n\n"
+                                         "class Gap:"),
+                                     ('self.ran.append("base")',
+                                      'self.ran.append(str(helper(1)))'))),
+            "removed": ("engine", edit(E, ("    def drain(self):\n        self.tokens.clear()"
+                                           "\n\n", ""))),
+            "genexpr": ("engine", edit(E, ("(b - a for a, b in", "(2 * (b - a) for a, b in"))),
+        }
+        _summary = ProcessAnalyzerTest._summary
+        real_parse, calls = ast.parse, []
+
+        def counting(*a, **kw):
+            calls.append(1)
+            return real_parse(*a, **kw)
+        for case, (m, src) in cases.items():
+            _, eng, ops = fresh("trees")
+            mod = (eng if m == "engine" else ops).__name__
+            base = E if m == "engine" else O
+            explicit = S.changed_targets(base, src)
+            want = _summary(S.stage(mod, src, explicit))
+            trees = (ast.parse(base), ast.parse(src))
+            dumps = [ast.dump(t, include_attributes=True) for t in trees]
+            ast.parse = counting
+            try:
+                got = [S.stage(mod, src, trees=trees), S.stage(mod, src, trees=trees)]
+                sub = S.changed_targets(base, src, trees=trees)[:1]
+                one = S.stage(mod, src, sub, trees=trees)
+            finally:
+                ast.parse = real_parse
+            self.assertEqual(calls, [], case)
+            for r in got:
+                self.assertEqual((r["targets"], r["timings"]["trees"]), (explicit, "caller"))
+                self.assertEqual(_summary(r), want, case)
+            self.assertEqual(_summary(one), _summary(S.stage(mod, src, sub)), case)
+            self.assertEqual([ast.dump(t, include_attributes=True) for t in trees], dumps,
+                             case)
+
+
+class UndoCallTest(unittest.TestCase):
+    """Pain point: an in-place re-init (a Triton kernel rebuilt) had no undo entry, so undo
+    needed a hand-run `repair()`."""
+
+    def test_record_call_runs_in_reverse_order_and_a_failure_is_a_finding(self):
+        """Proves: `record_call` entries run at their place in reverse order with the attribute entries (the first call sees the later attribute already undone), and one that raises is an `undo_incomplete` finding naming its label while the rest still run. Not: calls that take arguments (bind them in a closure)."""
+        class O:
+            pass
+        o, log = O(), []
+        j = J.Journal()
+        j.set_attr(o, "a", 1)
+        j.record_call(lambda: log.append(("k1", vars(o).get("b"))), "rebuild k1")
+
+        def boom():
+            raise RuntimeError("kernel cache gone")
+        j.set_attr(o, "b", 2)
+        j.record_call(boom, "rebuild k2")
+        j.record_call(lambda: log.append(("k3", vars(o).get("b"))), "rebuild k3")
+        u = j.undo_to(0)
+        self.assertEqual(log, [("k3", 2), ("k1", None)])
+        self.assertEqual(vars(o), {})
+        self.assertFalse(u["ok"])
+        self.assertEqual([f["check"] for f in u["findings"]], ["undo_incomplete"])
+        self.assertIn("rebuild k2", u["findings"][0]["observed"])
+        self.assertIn("kernel cache gone", u["findings"][0]["observed"])
+
+
+class RuntimeClosureUndoTest(unittest.TestCase):
+    """Pain point: after a swap of `make_shift`, closures its new code made while installed
+    are in no journal entry; undo restored `make_shift` and left those closures running the
+    new inner code for whoever held them."""
+
+    def test_closure_made_after_the_swap_runs_the_old_code_after_undo(self):
+        """Proves: a closure made by the swapped `make_shift` after apply (shift(1) = 1 + 1 + 100) runs the base inner code after undo (2), counted in `closures_restored`; the engine's closure made before the swap is restored too. Not: closures held only by a suspended frame's locals of the new code (they are still found: the scan is by referrer)."""
+        _, eng, ops = fresh("rtclosure")
+        e = eng.Engine()
+        new = edit(OPS, ("        return x + k\n", "        return x + k + 100\n"))
+        j = J.Journal()
+        r, d, a = install(ops.__name__, new, "auto", j, W.Witness())
+        self.assertTrue(a and a["ok"], (r["findings"], d))
+        held = ops.make_shift(1)
+        self.assertEqual((held(1), e.shift(1)), (102, 111))
+        u = j.undo_to(0)
+        self.assertTrue(u["ok"], u)
+        self.assertEqual((held(1), e.shift(1), ops.make_shift(1)(1)), (2, 11, 2))
+        self.assertEqual(u["closures_restored"], 1)
+
+    def test_closure_with_no_base_version_is_a_finding(self):
+        """Proves: a closure from a nested def the edit added (`shift2`) cannot go back to base code; undo restores `make_shift` and reports `closure_not_restored` with the count and the qualname, and is not ok. Not: what the holder should do next (rebuild or drop it)."""
+        _, eng, ops = fresh("rtclosure2")
+        new = edit(OPS, ("        return x + k\n    return shift\n",
+                         "        return x + k\n\n    def shift2(x):\n        return x - k\n"
+                         "    return shift2\n"))
+        j = J.Journal()
+        r, d, a = install(ops.__name__, new, "auto", j, W.Witness())
+        self.assertTrue(a and a["ok"], (r["findings"], d))
+        held = [ops.make_shift(1), ops.make_shift(2)]
+        self.assertEqual([h(5) for h in held], [4, 3])
+        u = j.undo_to(0)
+        self.assertFalse(u["ok"])
+        self.assertEqual([(f["check"], f["subject"]) for f in u["findings"]],
+                         [("closure_not_restored", "make_shift.<locals>.shift2")])
+        self.assertIn("2 function object(s)", u["findings"][0]["observed"])
+        self.assertEqual(ops.make_shift(1)(5), 6)
 
 
 if __name__ == "__main__":

@@ -184,6 +184,15 @@ CATALOG = {
           "every prepare until fixed"}],
         "every prepare stalls the engine loop for its parse and compare, silently "
         "(tens of ms per module on a 3,800-line file)", [], True),
+    "closure_not_restored": (
+        "undo restored the swapped functions, but function objects their new code created "
+        "while installed (a closure it returned, a callback it registered) run a nested "
+        "code with no base version to go back to: a nested definition the edit added, or "
+        "one with other free variables",
+        [{"action": "find the holders (REPL: functions whose __qualname__ is the subject) and "
+          "rebuild or drop them", "cost": "seconds"}, RESTART],
+        "whoever holds those closures keeps running the undone edit's code",
+        ["Keeping state across edits"], False),
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),

@@ -9,8 +9,8 @@ Pure Python, standard library only; it imports no engine.
 | File | What it does |
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
-| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage(module, source)` with the targets omitted finds that same list from its own parse, so prepare needs no planner pass. `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. |
-| `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10). |
+| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage(module, source)` with the targets omitted finds that same list from its own parse, so prepare needs no planner pass. `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. `analyze` is stage's text half (parse, compile, compare); `ProcessAnalyzer` runs it in a child process so prepare does not hold the engine's GIL. `stage(..., trees=(base, patch))` takes trees the caller already parsed (its own planner) instead of parsing again. New defaults and added methods are evaluated in a scratch class body that reads the live class's names (`_LiveBody`). |
+| `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, `removed`, `call`, `closures`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10); `record_attr` restores through `setattr` / `delattr` what is not a plain `__dict__` entry (descriptors, `nn.Module` submodules, `__doc__`). `record_call(undo_fn, label)` journals an in-place re-init by the function that undoes it. `record_closures` (called by `apply`) lets undo take back closures the new code made at run time. |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
@@ -175,6 +175,41 @@ expression, a comment, an added function, a removed method), the targets equal a
 `ast.dump`-only reference and the staged findings, items and code objects equal those of
 explicit targets, in-process and in the child.
 
+Trees the caller already parsed. A caller with its own planner (one that plans module
+constants or dataclass fields itself) has parsed both texts already; `stage(module, source,
+trees=(base tree, patch tree))` analyzes those instead of parsing again, and gives them back
+unchanged (the analysis logs every edit it makes to them, the witness call and the blanked
+bodies of the outside-changes compare, and takes it back before returning). The trees must be
+`ast.parse` of exactly the text the module runs (`base_source`, or its file) and `source`;
+nothing checks that. `changed_targets(base, new, trees=...)` takes them too, so a caller that
+wants only some of the changed definitions picks them and passes them as explicit targets,
+still with no parse. The trees are used when the analysis runs in this process; a
+`ProcessAnalyzer` child parses its own copy (an AST cannot cross the pipe, and that parse does
+not hold this process's GIL). Stage of a one-line edit of `Scheduler.schedule` in vLLM 0.33's
+`scheduler.py` (3,783 lines) on CPU, in-process analysis, targets omitted, 21 runs each (our
+2026-11-05 CPU run; the caller's own parse of both texts took 21.9 ms and is not counted):
+
+| Stage | wall, median (min-max) | parse inside stage |
+|---|---|---|
+| before (previous kernel, parses both texts again) | 76.4 ms (72.9-83.4) | 19.0 ms |
+| this kernel, no trees | 74.1 ms (73.7-76.2) | 18.2 ms |
+| this kernel, `trees=` the caller's | 55.0 ms (54.2-56.4) | 0 |
+| this kernel, `ProcessAnalyzer` (trees not used) | 79.9 ms (77.8-112.6) | 20.9 ms, in the child |
+
+The staged code is the same in all four (new hash `73d9f00e04cc058d`, no findings). Across the
+54 generated edits of 9 vLLM 0.33 modules used above, stage with the caller's trees (twice
+with the same trees) stages the same findings, items and code objects as with explicit
+targets, and the trees come back unchanged (`ast.dump` with positions).
+
+Class bodies. New defaults of a method (`def f(self, x=CONST)`) and added methods (their
+decorators and defaults) are evaluated as in the live class body: the scratch class's
+metaclass is a `_LiveBody` whose namespace is a `ChainMap` that reads the live class's names,
+then the patch's new imports, then (as any class body) the module globals; writes go to a
+fresh dict. So `CONST` from the class body, not a module-level `CONST`, and a decorator defined
+in the class work, and the live class is not touched before commit. Every name of the live
+class is visible, also those defined below the method in the file. A decorator that changes
+a class-level object in place does so at stage, as it would at import.
+
 Several modules in one transaction. A participant stages a plan's modules so that each sees
 the names the others' patches add (`overlay`, from `swap.staged_names`): module B's
 `from .a import new_helper`, where A's patch adds `new_helper`, takes A's staged object, and B's
@@ -255,7 +290,8 @@ nothing; the host is poisoned, so the next transaction is refused (undo is still
 ## Golden tests
 
 `python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 5 s; one
-test builds a 2.5 M-object heap, one waits out a 0.6 s hang, five use an analyzer child). `python3 -m unittest` also runs the conformance cases on
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang, five use an analyzer child; one
+imports torch on CPU and is skipped without it). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
@@ -266,7 +302,10 @@ test_auto_targets_stage_like_explicit_ones ... ok
 test_chained_edit_stages_against_the_installed_text ... ok
 test_changed_targets_match_the_ast_reference ... ok
 test_child_runs_when_the_kernel_has_another_package_name ... ok
+test_added_method_uses_a_decorator_defined_in_the_class ... ok
 test_closure_change_is_a_finding_not_an_exception ... ok
+test_closure_made_after_the_swap_runs_the_old_code_after_undo ... ok
+test_closure_with_no_base_version_is_a_finding ... ok
 test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
 test_edit_that_changes_no_code_is_refused ... ok
@@ -279,8 +318,10 @@ test_hung_commit_ends_the_gap_at_the_deadline ... ok
 test_linked_receipts_and_measured_times ... ok
 test_module_imports_a_name_another_module_of_the_txn_adds ... ok
 test_name_and_txn_record_still_accept ... ok
+test_new_defaults_see_the_live_class_body ... ok
 test_one_by_one_commit_mixes_versions ... ok
 test_prepare_never_holds_the_loop_longer_than_the_budget ... ok
+test_record_call_runs_in_reverse_order_and_a_failure_is_a_finding ... ok
 test_process_analysis_keeps_the_gil_free ... ok
 test_process_analysis_stages_the_same_code_and_findings ... ok
 test_removed_definition_is_a_finding_and_undo_restores_it ... ok
@@ -290,6 +331,7 @@ test_running_frame_never_runs_the_new_code ... ok
 test_second_genexpr_edit_on_top_is_not_a_base_mismatch ... ok
 test_stage_compiles_only_the_changed_definitions ... ok
 test_stage_findings_carry_the_checked_code_hash ... ok
+test_stage_with_the_callers_trees_parses_nothing_and_stages_the_same ... ok
 test_standing_accept_expires_when_code_changes ... ok
 test_step_gap_commit_and_undo_never_mix_versions ... ok
 test_step_gap_failed_commit_is_undone_in_the_same_gap ... ok
@@ -298,12 +340,14 @@ test_swap_reaches_every_holder ... ok
 test_timed_out_caller_resolves_the_outcome_with_status ... ok
 test_undo_after_a_deadline_rollback_leaves_every_rank_undone ... ok
 test_undo_of_an_older_txn_reports_the_later_ones ... ok
+test_undo_restores_descriptor_side_dict_and_doc ... ok
 test_undo_restores_exact_base ... ok
+test_undo_restores_parameter_data_and_module_submodules ... ok
 test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 43 tests in 5.4s
+Ran 51 tests in 6.6s
 
 OK
 ```
@@ -353,7 +397,28 @@ Each test's docstring says what it proves and what it does not.
 - **Undo is exact for code, not for data.** The journal restores the same code and attribute
   objects and removes every name it added. Data the new code wrote (requests, cache entries)
   needs the reset the plan declares in `undo_resets`; a missing hook is a `reset_failed`
-  finding.
+  finding. An in-place re-init (a Triton kernel rebuilt) journals its own inverse with
+  `record_call(undo_fn, label)`; it runs at its place in the reverse order, and if it raises,
+  the undo reports `undo_incomplete` with the label and goes on.
+- **Attributes outside `__dict__` are journaled through `getattr` / `setattr`.**
+  `record_attr` reads the instance dict only when that is exact (default `__setattr__` and
+  `__delattr__`, no data descriptor of the type owns the name). A function's `__doc__`, a
+  property, torch's `Parameter.data`, an `nn.Module` submodule (kept in `_modules`) or a slot
+  is recorded with `getattr`, and undo puts it back with `setattr`, or `delattr` when it was
+  absent.
+- **Closures the new code made come back too.** A swapped function's new code makes function
+  objects at run time (a closure it returns, a callback it registers), which no journal entry
+  holds. `apply` journals, first, the pairs (new nested code, old nested code of the same
+  qualname and ordinal) of every code it installs; at undo, last, and only when there are
+  pairs, one `gc.get_referrers` pass over the new nested codes (frozen objects included) finds
+  the functions that run one and gives each its old code (`closures_restored` in the undo
+  result). A function made from a nested definition the edit added, or one whose free
+  variables changed, has no base code: a `closure_not_restored` finding with the count and the
+  qualname, and the undo is not ok. Generator expressions are left out (their function never
+  outlives the call). Cost: in a CPU process that imported vLLM 0.33's model runner (0.86 M
+  gc objects), the pass took 57.6 ms median (one `get_objects` plus a Python loop: 84.1 ms;
+  our 2026-11-05 CPU run); it holds the GIL in one piece, inside the undo's gap, on every undo
+  of a swap whose code has a nested def or lambda.
 - **The heap scan unfreezes the gc.** Engines call `gc.freeze()` after startup, and
   `gc.get_objects()` and `gc.get_referrers()` both skip frozen objects.
 
@@ -375,10 +440,17 @@ Each test's docstring says what it proves and what it does not.
   `analyze_fallback` finding blocks the vote until accepted, and each later prepare tries a
   new child first.
 - Names a patch adds that another module of the same transaction uses are found only through
-  `from m import name` at module level (and in added definitions and top-level defaults). A
-  method default or a class-level statement of an existing class that needs them is
-  evaluated against the live module and fails; two patches that import from each other are
-  not staged.
+  `from m import name` at module level (and in added definitions, top-level defaults, and,
+  through `_LiveBody`, method defaults; that last case is not tested). A class-level
+  statement of an existing class that needs them is evaluated against the live module and
+  fails; two patches that import from each other are not staged.
+- The closure undo finds closures by their code object. A closure copied with
+  `types.FunctionType(code, ...)` is found too; one whose code was replaced again after the
+  swap (another tool, not the journal) is not. A closure's defaults, evaluated by the new code
+  when it was made, stay. The `get_referrers` pass is not gated: it runs even when the new
+  code never ran.
+- `trees=` is trusted: trees parsed from another text than the one the module runs give
+  wrong code, with no finding.
 - A chained edit of a function the earlier edit did not touch, when the earlier edit moved
   lines above it: the function's running code keeps the file's line, the text the
   participant stages against has another, and the target is not found (`no_live_function`).

@@ -56,6 +56,15 @@ Signatures and plan format: `kernel/coordinator.py`.
   (phase 2 started, not finished). A phase 2 not yet started when the caller gave up is
   cancelled.
 - Chained edits: a participant stages a new plan against the text it last installed.
+- Undo takes back everything the journal recorded, newest first: code, attributes (through
+  `setattr` / `delattr` when the attribute is not a plain `__dict__` entry: descriptors,
+  `nn.Module` submodules, `__doc__`), added and deleted names, and in-place re-inits that
+  journaled their inverse (`record_call`). Closures the new code made at run time, which no
+  entry holds, get their base code back by code identity (one referrer pass, at undo only);
+  one with no base version (a nested definition the edit added) is a `closure_not_restored`
+  finding, and the undo is not ok.
+- A participant in the caller's process may take the caller's own parse of the two texts
+  (`trees`), so a caller that plans with its own parser does not make prepare parse again.
 
 ## Verbs
 
@@ -101,7 +110,9 @@ Costs from our vLLM runs (design notes §2; per-engine numbers belong in `repos/
 | R9 warm restart | everything below config | caches, weight daemon | 31-84 s |
 | R10 repair cell | what the cell declares it sets | everything else | ms per call |
 
-Recipes compose (R0+R10 for a new field, R0+R1 for a forward edit in graph mode). The kernel
+Recipes compose (R0+R10 for a new field, R0+R1 for a forward edit in graph mode). New
+defaults and added methods are evaluated as in the live class body (its names are visible,
+read-only), so R0 covers `def f(self, x=CONST)` with `CONST` in the class. The kernel
 implements R0 and R10, and R2, R3, R8 as reset hooks; the others are named here and not yet
 behind the kernel. A change that no recipe below R9 covers (startup logic, launch flags,
 environment variables) is refused with its reason: it needs a restart.
@@ -117,7 +128,7 @@ The caller's `accept` list (check names, accept records, or `"all"`) decides: a 
 every finding is accepted, and only overridable findings can be. Physical limits are not
 overridable: `patch_invalid`, `no_live_function`, `not_in_patch`, `closure_changed`,
 `changed_since_prepare`, `empty_change`, `repair_failed`, `participant_failed`, `reset_failed`,
-`undo_incomplete`, `tampered`, `session_poisoned`. Catalog: `kernel/findings.py`.
+`undo_incomplete`, `closure_not_restored`, `tampered`, `session_poisoned`. Catalog: `kernel/findings.py`.
 A check that could not run as designed says so as a finding too: a prepare whose analysis
 fell back from its child process to the engine's own process reports `analyze_fallback`
 (overridable) with the reason and the time it held the engine's GIL.
