@@ -138,10 +138,12 @@ What the warm start saved and why:
     are sent by value and exceed the 16 GiB message limit.
   - The MXFP8 batched-matmul kernel needs `patches/ipc-mxfp8-bmm.patch` (one line) to accept
     the daemon's already-processed weights. With it, weights map in 5.4-5.7 s.
-  - The engine then crashes in its first forward pass (illegal address, zero-copy). Leading
-    guess, not proven: Engram builds a table of raw GPU addresses for cross-GPU reads, and
-    addresses of memory borrowed from the daemon are not valid that way. Copy mode does not fit
-    (daemon 130 GB/GPU plus the engine's copy).
+  - The engine then crashes in its first forward pass (illegal address, zero-copy). With
+    `CUDA_LAUNCH_BLOCKING=1` the first faulting kernel is Engram's lookup (Triton,
+    `models/deepseek_v41/common/engram.py:1290`, from `prepare_embeddings`), so Engram's GPU tables
+    as mapped over IPC are the cause. Not the cross-GPU pointer table: that is only built with
+    DP > 1 and TP = 1 (we run TP4, DP1). Which property of the mapped tables is wrong is still
+    open. Copy mode does not fit (daemon 130 GB/GPU plus the engine's copy).
 - Autotune: sharing one cache root between preload daemons and engines, plus pinning the
   autotune cache key (`startup/autotune_key.py`, `--autotune-key`), keeps it at 0 tuning passes
   even when the config hash changes.
