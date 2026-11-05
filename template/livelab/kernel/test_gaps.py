@@ -362,6 +362,7 @@ class CellJournalTest(unittest.TestCase):
         r = co.run({"id": "ok", "modules": edit, "repairs": [{"cell": cell, "declares": []}]})
         self.assertEqual((r["outcome"], calls, r["receipt"]["actual_recipes"]),
                          ("committed", [], ["R0 swap", "R10 repair", "R1 recapture"]))
+        self.assertIsNotNone(r["receipt"]["edit_to_run_s"])     # the cell rebuilt in the gap
         self.assertTrue(co.undo("ok")["ok"])
         self.assertEqual(calls, [("undo", "base")])
 

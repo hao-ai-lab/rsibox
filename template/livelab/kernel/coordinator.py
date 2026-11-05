@@ -1312,7 +1312,8 @@ class Coordinator:
                                               if not f.get("accepted")})},
             "outcome": out["outcome"], "timeline": tl,
             # with a rebuild, the edit runs in every step only once the rebuild is done
-            "edit_to_run_s": span("edit", "rebuilt" if t.get("rebuilt") else "committed"),
+            "edit_to_run_s": span("edit", "rebuilt" if t.get("rebuilt") and "rebuilt" in tl
+                                  else "committed"),
             "edit_to_commit_s": span("edit", "committed"),
             "rebuild": out.get("rebuild"),
             "recapture_s": ((out.get("rebuild") or {}).get("seconds") or {}).get("R1"),
