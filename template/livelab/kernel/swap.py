@@ -272,6 +272,7 @@ class Staged:
         self.expect = []         # (function, code it ran at stage time, its hash): validate
         self.removes = []        # (owner: module dict or class, name) the edit deletes
         self.items = {}          # key -> JSON summary
+        self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
 
 
 _compile = compile          # `stage` has a parameter named compile
@@ -407,7 +408,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
                 line_map[(q, first_line(n))] = first_line(b)
 
     # 1. targets: match base and patch, add the witness (the live checks are the caller's)
-    tres, todo = [], []
+    tres, todo, aliases = [], [], []
     for q, line in targets:
         line = int(line)
         k = L.key_of(key_module, q, line)
@@ -416,8 +417,13 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
             tres.append({"status": "no_definition"})
             continue
         if not live.get((q, line)):
-            tres.append({"status": "no_live_function"})
-            continue
+            # fallback when no line map led here (see stage's `line_maps`): the one live code
+            # with this qualname is taken as it; stage reports it as a finding
+            cands = [kl for kl in live if kl[0] == q and live[kl]]
+            if len(cands) != 1:
+                tres.append({"status": "no_live_function"})
+                continue
+            aliases.append([q, line, cands[0][1]])
         if len(pq.get(q, [])) != len(bq[q]):
             tres.append({"status": "count", "patch": len(pq.get(q, [])), "base": len(bq[q])})
             continue
@@ -491,7 +497,8 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live, compil
     return {"targets": tres, "resolved": [[q, int(line)] for q, line in targets],
             "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
-            "imports": imports, "outside_changes": outside, "timings": timings}
+            "imports": imports, "outside_changes": outside, "timings": timings,
+            "aliases": aliases}
 
 
 def _try_compile(mod, filename):
@@ -520,6 +527,7 @@ def _err(e):
 
 def stage(module, source, targets="auto", base_hash=None, key_module=None, scan="auto",
           base_source=None, own_codes=(), compile="definitions", analyzer=None, overlay=None,
+          line_maps=(),
           trees=None):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)], or "auto" (the default; None too): the analysis
@@ -549,6 +557,13 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     parses its own copy (trees cannot cross the pipe, and that parse holds no GIL here).
     With `changed_targets(..., trees=)` a caller can also pick a subset of the changed
     definitions and pass them as explicit targets, still without a parse.
+    line_maps: when base_source is the text of earlier swaps, their line maps, newest first:
+    each {(qualname, line in that swap's patch): line in its base} (the `line_map` of each
+    staged swap). A definition no swap replaced still carries the line of the text it was
+    compiled from, so a target keyed at base_source's line is found by walking the maps back
+    to that text (`timings["line_map_aliases"]`). Without a map that leads there, the one live
+    code with the target's qualname is taken as it: a `line_aliased` finding (advisory; the
+    content check against the base text still guards it).
     Returns {"ok", "staged", "items", "findings", "timings", "targets"}; ok is False only
     when nothing can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -569,14 +584,18 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     t = time.perf_counter()
     auto = targets is None or targets == "auto"
     run, held = L.index_module(mod, None if scan == "always" else L.module_functions(mod))
+    mapped = _follow_line_maps(run, line_maps)
     timings["scan"] = "heap" if scan == "always" else "namespace"
     if not auto and scan == "auto" and any(_needs_heap(run.get((q, int(line)), ()), run, held)
                                            for q, line in targets):
         run, held = L.index_module(mod)
+        mapped = _follow_line_maps(run, line_maps)
         timings["scan"] = "heap"
     timings["locate_s"] = round(time.perf_counter() - t, 6)
+    # explicit targets that no line map resolved: the qualname fallback (auto: in analyze)
+    fallback = [] if auto else _alias_shifted(targets, run)
     # auto: the targets are known only after the analysis, so it gets every live key
-    live = _live_keys(held) if auto else _live_of(targets, run, held)
+    live = _live_keys(held, mapped) if auto else _live_of(targets, run, held)
     req = {"base_src": base_src, "source": source,
            "targets": "auto" if auto else [[q, int(line)] for q, line in targets],
            "filename": mod.__file__, "key_module": kname, "live": live, "compile": compile}
@@ -589,6 +608,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                                   for q, line in targets):
             t2 = time.perf_counter()
             run, held = L.index_module(mod)
+            mapped = _follow_line_maps(run, line_maps)
             timings["scan"] = "heap"
             timings["locate_s"] = round(timings["locate_s"] + time.perf_counter() - t2, 6)
             heap_live = _live_of(targets, run, held)
@@ -602,10 +622,28 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     at = a["timings"]
     if "error" in a:
         return _invalid(a["error"], kname)
+    if mapped:
+        timings["line_map_aliases"] = mapped
+    for q, bl, ll in a.get("aliases") or ():
+        if (q, int(bl)) not in run and (q, int(ll)) in run:
+            run[(q, int(bl))] = run[(q, int(ll))]
+            fallback.append([q, int(bl), int(ll)])
+    nodef = {(q, int(line)) for (q, line), r in zip(a["resolved"], a["targets"])
+             if r["status"] == "no_definition"}
+    fallback = [x for x in fallback if (x[0], x[1]) not in nodef]   # not_in_patch says it
+    for q, bl, ll in fallback:
+        fs.append({**F.finding(
+            "line_aliased", f"no line map leads from line {bl} of the base text to live "
+            f"code; the one live {q} (line {ll}) is taken as it",
+            "a line map from the earlier swaps to the live code",
+            subject=L.key_of(kname, q, bl)), "advisory": True})
+    if fallback:
+        timings["line_aliases"] = fallback
     timings["parse_s"] = at["parse_s"]
     if "trees" in at:
         timings["trees"] = at["trees"]
     st = Staged(mod)
+    st.line_map = a["line_map"]
     if base_hash is not None and L.text_hash(base_src) != base_hash:
         fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
                             f"plan base hash {base_hash}", subject=kname))
@@ -789,15 +827,57 @@ def _live_of(targets, run, held):
     return live
 
 
-def _live_keys(held):
+def _alias_shifted(targets, run):
+    """Fallback for explicit targets whose (qualname, base line) runs no code while exactly
+    one running code has that qualname: alias the target to it in `run` (the base_mismatch
+    content check still compares it with the base text's code). Returns [[qualname, base
+    line, live line]]."""
+    out = []
+    for q, line in targets:
+        line = int(line)
+        if run.get((q, line)):
+            continue
+        cands = [k for k in run if k[0] == q and run[k]]
+        if len(cands) == 1:
+            run[(q, line)] = run[cands[0]]
+            out.append([q, line, cands[0][1]])
+    return out
+
+
+def _follow_line_maps(run, line_maps):
+    """Add to `run` the keys of base_source's text that earlier swaps' line maps (newest
+    first) lead to live code: a definition no swap replaced still carries the line of the
+    text it was compiled from. Returns [[qualname, base_source line, live line]]."""
+    out = []
+    if not line_maps:
+        return out
+    for q, line in list(line_maps[0]):
+        if run.get((q, line)):
+            continue
+        cur = line
+        for m in line_maps:
+            cur = m.get((q, cur))
+            if cur is None:
+                break
+            if run.get((q, cur)):
+                run[(q, line)] = run[(q, cur)]
+                out.append([q, line, cur])
+                break
+    return out
+
+
+def _live_keys(held, mapped=()):
     """`_live_of` for every code of the module at once: a held code and the codes it
-    directly contains."""
+    directly contains; `mapped` ([qualname, line, live line]) adds the line-mapped keys."""
     live = {}
     for o in held:
         live[(o.co_qualname, o.co_firstlineno)] = True
         for c in o.co_consts:
             if hasattr(c, "co_code"):
                 live[(c.co_qualname, c.co_firstlineno)] = True
+    for q, line, ll in mapped:
+        if live.get((q, ll)):
+            live[(q, line)] = True
     return live
 
 

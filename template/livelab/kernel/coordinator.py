@@ -250,6 +250,8 @@ class LocalParticipant(Participant):
         self._sources = {}            # committed txn -> {plan module: source it installed}
         self._codes = {}              # committed txn -> [code objects it swapped in]
         self._pending = {}            # prepared txn -> {plan module: source}
+        self._maps = {}               # committed txn -> {plan module: line map of its swap}
+        self._pending_maps = {}       # prepared txn -> the same, until commit
 
     def _live_source(self, module):
         """The text the live module runs: the latest committed transaction's, else None."""
@@ -257,6 +259,13 @@ class LocalParticipant(Participant):
             if module in self._sources[txn]:
                 return self._sources[txn][module]
         return None
+
+    def _line_maps(self, module):
+        """The line maps of the committed swaps of this module, newest first: a later plan's
+        targets are keyed at the installed text's lines, and the definitions no swap replaced
+        still carry the lines of the text they were compiled from (swap.stage line_maps)."""
+        return [self._maps[t][module] for t in reversed(list(self._maps))
+                if module in self._maps[t]]
 
     def fingerprint(self, modules):
         """{key: [content hash, id of the code object]} for every function the modules' own
@@ -308,6 +317,7 @@ class LocalParticipant(Participant):
         return S.stage(self._actual(m), spec["source"], spec.get("targets", "auto"),
                        spec.get("base_hash"), key_module=m, scan=spec.get("scan", "auto"),
                        base_source=self._live_source(m), own_codes=own,
+                       line_maps=self._line_maps(m),
                        compile=spec.get("compile", "definitions"),
                        analyzer=None if spec.get("analyze") == "inline" else self.analyzer,
                        overlay=overlay, trees=spec.get("trees"))
@@ -376,6 +386,8 @@ class LocalParticipant(Participant):
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
         self._pending[txn] = {m: spec["source"] for m, spec in plan.get("modules", {}).items()}
+        self._pending_maps[txn] = {m: r["staged"].line_map for m, r in res.items()
+                                   if r["staged"] is not None}
         self._state[txn] = "prepared"
         return F.ok(staged=items, findings=out_fs, timings=timings, targets=targets)
 
@@ -426,6 +438,7 @@ class LocalParticipant(Participant):
             self._marks[txn] = mark
             self._done[txn] = staged
             self._sources[txn] = self._pending.pop(txn, {})
+            self._maps[txn] = self._pending_maps.pop(txn, {})
             self._codes[txn] = [c for st in staged for _, c, _, _ in st.swaps]
             self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
@@ -440,6 +453,7 @@ class LocalParticipant(Participant):
     def abort(self, txn):
         txn, _ = txn_ref(txn)
         self._pending.pop(txn, None)
+        self._pending_maps.pop(txn, None)
         if self._staged.pop(txn, None) is not None or self._state.get(txn) == "prepared":
             self._state[txn] = "aborted"
         return F.ok()
@@ -459,6 +473,7 @@ class LocalParticipant(Participant):
             if txn in self._state:
                 self._staged.pop(txn, None)
                 self._pending.pop(txn, None)
+                self._pending_maps.pop(txn, None)
                 self._state[txn] = "undone"
             return F.ok(undone=0, note="nothing committed")
         mark = self._marks[txn]
@@ -474,7 +489,7 @@ class LocalParticipant(Participant):
         # reported), and it undid every later transaction too.
         for t in [txn] + later:
             self._marks.pop(t, None)
-            for d in (self._done, self._sources, self._codes):
+            for d in (self._done, self._sources, self._codes, self._maps):
                 d.pop(t, None)
             self._state[t] = "undone" if r["ok"] else "partial"
         if not r["ok"]:

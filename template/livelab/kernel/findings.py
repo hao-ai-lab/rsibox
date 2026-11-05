@@ -77,6 +77,15 @@ CATALOG = {
         "defaults are kept",
         [{"action": "move the default into the body (None sentinel)", "cost": "none"}, ACCEPT],
         "calls that rely on a changed default get the old value", [], True),
+    "line_aliased": (
+        "an earlier swap changed the module's line numbers and no recorded line map leads from "
+        "this target's line in the running text to live code, so the one live function with "
+        "the target's qualname was taken as it; the content check against the base text still "
+        "compares the code",
+        [{"action": "check the swapped function is the intended one (the finding's subject "
+                    "and observed lines)", "cost": "seconds"}, ACCEPT],
+        "a qualname that names another definition than the target's would be swapped",
+        ["Proving an edit applied"], True),
     "running_frame": (
         "a frame of this code is running now (a loop entered before the swap, or a "
         "suspended coroutine); it keeps executing the old bytecode until it returns",
