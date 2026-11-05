@@ -200,12 +200,13 @@ def recompile(worker, disable_cache=True):
 def run(worker, journal=None):
     """R1 on this worker, by engine mode. Returns a JSON-able dict with `how`; raises on
     failure (the side turns it into a not-ok reply). journal: a repair cell's (kernel
-    journal) when a cell runs R1 itself: before releasing anything, R1 journals "R1 again"
-    with record_call(after_code=True), so an undo or a rollback of the cell's transaction
-    rebuilds the graphs from the base code once the code is back (a cell that failed after
-    releasing the graphs left the engine without them while the host said rolled_back)."""
+    journal) when a cell runs R1 itself: before releasing anything, R1 asks for a rebuild
+    (`journal.need_rebuild("R1")`), so the host runs R1 again from the base code after an
+    undo or a rollback of the cell's transaction, outside the phase-2 gap (a cell that failed
+    after releasing the graphs left the engine without them while the host said
+    rolled_back; an inverse that recompiled inside the undo gap missed the deadline)."""
     if journal is not None and how(worker) != "none":
-        journal.record_call(lambda: run(worker), "R1 from the base code", after_code=True)
+        journal.need_rebuild("R1")
     h = how(worker)
     if h == "recompile":
         return recompile(worker)

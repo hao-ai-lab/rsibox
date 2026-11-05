@@ -661,38 +661,46 @@ class R6Test(unittest.TestCase):
 
 
 class JournaledR1Test(unittest.TestCase):
-    def test_a_cell_that_fails_after_r1_rebuilds_the_base_graphs_on_rollback(self):
-        """Input: a worker transaction swapping the toy step plus a repair cell that runs
-        rebuild.run(worker, journal) (R1: here a recapture that records which code it
-        captured) and then fails. Expected: the commit fails, the code is back at base, and
-        R1 ran again during the rollback AFTER the code undo, so the last capture is of the
-        base code. Fails before this change: rebuild.run took no journal; the rollback left
-        the graphs captured from the edit (the live run served edited code with "rolled_back").
-        Not: vLLM's capture (GPU run)."""
+    _host, _plan = RebuildTest._host, RebuildTest._plan
+
+    def test_a_cell_that_runs_r1_gets_r1_from_the_base_code_outside_the_gap(self):
+        """Input: through the host, a worker transaction swapping the toy step plus a repair
+        cell that runs rebuild.run(worker, journal) (a recapture that records which code it
+        captured). Case 1: the cell then fails. Expected: rolled_back, the code back at base,
+        and the host's R1 run after the gap from the base code (why rollback). Case 2: the
+        cell succeeds. Expected: committed; undo runs R1 after the code undo (why undo,
+        outside the gap: the undo gap stays short). Fails before this change: rebuild.run
+        took no journal and the host never rebuilt, so the rollback or undo left the graphs
+        of the edit (the live run served edited code after undo); an inverse that recompiled
+        inside the undo gap missed the 5 s deadline and killed a live engine. Not: vLLM's
+        capture (GPU run)."""
         from unittest import mock
         from . import rebuild as RB
-        p = plan("jr1")
-        name = next(iter(p["modules"])).rsplit(".", 1)[0]
+        h, names, calls, sides = self._host("jr1", ranks=1)
         w = _worker("FULL_AND_PIECEWISE", "NONE")
+        sides[0].scope["worker"] = sides[0].lp.scope["worker"] = w
         captured = []
 
         def recapture(worker):
-            e = sys.modules[name + ".engine"].Engine()
+            e = sys.modules[names[0] + ".engine"].Engine()
             e.step(1)
             captured.append(e.ran[-1])
             return {"how": "recapture"}
-        side = Side("worker", scope={"worker": w}, rank=0)
-        if side.lp.analyzer is not None:
-            self.addCleanup(side.lp.analyzer.close)
-        p["repairs"] = [{"cell": "from kernel_vllm import rebuild\n"
-                                 "rebuild.run(worker, journal)\nraise RuntimeError('capture refused')\n",
-                         "declares": [], "on": ["worker"]}]
+        cell = "from kernel_vllm import rebuild\nrebuild.run(worker, journal)\n"
         with mock.patch.object(RB, "recapture", recapture):
-            self.assertTrue(side.dispatch("prepare", p)["ok"])
-            c = side.dispatch("commit", p["id"])
-        self.assertFalse(c["ok"])
-        self.assertEqual(c["findings"][0]["check"], "repair_failed")
-        self.assertEqual(captured, ["v1", "base"])
+            r = h.handle({"op": "txn", "plan": self._plan("j1", repairs=[{
+                "cell": cell + "raise RuntimeError('capture refused')\n", "declares": [],
+                "on": ["worker"]}])})
+            self.assertEqual(r["outcome"], "rolled_back")
+            self.assertEqual((captured, calls), (["v1"], [(0, "base")]))
+            self.assertEqual(r["receipt"]["rebuild"]["why"], "rollback")
+            del captured[:], calls[:]
+            r = h.handle({"op": "txn", "plan": self._plan("j2", repairs=[{
+                "cell": cell, "declares": [], "on": ["worker"]}])})
+            self.assertEqual((r["outcome"], captured, calls), ("committed", ["v1"], []))
+            u = h.handle({"op": "undo", "txn": "j2"})
+        self.assertTrue(u["ok"])
+        self.assertEqual((calls, u["receipt"]["rebuild"]["why"]), ([(0, "base")], "undo"))
 
 
 if __name__ == "__main__":
