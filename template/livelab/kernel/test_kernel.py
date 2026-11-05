@@ -6,6 +6,7 @@ Toy arithmetic: Engine.step(x) = shift(activate(scale(x))) with scale = x*2, act
 shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy package
 (`toy.load_copy`), so participants and tests never share module objects.
 """
+import ast
 import gc
 import itertools
 import os
@@ -21,6 +22,7 @@ from . import findings as F
 from . import journal as J
 from . import locate as L
 from . import receipt as R
+from . import session as SS
 from . import swap as S
 from . import toy
 from . import witness as W
@@ -734,6 +736,163 @@ class KernelTest(unittest.TestCase):
         e0.step(3)
         self.assertEqual(e0.cache, {})                          # base code writes no cache
         self.assertEqual([r["kind"] for r in R.read(path, res["txn"])], ["txn", "undo"])
+
+    # -- groups of ranks, phase-2 deadline, compile units ---------------------------------
+
+    def _ranks(self, tag, n=3, quiesce=None):
+        """n ranks, each its own toy copy, as one GroupParticipant "workers" (like vLLM's
+        worker group: one call reaches every rank). Returns (group, [(local, engine)])."""
+        out = []
+        for i in range(n):
+            name, eng, _ = fresh(f"{tag}r{i}")
+            out.append((C.LocalParticipant(f"rank{i}", alias={"toy": name},
+                                           quiesce=(quiesce or {}).get(i)), eng.Engine()))
+        return C.GroupParticipant("workers", [p for p, _ in out]), out
+
+    def test_group_witness_is_kept_per_rank_and_uneven_is_a_finding(self):
+        """Proves: a group's proof keeps each rank's witness count (5, 5, 2), not their sum (12), and a rank that ran the new code less than the others is a witness_uneven finding; equal ranks give none. Not: vLLM (the TP4 receipt summed 4 ranks into one count)."""
+        group, ranks = self._ranks("wit")
+        co = C.Coordinator([group])
+        res = co.run({"modules": {"toy.engine": step_target() | {"source": self.V1[
+            "toy.engine"]["source"]}}})
+        self.assertEqual(res["outcome"], "committed")
+        for (_, e), n in zip(ranks, (5, 5, 2)):         # rank2 ran 2 of the 5 steps
+            for _ in range(n):
+                e.step(3)
+        pr = co.prove(res["txn"])["receipt"]
+        k = f"toy.engine:Engine.step:{at(ENG, 'def step')}"
+        self.assertEqual(pr["witness"], {"workers/rank0": {k: 5}, "workers/rank1": {k: 5},
+                                         "workers/rank2": {k: 2}})
+        self.assertEqual([(f["participant"], f["check"], f["subject"], f["observed"])
+                          for f in pr["findings"]],
+                         [("workers", "witness_uneven", k, "rank 0: 5, rank 1: 5, rank 2: 2")])
+        for _ in range(3):
+            ranks[2][1].step(3)                         # rank2 catches up: 5, 5, 5
+        again = co.prove(res["txn"])
+        self.assertEqual((again["ok"], again["receipt"]["findings"]), (True, []))
+
+    def test_group_proof_reports_ranks_agree(self):
+        """Proves: the txn receipt carries each rank's code hashes and ranks_agree per group; it is true when the ranks run the same code and false when one rank's function was replaced outside the journal right after commit (agree false too). Not: hashes read later than right after the gap."""
+        group, _ = self._ranks("agree")
+        rec = C.Coordinator([group]).run({"modules": self.V1})["receipt"]
+        ch = rec["commit_hashes"]
+        self.assertEqual((rec["outcome"], ch["ranks_agree"], ch["agree"]),
+                         ("committed", {"workers": True}, True))
+        self.assertEqual(sorted(ch["ranks"]["workers"]), ["0", "1", "2"])
+
+        def tamper(fn):                      # rank 2: a REPL edit lands right after commit
+            r = fn()
+            mod = sys.modules[p2.alias["toy"] + ".engine"]
+            mod.Engine.step.__code__ = mod.Engine.drain.__code__.replace(
+                co_name="step", co_qualname="Engine.step")
+            return r
+        group, ranks = self._ranks("disagree", quiesce={2: tamper})
+        p2 = ranks[2][0]
+        rec = C.Coordinator([group]).run({"modules": self.V1})["receipt"]
+        ch = rec["commit_hashes"]
+        self.assertEqual((rec["outcome"], ch["ranks_agree"], ch["agree"]),
+                         ("committed", {"workers": False}, False))
+        h = ch["ranks"]["workers"]
+        self.assertEqual((h["0"] == h["1"], h["1"] == h["2"]), (True, False))
+
+    def test_hung_commit_ends_the_gap_at_the_deadline(self):
+        """Proves: with steps running, a rank that hangs 0.6 s in commit does not stall the loop: the gap ends within the 0.2 s deadline, rank0's commit is undone in it, no step ever runs mixed versions (not even after the late commit arrives: it is refused), the outcome is definite (rolled back, state aborted) and the host and session are poisoned (install refused, undo allowed). Not: a participant stuck inside apply (its late switch is undone by the queued undo, after it ran)."""
+        cl, ps, lps = self._cluster("deadline", gap_mode=True, slow={"rank1": {"commit": 0.6}})
+        co = C.StepGapCoordinator(ps, cl.at_gap, phase2_deadline_s=0.2)
+        sess = SS.Session(co, ["toy.engine"])
+        halt = self._start(cl)
+        t0 = time.perf_counter()
+        res = sess.install({"modules": self.V1})
+        took = time.perf_counter() - t0
+        st = co.status(res["txn"])
+        rec = res["receipt"]
+        self.assertEqual((res["outcome"], st["state"], st["poisoned"], st["missed"]),
+                         ("rolled_back", "aborted", True, ["rank1"]))
+        self.assertLess(rec["gap_s"], 0.2 + 0.05)
+        self.assertLess(took, 0.5)
+        self.assertEqual(rec["rollback"]["missed_deadline"], ["rank1"])
+        self.assertIn(("rank1", "deadline_missed"),
+                      [(f.get("participant"), f["check"]) for f in rec["findings"]])
+        self.assertEqual(sess.state(), "poisoned")
+        again = sess.install({"modules": self.V1})
+        self.assertEqual([f["check"] for f in again["findings"]], ["session_poisoned"])
+        self.assertEqual(co.run({"modules": self.V1})["outcome"], "refused")
+        # the hung commit arrives late; then the undo and abort queued behind it run
+        wait_for(lambda: lps[1].status(res["txn"])["state"] != "prepared")
+        self._steps(cl)
+        halt()
+        self.assertLess(cl.longest_stall(), 0.2 + 0.05)  # measured by the loop itself
+        self.assertEqual(set(cl.log), {("base",) * 3})    # never v1 anywhere, never mixed
+        self.assertEqual([p.status(res["txn"])["state"] for p in lps],
+                         ["undone", "aborted", "aborted"])
+        self.assertEqual(lps[1].journal.entries, [])     # the late commit applied nothing
+        self.assertTrue(sess.uninstall()["ok"])          # undo stays allowed while poisoned
+        self.assertEqual(sess.state(), "poisoned")
+
+    TRICKY = '''from __future__ import annotations
+import functools
+import os.path
+try:
+    import json
+except ImportError:
+    json = None
+
+
+class Base:
+    def f(self):
+        return 1
+
+
+class Sub(Base):
+    __slots__ = ("__secret",)
+    kind = staticmethod(lambda x: x + 1)
+
+    def f(self):
+        return super().f() + len(self.__secret) + json.dumps(1).count("1")
+
+    class Inner:
+        def g(self, x: int) -> int:
+            return os.path.join("a", str(x))
+
+
+class Box[T]:
+    def get(self, x: T) -> T:
+        return functools.reduce(lambda a, b: a, [x])
+
+
+def outer(k):
+    def inner(x):
+        return x + k
+    return inner
+
+
+@functools.lru_cache(maxsize=None)
+def cached(x=lambda: 0):
+    return x
+'''
+
+    def test_stage_compiles_only_the_changed_definitions(self):
+        """Proves: stage compiles one unit per changed definition (Engine.step; the enclosing make_shift for a closure), not the module, and every definition's unit code equals the whole-module compile (super(), name mangling, nested classes, generic classes, closures, decorators, lambdas, __future__ and module imports). Not: the GIL stall it saves (measured live)."""
+        _, eng, ops = fresh("units")
+        r = S.stage(eng.__name__, self.V1["toy.engine"]["source"], [["Engine.step",
+                                                                    at(ENG, "def step")]])
+        self.assertEqual((r["ok"], r["timings"]["compiled"]), (True, ["Engine.step"]))
+        new_ops = edit(OPS, ("        return x + k", "        return x + k * 1"))
+        r = S.stage(ops.__name__, new_ops, [["make_shift.<locals>.shift",
+                                             at(OPS, "def shift")]])
+        self.assertEqual((r["ok"], r["timings"]["compiled"]), (True, ["make_shift"]))
+        old = S.stage(eng.__name__, self.V1["toy.engine"]["source"],
+                      [["Engine.step", at(ENG, "def step")]], compile="module")
+        self.assertEqual(old["timings"]["compiled"], ["<module>"])
+        for src in (ENG, OPS, self.TRICKY):
+            tree = ast.parse(src)
+            whole = L.code_tree(compile(tree, "<m>", "exec", dont_inherit=True))[0]
+            for q, nodes in S.qual_index(tree).items():
+                for n in nodes:
+                    k = (q, S.first_line(n))
+                    unit = S.compile_units(tree, [n], "<m>")[0]
+                    self.assertEqual([L.content_hash(c) for c in unit[k]],
+                                     [L.content_hash(c) for c in whole[k]], k)
 
 
 if __name__ == "__main__":

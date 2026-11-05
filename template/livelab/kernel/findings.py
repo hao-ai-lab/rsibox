@@ -79,6 +79,23 @@ CATALOG = {
          {"action": "if it runs only at startup: soft restart", "cost": "recipe R5"},
          {"action": "if it runs inside captured graphs: recapture", "cost": "recipe R1"}],
         "results are judged on code that never ran", ["Proving an edit applied"], True),
+    "witness_uneven": (
+        "ranks of one group (they run the same steps and switched in the same gap) counted "
+        "different numbers of calls of the new code: a rank took another path, or did not "
+        "run the swapped code for part of the workload",
+        [{"action": "compare the ranks' per-step version logs and the code each rank runs",
+          "cost": "seconds"},
+         {"action": "accept if the code is rank-specific (runs on some ranks only)",
+          "cost": "none"}],
+        "a summed or single count hides a rank that never ran the edit",
+        ["Proving an edit applied"], True),
+    "deadline_missed": (
+        "a participant did not answer a phase-2 call within the deadline; it is treated as "
+        "failed and the others are undone in the gap, but its own call may still be running",
+        [{"action": "respawn the worker group (reset kind respawn)", "cost": "respawn"},
+         {"action": "undo the transaction, then respawn", "cost": "undo + respawn"}],
+        "the late participant may still switch after the gap and run code the others do not",
+        [], False),
     "repair_not_undoable": (
         "the repair cell changed state it did not declare, or changed a value in place; "
         "undo restores only the declared attributes",

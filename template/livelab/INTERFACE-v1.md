@@ -73,8 +73,9 @@ The lab records a code **fingerprint** per participant (content hash and object 
 every function its engine modules reach) at start and after every commit, and checks it after
 every abort, rollback, undo and `status()`. The lab is **poisoned** by: a fingerprint that
 differs (code changed outside the journal), a crash, a hang, a lost participant, a failed undo
-or rollback, an unresolved in-doubt transaction. A poisoned lab refuses `install` and
-`uninstall` with `session_poisoned` until `reset("respawn")`.
+or rollback, an unresolved in-doubt transaction, a participant that missed the phase-2
+deadline. A poisoned lab refuses `install` with `session_poisoned` until `reset("respawn")`;
+`uninstall` stays allowed (it backs out before the respawn) and leaves the lab poisoned.
 
 ## Recipes (mechanism vocabulary)
 

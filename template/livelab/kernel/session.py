@@ -12,9 +12,10 @@ the interface's `status()` needs:
 - poison: findings that put the session in a state the host cannot prove. Set by a
   fingerprint that differs from the expected one (`tampered`: code changed outside the
   journal, or a participant that does not answer), by an undo that failed, by a transaction
-  left in doubt, or by the lab itself (`fault`: a crash or a hang it saw). A poisoned session
-  refuses `install` and `uninstall` with `session_poisoned` until `recovered()` (after the lab
-  respawned its worker group).
+  left in doubt, by a participant that missed the phase-2 deadline (the coordinator's
+  `poison`), or by the lab itself (`fault`: a crash or a hang it saw). A poisoned session
+  refuses `install` with `session_poisoned` and allows only `uninstall` (undo; the session
+  stays poisoned) and `recovered()` (after the lab respawned its worker group).
 
 Never raises to the caller: every call returns an ok-dict.
 """
@@ -75,24 +76,28 @@ class Session:
         self.poison.append(f)
         return f
 
+    def poisoned(self):
+        """Every poison finding: the session's own and the coordinator's (deadline missed)."""
+        return self.poison + list(getattr(self.co, "poison", []))
+
     def state(self):
-        return "poisoned" if self.poison else "edited" if self.stack else "base"
+        return "poisoned" if self.poisoned() else "edited" if self.stack else "base"
 
     def status(self):
-        if not self.poison:
+        if not self.poisoned():
             self.verify()
-        return F.ok(state=self.state(), txns=list(self.stack), poison=list(self.poison),
+        return F.ok(state=self.state(), txns=list(self.stack), poison=self.poisoned(),
                     fingerprint=self.digest(self._fingerprint()))
 
     def _refuse(self, what):
         return F.not_ok(f"{what} refused: session poisoned", [F.finding(
-            "session_poisoned", "; ".join(f["check"] for f in self.poison),
+            "session_poisoned", "; ".join(f["check"] for f in self.poisoned()),
             "a session in a known state")], outcome="refused")
 
     # -- verbs ---------------------------------------------------------------------------
     def install(self, plan, **kw):
         """One transaction. Returns the coordinator's result plus `state`."""
-        if self.poison:
+        if self.poisoned():
             return self._refuse("install")
         res = self.co.run(plan, **kw)
         outcome = res["outcome"]
@@ -118,9 +123,9 @@ class Session:
         return {**res, "outcome": outcome, "state": self.state()}
 
     def uninstall(self, txn=None):
-        """Undo `txn` and every later transaction (newest first); default: the newest."""
-        if self.poison:
-            return self._refuse("uninstall")
+        """Undo `txn` and every later transaction (newest first); default: the newest. Allowed
+        while poisoned (undo is how a poisoned lab backs out before a respawn); the session
+        stays poisoned."""
         if not self.stack:
             return F.ok(undone=[], state=self.state())
         txn = txn or self.stack[-1]
@@ -134,8 +139,8 @@ class Session:
             if not u["ok"]:
                 self.fault("undo_incomplete", f"undo of {t}: {u['receipt']['status']}",
                            "undone on every participant", subject=t)
-                return F.not_ok("undo failed", self.poison, undone=undone, results=results,
-                                state=self.state())
+                return F.not_ok("undo failed", self.poisoned(), undone=undone,
+                                results=results, state=self.state())
             self.stack.pop()
             self.expected.pop()
             undone.append(t)
@@ -146,6 +151,8 @@ class Session:
         """After the lab respawned its participants: a new base, no poison, empty stack."""
         if coordinator is not None:
             self.co = coordinator
+        elif hasattr(self.co, "recovered"):
+            self.co.recovered()
         self.stack, self.poison = [], []
         fp = self._fingerprint()
         self.expected = [fp]

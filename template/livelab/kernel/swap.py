@@ -1,7 +1,7 @@
 """Swap: one code-swap primitive, in two steps.
 
-`stage(module, source, targets)` compiles the patched module source and plans the swap, with
-no visible change: for each target it finds the new code object (by qualname and its ordinal
+`stage(module, source, targets)` parses the patched module source, compiles only the
+definitions it swaps, and plans the swap, with no visible change: for each target it finds the new code object (by qualname and its ordinal
 among same-named definitions, so a patch may move lines), adds the witness, and pairs every
 running code object of the target and of its enclosing functions with its new version (so
 closures made later run the new code too). It runs the checks and returns findings:
@@ -14,6 +14,15 @@ classes are built in a scratch namespace (methods get the real class for `super(
 added imports and the witness hook (module dict), counter keys, `__code__`, `__defaults__`,
 `__kwdefaults__` of every holding function object, added names. On an error it undoes itself.
 The caller decides from the findings (findings.decide) whether to apply at all.
+
+Compile units. Prepare runs in the engine's own process while it steps, and `compile` is one C
+call that holds the GIL: compiling a 3,800-line module stalls a step by its whole compile time.
+So `stage` compiles one unit per changed definition (`compile_units`): the module- or
+class-level statement that holds it, inside empty shells of its enclosing classes (same names,
+lines and type parameters), with the module's `from __future__` imports. Qualnames, private
+name mangling, `__class__` cells and closures come out as in the whole module, so the code
+objects are the same (content hash) and the free-variable check compares the same things.
+`compile="module"` compiles the whole module instead (the old path, for a before/after).
 """
 import ast
 import copy
@@ -100,6 +109,79 @@ def _blank(tree, targets, added):
     return ast.dump(tree)
 
 
+def _holder(body, node):
+    """The statement of `body` that contains `node` (by identity), or None."""
+    line = node.lineno
+    for st in body:
+        if first_line(st) <= line <= st.end_lineno and any(n is node for n in ast.walk(st)):
+            return st
+    return None
+
+
+def compile_unit(tree, node):
+    """(shells, statement): the module- or class-level statement holding `node`, and the
+    classes around it, outermost first. A node in a class header (decorator, base) makes the
+    whole class the unit."""
+    body, shells = tree.body, []
+    while True:
+        st = _holder(body, node)
+        if st is None:
+            raise LookupError(f"line {node.lineno}: definition not found in the tree")
+        if st is node or not isinstance(st, ast.ClassDef):
+            return shells, st
+        inner = _holder(st.body, node)
+        if inner is None:                        # in the class header: compile the class
+            return shells, st
+        shells.append(st)
+        body = st.body
+
+
+def _module_imports(tree):
+    """Every import statement of the module scope (also inside top-level if / try / with /
+    loops), except `from __future__`. CPython 3.12 compiles `name.attr(...)` differently
+    when `name` is bound by an import in the module (no method-call form), so a unit
+    without them would give other bytecode."""
+    out = []
+
+    def visit(body):
+        for n in body:
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                if not (isinstance(n, ast.ImportFrom) and n.module == "__future__"):
+                    out.append(n)
+            elif not isinstance(n, (*_DEF, ast.ClassDef)):
+                for field in ("body", "orelse", "finalbody"):
+                    visit(getattr(n, field, None) or [])
+                for h in getattr(n, "handlers", None) or []:
+                    visit(h.body)
+                for c in getattr(n, "cases", None) or []:
+                    visit(c.body)
+    visit(tree.body)
+    return out
+
+
+def compile_units(tree, nodes, filename):
+    """Compile only the units that hold `nodes` (see the module docstring). Returns
+    ({(qualname, firstlineno): [code]}, {code: enclosing code}, [unit names])."""
+    futures = [n for n in tree.body
+               if isinstance(n, ast.ImportFrom) and n.module == "__future__"]
+    out, seen, names = ({}, {}), set(), []
+    imports = _module_imports(tree)
+    for node in nodes:
+        shells, st = compile_unit(tree, node)
+        if id(st) in seen:
+            continue
+        seen.add(id(st))
+        body = [st]
+        for cls in reversed(shells):
+            body = [ast.copy_location(ast.ClassDef(cls.name, [], [], body, [],
+                                                   type_params=list(cls.type_params)), cls)]
+        mod = ast.fix_missing_locations(ast.Module(futures + imports + body, []))
+        L.code_tree(compile(mod, filename, "exec", dont_inherit=True), None, out)
+        names.append(".".join([c.name for c in shells] +
+                              [getattr(st, "name", None) or type(st).__name__]))
+    return out[0], out[1], names
+
+
 class Staged:
     """What `apply` will do. Built by `stage`; nothing in it is visible to the engine yet."""
 
@@ -116,6 +198,9 @@ class Staged:
         self.items = {}          # key -> JSON summary
 
 
+_compile = compile          # `stage` has a parameter named compile
+
+
 def _defaults(mod, q, node):
     """Evaluate a def's new defaults in a scratch namespace (module globals, scratch classes
     for the qualname's class part). Returns (defaults, kwdefaults) or raises."""
@@ -126,7 +211,7 @@ def _defaults(mod, q, node):
     for cls in reversed(parts[:-1]):
         body = [ast.ClassDef(cls, [], [], body, [], type_params=[])]
     ns = {}
-    exec(compile(ast.fix_missing_locations(ast.Module(body, [])), "<defaults>", "exec"),
+    exec(_compile(ast.fix_missing_locations(ast.Module(body, [])), "<defaults>", "exec"),
          mod.__dict__, ns)
     obj = ns[parts[0]]
     for p in parts[1:]:
@@ -140,7 +225,7 @@ def _set_class_cell(fn, cls):
 
 
 def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
-          base_source=None, own_codes=()):
+          base_source=None, own_codes=(), compile="definitions"):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)]; base_hash: text_hash of the source the patch was
     made against (checked against the base text); base_source: the text the live module runs
@@ -150,6 +235,8 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
     witness keys (participants that load a module under another name pass the shared one);
     scan: "auto" (heap scan only when the module namespace cannot find a target, suspended
     frames only for generator / coroutine targets) or "always" (both scans, as before v2.2).
+    compile: "definitions" (compile only the units holding the targets) or "module" (the
+    whole base and patched modules, as before).
     Returns {"ok", "staged", "items", "findings", "timings"}; ok is False only when nothing
     can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -168,12 +255,11 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         return F.not_ok(f"{type(e).__name__}: {e}", [F.finding(
             "patch_invalid", f"{type(e).__name__}: {e}", "an importable module and a patch "
             "that parses", subject=kname)], staged=None, items={})
+    timings["parse_s"] = round(time.perf_counter() - t0, 6)
     st = Staged(mod)
     if base_hash is not None and L.text_hash(base_src) != base_hash:
         fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
                             f"plan base hash {base_hash}", subject=kname))
-    base_idx = L.code_tree(compile(base_tree, mod.__file__, "exec", dont_inherit=True))[0]
-    timings["parse_compile_s"] = round(time.perf_counter() - t0, 6)
     # Locate without a heap scan when the module namespace finds every target (top-level
     # functions and methods); scan (one get_objects + a sliced pass) only for nested targets
     # or targets the namespace does not hold.
@@ -186,6 +272,15 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         timings["scan"] = "heap"
     timings["locate_s"] = round(time.perf_counter() - t, 6)
     bq, pq = qual_index(base_tree), qual_index(tree)
+    whole = compile == "module"
+    t = time.perf_counter()
+    if whole:
+        base_idx = L.code_tree(_compile(base_tree, mod.__file__, "exec", dont_inherit=True))[0]
+    else:
+        nodes = [bq[q][i] for q, line in targets
+                 for i in [_ordinal(bq, q, int(line))] if i is not None]
+        base_idx, _, _ = compile_units(base_tree, nodes, mod.__file__)
+    compile_s = time.perf_counter() - t
     line_map = {}
     for q, nodes in pq.items():
         if len(nodes) == len(bq.get(q, [])):
@@ -253,15 +348,6 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
                                 subject=f"{kname}:{q}"))
             st.removes.append((owner, name))
 
-    # 3. anything else changed?
-    tq = [(q, i) for q, _, i, _, _ in todo]
-    if _blank(ast.parse(base_src), tq, set(removed)) != _blank(ast.parse(source), tq,
-                                                               {q for q, _, _ in added}):
-        fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
-                            "(beyond added definitions and imports)",
-                            "only target bodies, added definitions and imports differ",
-                            subject=kname))
-
     try:
         # 4. imports the module lacks, run in a scratch namespace
         for n in tree.body:
@@ -269,17 +355,25 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
                 names = [(a.asname or a.name).split(".")[0] for a in n.names]
                 if any(x not in mod.__dict__ for x in names):
                     ns = {}
-                    exec(compile(ast.Module([n], []), mod.__file__, "exec"), mod.__dict__, ns)
+                    exec(_compile(ast.Module([n], []), mod.__file__, "exec"), mod.__dict__, ns)
                     st.imports.update({x: v for x, v in ns.items() if x not in mod.__dict__})
-        new_idx, parent = L.code_tree(compile(ast.fix_missing_locations(tree), mod.__file__,
-                                              "exec", dont_inherit=True))
+        t = time.perf_counter()
+        if whole:
+            new_idx, parent = L.code_tree(_compile(ast.fix_missing_locations(tree),
+                                                   mod.__file__, "exec", dont_inherit=True))
+            timings["compiled"] = ["<module>"]
+        else:
+            new_idx, parent, timings["compiled"] = compile_units(
+                tree, [pq[q][i] for q, _, i, _, _ in todo], mod.__file__)
+        timings["compile_s"] = round(compile_s + time.perf_counter() - t, 6)
+        timings["parse_compile_s"] = round(timings["parse_s"] + timings["compile_s"], 6)
         # 5. added definitions, built in a scratch namespace
         for q, cls_name, n in added:
             body = [n] if cls_name is None else [ast.ClassDef(cls_name, [], [], [n], [],
                                                               type_params=[])]
             ns = {}
-            exec(compile(ast.fix_missing_locations(ast.Module(body, [])), mod.__file__,
-                         "exec"), mod.__dict__, ns)
+            exec(_compile(ast.fix_missing_locations(ast.Module(body, [])), mod.__file__,
+                          "exec"), mod.__dict__, ns)
             if cls_name is None:
                 st.adds.append((mod.__dict__, n.name, ns[n.name]))
             else:
@@ -344,6 +438,17 @@ def stage(module, source, targets, base_hash=None, key_module=None, scan="auto",
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
+
+    # 7. anything else changed? Last, because blanking edits the two trees in place (they are
+    # not parsed again).
+    t = time.perf_counter()
+    tq = [(q, i) for q, _, i, _, _ in todo]
+    if _blank(base_tree, tq, set(removed)) != _blank(tree, tq, {q for q, _, _ in added}):
+        fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
+                            "(beyond added definitions and imports)",
+                            "only target bodies, added definitions and imports differ",
+                            subject=kname))
+    timings["compare_s"] = round(time.perf_counter() - t, 6)
     timings["stage_s"] = round(time.perf_counter() - t0, 6)
     return F.ok(staged=st, items=st.items, findings=fs, timings=timings)
 

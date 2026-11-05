@@ -9,13 +9,13 @@ Pure Python, standard library only; it imports no engine.
 | File | What it does |
 |---|---|
 | `locate.py` | (module, qualname, first line) -> running code objects, the function objects that hold them (gc heap scan), and every holder (module and class dicts, closure cells, `__wrapped__`, bound methods, attributes). One code identity: file, `co_qualname`, `co_firstlineno` + `content_hash`. |
-| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` compiles the patched module, adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. |
+| `swap.py` | `changed_targets(base, new)`: the definitions whose AST changed (the smallest planner). `stage` parses the patched module and compiles only the units that hold the targets (`compile_units`), adds the witness, pairs old and new code for each target and its enclosing functions, evaluates changed defaults, runs imports in a scratch namespace, runs the checks. Nothing is visible. `apply` makes it visible through the journal. |
 | `journal.py` | One ordered undo log per participant. Entries `code`, `attr`, `added`, `object`, each with its inverse. `mark()` / `undo_to(mark)`. `record_attr` and `repair(...)` journal hand-written repair cells (recipe R10). |
 | `findings.py` | One findings schema, the catalog of checks, and `decide(findings, accept)`: the one accept mechanism. |
 | `witness.py` | Counters keyed `module:qualname:firstline`; `check` reports `zero_witness` or `running_frame`. |
 | `receipt.py` | **Proposal, needs a human owner** (AGENTS.md, Trust). The one receipt writer: linked `txn` / `proof` / `undo` records sharing a transaction id, appended as JSON lines under a lock. Schema in the docstring and in `../INTERFACE.md` (proposed for v1). |
-| `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails; `prove` after the workload; `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process; `CallParticipant` is the shape an engine implements over its RPC. |
-| `session.py` | The host's state machine for one lab: a stack of committed transactions, the code fingerprint each participant should show (content hash and code object id of every function the modules' namespaces reach), checked after every abort, rollback, undo and `status()`. Crash, hang, lost participant, failed undo or code changed outside the journal poison it; a poisoned session refuses install and uninstall until the lab respawns its workers. |
+| `coordinator.py` | Two-phase transactions: prepare (stage and vote), commit, abort, undo of committed participants when a commit fails, a phase-2 deadline (`Lane`, `deadline_missed`, host poison); `prove` after the workload (witness counts per rank); `undo` then the plan's data resets (`undo_resets`: R2, R3, ...). `StepGapCoordinator` runs a whole transaction in one gap between two steps of the loop owner; `Coordinator` calls participants one by one. `LocalParticipant` runs the kernel in-process; `CallParticipant` is the shape an engine implements over its RPC. `GroupParticipant` / `merge_ranks`: several ranks reached by one call, with per-rank replies in `ranks`. |
+| `session.py` | The host's state machine for one lab: a stack of committed transactions, the code fingerprint each participant should show (content hash and code object id of every function the modules' namespaces reach), checked after every abort, rollback, undo and `status()`. Crash, hang, lost participant, a missed phase-2 deadline, failed undo or code changed outside the journal poison it; a poisoned session refuses install (undo stays allowed) until the lab respawns its workers. |
 | `toy/` | A toy engine: ops with a decorator and a closure factory; an `Engine` built in `__init__` with a saved bound-method callback, a cache, and a `step` that records the code version it ran; a single-engine busy loop; and a `Cluster` (the engine core) that steps several ranks together and runs queued work only between steps. `load_copy` gives each participant its own module copy. |
 
 ## Walkthrough: one transaction in one step gap
@@ -107,14 +107,89 @@ On the toy, with 2.0 M objects (one `get_objects` takes 22 ms) and a median step
 Slicing barely helps: what remains is the single `get_objects` call. Nested targets still pay
 it once.
 
+Compile units. Prepare also holds the GIL to parse and compile: `compile` is one C call. On
+vLLM 0.33's `scheduler.py` (3,783 lines), staging a one-line edit of `Scheduler.schedule`
+on CPU (11 runs, medians) went from 56.4 ms of parse+compile (4 parses, 41.5 ms; 2 whole-module
+compiles, 15.4 ms) to 26.9 ms (2 parses, 23.0 ms; 2 compiles of the `Scheduler.schedule`
+unit, 4.1 ms); the whole stage from 114 to 78 ms. `compile_units` compiles the statement
+that holds each target inside empty shells of its classes, with the module's `__future__` and
+import statements (CPython 3.12 compiles `mod.attr()` differently when `mod` is a module
+import). Each unit's code objects equal the whole-module compile for all 43,457 definitions in
+vLLM 0.33 (content hash). The longest single GIL hold is now one parse (11-13 ms here);
+the outside-changes comparison (two `ast.dump` calls of about 9 ms) is next.
+
 With the one-by-one `Coordinator` instead (each rank switching at its own boundary), the same
 commit and undo gave at least one step with mixed versions in 20 of 20 runs on CPU; the
 step-gap coordinator gave none in 20 of 20.
 
+## Walkthrough: a commit that hangs
+
+The gap is a global barrier: without a deadline, a rank that hangs in commit stalls every
+step for as long as it hangs. Same toy cluster, rank1's RPC hangs 0.6 s in commit; once with
+no deadline, once with `phase2_deadline_s=0.2` (validate and commit by 0.1 s, rollback by
+0.2 s). Run from `template/livelab`:
+
+```python
+import sys, threading, time
+from kernel import toy, coordinator as C, locate as L
+
+ENG = toy.source("engine")
+line = next(i for i, s in enumerate(ENG.splitlines(), 1) if "def step" in s)
+plan = {"modules": {"toy.engine": {
+    "source": ENG.replace('self.ran.append("base")', 'self.ran.append("v1")'),
+    "base_hash": L.text_hash(ENG), "targets": [["Engine.step", line]]}}}
+
+
+def lab(tag, deadline):
+    engines, parts = {}, []
+    for rank in ("rank0", "rank1", "rank2"):
+        toy.load_copy(f"{tag}_{rank}")
+        engines[rank] = sys.modules[f"{tag}_{rank}.engine"].Engine()
+        lp = C.LocalParticipant(rank, alias={"toy": f"{tag}_{rank}"})
+
+        def rpc(method, payload, lp=lp, rank=rank):        # rank1 hangs 0.6 s in commit
+            time.sleep(0.6 if (rank, method) == ("rank1", "commit") else 0.001)
+            return getattr(lp, method)(payload)
+        parts.append(C.CallParticipant(rank, rpc))
+    cluster = sys.modules[f"{tag}_rank0.engine"].Cluster(engines)
+    co = C.StepGapCoordinator(parts, cluster.at_gap, phase2_deadline_s=deadline)
+    stop = threading.Event()
+    loop = threading.Thread(target=cluster.run, args=(stop,))
+    loop.start()
+    time.sleep(0.02)
+    res = co.run(dict(plan))
+    time.sleep(0.8)                                         # the hung commit returns
+    stop.set()
+    loop.join()
+    st = co.status(res["txn"])
+    print(f"deadline {deadline}: outcome {res['outcome']}, state {st['state']}, poisoned "
+          f"{st['poisoned']}, missed {st['missed']}, gap_s {res['receipt']['gap_s']}, "
+          f"longest stall {cluster.longest_stall():.3f} s, mixed steps "
+          f"{sum(1 for t in cluster.log if len(set(t)) > 1)}")
+    if st["poisoned"]:
+        print("  next run:", co.run(dict(plan))["outcome"])
+
+
+lab("nodl", None)
+lab("dl", 0.2)
+```
+
+Real output:
+
+```
+deadline None: outcome committed, state committed, poisoned False, missed [], gap_s 0.605508, longest stall 0.610 s, mixed steps 0
+deadline 0.2: outcome rolled_back, state aborted, poisoned True, missed ['rank1'], gap_s 0.103268, longest stall 0.108 s, mixed steps 0
+  next run: refused
+```
+
+With the deadline the loop stalled 0.11 s instead of 0.61 s; rank0's commit was undone in
+the gap; rank1's late commit, when it arrived, saw its deadline had passed and applied
+nothing; the host is poisoned, so the next transaction is refused (undo is still allowed).
+
 ## Golden tests
 
-`python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 1.5 s; one
-test builds a 2.5 M-object heap). `python3 -m unittest` also runs the conformance cases on
+`python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 2.5 s; one
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 
 ```
@@ -125,6 +200,10 @@ test_code_identity_and_hash ... ok
 test_commit_failure_undoes_the_committed ... ok
 test_edit_that_changes_no_code_is_refused ... ok
 test_gap_stays_small_while_prepare_is_slow ... ok
+test_group_proof_reports_ranks_agree ... ok
+test_group_witness_is_kept_per_rank_and_uneven_is_a_finding ... ok
+test_half_committed_group_is_undone ... ok
+test_hung_commit_ends_the_gap_at_the_deadline ... ok
 test_linked_receipts_and_measured_times ... ok
 test_one_by_one_commit_mixes_versions ... ok
 test_prepare_never_holds_the_loop_longer_than_the_budget ... ok
@@ -132,16 +211,18 @@ test_removed_definition_is_a_finding_and_undo_restores_it ... ok
 test_repair_cell_sets_missing_field_and_undo_removes_it ... ok
 test_repair_that_cannot_be_undone_is_a_finding ... ok
 test_running_frame_never_runs_the_new_code ... ok
+test_stage_compiles_only_the_changed_definitions ... ok
 test_step_gap_commit_and_undo_never_mix_versions ... ok
 test_step_gap_failed_commit_is_undone_in_the_same_gap ... ok
 test_swap_reaches_every_holder ... ok
 test_timed_out_caller_resolves_the_outcome_with_status ... ok
+test_undo_of_an_older_txn_reports_the_later_ones ... ok
 test_undo_restores_exact_base ... ok
 test_undo_runs_the_declared_data_reset ... ok
 test_validate_catches_a_change_between_prepare_and_gap ... ok
 test_vote_no_changes_nobody ... ok
 ----------------------------------------------------------------------
-Ran 22 tests in 1.50s
+Ran 28 tests in 2.5s
 
 OK
 ```
@@ -161,6 +242,17 @@ Each test's docstring says what it proves and what it does not.
   Validate re-checks that every function still runs the code object prepare staged against;
   a change in between (`changed_since_prepare`) aborts everyone. A failed commit is undone in
   the same gap, so no step runs the new code anywhere.
+- **Phase 2 has a deadline.** `phase2_deadline_s` (default 5 s) bounds the gap: validate and
+  commit by half of it, the rollback by all of it. A participant that misses it is failed
+  (`deadline_missed`), the others are undone in the gap, and the host is poisoned (its late
+  call may still run): `run` is refused, undo is allowed, `recovered()` after a respawn. A
+  participant must not switch after the `deadline_at` it was given.
+- **Ranks are kept apart.** A group participant (one call reaches several ranks) replies with
+  every rank's reply in `ranks`. Proofs keep witness counts per rank (`workers/rank0`, ...);
+  ranks whose counts differ by more than 1% of the largest (at least 1 call) are
+  `witness_uneven` (ranks step together and are read between the same two steps, so code
+  that runs on every rank counts the same). The txn receipt keeps each rank's code hashes and
+  `commit_hashes.ranks_agree` per group; `agree` is false if any comparison differs.
 - **Never assume a timed-out transaction failed.** The caller gets `in-doubt`; the host's
   `status(txn)` gives the real state (prepared, committed, aborted, undone, in-doubt). A phase
   2 that had not started when the caller gave up is cancelled.
@@ -184,6 +276,12 @@ Each test's docstring says what it proves and what it does not.
 
 ## Not covered yet
 
+- A participant stuck inside `apply` at its deadline (not before it) can still switch late;
+  the undo the host queued behind it then undoes it, but steps in between run its new code.
+  The session is poisoned either way.
+- A unit compile does not check that the rest of the patched module compiles: a
+  compile-time error (not a syntax error) outside the targets shows up only as
+  `outside_changes`, or at the next restart if that finding was accepted.
 - Nested targets (closures) still need one heap scan, whose `get_objects` call holds the GIL
   in one piece. Copies of a function object made with `types.FunctionType(code, ...)` are not
   found by the namespace path.
