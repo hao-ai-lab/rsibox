@@ -96,6 +96,14 @@ CATALOG = {
         [{"action": "inspect the participant (REPL) and retry", "cost": "seconds"}, RESTART],
         "participants run different code: every collective of the next step is suspect",
         [], False),
+    "undo_cascade": (
+        "the journal undoes back to a transaction's mark, so undoing an older transaction "
+        "also undoes every transaction committed after it on that participant",
+        [{"action": "accept: the later transactions are now undone (their state says so)",
+          "cost": "none"},
+         {"action": "re-run the later transactions after this undo", "cost": "seconds"}],
+        "a later transaction looks committed while its code is gone",
+        [], True),
     "removed_definition": (
         "the edit deletes a function, method or class that the live module still defines; a "
         "swap that only adds and replaces leaves it callable, so a forgotten caller keeps "

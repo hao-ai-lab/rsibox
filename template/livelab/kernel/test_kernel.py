@@ -226,6 +226,48 @@ class KernelTest(unittest.TestCase):
                                            scope={"engine": e}), eng, e))
         return out
 
+    def _group(self, ranks, fail_commit=None):
+        """One participant made of several ranks (like vLLM's worker group: one collective
+        call per method); `fail_commit`: the rank whose commit returns not-ok."""
+        def call(method, payload):
+            rs = []
+            for i, (p, _, _) in enumerate(ranks):
+                r = (F.not_ok(f"rank{i} commit failed") if method == "commit" and i == fail_commit
+                     else getattr(p, method)(payload))
+                rs.append(r)
+            return {"ok": all(r["ok"] for r in rs), "ranks": rs,
+                    "state": rs[0].get("state"), "error": "; ".join(
+                        str(r.get("error")) for r in rs if not r["ok"]) or None}
+        return C.CallParticipant("workers", call)
+
+    def test_half_committed_group_is_undone(self):
+        """Proves: when one rank of a group participant fails its commit, the ranks of that group that did commit are undone in the same phase 2, so every rank runs its base code. Not: real RPC (TP4 live run shows it on vLLM)."""
+        parts = self._three("half")
+        ranks = parts[:2]
+        base = [(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))
+                for _, eng, _ in ranks]
+        spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        res = C.Coordinator([self._group(ranks, fail_commit=1), parts[2][0]]).run(
+            {"modules": {"toy.engine": spec}})
+        self.assertEqual(res["outcome"], "rolled_back")
+        self.assertEqual([p._state[res["txn"]] for p, _, _ in ranks], ["undone", "aborted"])
+        self.assertEqual([(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))
+                          for _, eng, _ in ranks], base)
+
+    def test_undo_of_an_older_txn_reports_the_later_ones(self):
+        """Proves: undoing txn A after txn B committed on top also undoes B (journal order); B's state becomes undone and an undo_cascade finding names it, instead of B staying committed. Not: per-transaction undo out of order."""
+        (p, eng, _), = self._three("cascade")[:1]
+        a = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        co = C.Coordinator([p])
+        ra = co.run({"id": "A", "modules": {"toy.engine": a}})
+        b = {**step_target(), "source": edit(ENG, ("return y", "return y * 7"))}
+        rb = co.run({"id": "B", "modules": {"toy.engine": b}, "accept": "all"})
+        self.assertEqual((ra["outcome"], rb["outcome"]), ("committed", "committed"))
+        u = p.undo("A")
+        self.assertEqual((u["ok"], u.get("also_undone")), (True, ["B"]))
+        self.assertEqual([f["check"] for f in u["findings"]], ["undo_cascade"])
+        self.assertEqual(p.status("B")["state"], "undone")
+
     def test_vote_no_changes_nobody(self):
         """Proves: one participant on another build votes no and every participant keeps its base code objects. Not: a vote over real RPC."""
         tmp = tempfile.mkdtemp()
@@ -253,7 +295,7 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(R.read(path)[0]["outcome"], "aborted")
 
     def test_commit_failure_undoes_the_committed(self):
-        """Proves: a participant lost at commit gets rank0 undone and core aborted, and the receipt says so. Not: a half-switched participant."""
+        """Proves: a participant lost at commit gets rank0 undone (and itself undone: a no-op here) and core aborted, and the receipt says so. Not: a half-switched participant (next test)."""
         def lost(fn):
             raise RuntimeError("rank1: worker process lost")
         parts = self._three("fail", quiesce={"rank1": lost})
@@ -265,12 +307,12 @@ class KernelTest(unittest.TestCase):
         self.assertEqual(res["outcome"], "rolled_back")
         self.assertEqual({n: sorted(r) for n, r in rec["participants"].items()},
                          {"rank0": ["commit", "prepare", "undo", "validate"],
-                          "rank1": ["abort", "commit", "prepare", "validate"],
+                          "rank1": ["abort", "commit", "prepare", "undo", "validate"],
                           "core": ["abort", "prepare", "validate"]})
         self.assertEqual(rec["participants"]["rank1"]["commit"]["error"],
                          "commit: RuntimeError: rank1: worker process lost")
         self.assertEqual((rec["rollback"]["status"], list(rec["rollback"]["participants"])),
-                         ("undone", ["rank0"]))
+                         ("undone", ["rank1", "rank0"]))
         self.assertIn(("rank1", "participant_failed"),
                       [(f["participant"], f["check"]) for f in rec["findings"]])
         self.assertEqual([(eng.Engine.step.__code__, L.content_hash(eng.Engine.step.__code__))

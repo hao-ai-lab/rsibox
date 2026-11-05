@@ -309,16 +309,25 @@ class LocalParticipant(Participant):
         if txn not in self._marks:
             return F.ok(undone=0, note="nothing committed")
         mark = self._marks[txn]
+        # The journal undoes back to the mark, so it also undoes every transaction committed
+        # after this one. Say so and record their state: they must not stay "committed".
+        later = sorted((t for t, m in self._marks.items() if m > mark),
+                       key=lambda t: self._marks[t])
         try:
             r = self.quiesce(lambda: self.journal.undo_to(mark))
         except Exception as e:
             return F.not_ok(f"undo: {type(e).__name__}: {e}")
         if r["ok"]:                    # the journal undid every later transaction too
-            for t in [t for t, m in self._marks.items() if m >= mark]:
-                del self._marks[t]
+            for t in [txn] + later:
+                self._marks.pop(t, None)
                 for d in (self._done, self._sources, self._codes):
                     d.pop(t, None)
                 self._state[t] = "undone"
+            if later:
+                r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
+                    **F.finding("undo_cascade",
+                                f"undoing {txn} also undid later transactions {later}",
+                                f"only {txn} undone"), "participant": self.name}]}
         return r
 
     def proof(self, txn):
@@ -455,7 +464,10 @@ class Coordinator:
                 out["extra"].append({**F.finding(
                     "participant_failed", res[failed.name]["commit"].get("error"),
                     "commit ok on every participant"), "participant": failed.name})
-                for p in reversed(committed):
+                # The failed participant may have committed in part (a worker group whose
+                # ranks commit in one call: some ranks did, one did not), so it is undone too;
+                # undo is a no-op where nothing was committed.
+                for p in [failed] + list(reversed(committed)):
                     rollback["participants"][p.name] = res[p.name]["undo"] = \
                         _call(p, "undo", txn)
                 for p in self.participants:
