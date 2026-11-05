@@ -806,21 +806,28 @@ def _analyze(req, analyzer, timings, fs, kname, trees=None):
     finding that says why and what it cost. `trees` (the caller's parse) are used only
     here, in this process."""
     if analyzer is not None:
+        info = {}
         try:
-            a = analyzer(req)
+            a = analyzer(req, info=info) if isinstance(analyzer, ProcessAnalyzer) \
+                else analyzer(req)
             timings["analyze"] = "process"
             return a
         except Exception as e:           # the child is gone: analyze here, and say so
             timings["analyze_fallback"] = why = f"{type(e).__name__}: {e}"
-            t = time.perf_counter()
-            a = analyze(**req, trees=trees)
-            timings["analyze"] = "inline"
-            cost = time.perf_counter() - t
-            fs.append(F.finding(
-                "analyze_fallback", f"the analyzer failed ({why}); analyzed in this process "
-                f"instead, holding its GIL for {cost * 1e3:.1f} ms of parse, compile and "
-                "compare", "the analysis in the analyzer's child process", subject=kname))
-            return a
+        finally:                         # a spawn or a boot wait inside this prepare
+            if info.get("spawned"):
+                timings["analyze_spawned"] = True
+            if info.get("boot_wait_s"):
+                timings["analyze_boot_wait_s"] = info["boot_wait_s"]
+        t = time.perf_counter()
+        a = analyze(**req, trees=trees)
+        timings["analyze"] = "inline"
+        cost = time.perf_counter() - t
+        fs.append(F.finding(
+            "analyze_fallback", f"the analyzer failed ({why}); analyzed in this process "
+            f"instead, holding its GIL for {cost * 1e3:.1f} ms of parse, compile and "
+            "compare", "the analysis in the analyzer's child process", subject=kname))
+        return a
     timings["analyze"] = "inline"
     return analyze(**req, trees=trees)
 
@@ -877,6 +884,8 @@ sys.modules[_spec.name] = _pkg
 _spec.loader.exec_module(_pkg)
 S = importlib.import_module(_spec.name + ".swap")
 inp, out = sys.stdin.buffer, sys.stdout.buffer
+out.write(b"R")            # ready: the kernel is imported (the parent times the boot)
+out.flush()
 def read(n):
     b = bytearray()
     while len(b) < n:
@@ -905,9 +914,16 @@ class ProcessAnalyzer:
     optimization level, `-I`), so the parses, compiles and `ast.dump` compares of a prepare
     do not hold this process's GIL: the engine loop keeps stepping. Requests and replies go
     over pipes as `marshal` data (code objects included). Thread-safe (one request at a time).
-    The child exits when this process closes the pipe. `start()` spawns it ahead of the first
-    prepare; a call also spawns it when needed. The child loads the kernel from this file's
-    directory under a private name, whatever package name the parent loaded it as. A failed
+    The child exits when this process closes the pipe. The child loads the kernel from this
+    file's directory under a private name, whatever package name the parent loaded it as.
+
+    Warm start: `start()` spawns the child and returns at once (idempotent: a live child is
+    kept); the child boots (interpreter, kernel import) in the background and writes one
+    ready byte. A `LocalParticipant` given an analyzer calls `start()` when it is created, so
+    the first prepare does not pay the spawn (1.5-2.2 s on an engine host). `wait_ready(s)`
+    blocks until the child is ready; `state()` says whether it is, without blocking. A child
+    that died is respawned lazily, by the next call; `last_call` says whether that call
+    spawned it and how long it waited for the boot (stage puts both in its timings). A failed
     call (child gone, or no answer within `timeout_s`: the child is killed) raises, with the
     child's last stderr line when it died; `stage` then analyzes in-process and reports an
     `analyze_fallback` finding (and the reason in its timings)."""
@@ -917,18 +933,41 @@ class ProcessAnalyzer:
         self.timeout_s = timeout_s     # a child that does not answer by then is killed
         self._p = None
         self._err = None
+        self._ready = False            # the child's ready byte was read
+        self._t_spawn = None
+        self.boot_s = None             # spawn to ready byte, when this process saw it
+        self.spawns = 0                # children spawned (the first, then respawns)
+        self.last_call = {}            # {"spawned": bool, "boot_wait_s": float}
         self._lock = threading.Lock()
 
     def _spawn(self):
+        """Spawn the child unless a live one exists. Returns True when it spawned."""
         if self._p is not None and self._p.poll() is None:
-            return
+            return False
+        if self._p is not None or self._err is not None:
+            self._kill()               # a dead child: close its pipes and stderr file
         kernel_dir = os.path.dirname(os.path.abspath(__file__))
         # stderr to a file, not a pipe: a child that warns a lot (SyntaxWarning while
         # compiling a patch) must never block on a full pipe; its tail explains a death
         self._err = tempfile.TemporaryFile()
+        self._ready, self.boot_s = False, None
+        self._t_spawn = time.monotonic()
         self._p = subprocess.Popen(
             [self.python, "-I", *["-O"] * sys.flags.optimize, "-c", _CHILD, kernel_dir],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._err, close_fds=True)
+        self.spawns += 1
+        return True
+
+    def _await_ready(self, p, end):
+        """Read the child's ready byte (by monotonic time `end`). Returns seconds waited."""
+        if self._ready:
+            return 0.0
+        t = time.monotonic()
+        if self._read(p, 1, end) != b"R":
+            raise RuntimeError("the analyzer child did not start its protocol")
+        self._ready = True
+        self.boot_s = time.monotonic() - self._t_spawn
+        return time.monotonic() - t
 
     def _stderr_tail(self):
         try:
@@ -940,19 +979,54 @@ class ProcessAnalyzer:
             return ""
 
     def start(self):
+        """Spawn the child now, if none is alive; does not wait for its boot."""
         with self._lock:
             self._spawn()
         return self
 
-    def __call__(self, req):
+    def wait_ready(self, timeout_s=None):
+        """Start the child if needed and wait until it is ready (at most `timeout_s`, default
+        the call timeout). True when ready; False when the child died or is still booting."""
         with self._lock:
             self._spawn()
-            p = self._p
+            end = time.monotonic() + (self.timeout_s if timeout_s is None else timeout_s)
             try:
+                self._await_ready(self._p, end)
+            except (EOFError, TimeoutError, RuntimeError, OSError):
+                return False
+            return True
+
+    def state(self):
+        """{"alive", "ready", "spawns", "boot_s", "pid"} without blocking (a ready byte that
+        already arrived is read)."""
+        with self._lock:
+            p = self._p
+            alive = p is not None and p.poll() is None
+            if alive and not self._ready:
+                try:
+                    self._await_ready(p, time.monotonic())
+                except (EOFError, TimeoutError, RuntimeError, OSError):
+                    pass
+            return {"alive": alive, "ready": alive and self._ready, "spawns": self.spawns,
+                    "boot_s": None if self.boot_s is None else round(self.boot_s, 6),
+                    "pid": p.pid if alive else None}
+
+    def __call__(self, req, info=None):
+        """The analysis of `req` in the child. `info` (a dict), if given, gets "spawned"
+        (this call started the child: a cold or respawned analyzer) and "boot_wait_s" (time
+        this call waited for the child's boot), filled even when the call raises."""
+        info = {} if info is None else info
+        with self._lock:
+            spawned = self._spawn()
+            p = self._p
+            info.update(spawned=spawned, boot_wait_s=0.0)
+            self.last_call = info
+            try:
+                end = time.monotonic() + self.timeout_s
+                info["boot_wait_s"] = round(self._await_ready(p, end), 6)
                 b = marshal.dumps(req)
                 p.stdin.write(struct.pack("<Q", len(b)) + b)
                 p.stdin.flush()
-                end = time.monotonic() + self.timeout_s
                 n = struct.unpack("<Q", self._read(p, 8, end))[0]
                 body = self._read(p, n, end)
             except (EOFError, BrokenPipeError) as e:    # the child died: say what it said
@@ -977,7 +1051,7 @@ class ProcessAnalyzer:
         fd, out = p.stdout.fileno(), bytearray()
         while len(out) < n:
             left = end - time.monotonic()
-            if left <= 0 or not select.select([fd], [], [], left)[0]:
+            if not select.select([fd], [], [], max(0.0, left))[0]:
                 raise TimeoutError("the analyzer child did not answer in time")
             b = os.read(fd, n - len(out))
             if not b:
@@ -987,8 +1061,10 @@ class ProcessAnalyzer:
 
     def _kill(self):
         p, self._p = self._p, None
+        self._ready = False
         if p is not None:
-            p.kill()
+            if p.poll() is None:
+                p.kill()
             p.wait()
             for f in (p.stdin, p.stdout):
                 try:
@@ -1002,6 +1078,7 @@ class ProcessAnalyzer:
     def close(self):
         with self._lock:
             p, self._p = self._p, None
+            self._ready = False
         if p is not None:
             p.stdin.close()
             p.wait()

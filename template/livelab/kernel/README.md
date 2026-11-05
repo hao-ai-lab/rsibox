@@ -134,7 +134,18 @@ the kernel as (the vLLM adapter's `fastrsi_kernel` from a directory named `kerne
 old child on import, and every prepare analyzed in-process without a word). If the child fails,
 `stage` analyzes in-process and reports an `analyze_fallback` finding (overridable) with the
 reason, the child's last stderr line, and the time the analysis held this process's GIL; the
-reason is also in `timings["analyze_fallback"]`. The same edit of
+reason is also in `timings["analyze_fallback"]`.
+
+The child boots when the participant is created, not in the first prepare: a `LocalParticipant`
+given an analyzer calls its `start()` (idempotent: a live child is kept), and the child writes a
+ready byte once the kernel is imported (`wait_ready(s)` waits for it, `state()` reports it
+without blocking). Before, the first prepare after engine start paid the spawn: 1.5-2.2 s on an
+engine host, against 0.12 s for later prepares (our NVL runs); on CPU with the toy engine, after
+a 2 s idle, the first prepare took 32.7 ms against 5.0 ms for the second, and with the warm start
+5.4 ms against 5.1 ms (5 runs, medians; our 2026-11-05 CPU run). A child that dies is respawned
+lazily, by the next prepare, whose timings then say `analyze_spawned` (and
+`analyze_boot_wait_s`, the time it waited for the boot); if the respawn fails, the prepare
+reports `analyze_fallback` as above. The same edit of
 `Scheduler.schedule` on CPU, prepared by a core `LocalParticipant` in a background thread while
 the main thread ticks every 0.5 ms (9 runs each; our 2026-11-05 CPU run):
 
@@ -290,7 +301,7 @@ nothing; the host is poisoned, so the next transaction is refused (undo is still
 ## Golden tests
 
 `python3 -m unittest kernel.test_kernel -v` from `template/livelab` (CPU, about 5 s; one
-test builds a 2.5 M-object heap, one waits out a 0.6 s hang, five use an analyzer child; one
+test builds a 2.5 M-object heap, one waits out a 0.6 s hang, seven use an analyzer child; one
 imports torch on CPU and is skipped without it). `python3 -m unittest` also runs the conformance cases on
 the toy lab (`../conformance/`, about 1.5 s more).
 

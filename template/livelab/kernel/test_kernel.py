@@ -1257,6 +1257,49 @@ class AnalyzerFallbackTest(unittest.TestCase):
         self.assertEqual(e.ran, ["v1"])
 
 
+class WarmAnalyzerTest(unittest.TestCase):
+    """Pain point: the analyzer child was spawned by the first prepare, so on an engine host
+    the first edit after engine start paid its 1.5-2.2 s boot (0.2 s edit-to-run became 2 s),
+    and an adapter that created its participant lazily could not avoid it."""
+
+    def test_child_boots_at_participant_creation_not_in_the_first_prepare(self):
+        """Proves: a LocalParticipant given an unstarted ProcessAnalyzer has a live child before any prepare (spawns 1), a second participant on the same analyzer does not spawn again, and the first prepare spawns nothing and waits for no boot (no analyze_spawned, no analyze_boot_wait_s in its timings; analysis "process"). Not: the boot time on an engine host (the GPU job measures that)."""
+        A = S.ProcessAnalyzer()
+        self.addCleanup(A.close)
+        name, eng, _ = fresh("warm")
+        p = C.LocalParticipant("rank0", alias={"toy": name}, analyzer=A)
+        st = A.state()
+        self.assertEqual((st["alive"], st["spawns"]), (True, 1))
+        C.LocalParticipant("rank0b", alias={"toy": name}, analyzer=A)   # idempotent
+        self.assertEqual(A.state()["spawns"], 1)
+        self.assertTrue(A.wait_ready(30))
+        mods = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")',
+                                                    'self.ran.append("v1")'))}}
+        r = p.prepare({"id": "w1", "modules": mods})
+        self.assertTrue(r["ok"], r["findings"])
+        t = r["timings"]["toy.engine"]
+        self.assertEqual((t["analyze"], "analyze_spawned" in t, "analyze_boot_wait_s" in t,
+                          A.state()["spawns"]), ("process", False, False, 1))
+
+    def test_a_dead_child_is_respawned_by_the_next_prepare_and_said(self):
+        """Proves: after the warm child is killed, nothing respawns it until the next prepare (alive False, spawns 1), which respawns it (spawns 2), still analyzes in the child (no analyze_fallback) and says so in its timings (analyze_spawned True). Not: a respawn that fails (test_fallback_to_in_process_is_a_finding covers that)."""
+        A = S.ProcessAnalyzer()
+        self.addCleanup(A.close)
+        name, eng, _ = fresh("respawn")
+        p = C.LocalParticipant("rank0", alias={"toy": name}, analyzer=A)
+        self.assertTrue(A.wait_ready(30))
+        A._p.kill()
+        A._p.wait()
+        self.assertEqual((A.state()["alive"], A.state()["spawns"]), (False, 1))
+        mods = {"toy.engine": {"source": edit(ENG, ('self.ran.append("base")',
+                                                    'self.ran.append("v1")'))}}
+        r = p.prepare({"id": "r1", "modules": mods})
+        self.assertTrue(r["ok"], r["findings"])
+        t = r["timings"]["toy.engine"]
+        self.assertEqual((t["analyze"], t.get("analyze_spawned"), "analyze_fallback" in t,
+                          A.state()["spawns"]), ("process", True, False, 2))
+
+
 class CrossModuleTest(unittest.TestCase):
     """Pain point (vLLM #51899): one edit adds a name in module A and imports it in module B.
     Staging B failed (A is applied only at commit), so the lab shimmed sys.modules."""

@@ -186,8 +186,11 @@ class LocalParticipant(Participant):
     `scope`: names a repair cell can use. `resets`: {"R3": callable, ...}, data resets an
     undo can ask for (each returns a JSON-able summary or None). `analyzer`: where `stage`
     parses, compiles and compares the texts (`swap.ProcessAnalyzer()`: a child process, so
-    prepare holds this process's GIL only briefly; default: here). A plan module with
-    `"analyze": "inline"` is analyzed here anyway (for a before/after).
+    prepare holds this process's GIL only briefly; default: here). The participant starts the
+    analyzer when it is created (`start()`, idempotent), so the child boots before the first
+    prepare instead of inside it; a child that dies later is respawned by the next prepare,
+    which says so (`timings[module]["analyze_spawned"]`, and `analyze_fallback` if it fails).
+    A plan module with `"analyze": "inline"` is analyzed here anyway (for a before/after).
 
     Chained edits: the participant remembers the source text each committed transaction
     installed and the code objects it swapped in. A later plan for the same module is staged
@@ -205,6 +208,14 @@ class LocalParticipant(Participant):
         self.name = name
         self.checks = list(checks or ())   # engine checks: fn(module, items) -> [findings]
         self.analyzer = analyzer      # swap.ProcessAnalyzer: parse and compare off this process
+        self.analyzer_start = None    # why the analyzer did not start here (then: at first use)
+        if hasattr(analyzer, "start"):
+            # warm start: the child boots now, not inside the first prepare (idempotent; a
+            # child that dies later is respawned lazily, by the next prepare)
+            try:
+                analyzer.start()
+            except Exception as e:
+                self.analyzer_start = f"{type(e).__name__}: {e}"
         self.resets = dict(resets or {})
         self.alias = dict(alias or {})
         self.quiesce = quiesce or (lambda fn: fn())
