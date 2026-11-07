@@ -29,7 +29,7 @@ lab: changing long-lived state in place is what the vLLM lab moved to restart ti
 ran: after a check, all 160 TE weights on both ranks carried `grad_added_to_main_grad` (set only by
 TE's fused path). The flag `--gradient-accumulation-fusion` would be the supported way, but on this build it fails
 at the first step: with the flag on, the LM head's non-TE `ColumnParallelLinear` needs apex's
-`fused_weight_gradient_mlp_cuda`, which is not installed (our 2026-11-07 T1 restart, 58 s to the
+`fused_weight_gradient_mlp_cuda`, which is not installed (our 2026-11-07 flag restart, 58 s to the
 error). Until that path works without apex, the TE-only change is reachable only as this cell.
 
 ## The kept set on the Qwen3-32B architecture (TP 4, 4 GB200)
