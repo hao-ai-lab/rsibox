@@ -19,6 +19,7 @@ torchrun (one process per GPU, sessions of their own)
      state.py    snapshot / restore of weights, fp32 masters, Adam state, scheduler, RNG;
                  frozen batches
 client.py        one JSON request per call (socket or mailbox)
+zygote.py        restart by fork: torch, TE, Megatron imported once, no CUDA; ranks forked per request
 overlay.py       fresh processes with edited modules, same file names and lines
 conformance_lab.py   LabUnderTest for template/livelab/conformance
 ```
@@ -97,3 +98,43 @@ c10_not_proven        pass     48.798  MLP.__init__ edit: proven False, findings
 What it does not show: more than 2 ranks, PP > 1, edits of `jit_fuser` functions or CUDA graphs,
 the 14B model (see the hill-climb), a conformance receipt (the receipt writer has no record kind
 for it yet).
+
+## Restart by fork: the zygote
+
+`zygote.py` keeps one process per node with torch, Transformer Engine, Megatron and the training
+script's imports loaded, and CUDA not initialized. A restart forks the ranks from it instead of
+`torchrun` + exec, so a new process skips 10-50 s of imports and pays only Megatron's setup and
+the first step. Use it when a candidate differs in launch flags or NCCL settings; code edits go
+through the live lab (or a fresh `torchrun` with an overlay, which the zygote refuses).
+
+```sh
+python -m fastrsi_megatron.zygote serve --sock S --script pretrain_gpt.py      # once
+FASTRSI_T0=$(date +%s.%N) python -m fastrsi_megatron.zygote start --sock S --nproc 4 --port P \
+    --log-dir D --cwd D --env FASTRSI_RUN=D [--env K=V ...] -- pretrain_gpt.py <megatron args>
+```
+
+Contract: each rank gets torchrun's variables and the request's, a session of its own and
+`D/rank<r>.log`; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
+time. One rank exiting non-zero stops the others by PID tree. Findings refuse a request unless
+it accepts them: `stale` (an imported source file changed), `env` (a variable a library may
+read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_OVERLAY replaces a
+module the zygote has imported).
+
+Keeping CUDA uninitialized: Megatron's import reaches three libraries that ask about the GPU at
+import. quack (through TE) calls `get_device_capability`: answered from NVML by the vLLM lab's
+`forksafe.py`. tvm_ffi calls `is_available`: answered by NVML with
+PYTORCH_NVML_BASED_CUDA_CHECK=1. flashinfer's gdn kernels read
+`get_device_properties(0).multi_processor_count` at module level: answered with the values CUDA
+reported in a one-off helper process (1.5-1.9 s at zygote start). Without these the zygote stops
+and names the module.
+
+Receipt (our 2026-11-07 runs, 4x GB200, node-local copy of the environment): zygote ready in
+12-24 s (64 native threads, one Python thread at fork). Request to first train step done:
+Qwen3-14B architecture TP 2: 17.5, 18.4 s (same flags, NCCL_ALGO=Ring) and 23.7 s
+(`--cross-entropy-loss-fusion`, which adds its torch.compile warm-up); 40.1 s once (a slow first
+step, 17 s, not reproduced). Qwen3-32B architecture TP 4: 24.5-27.5 s, 30.8 s with the
+cross-entropy fusion. Same model from `torchrun` with the environment on the network file system:
+58.0 s (14B) and 110.1 s (32B). Same results as `torchrun` (no deterministic mode): loss of steps
+1-2 equal to 4 decimals (14B 12.9215, 12.9391; 32B 12.8841, 12.9135); step 3 within the spread of
+`torchrun` repeats (14B: zygote 14.1019-14.1043, torchrun 14.1019-14.1059; 32B: 19.0409-19.0575
+vs 19.0453-19.0471); steady step 4.6 s (14B), 6.7-7.2 s (32B) either way.
