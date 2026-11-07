@@ -1,4 +1,4 @@
-"""Golden tests of the T2 JIT-cache pinning (CPU).
+"""Golden tests of the path-stable JIT-cache pinning (CPU).
 
 Run from the repo root:
     python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
@@ -51,6 +51,27 @@ class JitCacheTest(unittest.TestCase):
         f = J.check_root(b)
         self.assertEqual([x["check"] for x in f], ["jit_root_moved"])
         self.assertIn(os.path.abspath(a), f[0]["observed"])
+
+    def test_staged_copy_keeps_path_and_mtimes_symlink_is_caught(self):
+        """Input: a root used at A (with a file of a known mtime) is copied away, A removed,
+        then (1) the copy reached through a symlink at A's place is checked, (2) the copy
+        staged back at A. Expect: (1) a finding `jit_root_moved` (FlashInfer resolves the link
+        and would rebuild: 155 s on GPU), (2) no finding and the file's mtime kept to the
+        nanosecond. Proves: the staged tree keeps what ninja compares. GPU receipt in kb."""
+        a = os.path.join(self.dir, "a")
+        self.assertEqual(J.check_root(a), [])
+        f = os.path.join(a, "x.o")
+        open(f, "w").close()
+        os.utime(f, ns=(1_700_000_000_123_456_789, 1_700_000_000_123_456_789))
+        away = os.path.join(self.dir, "away")
+        shutil.copytree(a, away, copy_function=shutil.copy2)
+        shutil.rmtree(a)
+        os.symlink(away, a)
+        self.assertEqual([x["check"] for x in J.check_root(a)], ["jit_root_moved"])
+        os.unlink(a)
+        J.stage_root(away, a)
+        self.assertEqual(J.check_root(a), [])
+        self.assertEqual(os.stat(os.path.join(a, "x.o")).st_mtime_ns, 1_700_000_000_123_456_789)
 
     def test_env_pins_every_cache_under_the_root(self):
         """Input: env_for(root). Expect: the four cache roots under root, autotune caching on."""

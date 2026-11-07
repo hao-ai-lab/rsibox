@@ -1,4 +1,5 @@
-"""Path-stable JIT caches for a fresh FastVideo process: the T2 (warm) restart tier.
+"""Path-stable JIT caches for a fresh FastVideo process: the warm restart with
+path-stable caches.
 
 A fresh FastH3 process compiles nothing when every JIT cache it reads is warm *at the same
 path*. Measured (kb/costs.md, "Why a restart costs what it costs"):
@@ -14,9 +15,11 @@ path*. Measured (kb/costs.md, "Why a restart costs what it costs"):
   first cache lookup, and keeps the result in memory only. `preset_torch_key` stores it on
   disk under a stamp of torch's install record, and presets it in the next process.
 
-`env_for(root)` gives the variables that pin every cache under one root; `check_root(root)`
-records where the root was first used and reports a finding when it is used from another
-path (the 159 s rebuild), before the process pays it.
+`env_for(root)` gives the variables that pin every cache under one root. The root must keep
+its real path across restarts and nodes: `stage_root(copy, root)` puts a shipped copy back at
+the path it was built at (a symlink does not do: FlashInfer resolves it). `check_root(root)`
+records where a root was first used and reports a finding when it is used from another path
+(the 153-159 s rebuild), before the process pays it.
 """
 import hashlib
 import json
@@ -28,9 +31,24 @@ ROOTS = {"FLASHINFER_WORKSPACE_BASE": "flashinfer", "TRITON_CACHE_DIR": "triton"
 MARKER = ".fastrsi-jit-root"
 
 
+def stage_root(src, dst):
+    """Put a JIT cache root built at `dst` back at `dst` from a copy `src` (another node, an
+    archive, a staging area): a recursive copy that keeps every mtime, so ninja finds its outputs
+    up to date. FlashInfer names each output by its *resolved* absolute path
+    (`flashinfer/jit/cpp_ext.py`, `(output_dir / obj_name).resolve()`), so a symlink to the copy
+    does not keep the path: the copy must live at the real path it was built at."""
+    import shutil
+    src, dst = os.path.abspath(src), os.path.abspath(dst)
+    if os.path.lexists(dst):
+        raise FileExistsError(f"{dst} exists: stage into an empty path")
+    shutil.copytree(src, dst, symlinks=True, copy_function=shutil.copy2)
+    return dst
+
+
 def env_for(root):
-    """Environment that puts every JIT cache under `root` (absolute), autotuning included."""
-    root = os.path.abspath(root)
+    """Environment that puts every JIT cache under `root` (absolute, symlinks resolved: what
+    FlashInfer keys its builds on), autotuning included."""
+    root = os.path.realpath(root)
     env = {k: os.path.join(root, sub) for k, sub in ROOTS.items()}
     env["TRITON_CACHE_AUTOTUNING"] = "1"
     env["FASTRSI_TORCH_KEY_CACHE"] = os.path.join(root, "torch_key.json")
@@ -40,7 +58,7 @@ def env_for(root):
 def check_root(root):
     """Record the absolute path a cache root was first used from. Returns a list of findings:
     `jit_root_moved` when the root's marker names another path (a copied or moved cache)."""
-    root = os.path.abspath(root)
+    root = os.path.realpath(root)
     os.makedirs(root, exist_ok=True)
     marker = os.path.join(root, MARKER)
     try:
