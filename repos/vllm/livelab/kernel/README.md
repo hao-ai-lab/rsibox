@@ -3,8 +3,9 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate, journal, witness, the R0 swap (a function-body swap), and two-phase
-transactions (participants and their host).
+findings, locate, journal, witness, the R0 swap (a function-body swap), two-phase
+transactions (participants and their host), the session, and a toy lab that passes the
+template's conformance cases c0-c10.
 
 ## Contract
 
@@ -104,6 +105,19 @@ transactions (participants and their host).
   the deadline is treated as failed and poisons the host (only undo, until `recovered()`).
   `prove` and `undo` close the transaction. Each call appends a linked receipt (`txn`,
   `proof`, `undo`) through `receipt.ReceiptWriter`.
+- **Session** (`session.py`) strings transactions together for a live lab: base, edited or
+  poisoned. It keeps the stack of committed transactions (`uninstall` undoes the newest, or
+  down to a given one) and the code fingerprint every participant should show, checked
+  after every abort, rollback and undo and on every `status()`. A fingerprint that differs
+  (`tampered`), a failed undo, a transaction left in doubt, a missed phase-2 deadline or a
+  fault the lab saw poisons it: `install` is refused (`session_poisoned`), `uninstall` and
+  `recovered()` are allowed.
+- **Toy lab** (`toy_lab.py`, `ToyLab`) puts the toy engine behind the interface verbs
+  (`install`, `check`, `reset`, `uninstall`, `status`) and the conformance harness
+  (`patches`, `fresh_check`, `inject`): two ranks step together in a loop thread, the host
+  is a `StepGapCoordinator` inside a `Session`, ranks are reached through `CallParticipant`.
+  CI runs `python3 -m conformance --lab kernel.toy_lab:ToyLab` from `template/livelab` with
+  `repos/vllm/livelab` on `PYTHONPATH`.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
   expected, why it matters, the actions and their cost, and the risk of ignoring it.
@@ -117,6 +131,8 @@ transactions (participants and their host).
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
 | `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `journal`, `locate`, `witness`. |
 | `coordinator.py` | Participants (`Participant`, `CallParticipant`, `LocalParticipant`) and the host (`Coordinator`, `StepGapCoordinator`, `GroupParticipant`, `merge_ranks`, `expect_ranks`, `Lane`). Imports `findings`, `journal`, `locate`, `receipt`, `swap`, `witness`. |
+| `session.py` | `Session`: the transaction stack, expected fingerprints, poison. Imports `coordinator`, `findings`, `locate`. |
+| `toy_lab.py` | `ToyLab`: the conformance lab on the toy engine (2 ranks, step-gap host, session). |
 | `receipt.py` | The receipt writer: linked `txn` / `proof` / `undo` records in an append-only JSON-lines file, validated against the proposed schema. A proposal that needs a human owner (see its docstring). |
 | `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
@@ -197,6 +213,13 @@ Each test's docstring says what it proves and what it does not.
 | `test_late_commit_poisons_and_steps_may_mix` | a commit that misses the deadline read as a clean rollback: shows the host poisoned, the next run refused, and the mixed steps until the queued undo |
 | `test_receipt_written_only_after_append_succeeds` | a failed receipt append reported as written (and never retried) |
 | `test_a_rank_missing_from_proof_is_in_the_receipt` | a rank missing from the post-commit proof dropped from the receipt, which then says the ranks agree |
+| `test_code_changed_outside_the_journal_poisons_the_session` | a lab that says "edited" while it runs code no transaction installed |
+| `test_hung_commit_ends_the_gap_at_the_deadline` | a rank that hangs in commit and stalls every step |
+| `test_install_after_an_unjournaled_edit_is_refused` | an install that adopts a hand edit made since the last status() as the expected code |
+| `test_no_fingerprint_never_verifies` | a participant with no fingerprint passing verify because none was expected either |
+
+The conformance cases c0-c10 (`template/livelab/conformance/cases.py`) run against the toy
+lab in CI; all 11 pass (no XFAIL).
 
 ## Not here yet
 
@@ -217,6 +240,5 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
   analyzer.
 - **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes: the receipt's
   `rebuild` and `recapture_s` stay None.
-- **Session** (the host's state machine and poisoning) and the toy lab are the next PR.
 
-These come in later PRs of the kernel series, each importing and testing on top of this one.
+These come in later PRs, each importing and testing on top of this series.
