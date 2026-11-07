@@ -126,11 +126,13 @@ def force_multiproc():
 
 class FastVideoLab:
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
-    `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy."""
+    `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
+    `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
+    `reset("respawn")` skips the workers' imports (T1b)."""
     name = "fastvideo"
 
     def __init__(self, config, receipts=None, golden=None, modules=MODULES, rpc_timeout=60.0,
-                 check_timeout=600.0):
+                 check_timeout=600.0, zygote=False):
         self.config = json.loads(json.dumps(config))
         self.writer = R.ReceiptWriter(receipts) if receipts else None
         self.rpc_timeout, self.check_timeout = rpc_timeout, check_timeout
@@ -141,6 +143,9 @@ class FastVideoLab:
             self.golden = np.load(golden)
         self.lock = threading.RLock()
         self.costs = {}
+        if zygote:          # every worker group, respawns included, forks from preloaded imports
+            from services import zygote as Z
+            self.zygote_preload = Z.enable()
         self._spawn()
 
     # -- process layout ------------------------------------------------------------------
