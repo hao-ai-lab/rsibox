@@ -4,10 +4,12 @@ Code identity is (file, co_qualname, co_firstlineno) plus a content hash. For a 
 function CPython's co_firstlineno is the line of the first decorator.
 
 `content_hash(code)` is the one hash function for code. It is sha256 over the bytecode, the
-names, local/free/cell variable names, argument counts, flags and constants, with nested code
+exception table (3.11+: which instructions a try/with covers, by offset), the names,
+local/free/cell variable names, argument counts, flags and constants, with nested code
 objects hashed recursively and frozenset constants sorted (a .pyc keeps the set order of the
-process that wrote it). It leaves out the file, the qualname and line numbers, which form the
-identity, so moving a function does not change its hash. First 16 hex digits.
+process that wrote it). Each part is tagged and length-prefixed, so (1, 23) and (12, 3) differ.
+It leaves out the file, the qualname and line numbers, which form the identity, so moving a
+function does not change its hash. First 16 hex digits.
 `text_hash(s)` is sha256 of UTF-8 text, 16 hex digits, for sources and plans.
 
 The live functions of a module are found by scanning the gc heap (as
@@ -21,6 +23,7 @@ import gc
 import hashlib
 import importlib
 import sys
+import threading
 import time
 import types
 
@@ -34,13 +37,21 @@ def _const_repr(c):
 
 
 def content_hash(code):
-    h = hashlib.sha256(code.co_code)
+    h = hashlib.sha256()
+
+    def put(tag, data):
+        h.update(tag + len(data).to_bytes(8, "little") + data)
+    put(b"c", code.co_code)
+    put(b"x", getattr(code, "co_exceptiontable", b""))
     for part in (code.co_names, code.co_varnames, code.co_freevars, code.co_cellvars,
                  (code.co_argcount, code.co_posonlyargcount, code.co_kwonlyargcount,
                   code.co_flags)):
-        h.update(repr(part).encode())
+        put(b"p", repr(part).encode())
     for c in code.co_consts:
-        h.update((content_hash(c) if isinstance(c, types.CodeType) else _const_repr(c)).encode())
+        if isinstance(c, types.CodeType):
+            put(b"n", content_hash(c).encode())
+        else:
+            put(b"k", _const_repr(c).encode())
     return h.hexdigest()[:16]
 
 
@@ -73,21 +84,45 @@ def code_tree(code, parent=None, out=None):
     return out
 
 
+_scan_lock = threading.RLock()
+_scan = {"depth": 0, "frozen": 0, "gc_on": False}
+
+
 class unfrozen:
     """Engines may call gc.freeze() after startup (vLLM does; some interpreters do at start),
     and both gc.get_objects() and gc.get_referrers() skip frozen objects: without this, the
     scan sees almost nothing. Unfreeze for the scan, freeze everything again after (as after
-    startup)."""
+    startup). One window at a time in the process (a lock; nested use in one thread keeps
+    the outer window): a second thread's scan never has the heap frozen again under it. While
+    the heap is unfrozen, automatic collection is off, so no full collection of it can start
+    in the window (it would stall the engine). Freezing again also freezes what was made
+    after startup: witness.live_codes does not see suspended generators made before a scan
+    (#42)."""
 
     def __enter__(self):
-        self.frozen = gc.get_freeze_count()
-        if self.frozen:
-            gc.unfreeze()
+        _scan_lock.acquire()
+        try:
+            if _scan["depth"] == 0:
+                _scan["frozen"] = gc.get_freeze_count()
+                if _scan["frozen"]:
+                    _scan["gc_on"] = gc.isenabled()
+                    gc.disable()
+                    gc.unfreeze()
+            _scan["depth"] += 1
+        except BaseException:
+            _scan_lock.release()
+            raise
         return self
 
     def __exit__(self, *exc):
-        if self.frozen:
-            gc.freeze()
+        try:
+            _scan["depth"] -= 1
+            if _scan["depth"] == 0 and _scan["frozen"]:
+                gc.freeze()
+                if _scan["gc_on"]:
+                    gc.enable()
+        finally:
+            _scan_lock.release()
 
 
 SLICE_S = 0.002     # longest stretch a scan keeps the GIL before it sleeps (see `sliced`)
@@ -163,12 +198,12 @@ def module_functions(mod):
         elif not isinstance(o, (type, types.ModuleType)):
             # a wrapper object that keeps the function in `.fn` (a Triton @jit kernel, its
             # autotune / heuristics wrappers): found here, not by a heap scan
-            try:
-                d = object.__getattribute__(o, "__dict__")
-            except Exception:
-                continue
-            if isinstance(d, dict) and "fn" in d:
-                stack.append(d["fn"])
+            # functools.update_wrapper on a non-function (lru_cache, a callable class)
+            # keeps the original in `__wrapped__`
+            d = _dict_of(o)
+            for k in ("fn", "__wrapped__"):
+                if d is not None and k in d:
+                    stack.append(d[k])
     return list(out.values())
 
 
@@ -185,9 +220,19 @@ def index_module(mod, functions=None):
     return run[0], holders
 
 
+def _dict_of(o):
+    """o's instance __dict__, or None; never runs o's own __getattr__ / __getattribute__ (an
+    RPC or lazy proxy may raise anything from them)."""
+    try:
+        d = object.__getattribute__(o, "__dict__")
+    except Exception:
+        return None
+    return d if isinstance(d, dict) else None
+
+
 def _module_of_dict(d):
     for name, m in list(sys.modules.items()):
-        if getattr(m, "__dict__", None) is d:
+        if _dict_of(m) is d:
             return name
     return None
 
@@ -204,6 +249,7 @@ def holders(fn, ignore=()):
 def _holders(fn, ignore):
     out = []
     refs = gc.get_referrers(fn)
+    ref_ids = {id(r) for r in refs}
     for r in refs:
         if isinstance(r, types.FrameType) or r is refs or id(r) in ignore:
             continue
@@ -227,8 +273,7 @@ def _holders(fn, ignore):
                     owner = ("class_dict", o.__qualname__)
                 elif isinstance(o, types.FunctionType) and o.__dict__ is r:
                     owner = ("wrapped_by", o.__code__.co_qualname)
-                elif not isinstance(o, (type, types.FrameType, list)) and \
-                        getattr(o, "__dict__", None) is r:
+                elif not isinstance(o, (type, types.FrameType, list)) and _dict_of(o) is r:
                     owner = ("attribute", type(o).__name__ + "()")
                 if owner:
                     break
@@ -236,8 +281,10 @@ def _holders(fn, ignore):
             out += [{"kind": kind, "where": f"{where}.{k}"} for k in keys]
         elif isinstance(r, (list, tuple, set)):
             out.append({"kind": "container", "where": type(r).__name__})
-        elif any(v is fn for v in getattr(r, "__dict__", {}).values()):
-            keys = [k for k, v in vars(r).items() if v is fn]
+        elif any(v is fn for v in (_dict_of(r) or {}).values()):
+            if id(_dict_of(r)) in ref_ids:
+                continue     # its __dict__ is a referrer too, listed above (a C wrapper)
+            keys = [k for k, v in _dict_of(r).items() if v is fn]
             out += [{"kind": "attribute", "where": f"{type(r).__name__}().{k}"} for k in keys]
         else:
             out.append({"kind": "other", "where": type(r).__name__})
@@ -252,17 +299,21 @@ def locate(module, qualname, firstlineno):
     key = key_of(module, qualname, firstlineno)
     try:
         mod = importlib.import_module(module)
+        line = int(firstlineno)
     except Exception as e:
         return F.not_ok(f"import {module}: {type(e).__name__}: {e}", [F.finding(
-            "patch_invalid", f"import failed: {e}", "an importable module", subject=key)],
-            key=key)
+            "patch_invalid", f"{type(e).__name__}: {e}", "an importable module and a line "
+            "number", subject=key)], key=key, codes=[], functions=[], holders=[])
     run, held = index_module(mod)
-    codes = run.get((qualname, int(firstlineno)), [])
+    codes = run.get((qualname, line), [])
     fns = [f for c in codes for f in held.get(c, [])]
     if not fns:
         return F.not_ok("no live function", [F.finding(
             "no_live_function", f"{len(codes)} code object(s), no function object holds them",
             "a function object running this code", subject=key)], key=key,
             codes=[code_id(c) for c in codes], functions=[], holders=[])
-    hs = [h for f in fns for h in holders(f, ignore=[fns, *held.values()])]
+    try:
+        hs = [h for f in fns for h in holders(f, ignore=[fns, *held.values()])]
+    except Exception as e:        # a referrer this walk does not know: the record says so
+        hs = [{"kind": "other", "where": f"holders walk failed: {type(e).__name__}: {e}"}]
     return F.ok(key=key, codes=[code_id(c) for c in codes], functions=fns, holders=hs)
