@@ -3,7 +3,7 @@ respawn with weights holder.
 
 A respawned worker forked from the zygote (`zygote.py`) still loads its components from disk:
 11-12 s of a 14 s respawn on one GB200 (`kb/costs.md`). The holder is a long-lived process that
-owns a copy of the loaded components (the DiT and the text encoder by default) on the GPU. The
+owns a copy of the loaded components (the DiT, the text encoder and the VAE by default) on the GPU. The
 first worker loads them from disk and deposits them (`put`); a respawned worker asks for them
 (`get`) and receives the module objects with their CUDA tensors mapped by CUDA IPC
 (`torch.multiprocessing`): no file read, no host-to-device copy, no new GPU memory.
@@ -28,7 +28,7 @@ import os
 import sys
 import time
 
-DEFAULT_COMPONENTS = ("transformer", "text_encoder")
+DEFAULT_COMPONENTS = ("transformer", "text_encoder", "vae")   # audio_vae: a non-leaf grad tensor, not shareable
 STAMP_PREFIXES = ("fastvideo.models.loader", "fastvideo.layers.quantization")
 STAMP_ENV = ("FASTVIDEO_H3_ADALN_TABLE", "FASTVIDEO_H3_VAE_NVFP4_DECODER", "FASTVIDEO_ATTENTION_BACKEND",
              "FASTVIDEO_MINIMAX_H3_FUSIONS", "FASTVIDEO_H3_VSA_FP4", "FASTVIDEO_FA4")
