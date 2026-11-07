@@ -23,12 +23,16 @@ c5_failed_install     pass     34.0    fail_apply: rolled_back, codes ['particip
 c6_refusal            pass     24.5    syntax: ['patch_invalid']; closure: ['closure_changed']
                                        module_state: ['empty_change', 'outside_changes']; empty: ['empty_change']
 c7_chain              pass     38.6    d0... -> cd... -> 23... -> 23... -> undone one by one to base
+c8_crash_and_hang     pass    610.3    crash: poisoned by ['participant_failed'], respawn 78.4 s
+                                       hang: poisoned by ['participant_failed'], respawn 78.4 s
+                                       lost: poisoned by ['participant_failed'], respawn 68.7 s
+                                       tamper: poisoned by ['tampered'], respawn 48.4 s
+c9_soak               pass    202.7    20 cycles; install median 0.0819 s, uninstall median 0.0355 s
 c10_not_proven        pass    115.1    proven False, findings ['zero_witness', 'zero_witness']
                                        live {'video': 'd0e55e892690e260', ...} (base: True); fresh {'video': 'c7db7f61a884d310', ...}
 ```
 
-c8 and c9 on 2 GPUs: see below (they ran on 1 GPU; the 2-GPU run is in the PR description
-when it lands).
+11/11 on 2 ranks (c0-c7 and c10 in one lab session, c8 and c9 in a second one).
 
 ## 1 GPU (1 rank)
 
