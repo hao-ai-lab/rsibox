@@ -1,0 +1,173 @@
+diff --git a/fastvideo/models/dits/minimax_h3.py b/fastvideo/models/dits/minimax_h3.py
+index 119b70b..dfb6271 100644
+--- a/fastvideo/models/dits/minimax_h3.py
++++ b/fastvideo/models/dits/minimax_h3.py
+@@ -89,6 +89,67 @@ def _enabled_minimax_h3_exact_kernels(value: str | None = None) -> frozenset[str
+     return enabled
+ 
+ 
++def _h3_ff_graph_signature(ff, hidden_states, stream):
++    """Identify the frozen FFN state; reject unversioned weight tensors."""
++    tensors = []
++    options = []
++    for name, module in (("in", ff.fc_in), ("out", ff.fc_out)):
++        if (type(module) is not ReplicatedLinear
++                or module.training
++                or module.bias is not None
++                or module._forward_hooks
++                or module._forward_pre_hooks
++                or module._backward_hooks):
++            return None
++        method = module.quant_method
++        if type(method).__name__ != "NVFP4QuantizeMethod":
++            return None
++        packed = getattr(module, "_nvfp4_weight", None)
++        if (not isinstance(packed, torch.Tensor)
++                or packed.device != hidden_states.device):
++            return None
++
++        owners = (
++            ("module", vars(module)),
++            ("parameters", module._parameters),
++            ("buffers", module._buffers),
++            ("method", vars(method)),
++        )
++        for owner_name, values in owners:
++            for attr, value in sorted(values.items()):
++                label = (name, owner_name, attr)
++                if isinstance(value, torch.Tensor):
++                    try:
++                        version = value._version
++                    except RuntimeError:
++                        return None
++                    tensors.append((
++                        label, id(value), value.data_ptr(), version,
++                        tuple(value.shape), tuple(value.stride()),
++                        value.dtype, value.device,
++                    ))
++                elif type(value) in (bool, int, float, str, type(None)):
++                    options.append((label, value))
++        options.append((name, id(module), id(method), type(method)))
++
++    return (
++        tuple(hidden_states.shape),
++        tuple(hidden_states.stride()),
++        hidden_states.dtype,
++        hidden_states.device,
++        stream.cuda_stream,
++        torch.is_inference_mode_enabled(),
++        torch.is_autocast_enabled("cuda"),
++        torch.get_autocast_dtype("cuda"),
++        ff.fuse_swiglu,
++        ff.exact_swiglu,
++        ff.use_mxfp8,
++        type(ff)._forward,
++        tuple(tensors),
++        tuple(options),
++    )
++
++
+ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
+     """Triton kernels are inference-only and trace as opaque custom ops.
+ 
+@@ -99,6 +160,90 @@ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
+     return HAVE_TRITON and tensor.is_cuda and not torch.is_grad_enabled()
+ 
+ 
++def _h3_ff_graph_forward(ff, hidden_states):
++    """Replay the original inference FFN, or return None for eager fallback."""
++    if (torch.compiler.is_compiling()
++            or torch.is_grad_enabled()
++            or type(ff) is not MiniMaxH3FeedForward
++            or ff.training
++            or ff.use_mxfp8
++            or ff._forward_hooks
++            or ff._forward_pre_hooks
++            or ff._backward_hooks
++            or hidden_states.requires_grad
++            or not hidden_states.is_cuda
++            or hidden_states.dtype != torch.bfloat16
++            or hidden_states.ndim != 3
++            or hidden_states.shape[0] != 1
++            or hidden_states.shape[1] < 1024
++            or hidden_states.shape[2] <= 0
++            or not hidden_states.is_contiguous()
++            or hidden_states.storage_offset() != 0
++            or torch.cuda.get_device_capability(hidden_states.device) != (10, 0)):
++        return None
++
++    with torch.cuda.device(hidden_states.device):
++        if torch.cuda.is_current_stream_capturing():
++            return None
++        current = torch.cuda.current_stream(hidden_states.device)
++        signature = _h3_ff_graph_signature(ff, hidden_states, current)
++        if signature is None:
++            return None
++
++        cache = getattr(_h3_ff_graph_forward, "_graphs_v2", None)
++        if cache is None:
++            import weakref
++            cache = weakref.WeakKeyDictionary()
++            _h3_ff_graph_forward._graphs_v2 = cache
++
++        state = cache.get(ff)
++        if state is None or state[0] != signature:
++            # Each layer owns its graph pool and stable input/output storage.
++            cache.pop(ff, None)
++            static_input = torch.empty_like(hidden_states)
++            side = torch.cuda.Stream(device=hidden_states.device)
++            side.wait_stream(current)
++            try:
++                with torch.cuda.stream(side):
++                    static_input.copy_(hidden_states)
++                    for _ in range(2):
++                        warm_output = ff._forward(static_input)
++                        del warm_output
++                side.synchronize()
++
++                signature = _h3_ff_graph_signature(ff, hidden_states, current)
++                if signature is None:
++                    return None
++
++                graph = torch.cuda.CUDAGraph()
++                with torch.cuda.graph(graph, stream=side):
++                    static_output = ff._forward(static_input)
++
++                after_capture = _h3_ff_graph_signature(ff, hidden_states, current)
++                if after_capture != signature:
++                    cache[ff] = (after_capture, None, None, None)
++                    return None
++            except (RuntimeError, torch.cuda.OutOfMemoryError):
++                cache[ff] = (signature, None, None, None)
++                return None
++            finally:
++                current.wait_stream(side)
++
++            state = (signature, graph, static_input, static_output)
++            cache[ff] = state
++
++        _, graph, static_input, static_output = state
++        if graph is None:
++            return None
++
++        # FFN projections are replicated, with no SP collective inside this
++        # graph. Every rank independently copies its current local shard.
++        static_input.copy_(hidden_states)
++        graph.replay()
++        # Preserve the original fresh-output ownership across later replays.
++        return static_output.clone(memory_format=torch.preserve_format)
++
++
+ @torch.compile(dynamic=True, fullgraph=True)
+ def _gated_residual(hidden_states: torch.Tensor, gate_table: torch.Tensor, indices: torch.Tensor,
+                     branch: torch.Tensor) -> torch.Tensor:
+@@ -172,6 +317,9 @@ class MiniMaxH3FeedForward(nn.Module):
+                 rows = slice(start, start + self.chunk_tokens)
+                 out[..., rows, :] = self._forward(hidden_states[..., rows, :].contiguous())
+             return out
++        graphed = _h3_ff_graph_forward(self, hidden_states)
++        if graphed is not None:
++            return graphed
+         return self._forward(hidden_states)
+ 
+     def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

@@ -1,0 +1,382 @@
+diff --git a/fastvideo/models/dits/minimax_h3.py b/fastvideo/models/dits/minimax_h3.py
+index b5d3509..84710ec 100644
+--- a/fastvideo/models/dits/minimax_h3.py
++++ b/fastvideo/models/dits/minimax_h3.py
+@@ -150,6 +150,97 @@ def _h3_ff_graph_signature(ff, hidden_states, stream):
+     )
+ 
+ 
++def _h3_projection_graph_signature(attn, hidden_states, rotary_emb, stream):
++    """Track projection weights, quantization policy, layouts, and execution state."""
++    tensors = []
++    options = []
++    for name in ("to_q", "to_k", "to_v", "to_gate_compress"):
++        module = getattr(attn, name)
++        if (type(module) is not ReplicatedLinear
++                or module.training
++                or module.bias is not None
++                or "forward" in vars(module)
++                or getattr(module, "_compiled_call_impl", None) is not None
++                or module._forward_hooks
++                or module._forward_pre_hooks
++                or module._backward_hooks
++                or module._backward_pre_hooks):
++            return None
++        method = module.quant_method
++        if type(method).__name__ != "NVFP4QuantizeMethod":
++            return None
++        packed = getattr(module, "_nvfp4_weight", None)
++        if (not isinstance(packed, torch.Tensor)
++                or packed.device != hidden_states.device):
++            return None
++        owners = (
++            ("module", vars(module)),
++            ("parameters", module._parameters),
++            ("buffers", module._buffers),
++            ("method", vars(method)),
++        )
++        for owner_name, values in owners:
++            for attr, value in sorted(values.items()):
++                label = (name, owner_name, attr)
++                if isinstance(value, torch.Tensor):
++                    try:
++                        version = value._version
++                    except RuntimeError:
++                        return None
++                    tensors.append((
++                        label, id(value), value.data_ptr(), version,
++                        tuple(value.shape), tuple(value.stride()),
++                        value.dtype, value.device,
++                    ))
++                elif type(value) in (bool, int, float, str, type(None)):
++                    options.append((label, value))
++        options.append((
++            name, id(module), id(method), type(method),
++            type(module).forward, getattr(type(method), "apply", None),
++        ))
++
++    for name in ("norm_q", "norm_k"):
++        norm = getattr(attn, name)
++        if (type(norm) is not nn.RMSNorm
++                or norm.training
++                or norm.weight is None
++                or norm.weight.device != hidden_states.device
++                or norm.weight.shape != (128,)):
++            return None
++        weight = norm.weight
++        try:
++            version = weight._version
++        except RuntimeError:
++            return None
++        tensors.append((
++            name, id(weight), weight.data_ptr(), version,
++            tuple(weight.shape), tuple(weight.stride()),
++            weight.dtype, weight.device,
++        ))
++        options.append((name, norm.eps))
++
++    return (
++        tuple(hidden_states.shape),
++        tuple(hidden_states.stride()),
++        hidden_states.dtype,
++        hidden_states.device,
++        tuple(
++            (tuple(t.shape), tuple(t.stride()), t.dtype, t.device)
++            for t in rotary_emb
++        ),
++        stream.cuda_stream,
++        torch.is_inference_mode_enabled(),
++        torch.is_autocast_enabled("cuda"),
++        torch.get_autocast_dtype("cuda"),
++        attn.num_attention_heads,
++        attn.attention_head_dim,
++        attn.fuse_qknorm_rope,
++        _h3_projection_graph_ops,
++        tuple(tensors),
++        tuple(options),
++    )
++
++
+ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
+     """Triton kernels are inference-only and trace as opaque custom ops.
+ 
+@@ -160,6 +251,38 @@ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
+     return HAVE_TRITON and tensor.is_cuda and not torch.is_grad_enabled()
+ 
+ 
++def _h3_projection_graph_ops(attn, hidden_states, rotary_emb):
++    """The existing fused projection path, with identical operation order."""
++    from fastvideo.models.dits.minimax_h3_vsa_fp4 import _shared_input_projections
++
++    query, key, value = _shared_input_projections(
++        (attn.to_q, attn.to_k, attn.to_v), hidden_states,
++    )
++    query = query.unflatten(
++        -1, (attn.num_attention_heads, attn.attention_head_dim),
++    )
++    key = key.unflatten(
++        -1, (attn.num_attention_heads, attn.attention_head_dim),
++    )
++    value = value.unflatten(
++        -1, (attn.num_attention_heads, attn.attention_head_dim),
++    )
++    cos, sin = rotary_emb
++    cos = cos.to(query.dtype)
++    sin = sin.to(query.dtype)
++    query = fused_qknorm_rope(
++        query, attn.norm_q.weight, cos, sin, attn.norm_q.eps,
++    )
++    key = fused_qknorm_rope(
++        key, attn.norm_k.weight, cos, sin, attn.norm_k.eps,
++    )
++    gate, _ = attn.to_gate_compress(hidden_states)
++    gate = gate.unflatten(
++        -1, (attn.num_attention_heads, attn.attention_head_dim),
++    )
++    return query, key, value, gate
++
++
+ def _h3_ff_graph_forward(ff, hidden_states, residual_args=None):
+     """Replay the unchanged FFN; optionally consume its output before returning."""
+     if (torch.compiler.is_compiling()
+@@ -269,6 +392,147 @@ def _h3_ff_graph_forward(ff, hidden_states, residual_args=None):
+         return static_output.clone(memory_format=torch.preserve_format)
+ 
+ 
++def _h3_projection_graph_forward(attn, hidden_states, rotary_emb):
++    """Borrow projection graph outputs until this layer's next dispatch."""
++    if (torch.compiler.is_compiling()
++            or torch.is_grad_enabled()
++            or type(attn) is not MiniMaxH3Attention
++            or attn.training
++            or STAGES.enabled
++            or not HAVE_TRITON
++            or not attn.fuse_qknorm_rope
++            or attn.attention_head_dim != 128
++            or attn.num_attention_heads <= 0
++            or type(attn.distributed_attention) is not DistributedAttention_VSA
++            or attn.to_gate_compress is None
++            or attn._gate_compress_active is not True
++            or hidden_states.requires_grad
++            or not hidden_states.is_cuda
++            or hidden_states.dtype != torch.bfloat16
++            or hidden_states.ndim != 3
++            or hidden_states.shape[0] != 1
++            or hidden_states.shape[1] < 1024
++            or hidden_states.shape[2] <= 0
++            or not hidden_states.is_contiguous()
++            or hidden_states.storage_offset() != 0
++            or rotary_emb is None
++            or len(rotary_emb) != 2
++            or torch.cuda.get_device_capability(hidden_states.device) != (10, 0)):
++        return None
++
++    if model_parallel_is_initialized() and get_sp_world_size() not in (1, 2):
++        return None
++    cos, sin = rotary_emb
++    if (cos.shape != sin.shape
++            or cos.ndim != 2
++            or cos.shape[0] != hidden_states.shape[1]
++            or not 0 < cos.shape[1] <= 128
++            or cos.shape[1] % 2):
++        return None
++    for tensor in rotary_emb:
++        if (tensor.device != hidden_states.device
++                or tensor.dtype != torch.bfloat16
++                or tensor.requires_grad
++                or not tensor.is_contiguous()):
++            return None
++
++    # Borrowed graph outputs must not escape through user-installed hooks.
++    from torch.nn.modules import module as module_state
++    for name in (
++        "_global_forward_pre_hooks",
++        "_global_forward_hooks",
++        "_global_backward_pre_hooks",
++        "_global_backward_hooks",
++    ):
++        if getattr(module_state, name, None):
++            return None
++    for module in attn.modules():
++        if (module._forward_hooks
++                or module._forward_pre_hooks
++                or module._backward_hooks
++                or module._backward_pre_hooks):
++            return None
++    distributed = attn.distributed_attention
++    if ("forward" in vars(distributed)
++            or getattr(distributed, "_compiled_call_impl", None) is not None):
++        return None
++
++    with torch.cuda.device(hidden_states.device):
++        if torch.cuda.is_current_stream_capturing():
++            return None
++        current = torch.cuda.current_stream(hidden_states.device)
++        signature = _h3_projection_graph_signature(
++            attn, hidden_states, rotary_emb, current,
++        )
++        if signature is None:
++            return None
++
++        cache = getattr(_h3_projection_graph_forward, "_projection_graphs_v1", None)
++        if cache is None:
++            import weakref
++            cache = weakref.WeakKeyDictionary()
++            _h3_projection_graph_forward._projection_graphs_v1 = cache
++
++        state = cache.get(attn)
++        if state is None or state[0] != signature:
++            cache.pop(attn, None)
++            static_input = torch.empty_like(hidden_states)
++            static_rotary = (torch.empty_like(cos), torch.empty_like(sin))
++            side = torch.cuda.Stream(device=hidden_states.device)
++            side.wait_stream(current)
++            try:
++                with torch.cuda.stream(side):
++                    static_input.copy_(hidden_states)
++                    static_rotary[0].copy_(cos)
++                    static_rotary[1].copy_(sin)
++                    for _ in range(2):
++                        warm_outputs = _h3_projection_graph_ops(
++                            attn, static_input, static_rotary,
++                        )
++                        del warm_outputs
++                side.synchronize()
++
++                signature = _h3_projection_graph_signature(
++                    attn, hidden_states, rotary_emb, current,
++                )
++                if signature is None:
++                    return None
++
++                graph = torch.cuda.CUDAGraph()
++                with torch.cuda.graph(graph, stream=side):
++                    static_outputs = _h3_projection_graph_ops(
++                        attn, static_input, static_rotary,
++                    )
++
++                after_capture = _h3_projection_graph_signature(
++                    attn, hidden_states, rotary_emb, current,
++                )
++                if after_capture != signature:
++                    cache[attn] = (after_capture, None, None, None, None)
++                    return None
++            except (RuntimeError, torch.cuda.OutOfMemoryError):
++                cache[attn] = (signature, None, None, None, None)
++                return None
++            finally:
++                current.wait_stream(side)
++
++            state = (
++                signature, graph, static_input, static_rotary, static_outputs,
++            )
++            cache[attn] = state
++
++        _, graph, static_input, static_rotary, static_outputs = state
++        if graph is None:
++            return None
++        static_input.copy_(hidden_states)
++        static_rotary[0].copy_(cos)
++        static_rotary[1].copy_(sin)
++        graph.replay()
++        # The caller immediately consumes every output in attention on this
++        # stream. No projection buffer is returned from attention.forward.
++        return static_outputs
++
++
+ @torch.compile(dynamic=True, fullgraph=True)
+ def _gated_residual(hidden_states: torch.Tensor, gate_table: torch.Tensor, indices: torch.Tensor,
+                     branch: torch.Tensor) -> torch.Tensor:
+@@ -532,8 +796,6 @@ class MiniMaxH3Attention(nn.Module):
+         if (self._vsa_fp4 and fine_override is None and rotary_emb is not None and not torch.is_grad_enabled()
+                 and not torch.compiler.is_compiling()):
+             meta = get_forward_context().attn_metadata
+-            # Exempt mode lists the first prefix tile for every query, which the
+-            # FP4 kernel relies on to start each row from a finite running max.
+             if isinstance(meta, MiniMaxH3VSAMetadata) and meta.exempt:
+                 use_fused_rope = self.fuse_qknorm_rope and _can_run_minimax_h3_fusion(hidden_states)
+                 if not model_parallel_is_initialized() or get_sp_world_size() == 1:
+@@ -554,39 +816,51 @@ class MiniMaxH3Attention(nn.Module):
+                 with STAGES.span("out_proj"):
+                     hidden_states, _ = self.to_out(hidden_states)
+                 return hidden_states
+-        with STAGES.span("qkv_proj"):
+-            # All three projections see the same activations. Reuse their FP8
+-            # quantization when the loaded methods have identical granularity.
+-            from fastvideo.models.dits.minimax_h3_vsa_fp4 import _shared_input_projections
+-            if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
+-                query, key, value = _shared_input_projections((self.to_q, self.to_k, self.to_v), hidden_states)
+-            else:
+-                query, _ = self.to_q(hidden_states)
+-                key, _ = self.to_k(hidden_states)
+-                value, _ = self.to_v(hidden_states)
+-        query = query.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+-        key = key.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+-        value = value.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
+-        if (self.fuse_qknorm_rope and rotary_emb is not None and _can_run_minimax_h3_fusion(query)):
+-            cos, sin = rotary_emb
+-            cos = cos.to(query.dtype)
+-            sin = sin.to(query.dtype)
+-            query = fused_qknorm_rope(query, self.norm_q.weight, cos, sin, self.norm_q.eps)
+-            key = fused_qknorm_rope(key, self.norm_k.weight, cos, sin, self.norm_k.eps)
+-        else:
+-            query = self.norm_q(query)
+-            key = self.norm_k(key)
+-            if rotary_emb is not None:
+-                query = self._rotate(query, rotary_emb)
+-                key = self._rotate(key, rotary_emb)
+-
+-        # H3 rotates only 96/128 channels, which the generic `freqs_cis`
+-        # branch cannot express. Apply it above, then pass no RoPE here.
++
++        projected = None
++        if (not torch.compiler.is_compiling()
++                and not torch.is_grad_enabled()
++                and fine_override is None
++                and self.to_gate_compress is not None
++                and self._gate_compress_active is True):
++            projected = _h3_projection_graph_forward(self, hidden_states, rotary_emb)
++
+         extra_attention_kwargs = {}
+-        if self.to_gate_compress is not None and self._gate_active():
+-            gate_compress, _ = self.to_gate_compress(hidden_states)
+-            extra_attention_kwargs["gate_compress"] = gate_compress.unflatten(
+-                -1, (self.num_attention_heads, self.attention_head_dim))
++        if projected is not None:
++            query, key, value, gate_compress = projected
++            extra_attention_kwargs["gate_compress"] = gate_compress
++        else:
++            with STAGES.span("qkv_proj"):
++                from fastvideo.models.dits.minimax_h3_vsa_fp4 import _shared_input_projections
++                if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
++                    query, key, value = _shared_input_projections(
++                        (self.to_q, self.to_k, self.to_v), hidden_states,
++                    )
++                else:
++                    query, _ = self.to_q(hidden_states)
++                    key, _ = self.to_k(hidden_states)
++                    value, _ = self.to_v(hidden_states)
++            query = query.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
++            key = key.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
++            value = value.unflatten(-1, (self.num_attention_heads, self.attention_head_dim))
++            if (self.fuse_qknorm_rope and rotary_emb is not None and _can_run_minimax_h3_fusion(query)):
++                cos, sin = rotary_emb
++                cos = cos.to(query.dtype)
++                sin = sin.to(query.dtype)
++                query = fused_qknorm_rope(query, self.norm_q.weight, cos, sin, self.norm_q.eps)
++                key = fused_qknorm_rope(key, self.norm_k.weight, cos, sin, self.norm_k.eps)
++            else:
++                query = self.norm_q(query)
++                key = self.norm_k(key)
++                if rotary_emb is not None:
++                    query = self._rotate(query, rotary_emb)
++                    key = self._rotate(key, rotary_emb)
++
++            if self.to_gate_compress is not None and self._gate_active():
++                gate_compress, _ = self.to_gate_compress(hidden_states)
++                extra_attention_kwargs["gate_compress"] = gate_compress.unflatten(
++                    -1, (self.num_attention_heads, self.attention_head_dim))
++
+         with STAGES.span("attention"):
+             hidden_states, _ = self.distributed_attention(
+                 query,

@@ -1,4 +1,4 @@
-# MiniMax H3 hill-climb: eight bit-exact edits to FastVideo
+# MiniMax H3 hill-climb: bit-exact edits to FastVideo (1 and 2 GPUs)
 
 Edits to FastVideo `376e445f0e8d192c2d9a5f28010a6b3a7012667e` that developer agents found and
 the live lab kept, our 2026-11-07 overnight run on one GB200 GPU (workload: `kb/workload.md`).
@@ -55,6 +55,37 @@ At 1 GPU the fresh-process result of 01-08 (4.24-4.29 s) is no better than an ea
 fresh-process run of 01-05 (4.26 s, our 2026-11-07 01:24 run): the lab-measured gains of 06-08
 (1-2% each) are within fresh-process noise at 1 GPU. At 2 GPUs the full set beat 01-05 (3.55 vs
 3.61-3.90 s).
+
+## Patches 09-19: the 2-GPU climb (sequence parallel 2)
+
+A second climb the next morning (2026-11-07, 08:00-12:00 PST) on 2 GPUs, on top of 01-08, Codex
+only (propose-only, rotating two accounts): 58 iterations, 48 measured, 11 kept. Same gate.
+Apply 01-19 in order; together they are the set measured below.
+
+Fresh processes, our 2026-11-07 12:03-12:38 PST runs, base and patched alternating twice,
+1 cold + 5 warm videos each, every video bit-identical to the golden:
+
+| GPUs | Base | Patches 01-19 | Speedup |
+|---|---|---|---|
+| 2 (sequence parallel) | 4.41 / 4.42 s | 2.93 / 2.88 s | **1.52x** |
+| 1 | 6.10 / 6.12 s | 4.20 / 4.23 s | **1.45x** (the same as 01-08: 09-19 neither help nor hurt at 1 GPU) |
+
+| # | Edit | s/video in the lab | Edit-to-run (in the lab) | Antigravity | Review notes and upstream needs |
+|---|---|---|---|---|---|
+| 09 | SP=2: pack q/k/v/gate for the all-to-all and scatter received rows straight into the tile buffer (one cached Triton helper) | 3.650 -> 3.568 | 1.83 s (0.27 s) | correct | Specialised to SP=2; generalise or guard by world size (it falls back otherwise) |
+| 10 | Fold the gated merge and untile into the return all-to-all's packing | 3.639 -> 3.414 | 1.52 s (0.32 s) | correct | Same |
+| 11 | Exchange only the remote half of q/k/v/gate heads; tile local rows in place | 3.615 -> 3.446 | 1.45 s (0.28 s) | correct | Replaces the collective's self-copy; keep a test at SP=4 before upstreaming |
+| 12 | Write local gated heads straight into the final output; return only remote heads | 3.568 -> 3.475 | 1.22 s (0.29 s) | correct | Same |
+| 13 | Generic Ulysses packing and local placement, exchanging only remote data | 3.032 -> 2.989 | 0.61 s (0.03 s) | correct | Generalises 09-12 |
+| 14 | Patch 08's compact video-only top-k extended to SP=2 | 3.194 -> 2.999 | 1.30 s (0.25 s) | correct | Patch 08's tie test applies |
+| 15 | Replay the unchanged NVFP4 feed-forward per layer from a CUDA graph (signature: weight pointers and versions, shapes, stream, autocast; eager fallback on any change or error) | 3.010 -> 2.957 | 0.91 s (0.20 s) | **correct for this workload only** | Antigravity: FastVideo's hook manager (activation tracing, shape tracking) wraps `forward` outside PyTorch's hook lists, so tracing breaks the capture or silently drops records on replayed steps; `FASTVIDEO_NVFP4_MM_BACKEND` / `_ROW_SPLIT` are read per call but not in the signature, so changing them replays a stale graph. Claude review: exact here; per-layer graph pools cost tens of GB per GPU; alternating resolutions re-capture every time. Needs an opt-in flag, a memory budget, and both fixes |
+| 16 | Feed the FFN graph's output straight into the gated residual (no clone) | 3.009 -> 2.940 | 0.90 s (0.20 s) | correct | Claude review: safe only while every consumer is done with the output before that layer's next replay; true for the denoise loop as written, not enforced |
+| 17 | Replay the NVFP4 QKV and gate projections plus fused qk-norm/RoPE from per-layer CUDA graphs | 3.005 -> 2.959 | 1.10 s (0.22 s) | correct | Same caveats as 15 |
+| 18 | Fused strided q/k/v/gate remote packing and local tiling; scatter only remote rows | 2.958 -> 2.902 | 1.89 s (0.26 s) | correct | |
+| 19 | Contiguous row/head partitions for the SP=2 gated return | 2.931 -> 2.901 | 1.25 s (0.26 s) | pending | |
+
+Lab seconds per video drift between iterations (the baseline is the median of the recent
+baselines on the same engine); the fresh-process table is the result.
 
 ## Not in this set
 

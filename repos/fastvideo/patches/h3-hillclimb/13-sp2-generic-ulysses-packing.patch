@@ -1,0 +1,161 @@
+diff --git a/fastvideo/distributed/communication_op.py b/fastvideo/distributed/communication_op.py
+index 502284f..5814084 100644
+--- a/fastvideo/distributed/communication_op.py
++++ b/fastvideo/distributed/communication_op.py
+@@ -28,8 +28,154 @@ def tensor_model_parallel_all_gather(input_: torch.Tensor, dim: int = -1) -> tor
+ def sequence_model_parallel_all_to_all_4D(input_: torch.Tensor,
+                                           scatter_dim: int = 2,
+                                           gather_dim: int = 1) -> torch.Tensor:
+-    """All-to-all communication of 4D tensors (e.g. QKV matrices) across sequence parallel group."""
+-    return get_sp_group().all_to_all_4D(input_, scatter_dim, gather_dim)
++    """SP=2 byte-preserving transport with fused local placement and packing."""
++    if (torch.compiler.is_compiling() or torch.is_grad_enabled()
++            or input_.requires_grad or input_.ndim != 4
++            or not input_.is_cuda or input_.dtype != torch.bfloat16
++            or input_.shape[-1] != 128 or input_.stride(-1) != 1
++            or any(size <= 0 for size in input_.shape)
++            or (scatter_dim, gather_dim) not in ((2, 1), (1, 2))
++            or get_sp_world_size() != 2):
++        return get_sp_group().all_to_all_4D(input_, scatter_dim, gather_dim)
++
++    import torch.distributed as dist
++
++    sp_group = get_sp_group()
++    group = getattr(sp_group, "device_group", None)
++    if (not dist.is_initialized()
++            or not isinstance(group, dist.ProcessGroup)
++            or dist.get_world_size(group) != 2
++            or dist.get_backend(group) != "nccl"
++            or torch.cuda.get_device_capability(input_.device) != (10, 0)
++            or input_.shape[scatter_dim] % 2):
++        return sp_group.all_to_all_4D(input_, scatter_dim, gather_dim)
++
++    rank = dist.get_rank(group)
++    if rank not in (0, 1):
++        return sp_group.all_to_all_4D(input_, scatter_dim, gather_dim)
++
++    batch, seq, heads, dim = input_.shape
++    mode = 0 if scatter_dim == 2 else 1
++    rows = seq if mode == 0 else seq // 2
++    chunk_heads = heads // 2 if mode == 0 else heads
++    output_shape = (
++        (batch, 2 * seq, chunk_heads, dim)
++        if mode == 0 else (batch, rows, 2 * heads, dim)
++    )
++    result = torch.empty(output_shape, dtype=input_.dtype, device=input_.device)
++    count = batch * rows * chunk_heads * dim
++    send = torch.empty((count,), dtype=input_.dtype, device=input_.device)
++    recv = torch.empty_like(send)
++    pack, unpack = _sp2_exact_transport_kernels()
++    grid = ((count + 511) // 512,)
++    pack[grid](
++        input_.view(torch.int16), send.view(torch.int16),
++        result.view(torch.int16),
++        input_.stride(0), input_.stride(1), input_.stride(2),
++        COUNT=count, ROWS=rows, HEADS=chunk_heads,
++        MODE=mode, RANK=rank, BLOCK=512, num_warps=4,
++    )
++    splits = [0, count] if rank == 0 else [count, 0]
++    dist.all_to_all_single(
++        recv, send,
++        output_split_sizes=splits,
++        input_split_sizes=splits,
++        group=group,
++    )
++    unpack[grid](
++        recv.view(torch.int16), result.view(torch.int16),
++        COUNT=count, ROWS=rows, HEADS=chunk_heads,
++        MODE=mode, RANK=rank, BLOCK=512, num_warps=4,
++    )
++    return result
++
++
++def _sp2_exact_transport_kernels():
++    """Lazily build integer-copy kernels for the two Ulysses permutations."""
++    kernels = getattr(_sp2_exact_transport_kernels, "_copy_kernels_v1", None)
++    if kernels is None:
++        g = globals()
++        g["_sp2_copy_triton"] = __import__("triton")
++        g["_sp2_copy_tl"] = __import__("triton.language").language
++
++        @g["_sp2_copy_triton"].jit
++        def pack_and_place(
++            Input, Send, Output,
++            SB, SS, SH,
++            COUNT: _sp2_copy_tl.constexpr,
++            ROWS: _sp2_copy_tl.constexpr,
++            HEADS: _sp2_copy_tl.constexpr,
++            MODE: _sp2_copy_tl.constexpr,
++            RANK: _sp2_copy_tl.constexpr,
++            BLOCK: _sp2_copy_tl.constexpr,
++        ):
++            x = (
++                _sp2_copy_tl.program_id(0).to(_sp2_copy_tl.int64) * BLOCK
++                + _sp2_copy_tl.arange(0, BLOCK)
++            )
++            valid = x < COUNT
++            d = x % 128
++            h = (x // 128) % HEADS
++            s = (x // (128 * HEADS)) % ROWS
++            b = x // (128 * HEADS * ROWS)
++
++            if MODE == 0:
++                local_src = b * SB + s * SS + (RANK * HEADS + h) * SH + d
++                remote_src = b * SB + s * SS + ((1 - RANK) * HEADS + h) * SH + d
++                local_dst = (
++                    ((b * (2 * ROWS) + RANK * ROWS + s) * HEADS + h)
++                    * 128 + d
++                )
++            else:
++                local_src = b * SB + (RANK * ROWS + s) * SS + h * SH + d
++                remote_src = b * SB + ((1 - RANK) * ROWS + s) * SS + h * SH + d
++                local_dst = (
++                    ((b * ROWS + s) * (2 * HEADS) + RANK * HEADS + h)
++                    * 128 + d
++                )
++
++            local_bits = _sp2_copy_tl.load(Input + local_src, mask=valid, other=0)
++            remote_bits = _sp2_copy_tl.load(Input + remote_src, mask=valid, other=0)
++            _sp2_copy_tl.store(Output + local_dst, local_bits, mask=valid)
++            _sp2_copy_tl.store(Send + x, remote_bits, mask=valid)
++
++        @g["_sp2_copy_triton"].jit
++        def place_remote(
++            Recv, Output,
++            COUNT: _sp2_copy_tl.constexpr,
++            ROWS: _sp2_copy_tl.constexpr,
++            HEADS: _sp2_copy_tl.constexpr,
++            MODE: _sp2_copy_tl.constexpr,
++            RANK: _sp2_copy_tl.constexpr,
++            BLOCK: _sp2_copy_tl.constexpr,
++        ):
++            x = (
++                _sp2_copy_tl.program_id(0).to(_sp2_copy_tl.int64) * BLOCK
++                + _sp2_copy_tl.arange(0, BLOCK)
++            )
++            valid = x < COUNT
++            d = x % 128
++            h = (x // 128) % HEADS
++            s = (x // (128 * HEADS)) % ROWS
++            b = x // (128 * HEADS * ROWS)
++
++            if MODE == 0:
++                dst = (
++                    ((b * (2 * ROWS) + (1 - RANK) * ROWS + s) * HEADS + h)
++                    * 128 + d
++                )
++            else:
++                dst = (
++                    ((b * ROWS + s) * (2 * HEADS) + (1 - RANK) * HEADS + h)
++                    * 128 + d
++                )
++
++            bits = _sp2_copy_tl.load(Recv + x, mask=valid, other=0)
++            _sp2_copy_tl.store(Output + dst, bits, mask=valid)
++
++        kernels = (pack_and_place, place_remote)
++        _sp2_exact_transport_kernels._copy_kernels_v1 = kernels
++    return kernels
+ 
+ 
+ def sequence_model_parallel_all_gather(input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
