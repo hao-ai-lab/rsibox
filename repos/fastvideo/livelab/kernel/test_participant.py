@@ -171,6 +171,38 @@ class LineMapChainTest(unittest.TestCase):
         self._chain("auto")
 
 
+class EditAddedDefinitionTest(unittest.TestCase):
+
+    def test_a_function_an_earlier_transaction_added_can_be_edited_again(self):
+        """Input: transaction a adds `helper` (and calls it from scale), transaction b edits
+        `helper`'s body. Expected: b commits and runs the new body; undoing b then a returns
+        scale's base code and removes helper. Fails without the fix: b aborts with
+        base_mismatch ("running code ..."), because the code of a definition a transaction
+        added was not counted as the participant's own (an overnight H3 hill-climb lost most
+        proposals this way: they tuned helpers that kept edits had added). Not: added classes'
+        methods (same path, not exercised here)."""
+        n = next(_n)
+        mod = f"kt_added{n}"
+        base = "def scale(x):\n    return x * 2\n"
+        (mod_obj,) = temp_modules(self, {mod: base})
+        p = C.LocalParticipant("core")
+        t1 = ("def helper(x):\n    return x + 1\n\n\n"
+              "def scale(x):\n    return helper(x) * 2\n")
+        self.assertTrue(p.prepare({"id": "a", "modules": {mod: {"source": t1}}})["ok"])
+        self.assertTrue(p.commit("a")["ok"])
+        self.assertEqual(mod_obj.scale(1), 4)
+        t2 = t1.replace("return x + 1", "return x + 5")
+        r = p.prepare({"id": "b", "modules": {mod: {"source": t2}}})
+        self.assertTrue(r["ok"], [f["check"] for f in r.get("findings", [])])
+        self.assertTrue(p.commit("b")["ok"])
+        self.assertEqual(mod_obj.scale(1), 12)
+        self.assertTrue(p.undo("b")["ok"])
+        self.assertEqual(mod_obj.scale(1), 4)
+        self.assertTrue(p.undo("a")["ok"])
+        self.assertEqual(mod_obj.scale(1), 2)
+        self.assertFalse(hasattr(mod_obj, "helper"))
+
+
 LAZY = '''import importlib
 
 DEP = "{dep}"

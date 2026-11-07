@@ -531,7 +531,11 @@ class LocalParticipant(Participant):
             self._done[txn] = staged
             self._sources[txn] = self._pending.pop(txn, {})
             self._maps[txn] = self._pending_maps.pop(txn, {})
-            self._codes[txn] = [c for st in staged for _, c, _, _ in st.swaps]
+            # own code: what the swaps put in, and the code of every definition the edit added
+            # (a later edit of an added function must not read as base_mismatch)
+            self._codes[txn] = ([c for st in staged for _, c, _, _ in st.swaps]
+                                + [c for st in staged for _, _, obj in st.adds
+                                   for c in _codes_of(obj)])
             self._cell_keys[txn] = armed
             self._state[txn] = "committed"
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
@@ -665,6 +669,20 @@ def _attr_names(scope):
             if isinstance(dv, dict) and not isinstance(v, (type, types.ModuleType,
                                                            types.FunctionType)):
                 out[f"{n}.{k}"] = set(dv)
+    return out
+
+
+def _codes_of(obj, depth=0):
+    """Code objects an added object runs: a function, a static/class method's function, a
+    decorator's __wrapped__, or a JIT wrapper's `fn` (Triton). Empty for anything else."""
+    if depth > 4 or obj is None:
+        return []
+    code = getattr(obj, "__code__", None)
+    out = [code] if isinstance(code, types.CodeType) else []
+    for attr in ("__func__", "__wrapped__", "fn"):
+        inner = getattr(obj, attr, None)
+        if inner is not None and inner is not obj:
+            out += _codes_of(inner, depth + 1)
     return out
 
 
