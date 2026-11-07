@@ -102,3 +102,10 @@ all-gather took 1.02 ms (profile), 7.5x the isolated 135 us: the cost is interfe
 schedule, not the NCCL settings. Use the probe to screen, then confirm the chosen setting with one
 restart.
 
+The bucket-size "win" is not one. In the 2-node lab (lr 3e-5, kept set or none), `--ddp-bucket-size 4e8`
+ran at 1,972-2,127 tokens/s/GPU against 1,500-2,096 for the default, but its loss left the default's
+curve from step 3 (14.82 vs 14.72; step 6 47.5 vs 14.9), identically with no edits, with the code edits,
+and with code edits plus the fused weight-gradient cell; each setting repeated itself to 1e-3. With DP 2
+the bucket size should not change the gradients. Not a valid speedup; cause not established (suspect:
+overlapped parameter all-gather with one 400M-element bucket).
+
