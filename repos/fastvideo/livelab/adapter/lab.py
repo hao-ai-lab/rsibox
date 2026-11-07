@@ -49,6 +49,14 @@ MODULES = (DEC, LAT, INP, f"{H3}.stages.minimax_h3_denoising",
 RPC_ERROR = "__fastvideo_rpc_error__"
 
 
+def finding(check, observed, expected):
+    """A kernel finding when the kernel catalogues the check; a plain one otherwise."""
+    try:
+        return F.finding(check, observed, expected)
+    except KeyError:
+        return {"check": check, "observed": str(observed), "expected": str(expected)}
+
+
 def module_file(name):
     spec = importlib.util.find_spec(name)
     return spec.origin if spec else None
@@ -312,6 +320,55 @@ class FastVideoLab:
                         "cost_s": round(time.perf_counter() - t0, 6)}
             res = [C._call(p, "reset", "R3") for p in self.co.participants]
             return {"ok": all(r["ok"] for r in res), "reset": ["cuda cache"],
+                    "cost_s": round(time.perf_counter() - t0, 6)}
+
+    def rebuild(self, patch):
+        """T1 restart: every warm worker re-imports the edited modules from `patch["files"]`
+        and rebuilds what was built from them (adapter/agent.py `rebuild`): for the edits the
+        R0 swap refuses (constructors, new fields, module constants, new classes). The edited
+        text becomes the new base: the session starts over (no live edits may be installed).
+        `{"revert": True}` rebuilds every module rebuilt so far back to its file on disk."""
+        t0 = time.perf_counter()
+        with self.lock:
+            refuse = None
+            if self.session.poisoned():
+                refuse = finding("session_poisoned", "the lab is poisoned", "a known state: respawn")
+            elif self.session.stack:
+                refuse = finding("live_edits_installed", f"{len(self.session.stack)} transaction(s)",
+                                   "uninstall the live edits before a rebuild")
+            revert = bool(patch.get("revert"))
+            files = ({m: read_module(m) for m in getattr(self, "rebuilt", {})} if revert
+                     else dict(patch.get("files") or {}))
+            if not files and refuse is None:
+                refuse = finding("patch_invalid", "no files", "at least one edited module")
+            if refuse is not None:
+                return {"ok": False, "outcome": "refused", "findings": [refuse], "ranks": {},
+                        "cost_s": round(time.perf_counter() - t0, 6)}
+            ranks = {}
+            for i in range(self.ranks):
+                try:
+                    ranks[f"rank{i}"] = self.rank_call(i, "rebuild", {"files": files})
+                except Exception as e:
+                    ranks[f"rank{i}"] = {"ok": False, "findings": [finding(
+                        "participant_failed", f"{type(e).__name__}: {e}", "the rank answers")]}
+            oks = [r.get("ok") for r in ranks.values()]
+            findings = [f for r in ranks.values() for f in r.get("findings", [])]
+            if any(oks) and not all(oks):              # ranks now run different code
+                self.session.fault("participant_failed", "rebuild applied on some ranks only",
+                                   "every rank rebuilt, or none")
+                outcome = "partial"
+            elif all(oks):
+                outcome = "rebuilt"
+                self.rebuilt = {} if revert else {**getattr(self, "rebuilt", {}), **files}
+                for m, text in files.items():
+                    self.base_text[m] = text
+                self.live_text = [{}]
+                self.session.recovered(self.co)        # the edited text is the new base
+            else:
+                outcome = "refused"
+            et = patch.get("edit_time")
+            return {"ok": outcome == "rebuilt", "outcome": outcome, "findings": findings,
+                    "ranks": ranks, "edit_to_rebuilt_s": round(time.time() - et, 4) if et else None,
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
     def uninstall(self, id=None):
