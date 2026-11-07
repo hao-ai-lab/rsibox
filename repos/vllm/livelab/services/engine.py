@@ -97,8 +97,9 @@ def engine_env(a, base=None):
     if a.fork:
         # The engine core and workers are forked, not spawned: they inherit the parent's
         # imports. vLLM falls back to spawn when the parent has initialized CUDA; fork_check()
-        # reports that. TODO(startup boundary): forksafe keeps CUDA uninitialized in the API
-        # server so the fork actually happens on servers that probe the GPU arch at import.
+        # reports that. A server forked from the zygote inherits forksafe.py, which keeps
+        # CUDA uninitialized in the API server when a library probes the GPU arch at import
+        # (FlashInfer at TP>1). TODO(startup boundary): the same for a direct start.
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
         # CuTe DSL probes the GPU arch with cuInit at import (from flashinfer), which makes a
         # forked child's CUDA fail. Give it the arch it would detect, from nvidia-smi, which
