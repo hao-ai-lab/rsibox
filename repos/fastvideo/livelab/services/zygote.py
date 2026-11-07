@@ -69,7 +69,14 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
     stale = [n for n in stale if n not in blocked]
     dropped = []
     if stale:
-        dropped = sorted(RB.dependents(set(stale), RB.import_graph(prefixes, modules)))
+        dropped = RB.dependents(set(stale), RB.import_graph(prefixes, modules))
+        if dropped & set(prefixes):
+            # the edit reached the package root (FastVideo's __init__ imports the entry points,
+            # which import the loader): a partial re-import would register FastVideo's presets
+            # again into the registry module it kept ("Duplicate preset registration"). Drop the
+            # whole package, the state a fresh process starts from (~15 s of imports).
+            dropped |= {n for n in modules if n.split(".")[0] in prefixes}
+        dropped = sorted(dropped)
         for n in dropped:
             modules.pop(n, None)
             RB._unbind(modules, n)
@@ -79,24 +86,28 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
 
 
 def _install_worker_hook():
-    """Runs in the server: wrap FastVideo's worker entry so each child refreshes first."""
-    from fastvideo.worker import multiproc_executor as M
-    orig = M.WorkerMultiprocProc.__dict__["worker_main"]
-    orig = orig.__func__ if isinstance(orig, staticmethod) else orig
+    """Runs in the server: each forked child refreshes before it unpickles its process object.
 
-    def worker_main(*args, **kwargs):
+    The child's process object (target and kwargs: FastVideo's args, pipes) is unpickled by
+    `multiprocessing.spawn._main` right after `prepare()`. Refreshing inside the target would
+    be too late: the kwargs would already be instances of the old classes, which the
+    re-imported code does not recognize. So the hook wraps `spawn.prepare`: refresh, then (with
+    a holder) hook the loader the child will use, then unpickle."""
+    import multiprocessing.spawn as SP
+    orig = SP.prepare
+
+    def prepare(data):
         rep = refresh_stale()
         _REPORT.update(rep)
         if rep["stale"] or rep["blocked"]:
-            print(f"[fastrsi-zygote] pid {os.getpid()} refreshed {rep}", file=sys.stderr, flush=True)
-        from fastvideo.worker import multiproc_executor as M2        # the new one if dropped
-        fn = M2.WorkerMultiprocProc.__dict__["worker_main"]
-        fn = fn.__func__ if isinstance(fn, staticmethod) else fn
-        if getattr(fn, "_fastrsi_zygote", False):
-            fn = orig
-        return fn(*args, **kwargs)
-    worker_main._fastrsi_zygote = True
-    M.WorkerMultiprocProc.worker_main = staticmethod(worker_main)
+            print(f"[fastrsi-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
+                  f"dropped={len(rep['dropped'])} blocked={rep['blocked']} in {rep['seconds']} s",
+                  file=sys.stderr, flush=True)
+        if os.environ.get("FASTRSI_HOLDER_SOCK"):
+            from services import holder
+            holder.install_loader_hook(os.environ["FASTRSI_HOLDER_SOCK"])
+        return orig(data)
+    SP.prepare = prepare
 
 
 def _capability():
@@ -176,6 +187,7 @@ def enable(preload=None):
     """Make FastVideo fork its workers from a preloaded forkserver (call in the lab host before
     building the first generator). Returns the preload list."""
     preload = [m for m in (preload or PRELOAD) if m != "services.zygote"]
+    preload += [m for m in os.environ.get("FASTRSI_ZYGOTE_EXTRA", "").split(",") if m and m not in preload]
     os.environ["FASTVIDEO_WORKER_MULTIPROC_METHOD"] = "forkserver"
     # FastVideo calls torch.cuda.is_available() at import; through the CUDA runtime that poisons
     # every later fork, through NVML it does not

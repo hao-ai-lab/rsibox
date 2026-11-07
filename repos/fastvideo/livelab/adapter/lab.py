@@ -128,7 +128,7 @@ class FastVideoLab:
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
     `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
     `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
-    `reset("respawn")` skips the workers' imports (T1b). `holder`: also keep the loaded DiT and
+    `reset("respawn")` skips the workers' imports (zygote respawn). `holder`: also keep the loaded DiT and
     text encoder in a holder process (services/holder.py) that respawned workers map by CUDA
     IPC instead of loading; implies `zygote`."""
     name = "fastvideo"
@@ -346,7 +346,7 @@ class FastVideoLab:
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
     def rebuild(self, patch):
-        """T1 restart: every warm worker re-imports the edited modules from `patch["files"]`
+        """In-place rebuild: every warm worker re-imports the edited modules from `patch["files"]`
         and rebuilds what was built from them (adapter/agent.py `rebuild`): for the edits the
         R0 swap refuses (constructors, new fields, module constants, new classes). The edited
         text becomes the new base: the session starts over (no live edits may be installed).
