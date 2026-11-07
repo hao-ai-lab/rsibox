@@ -1,8 +1,8 @@
 """The conformance cases test labs; this file tests the cases.
 
 A case is only worth something if a lab without the property fails it. Each test below runs a
-case against a small fake lab twice: an honest one, which must pass, and one that lacks exactly
-the property the case names, which must fail. The fakes are not live labs (their "code" is one
+case against an honest fake lab, which must pass, and, where the test has one, a fake lab that
+lacks exactly the property the case names, which must fail. The fakes are not live labs (their "code" is one
 number per participant); they exercise the cases' own logic, nothing else.
 
 Run from template/livelab:  python3 -m unittest discover -s conformance -t . -v

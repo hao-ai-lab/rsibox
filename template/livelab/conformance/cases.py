@@ -307,7 +307,8 @@ XFAIL = {"toy": {}}
 
 
 def run(name, make_lab):
-    """Run one case on a new lab. Returns {"case", "result", "seconds", "evidence"}."""
+    """Run one case on a new lab. Returns {"case", "result", "seconds", "evidence", "error",
+    "xfail_reason"}."""
     lab, t0 = make_lab(), time.perf_counter()
     reason = XFAIL.get(lab.name, {}).get(name)
     try:
