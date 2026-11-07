@@ -19,7 +19,8 @@ Contract:
 - A rank gets the variables torchrun sets (RANK, LOCAL_RANK, WORLD_SIZE, LOCAL_WORLD_SIZE,
   GROUP_RANK, MASTER_ADDR, MASTER_PORT, TORCHELASTIC_RUN_ID, and OMP_NUM_THREADS=1 for more than
   one rank unless set) plus the request's `env`, its own session (setsid) and its stdout/stderr
-  in <log-dir>/rank<r>.log. OMP_NUM_THREADS is applied to torch's thread pool in the rank
+  in <log-dir>/rank<r>.log; with `cpus` (one CPU list per local rank) it is pinned to its list
+  right after the fork (a fork otherwise keeps the zygote's affinity). OMP_NUM_THREADS is applied to torch's thread pool in the rank
   (torch.set_num_threads), since torch read the variable when the zygote imported it.
 - When a rank exits non-zero, the zygote terminates the other ranks' process trees by PID (as
   torchrun does), never by a process group it shares.
@@ -254,6 +255,27 @@ def rank_env(req, local_rank):
     return env
 
 
+def cpu_list(spec):
+    """'0-3,8,10-11' -> {0, 1, 2, 3, 8, 10, 11}."""
+    out = set()
+    for part in spec.split(","):
+        a, _, b = part.strip().partition("-")
+        out.update(range(int(a), int(b or a) + 1))
+    return out
+
+
+def bind(req, local_rank):
+    """Pin the rank to its CPU list (`cpus`: one 'a-b,c' string per local rank) before CUDA and
+    its threads start. A fork keeps the zygote's affinity; without a list nothing changes,
+    as under torchrun. Returns the CPUs set, or None."""
+    lists = req.get("cpus") or []
+    if local_rank < len(lists) and lists[local_rank]:
+        cpus = cpu_list(lists[local_rank])
+        os.sched_setaffinity(0, cpus)
+        return sorted(cpus)
+    return None
+
+
 def set_threads(env=os.environ):
     """Apply OMP_NUM_THREADS to torch's intra-op pool in a forked rank. OpenMP and torch read
     it when they load, in the zygote, so setting the variable after the fork alone does
@@ -276,6 +298,7 @@ def _child(req, local_rank, lsock, conn):
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGCHLD):
             signal.signal(s, signal.SIG_DFL)
         os.environ.update(rank_env(req, local_rank))
+        bind(req, local_rank)
         set_threads()
         d = req.get("log_dir") or "."
         os.makedirs(d, exist_ok=True)
@@ -436,6 +459,7 @@ def main(argv=None):
     p.add_argument("--accept", default="")
     p.add_argument("--entry", default="run", choices=["run", "script"])
     p.add_argument("--timeout", type=float, default=0)
+    p.add_argument("--cpus", default="", help="per local rank CPU lists, ';'-separated: '0-71;72-143'")
     argv = list(sys.argv[1:] if argv is None else argv)
     rest = argv[argv.index("--") + 1:] if "--" in argv else []
     a = p.parse_args(argv[:len(argv) - len(rest) - (1 if rest or "--" in argv else 0)])
@@ -450,6 +474,7 @@ def main(argv=None):
     req = {"argv": rest, "nproc": a.nproc, "port": a.port, "log_dir": a.log_dir, "cwd": a.cwd,
            "env": dict(kv.split("=", 1) for kv in a.env), "entry": a.entry,
            "accept": [x for x in a.accept.split(",") if x], "timeout": a.timeout,
+           "cpus": [x for x in a.cpus.split(";")] if a.cpus else [],
            "t0": float(os.environ.get("FASTRSI_T0") or time.time())}
     rc = 1
     for ev in request(a.sock, req):

@@ -18,7 +18,8 @@ HEAVY = "import os, time\nPID = os.getpid()\nT = time.time()\n"
 SCRIPT = """import heavy, json, os, sys
 out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_PORT", "MY_FLAG",
                                       "OMP_NUM_THREADS")}
-out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:])
+out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:],
+           cpus=sorted(os.sched_getaffinity(0)))
 json.dump(out, open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w"))
 if os.environ.get("FAIL_RANK") == os.environ["RANK"]:
     sys.exit(7)
@@ -120,8 +121,22 @@ class Zygote(unittest.TestCase):
         os.rename(os.path.join(ov, "heavy.py"), os.path.join(ov, "light.py"))
         self.assertEqual(self.start(env={"FASTRSI_OVERLAY": ov})[-1]["rc"], [0, 0])
 
+    def test_each_rank_is_pinned_to_its_cpu_list(self):
+        """A fork keeps the zygote's CPU affinity; ranks on GPUs of different sockets need
+        their own. Input: cpus ["0", "0"] for 2 ranks (CPU 0 always exists). Expect: each
+        rank's sched_getaffinity == [0]; without `cpus`, the zygote's full set."""
+        self.start(cpus=["0", "0"])
+        for r in (0, 1):
+            self.assertEqual(json.load(open(os.path.join(self.d, f"r{r}.json")))["cpus"], [0])
+        self.start()
+        full = sorted(os.sched_getaffinity(0))
+        self.assertEqual(json.load(open(os.path.join(self.d, "r1.json")))["cpus"], full)
+
 
 class Pieces(unittest.TestCase):
+    def test_cpu_list_parses_ranges(self):
+        self.assertEqual(zygote.cpu_list("0-3,8,10-11"), {0, 1, 2, 3, 8, 10, 11})
+
     def test_set_threads_applies_omp_num_threads_to_torch_in_the_rank(self):
         """torch reads OMP_NUM_THREADS when it loads (in the zygote), so a forked rank would
         keep the zygote's pool (every core) and run its CPU work slower than under torchrun.
