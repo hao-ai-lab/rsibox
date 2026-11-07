@@ -60,9 +60,13 @@ At 14B (Qwen3-14B architecture, TP 2, hill-climb lab, 2026-11-07):
 | Start state S in pinned host memory | | 96.3 GiB per rank (bf16 weights, fp32 masters, two fp32 moments), 646 state tensors zeroed |
 | Restore S before a check | 0.25-0.27 | |
 | `check(steps=8)` | 43-44 | 8 train steps of about 4.4 s, plus restore |
+| Lab at Qwen3-32B architecture, TP 4 on 4 GB200 | | start state S 106.8 GiB per rank, restore 0.79 s, setup 31 s (2 warm-up steps 14.8 + 7.7 s), 8-step check about 65 s |
 | A client request through the NFS mailbox from another host | 5-6 wall | copy of the request, a remote Python start and the mailbox round trip (26-34 ms of it) |
 
 ## Repeatability
+
+32B architecture, TP 4, lr 3e-5, two identical 8-step checks from S (2026-11-07): loss differed by
+up to 4.5e-3 (step 8) and grad norm by 1.4e-2; tokens/s/GPU 2,398-2,409.
 
 14B, no deterministic mode, three identical 8-step checks from S (2026-11-07): at lr 3e-4 the loss
 spiked and differed by up to 4% at step 8; at lr 3e-5 it differed by at most 0.15% in loss and about

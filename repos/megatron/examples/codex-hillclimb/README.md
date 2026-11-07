@@ -31,6 +31,19 @@ TE's fused path). The supported way is the flag `--gradient-accumulation-fusion`
 rebuild the model from the in-memory start state with the flag on), which on this aarch64 build
 also needs the LM head's non-TE path to work without apex.
 
+## The kept set on the Qwen3-32B architecture (TP 4, 4 GB200)
+
+Same lab, same 8-step checks and lr, Qwen3-32B architecture at TP 4 (our 2026-11-07 07:38-07:54 run):
+the three kept edits installed cleanly (iterations 11 + 61 in 0.32 s, the iteration-12 cell in
+0.04 s, all four ranks). Kept set vs base, 4 paired rounds: **median +7.1% tokens/s/GPU** (1.089,
+1.069, 1.055, 1.074; kept 2,475-2,521 vs base 2,306-2,389).
+
+The loss gate is tight at this size: two identical base checks differed by 4.5e-3 in loss (step 8:
+15.128 vs 15.059) and 1.4e-2 in grad norm. Two rounds were inside the gate (loss 2.0e-3 and 2.6e-3),
+two just outside (5.2e-3 and 5.9e-3); grad norm within 0.7-2.0% (gate 5%). Read as: the kept set
+changes loss by about as much as the base changes against itself here; a tighter gate for 32B needs
+deterministic kernels or more steps. Lab start state 106.8 GiB per rank, restore 0.79 s.
+
 ## Where the time is (profile of 2 steps, rank 0, after iterations 11 and 12)
 
 Sequence-parallel all-gather 21.5% and reduce-scatter 14.7% of CUDA time (NCCL ring, LL protocol,
