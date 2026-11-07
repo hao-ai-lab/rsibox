@@ -321,8 +321,7 @@ def start(a, vargv):
     if not found:
         found, pre = preflight(a, v, env)
     if found:
-        print(json.dumps({"findings": found, **pre, "vllm_args": v, "note": "not started"},
-                         indent=1))
+        print(json.dumps({"findings": found, **pre, "vllm_args": v, "note": "not started"}))
         sys.exit(2)
     cmd, port = serve_cmd(a, vargv, v), v["args"]["port"]
     rep = {"port": port, "vllm_args": v, **pre}
@@ -335,7 +334,7 @@ def start(a, vargv):
             "/health as this start's; the new server then fails to bind",
             "actions": ["pick a free port (cost: none)", "--accept-port-in-use: start anyway "
                         "(the health result is then not about this engine)"],
-            "risk": "a start reported healthy that never ran"}, "note": "not started"}, indent=1))
+            "risk": "a start reported healthy that never ran"}, "note": "not started"}))
         sys.exit(2)
     Path(a.log).parent.mkdir(parents=True, exist_ok=True)
     t_launch = time.time()
@@ -348,7 +347,7 @@ def start(a, vargv):
         if not reply.get("ok"):
             print(json.dumps({"zygote_findings": reply.get("findings"), "error": reply.get("error"),
                               "note": "not started; act on the findings or pass "
-                                      "--zygote-accept"}, indent=1))
+                                      "--zygote-accept"}))
             sys.exit(2)
         out = {"pid": reply["pid"], "cmd": cmd, "t_launch": t_launch, **rep, "zygote": a.zygote,
                "zygote_check_seconds": reply.get("check_seconds"),
@@ -404,22 +403,18 @@ def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
 
 
 SPAWN_FORCED = "We must use the `spawn` multiprocessing start method"
-SPAWNED = "fastrsi forksafe: spawned interpreter"
 
 
 def fork_check(log):
     """With --fork, every process after the API server must be forked. vLLM logs SPAWN_FORCED
-    (with its reason) when it falls back to spawn. SPAWNED lines come from the forksafe startup
-    hook, one per spawned interpreter; without that hook their count is always 0, so
-    `spawned_probe` says whether the count means anything."""
+    (with its reason) when it falls back to spawn; that line is the only spawn signal read."""
     text = open(log, errors="replace").read()
-    return {"spawn_forced": SPAWN_FORCED in text, "spawned_interpreters": text.count(SPAWNED),
-            "spawned_probe": os.environ.get("FASTRSI_FORKSAFE") == "1"}
+    return {"spawn_forced": SPAWN_FORCED in text}
 
 
 def fork_finding(fc):
     """None when the fork applied, else the finding (checks advise; the server still runs)."""
-    if not fc["spawn_forced"] and fc["spawned_interpreters"] == 0:
+    if not fc["spawn_forced"]:
         return None
     return {"check": "fork", "observed": fc,
             "expected": "no spawned interpreter after the API server",

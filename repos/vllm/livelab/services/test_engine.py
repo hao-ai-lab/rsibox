@@ -98,6 +98,13 @@ def _short_dir():
     return tempfile.mkdtemp(prefix="eng", dir="/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
 
 
+def _one_json_line(stdout):
+    """engine.py's stdout contract: one JSON line (callers read it line by line)."""
+    lines = stdout.splitlines()
+    assert len(lines) == 1, f"{len(lines)} lines on stdout, expected one JSON line:\n{stdout}"
+    return json.loads(lines[0])
+
+
 def _stop(pid):
     try:
         os.kill(pid, signal.SIGKILL)
@@ -122,7 +129,7 @@ def test_busy_port_is_a_finding_and_nothing_starts():
     """Input: a listener holds 127.0.0.1:P; `engine.py start --port P`. Expect: a port_in_use
     finding, exit 2, the fake vllm never ran (without the check wait_healthy read the other
     server's /health and reported a start healthy after ~0.01 s). Not covered: a port taken
-    after the check (a race)."""
+    after the check (a race). The finding is one JSON line on stdout (before: indented)."""
     srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
     port = srv.getsockname()[1]
     with tempfile.TemporaryDirectory() as d:
@@ -134,7 +141,7 @@ def test_busy_port_is_a_finding_and_nothing_starts():
                            env=stub_env(d, FAKE_OUT=out))
         srv.close()
         assert r.returncode == 2, r.stdout + r.stderr
-        assert json.loads(r.stdout)["finding"]["check"] == "port_in_use"
+        assert _one_json_line(r.stdout)["finding"]["check"] == "port_in_use"
         assert not os.path.exists(out)
 
 
@@ -188,7 +195,9 @@ def test_an_argv_vllm_would_not_serve_as_meant_is_a_finding_and_nothing_starts()
     """Input: three starts: no model (only `--port`), a flag vLLM rejects, `--host 0.0.0.0`.
     Expect: exit 2, findings vllm_model (naming vLLM's default model), vllm_args (vLLM's
     message) and vllm_host (naming 0.0.0.0); the fake vllm never ran. Before: the launcher
-    passed what it had and the server served vLLM's default model, or exited on the flag."""
+    passed what it had and the server served vLLM's default model, or exited on the flag.
+    Each refusal is one JSON line on stdout, as engine.py's docstring promises (before: an
+    indented multi-line dump)."""
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM)
         out = os.path.join(d, "ran.json")
@@ -199,7 +208,7 @@ def test_an_argv_vllm_would_not_serve_as_meant_is_a_finding_and_nothing_starts()
                                capture_output=True, text=True, timeout=60,
                                env=stub_env(d, FAKE_OUT=out))
             assert r.returncode == 2, r.stdout + r.stderr
-            f = json.loads(r.stdout)["findings"][0]
+            f = _one_json_line(r.stdout)["findings"][0]
             seen[f["check"]] = f["observed"]
         assert "Qwen/Qwen3-0.6B" in seen["vllm_model"]
         assert "--no-such-flag" in seen["vllm_args"]
@@ -211,8 +220,10 @@ def test_zygote_runs_with_the_engine_env():
     """Input: `engine.py zygote` starts a real zygote.py; then the zygote's own env check is
     asked about (1) the env a start with the same options builds and (2) one with another
     cache root. Expect: (1) ok with no env finding, also through `start --zygote-check`
-    (exit 0); (2) an env finding naming VLLM_CACHE_ROOT. Proves the zygote is started with
-    engine_env(); not: a fork of a real `vllm serve` (GPU receipt)."""
+    (exit 0); (2) an env finding naming VLLM_CACHE_ROOT, open and so not in
+    "accepted_findings" (before: every finding was listed there, accepted or not); with
+    accept=["env"] it is ok and the finding moves to "accepted_findings". Proves the zygote is
+    started with engine_env(); not: a fork of a real `vllm serve` (GPU receipt)."""
     d = _short_dir()
     sock = os.path.join(d, "z.sock")
     zpy = _script(d, "python", FAKE_PYTHON)
@@ -232,6 +243,10 @@ def test_zygote_runs_with_the_engine_env():
         assert other["ok"] is False
         assert other["findings"][0]["check"] == "env"
         assert "VLLM_CACHE_ROOT" in other["findings"][0]["observed"]
+        assert other["accepted_findings"] == [], other
+        acc = zygote.check(sock, engine.engine_env(a2, base), accept=["env"])
+        assert acc["ok"] is True and acc["findings"] == [], acc
+        assert [f["check"] for f in acc["accepted_findings"]] == ["env"], acc
         chk = subprocess.run([sys.executable, ENGINE, "start", "m", "--port",
                               str(_free_port()), "--cache-root", cache, "--log",
                               os.path.join(d, "s.log"), "--zygote", sock, "--zygote-check"],
@@ -288,8 +303,10 @@ def test_zygote_parse_reads_an_edit_to_vllms_argument_code():
     names the parser's module (before: the child parsed with the zygote's pre-edit parser
     and rejected the flag); (3) `engine.py start --zygote` exits 2 with a `zygote_parse`
     finding carrying the SyntaxError (before: a `vllm_args` finding, "fix the vLLM flags"),
-    and nothing started. Not: a refresh of the real vLLM's argument modules (they are the same
-    refresh as a fork's, test_zygote_refresh.py)."""
+    and nothing started; (4) a start of `m` with another cache root: the parse passes, the
+    zygote refuses the fork with an env finding, exit 2 and one JSON line on stdout (before:
+    an indented multi-line dump). Not: a refresh of the real vLLM's argument modules (they are
+    the same refresh as a fork's, test_zygote_refresh.py)."""
     d = _short_dir()
     sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
     zpy = _script(d, "python", FAKE_PYTHON.replace('sys.modules["vllm"] = None\n', ""))
@@ -322,13 +339,23 @@ def test_zygote_parse_reads_an_edit_to_vllms_argument_code():
         assert [x["check"] for x in f] == ["zygote_parse"], f
         assert "SyntaxError" in f[0]["observed"], f
         assert not os.path.exists(os.path.join(d, "s.log"))
+        cli.write_text(text)
+        out = subprocess.run([sys.executable, ENGINE, "start", "--cache-root",
+                              os.path.join(d, "other"), "--log", os.path.join(d, "o.log"),
+                              "--zygote", sock, "m", "--port", str(_free_port())],
+                             capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        zf = _one_json_line(out.stdout)["zygote_findings"]
+        assert [x["check"] for x in zf] == ["env"], zf
     finally:
         _stop(rep["pid"])
 
 
 def test_fork_check_reads_vllms_spawn_fallback():
     """Input: a server log where vLLM fell back to spawn, and one where it did not. Expect:
-    spawn_forced and a fork finding for the first; none for the second."""
+    spawn_forced and a fork finding for the first; none for the second, and fork_check reports
+    only that signal (before: it also reported a count of a "spawned interpreter" line and a
+    FASTRSI_FORKSAFE "probe" that nothing on main prints or sets, so the count was always 0)."""
     with tempfile.TemporaryDirectory() as d:
         bad, good = os.path.join(d, "bad.log"), os.path.join(d, "good.log")
         Path(bad).write_text("WARNING We must use the `spawn` multiprocessing start method. "
@@ -337,4 +364,4 @@ def test_fork_check_reads_vllms_spawn_fallback():
         Path(good).write_text("INFO Application startup complete.\n")
         fb, fg = engine.fork_check(bad), engine.fork_check(good)
         assert fb["spawn_forced"] is True and engine.fork_finding(fb)["check"] == "fork"
-        assert fg["spawn_forced"] is False and engine.fork_finding(fg) is None
+        assert fg == {"spawn_forced": False} and engine.fork_finding(fg) is None
