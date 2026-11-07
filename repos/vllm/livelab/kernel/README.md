@@ -215,6 +215,8 @@ Each test's docstring says what it proves and what it does not.
 | `test_a_rank_missing_from_proof_is_in_the_receipt` | a rank missing from the post-commit proof dropped from the receipt, which then says the ranks agree |
 | `test_code_changed_outside_the_journal_poisons_the_session` | a lab that says "edited" while it runs code no transaction installed |
 | `test_hung_commit_ends_the_gap_at_the_deadline` | a rank that hangs in commit and stalls every step |
+| `test_install_after_an_unjournaled_edit_is_refused` | an install that adopts a hand edit made since the last status() as the expected code |
+| `test_no_fingerprint_never_verifies` | a participant with no fingerprint passing verify because none was expected either |
 
 The conformance cases c0-c10 (`template/livelab/conformance/cases.py`) run against the toy
 lab in CI; all 11 pass (no XFAIL).

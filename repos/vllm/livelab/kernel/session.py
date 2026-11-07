@@ -8,7 +8,7 @@ the interface's `status()` needs:
 - the code fingerprint every participant should show now (`fingerprint(modules)`: content
   hash and code object id of every function the modules' namespaces reach). It is recorded
   at the start and after every commit, and checked after every abort, rollback and undo,
-  and on every `status()`;
+  before every `install` and on every `status()`;
 - poison: findings that put the session in a state the host cannot prove. Set by a
   fingerprint that differs from the expected one (`tampered`: code changed outside the
   journal, or a participant that does not answer), by an undo that failed, by a transaction
@@ -66,6 +66,8 @@ class Session:
                            if fp.get(p, {}).get(k) != (want or {}).get(p, {}).get(k)})
             self.fault("tampered", f"{len(diff)} function(s) differ: {diff[:5]}",
                        "the code the last commit or undo left")
+        if fp is None:      # no fingerprint proves nothing, even when none was expected
+            return F.not_ok("no fingerprint", self.poison, fingerprint=None)
         return F.ok(fingerprint=self.digest(fp)) if fp == want else \
             F.not_ok("fingerprint differs", self.poison, fingerprint=self.digest(fp))
 
@@ -98,6 +100,10 @@ class Session:
     def install(self, plan, **kw):
         """One transaction. Returns the coordinator's result plus `state`."""
         if self.poisoned():
+            return self._refuse("install")
+        # code changed outside the journal since the last commit or undo: refuse before the
+        # transaction, or its commit would record the tampered code as expected
+        if not self.verify()["ok"]:
             return self._refuse("install")
         res = self.co.run(plan, **kw)
         outcome = res["outcome"]

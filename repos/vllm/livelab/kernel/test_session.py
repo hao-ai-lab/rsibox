@@ -49,6 +49,45 @@ class SessionTest(unittest.TestCase):
         self.assertTrue(sess.uninstall()["ok"])
         self.assertEqual(sess.state(), "poisoned")
 
+    def test_install_after_an_unjournaled_edit_is_refused(self):
+        """Input: a session over one rank at base; someone rebinds Engine.drain.__code__ by
+        hand; with no status() call in between, an install of an edit to Engine.step.
+        Expected: refused with session_poisoned, a `tampered` finding naming Engine.drain,
+        Engine.step untouched. Fails before the fix: the install committed and recorded the
+        hand edit as the code the session expects, so status() then said "edited"."""
+        name, eng, _ = fresh("tamper2")
+        e = eng.Engine()
+        sess = SS.Session(C.Coordinator([C.LocalParticipant("rank0", alias={"toy": name})],
+                                        phase2_deadline_s=None), ["toy.engine"])
+        eng.Engine.drain.__code__ = eng.Engine.drain.__code__.replace(
+            co_consts=eng.Engine.drain.__code__.co_consts + ("by hand",))   # by hand
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], [f["check"] for f in res.get("findings", [])], e.step(3)),
+                         ("refused", ["session_poisoned"], 17))
+        self.assertEqual([f["check"] for f in sess.poisoned()], ["tampered"])
+        self.assertIn("toy.engine:Engine.drain", sess.poisoned()[0]["observed"])
+        self.assertEqual(sess.status()["state"], "poisoned")
+
+    def test_no_fingerprint_never_verifies(self):
+        """Input: a session whose only participant cannot give a fingerprint (its call
+        fails), so the expected one is None too. Expected: verify() is not ok and the session
+        is poisoned with `tampered`. Fails before the fix: verify() said ok, because the
+        missing fingerprint equalled the missing expected one (None == None)."""
+        name, _, _ = fresh("nofp")
+        lp = C.LocalParticipant("rank0", alias={"toy": name})
+
+        def call(method, payload):
+            if method == "fingerprint":
+                return {"ok": False, "error": "rank0 lost"}
+            return getattr(lp, method)(payload)
+        sess = SS.Session(C.Coordinator([C.CallParticipant("rank0", call)],
+                                        phase2_deadline_s=None), ["toy.engine"])
+        v = sess.verify()
+        self.assertEqual((v["ok"], v["fingerprint"], sess.state()), (False, None, "poisoned"))
+        self.assertEqual({f["check"] for f in sess.poisoned()}, {"tampered"})
+
     def test_hung_commit_ends_the_gap_at_the_deadline(self):
         """Proves: with steps running, a rank that hangs 0.6 s in commit does not stall the loop: the gap ends within the 0.2 s deadline, rank0's commit is undone in it, no step ever runs mixed versions (not even after the late commit arrives: it is refused), the outcome is definite (rolled back, state aborted) and the host and session are poisoned (install refused, undo allowed). Not: a participant stuck inside apply (its late switch is undone by the queued undo, after it ran)."""
         cl, ps, lps = self._cluster("deadline", gap_mode=True, slow={"rank1": {"commit": 0.6}})
