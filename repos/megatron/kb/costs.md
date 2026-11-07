@@ -109,3 +109,45 @@ and with code edits plus the fused weight-gradient cell; each setting repeated i
 the bucket size should not change the gradients. Not a valid speedup; cause not established (suspect:
 overlapped parameter all-gather with one 400M-element bucket).
 
+## CPU socket placement on a GB200 node
+
+Each node has two CPU sockets. GPUs 0 and 1 are attached to socket 0 (cores 0-71) and GPUs 2 and 3 to
+socket 1 (cores 72-143), all four on NVLink (NV18). Our training processes were not bound to cores, so
+any of the 144 could run them. Source: our 2026-11-07 hill-climb lab, 14B TP 2, two jobs on one node:
+the base on GPUs 0,1 and T1 candidates on GPUs 2,3.
+
+| Job, GPUs | CPU binding | tokens/s/GPU (fastest 3 of 8 steps) |
+|---|---|---|
+| base, 0,1 | none | 6,694-6,801 (7,134-7,537 earlier the same day) |
+| candidate, 2,3, same code | none | 4,857-4,862 (0.71-0.73 of the base) |
+| candidate, 2,3, same code | `taskset` to socket 1 from start | 7,553-7,569 |
+| base, 0,1, bound to socket 0 after it started | `taskset -ap` on the running ranks | 6,725-6,740 (candidate / base 1.12) |
+
+Clocks were at maximum on all four GPUs with no throttle reasons, and the other processes on the GPUs
+did no work. The unbound candidate also took 6.5 s, against 2.6 s, to snapshot its start state to
+pinned host memory. Binding a job's CPUs to its GPUs' socket from the start made it 11-56% faster.
+Rebinding a running job did not recover the same speed, because memory it had already allocated
+stayed where it was. Two jobs on the two GPU pairs of one node therefore differ by a fixed factor:
+the hill-climb measures that factor with a no-op restart and divides it out of every cross-pair A/B.
+
+## T1 in the hill-climb: a fresh candidate job next to the running base
+
+The harness offers launch-flag changes (T1) next to live swaps (T0). The base lab stays on GPUs 0,1.
+For each T1 candidate, a job on GPUs 2,3 starts with the flags from the same seed and start state.
+Checks then alternate between the candidate job and the base, and the ratio is divided by the measured
+GPU-pair factor (above). Source: our 2026-11-07 hill-climb lab, 14B TP 2.
+
+| Step | Seconds | Notes |
+|---|---|---|
+| Request to lab ready, torchrun restart | 73.1-88.8 | about 45 s to the first step, plus 25 s of lab setup (warm-up 15, restore + zero + snapshot 5-8, snapshot 2.6-6.5) |
+| Paired checks, 2 pairs of 8 steps | about 175 | the same as for a T0 candidate |
+| Exit of the candidate job | 2-15 | |
+| A no-op restart to measure the GPU-pair factor | about 300 | before the first T1 candidate, then every 6 |
+
+## Upstream PR replay
+
+Six merged upstream PRs through T0 (`examples/upstream-replay/`): 218 s in all, including two 4-step
+base checks. Installs took 0.07-0.60 s, refusals included. T1 for a refused PR: restart 79-89 s, then
+one 8-step check and exit, about 3.5-7.5 min in all. The placement and compile check of a fuzzy-applied
+diff takes about 1 s and needs no GPU.
+
