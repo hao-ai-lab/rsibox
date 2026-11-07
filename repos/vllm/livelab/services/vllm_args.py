@@ -23,7 +23,7 @@ import argparse, contextlib, io, sys, time
 
 # What the launcher reads back: dest names of vLLM's parser.
 FIELDS = ("model", "port", "host", "tensor_parallel_size", "load_format", "enforce_eager",
-          "worker_cls")
+          "worker_cls", "model_loader_extra_config")
 _UNSET = object()
 
 

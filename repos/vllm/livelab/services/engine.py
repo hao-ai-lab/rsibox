@@ -3,7 +3,7 @@ it answers /health, and report whether its processes were forked or spawned.
 
 Usage:
   python3 engine.py start --cache-root C --log serve.log [--fork] [--zygote SOCK] \
-      MODEL [any `vllm serve` flag: --port P -tp N --max-model-len L ...]
+      [--weights] [--kvplan[=DIR]] MODEL [any `vllm serve` flag: --port P -tp N ...]
   python3 engine.py zygote --python <venv python> --zygote SOCK --cache-root C --log z.log \
       [--fork] [--zygote-modules FILE]
   python3 engine.py start ... --zygote SOCK --zygote-check   # would the zygote fork it now?
@@ -28,6 +28,19 @@ Contract:
   too, so a start that matches the zygote's settings passes the zygote's "env" check.
 - Weights load with vLLM's default load format (`auto`: from disk) unless the argv asks for
   another one.
+- A holder flag adds the vLLM flag its holder needs, unless the argv set that flag itself
+  ("explicit": given in the argv, even at vLLM's default). An explicit value the holder cannot
+  use is a finding naming both values, and nothing starts:
+  - --weights appends `--load-format ipc_cache` (and the loader config, unless the argv has
+    `--model-loader-extra-config`); an explicit `--load-format` other than ipc_cache conflicts.
+    With ipc_cache (from --weights or the argv) the weights daemon of weights.py is probed
+    first: when none answers for a GPU of this engine, the launcher prints a weights_daemon
+    finding (exit 2) instead of a start that waits 300 s.
+  - --kvplan appends `--worker-cls kvplan.KVPlanWorker`; an explicit other `--worker-cls`
+    conflicts. It reuses the KV plan of an earlier start with the same config (kvplan.py), so
+    the profile run of startup step 4c is skipped; the report counts reuses and findings.
+    Give a folder as `--kvplan=DIR`: a bare `--kvplan` followed by the model takes the model
+    as the folder (the missing model is then a finding).
 - The server binds 127.0.0.1 only: the launcher appends `--host 127.0.0.1`, and an argv that
   sets another host is a finding.
 - healthy_after_s is seconds from launch until /health answers 200, or null as soon as the
@@ -37,16 +50,17 @@ Contract:
 
 Writes only --log and files under --cache-root (and the zygote's socket).
 
-Not here (other boundaries, later PRs): the weights preload daemon and its `ipc_cache` load
-format; the startup hooks (graph memory, KV plan, overlay, autotune key, forksafe); the lab
-worker extension and dev mode. Pass their vLLM flags in the argv or set their variables in the
-environment until they land.
+Not here (other boundaries, later PRs): the startup hooks (graph memory, overlay, autotune
+key, forksafe); the lab worker extension and dev mode. Pass their vLLM flags in the argv or set
+their variables in the environment until they land.
 """
 import argparse, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import vllm_args, zygote  # noqa: E402
+import kvplan, vllm_args, weights, zygote  # noqa: E402
+
+KVPLAN_WORKER = "kvplan.KVPlanWorker"
 
 # One folder per compiler/autotune cache under --cache-root, so later starts with the same
 # config reuse compiled kernels, and concurrent runs with different roots never share a JIT
@@ -70,6 +84,12 @@ def engine_env(a, base=None):
     """The environment every engine process runs with, and the zygote's (start_zygote)."""
     env = dict(os.environ if base is None else base)
     env.update(cache_env(a.cache_root))
+    if a.kvplan is not None:
+        # KVPlanWorker is imported by name in every worker: this folder goes on the path.
+        here = str(Path(__file__).resolve().parent)
+        env["PYTHONPATH"] = os.pathsep.join([here] + ([env["PYTHONPATH"]]
+                                                      if env.get("PYTHONPATH") else []))
+        env["FASTRSI_KVPLAN_DIR"] = kvplan_dir(a)
     if a.fork:
         # The engine core and workers are forked, not spawned: they inherit the parent's
         # imports. vLLM falls back to spawn when the parent has initialized CUDA; fork_check()
@@ -135,7 +155,27 @@ def read_vllm_args(a, vargv, env):
     return {**r, "via": "direct"}
 
 
-def argv_findings(v):
+def kvplan_dir(a):
+    return str(Path(a.kvplan or Path(a.cache_root) / "kvplan").resolve())
+
+
+def load_format(a, v):
+    """The load format the server will use: the argv's if explicit, else ipc_cache with
+    --weights, else vLLM's default."""
+    if a.weights and "load_format" not in v["explicit"]:
+        return "ipc_cache"
+    return v["args"]["load_format"]
+
+
+def socket_dir(a, v):
+    """The daemon socket folder this start dials: --weights-socket-dir, else the socket_dir of
+    the argv's --model-loader-extra-config, else vLLM's default."""
+    cfg = v["args"].get("model_loader_extra_config")
+    given = cfg.get("socket_dir") if isinstance(cfg, dict) else None
+    return a.weights_socket_dir or given or weights.default_socket_dir()
+
+
+def argv_findings(a, v):
     """Findings about the parsed `vllm serve` argv that stop the start (each names both values
     or what is missing)."""
     if not v["ok"] and v.get("findings"):        # the zygote refused to parse (stale)
@@ -162,17 +202,70 @@ def argv_findings(v):
         found.append({"check": "vllm_host", "observed": f"--host {args['host']}",
                       "expected": "--host 127.0.0.1 (the launcher's)", "why": "lab engines "
                       "bind 127.0.0.1 only", "actions": ["drop --host"]})
+    if a.weights and "load_format" in explicit and args["load_format"] != "ipc_cache":
+        found.append({"check": "weights_load_format", "observed": f"--weights and the argv's "
+                      f"--load-format {args['load_format']}", "expected": "--load-format "
+                      "ipc_cache, or none (--weights adds it)", "why": "--weights maps the "
+                      "daemon's weights over IPC; the argv asks vLLM to load them another way",
+                      "actions": ["drop --load-format", "drop --weights"]})
+    if a.kvplan is not None and "worker_cls" in explicit and args["worker_cls"] != KVPLAN_WORKER:
+        found.append({"check": "kvplan_worker_cls", "observed": f"--kvplan and the argv's "
+                      f"--worker-cls {args['worker_cls']}", "expected": f"--worker-cls "
+                      f"{KVPLAN_WORKER}, or none (--kvplan adds it)", "why": "the KV plan lives "
+                      "in that worker class; with another one every start profiles",
+                      "actions": ["drop --worker-cls", "drop --kvplan"],
+                      "risk": "none for correctness; startup not faster"})
     return found
 
 
 def serve_cmd(a, vargv, v):
-    """The `vllm serve` argv: the caller's, verbatim, then what the launcher needs that the
-    caller did not set (the host). Flags go after the caller's: `vllm serve` wants the model
-    first when --served-model-name is given."""
-    cmd = [a.vllm, "serve", *vargv]
-    if "host" not in v["explicit"]:
+    """The `vllm serve` argv: the caller's, verbatim, then what the launcher and the holders
+    need that the caller did not set (host, load format and loader config, worker class).
+    Flags go after the caller's: `vllm serve` wants the model first when --served-model-name
+    is given."""
+    cmd, explicit = [a.vllm, "serve", *vargv], v["explicit"]
+    if "host" not in explicit:
         cmd += ["--host", "127.0.0.1"]
+    if a.weights and "load_format" not in explicit:
+        cmd += ["--load-format", "ipc_cache"]
+    if load_format(a, v) == "ipc_cache" and "model_loader_extra_config" not in explicit:
+        cmd += ["--model-loader-extra-config", json.dumps(weights.loader_config(socket_dir(a, v)))]
+    if a.kvplan is not None and "worker_cls" not in explicit:
+        cmd += ["--worker-cls", KVPLAN_WORKER]
     return cmd
+
+
+def preflight(a, v, env):
+    """Holder checks that stop this start before anything runs (each names its override), and
+    the report fields of the checks that ran."""
+    found, rep = [], {}
+    if load_format(a, v) == "ipc_cache":
+        pr = weights.probe(socket_dir(a, v), env.get("CUDA_VISIBLE_DEVICES"),
+                           v["args"]["tensor_parallel_size"])
+        rep["weights_probe"] = pr
+        if not pr["ok"] and not a.weights_accept_missing:
+            found.append(weights.daemon_finding(pr))
+    return found, rep
+
+
+def kvplan_report(log):
+    """The KV plan's log lines (one per rank per start): counts, seconds and findings."""
+    rep = {"reused": 0, "measured": 0, "profiled": 0, "seconds": [], "findings": []}
+    for line in open(log, errors="replace"):
+        i = line.find(kvplan.TAG)
+        j = line.find("{", i)
+        if i < 0 or j < 0:
+            continue
+        try:
+            ev = json.loads(line[j:])
+        except ValueError:
+            continue
+        if line[i:j].startswith(kvplan.TAG + " finding"):
+            rep["findings"].append(ev)
+        elif ev.get("event") in ("reused", "measured", "profiled"):
+            rep[ev["event"]] += 1
+            rep["seconds"].append(ev.get("seconds"))
+    return rep
 
 
 def _accept(a):
@@ -190,12 +283,15 @@ def start(a, vargv):
         print(json.dumps({"zygote_check": reply}))
         sys.exit(0 if reply.get("ok") else 2)
     v = read_vllm_args(a, vargv, env)
-    found = argv_findings(v)
+    found, pre = argv_findings(a, v), {}
+    if not found:
+        found, pre = preflight(a, v, env)
     if found:
-        print(json.dumps({"findings": found, "vllm_args": v, "note": "not started"}, indent=1))
+        print(json.dumps({"findings": found, **pre, "vllm_args": v, "note": "not started"},
+                         indent=1))
         sys.exit(2)
     cmd, port = serve_cmd(a, vargv, v), v["args"]["port"]
-    rep = {"port": port, "vllm_args": v}
+    rep = {"port": port, "vllm_args": v, **pre}
     if port_in_use(port) and not a.accept_port_in_use:
         # Another server on this port answers /health at once: wait_healthy would report the
         # new engine healthy after ~0.01 s while it dies on bind.
@@ -308,6 +404,17 @@ def launcher_parser():
     p.add_argument("cmd", choices=["start", "zygote"])
     p.add_argument("--cache-root", required=True); p.add_argument("--log", required=True)
     p.add_argument("--vllm", default="vllm", help="start: the vllm executable")
+    p.add_argument("--weights", action="store_true",
+                   help="start: map the weights held by the daemon of weights.py (adds "
+                        "--load-format ipc_cache, no disk fallback); off by default")
+    p.add_argument("--weights-socket-dir", default="",
+                   help="the daemon's --socket-dir (default: vLLM's default folder)")
+    p.add_argument("--weights-accept-missing", action="store_true",
+                   help="start: launch although no daemon answers (it then waits up to 300 s)")
+    p.add_argument("--kvplan", nargs="?", const="", default=None, metavar="DIR",
+                   help="reuse the KV plan of an earlier start with the same config (adds "
+                        "--worker-cls kvplan.KVPlanWorker; plans in DIR, default "
+                        "<cache-root>/kvplan; give DIR as --kvplan=DIR); off by default")
     p.add_argument("--fork", action="store_true",
                    help="fork the engine core and workers instead of spawning them")
     p.add_argument("--zygote", default="", help="start: fork from the zygote at this socket; "
@@ -340,6 +447,8 @@ def main(argv=None):
     r = start(a, vargv)
     r["healthy_after_s"] = wait_healthy(r["port"], r["pid"], a.log, timeout=a.timeout,
                                         t0=r["t_launch"])
+    if a.kvplan is not None:
+        r["kvplan"] = kvplan_report(a.log)
     if a.fork or a.zygote:
         r["fork_check"] = fork_check(a.log)
         r["fork_finding"] = fork_finding(r["fork_check"])
