@@ -22,7 +22,10 @@ patterns=(
 )
 
 # Added lines as "file:line-in-new-file:text".
-added=$(git diff -U0 --no-color "$base...$head" -- . "${exclude[@]}" | awk '
+# Diff from the merge base; with no shared history (an orphan branch), diff the trees directly.
+range="$base...$head"
+git merge-base "$base" "$head" >/dev/null 2>&1 || range="$base $head"
+added=$(git diff -U0 --no-color $range -- . "${exclude[@]}" | awk '
   /^\+\+\+ b\// { file = substr($0, 7); next }
   /^@@/ { split($3, a, ","); line = substr(a[1], 2) + 0; next }
   /^\+/ { print file ":" line ": " substr($0, 2); line++ }')
