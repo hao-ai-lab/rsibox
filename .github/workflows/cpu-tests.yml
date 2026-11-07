@@ -32,3 +32,14 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/repos/vllm/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
+  vllm-adapter:
+    name: vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run the adapter's unittest cases (host, worker group, endpoints; collective_rpc is an in-process loop)
+        run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
