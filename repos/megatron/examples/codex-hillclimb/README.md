@@ -27,9 +27,10 @@ the journal, so weight gradients accumulate into `main_grad` inside the GEMM ins
 `add_` (about 10% of CUDA time before). It ran only in a private harness and is **not** part of the
 lab: changing long-lived state in place is what the vLLM lab moved to restart tiers. Proof that it
 ran: after a check, all 160 TE weights on both ranks carried `grad_added_to_main_grad` (set only by
-TE's fused path). The supported way is the flag `--gradient-accumulation-fusion`, a restart (T1:
-rebuild the model from the in-memory start state with the flag on), which on this aarch64 build
-also needs the LM head's non-TE path to work without apex.
+TE's fused path). The flag `--gradient-accumulation-fusion` would be the supported way, but on this build it fails
+at the first step: with the flag on, the LM head's non-TE `ColumnParallelLinear` needs apex's
+`fused_weight_gradient_mlp_cuda`, which is not installed (our 2026-11-07 T1 restart, 58 s to the
+error). Until that path works without apex, the TE-only change is reachable only as this cell.
 
 ## The kept set on the Qwen3-32B architecture (TP 4, 4 GB200)
 
