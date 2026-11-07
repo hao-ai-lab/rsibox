@@ -22,9 +22,11 @@ nothing is guessed. Every answer and every fallback is counted in COUNTS.
 Contract:
 - install(cuda) patches the given torch.cuda module once; it returns what it did.
 - An answer from NVML equals what CUDA would return for these devices: one capability shared
-  by every visible GPU, for device None, 0..n-1, "cuda", "cuda:i" or a cuda torch.device.
-- Anything else (another device type, differing capabilities, no NVML, CUDA already
-  initialized) calls the original function.
+  by every visible GPU, for device None, 0..n-1, "cuda", "cuda:i" or a cuda torch.device,
+  where n is the number of visible GPUs.
+- Anything else (an index outside 0..n-1, another device type, differing capabilities, no
+  NVML, CUDA already initialized) calls the original function, which raises or initializes
+  CUDA exactly as without this module.
 The zygote installs it before its imports (zygote.py), so every server it forks inherits it.
 """
 import functools, os
@@ -46,6 +48,13 @@ def _nvml():
 
 def nvml_capability(visible=None, nvml=None):
     """The compute capability (major, minor) every visible GPU shares, or None."""
+    r = nvml_visible(visible, nvml)
+    return r[0] if r else None
+
+
+def nvml_visible(visible=None, nvml=None):
+    """(the compute capability every visible GPU shares, the number of visible GPUs), or
+    None."""
     nvml = nvml or _nvml()
     if nvml is None:
         return None
@@ -63,7 +72,7 @@ def nvml_capability(visible=None, nvml=None):
             idx = [int(x) for x in ids]
         caps = {tuple(nvml.nvmlDeviceGetCudaComputeCapability(nvml.nvmlDeviceGetHandleByIndex(i)))
                 for i in idx}
-        return caps.pop() if len(caps) == 1 else None
+        return (caps.pop(), len(idx)) if len(caps) == 1 else None
     except Exception:
         return None
     finally:
@@ -88,25 +97,25 @@ def _index(device):
 
 def install(cuda, capability=None):
     """Patch cuda.get_device_capability and cuda.current_device (see the module doc).
-    `capability` returns the shared capability or None; by default NVML for the visible GPUs,
-    read at the first call (in the forked server, with its environment)."""
+    `capability` returns (the shared capability, the number of visible GPUs) or None; by
+    default NVML for the visible GPUs, read at the first call (in the forked server, with its
+    environment)."""
     if not all(hasattr(cuda, f) for f in ("get_device_capability", "current_device",
                                           "is_initialized")):
         return {"installed": False, "why": "this torch.cuda lacks the functions to patch"}
     if getattr(cuda.get_device_capability, "_fastrsi_forksafe", False):
         return {"installed": False, "why": "already installed"}
     cap_of = capability or functools.lru_cache(maxsize=1)(
-        lambda: nvml_capability(os.environ.get("CUDA_VISIBLE_DEVICES")))
+        lambda: nvml_visible(os.environ.get("CUDA_VISIBLE_DEVICES")))
     orig_cap, orig_cur = cuda.get_device_capability, cuda.current_device
 
     @functools.wraps(orig_cap)
     def get_device_capability(device=None):
         if not cuda.is_initialized():
-            i = _index(device)
-            cap = cap_of() if (i is None or i >= 0) else None
-            if cap is not None:
+            i, known = _index(device), cap_of()
+            if known is not None and (i is None or 0 <= i < known[1]):
                 COUNTS["get_device_capability"] += 1
-                return cap
+                return known[0]
             COUNTS["fallback"] += 1
         return orig_cap(device)
 
