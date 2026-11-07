@@ -10,7 +10,9 @@ running code object of the target and of its enclosing functions with its new ve
 closures made later run the new code too). It runs the checks and returns findings:
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
 (free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`,
-`new_fields` and `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks).
+`new_fields`, `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks) and
+`constructor_edit` (an `__init__`, `__new__` or `__post_init__` target: built instances keep
+the old state, so it blocks and routes to T1).
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
 classes are built in a scratch namespace (methods get the real class for `super()`). New
 methods and new defaults of methods are evaluated in a scratch class body that reads the live
@@ -42,6 +44,9 @@ from . import findings as F
 from . import journal as J
 from . import locate as L
 from . import witness as W
+
+# Methods that build an instance: an edit to one never reaches the instances already built.
+CONSTRUCTORS = ("__init__", "__new__", "__post_init__")
 
 
 def first_line(node):
@@ -891,6 +896,19 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             f"every live {nf['cls']} has {x}", subject=f"{kname}:{nf['cls']}.{x}")
         f["actions"] = [act for act in f["actions"] if "backfill" not in act["action"]]
         fs.append({**f, "route": "T1"})
+
+    # 6c. constructors: the swap reaches only instances built after it; every instance built
+    # before keeps what the old constructor set (vLLM #61323 edits RMSNorm.__init__: the model's
+    # norm layers were built at start-up, so a commit changes nothing they hold, witness 0).
+    # The kernel does not search the heap for instances: any constructor target blocks.
+    for q, line, r, k, olds in todo:
+        cls, _, meth = q.rpartition(".")
+        if meth in CONSTRUCTORS and cls and not cls.endswith("<locals>"):
+            fs.append({**F.finding(
+                "constructor_edit", f"{q} changed: instances of {cls} built before the swap "
+                "keep the state the old constructor gave them; only new instances run it",
+                "a target that runs again on the objects the engine already holds",
+                subject=k), "route": "T1"})
 
     # 7. anything else changed? (compared by the analysis)
     if a["outside_changes"]:

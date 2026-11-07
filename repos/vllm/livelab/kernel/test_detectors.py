@@ -22,6 +22,12 @@ from .test_locate import OPS, at, edit, fresh
 _n = itertools.count()
 
 
+def _but_ctor(findings):
+    """The findings other than constructor_edit, which every __init__ edit also gives
+    (ConstructorEditTest); the new_fields cases below are about the fields."""
+    return [f for f in findings if f["check"] != "constructor_edit"]
+
+
 def temp_modules(test, files):
     """Write {name: text} into a new directory on sys.path and import them in order."""
     tmp = tempfile.mkdtemp()
@@ -80,15 +86,15 @@ class NewFieldsTest(unittest.TestCase):
         gc.freeze()
         self.addCleanup(gc.unfreeze)
         r = S.stage(name, ESTIMATOR_NEW)
-        (f,) = r["findings"]
+        (f,) = _but_ctor(r["findings"])
         self.assertEqual((f["check"], f["subject"], f["route"], f["overridable"]),
                          ("new_fields", f"{name}:Estimator._block", "T1", True))
         self.assertIn("Estimator.step read self._block", f["observed"])
         self.assertFalse(any("backfill" in a["action"] for a in f["actions"]))
         j, w = J.Journal(), W.Witness()
-        r = S.stage_and_apply(name, ESTIMATOR_NEW, j, w)
+        r = S.stage_and_apply(name, ESTIMATOR_NEW, j, w, accept=["constructor_edit"])
         self.assertEqual((r["ok"], [(x["check"], x["accepted"]) for x in r["findings"]]),
-                         (False, [("new_fields", False)]))
+                         (False, [("new_fields", False), ("constructor_edit", True)]))
         self.assertEqual((est.step(5000), j.entries), (256, []))
 
     def test_a_class_default_or_an_old_setter_is_not_a_new_field(self):
@@ -104,7 +110,7 @@ class NewFieldsTest(unittest.TestCase):
                                "        self._block = max(256, max_num_reqs)\n").replace(
                 "return min(n, 256)", "return min(n, self._block)")
             r = S.stage(name, new)
-            self.assertEqual([f["check"] for f in r["findings"]], [])
+            self.assertEqual([f["check"] for f in _but_ctor(r["findings"])], [])
 
 
 COUNTER = '''class Counter:
@@ -124,7 +130,7 @@ class NewFieldsReviewTest(unittest.TestCase):
         name = f"kt_nf{next(_n)}"
         (m,) = temp_modules(self, {name: base})
         c = m.Counter()
-        r = S.stage_and_apply(name, new, J.Journal(), W.Witness())
+        r = S.stage_and_apply(name, new, J.Journal(), W.Witness(), accept=["constructor_edit"])
         self.assertEqual((r["ok"], [x["check"] for x in r["findings"]
                                     if not x["accepted"]]), (False, ["new_fields"]))
         self.assertEqual(c.step(), 1)            # still the old code, no AttributeError
@@ -153,7 +159,7 @@ class NewFieldsReviewTest(unittest.TestCase):
         r = S.stage(name, COUNTER.replace("class Counter:\n", "class Counter:\n    x = 0\n\n")
                     .replace("        self.a = 1\n", new).replace("return self.a",
                                                                  "return self.x"))
-        self.assertEqual(sorted(f["check"] for f in r["findings"]),
+        self.assertEqual(sorted(f["check"] for f in _but_ctor(r["findings"])),
                          ["new_fields", "outside_changes"])
 
 
@@ -205,6 +211,79 @@ class JitTargetTest(unittest.TestCase):
                              (False, [("jit_target", "T1", f"{name}:add_one:{line}", False)]),
                              deco)
             self.assertEqual((m.launch(1), j.entries), (2, []))
+
+
+NORM = '''import dataclasses
+
+
+class RMSNorm:
+    def __init__(self, hidden):
+        self.weight = [1.0] * hidden
+
+    def forward(self, x):
+        return [a * w for a, w in zip(x, self.weight)]
+
+
+@dataclasses.dataclass
+class Config:
+    eps: float = 1e-6
+
+    def __post_init__(self):
+        self.scaled = self.eps
+
+
+class Model:
+    def __init__(self):
+        self.norm = RMSNorm(2)
+'''
+
+
+class ConstructorEditTest(unittest.TestCase):
+
+    def test_a_constructor_edit_blocks_and_routes_to_t1(self):
+        """Input (vLLM #61323's shape): RMSNorm.__init__ changes the weight it builds from
+        1.0 to 0.0; the live model's norm was built before the edit (forward([2, 3]) =
+        [2.0, 3.0]). Expected: one blocking constructor_edit finding (route T1, subject the
+        __init__ key, overridable) and nothing applied. Fails without the detector: the swap
+        commits with no finding and the live norm keeps weight 1.0 (the replay's witness 0).
+        Accepted, it applies and shows why it blocks: a new RMSNorm gets 0.0, the live one
+        still 1.0. The same holds for a dataclass __post_init__. Not: finding the live
+        instances (the kernel never looks; every constructor edit blocks)."""
+        name = f"kt_norm{next(_n)}"
+        (m,) = temp_modules(self, {name: NORM})
+        model = m.Model()
+        new = edit(NORM, ("[1.0] * hidden", "[0.0] * hidden"))
+        line = at(NORM, "    def __init__(self, hidden)")
+        j = J.Journal()
+        r = S.stage_and_apply(name, new, j, W.Witness())
+        self.assertEqual((r["ok"], [(f["check"], f.get("route"), f["subject"], f["overridable"],
+                                     f["accepted"]) for f in r["findings"]]),
+                         (False, [("constructor_edit", "T1", f"{name}:RMSNorm.__init__:{line}",
+                                   True, False)]))
+        self.assertEqual((model.norm.forward([2, 3]), j.entries), ([2.0, 3.0], []))
+        r = S.stage_and_apply(name, new, j, W.Witness(), accept=["constructor_edit"])
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertEqual((model.norm.forward([2, 3]), m.RMSNorm(2).forward([2, 3])),
+                         ([2.0, 3.0], [0.0, 0.0]))
+        j.undo_to(0)
+
+        post = edit(NORM, ("self.scaled = self.eps", "self.scaled = self.eps * 2"))
+        r = S.stage(name, post)
+        self.assertEqual([(f["check"], f["subject"]) for f in r["findings"]],
+                         [("constructor_edit",
+                           f"{name}:Config.__post_init__:{at(NORM, 'def __post_init__')}")])
+
+    def test_an_edit_to_another_method_is_not_a_constructor_edit(self):
+        """Input: the same module, forward() edited (weights times 2). Expected: no finding,
+        applied, and the live norm runs it (forward([2, 3]) = [4.0, 6.0]). Pain point: a
+        detector keyed on the class instead of the method would block every layer edit."""
+        name = f"kt_norm{next(_n)}"
+        (m,) = temp_modules(self, {name: NORM})
+        model = m.Model()
+        r = S.stage_and_apply(name, edit(NORM, ("a * w for", "a * w * 2 for")), J.Journal(),
+                              W.Witness())
+        self.assertEqual((r["ok"], r["findings"]), (True, []))
+        self.assertEqual(model.norm.forward([2, 3]), [4.0, 6.0])
 
 
 class LineShiftTest(unittest.TestCase):
