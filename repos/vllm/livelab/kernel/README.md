@@ -3,7 +3,7 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate, journal and witness.
+findings, locate, journal, witness, and the R0 swap (a function-body swap).
 
 ## Contract
 
@@ -25,6 +25,22 @@ findings, locate, journal and witness.
   can undo), `record_closures`, and `repair(...)` for hand-written repair cells.
   `mark()` returns the log position; `undo_to(mark)` replays inverses newest first, back to
   the same code and attribute objects, with added names removed.
+- **Swap** installs an edited module's function bodies into the running module, in two
+  steps. `stage(module, source, targets="auto")` parses the base and patched texts, takes
+  every definition whose AST changed (or the explicit `[(qualname, first line)]`), adds the
+  witness, compiles the patched module, and pairs each running code object of a target and of
+  its enclosing functions with its new version (so closures made later run the new code).
+  New imports, new functions and methods, and new defaults are built in a scratch namespace;
+  nothing is visible yet. It returns findings: `no_live_function`, `not_in_patch`,
+  `base_mismatch`, `outside_changes` (the module differs beyond target bodies, added
+  definitions and imports), `removed_definition`, `closure_changed` (free variables differ;
+  not overridable), `defaults_not_evaluated`, `running_frame` (advisory at stage: a step in
+  flight), `patch_invalid`. `validate(staged)` re-checks at the apply point: the same code
+  objects are still installed, and no thread stack holds a frame of the old code.
+  `apply(staged, journal, witness)` makes it visible, every change through the journal
+  (closure pairs first, so undo also takes back closures the new code made).
+  `stage_and_apply` is stage, decide, validate, apply in one call for a host with no two
+  phases. `changed_targets(base, new)` is the planning helper.
 - **Witness** proves that swapped code ran, per participant. The swap puts
   `__fastrsi_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
   after the docstring; for a lambda or generator expression, in the expression: a generator
@@ -49,6 +65,7 @@ findings, locate, journal and witness.
 | `findings.py` | The findings schema, the catalog of checks, `decide`. No imports. |
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
+| `swap.py` | `analyze` (the text half: parse, match, witness, compile, compare), `stage` (the live half: locate, base check, scratch builds, pairing, frames), `validate`, `apply`, `stage_and_apply`, `changed_targets`, `closure_pairs`. Imports `findings`, `journal`, `locate`, `witness`. |
 | `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
 
@@ -101,15 +118,31 @@ Each test's docstring says what it proves and what it does not.
 | `test_capture_calls_are_counted_apart_from_live_calls` | 13280 calls per rank after a CUDA-graph recapture, all made while capturing: proof of capture, not of a run |
 | `test_the_counter_keeps_the_docstring_and_counts_lambdas_and_genexprs` | a counter that breaks a docstring, or miscounts code with no statement body |
 | `test_the_witness_is_a_constant_for_dynamo` | a recompile that failed in Dynamo on a traced counter |
+| `test_swap_reaches_every_holder` | a swap that misses a `from x import f` copy, a decorator's original, a saved callback or a closure made after the swap |
+| `test_undo_restores_exact_base` | an undo that leaves an added method or import behind, or deletes the witness global that compiled code still calls |
+| `test_closure_change_is_a_finding_not_an_exception` | a new free variable that crashes the swap, or is accepted and breaks the closure |
+| `test_an_edit_a_code_swap_cannot_install_is_a_finding` | a module-constant edit that "succeeds" while the engine runs what it ran before |
+| `test_a_loop_frame_live_at_apply_blocks_through_the_helper` | a loop that never leaves the old code, swapped with no blocking finding |
 
 ## Not here yet
 
-- **Swap** (stage the patched module, pair old and new code, `apply` through the journal),
-  with its line maps and analyzer child. The journal's `record_closures` entry is driven by
-  `apply`, so taking back closures the new code made at run time is tested there. The swap
-  also adds the per-block witness of changed branches, and drives `Witness.arm` (counters for
-  repair cells). **jit** (Triton `@jit` targets),
-  **fields** (fields only the new `__init__` sets).
+The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in later PRs:
+
+- **New fields** (`_new_fields`, `_backfill_code`, the `new_fields` finding, `rebuilds=`)
+  with `fields.py`. Until then a changed method that reads a field only the edited
+  `__init__` sets is swapped with no finding, and fails on instances built before the swap.
+- **Triton `@jit` targets** (`jit_rebuild`, rebuild in place, launch counters) with `jit.py`.
+  Until then such a target is swapped as bytecode the kernel compiler never runs, and its
+  witness reads zero (`zero_witness`).
+- **Per-block witness** (`_inject_hunks`: a key per changed branch, #62206's shape).
+- **Compile units** (compile only the statements holding the changed definitions; a whole
+  3,800-line module compile stalls a step) and the **analyzer child process**
+  (`ProcessAnalyzer`, `analyze_fallback`), which keep the GIL free during prepare.
+- **Chained edits**: `line_maps=`, the `line_aliased` fallback (the prototype's `test_line_shift.py`).
+- **Transaction-level parts**, with the coordinator: `overlay=` and `staged_names` (a module
+  importing a name another module of the same transaction adds), `docstring_only`, the
+  `empty_change` verdict, `Witness.arm` (counters for repair cells), and the
+  `record_closures` cases for partial undo.
 - **Coordinator** (two-phase transactions over participants, step-gap commits, deadlines,
   proofs) and **session** (the host's state machine and poisoning), and the receipt writer.
 
