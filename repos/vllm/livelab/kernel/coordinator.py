@@ -351,8 +351,34 @@ class LocalParticipant(Participant):
                     engine_names=engine, poisoned=poisoned)
 
     def prepare(self, plan):
+        """Phase 1. The plan's "id" is optional: without one the participant names the
+        transaction, and the reply's `txn` says which. An id that is prepared, committed or
+        partial here is refused (re-preparing it would drop the earlier one's undo mark).
+        A plan that is not as the schema documents is a no vote, never an exception."""
+        txn = None
+        try:
+            txn = (plan.get("id") if isinstance(plan, dict) else None) \
+                or f"txn-{uuid.uuid4().hex[:8]}"
+            if self._state.get(txn) in ("prepared", "committed", "partial"):
+                return F.not_ok(f"transaction {txn} is {self._state[txn]} here", [{
+                    **F.finding("patch_invalid", f"transaction id {txn} is "
+                                f"{self._state[txn]} here", "a new transaction id",
+                                subject=txn), "participant": self.name}], staged={}, txn=txn)
+            return {**self._prepare(plan, txn), "txn": txn}
+        except Exception as e:
+            if txn is not None:
+                self._state[txn] = "aborted"
+                self._staged.pop(txn, None)
+                self._pending.pop(txn, None)
+                self._pending_maps.pop(txn, None)
+            return F.not_ok(f"prepare: {type(e).__name__}: {e}", [{
+                **F.finding("patch_invalid", f"{type(e).__name__}: {e}",
+                            "a plan as the coordinator's plan schema documents"),
+                "participant": self.name}], staged={}, txn=txn)
+
+    def _prepare(self, plan, txn):
         self._remember_base(plan)
-        txn, accept = plan["id"], plan.get("accept", ())
+        accept = plan.get("accept", ())
         fs, staged, items, ok, timings, targets = [], [], {}, True, {}, {}
         own = [c for cs in self._codes.values() for c in cs]
         res = {m: self._stage(m, spec, own) for m, spec in plan.get("modules", {}).items()}
@@ -429,8 +455,9 @@ class LocalParticipant(Participant):
             for st in staged:
                 r = S.apply(st, self.journal, self.witness)
                 if not r["ok"]:
-                    self.journal.undo_to(mark)
-                    return r
+                    u = self.journal.undo_to(mark)
+                    self._rolled_back(txn, u, [])
+                    return {**r, "findings": r.get("findings", []) + u["findings"]}
             fs = []
             armed, n_routes = [], len(self.journal.routes)
 
@@ -456,6 +483,7 @@ class LocalParticipant(Participant):
                     # findings), so a rolled-back cell is never read as a clean rollback
                     left = list(rep.findings) if rep is not None else []
                     u = self.journal.undo_to(mark)
+                    self._rolled_back(txn, u, fs + left)
                     return F.not_ok("repair failed", [F.finding(
                         "repair_failed", f"{type(e).__name__}: {e}", "the cell runs")]
                         + left + u["findings"], rebuild_routes=routes())
@@ -465,6 +493,7 @@ class LocalParticipant(Participant):
             rebuild_routes = routes()
             if not d["proceed"]:
                 u = self.journal.undo_to(mark)
+                self._rolled_back(txn, u, fs)
                 return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"],
                                 rebuild_routes=rebuild_routes)
             self._marks[txn] = mark
@@ -483,6 +512,19 @@ class LocalParticipant(Participant):
         except Exception as e:
             gone.append(True)
             return F.not_ok(f"commit: {type(e).__name__}: {e}")
+
+    def _rolled_back(self, txn, u, cell_findings):
+        """A commit rolled back (journal.undo_to its mark). When that could not restore
+        everything (an inverse failed, or a repair cell changed what the journal cannot
+        undo: repair_not_undoable, accepted or not), the transaction is "partial", as after
+        a partial undo: at_base is poisoned and undo repeats the findings."""
+        lost = [{**f, "participant": self.name} for f in cell_findings
+                if f["check"] == "repair_not_undoable"]
+        if not u["ok"]:
+            lost += [{**f, "participant": self.name} for f in u.get("findings", [])]
+        if lost:
+            self._state[txn] = "partial"
+            self._partial[txn] = lost
 
     def abort(self, txn):
         txn, _ = txn_ref(txn)
@@ -527,7 +569,8 @@ class LocalParticipant(Participant):
                 d.pop(t, None)
             self._state[t] = "undone" if r["ok"] else "partial"
         if not r["ok"]:
-            self._partial[txn] = r.get("findings", [])
+            for t in [txn] + later:      # which txn's entry failed, the journal does not say
+                self._partial[t] = r.get("findings", [])
         if later:
             r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
                 **F.finding("undo_cascade",
@@ -562,11 +605,18 @@ class LocalParticipant(Participant):
             keys += st.keys                # added definitions too: they get a witness
             old.update(st.old_codes)
         keys += self._cell_keys.get(txn, [])      # counters the repair cells armed
+        state = self._state.get(txn, "unknown")
+        if state != "committed":
+            return F.not_ok(f"{txn} is {state} here", [{**F.finding(
+                "no_witness_possible", f"transaction {txn} is {state} on this participant",
+                "a transaction committed here", subject=txn), "participant": self.name}],
+                counts={}, capture_counts={})
         r = self.witness.check(keys, old)
-        if not keys and self._state.get(txn) == "committed":
+        if not keys:
             r["findings"].append(F.finding(
                 "no_witness_possible", "the transaction swapped no code and its cells armed "
                 "no counter: an empty witness proves nothing", "at least one witness key"))
+        r["findings"] = [{**f, "participant": self.name} for f in r["findings"]]
         return r
 
 

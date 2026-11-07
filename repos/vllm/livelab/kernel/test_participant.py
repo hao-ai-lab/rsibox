@@ -169,5 +169,110 @@ class LineMapChainTest(unittest.TestCase):
         self._chain("auto")
 
 
+class _Box:
+    pass
+
+
+SCALE3 = edit(OPS, ("x * STEP_SCALE", "x * 3"))       # scale(1): 2 -> 3
+
+
+class ParticipantReviewTest(unittest.TestCase):
+    """Review follow-ups of #29 (each case failed before its fix)."""
+
+    def _part(self, tag, **kw):
+        name, _, ops = fresh(tag)
+        return C.LocalParticipant("core", alias={"toy": name}, **kw), ops
+
+    def test_a_plan_without_an_id_or_with_missing_fields_never_raises(self):
+        """Input: a plan with no "id"; a module spec with no "source"; a repair with no
+        "declares". Expected: the first is staged under a generated id that the reply names
+        (`txn`) and commits (scale(1) = 3); the others vote no with a patch_invalid finding.
+        Pain point: KeyError out of a call documented "never raises" (the id is optional).
+        Not: a host that names the id itself (it does)."""
+        p, ops = self._part("noid")
+        r = p.prepare({"modules": {"toy.ops": {"source": SCALE3}}})
+        self.assertTrue(r["ok"], r["findings"])
+        self.assertEqual((p.status(r["txn"])["state"], p.commit(r["txn"])["ok"], ops.scale(1)),
+                         ("prepared", True, 3))
+        for i, bad in enumerate([{"modules": {"toy.ops": {}}},
+                                 {"repairs": [{"cell": "x = 1"}]}]):
+            r = p.prepare({"id": f"bad{i}", **bad})
+            self.assertEqual((r["ok"], [f["check"] for f in r["findings"]],
+                              p.status(f"bad{i}")["state"]),
+                             (False, ["patch_invalid"], "aborted"))
+
+    def test_an_id_already_in_use_is_refused(self):
+        """Input: commit "c" (scale x 3), then prepare another plan with the same id "c".
+        Expected: the second prepare votes no (patch_invalid naming the id); undo("c") then
+        takes the first edit back and the participant is at base. Pain point: the second
+        prepare overwrote the first one's journal mark, so its undo left scale x 3 running.
+        Not: reusing the id of an aborted or undone transaction (allowed)."""
+        p, ops = self._part("reuse")
+        self.assertTrue(p.prepare({"id": "c", "modules": {"toy.ops": {"source": SCALE3}}})["ok"])
+        self.assertTrue(p.commit("c")["ok"])
+        again = edit(SCALE3, ("    return x + 1", "    return x + 2"))
+        r = p.prepare({"id": "c", "modules": {"toy.ops": {"source": again}}})
+        self.assertEqual((r["ok"], [f["check"] for f in r["findings"]], p.status("c")["state"]),
+                         (False, ["patch_invalid"], "committed"))
+        self.assertTrue(p.undo("c")["ok"])
+        self.assertEqual((ops.scale(1), ops.activate(1), p.at_base()["ok"]), (2, 2, True))
+
+    def test_a_commit_rollback_that_leaves_a_change_is_partial(self):
+        """Input: a repair cell that changes an undeclared scope object (box.val = 2, which
+        the journal cannot undo) and then raises, or does not raise (its
+        repair_not_undoable blocks the commit). Expected: the commit fails, the state is
+        "partial", at_base is not ok and poisoned, and undo repeats the finding instead of
+        "nothing committed". Pain point: box.val stayed 2 while at_base said ok and undo
+        said ok. Not: changes the audit cannot see (deeper than one level)."""
+        for tail in ("raise RuntimeError('boom')\n", ""):
+            box = _Box()
+            box.val = 1
+            p, _ = self._part("rollback", scope={"box": box})
+            self.assertTrue(p.prepare({"id": "r", "modules": {"toy.ops": {"source": SCALE3}},
+                                       "repairs": [{"cell": "box.val = 2\n" + tail,
+                                                    "declares": []}]})["ok"])
+            c = p.commit("r")
+            self.assertIn("repair_not_undoable", [f["check"] for f in c["findings"]])
+            ab, u = p.at_base(), p.undo("r")
+            self.assertEqual((c["ok"], box.val, p.status("r")["state"], ab["ok"],
+                              ab["poisoned"], u["ok"]),
+                             (False, 2, "partial", False, True, False), tail)
+            self.assertIn("repair_not_undoable", [f["check"] for f in u["findings"]])
+
+    def test_an_undo_cascade_that_was_partial_stays_partial_for_later_txns(self):
+        """Input: txn A records an undo hook that raises; txn B commits after A; undo(A)
+        (partial, cascades over B), then undo(B). Expected: undo(B) is not ok and repeats
+        the partial undo's findings; B stays "partial". Pain point: undo(B) answered ok,
+        "nothing committed", and set B "undone". Not: which txn's entry failed (the journal
+        does not say)."""
+        p, _ = self._part("cascade", scope={"bad": lambda: 1 / 0})
+        self.assertTrue(p.prepare({"id": "A", "modules": {"toy.ops": {"source": SCALE3}},
+                                   "repairs": [{"cell": "journal.record_call(bad, 'bad')\n",
+                                                "declares": []}]})["ok"])
+        self.assertTrue(p.commit("A")["ok"])
+        two = edit(SCALE3, ("    return x + 1", "    return x + 2"))
+        self.assertTrue(p.prepare({"id": "B", "modules": {"toy.ops": {"source": two}}})["ok"])
+        self.assertTrue(p.commit("B")["ok"])
+        self.assertEqual((p.undo("A")["ok"], p.status("B")["state"]), (False, "partial"))
+        ub = p.undo("B")
+        self.assertEqual((ub["ok"], p.status("B")["state"]), (False, "partial"))
+        self.assertIn("undo_incomplete", [f["check"] for f in ub["findings"]])
+
+    def test_a_witness_check_of_a_txn_not_committed_here_is_not_a_pass(self):
+        """Input: witness_check of an unknown id; of a committed txn whose target never ran.
+        Expected: the unknown id is not ok with no_witness_possible; every finding names the
+        participant. Pain point: an unknown id answered ok with no finding (a pass). Not: the
+        host's per-rank merge."""
+        p, _ = self._part("witness")
+        r = p.witness_check("nope")
+        self.assertEqual((r["ok"], [(f["check"], f["participant"]) for f in r["findings"]]),
+                         (False, [("no_witness_possible", "core")]))
+        self.assertTrue(p.prepare({"id": "w", "modules": {"toy.ops": {"source": SCALE3}}})["ok"])
+        self.assertTrue(p.commit("w")["ok"])
+        r = p.witness_check("w")
+        self.assertEqual([(f["check"], f["participant"]) for f in r["findings"]],
+                         [("zero_witness", "core")])
+
+
 if __name__ == "__main__":
     unittest.main()
