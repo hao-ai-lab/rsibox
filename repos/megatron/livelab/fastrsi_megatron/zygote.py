@@ -265,6 +265,28 @@ def cpu_list(spec):
     return out
 
 
+def unpatch(cuda=None):
+    """In a forked rank: put back the torch.cuda functions the zygote patched for its imports
+    (forksafe's get_device_capability and current_device, the device-properties stand-in), and
+    drop PYTORCH_NVML_BASED_CUDA_CHECK if the zygote set it. The rank initializes CUDA itself,
+    so it needs neither, and the wrappers cost a check on every call. Returns the names put back."""
+    if cuda is None:
+        t = sys.modules.get("torch")
+        cuda = t.cuda if t is not None else None
+    out = []
+    if cuda is not None:
+        for name in ("get_device_capability", "current_device", "get_device_properties"):
+            f = getattr(cuda, name, None)
+            if f is not None and hasattr(f, "__wrapped__") and (
+                    getattr(f, "_fastrsi_forksafe", False) or getattr(f, "_fastrsi_props", False)
+                    or getattr(f, "__module__", "") == "forksafe"):
+                setattr(cuda, name, f.__wrapped__)
+                out.append(name)
+    if "PYTORCH_NVML_BASED_CUDA_CHECK" not in START_ENV:
+        os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
+    return out
+
+
 def bind(req, local_rank):
     """Pin the rank to its CPU list (`cpus`: one 'a-b,c' string per local rank) before CUDA and
     its threads start. A fork keeps the zygote's affinity; without a list nothing changes,
@@ -299,6 +321,8 @@ def _child(req, local_rank, lsock, conn):
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGCHLD):
             signal.signal(s, signal.SIG_DFL)
         os.environ.update(rank_env(req, local_rank))
+        if os.environ.get("FASTRSI_ZYGOTE_UNPATCH", "1") != "0":
+            unpatch()
         bind(req, local_rank)
         set_threads()
         d = req.get("log_dir") or "."

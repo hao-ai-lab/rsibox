@@ -134,6 +134,26 @@ class Zygote(unittest.TestCase):
 
 
 class Pieces(unittest.TestCase):
+    def test_unpatch_puts_back_the_patched_cuda_functions(self):
+        """The patches keep CUDA out of the zygote's imports; a rank initializes CUDA and should
+        call torch's own functions. Input: a fake cuda with the device-properties stand-in
+        installed. Expect: unpatch() names it and get_device_properties is the original again;
+        a function nobody patched is left alone."""
+        class Cuda:
+            def is_initialized(self):
+                return False
+            def get_device_properties(self, d=None):
+                return "orig"
+            def current_device(self):
+                return 7
+        c = Cuda()
+        orig = c.get_device_properties
+        zygote.install_properties(c, probe=lambda: [{"multi_processor_count": 1}])
+        self.assertIsNot(c.get_device_properties, orig)
+        self.assertEqual(zygote.unpatch(c), ["get_device_properties"])
+        self.assertEqual(c.get_device_properties(0), "orig")
+        self.assertEqual(c.current_device(), 7)
+
     def test_cpu_list_parses_ranges(self):
         self.assertEqual(zygote.cpu_list("0-3,8,10-11"), {0, 1, 2, 3, 8, 10, 11})
 
