@@ -43,8 +43,8 @@ It needs the same `FASTRSI_REVIEW_URL` and `FASTRSI_REVIEW_TOKEN` as the descrip
 
 A suggestion is applied only if, compared with the original:
 
-- every number, PR/issue reference, commit hash and backticked code span is still there, and
-  none was added;
+- every number, PR/issue reference, commit hash and the text of every code span is still
+  there, and none was added (adding or removing backticks alone is fine);
 - the title matches the title rule, keeps its type and scope, and is at most 72 characters;
 - every Loop record field is still there (when the original has the section);
 - it adds no AI attribution.
@@ -71,7 +71,7 @@ requests after 100 s:
 
 ```
 POST /v1/review   {"kind", "engine", "repo", "pr", "prompt", "model"}  ->  {"id"}
-GET  /v1/review/<id>   ->  {"status": "queued|running|done|error", "reply", "error"}
+GET  /v1/review/<id>   ->  {"status": "queued|running|done|error", "reply", "error", "seconds"}
 ```
 
 `reply` is the raw reviewer output (TITLE/BODY/NOTES blocks, or the code review's JSON). The
@@ -83,7 +83,8 @@ needs GitHub access.
 review). Each job runs in a fresh empty directory with a minimal environment and a fresh HOME that
 holds only copies of the reviewer's credential files (never its real state directory with
 other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
-only system paths and its own binary, and write only the job directory. A refreshed
+only system paths and its own binary, and write only the job directory (plus `/dev/null`
+and `/dev/shm`). A refreshed
 credential is copied back only if it is valid JSON for the same account and the real file was
 not changed meanwhile. Known limit: a prompt-injected reviewer that keeps the account fields
 can still write unusable tokens into its copy, which would log the host CLI out until you log
@@ -94,12 +95,12 @@ unconfined headless `agy -p --sandbox` read a file outside its directory when as
 confined, the same request got "permission denied" even with every agy tool approved. Codex
 runs with its read-only sandbox and its shell, exec, web, browser, app and plugin tools
 disabled. A reply or error that contains text from a secret file (the service token, the reviewers'
-credentials, SSH keys) is withheld. In CI the code review runs its script from the PR's base
-commit, never from the PR, because that job holds the service token. Every call except `/v1/health` needs
+credentials, SSH keys) is withheld. In CI the code review runs its script from the default
+branch (`github.sha`), never from the PR, because that job holds the service token. Every call except `/v1/health` needs
 `Authorization: Bearer <token>`.
 
 Trap: Cloudflare's Browser Integrity Check answers 403 (error 1010) to the default
-`Python-urllib` user agent before the request reaches the server, so `review.py` sends its own.
+`Python-urllib` user agent before the request reaches the server, so `review.py` and `code_review.py` send their own.
 
 **Setup steps:**
 
@@ -124,4 +125,6 @@ The golden cases run either way.
 - Edits made with the workflow's `GITHUB_TOKEN` do not trigger other workflows, so the PR rules
   check does not rerun on the new title. The checker enforces the same title and attribution
   rules itself.
-- Repository secrets are not given to workflows from forks, so fork PRs skip the review.
+- Repository secrets are not given to workflows that a fork's `pull_request` event starts, so
+  those runs skip the review. The owner's `/review` or `/describe` comment on a fork's PR runs
+  from the default branch, with the secrets, and reads the PR only as data.

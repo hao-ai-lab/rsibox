@@ -37,7 +37,7 @@ jobs:
        github.event.issue.pull_request &&
        startsWith(github.event.comment.body, '/review') &&
        github.event.comment.user.login == github.repository_owner)
-    # Job-level, so a run that skips this job (another label added) cannot cancel a review.
+    # Job-level, so a run that skips this job (an unrelated comment) cannot cancel a review.
     concurrency:
       group: code-review-${{ github.event.issue.number || inputs.pr }}
       cancel-in-progress: true
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # The review code runs from the base commit, never from the PR: this job holds the service
+      # The review code runs from the default branch, never from the PR: this job holds the service
       # token and a write-enabled GitHub token, and a PR could otherwise change the script that
       # uses them. The PR itself is read through the API as data.
       # issue_comment and workflow_dispatch both run on the default branch (github.sha).
@@ -68,8 +68,4 @@ jobs:
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           PR: ${{ github.event.issue.number || inputs.pr }}
         run: |
-          if [ ! -f .github/review/code_review.py ]; then
-            echo "::notice::The base commit has no code review yet (it arrives with this PR). Skipped."
-            exit 0
-          fi
           python3 .github/review/code_review.py --pr "$PR" --engines agy,codex --post

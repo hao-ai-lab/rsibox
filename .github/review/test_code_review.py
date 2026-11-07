@@ -50,7 +50,7 @@ class Diff(unittest.TestCase):
 
 
     def test_hunk_lines_that_look_like_headers_stay_content(self):
-        """Pain point (found by the agent review of this PR): an added line whose text starts
+        """Pain point: an added line whose text starts
         with "++ " after a deleted "-- " line was read as a new file header, which corrupted the
         path and shifted every later line number, so valid findings were dropped."""
         diff = ("diff --git a/x.md b/x.md\n--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,2 @@\n"
@@ -146,7 +146,7 @@ class Service(unittest.TestCase):
 
 
 class JobIsolation(unittest.TestCase):
-    """Pain points found by the agent review of this PR: the reviewer could see its whole real
+    """Pain points: the reviewer could see its whole real
     state directory (other conversations, settings), and an engine's error text bypassed the
     secret filter."""
 
@@ -183,7 +183,7 @@ class JobIsolation(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in copy.parent.iterdir()), ["auth.json"])  # no history
 
     def test_copy_back_keeps_only_a_refresh_of_the_same_account(self):
-        """Pain point (found in the second agent review round): a prompt-injected reviewer can
+        """Pain point: a prompt-injected reviewer can
         write its credential copy. Copying that back unchecked would install garbage, or
         another account's credentials, as the host's login."""
         real = self.codex_home / "auth.json"

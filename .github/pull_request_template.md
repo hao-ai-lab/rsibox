@@ -18,6 +18,6 @@
 - Upstream PRs: <!-- e.g. vllm-project/vllm#62240, and its base commit -->
 - Function groups: <!-- OP, GRAPH, STATE, RESOURCE, NATIVE, RANKS, restart; per changed function -->
 - Rule added: <!-- the smallest general rule this needed, and where it now lives -->
-- Overheads measured: <!-- phase, seconds, source (receipt or kb/measurements file) -->
+- Overheads measured: <!-- phase, seconds, source (receipt or kb/costs.md) -->
 - Receipts: <!-- paths, or none -->
 - Not verified: <!-- what a reader should not assume -->

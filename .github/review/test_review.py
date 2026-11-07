@@ -67,7 +67,7 @@ class Rejects(unittest.TestCase):
         new = rewrite("the 32K point is not measured yet.", "the 32K point improves by 15%.")
         self.assertTrue(any("added numbers" in x for x in check(TITLE, BODY, TITLE, new)))
 
-    def test_dropped_hedge_reference(self):
+    def test_dropped_base_commit(self):
         """Dropping the base commit loses the one thing that makes the result reproducible."""
         new = rewrite(" on base `0124e16a6c06`", "")
         self.assertTrue(any("dropped code" in x for x in check(TITLE, BODY, TITLE, new)))

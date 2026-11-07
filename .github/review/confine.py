@@ -7,7 +7,7 @@ from its command line (tested: a headless `agy -p --sandbox` read a file outside
 directory), so the service confines the whole process instead. Landlock is enforced by the
 kernel, is inherited by every child and thread, and cannot be lifted by the confined process.
 
-  confine.py --read DIR... --write DIR... -- CMD ARGS...
+  confine.py --read PATH... --write PATH... -- CMD ARGS...
 
 `--read` paths are readable and executable, `--write` paths are fully usable; everything else
 on the filesystem is denied (network is not restricted). Fails closed: if Landlock is

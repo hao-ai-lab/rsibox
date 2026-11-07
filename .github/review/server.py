@@ -10,14 +10,15 @@ Asynchronous, because a review takes minutes and Cloudflare closes proxied reque
   GET  /v1/health       -> {"ok": true, "queued": n, "running": n, "engines": [...]} (no auth)
 
 Kinds: "pr-description" (engine agy) and "code-review" (engine agy or codex). `engine`
-defaults to agy, so description-review clients from before code review keep working.
+defaults to agy (description-review clients send none).
 
 Safety (the prompt carries untrusted PR text):
 - Every call except /v1/health needs `Authorization: Bearer <token>`.
 - Each reviewer runs in a fresh empty directory with a minimal environment and a fresh HOME
   that holds only copies of its credential files (never its real state directory with other
   conversations, settings or plugins), under confine.py: Landlock lets it read only system
-  paths and its own binary, and write only the job directory. Tested: a prompt
+  paths and its own binary, and write only the job directory (plus /dev/null and /dev/shm).
+  Tested: a prompt
   telling agy to read a file elsewhere gets "permission denied", even with all agy tools
   approved. agy also runs with `--sandbox` and slash commands off; codex with its read-only
   sandbox and its shell, exec, web, browser, app and plugin tools disabled.
@@ -138,7 +139,8 @@ def _get(d, path):
 
 
 def refresh_ok(engine, snap, new):
-    """True only for a token refresh: JSON with the same keys and the same account. Anything
+    """True when `new` looks like a refresh of `snap`: JSON with the same keys and the same
+    account (it does not check that the tokens work). Anything
     else (garbage, another account's credentials planted by a prompt-injected reviewer) is
     refused."""
     try:
@@ -151,8 +153,8 @@ def refresh_ok(engine, snap, new):
 
 
 def copy_back(engine, pairs):
-    """Keep a credential the reviewer refreshed (token rotation), but only a genuine refresh of
-    the same account, and only if no other job changed the real file meanwhile."""
+    """Keep a credential the reviewer refreshed (token rotation), but only one that looks like a
+    refresh of the same account (refresh_ok), and only if no other job changed the real file meanwhile."""
     with COPY_BACK_LOCK:
         for copy, src, snap in pairs:
             if not copy.exists():

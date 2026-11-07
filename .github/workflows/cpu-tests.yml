@@ -14,7 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - working-directory: template/livelab
+      - name: Run the conformance cases against fake labs, each missing one property (standard library only)
+        working-directory: template/livelab
         run: python3 -m unittest discover -s conformance -t . -v
   vllm-kernel:
     name: vLLM kernel golden tests and conformance c0-c10 on the toy lab (CPU)
