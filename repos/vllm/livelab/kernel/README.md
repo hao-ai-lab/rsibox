@@ -3,7 +3,8 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate, journal, witness, and the R0 swap (a function-body swap).
+findings, locate, journal, witness, the R0 swap (a function-body swap), and the participant
+side of a transaction.
 
 ## Contract
 
@@ -75,6 +76,18 @@ findings, locate, journal, witness, and the R0 swap (a function-body swap).
   they prove capture, not a run, so zero live calls with capture calls is a `zero_witness`
   routed to R1 that asks for a device-side probe. With torch loaded, the hook is marked
   `assume_constant_result`, so Dynamo calls it while tracing and never traces it.
+- **Participant** (`coordinator.py`, part 1) is one side of a two-phase transaction: a worker
+  rank, the engine core or the API server. Every call returns an ok-dict and never raises:
+  `prepare(plan)` stages every module of the plan (nothing visible; the reply's `ok` is the
+  vote, after the plan's `accept`), `validate(ref)` re-checks the staged identities,
+  `commit(ref)` applies at the participant's quiesce point (refusing a commit that starts
+  after `deadline_at`), `abort`, `undo` (back to the transaction's journal mark, saying which
+  later transactions it undid too), `status`, `proof` (code hashes and witness counts),
+  `witness_check`, `reset`, `fingerprint`, `at_base`. `LocalParticipant` runs the kernel in
+  this process; `CallParticipant` reaches one in another process through `call(method,
+  payload)`. Chained edits: a later plan for a module is staged against the text the last
+  committed transaction installed, with that participant's own code and line maps. A plan
+  that would change nothing is `empty_change`.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
   expected, why it matters, the actions and their cost, and the risk of ignoring it.
@@ -87,6 +100,7 @@ findings, locate, journal, witness, and the R0 swap (a function-body swap).
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
 | `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `journal`, `locate`, `witness`. |
+| `coordinator.py` | So far the participant side: `Participant`, `CallParticipant`, `LocalParticipant`, `txn_ref`. Imports `findings`, `journal`, `locate`, `swap`, `witness`. |
 | `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
 
@@ -152,6 +166,11 @@ Each test's docstring says what it proves and what it does not.
 | `test_a_class_default_or_an_old_setter_is_not_a_new_field` | a false new_fields block when old instances do have the attribute |
 | `test_edit_again_after_a_line_shift_follows_the_line_map` | a second edit refused with no_live_function + outside_changes after the first shifted the module's lines |
 | `test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias` | the same with no line map: the one live definition is taken, and said |
+| `test_two_ranks_switch_together_and_undo_to_the_same_code_objects` | a rank that runs the edit before commit, or keeps it after undo |
+| `test_edit_that_changes_no_code_is_refused` | a transaction that "commits" while nothing changed |
+| `test_running_frame_never_runs_the_new_code` | a loop frame that never runs the new code reported as a pass |
+| `test_a_new_field_votes_no_and_routes_to_t1` | a participant that votes yes on an edit that would raise AttributeError |
+| `test_three_edit_chain_explicit` / `_auto` | a second transaction refused after the first shifted lines; an undo that leaves the wrong text as the base |
 
 ## Not here yet
 
@@ -167,11 +186,12 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
 - **Compile units** (compile only the statements holding the changed definitions; a whole
   3,800-line module compile stalls a step) and the **analyzer child process**
   (`ProcessAnalyzer`, `analyze_fallback`), which keep the GIL free during prepare.
-- **Transaction-level parts**, with the coordinator: `overlay=` and `staged_names` (a module
-  importing a name another module of the same transaction adds), `docstring_only`, the
-  `empty_change` verdict, `Witness.arm` (counters for repair cells), and the
-  `record_closures` cases for partial undo.
-- **Coordinator** (two-phase transactions over participants, step-gap commits, deadlines,
-  proofs) and **session** (the host's state machine and poisoning), and the receipt writer.
+- **Transaction-level parts**: `overlay=` and `staged_names` (a module importing a name
+  another module of the same transaction adds), `docstring_only`, and the participant's
+  analyzer.
+- **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes.
+- **The host** (`Coordinator`, `StepGapCoordinator`: votes, the step gap, phase-2 deadlines,
+  group participants and missing ranks, receipts) is the next PR; then **session** (the
+  host's state machine and poisoning) and the toy lab.
 
 These come in later PRs of the kernel series, each importing and testing on top of this one.
