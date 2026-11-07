@@ -254,6 +254,8 @@ def main(argv=None):
                           report, truncated)
     print(json.dumps({"report": report, "comments": len(review["comments"])}, indent=1))
     print(review["body"])
+    for c in review["comments"]:
+        print(f"\n{c['path']}:{c['line']}\n{c['body']}")
     if a.post:
         r = post(a.repo, a.pr, review)
         print(f"posted: {r.get('html_url')}")

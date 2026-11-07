@@ -85,7 +85,10 @@ holds only copies of the reviewer's credential files (never its real state direc
 other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
 only system paths and its own binary, and write only the job directory. A refreshed
 credential is copied back only if it is valid JSON for the same account and the real file was
-not changed meanwhile. This matters
+not changed meanwhile. Known limit: a prompt-injected reviewer that keeps the account fields
+can still write unusable tokens into its copy, which would log the host CLI out until you log
+in again (denial of service; it cannot plant another account's credentials). Removing
+copy-back closes that, at the risk of a rotated refresh token logging the host out instead. This matters
 because agy's file tools cannot be turned off from its command line: in our test an
 unconfined headless `agy -p --sandbox` read a file outside its directory when asked to;
 confined, the same request got "permission denied" even with every agy tool approved. Codex
