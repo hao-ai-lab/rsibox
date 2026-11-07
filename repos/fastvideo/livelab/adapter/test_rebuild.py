@@ -1,4 +1,4 @@
-"""Golden tests of the lab's `rebuild` verb (T1 restart) on the FastVideo-shaped toy (CPU,
+"""Golden tests of the lab's `rebuild` verb (in-place rebuild) on the FastVideo-shaped toy (CPU,
 real spawned workers reached through their pipes).
 
 Run from the repo root:
