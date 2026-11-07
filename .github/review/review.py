@@ -33,13 +33,17 @@ def strip_comments(text):
 
 
 def facts(text):
-    """What a rewrite must keep: numbers, references, hashes and code spans."""
+    """What a rewrite must keep: numbers, references, hashes and code spans.
+
+    Backticks are formatting, not facts: numbers and references are read from the whole text,
+    and a code span only counts as new or lost if its text is new or lost (see check)."""
     text = strip_comments(text)
-    code = re.findall(r"`[^`\n]+`", text)
-    prose = re.sub(r"`[^`\n]+`", " ", text)
-    refs = re.findall(r"[\w.-]+/[\w.-]+#\d+|#\d+|\b[0-9a-f]{7,40}\b", prose)
-    nums = re.findall(r"(?<![\w#])\d[\d,]*(?:\.\d+)?", prose)
-    return {"code": set(code), "refs": set(refs), "numbers": set(nums)}
+    code = {c[1:-1] for c in re.findall(r"`[^`\n]+`", text)}
+    flat = text.replace("`", "")
+    refs = re.findall(r"[\w.-]+/[\w.-]+#\d+|#\d+|\b[0-9a-f]{7,40}\b", flat)
+    nums = re.findall(r"(?<![\w#])\d[\d,]*(?:\.\d+)?", flat)
+    return {"code": code, "refs": set(refs), "numbers": set(nums),
+            "plain": re.sub(r"\s+", " ", flat)}
 
 
 def check(old_title, old_body, new_title, new_body):
@@ -53,11 +57,18 @@ def check(old_title, old_body, new_title, new_body):
     if m_old and m_new and m_old.group(1, 2) != m_new.group(1, 2):
         problems.append("title changed its type or scope")
     a, b = facts(old_title + "\n" + old_body), facts(new_title + "\n" + new_body)
-    for kind in ("code", "refs", "numbers"):
+    for kind in ("refs", "numbers"):
         if a[kind] - b[kind]:
             problems.append(f"dropped {kind}: {sorted(a[kind] - b[kind])[:8]}")
         if b[kind] - a[kind]:
             problems.append(f"added {kind}: {sorted(b[kind] - a[kind])[:8]}")
+    # Wrapping existing text in backticks (or unwrapping it) is fine; new or lost text is not.
+    lost = sorted(c for c in a["code"] if " ".join(c.split()) not in b["plain"])
+    new = sorted(c for c in b["code"] if " ".join(c.split()) not in a["plain"])
+    if lost:
+        problems.append(f"dropped code: {lost[:8]}")
+    if new:
+        problems.append(f"added code: {new[:8]}")
     if "## Loop record" in old_body:
         for field in LOOP_FIELDS:
             if f"{field}:" not in new_body:
@@ -135,6 +146,9 @@ def main():
         return 0
     if problems:
         print("--- rejected, nothing changed:\n" + "\n".join(f"- {p}" for p in problems))
+        if os.environ.get("GITHUB_ACTIONS"):
+            print(f"::warning title=Description review rejected::{len(problems)} fact check(s) "
+                  "failed, so the suggested rewrite was not applied. See the job log.")
         return 0 if os.environ.get("GITHUB_ACTIONS") else 2
     print("--- every check passed")
     if args.apply:
