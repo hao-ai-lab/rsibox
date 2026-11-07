@@ -70,3 +70,89 @@ executor, and 6.00 s per video against 6.09 s: the frames crossing the process b
 nothing measurable at this size.
 
 **Edit-to-run:** 0.72 s live against about 72 s for a warm restart and about 500 s for a cold one.
+
+## Why a restart costs what it costs (1 GPU, phase by phase)
+
+Our 2026-11-07 phase-timed restarts on one GB200 of a 4-GPU tray: one fresh process per run,
+timers wrapped around the real calls in the driver and in the spawned worker (interpreter start,
+imports, `init_device`, distributed init, each component load, each stage, every Triton compile
+and autotune bench, every FlashInfer JIT load and autotune lookup, every Dynamo frame compile,
+plus Dynamo's own `compile_times`). Page cache warm. "Warm JIT" = every JIT cache at the path it
+was built at. Workload of `workload.md`, all outputs bit-exact to the 1-GPU golden.
+
+| Phase | Cold | Warm | Avoidable? | How | Tier |
+|---|---|---|---|---|---|
+| Driver interpreter start | 0.5 s | 0.5 s | in a resident host | keep the lab host | T1 |
+| Driver imports (torch 1.5-2.4 s, fastvideo 14.8-35.6 s) | 93.5 s | 17.4-38.4 s | yes | resident lab host; zygote | T1 |
+| Worker spawn: interpreter 0.5 s + torch 1.6-2.1 s + fastvideo re-import 14.8-17.3 s | in load | 17-20 s | yes | fork from a preloaded server (`services/zygote.py`) | T1b |
+| CUDA context + device init (`init_device` minus loads) | | 0.2-0.3 s (micro: context 0.28-0.34 s) | no, per process | | |
+| Distributed init (N = 1) | | 0.02 s | | | |
+| Text encoder load (NVFP4 Qwen3-VL) | 91.1 s | 2.3-2.7 s | yes | keep the process (T1a); map by CUDA IPC (T1b) | T1 |
+| Tokenizer + processor | | 0.5-0.85 s | yes | keep the process | T1 |
+| VAE load (incl. NVFP4 decoder apply) | 21.9 s | 5.0-5.2 s | yes | keep the process; IPC | T1 |
+| Audio VAE | 3.6 s | 0.55-0.6 s | yes | keep the process; IPC | T1 |
+| DiT load (NVFP4 checkpoint) | 76.3 s | 2.5-3.0 s | yes | keep the process; IPC: 1,838 tensors (36.9 GiB) mapped in 0.12 s | T1 |
+| Stage creation, post-init, NCCL warm-up | | < 0.1 s | | | |
+| **Load total (`from_config`)** | 195.6 s | 30.1-35.3 s (alone) | | | |
+| FlashInfer NVFP4 JIT (`fp4_quantization`, `fp4_gemm_cutlass`) | 158.7 s (a warm cache copied to a new path rebuilds) | 0.09-1.05 s (ninja no-op + load) | yes | one cache root at a fixed path (`services/jitcache.py`) | T2 |
+| Inductor `torch_key()` (hashes every torch source file) | 2.55 s | 0.8-2.6 s | yes | preset from disk (`jitcache.preset_torch_key`) | T2 |
+| Dynamo: 5 frames (VAE + DiT `@torch.compile` helper), Inductor FX cache hit | | 1.1-1.2 s besides `torch_key` (bytecode tracing 0.72-1.02 s) | no, per process | keep the process | T1 |
+| Triton kernel loads (23 kernels from the disk cache) | | 0.39-1.26 s | no, per process | keep the process | T1 |
+| Triton autotune (VSA `_attn_fwd_sparse`, 12 configs) | | 1.94-2.64 s | yes (12 benches gone with the cache on; warm videos no slower, A/B `ab-*`) | `TRITON_CACHE_AUTOTUNING=1` | T2 |
+| FlashInfer autotune lookups (3,150 per video) | | 0.17 s (also on warm videos) | | | |
+| cuBLAS / cuDNN handles, allocator growth | | 0.04 s / 0.09-0.14 s / 0.003 s per 40 GiB (micro) | no | | |
+| **First video** | 217.9 s cold JIT; 174.0 s after a cache move | 13.95 s alone (warm 6.03-6.13 s): +1.0 s conditioning, +5.55 s denoise, +1.25 s decode | | | |
+| Shutdown | | 2.2-2.6 s | | | |
+
+- **The cold first video is FlashInfer's NVFP4 JIT, and it is a path problem.** Copying a warm
+  cache root byte for byte to a new path rebuilt both modules (72.6 s + 86.1 s): FlashInfer runs
+  ninja on every load and the ninja command lines hold the absolute path. Triton's and Inductor's
+  caches hit after the same copy (content-keyed). A fresh process at the same path paid 0.09-1.05 s.
+- **The warm first video's 7.8 s excess** (13.95 s against 6.1 s, a run alone on the tray): Dynamo
+  3.8 s in total (of which `torch_key` 2.55 s, bytecode tracing 0.79 s), Triton autotune 1.94 s,
+  Triton kernel loads 0.44 s, FlashInfer loads 0.09 s; about 1.5 s is not attributed (first calls of
+  the text encoder and the CUDA modules they load).
+- **The warm load's 31 s is half imports:** the spawned worker imports torch and FastVideo again
+  (16-19 s); the component loads take 11-12 s, the VAE (5.1 s) the largest.
+- **Noise:** from 13:04 PST the tray's other GPUs ran H3 checks too, and our warm videos read
+  9.0-15.0 s instead of 6.0-6.1 s, with or without the Triton autotune cache (A/B `ab-noauto`
+  10.6-10.8 s, `ab-auto` 11.4-15.0 s), so the cache is not the cause; which shared resource is,
+  is not isolated (`lessons.md`). The phase rows above come from runs alone or from
+  per-process work (imports, loads, JIT) that the noise moves less.
+
+## Restart ladder: edit to first video (1 GPU)
+
+Our 2026-11-07 runs (`livelab/services/`, lab verbs), same workload, bit-exact to the golden
+unless the edit changes the output. **Measured** = what the runs read; from 13:04 PST the tray's
+other GPUs ran H3 checks, and a warm video read 9.0-15.0 s instead of 6.0-6.1 s alone, so each
+tier also has a **quiet** column: its measured overhead plus the 6.1 s video of a run alone.
+
+| Tier | What survives | Edit to first video, measured | Quiet (overhead + 6.1 s video) | Source |
+|---|---|---|---|---|
+| Cold restart | nothing (cold page cache, empty JIT caches) | about 507 s (93.5 imports + 195.6 load + 217.9 first video) | | ladder above |
+| Restart after a JIT-cache move | page cache | 223.4 s (17.4 + 32.0 + 174.0) | | `base-a` |
+| Warm process restart, before | page cache, JIT caches at their path | 83.5 s (38.4 imports + 31.1 load + 13.95 first video) | about 62 s with 17 s imports | `base-b` |
+| Lab respawn (`reset("respawn")`), before | lab host | 58.1-62.1 s (respawn 43.0-45.0 s + first video 15.1-17.1 s) | about 47 s (2.4 s shutdown + 31 s load + 13.95 s) | `resp-spawn2` |
+| **T2 warm restart** (path-stable roots, autotune cache, `torch_key` preset) | + Triton autotune, Inductor `torch_key` | 66.4 s (18.1 + 33.3 + 15.1) | about 58 s; first-video JIT 2.2 s instead of 6.3 s | `ab-auto`, `t2-*` |
+| **T1b zygote respawn** (`FastVideoLab(zygote=True)`) | + imports (workers fork from a preloaded server) | 28.5-34.2 s (respawn 14.1-14.3 s + first video 14.2-20.1 s) | about 24 s (14.2 s respawn + 2.2 s JIT + 1.5 s first calls + 6.1 s) | `resp-zygote3` |
+| **T1a rebuild** (`rebuild` verb) | + process, CUDA context, weights, JIT and compile state | 12.6-16.4 s (rebuild 0.19-1.7 s + first video 10.9-15.3 s; the next warm video 11.5-15.0 s) | **6.4-7.5 s** (rebuild 0.19-1.27 s + 0.1 s Dynamo recompile + 6.1 s) | `rebuild-a/b/c/d`, `rebuild-2g-b` |
+| T0 live swap (R0, `install`) | everything | 6.7 s (0.72 s edit-to-run + 6.0 s check) | 6.7 s | live lab table above |
+
+- **T1a covers the edits T0 refuses** (a constructor, a new field, a module constant) on the H3
+  stages and the H3 DiT: a stage constructor edit (4 modules re-imported), a DiT block
+  constructor edit that adds a field (merged into 50 live blocks), a DiT edit that changes
+  `norm1.eps` (output changed, `9eadd39e7674caf0`), and a revert (bit-exact again). The first
+  video after a rebuild costs what the next warm video costs (paired, `rebuild-c`: 10.9 vs 13.3,
+  12.4 vs 12.4, 11.0 vs 11.8, 15.3 vs 15.0 s); the only JIT work is one Dynamo recompile of the
+  DiT's `@torch.compile` helper (0.08-0.09 s, Inductor cache hit). Rebuild cost, ranks in
+  parallel and each file's imports parsed once per process (`rebuild-d`, `rebuild-2g-b`): DiT
+  edits 0.19-0.64 s (re-import 0.04-0.17 s, meta builds of the old and new DiT 0.13-0.47 s), a
+  stage edit 1.16-1.27 s (the process's first import graph: 1.1 s), stages < 1 ms; 2 ranks
+  0.31-1.16 s. Before those two changes: 1.0-2.6 s, mostly the graph.
+- **T1b** (zygote): the forkserver imports 357 modules once (19.4-21.0 s, at lab start); a
+  respawn's worker start fell from 40.4-42.1 s to 12.6-13.0 s (paired runs, same window): what
+  remains is shutdown, CUDA context and the component loads (11-12 s), then the per-process JIT
+  of the first video. A weights holder would take the loads off: mapping the DiT's 1,838 tensors
+  by CUDA IPC took 0.12 s (`ipc-b`), not built into the lab yet.
+- **T2 alone does not make a restart cheap:** it takes the first video's JIT from 6.3 s to 2.2 s,
+  but a fresh process still pays 17-38 s of imports and 30-35 s of loads.
