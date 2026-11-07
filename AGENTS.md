@@ -19,10 +19,11 @@ We build FastRSI one engine and a few real PRs at a time.
 
 The repo holds three things. Keep them apart.
 
-- **Framework:** what works for any engine. `core/`, `template/`, `docs/`, `AGENTS.md`,
-  `.github/`.
-- **Artifact:** what the loop produced for one engine. `repos/<engine>/`. It shows the current
-  state only: edit `kb/` in place, never append history.
+- **Framework:** blueprints that hold for any engine, and no engine code. `core/`, `template/`,
+  `docs/`, `AGENTS.md`, `.github/`.
+- **Artifact:** what the loop produced for one engine, code and architecture included.
+  `repos/<engine>/`. It shows the current state only: edit `docs/` and `kb/` in place, never
+  append history.
 - **Loop:** the journey. It lives in pull requests, not in files. One loop iteration is one PR,
   and its description carries the record (see below).
 
@@ -49,6 +50,12 @@ then the iteration on top of it. That way each framework rule points to the PR t
   text is true.
 - **One iteration per PR.** Keep it small enough to review in one sitting. Stack PRs when one
   step depends on another.
+- **One boundary per PR.** A code PR changes one folder of `livelab/` (one boundary), with at
+  most about 600 lines of non-test code. Its description states the contract (interface,
+  invariants, what the folder owns), and it carries its own tests: at least one case that fails
+  without the PR. A PR that touches a running engine also carries a GPU receipt. Split a bigger
+  change along its dependency order, so that each PR imports and tests on its own on top of the
+  one before it.
 - **Merge** with squash, keeping the PR description as the commit body, so the loop record is
   also in `git log`.
 - **Attribution:** do not add AI tools as co-authors. No co-author trailer naming Claude,
@@ -88,12 +95,22 @@ test, because it misleads the reader.
 
 ## Where things go
 
-- `core/`: the skill and the agent prompts (developer, toolsmith offline and online,
-  orchestrator). No code.
-- `template/livelab/`: the fixed live lab interface, a stub, and the conformance cases.
-  Changing `INTERFACE.md` is a breaking change: bump its version and say so in the PR.
-- `repos/<engine>/`: everything about one engine: `kb/`, `livelab/`, `tools/`, `examples/`.
-- `docs/`: docs about FastRSI itself, following `docs/README.md`. No loose files at the root.
+- `core/`: blueprints only: the skill, the agent prompts (developer, toolsmith offline and
+  online, orchestrator) and the method. No code, and nothing about one engine.
+- `template/livelab/`: the blueprint for a new engine's live lab: the fixed interface, a stub,
+  and the conformance cases, run against a toy lab. Changing `INTERFACE.md` is a breaking
+  change: bump its version and say so in the PR.
+- `docs/`: how this repo and its process work, following `docs/README.md`. No engine
+  architecture, and no loose files at the root.
+- `repos/<engine>/`: everything about one engine:
+  - `docs/`: its architecture: the process tree, the restart boundaries and what each costs,
+    and how the live lab maps onto them.
+  - `kb/`: measured facts with their sources (costs, workload, lessons).
+  - `livelab/`: all code, one folder per boundary (for example `kernel/`, `adapter/`,
+    `services/`). Code that looks engine-agnostic still starts here. Move it to the framework
+    only when a second engine needs it, in a framework PR of its own.
+  - `tools/`: proven probes. `patches/`: our edits to the engine itself, with a ledger for
+    upstreaming. `examples/<name>/`: one walkthrough per replayed change, with its receipt.
 - No decision logs, ADRs or changelogs. Update the doc that describes the thing instead.
 
 ## What stays out of the repo
