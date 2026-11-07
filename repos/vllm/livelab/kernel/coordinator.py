@@ -1,12 +1,18 @@
-"""Coordinator, part 1: the participant side of two-phase transactions over participants
-(worker ranks, engine core, API server).
+"""Coordinator: two-phase transactions over participants (worker ranks, engine core, API server).
 
-    phase 1, while steps go on: prepare (stage beside the old state, run checks, vote)
-    phase 2, in the gap: validate (the staged plan is still valid), then commit or
-      abort; undo takes a committed transaction back
+    phase 1, while steps go on: prepare on every participant (stage beside the old state,
+      run checks, vote); a no vote aborts here
+    phase 2, in the gap: validate on every participant (the staged plan is still valid),
+      then commit on all, or abort on all; a commit that fails undoes the committed ones
 
-The host that drives them (`Coordinator`, `StepGapCoordinator`: votes, the step gap, the
-phase-2 deadline, group participants, receipts) is the next PR, on top of this one.
+`StepGapCoordinator` runs phase 2 inside ONE gap between two steps of the loop owner, so
+participants that step together never run a step on different versions, and the loop stalls
+only for phase 2. `Coordinator` runs phase 2 right away, each participant switching at its
+own quiesce point: between two commits a step can see mixed versions (the toy test shows it).
+The host answers `status(txn)`: prepared, committed, aborted, undone or in-doubt. Receipts are
+linked records sharing the transaction id: `run` appends `txn`, `prove` appends `proof`
+(witnesses after the workload, edit_to_finish_s), `undo` appends `undo` (code undo, then the
+plan's `undo_resets`).
 
 Participant protocol (every call returns an ok-dict and never raises; a crash or a reply that
 is not an ok-dict counts as not-ok):
@@ -27,6 +33,21 @@ is not an ok-dict counts as not-ok):
 phase 2 a deadline (`phase2_deadline_s`). A participant must not switch after `deadline_at`
 (LocalParticipant refuses a commit that starts late). Participants share the host's clock (one
 node; across nodes the clock skew shifts the cut-off by the skew).
+
+Phase-2 deadline. The gap is a global barrier: a participant that hangs in commit stalls every
+step. With a deadline D, validate and commit must answer by gap start + D/2; the rollback has
+until gap start + D, so the gap ends within D. A participant that misses its deadline is
+treated as failed (`deadline_missed`), the others are undone in the gap, and the host is
+poisoned: its late call may still be running, so only undo or respawn are allowed until
+`recovered()`. The host calls an unbounded participant on a `Lane` (one thread per
+participant, calls in order) and stops waiting at the deadline; later calls queue behind the
+late one, so an undo runs after a late commit. A `bounded` participant (its transport has a
+timeout and it bounds its own calls, as the vLLM worker group does) is called directly.
+
+A group participant (several ranks reached by one call, e.g. one collective_rpc) answers with
+the per-rank replies in `ranks` (`merge_ranks`): witness counts and code hashes are kept per
+rank in the receipts, and ranks that differ are findings (`witness_uneven`) or
+`commit_hashes.ranks_agree: false`.
 
 A plan is plain data, so it can cross a process boundary:
 
@@ -52,18 +73,24 @@ side implements: one `call(method, payload) -> dict` per participant (for vLLM: 
 to a worker rank, or the engine-core input-queue channel), which on the far side dispatches
 to a LocalParticipant.
 
-Not in v1 (see the kernel README): the analyzer child, cross-module overlays, the
-docstring-only label, per-block witness keys, compile units, and the new-field
-backfill. A `new_fields` finding (route T1) blocks like any other.
+Not in v1 (later PRs; see the kernel README): rebuilds after the commit (R1 recapture, R6
+weight reload), the analyzer child, cross-module overlays, the docstring-only label, per-block
+witness keys, compile units, and the new-field backfill. A `new_fields` finding (route T1)
+blocks like any other.
 """
 import json
+import math
+import queue
 import sys
+import threading
 import time
 import types
+import uuid
 
 from . import findings as F
 from . import journal as J
 from . import locate as L
+from . import receipt as R
 from . import swap as S
 from . import witness as W
 
@@ -558,3 +585,683 @@ def _attr_names(scope):
                                                            types.FunctionType)):
                 out[f"{n}.{k}"] = set(dv)
     return out
+
+
+def _call(p, method, arg):
+    try:
+        r = getattr(p, method)(arg)
+    except Exception as e:
+        return F.not_ok(f"{method} crashed: {type(e).__name__}: {e}", [
+            {**F.finding("participant_failed", f"{type(e).__name__}: {e}",
+                         f"{method} returns an ok-dict"), "participant": p.name}])
+    if not isinstance(r, dict) or "ok" not in r:
+        return F.not_ok(f"{method}: bad reply {r!r}")
+    return expect_ranks(p, method, r)
+
+
+def expect_ranks(p, method, r):
+    """A group participant that declares the ranks it must reach (`expected`: rank ids, e.g.
+    every rank of every data-parallel group, from the engine's parallel config) and whose
+    reply lacks some: the reply becomes not-ok with a blocking `participant_missing` naming
+    them. At DP>1 a vLLM client returned only DP rank 0's replies, and witness, receipt and
+    undo covered 1 of 4 groups with no word."""
+    exp = getattr(p, "expected", None)
+    if exp is None:
+        return r
+    got = {str(x.get("rank")) for x in (r.get("ranks") or [r])}
+    missing = [str(e) for e in exp if str(e) not in got]
+    if not missing:
+        return r
+    f = {**F.finding("participant_missing", f"{method}: no reply from {', '.join(missing)} "
+                     f"(replies from {', '.join(sorted(got)) or 'none'})",
+                     f"a reply from every expected rank: {', '.join(map(str, exp))}",
+                     subject=p.name), "participant": p.name, "missing": missing}
+    return {**r, "ok": False, "missing": missing,
+            "error": (f"{r.get('error')}; " if r.get("error") else "")
+            + f"no reply from {missing}", "findings": list(r.get("findings") or []) + [f]}
+
+
+def _hashes_agree(hashes):
+    """Do participants that swapped the same target run the same code? Compares each witness
+    key across the participants that report it (participants may swap different modules, e.g.
+    workers the sampler and the engine core the scheduler). None when no key is shared."""
+    by_key = {}
+    for h in hashes.values():
+        for k, v in (h or {}).items():
+            by_key.setdefault(k, []).append(json.dumps(v, sort_keys=True))
+    shared = [vs for vs in by_key.values() if len(vs) > 1]
+    return all(len(set(vs)) == 1 for vs in shared) if shared else None
+
+
+def _rank_split(rank_hashes):
+    """For ranks whose code hashes differ: ("ranks 0 vs 1,2: k1, ...", same_key) where
+    same_key says whether a function key held by several ranks has different hashes (as
+    opposed to only some ranks holding a key). Ranks are grouped by identical hashes."""
+    groups = {}
+    for r, h in rank_hashes.items():
+        groups.setdefault(json.dumps(h, sort_keys=True), []).append(str(r))
+    keys = set().union(*[set(h or {}) for h in rank_hashes.values()])
+    differ, same_key = [], False
+    for k in sorted(keys):
+        vals = [json.dumps((h or {}).get(k), sort_keys=True) for h in rank_hashes.values()]
+        held = [v for v, h in zip(vals, rank_hashes.values()) if k in (h or {})]
+        if len(set(vals)) > 1:
+            differ.append(k)
+            same_key = same_key or len(set(held)) > 1
+    split = " vs ".join(",".join(rs) for rs in sorted(groups.values(), key=len))
+    return f"ranks {split}: {', '.join(differ)[:300]}", same_key
+
+
+def _ranks_agree(rank_hashes):
+    """Do the ranks of one group run the same code? None for a group of one (nothing to
+    compare)."""
+    if len(rank_hashes) < 2:
+        return None
+    return len({json.dumps(h, sort_keys=True) for h in rank_hashes.values()}) == 1
+
+
+# Ranks of one group run the same steps and switch in the same gap, and a group reads all its
+# counters in one call (for vLLM: one collective_rpc between the same two steps), so code that
+# runs on every rank gives equal counts. A read that is not step-aligned can be off by one
+# step's calls, which is under 1% once the workload ran 100 steps after the commit. The
+# tolerance is 1% of the largest count, at least 1 call; a rank that missed part of the
+# workload (or never ran the edit) is far outside it.
+WITNESS_TOLERANCE = 0.01
+
+
+def witness_uneven(name, ranks, tolerance=WITNESS_TOLERANCE):
+    """Findings for the keys whose per-rank counts differ beyond the tolerance.
+    ranks: {rank label: {key: count}}."""
+    out = []
+    keys = sorted({k for c in ranks.values() for k in c})
+    for k in keys:
+        by = {r: c.get(k, 0) for r, c in ranks.items()}
+        hi, lo = max(by.values()), min(by.values())
+        if hi - lo > max(1, math.ceil(tolerance * hi)):
+            out.append({**F.finding(
+                "witness_uneven", ", ".join(f"rank {r}: {n}" for r, n in by.items()),
+                f"equal counts within {max(1, math.ceil(tolerance * hi))} call(s)",
+                subject=k), "participant": name})
+    return out
+
+
+def merge_ranks(method, replies):
+    """One reply for a group participant from its ranks' replies (each an ok-dict with its
+    `rank`). Keeps every rank's reply in `ranks`; findings carry their rank. witness_check:
+    `counts` is the count every rank reached (the minimum), the per-rank counts are in
+    `ranks`. status: one state, or "mixed"."""
+    rs = [r if isinstance(r, dict) and "ok" in r else F.not_ok(f"bad reply {r!r}")
+          for r in replies]
+    for i, r in enumerate(rs):
+        r.setdefault("rank", i)
+    out = {"ok": all(r["ok"] for r in rs), "ranks": rs,
+           "findings": [{**f, "rank": r["rank"]} for r in rs for f in r.get("findings", [])]}
+    if not out["ok"]:
+        out["error"] = "; ".join(f"rank {r['rank']}: {r.get('error')}" for r in rs
+                                 if not r["ok"])
+    if method == "status":
+        states = {r.get("state") for r in rs}
+        out["state"] = states.pop() if len(states) == 1 else "mixed"
+    elif method == "witness_check":
+        for f in ("counts", "capture_counts"):
+            keys = {k for r in rs for k in r.get(f, {})}
+            out[f] = {k: min(r.get(f, {}).get(k, 0) for r in rs) for k in keys}
+    elif method == "proof":
+        out["hashes"] = rs[0].get("hashes") if rs else {}
+    return out
+
+
+class GroupParticipant(Participant):
+    """Several ranks as one participant: every call reaches each member in turn and the
+    replies merge into one (`merge_ranks`), as one collective_rpc reaches every worker rank."""
+
+    def __init__(self, name, members):
+        self.name, self.members = name, list(members)
+
+    def _all(self, method, arg):
+        return merge_ranks(method, [{**_call(m, method, arg), "rank": i}
+                                    for i, m in enumerate(self.members)])
+
+    def prepare(self, plan):
+        return self._all("prepare", plan)
+
+    def validate(self, txn):
+        return self._all("validate", txn)
+
+    def commit(self, txn):
+        return self._all("commit", txn)
+
+    def abort(self, txn):
+        return self._all("abort", txn)
+
+    def undo(self, txn):
+        return self._all("undo", txn)
+
+    def status(self, txn):
+        return self._all("status", txn)
+
+    def proof(self, txn):
+        return self._all("proof", txn)
+
+    def witness_check(self, txn):
+        return self._all("witness_check", txn)
+
+    def reset(self, kind):
+        return self._all("reset", kind)
+
+    def at_base(self, _=None):
+        return self._all("at_base", None)
+
+
+class Lane:
+    """One thread that runs the host's calls to one participant, in order. `call` waits until
+    the deadline at most. A call that misses it keeps running; later calls queue behind it
+    and are not waited for (so an undo runs after the late commit returns)."""
+
+    def __init__(self, name):
+        self._q = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self.pending, self.late = 0, False
+        threading.Thread(target=self._run, daemon=True, name=f"fastrsi-lane-{name}").start()
+
+    def _run(self):
+        while True:
+            job = self._q.get()
+            job()
+            with self._lock:
+                self.pending -= 1
+                if not self.pending:
+                    self.late = False
+
+    def call(self, fn, deadline_at):
+        """(True, value) if fn finished by deadline_at; (False, None) if it did not, or if it
+        only queued behind a late call."""
+        box, done = {}, threading.Event()
+
+        def job():
+            try:
+                box["value"] = fn()
+            except BaseException as e:            # never kill the lane
+                box["value"] = F.not_ok(f"{type(e).__name__}: {e}")
+            done.set()
+        with self._lock:
+            behind = self.late
+            self.pending += 1
+        self._q.put(job)
+        if behind:
+            return False, None
+        if done.wait(max(0.0, deadline_at - time.time())):
+            return True, box["value"]
+        with self._lock:
+            if not done.is_set():
+                self.late = True
+        return (True, box["value"]) if done.is_set() else (False, None)
+
+
+class Coordinator:
+    """The transaction host. Two phases:
+
+    1. `prepare` on every participant, in the caller's thread while steps go on: locate,
+       compile, stage, check. Nothing is visible. A no vote aborts here.
+    2. Inside `_in_gap`: `validate` on every participant (is the staged plan still valid?),
+       then commit on all, or abort on all; a commit that fails undoes the committed ones.
+
+    The plain Coordinator runs phase 2 right away and each participant switches at its own
+    quiesce point: between two commits a step can see mixed versions. StepGapCoordinator runs
+    phase 2 in one gap between two steps of the loop owner.
+
+    The host records every transaction's state; `status(txn)` answers prepared, committed,
+    aborted, undone, or in-doubt (phase 2 started but has not finished). A caller whose gap
+    call timed out resolves the outcome with `status`, never by assuming failure; a phase 2
+    that had not started when the caller gave up is cancelled (aborted).
+
+    phase2_deadline_s: the most phase 2 (and an undo) may hold the gap; None waits for every
+    participant however long it takes (the gap then lasts as long as the slowest one). A
+    participant that misses it poisons the host (`poison`): `run` is refused, `undo` is
+    allowed, `recovered()` clears it after the lab respawned its participants."""
+
+    def __init__(self, participants, writer=None, engine=None, interface_version="0",
+                 clock=time.time, phase2_deadline_s=5.0):
+        self.participants = list(participants)
+        self.writer = writer
+        self.engine = engine or {"name": "unknown", "version": None, "commit": None}
+        self.interface_version = interface_version
+        self.clock = clock
+        self.phase2_deadline_s = phase2_deadline_s
+        self.poison = []                   # deadline_missed findings; see recovered()
+        self.txns = {}                     # txn id -> host record (see _record)
+        self._lanes = {}
+        self._lock = threading.Lock()
+
+    def recovered(self):
+        """After the lab respawned its participants: clear the poison and the lanes (a lane
+        still stuck in a late call belonged to the old participant)."""
+        self.poison, self._lanes = [], {}
+        return F.ok()
+
+    def _bounded(self, p, method, arg, deadline_at, missed):
+        """Call p with a deadline (unix seconds; None: no deadline). Phase-2 methods get
+        {"txn", "deadline_at"}. A participant that does not answer in time is reported with a
+        `deadline_missed` finding and added to `missed` (participant names)."""
+        if deadline_at is None:
+            return _call(p, method, arg)
+        ref = {"txn": arg, "deadline_at": deadline_at} if method in PHASE2 else arg
+        if getattr(p, "bounded", False):
+            r = _call(p, method, ref)
+            late = any(f.get("check") == "deadline_missed" for f in r.get("findings", []))
+        else:
+            lane = self._lanes.get(p.name)
+            if lane is None:
+                lane = self._lanes[p.name] = Lane(p.name)
+            done, r = lane.call(lambda: _call(p, method, ref), deadline_at)
+            late = not done
+            if late:
+                why = ("queued behind a call that missed the deadline" if p.name in missed
+                       else f"no answer {self.phase2_deadline_s} s into the gap")
+                r = F.not_ok(f"{method}: {why}", [{**F.finding(
+                    "deadline_missed", f"{method}: {why}", f"{method} answers by the deadline"),
+                    "participant": p.name}], missed=True)
+        if late and p.name not in missed:
+            missed.add(p.name)
+            self.poison.append({**F.finding(
+                "deadline_missed", f"{p.name} missed the deadline in {method}",
+                f"{method} answers within the phase-2 deadline"), "participant": p.name})
+        return r
+
+    def _in_gap(self, fn):
+        """Run fn where phase 2 must happen. Here: right now, in this thread."""
+        return fn()
+
+    def _write(self, rec):
+        return self.writer.append(rec) if self.writer else {"ok": False, "error": "no writer"}
+
+    # -- host state ----------------------------------------------------------------------
+    def status(self, txn=None):
+        """{"ok", "txn", "state", "outcome", "written"}. Once phase 2 has finished, the first
+        status call after a timed-out run writes the transaction's receipt. Without a txn:
+        the host's own state ("idle", "in-doubt" while a phase 2 has not finished,
+        "poisoned"), its last transactions (newest last, at most 10) and at_base."""
+        if txn is None:
+            return self._overall()
+        with self._lock:
+            t = self.txns.get(txn)
+            if t is None:
+                return F.not_ok(f"unknown transaction {txn}", txn=txn, state="unknown")
+            state = t["state"]
+            if state == "prepared" and t["started"] and not t["done"]:
+                state = "in-doubt"
+            pending = t["done"] and not t["receipt"]
+        if pending:
+            self._finish(txn)
+        return F.ok(txn=txn, state=state, outcome=t.get("outcome"), written=t["receipt"],
+                    poisoned=bool(self.poison), missed=sorted(t.get("missed", ())))
+
+    def _overall(self):
+        with self._lock:
+            last = []
+            for t, rec in list(self.txns.items())[-10:]:
+                st = rec["state"]
+                if st == "prepared" and rec["started"] and not rec["done"]:
+                    st = "in-doubt"
+                last.append({"txn": t, "state": st, "outcome": rec.get("outcome")})
+        state = "poisoned" if self.poison else (
+            "in-doubt" if any(x["state"] == "in-doubt" for x in last) else "idle")
+        try:
+            ab = self.at_base()
+        except Exception as e:
+            ab = F.not_ok(f"at_base: {type(e).__name__}: {e}")
+        return F.ok(txn=None, state=state, txns=len(self.txns), last=last,
+                    at_base=ab.get("ok", False), at_base_detail=ab,
+                    poisoned=bool(self.poison))
+
+    # -- the transaction -----------------------------------------------------------------
+    def _phase2(self, txn, tl):
+        """validate -> commit, or abort; undo the committed ones if a commit fails. Inside
+        the gap. Returns the phase-2 result; never raises."""
+        now, t = self.clock, self.txns[txn]
+        res = t["res"]
+        tl["gap_start"] = now()
+        d = self.phase2_deadline_s
+        # validate and commit by half the deadline, the rollback by all of it: the gap ends
+        # within the deadline even when a commit misses its half
+        # (deadlines are on the shared wall clock, which participants also read)
+        g = time.time()
+        commit_at, end_at = (None, None) if d is None else (g + d / 2, g + d)
+        missed = t["missed"] = set()
+
+        def call(p, method, deadline_at):
+            return self._bounded(p, method, txn, deadline_at, missed)
+        for p in self.participants:
+            res[p.name]["validate"] = call(p, "validate", commit_at)
+        tl["vote"] = now()
+        rollback = {"status": "not_needed", "participants": {}}
+        out = {"rollback": rollback, "extra": [], "hashes": {}}
+        if not all(res[p.name]["validate"]["ok"] for p in self.participants):
+            for p in self.participants:
+                res[p.name]["abort"] = call(p, "abort", end_at)
+            out["outcome"] = "aborted"
+        else:
+            committed, failed = [], None
+            for p in self.participants:
+                r = res[p.name]["commit"] = call(p, "commit", commit_at)
+                if not r["ok"]:
+                    failed = p
+                    break
+                committed.append(p)
+            if failed is None:
+                tl["committed"] = now()
+                out["outcome"] = "committed"
+            else:
+                out["outcome"] = "rolled_back"
+                out["extra"].append({**F.finding(
+                    "participant_failed", res[failed.name]["commit"].get("error"),
+                    "commit ok on every participant"), "participant": failed.name})
+                # The failed participant may have committed in part (a worker group whose
+                # ranks commit in one call: some ranks did, one did not), so it is undone too;
+                # undo is a no-op where nothing was committed.
+                # A participant that missed the deadline gets its undo queued behind the late
+                # commit (not waited for), so it runs if that commit lands after all.
+                for p in [failed] + list(reversed(committed)):
+                    rollback["participants"][p.name] = res[p.name]["undo"] = \
+                        call(p, "undo", end_at)
+                for p in self.participants:
+                    if p not in committed:
+                        res[p.name]["abort"] = call(p, "abort", end_at)
+                rollback["status"] = ("undone" if all(
+                    u["ok"] for u in rollback["participants"].values()) else "partial")
+        tl["gap_end"] = now()
+        return out
+
+    def run(self, plan, edit_time=None, baseline_restart=None):
+        """One transaction; appends a `txn` receipt. edit_time: when the edit was made (unix
+        seconds; default now). baseline_restart: {"seconds", "source"} of the warm restart
+        this replaces. Returns {"ok", "outcome", "txn", "receipt", "written"}, where outcome is
+        committed, aborted, rolled_back, or in-doubt (resolve it with `status`)."""
+        now = self.clock
+        tl = {"edit": edit_time if edit_time is not None else now()}
+        txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"
+        plan = {**plan, "id": txn}
+        if self.poison:              # a late participant may still switch: undo or respawn
+            return {"ok": False, "outcome": "refused", "txn": txn, "receipt": None,
+                    "written": {"ok": False, "error": "host poisoned: no receipt"},
+                    "error": "host poisoned: undo or respawn first",
+                    "findings": [F.finding("session_poisoned", "; ".join(
+                        f"{f['participant']}: {f['check']}" for f in self.poison),
+                        "a host whose participants all met their deadlines")]}
+        t = self.txns[txn] = {"plan": plan, "edit": tl["edit"], "tl": tl, "state": "prepared",
+                              "res": {p.name: {} for p in self.participants},
+                              "started": False, "cancelled": False, "done": False,
+                              "receipt": False, "baseline": baseline_restart,
+                              "fin": threading.Lock()}
+        # phase 1: outside the gap, steps go on
+        tl["prepare_start"] = now()
+        for p in self.participants:
+            t["res"][p.name]["prepare"] = _call(p, "prepare", plan)
+        tl["prepared"] = now()
+        if not all(t["res"][p.name]["prepare"]["ok"] for p in self.participants):
+            for p in self.participants:
+                t["res"][p.name]["abort"] = _call(p, "abort", txn)
+            self._done(txn, {"outcome": "aborted", "hashes": {}, "extra": [],
+                             "rollback": {"status": "not_needed", "participants": {}}})
+            return self._finish(txn)
+
+        # phase 2: inside the gap
+        def job():
+            with self._lock:
+                if t["cancelled"]:
+                    return None
+                t["started"] = True
+            out = self._phase2(txn, tl)
+            self._done(txn, out)
+            return out
+        try:
+            self._in_gap(job)
+        except Exception as e:
+            with self._lock:
+                if not t["started"]:
+                    t["cancelled"] = True
+            if t["cancelled"]:
+                for p in self.participants:
+                    t["res"][p.name]["abort"] = _call(p, "abort", txn)
+                self._done(txn, {"outcome": "aborted", "hashes": {},
+                                 "rollback": {"status": "not_needed", "participants": {}},
+                                 "extra": [F.finding("participant_failed",
+                                                     f"phase 2 never started: {type(e).__name__}:"
+                                                     f" {e}", "a step gap within the timeout")]})
+                return self._finish(txn)
+            if not t["done"]:
+                return {"ok": False, "outcome": "in-doubt", "txn": txn, "receipt": None,
+                        "written": {"ok": False, "error": "in doubt: ask status(txn)"},
+                        "error": f"{type(e).__name__}: {e}"}
+        return self._finish(txn)
+
+    def _done(self, txn, out):
+        t = self.txns[txn]
+        with self._lock:
+            t["tl"]["txn_end"] = self.clock()
+            t["out"] = out
+            t["outcome"] = out["outcome"]
+            t["state"] = "committed" if out["outcome"] == "committed" else "aborted"
+            t["done"] = True
+
+    def _finish(self, txn):
+        """Build and append the `txn` receipt once phase 2 is over (or phase 1 aborted)."""
+        t = self.txns[txn]
+        ok = t["outcome"] == "committed"
+        # One finisher at a time. `receipt` turns True only once the append succeeded, so a
+        # failed append is retried by the next status(txn), and nobody reads a missing `rec`.
+        if not t["fin"].acquire(blocking=False):
+            return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": None,
+                    "written": {"ok": False, "error": "receipt being written: ask status(txn)"}}
+        try:
+            with self._lock:
+                if t["receipt"]:
+                    return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": t["rec"],
+                            "written": {"ok": True, "note": "already written"}}
+                rec = t.get("rec")
+            if rec is None:
+                rec = self._build(txn)
+                with self._lock:
+                    t["rec"] = rec
+            w = self._write(rec)
+            if w.get("ok"):
+                with self._lock:
+                    t["receipt"] = True
+            return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": rec, "written": w}
+        finally:
+            t["fin"].release()
+
+    def _build(self, txn):
+        """The `txn` receipt record; reads the code hashes of a committed transaction."""
+        t = self.txns[txn]
+        plan, tl, out, res = t["plan"], t["tl"], t["out"], t["res"]
+        rank_hashes, ranks_agree = {}, {}
+        if out["outcome"] == "committed":       # code hashes, read after the gap
+            for p in self.participants:
+                # kept in the receipt: its findings (participant_missing, participant_failed)
+                # count like those of any other call
+                r = res[p.name]["proof"] = _call(p, "proof", txn)
+                out["hashes"][p.name] = r.get("hashes")
+                if r.get("ranks"):              # a group: every rank's hashes, compared
+                    rank_hashes[p.name] = {str(x.get("rank")): x.get("hashes")
+                                           for x in r["ranks"]}
+                    ranks_agree[p.name] = _ranks_agree(rank_hashes[p.name])
+                    if ranks_agree[p.name] is False:     # never only a flag: a finding
+                        split, same_key = _rank_split(rank_hashes[p.name])
+                        out["extra"].append({**F.finding(
+                            "ranks_disagree", split,
+                            "every rank of the group runs the same code", subject=p.name),
+                            "participant": p.name,
+                            # the same function differs: no accept can make that safe
+                            **({"overridable": False} if same_key else {})})
+                if not r["ok"]:        # a failed proof, or one lacking ranks, shows no agreement
+                    ranks_agree[p.name] = False
+                    if not r.get("findings"):
+                        out["extra"].append({**F.finding(
+                            "participant_failed", f"proof: {r.get('error')}",
+                            "proof answers with every rank's code hashes"),
+                            "participant": p.name})
+        fs = [f for r in res.values() for x in r.values()
+              for f in x.get("findings", [])] + out["extra"]
+        modules = plan.get("modules", {})
+        # agree: False if any comparison differs (across participants on a shared target, or
+        # across the ranks of one group); None when nothing could be compared
+        checks = [a for a in [_hashes_agree(out["hashes"])] + list(ranks_agree.values())
+                  if a is not None]
+        agree = all(checks) if checks else None
+
+        def span(a, b):
+            return round(tl[b] - tl[a], 6) if a in tl and b in tl else None
+        rec = {
+            "schema": R.SCHEMA, "kind": "txn", "id": txn,
+            "interface_version": self.interface_version, "engine": self.engine,
+            "base_hash": L.text_hash(json.dumps(
+                {m: s.get("base_hash") for m, s in modules.items()}, sort_keys=True)),
+            "patch_hash": L.text_hash(json.dumps(
+                {"modules": {m: L.text_hash(str(s.get("source", "")))
+                             for m, s in modules.items()},
+                 "repairs": plan.get("repairs", [])}, sort_keys=True)),
+            "plan": {"targets": {m: s.get("targets", "auto") for m, s in modules.items()},
+                     "predicted_resources": plan.get("predicted_resources", []),
+                     "recipes": plan.get("recipes", []), "certainty": plan.get("certainty"),
+                     "accept": plan.get("accept", []),
+                     "undo_resets": plan.get("undo_resets", [])},
+            "actual_recipes": ((["R0 swap"] if modules else [])
+                               + (["R10 repair"] if plan.get("repairs") else []))
+            if out["outcome"] == "committed" else [],
+            "participants": res,
+            "commit_hashes": {"participants": out["hashes"], "ranks": rank_hashes,
+                              "ranks_agree": ranks_agree, "agree": agree},
+            "findings": fs,
+            "decisions": {"accepted": sorted({f["check"] for f in fs if f.get("accepted")}),
+                          "blocking": sorted({f["check"] for f in fs
+                                              if not f.get("accepted")})},
+            "outcome": out["outcome"], "timeline": tl,
+            # with a rebuild, the edit runs in every step only once the rebuild is done
+            "edit_to_run_s": span("edit", "rebuilt" if t.get("rebuilt") and "rebuilt" in tl
+                                  else "committed"),
+            "edit_to_commit_s": span("edit", "committed"),
+            "rebuild": out.get("rebuild"),
+            "recapture_s": ((out.get("rebuild") or {}).get("seconds") or {}).get("R1"),
+            "prepare_s": span("prepare_start", "prepared"),
+            "gap_s": span("gap_start", "gap_end"),
+            "baseline_restart_s": t["baseline"],
+            # the phase-2 deadline and who missed it (they poison the host)
+            "rollback": {**out["rollback"], "deadline_s": self.phase2_deadline_s,
+                         "missed_deadline": sorted(t.get("missed", ())),
+                         "poisoned": bool(t.get("missed"))},
+        }
+        return rec
+
+    def prove(self, txn, golden=None, tolerance=WITNESS_TOLERANCE):
+        """After the workload ran: collect witness counts and findings from every participant;
+        append a `proof` receipt. golden: the caller's golden-check results, recorded as is.
+        Witness counts are kept per rank: a group participant's ranks appear as
+        `<participant>/rank<r>`, and ranks whose counts differ beyond `tolerance` (a fraction
+        of the largest count, at least 1 call; see WITNESS_TOLERANCE) are `witness_uneven`."""
+        now = self.clock
+        res = {p.name: _call(p, "witness_check", txn) for p in self.participants}
+        fs = [{**f, "participant": n} for n, r in res.items() for f in r.get("findings", [])]
+        witness, capture = {}, {}
+        for n, r in res.items():
+            if r.get("ranks"):
+                ranks = {str(x.get("rank")): x.get("counts", {}) for x in r["ranks"]}
+                witness.update({f"{n}/rank{k}": c for k, c in ranks.items()})
+                capture.update({f"{n}/rank{x.get('rank')}": x.get("capture_counts", {})
+                                for x in r["ranks"]})
+                fs += witness_uneven(n, ranks, tolerance)
+            else:
+                witness[n] = r.get("counts", {})
+                capture[n] = r.get("capture_counts", {})
+        edit = self.txns.get(txn, {}).get("edit")
+        t = now()
+        rec = {"schema": R.SCHEMA, "kind": "proof", "id": txn,
+               "witness": witness,
+               # calls made while graphs were captured, apart from the live ones above: a
+               # replay runs no Python, so only live calls (or a device probe) prove a run
+               "witness_capture": capture,
+               "ran": {w: {k: W.ran(capture.get(w, {}).get(k, 0), n) for k, n in c.items()}
+                       for w, c in witness.items()},
+               "findings": fs, "golden": golden,
+               "timeline": {"edit": edit, "proved": t},
+               "edit_to_finish_s": round(t - edit, 6) if edit is not None else None}
+        return {"ok": all(r["ok"] for r in res.values()) and not fs, "receipt": rec,
+                "written": self._write(rec)}
+
+    def at_base(self):
+        """Every participant (every rank of a group) back at its start state? Cheap: no heap
+        scan, only the modules a transaction touched (LocalParticipant.at_base). Returns
+        {ok, participants: {name: reply}, poisoned, missing}."""
+        res = {p.name: _call(p, "at_base", None) for p in self.participants}
+        ok = all(r["ok"] for r in res.values()) and not self.poison
+        return F.ok(**{"ok": ok}, participants=res, poisoned=bool(self.poison),
+                    findings=[f for r in res.values() for f in r.get("findings", [])])
+
+    def _undo_phases(self, txn, resets, tl):
+        res = {p.name: {} for p in self.participants}
+        d, missed = self.phase2_deadline_s, set()
+        end_at = None if d is None else time.time() + d
+        for p in reversed(self.participants):
+            res[p.name]["undo"] = self._bounded(p, "undo", txn, end_at, missed)
+        tl["code_undone"] = self.clock()
+        for kind in resets:
+            for p in self.participants:
+                res[p.name].setdefault("reset", {})[kind] = self._bounded(
+                    p, "reset", kind, end_at, missed)
+        return res
+
+    def undo(self, txn):
+        """Undo a committed transaction on every participant (newest first), then run the
+        plan's `undo_resets` (R2, R3, ...) on each: code undo cannot un-write data the new code
+        produced. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
+        now = self.clock
+        t = self.txns.get(txn, {})
+        resets = t.get("plan", {}).get("undo_resets", [])
+        tl = {"queued": now()}
+        rb = {}
+        try:
+            res, err = self._in_gap(lambda: self._undo_phases(txn, resets, tl)), None
+        except Exception as e:
+            res, err = None, f"{type(e).__name__}: {e}"
+        tl["undo_end"] = now()
+        res = res or {}
+        calls = [x for r in res.values()
+                 for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x]
+        fs = [{**f, "participant": n} for n, r in res.items()
+              for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x
+              for f in x.get("findings", [])]
+        ok = err is None and all(x["ok"] for x in calls) and rb.get("ok", True)
+        rec = {"schema": R.SCHEMA, "kind": "undo", "id": txn, "participants": res,
+               "resets": list(resets), "status": "undone" if ok else "partial",
+               "findings": fs + ([F.finding("undo_incomplete", f"undo did not finish: {err}",
+                                            "a step gap within the timeout")] if err else []),
+               "rebuild": rb or None,
+               "recapture_s": (rb.get("seconds") or {}).get("R1"),
+               "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
+        if t and rb.get("ok"):
+            t["rebuilt"] = []
+        if t:                          # partial: an undo ran but could not restore everything
+            with self._lock:
+                t["state"] = "undone" if ok else "partial"
+        return {"ok": ok, "participants": res, "receipt": rec, "written": self._write(rec)}
+
+
+class StepGapCoordinator(Coordinator):
+    """The host for participants that step together (worker ranks + engine core), living in
+    the loop owner: phase 1 (prepare) runs in the caller's thread while steps go on; phase 2
+    (validate, commit or abort, undo of a failed commit) runs in ONE gap between two steps.
+    So while every participant answers by the phase-2 deadline, no step sees participants on
+    different versions. One that misses it poisons the host and the gap ends anyway: until the
+    lab respawns, steps may run mixed (a late commit lands before its queued undo runs).
+    The loop stalls only for
+    phase 2 (`gap_s` in the receipt). `gap(fn)` queues fn to the loop owner and returns its
+    result (for vLLM: the engine-core busy loop, which calls the workers by collective_rpc;
+    that completes on every worker before the next step). Participants must not quiesce on
+    their own: build them with the default `quiesce`."""
+
+    def __init__(self, participants, gap, **kw):
+        super().__init__(participants, **kw)
+        self.gap = gap
+
+    def _in_gap(self, fn):
+        return self.gap(fn)

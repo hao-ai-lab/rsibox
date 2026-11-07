@@ -3,8 +3,8 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate, journal, witness, the R0 swap (a function-body swap), and the participant
-side of a transaction.
+findings, locate, journal, witness, the R0 swap (a function-body swap), and two-phase
+transactions (participants and their host).
 
 ## Contract
 
@@ -88,6 +88,22 @@ side of a transaction.
   payload)`. Chained edits: a later plan for a module is staged against the text the last
   committed transaction installed, with that participant's own code and line maps. A plan
   that would change nothing is `empty_change`.
+- **Host** (`coordinator.py`, part 2) runs one transaction over every participant.
+  `Coordinator.run(plan)`: phase 1, prepare on all while steps go on (a no vote, or a
+  participant missing from a group's reply, aborts all); phase 2, validate on all, then
+  commit on all or abort on all, and a commit that fails undoes every participant that
+  committed (`rolled_back`). `StepGapCoordinator` runs phase 2 inside one gap between two
+  steps of the loop owner, so when every participant answers within `phase2_deadline_s`,
+  ranks that step together never run a step on different versions. When one misses it (a
+  commit or undo that started but has not returned), the gap still ends at the deadline:
+  the host is poisoned, and until the lab respawns the participants, steps may run on mixed
+  versions (the late commit can land after steps resumed, before its queued undo runs;
+  `test_late_commit_poisons_and_steps_may_mix`). A group participant (several ranks behind one call) merges its ranks' replies
+  (`merge_ranks`); one that declares `expected` ranks and lacks some is a blocking, not
+  overridable `participant_missing`. With `phase2_deadline_s`, a participant that misses
+  the deadline is treated as failed and poisons the host (only undo, until `recovered()`).
+  `prove` and `undo` close the transaction. Each call appends a linked receipt (`txn`,
+  `proof`, `undo`) through `receipt.ReceiptWriter`.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
   expected, why it matters, the actions and their cost, and the risk of ignoring it.
@@ -100,7 +116,8 @@ side of a transaction.
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
 | `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `journal`, `locate`, `witness`. |
-| `coordinator.py` | So far the participant side: `Participant`, `CallParticipant`, `LocalParticipant`, `txn_ref`. Imports `findings`, `journal`, `locate`, `swap`, `witness`. |
+| `coordinator.py` | Participants (`Participant`, `CallParticipant`, `LocalParticipant`) and the host (`Coordinator`, `StepGapCoordinator`, `GroupParticipant`, `merge_ranks`, `expect_ranks`, `Lane`). Imports `findings`, `journal`, `locate`, `receipt`, `swap`, `witness`. |
+| `receipt.py` | The receipt writer: linked `txn` / `proof` / `undo` records in an append-only JSON-lines file, validated against the proposed schema. A proposal that needs a human owner (see its docstring). |
 | `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
 
@@ -171,6 +188,15 @@ Each test's docstring says what it proves and what it does not.
 | `test_running_frame_never_runs_the_new_code` | a loop frame that never runs the new code reported as a pass |
 | `test_a_new_field_votes_no_and_routes_to_t1` | a participant that votes yes on an edit that would raise AttributeError |
 | `test_three_edit_chain_explicit` / `_auto` | a second transaction refused after the first shifted lines; an undo that leaves the wrong text as the base |
+| `test_step_gap_commit_and_undo_never_mix_versions` | ranks that run one step on different versions (all-or-nothing in one gap) |
+| `test_vote_no_changes_nobody` | one rank on another build that votes no while the others switch |
+| `test_a_dp_client_that_drops_replies_blocks_the_transaction` | a commit on 4 ranks whose witness, receipt and undo covered 2 (a DP client that returned DP group 0's replies only) |
+| `test_commit_failure_undoes_the_committed` | a rank lost at commit leaving the others on the new code |
+| `test_half_committed_group_is_undone` | a group whose ranks committed in part |
+| `test_step_gap_failed_commit_is_undone_in_the_same_gap` | a step that ran the edit on some ranks before the rollback |
+| `test_late_commit_poisons_and_steps_may_mix` | a commit that misses the deadline read as a clean rollback: shows the host poisoned, the next run refused, and the mixed steps until the queued undo |
+| `test_receipt_written_only_after_append_succeeds` | a failed receipt append reported as written (and never retried) |
+| `test_a_rank_missing_from_proof_is_in_the_receipt` | a rank missing from the post-commit proof dropped from the receipt, which then says the ranks agree |
 
 ## Not here yet
 
@@ -189,9 +215,8 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
 - **Transaction-level parts**: `overlay=` and `staged_names` (a module importing a name
   another module of the same transaction adds), `docstring_only`, and the participant's
   analyzer.
-- **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes.
-- **The host** (`Coordinator`, `StepGapCoordinator`: votes, the step gap, phase-2 deadlines,
-  group participants and missing ranks, receipts) is the next PR; then **session** (the
-  host's state machine and poisoning) and the toy lab.
+- **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes: the receipt's
+  `rebuild` and `recapture_s` stay None.
+- **Session** (the host's state machine and poisoning) and the toy lab are the next PR.
 
 These come in later PRs of the kernel series, each importing and testing on top of this one.
