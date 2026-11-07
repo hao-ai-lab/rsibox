@@ -1,4 +1,4 @@
-# Toolsmith (online): subagent prompt
+# Toolsmith agent (online): prompt
 
 You are called during optimization when a check is too slow, an install failed, the lab fell
 back to a restart, or the developer entered a module the lab does not cover.

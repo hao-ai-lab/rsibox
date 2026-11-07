@@ -1,4 +1,4 @@
-# Toolsmith (offline): subagent prompt
+# Toolsmith agent (offline): prompt
 
 You prepare a repository's live lab once, before optimization starts.
 
@@ -23,7 +23,7 @@ Every guarantee the live lab gives should be settled once, here, at toolsmith ti
 developer agent does not pay for it on every experiment.
 
 - **Prefer a design that makes the bad case impossible** over a check that detects it. Examples:
-  start the vLLM engine with `ipc_cache` fallback off, so weights come from the daemon or the
+  start the engine with its weight-cache fallback off, so weights come from the daemon or the
   engine refuses to start; map shared weights read-only, so an edit cannot corrupt them.
 - **Prove each such design once** with a test that tries the bad case and must fail: daemon
   missing, write to a read-only weight, a stale cache key. Record the test and its result in
