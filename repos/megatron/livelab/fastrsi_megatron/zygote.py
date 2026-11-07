@@ -32,6 +32,11 @@ Contract:
   CUDA_VISIBLE_DEVICES and the rank variables are read after the fork and never count;
   "overlay": the request's FASTRSI_OVERLAY replaces modules the zygote has imported already
   (overlay.py works only before the first import), so the edit would not run.
+- Code restart: `start --refresh megatron` makes each forked rank drop the named packages, the
+  script's own modules and our modules that hold references to them (run, hook, gap, state,
+  client) from sys.modules, install the overlay finder, and import them again, so an overlaid
+  edit runs while torch, Transformer Engine and the rest stay loaded. Stale and overlay findings
+  for refreshed modules do not count. Measured cost: see the PR (re-import about 1.4 s at 14B).
 """
 import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
 
@@ -208,9 +213,21 @@ def preload(mods, script=None, check=cuda_initialized):
     return took
 
 
+def refreshed(req, name):
+    """Is module `name` re-imported in the ranks of this request (a code restart)?"""
+    if name.startswith("fastrsi_megatron.") and name.rsplit(".", 1)[1] in REFRESH_OWN:
+        return bool(req.get("refresh"))
+    return any(name == p or name.startswith(p + ".") for p in req.get("refresh", []))
+
+
+# our own modules that hold references to megatron's: re-imported with it
+REFRESH_OWN = ("run", "hook", "gap", "state", "client")
+
+
 def findings(req, src):
     out = []
-    stale = [f for f, v in src.items() if _stat(f) != v]
+    mod_of = {getattr(m, "__file__", None): n for n, m in list(sys.modules.items())}
+    stale = [f for f, v in src.items() if _stat(f) != v and not refreshed(req, mod_of.get(f, ""))]
     if stale:
         out.append({"kind": "stale", "files": stale[:20], "n": len(stale),
                     "why": "the ranks would run the code imported when the zygote started",
@@ -224,7 +241,8 @@ def findings(req, src):
                     "do": "accept if they are read later, or start the zygote with them"})
     ov = req.get("env", {}).get("FASTRSI_OVERLAY")
     if ov and os.path.isdir(ov):
-        pre = sorted(f[:-3] for f in os.listdir(ov) if f.endswith(".py") and f[:-3] in sys.modules)
+        pre = sorted(f[:-3] for f in os.listdir(ov) if f.endswith(".py") and f[:-3] in sys.modules
+                     and not refreshed(req, f[:-3]))
         if pre:
             out.append({"kind": "overlay", "modules": pre,
                         "why": "the zygote imported these before the overlay could replace them, "
@@ -333,6 +351,20 @@ def _child(req, local_rank, lsock, conn):
         if req.get("cwd"):
             os.chdir(req["cwd"])
         sys.argv = ["fastrsi_megatron.run"] + list(req["argv"])
+        if req.get("refresh"):
+            # code restart: forget the refreshed packages (and the script's own modules next to it), so the
+            # ranks import them again, from the overlay where it has them; torch, TE and the rest stay loaded
+            here = os.path.dirname(os.path.abspath(req["argv"][0])) + os.sep if req.get("argv") else None
+            drop = [n for n, m in list(sys.modules.items()) if refreshed(req, n)
+                    or (here and not n.startswith(("fastrsi_megatron", "kernel", "services"))
+                        and os.path.abspath(getattr(m, "__file__", None) or "/").startswith(here))]
+            for n in drop:
+                sys.modules.pop(n, None)
+            importlib.invalidate_caches()
+            from fastrsi_megatron import overlay
+            overlay.install()
+            print(json.dumps({"zygote_refresh": {"dropped": len(drop), "overlay": os.environ.get("FASTRSI_OVERLAY")}}),
+                  flush=True)
         if req.get("entry", "run") == "run":
             from fastrsi_megatron import run
             run.main()
@@ -484,6 +516,8 @@ def main(argv=None):
     p.add_argument("--accept", default="")
     p.add_argument("--entry", default="run", choices=["run", "script"])
     p.add_argument("--timeout", type=float, default=0)
+    p.add_argument("--refresh", default="", help="code restart: comma-separated top-level packages the forked "
+                   "ranks drop and re-import (e.g. megatron), so FASTRSI_OVERLAY edits to them run")
     p.add_argument("--cpus", default="", help="per local rank CPU lists, ';'-separated: '0-71;72-143'")
     argv = list(sys.argv[1:] if argv is None else argv)
     rest = argv[argv.index("--") + 1:] if "--" in argv else []
@@ -499,6 +533,7 @@ def main(argv=None):
     req = {"argv": rest, "nproc": a.nproc, "port": a.port, "log_dir": a.log_dir, "cwd": a.cwd,
            "env": dict(kv.split("=", 1) for kv in a.env), "entry": a.entry,
            "accept": [x for x in a.accept.split(",") if x], "timeout": a.timeout,
+           "refresh": [x for x in a.refresh.split(",") if x],
            "cpus": [x for x in a.cpus.split(";")] if a.cpus else [],
            "t0": float(os.environ.get("FASTRSI_T0") or time.time())}
     rc = 1
