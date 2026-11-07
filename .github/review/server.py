@@ -14,14 +14,15 @@ defaults to agy, so description-review clients from before code review keep work
 
 Safety (the prompt carries untrusted PR text):
 - Every call except /v1/health needs `Authorization: Bearer <token>`.
-- Each reviewer runs in a fresh empty directory, with a minimal environment, under
-  confine.py: Landlock lets it read only system paths, its own binary and its own state
-  directory, and write only the job directory and its state directory. Tested: a prompt
+- Each reviewer runs in a fresh empty directory with a minimal environment and a fresh HOME
+  that holds only copies of its credential files (never its real state directory with other
+  conversations, settings or plugins), under confine.py: Landlock lets it read only system
+  paths and its own binary, and write only the job directory. Tested: a prompt
   telling agy to read a file elsewhere gets "permission denied", even with all agy tools
   approved. agy also runs with `--sandbox` and slash commands off; codex with its read-only
   sandbox and its shell, exec, web, browser, app and plugin tools disabled.
-- A reply that contains material from a secret file (the service token, the reviewers'
-  credentials, SSH keys) is withheld: the job errors and the reply is never returned.
+- A reply or error that contains material from a secret file (the service token, the
+  reviewers' credentials, SSH keys) is withheld: the job errors without returning it.
 - Only allow-listed kinds, engines and models; prompts up to 120 KB; 2 reviews at a time.
 
 Standard library only.
@@ -86,16 +87,56 @@ def leaks(reply, secrets_):
     return any(s in reply for s in secrets_)
 
 
+# Per engine: the state directory a reviewer needs and the only files copied into it. Each job
+# gets a fresh home holding just these copies, so a reviewer never sees the real state
+# directory (other conversations, settings, plugins); a refreshed credential is copied back.
+STATE = {"agy": (".gemini/antigravity-cli", ["antigravity-oauth-token", "installation_id"]),
+         "codex": (".codex", ["auth.json"])}
+
+
+def real_state(engine):
+    if engine == "codex" and os.environ.get("CODEX_HOME"):
+        return Path(os.path.expanduser(os.environ["CODEX_HOME"]))
+    return Path.home() / STATE[engine][0]
+
+
+def job_home(engine, workdir):
+    """A fresh HOME inside the job directory with copies of the engine's credential files.
+    Returns (env, [(copy, original)])."""
+    home = Path(workdir, "home")
+    state = home / STATE[engine][0]
+    state.mkdir(parents=True)
+    pairs = []
+    for name in STATE[engine][1]:
+        src = real_state(engine) / name
+        if src.exists():
+            shutil.copy2(src, state / name)
+            pairs.append((state / name, src))
+    if engine == "agy":
+        (state / "settings.json").write_text("{}")
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": workdir}
+    if engine == "codex":
+        env["CODEX_HOME"] = str(state)
+    return env, pairs
+
+
+def copy_back(pairs):
+    """Keep a credential the reviewer refreshed during the job (token rotation)."""
+    for copy, src in pairs:
+        if copy.exists() and copy.read_bytes() != src.read_bytes():
+            tmp = src.with_name(src.name + ".new")
+            shutil.copy2(copy, tmp)
+            os.replace(tmp, src)
+
+
 def command(engine, prompt, model, workdir, bins):
     """argv (confined) and stdin for one reviewer run."""
     exe = os.path.realpath(bins[engine])
     if engine == "agy":
-        state = os.path.expanduser("~/.gemini")
         argv = [exe, "-p", prompt, "--model", model, "--sandbox", "--disable-slash-commands",
                 "--print-timeout", "540s"]
         stdin = None
     else:
-        state = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
         argv = [exe, "exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral",
                 "--ignore-rules", "--ignore-user-config", "--color", "never",
                 "-o", os.path.join(workdir, "last-message.txt")]
@@ -107,7 +148,7 @@ def command(engine, prompt, model, workdir, bins):
         stdin = prompt
     confine = [sys.executable, "-I", str(HERE / "confine.py"),
                "--read", *SYSTEM_READ, os.path.dirname(exe),
-               "--write", workdir, state, "/dev/null", "/dev/shm", "--"]
+               "--write", workdir, "/dev/null", "/dev/shm", "--"]
     return confine + argv, stdin
 
 
@@ -115,25 +156,33 @@ def run_review(job_id, req, bins, secret_files):
     with LOCK:
         JOBS[job_id].update(status="running", started=time.time())
     workdir = tempfile.mkdtemp(prefix="review-")
-    env = {"HOME": os.path.expanduser("~"), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
-           "TMPDIR": workdir}
+    pairs, secret = [], set()
     try:
+        env, pairs = job_home(req["engine"], workdir)
         argv, stdin = command(req["engine"], req["prompt"], req["model"], workdir, bins)
         out = subprocess.run(argv, input=stdin, cwd=workdir, env=env, capture_output=True,
                              text=True, timeout=600)
+        secret = secret_strings(list(secret_files) + [str(c) for c, _ in pairs])
         reply = out.stdout
         if req["engine"] == "codex":
             last = Path(workdir, "last-message.txt")
             reply = last.read_text() if last.exists() else ""
+        if leaks(reply + out.stdout + out.stderr, secret):
+            raise RuntimeError("reply withheld: it contains material from a secret file")
         if out.returncode != 0 or EXPECT[req["kind"]] not in reply:
             raise RuntimeError(f"{req['engine']} exit {out.returncode}: "
                                f"{(out.stderr or out.stdout)[-400:]}")
-        if leaks(reply, secret_strings(secret_files)):
-            raise RuntimeError("reply withheld: it contains material from a secret file")
         update = dict(status="done", reply=reply)
     except Exception as e:  # report the failure to the caller instead of hanging the job
-        update = dict(status="error", error=str(e)[:500])
+        msg = str(e)[:500]
+        if leaks(msg, secret or secret_strings(secret_files)):
+            msg = "error withheld: it contains material from a secret file"
+        update = dict(status="error", error=msg)
     finally:
+        try:
+            copy_back(pairs)
+        except OSError as e:
+            log(f"job {job_id}: could not copy back a refreshed credential: {e}")
         shutil.rmtree(workdir, ignore_errors=True)
     with LOCK:
         job = JOBS[job_id]
@@ -217,7 +266,7 @@ def main():
     server.bins = {e: shutil.which(os.environ.get(e.upper(), e)) for e in ("agy", "codex")}
     server.bins = {e: b for e, b in server.bins.items() if b}
     server.secret_files = [token_file, "~/.gemini/antigravity-cli/antigravity-oauth-token",
-                           os.path.join(os.environ.get("CODEX_HOME", "~/.codex"), "auth.json"),
+                           str(real_state("codex") / "auth.json"),
                            *[str(p) for p in Path("~/.ssh").expanduser().glob("id_*")]]
     server.secret_files += [p for p in os.environ.get("FASTRSI_REVIEW_SECRET_FILES", "").split(":") if p]
     server.pool = ThreadPoolExecutor(max_workers=2)

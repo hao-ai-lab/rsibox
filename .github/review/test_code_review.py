@@ -14,7 +14,7 @@ DIFF = """diff --git a/pkg/mod.py b/pkg/mod.py
 index 111..222 100644
 --- a/pkg/mod.py
 +++ b/pkg/mod.py
-@@ -10,4 +10,5 @@ def f():
+@@ -10,3 +10,4 @@ def f():
      a = 1
 -    b = 2
 +    b = 3
@@ -49,6 +49,15 @@ class Diff(unittest.TestCase):
         self.assertEqual(cr.cap_diff("short\n"), ("short\n", False))
 
 
+    def test_hunk_lines_that_look_like_headers_stay_content(self):
+        """Pain point (found by the agent review of this PR): an added line whose text starts
+        with "++ " after a deleted "-- " line was read as a new file header, which corrupted the
+        path and shifted every later line number, so valid findings were dropped."""
+        diff = ("diff --git a/x.md b/x.md\n--- a/x.md\n+++ b/x.md\n@@ -1,2 +1,2 @@\n"
+                "--- old rule\n+++ new rule\n same\n")
+        self.assertEqual(cr.diff_lines(diff), {"x.md": {1, 2}})
+
+
 class Replies(unittest.TestCase):
     def test_bad_json_is_rejected_not_posted(self):
         """A reviewer that answers in prose (or broken JSON) is an error for that engine, never
@@ -58,11 +67,14 @@ class Replies(unittest.TestCase):
                 cr.parse_reply(reply)
 
     def test_malformed_findings_are_dropped_and_counted(self):
+        """Includes a finding without evidence: the prompt says "no evidence, no finding", so the
+        checker enforces it rather than trusting the reviewer."""
         reply = json.dumps({"findings": [finding(), finding(severity="critical"),
-                                         finding(line="11"), finding(claim=" "), "nope"],
+                                         finding(line="11"), finding(claim=" "),
+                                         finding(evidence=""), "nope"],
                             "summary": "s"})
         kept, summary, dropped = cr.parse_reply("Here you go:\n" + reply + "\nthanks")
-        self.assertEqual(([f["severity"] for f in kept], summary, dropped), (["high"], "s", 4))
+        self.assertEqual(([f["severity"] for f in kept], summary, dropped), (["high"], "s", 5))
 
     def test_finding_outside_the_diff_is_dropped(self):
         """A finding on a line the diff does not show (or a file it does not touch) cannot be
@@ -131,6 +143,55 @@ class Service(unittest.TestCase):
             self.assertFalse(server.leaks('{"findings": [], "summary": "fine"}', s))
         finally:
             os.unlink(f.name)
+
+
+class JobIsolation(unittest.TestCase):
+    """Pain points found by the agent review of this PR: the reviewer could see its whole real
+    state directory (other conversations, settings), and an engine's error text bypassed the
+    secret filter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.codex_home = Path(self.tmp.name, "codex-home")
+        self.codex_home.mkdir()
+        self.secret = "sk_live_0123456789abcdefghij"
+        Path(self.codex_home, "auth.json").write_text(json.dumps({"token": self.secret}))
+        Path(self.codex_home, "history.jsonl").write_text("private past conversation\n")
+        self.old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("CODEX_HOME", None)
+        else:
+            os.environ["CODEX_HOME"] = self.old
+        self.tmp.cleanup()
+
+    def test_job_home_holds_only_credential_copies_and_keeps_a_refresh(self):
+        work = Path(self.tmp.name, "job")
+        work.mkdir()
+        env, pairs = server.job_home("codex", str(work))
+        state = Path(env["CODEX_HOME"])
+        self.assertTrue(str(state).startswith(str(work)))
+        self.assertEqual(sorted(p.name for p in state.iterdir()), ["auth.json"])   # no history
+        Path(state, "auth.json").write_text('{"token": "refreshed"}')
+        server.copy_back(pairs)
+        self.assertEqual(json.loads(Path(self.codex_home, "auth.json").read_text())["token"], "refreshed")
+
+    @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
+    def test_secret_in_an_engine_error_is_withheld(self):
+        fake = Path(self.tmp.name, "bin", "fake-codex")
+        fake.parent.mkdir()
+        fake.write_text(f"#!/bin/sh\necho 'auth failed for {self.secret}' >&2\nexit 1\n")
+        fake.chmod(0o755)
+        server.JOBS["0" * 16] = {"status": "queued", "created": 0, "repo": "o/r", "pr": "1"}
+        server.run_review("0" * 16, {"kind": "code-review", "engine": "codex", "model": "default",
+                                     "prompt": "x"}, {"codex": str(fake)},
+                          [str(self.codex_home / "auth.json")])
+        job = server.JOBS.pop("0" * 16)
+        self.assertEqual(job["status"], "error")
+        self.assertNotIn(self.secret, job["error"])
+        self.assertIn("withheld", job["error"])
 
 
 @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")

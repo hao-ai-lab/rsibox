@@ -35,26 +35,37 @@ def sh(*args, stdin=None):
 # ---- diff ------------------------------------------------------------------------------
 
 def diff_lines(diff):
-    """{path: set of new-side line numbers shown in the diff} (added and context lines)."""
-    out, path, new = {}, None, 0
+    """{path: set of new-side line numbers shown in the diff} (added and context lines).
+
+    Hunk lengths come from each "@@ -a,b +c,d @@" header, so a line inside a hunk is never read
+    as a file header, even when its text starts with "++ " or "-- "."""
+    out, path, new, old_left, new_left = {}, None, 0, 0, 0
     for line in diff.splitlines():
-        if line.startswith("+++ "):
+        tag = line[:1]
+        if (old_left > 0 or new_left > 0) and tag not in ("+", "-", " ", "\\"):
+            old_left = new_left = 0                    # a malformed hunk ends at the next header
+        if old_left > 0 or new_left > 0:              # inside a hunk
+            if tag == "\\":                          # "\ No newline at end of file"
+                continue
+            if tag in ("+", " ") and path:
+                out[path].add(new)
+            if tag in ("+", " "):
+                new, new_left = new + 1, new_left - 1
+            if tag in ("-", " "):
+                old_left -= 1
+            continue
+        m = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", line)
+        if m:
+            old_left = int(m.group(1)) if m.group(1) is not None else 1
+            new = int(m.group(2))
+            new_left = int(m.group(3)) if m.group(3) is not None else 1
+        elif line.startswith("diff --git"):
+            path = None
+        elif line.startswith("+++ "):
             p = line[4:].strip()
             path = None if p == "/dev/null" else re.sub(r"^b/", "", p)
             if path:
                 out.setdefault(path, set())
-        elif line.startswith("@@"):
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-            new = int(m.group(1)) if m else 0
-        elif path is None or line.startswith(("--- ", "diff --git", "index ", "\\")):
-            continue
-        elif line.startswith("+"):
-            out[path].add(new)
-            new += 1
-        elif line.startswith(" "):
-            out[path].add(new)
-            new += 1
-        # "-" lines exist only on the old side
     return out
 
 
@@ -84,7 +95,8 @@ def parse_reply(reply):
         ok = (isinstance(f, dict) and isinstance(f.get("file"), str) and f["file"]
               and isinstance(f.get("line"), int) and not isinstance(f["line"], bool)
               and f["line"] > 0 and f.get("severity") in SEVERITIES
-              and isinstance(f.get("claim"), str) and f["claim"].strip())
+              and isinstance(f.get("claim"), str) and f["claim"].strip()
+              and isinstance(f.get("evidence"), str) and f["evidence"].strip())   # no evidence, no finding
         if not ok:
             dropped += 1
             continue

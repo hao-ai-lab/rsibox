@@ -10,9 +10,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-concurrency:
-  group: code-review-${{ github.event.pull_request.number || inputs.pr }}
-  cancel-in-progress: true
 jobs:
   checker:
     name: Code review checker keeps only diff-anchored findings and never approves (golden cases)
@@ -29,6 +26,10 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
        (github.event.action != 'labeled' || github.event.label.name == 'review-code'))
+    # Job-level, so a run that skips this job (another label added) cannot cancel a review.
+    concurrency:
+      group: code-review-${{ github.event.pull_request.number || inputs.pr }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
