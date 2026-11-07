@@ -36,6 +36,11 @@ node): 94.7 s from process start to the first step done (Megatron import 54 s, k
 model and optimizer build 0.4 s, first step 15.2 s); steady step 7.48 s for 65,536 tokens; 141 GB
 peak allocated per GPU.
 
+Two nodes, Qwen3-32B architecture, TP 4 x DP 2 (2 x 4 GB200, our 2026-11-07 run): 137 s from process
+start to the first step done (Megatron import 85 s, first step 21.4 s); steady step 11.57 s for
+131,072 tokens; 94 GB per GPU. In the lab: start state 61 GiB per rank, restore 0.28 s, setup 31 s,
+install of the kept set on all 8 ranks 1.39 s (code) + 0.10 s (cell).
+
 ## Live lab calls
 
 From the lab smoke (tiny, TP 2, 2026-11-07) and the conformance run.

@@ -44,6 +44,21 @@ two just outside (5.2e-3 and 5.9e-3); grad norm within 0.7-2.0% (gate 5%). Read 
 changes loss by about as much as the base changes against itself here; a tighter gate for 32B needs
 deterministic kernels or more steps. Lab start state 106.8 GiB per rank, restore 0.79 s.
 
+## The kept set on two nodes (Qwen3-32B architecture, TP 4 x DP 2, 8 GB200)
+
+Our 2026-11-07 08:04-08:37 run, one supervised job for both nodes. The lab ran on all 8 ranks
+across the two nodes; the kept set installed in one step gap on every rank (code 1.39 s, cell
+0.10 s). Base vs base: loss 6.6e-4, grad norm 2.5e-3. Kept set vs base, 4 paired rounds: **median
++7.3% tokens/s/GPU** (1.108, 1.075, 1.071, 1.064), every round inside the gate (loss at most 3.2e-3,
+grad norm at most 7.8e-3). Outside load lowered both arms during the A/B (base 1,209-1,238 against
+1,667-1,687 an hour before); the pairing absorbs it.
+
+Plain 2-node baseline (20 steps, lr 3e-4, global batch 32): 11.57 s per step, about 1,416
+tokens/s/GPU, against 7.48 s and 2,190 on one node. The cross-node link is not the limit (a 512 MiB
+all-reduce over the cross-node data-parallel pair reached about 533 GB/s of bus bandwidth); NCCL
+collectives were 74% of CUDA time, all-gathers 1.02 ms each against 0.22 ms on the 14B single-node
+run. Sweeping NCCL protocol, algorithm and DDP bucket size is a restart per setting, not a live edit.
+
 ## Where the time is (profile of 2 steps, rank 0, after iterations 11 and 12)
 
 Sequence-parallel all-gather 21.5% and reduce-scatter 14.7% of CUDA time (NCCL ring, LL protocol,
