@@ -1,0 +1,145 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 7e5e42f..75c513f 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -488,6 +488,91 @@ def _pool_tiles(x: torch.Tensor, variable_block_sizes: torch.Tensor, tile_elems:
+     return pooled.permute(0, 2, 1, 3)
+ 
+ 
++def _h3_gated_merge_kernel():
++    """Return the fused BHSD->BSHD transpose + gated compression merge kernel.
++
++    Built once on first use and cached on this function. ``triton`` and
++    ``triton.language`` are bound as module globals here (not locals) so the
++    kernel body resolves them as globals, which is what Triton expects.
++    """
++    kernel = getattr(_h3_gated_merge_kernel, "kernel", None)
++    if kernel is None:
++        g = globals()
++        if "_h3_tl" not in g:
++            g["_h3_triton"] = __import__("triton")
++            g["_h3_tl"] = __import__("triton.language").language
++
++        @g["_h3_triton"].jit
++        def _kernel(
++            out_ptr,
++            o_ptr,
++            c_ptr,
++            g_ptr,
++            seq_len,
++            heads,
++            tile_elems,
++            o_sb, o_sh, o_ss,
++            c_sb, c_st, c_sh,
++            g_sb, g_ss, g_sh,
++            BLOCK_S: _h3_tl.constexpr,
++            HEAD_DIM: _h3_tl.constexpr,
++        ):
++            # out[b, s, h, :] = o[b, h, s, :] + c[b, s // tile, h, :] * g[b, s, h, :]
++            # bf16*bf16 is exact in fp32, so this matches addcmul_ (one fp32 add,
++            # one RTNE round to bf16) bit for bit.
++            bh = _h3_tl.program_id(0)
++            b = bh // heads
++            h = bh % heads
++            s = _h3_tl.program_id(1).to(_h3_tl.int64) * BLOCK_S + _h3_tl.arange(0, BLOCK_S).to(_h3_tl.int64)
++            d = _h3_tl.arange(0, HEAD_DIM)
++            smask = (s < seq_len)[:, None]
++            t = s // tile_elems
++            o = _h3_tl.load(o_ptr + b * o_sb + h * o_sh + s[:, None] * o_ss + d[None, :], mask=smask,
++                            other=0.0).to(_h3_tl.float32)
++            gv = _h3_tl.load(g_ptr + b * g_sb + h * g_sh + s[:, None] * g_ss + d[None, :], mask=smask,
++                             other=0.0).to(_h3_tl.float32)
++            cv = _h3_tl.load(c_ptr + b * c_sb + h * c_sh + t[:, None] * c_st + d[None, :], mask=smask,
++                             other=0.0).to(_h3_tl.float32)
++            res = o + cv * gv
++            _h3_tl.store(out_ptr + ((b * seq_len + s[:, None]) * heads + h) * HEAD_DIM + d[None, :],
++                         res.to(out_ptr.dtype.element_ty), mask=smask)
++
++        kernel = _kernel
++        _h3_gated_merge_kernel.kernel = kernel
++    return kernel
++
++
++def _h3_gated_merge(out_bshd_view: torch.Tensor, out_c: torch.Tensor, gate: torch.Tensor,
++                    tile_elems: int) -> torch.Tensor:
++    """Contiguous ``out_bshd_view + out_c (broadcast per tile) * gate`` in one pass.
++
++    out_bshd_view: [B, S, H, D] (any strides, last dim contiguous);
++    out_c: [B, n_tiles, H, D]; gate: [B, S, H, D]. Returns a new contiguous
++    [B, S, H, D] tensor equal to ``out_bshd_view.contiguous()`` followed by
++    the tiled ``addcmul_``.
++    """
++    batch, seq_len, heads, dim = out_bshd_view.shape
++    result = torch.empty((batch, seq_len, heads, dim), dtype=out_bshd_view.dtype, device=out_bshd_view.device)
++    block_s = 32
++    grid = (batch * heads, (seq_len + block_s - 1) // block_s)
++    _h3_gated_merge_kernel()[grid](
++        result,
++        out_bshd_view,
++        out_c,
++        gate,
++        seq_len,
++        heads,
++        tile_elems,
++        out_bshd_view.stride(0), out_bshd_view.stride(2), out_bshd_view.stride(1),
++        out_c.stride(0), out_c.stride(1), out_c.stride(2),
++        gate.stride(0), gate.stride(1), gate.stride(2),
++        BLOCK_S=block_s,
++        HEAD_DIM=dim,
++        num_warps=4,
++    )
++    return result
++
++
+ def _build_block_mask(
+     scores: torch.Tensor,
+     num_prefix_tiles: int,
+@@ -853,6 +938,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
+             layer_sparsity = 0.0 if self.layer_idx in attn_metadata.dense_layers else attn_metadata.VSA_sparsity
+         probe_dir = None if compiling else probe_enabled()
+ 
++        fuse_gated_merge = False
+         scores = None
+         if layer_sparsity > 0.0 or gate_compress is not None or probe_dir is not None:
+             q_pooled = _pool_tiles(logical_query, attn_metadata.variable_block_sizes, tile_elems)
+@@ -1042,7 +1128,15 @@ class MiniMaxH3VSAImpl(AttentionImpl):
+                     )
+             if has_ptx_blackwell_pair and use_ptx_blackwell:
+                 out_bhsd = out_bhsd[:, :, :logical_seq_len]
+-            out = out_bhsd.transpose(1, 2).contiguous()
++            out = out_bhsd.transpose(1, 2)
++            # No-grad BF16 head-128 gated merge: the transpose copy and the
++            # addcmul run as one fused pass below, reading this BHSD view.
++            fuse_gated_merge = (logical_gate is not None and not compiling and not out.requires_grad
++                                and out.is_cuda and logical_gate.dtype == out.dtype
++                                and out.dtype == torch.bfloat16 and out.shape[-1] == 128
++                                and out.stride(-1) == 1 and logical_gate.stride(-1) == 1)
++            if not fuse_gated_merge:
++                out = out.contiguous()
+             # Fine attention is complete. Release its layout copies before the
+             # gated compression merge creates full-sequence temporaries.
+             del q_bhsd, k_bhsd, v_bhsd, out_bhsd
+@@ -1063,6 +1157,8 @@ class MiniMaxH3VSAImpl(AttentionImpl):
+             v_pooled = _pool_tiles(logical_value, attn_metadata.variable_block_sizes, tile_elems)
+             out_c = torch.matmul(torch.softmax(scores, dim=-1), v_pooled)  # [B, H, n_tiles, D]
+             out_c = out_c.permute(0, 2, 1, 3).to(out.dtype)  # [B, n_tiles, H, D]
++            if fuse_gated_merge:
++                return _h3_gated_merge(out, out_c, logical_gate, tile_elems)
+             batch, seq_len, heads, dim = out.shape
+             out_tiled = out.view(batch, n_tiles, tile_elems, heads, dim)
+             gate_tiled = logical_gate.view(batch, n_tiles, tile_elems, heads, dim)
+diff --git a/fastvideo/attention/layer.py b/fastvideo/attention/layer.py
+index ff499e4..75c15bf 100644
+--- a/fastvideo/attention/layer.py
++++ b/fastvideo/attention/layer.py
+@@ -265,7 +265,9 @@ class DistributedAttention_VSA(DistributedAttention):
+         # Apply backend-specific postprocess_output
+         output = self.attn_impl.postprocess_output(output, ctx_attn_metadata)
+ 
+-        output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, pad_seq_len))
++        if pad_seq_len:
++            # A zero-width pad is a full copy of the output; skip it.
++            output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, pad_seq_len))
+ 
+         output = sequence_model_parallel_all_to_all_4D(output, scatter_dim=1, gather_dim=2)
+         return output, replicated_output

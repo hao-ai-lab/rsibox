@@ -1,0 +1,80 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 75c513f..dbe8fb3 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -573,6 +573,50 @@ def _h3_gated_merge(out_bshd_view: torch.Tensor, out_c: torch.Tensor, gate: torc
+     return result
+ 
+ 
++def tile_rows_stacked(impl: Any, xs: list[torch.Tensor], attn_metadata: Any) -> torch.Tensor | None:
++    """``impl.tile(torch.cat(xs, dim=0), attn_metadata)`` without the cat, or None.
++
++    Scatters each ``[B, S, H, D]`` member straight into its batch slice of the
++    heads-first tile buffer (one launch each), so the stacked q/k/v/gate copy
++    is never materialized. It only moves bytes: the buffer holds exactly what
++    ``tile()`` writes for the concatenated tensor. Returns None whenever
++    ``tile()`` would not take its no-grad heads-first route, so the caller
++    falls back to the cat.
++    """
++    if torch.compiler.is_compiling() or not xs:
++        return None
++    x0 = xs[0]
++    tile_elems = attn_metadata.tile_elems
++    if tile_elems not in _PTX_BLACKWELL_TILE_ELEMS or x0.shape[1] != attn_metadata.total_seq_length:
++        return None
++    slots = attn_metadata.untile_combined_index
++    for x in xs:
++        if (x.shape != x0.shape or x.dtype != x0.dtype or x.device != x0.device
++                or (torch.is_grad_enabled() and x.requires_grad) or not supports_heads_first_scatter(x, slots)):
++            return None
++    holder = attn_metadata.tile_buf_holder
++    if holder is None:
++        return None
++    n_tiles = attn_metadata.variable_block_sizes.numel()
++    ptx_blackwell_route = tile_elems == 128 or (tile_elems == 64 and envs.FASTVIDEO_VSA_PTX_BLACKWELL.get())
++    needs_ptx_blackwell_pair = n_tiles % 2 != 0 and ptx_blackwell_route
++    kernel_tiles = n_tiles + int(needs_ptx_blackwell_pair)
++    batch = x0.shape[0]
++    shape = (batch * len(xs), x0.shape[2], kernel_tiles * tile_elems, x0.shape[3])
++    buffer = holder.heads_first_buffer
++    if buffer is None or buffer.shape != shape or buffer.dtype != x0.dtype or buffer.device != x0.device:
++        buffer = torch.zeros(shape, device=x0.device, dtype=x0.dtype)
++    elif holder.heads_first_geometry is not slots:
++        buffer.zero_()
++    for i, x in enumerate(xs):
++        scatter_rows_heads_first(x, slots, buffer[i * batch:(i + 1) * batch])
++    holder.heads_first_buffer = buffer
++    holder.heads_first_geometry = slots
++    if needs_ptx_blackwell_pair:
++        buffer[:, :, n_tiles * tile_elems:].zero_()
++    return buffer.transpose(1, 2)
++
++
+ def _build_block_mask(
+     scores: torch.Tensor,
+     num_prefix_tiles: int,
+diff --git a/fastvideo/attention/layer.py b/fastvideo/attention/layer.py
+index 75c15bf..9949faa 100644
+--- a/fastvideo/attention/layer.py
++++ b/fastvideo/attention/layer.py
+@@ -236,6 +236,20 @@ class DistributedAttention_VSA(DistributedAttention):
+         # Stack QKV (a caller with a structurally-zero gate passes None and
+         # skips the gate's share of the all-to-all/tile traffic)
+         stack = [q, k, v] if gate_compress is None else [q, k, v, gate_compress]
++        if (freqs_cis is None and get_sp_world_size() == 1 and original_seq_len == seq_len
++                and type(self.attn_impl).__name__ == "MiniMaxH3VSAImpl"):
++            # Single-rank VSA-H3: the all-to-all and the trim are identities,
++            # so scatter each member straight into the tile buffer and skip
++            # the stacked copy (bit-identical: it only moves bytes).
++            from fastvideo.attention.backends.video_sparse_attn_h3 import tile_rows_stacked
++            qkvg = tile_rows_stacked(self.attn_impl, stack, ctx_attn_metadata)
++            if qkvg is not None:
++                if gate_compress is None:
++                    q, k, v = qkvg.chunk(3, dim=0)
++                else:
++                    q, k, v, gate_compress = qkvg.chunk(4, dim=0)
++                output = self.attn_impl.forward(q, k, v, gate_compress, ctx_attn_metadata)  # type: ignore[call-arg]
++                return self.attn_impl.postprocess_output(output, ctx_attn_metadata), None
+         qkvg = torch.cat(stack, dim=0)  # [3or4*batch, seq_len, num_heads, head_dim]
+ 
+         # Redistribute heads across sequence dimension

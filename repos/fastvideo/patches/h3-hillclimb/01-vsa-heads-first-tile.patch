@@ -1,0 +1,17 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 745234e..7e5e42f 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -735,8 +735,11 @@ class MiniMaxH3VSAImpl(AttentionImpl):
+         holder = attn_metadata.tile_buf_holder
+         if holder is None:
+             raise RuntimeError("VSA-H3 metadata has no builder-owned tile buffer holder")
++        # Heads-first is the no-grad default: it only moves bytes (bit-identical),
++        # and replaces the indexed BSHD assignment (an index_put) plus the
++        # kernels' three transpose copies with one Triton scatter (~10x less
++        # time per layer at 15k rows on GB200).
+         if (not compiling and attn_metadata.tile_elems in _PTX_BLACKWELL_TILE_ELEMS
+-                and envs.FASTVIDEO_H3_VSA_HEADS_FIRST_TILE.get()
+                 and supports_heads_first_scatter(x, attn_metadata.untile_combined_index)):
+             return self._tile_heads_first(x, attn_metadata, holder, kernel_tiles, needs_ptx_blackwell_pair)
+         buffer_matches = (holder.buffer is not None and holder.buffer.shape == target_shape
