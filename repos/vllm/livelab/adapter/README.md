@@ -10,7 +10,7 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
 - **Host** (`host.py`). Imported in the engine-core process with `FASTRSI_KERNEL_DIR=<dir>`, it
   patches `EngineCoreProc` so custom input-queue items run jobs on the busy-loop thread, and
   runs the kernel's `StepGapCoordinator` over two participants: the workers (`WorkerGroup`,
-  every rank behind one `collective_rpc`) and the engine core (an `Endpoint` in its own
+  every rank behind one `collective_rpc`) and the engine core (a `Side` in the engine-core
   process). It serves a file control channel (`ctl.json` -> `reply/<seq>.json`) with the ops
   `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `versions`, `at_base`, `ping`.
 - **Phase 1** (prepare) runs in a thread on every side (`side.Side`): the host sends
@@ -107,6 +107,7 @@ each rank with its own copy of the toy engine.
 | `test_a_no_vote_waits_for_the_rank_still_preparing` | a no vote that ends the poll while another rank is still preparing: its vote lost, its staging racing the abort |
 | `test_an_abort_while_staging_drops_what_the_prepare_staged` | an abort during a background prepare, after which the prepare stages the transaction and watches its keys anyway |
 | `test_a_rank_that_hangs_in_commit_is_named_by_the_deadline` | one hung rank holding every step, or a late RPC reply misaligning the next call |
+| `test_fingerprint_names_the_same_code_objects_after_undo` | an empty per-rank fingerprint, so "identical after undo" compared two empty dicts |
 | `test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied` | a model-code edit that committed with no finding and never ran (graphs only) |
 | `test_accepted_captured_target_proves_nothing_and_says_why` | an accepted graph edit whose zero witness gives no reason |
 | `test_split_op_target_is_advisory_and_captured_only_stays_blocking` | a veto of code that does run in Python on prefill through a split op |

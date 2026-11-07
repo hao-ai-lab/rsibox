@@ -4,7 +4,7 @@
 answers the participant protocol by name: `dispatch(method, payload)` returns an ok-dict and
 never raises. A vLLM collective_rpc whose method raises on one rank leaves the other ranks'
 replies queued in the executor, and every later call then reads the reply of the call before
-it (the prototype hit it): a crash here is a not-ok reply, tagged with this process's role,
+it: a crash here is a not-ok reply, tagged with this process's role,
 rank and pid.
 
 - A plan module runs only on the roles in its `"on"` list (default: every role), so one plan

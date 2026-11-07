@@ -58,7 +58,7 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         rank until all are done and gets four yes votes; a poll after that repeats the result;
         after abort the result is gone ("no prepare started"). Pain point: ranks 0-2 answered
         "no prepare started" on the polls after their first finished one, a false abort (1 of
-        33 live TP4 prepares in the prototype). Not: the real collective_rpc."""
+        33 live TP4 prepares). Not: the real collective_rpc."""
         sides = [Side("worker", rank=r) for r in range(4)]
         from .test_host import Executor
         g = WorkerGroup(NS(core=NS(model_executor=Executor(sides)), in_loop=lambda fn: fn()))

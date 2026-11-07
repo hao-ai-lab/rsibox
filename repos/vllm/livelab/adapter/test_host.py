@@ -3,9 +3,9 @@
 Run from the repo root:
     python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
 
-Only the transport is replaced: `collective_rpc` becomes a loop over in-process `Endpoint`s,
+Only the transport is replaced: `collective_rpc` becomes a loop over in-process `Side`s,
 one call on every rank in rank order, as vLLM's executor does. Each rank has its own copy of
-the toy engine (its own module objects, as in its own process). Host, WorkerGroup, Endpoint
+the toy engine (its own module objects, as in its own process). Host, WorkerGroup, Side
 and the kernel are the real code.
 """
 import importlib
@@ -197,7 +197,8 @@ class TransactionTest(unittest.TestCase):
         """Input: rank 1's commit raises SystemExit (a repair cell or method calling
         sys.exit). Expected: every rank replies (rank 1 not-ok naming SystemExit), the
         transaction is rolled_back and both ranks run "base". Fails before the fix: dispatch
-        caught only Exception, so SystemExit escaped the RPC (here: out of handle itself)."""
+        caught only Exception, so SystemExit escaped the RPC (here: out of handle itself). Not:
+        vLLM's real executor queue."""
         h, names, eps = make_host(self, "exit")
 
         def bye(txn):
@@ -255,7 +256,7 @@ class TransactionTest(unittest.TestCase):
     def test_status_without_a_txn_is_the_hosts_overall_status(self):
         """Input: the status op with no txn, before and after a committed and undone
         transaction. Expected: ok, state "idle", the last transactions, at_base True. Pain
-        point: status without a txn id raised KeyError in the prototype."""
+        point: status without a txn id raised KeyError."""
         h, _, _ = make_host(self, "st")
         r = h.handle({"op": "status"})
         self.assertEqual((r["ok"], r["state"], r["last"]), (True, "idle", []))
@@ -318,7 +319,7 @@ class OverlayTest(unittest.TestCase):
         """Input: an installed `vllm/v1/engine/core.py` (SRC = "installed") and an overlay
         finder serving its own core.py (SRC = "overlay"), then the host's finder in front.
         Expected: importing vllm.v1.engine.core gives the overlay's module, patched. Pain point:
-        the prototype's finder asked PathFinder directly, so the engine core ran the installed
+        a finder that asks PathFinder directly made so the engine core ran the installed
         file while the plan's base was the overlay's: a false base_mismatch. Not: a real vLLM
         import."""
         import importlib.abc

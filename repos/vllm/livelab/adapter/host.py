@@ -9,9 +9,9 @@ How a transaction runs (kernel `StepGapCoordinator`):
 - Control: a file channel. A client writes <dir>/ctl.json `{"seq", "op", ...}`; a host thread
   in the engine-core process runs it and writes <dir>/reply/<seq>.json. Ops: `txn {plan,
   edit_time, baseline_restart}`, `prove {txn, golden}`, `undo {txn}`, `status {txn}` (without
-  txn: the host's own state), `pstatus {txn}` (every rank's own state), `fingerprint
-  {modules}` (per rank: content hash and code object id of every function), `versions` (per
-  rank: the per-step version log), `at_base`, `ping`.
+  txn: the host's own state), `pstatus {txn}` (`workers`, per rank, and `core`: each
+  side's own state), `fingerprint {modules}` (`workers` and `core`: content hash and code
+  object id of every function), `versions` (`workers` and `core`: the per-step version log), `at_base`, `ping`.
   Receipts also go to <dir>/receipts.jsonl (kernel `ReceiptWriter`).
 - Two participants: the workers (every rank behind one collective_rpc, `WorkerGroup`) and the
   engine core (a `Side` in this process).
@@ -387,9 +387,9 @@ def _patch_core(mod):
 
 class _After(importlib.abc.MetaPathFinder):
     """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
-    finders load it: it asks the finders after it on sys.meta_path, in order (an overlay
-    finder first, then the installed package), instead of PathFinder directly, which bypassed
-    the overlay and gave a false base_mismatch (the prototype hit it)."""
+    finders load it: it asks the other finders on sys.meta_path in list order (an overlay
+    finder first, then the installed package), instead of PathFinder directly, which would
+    bypass the overlay and give a false base_mismatch."""
 
     def find_spec(self, name, path, target=None):
         if name != "vllm.v1.engine.core":

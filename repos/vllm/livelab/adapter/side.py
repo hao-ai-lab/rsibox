@@ -13,7 +13,7 @@
   commit, abort, undo) run on this side's own lane thread (kernel `Lane`), and the side
   answers by the deadline: a call still running is `deadline_missed` naming this rank. So
   every rank replies to every collective_rpc by the deadline, the reply says which rank is
-  late, and the RPC itself never times out. The late call keeps the lane; a commit that starts
+  late, and no rank's late call holds up the RPC. The late call keeps the lane; a commit that starts
   after its deadline applies nothing (kernel), and the host's undo queues behind it.
 - **Graph detection** (graphs.py). On a worker whose config runs CUDA graphs or torch.compile,
   the split decorator itself (`eager_break_during_capture`, in any module, and code nested in
@@ -36,7 +36,6 @@
   "delay_s", "fail"}}` makes that method fail on that role (or rank), or delays it.
 """
 import importlib
-import os
 import sys
 import threading
 import time
@@ -91,8 +90,8 @@ class Side(Endpoint):
         return G.graph_mode(w) if w is not None else None
 
     def _captured_check(self, module, items):
-        """Kernel check at prepare, for targets in model code while the worker runs graphs or
-        compiled code (see the module doc)."""
+        """Kernel check at prepare while the worker runs graphs or compiled code: the split
+        decorator in any module, then targets in model code (see the module doc)."""
         g = self._graph()
         if g is None:
             return []
@@ -182,7 +181,8 @@ class Side(Endpoint):
                             self._watch_txn.setdefault(txn, set()).add(k)
 
     def _drop_watch(self, txn):
-        """The keys a vetoed transaction added stop being watched (at the next step start)."""
+        """The keys a vetoed transaction added stop being watched: keys not yet joined at once,
+        joined keys at the next step start."""
         keys = self._watch_txn.pop(txn, set())
         with self._watch_lock:
             for k in keys:
@@ -281,7 +281,7 @@ class Side(Endpoint):
             if method == "abort":
                 self._drop_watch(txn)          # vetoed here or on another rank
             else:
-                self._watch_txn.pop(txn, None)  # committed: its keys stay watched
+                self._watch_txn.pop(txn, None)  # commit or undo: its keys stay watched
         if method == "witness_check":
             return self._route(super()._dispatch(method, payload))
         if deadline_at is None or method not in C.PHASE2:

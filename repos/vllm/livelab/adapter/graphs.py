@@ -127,7 +127,7 @@ def _index(source):
 
 def reach(source, roots, qual):
     """("split", detail) when the split ops `roots` (module-level function names) reach `qual`
-    and nothing else in the module calls it; ("captured", detail) when no root reaches it;
+    and every other caller of it in the module is itself reached from a split op; ("captured", detail) when no root reaches it;
     ("unknown", reason) when this cannot be decided statically."""
     defs, calls, by_name = _index(source)
     if qual not in defs:
