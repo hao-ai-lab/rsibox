@@ -6,8 +6,6 @@ architecture goes in `repos/<engine>/docs/`, its measurements in `repos/<engine>
 ```
 docs/
   README.md        this index
-  core/            how the skill and the agent prompts work
-  livelab/         the interface, receipts, conformance
 ```
 
 Rules:

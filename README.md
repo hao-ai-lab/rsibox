@@ -6,8 +6,9 @@ FastRSI gives a coding agent a **live lab**: a running engine it can change with
 The agent swaps a code change into the live processes, proves the new code ran, measures it, and
 undoes it on request. When a change cannot be swapped safely, the lab says "restart needed".
 
-> **Status:** restarting development around a skill-first design. Nothing here runs yet.
-> The previous version (Python package, vLLM and SGLang plugins, conformance receipts) is on the
+> **Status:** early. The vLLM live lab (`repos/vllm/livelab/`: kernel, adapter, services) and
+> the conformance cases (`template/livelab/conformance/`) run in CPU CI; GPU results come as
+> receipts in pull requests. The v0 prototype is on the
 > [`legacy/v0`](https://github.com/GindaChen/fastrsi/tree/legacy/v0) branch.
 
 ## Layout
