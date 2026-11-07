@@ -107,8 +107,10 @@ zygotes alive at once (run fs-paired): caches as before (inductor and Triton on 
 in its default place under the home directory, also on the network file system) 15.69, 17.27, 17.99, 17.18 s (mean 17.03)
 to the first step done; all three caches on node-local disk 16.63, 15.47, 15.76, 15.07 s (mean 15.73). The difference is
 in the first microbatch: 3.96-5.71 s before, 3.35-3.64 s after. Empty local caches: 18.24 s, then 15.51 s.
-So of the 5-6.5 s a first step costs over a steady one (14B), a disk cache keeps about 1.3 s on average (the JIT cache's
-place) and up to 2.3 s on a bad run; the remaining 4-5 s (communicators, allocator, Adam state, cuDNN plans, the step's tail)
+Qwen3-32B architecture TP 4, three alternating pairs (run fs-paired-32b): 23.27, 25.33, 25.00 s (mean 24.53) before,
+22.58, 23.34, 22.57 s (mean 22.83) after; first microbatch 5.94-6.56 s before, 4.26-4.58 s after.
+So of the 5-6.5 s a first step costs over a steady one (14B), a disk cache keeps about 1.3 s on average (1.7 s at 32B; the JIT
+cache's place) and up to 2.3 s on a bad run; the remaining 4-5 s (communicators, allocator, Adam state, cuDNN plans, the step's tail)
 only a live process keeps. `tools/stage_local.sh` now puts all three caches on local disk.
 
 What only a live process keeps (the live lab's in-place edit): communicators, cuDNN plans, compiled graphs, allocator pools, Adam state.
