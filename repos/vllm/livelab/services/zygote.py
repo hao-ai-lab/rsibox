@@ -1,0 +1,337 @@
+"""Zygote: a process that has vLLM and its heavy dependencies imported and starts `vllm serve`
+by fork instead of exec. The API server then skips its Python imports, and with
+VLLM_WORKER_MULTIPROC_METHOD=fork the engine core (forked by the API server) and the workers
+(forked by the engine core) skip theirs too.
+
+Usage:
+  python3 zygote.py serve --sock S [--modules FILE]   # started by `engine.py zygote`, which
+                                                      # gives it the engine's environment
+  python3 zygote.py ping --sock S
+Client: `engine.py start --zygote S` (request() below) gets the pid of a new `vllm serve`.
+
+Checks (findings, not gates: each says what it saw, why it matters and what to do, and the
+caller can accept it with `accept`; nothing passes silently):
+- "env": the request's environment differs from the zygote's start environment (vLLM and its
+  libraries read many variables at import time, so the forked server would run with the
+  zygote's values), except the keys in VOLATILE;
+- "stale": a source file of an imported module changed since the zygote imported it. By default
+  the fork refreshes it (zygote_refresh.py): the child drops the edited modules and every module
+  that imports them before the server starts, so it imports them again from the new source. The
+  reply lists them under "refreshed". Only edits a refresh cannot apply (a changed extension
+  `.so`, a module outside the refresh packages) stay a finding.
+A finding without acceptance means no fork: the reply carries the finding and the suggested
+actions. The zygote itself stops if its imports initialized CUDA or the CUDA driver, since no
+forked child could then use the GPU; it names the module, which the modules file can exclude.
+"""
+import argparse, importlib, json, os, signal, socket, sys, time, traceback
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import zygote_refresh
+
+# Top-level packages whose edited modules a fork refreshes instead of refusing.
+REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
+                         if p)
+# A refresh that reaches more modules than this re-imports the whole package (see plan()).
+REFRESH_ALL_ABOVE = int(os.environ.get("FASTRSI_ZYGOTE_REFRESH_ALL_ABOVE", "100"))
+
+# The environment the zygote was started with, before its imports. Libraries set variables
+# while importing (torch, tilelang, vLLM's env_override ...); a request is compared with this
+# snapshot, and the child keeps the post-import environment, as a fresh process would have.
+START_ENV = dict(os.environ)
+
+# Keys that may differ between the zygote's and the request's environment: shell bookkeeping,
+# the cluster harness's per-task ids, and the profiler's per-run output settings (re-read
+# after fork).
+VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "FASTRSI_PROF_DIR", "FASTRSI_PROF_T0"}
+VOLATILE_PREFIXES = ("RAY_",)
+
+# What `vllm serve` imports before it parses its arguments (vllm/entrypoints/cli/main.py), and
+# the engine core and worker modules it would import later.
+BASE_MODULES = [
+    "vllm.entrypoints.cli.main", "vllm.entrypoints.cli.benchmark.main",
+    "vllm.entrypoints.cli.collect_env", "vllm.entrypoints.cli.download_kernels",
+    "vllm.entrypoints.cli.launch", "vllm.entrypoints.cli.openai", "vllm.entrypoints.cli.preload",
+    "vllm.entrypoints.cli.run_batch", "vllm.entrypoints.cli.serve", "vllm.entrypoints.cli.snapshot",
+    "vllm.entrypoints.openai.api_server", "vllm.v1.engine.async_llm", "vllm.v1.engine.core",
+    "vllm.v1.executor.multiproc_executor", "vllm.v1.worker.gpu_worker",
+]
+
+
+def driver_initialized():
+    """Whether this process has initialized the CUDA driver (cuInit). cuDeviceGetCount does not
+    initialize it and fails with CUDA_ERROR_NOT_INITIALIZED (3) until something has. A forked
+    child of a process that initialized the driver cannot use CUDA."""
+    import ctypes
+    try:
+        cu = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return False
+    n = ctypes.c_int()
+    return cu.cuDeviceGetCount(ctypes.byref(n)) != 3
+
+
+def _volatile(k):
+    return k in VOLATILE or k.startswith(VOLATILE_PREFIXES)
+
+
+def _sources():
+    """(path, mtime_ns, size) of every imported module's source file."""
+    out = {}
+    for m in list(sys.modules.values()):
+        f = getattr(m, "__file__", None)
+        if f and f not in out:
+            try:
+                st = os.stat(f)
+                out[f] = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                pass
+    return out
+
+
+def _changed(snapshot):
+    """Source files whose (mtime, size) differ from the snapshot. Stats run in threads: on a
+    shared filesystem one stat costs ~0.1-0.2 ms and the snapshot holds ~8,000 files."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def stat(item):
+        f, sig = item
+        try:
+            st = os.stat(f)
+            return None if (st.st_mtime_ns, st.st_size) == sig else f
+        except OSError:
+            return f
+    with ThreadPoolExecutor(32) as pool:
+        return [f for f in pool.map(stat, snapshot.items(), chunksize=64) if f]
+
+
+def _env_diff(env):
+    mine = {k: v for k, v in START_ENV.items() if not _volatile(k)}
+    theirs = {k: v for k, v in env.items() if not _volatile(k)}
+    return sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
+
+
+def _child(req, conns, refresh=()):
+    """In the forked child: become `vllm serve` with the request's argv, env, cwd and log, after
+    dropping the `refresh` modules so the server imports them again from their new source."""
+    code = 1
+    try:
+        for c in conns:
+            c.close()
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)   # multiprocessing must reap its children
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        os.setsid()
+        fd = os.open(req["log"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        os.dup2(fd, 1); os.dup2(fd, 2); os.close(fd)
+        null = os.open(os.devnull, os.O_RDONLY)
+        os.dup2(null, 0); os.close(null)
+        os.chdir(req.get("cwd") or "/")
+        for k in [k for k in os.environ if _volatile(k) and k not in req["env"]]:
+            del os.environ[k]
+        os.environ.update({k: v for k, v in req["env"].items() if _volatile(k)})
+        sys.argv = list(req["argv"])
+        if refresh:
+            r = zygote_refresh.refresh(refresh)
+            print(json.dumps({"event": "zygote_refresh", **r, "names": list(refresh)[:50]}),
+                  flush=True)
+        # Only a refreshed fork re-registers ops; each skipped define, replaced implementation
+        # and re-registered opaque type is a JSON line in the server log.
+        with zygote_refresh.guard_for(refresh, zygote_refresh.print_event):
+            from vllm.entrypoints.cli.main import main
+            main()
+        code = 0
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except BaseException:
+        traceback.print_exc()
+    finally:
+        try:
+            sys.stdout.flush(); sys.stderr.flush()
+        finally:
+            os._exit(code)
+
+
+def serve(sock_path, modules_file):
+    err = sock_path_error(sock_path)
+    if err:                      # fail before minutes of imports, not after them
+        raise SystemExit(err)
+    t0 = time.time()
+    mods = list(BASE_MODULES)
+    skip = set()
+    if modules_file:
+        for line in open(modules_file):
+            m = line.strip()
+            if m.startswith("-"):           # "-name": never pre-import (it initializes CUDA)
+                skip.add(m[1:])
+            elif m and not m.startswith("#"):
+                mods.append(m)
+    failed = []
+    for m in mods:
+        if m in sys.modules or m in skip:
+            continue
+        try:
+            importlib.import_module(m)
+        except BaseException as e:      # some optional modules fail to import; vLLM skips them too
+            failed.append(f"{m}: {type(e).__name__}")
+        if driver_initialized():
+            raise SystemExit(f"zygote: importing {m} initialized the CUDA driver; a forked "
+                             f"server could not use the GPU. Add '-{m}' to the modules file.")
+    import torch
+    if torch.cuda.is_initialized() or driver_initialized():
+        raise SystemExit("zygote: imports initialized CUDA; a forked server could not use the GPU")
+    sources = _sources()
+    tg = time.time()
+    graph = zygote_refresh.import_graph(REFRESH_PREFIXES) if REFRESH_PREFIXES else {}
+    graph_s = round(time.time() - tg, 2)
+    # Move everything imported so far out of the garbage collector's reach: a forked child
+    # would otherwise scan (and so write to, copying every page) the whole inherited heap on
+    # each full collection. Prefork servers do the same (Python docs, gc.freeze).
+    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
+        import gc
+        gc.collect()
+        gc.freeze()
+    print(json.dumps({"event": "zygote_ready", "pid": os.getpid(), "import_seconds":
+                      round(time.time() - t0, 2), "modules": len(sys.modules),
+                      "source_files": len(sources), "graph_modules": len(graph),
+                      "graph_seconds": graph_s, "failed_imports": failed[:50]}), flush=True)
+    signal.signal(signal.SIGCHLD, signal.SIG_IGN)   # children are reaped automatically
+    if os.path.exists(sock_path):
+        os.unlink(sock_path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path); os.chmod(sock_path, 0o600); srv.listen(4)
+    while True:
+        conn, _ = srv.accept()
+        try:
+            req = json.loads(conn.makefile().readline())
+            if req.get("cmd") == "ping":
+                reply = {"ok": True, "pid": os.getpid()}
+            else:
+                t = time.time()
+                findings = []
+                bad_env = _env_diff(req["env"])
+                if bad_env:
+                    findings.append({
+                        "check": "env", "observed": bad_env[:20],
+                        "expected": "same environment as the zygote's start (except VOLATILE)",
+                        "why": "variables read at import time keep the zygote's values in the "
+                               "forked server", "actions": [
+                            "restart the zygote with this environment (~25 s of imports, off "
+                            "the start path)", "start without the zygote (+~21 s)",
+                            "accept 'env' if these variables are not read at import time"],
+                        "risk": "the server runs with the zygote's values of these variables"})
+                stale = _changed(sources)
+                fix = zygote_refresh.plan(stale, graph, whole_above=REFRESH_ALL_ABOVE) \
+                    if stale else None
+                if fix and not req.get("refresh", True):
+                    fix = {"modules": [], "changed": [], "blocked": [
+                        {"file": f, "why": "the request turned refresh off"} for f in stale]}
+                if fix and fix["blocked"]:
+                    findings.append({
+                        "check": "stale", "observed": f"{len(fix['blocked'])} changed files a "
+                        f"refresh cannot apply: {fix['blocked'][:5]}",
+                        "expected": "edited files the fork can refresh (Python source under "
+                                    f"{','.join(REFRESH_PREFIXES) or 'no package'})",
+                        "why": "the forked server would run the code the zygote imported",
+                        "actions": ["restart the zygote (~25 s of imports, off the start path)",
+                                    "start without the zygote", "accept 'stale'"],
+                        "risk": "an edit is silently not applied"})
+                refresh = fix["modules"] if fix else []
+                check_s = round(time.time() - t, 3)
+                open_findings = [f for f in findings if f["check"] not in req.get("accept", [])]
+                if req.get("cmd") == "check":
+                    # The same checks as a fork, nothing forked: a caller about to stop the
+                    # running engine asks first, so a refusal does not leave it with none.
+                    reply = {"ok": not open_findings, "findings": open_findings,
+                             "check_seconds": check_s, "accepted_findings": findings}
+                elif open_findings:
+                    reply = {"ok": False, "findings": open_findings, "check_seconds": check_s}
+                else:
+                    sys.stdout.flush(); sys.stderr.flush()
+                    pid = os.fork()
+                    if pid == 0:
+                        _child(req, [conn, srv], refresh)
+                    reply = {"ok": True, "pid": pid, "check_seconds": check_s,
+                             "accepted_findings": findings}
+                if fix and fix["changed"]:
+                    reply["refreshed"] = {"changed": fix["changed"], "modules": len(refresh),
+                                          "scope": fix["scope"]}
+                print(json.dumps({"event": "request", **reply}), flush=True)
+            conn.sendall((json.dumps(reply) + "\n").encode())
+        except Exception as e:
+            try:
+                conn.sendall((json.dumps({"ok": False, "error": repr(e)}) + "\n").encode())
+            except OSError:
+                pass
+        finally:
+            conn.close()
+
+
+def _call(sock_path, msg, timeout=60):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(sock_path)
+    s.sendall((json.dumps(msg) + "\n").encode())
+    reply = json.loads(s.makefile().readline())
+    s.close()
+    return reply
+
+
+def request(sock_path, argv, env, log, cwd=None, accept=()):
+    """Ask the zygote for a new `vllm serve` process. Returns the reply: {"ok": True, "pid"} or
+    {"ok": False, "findings": [...]} (accept=("env", "stale") overrides those findings)."""
+    return _call(sock_path, {"cmd": "fork", "argv": argv, "env": env, "log": log,
+                             "cwd": cwd or os.getcwd(), "accept": list(accept)})
+
+
+def check(sock_path, env, accept=()):
+    """Would the zygote fork a server with this environment now? Same checks as `request`
+    (environment, stale sources), nothing forked: {"ok", "findings", "accepted_findings"}."""
+    return _call(sock_path, {"cmd": "check", "env": env, "accept": list(accept)})
+
+
+# sun_path holds 108 bytes on Linux, including the terminating NUL.
+MAX_SOCK_PATH = 107
+
+
+def sock_path_error(sock_path):
+    """Why a Unix socket cannot be bound at this path, or None."""
+    n = len(os.fsencode(os.path.abspath(sock_path)))
+    if n > MAX_SOCK_PATH:
+        return (f"socket path too long for AF_UNIX ({n} bytes > {MAX_SOCK_PATH}): {sock_path}; "
+                "use a short path such as /dev/shm/<run>/zyg.sock")
+    return None
+
+
+def _exited(pid):
+    """True when pid is gone or a zombie (a dead child its parent has not reaped yet)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return True
+
+
+def wait_ready(sock_path, pid, timeout=600):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if _exited(pid):
+            return {"ready": False, "error": "zygote exited"}
+        try:
+            if _call(sock_path, {"cmd": "ping"}, timeout=5).get("ok"):
+                return {"ready": True, "seconds": round(time.time() - t0, 2)}
+        except OSError:
+            pass
+        time.sleep(0.5)
+    return {"ready": False, "error": "timeout"}
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("cmd", choices=["serve", "ping"])
+    p.add_argument("--sock", required=True)
+    p.add_argument("--modules", default="")
+    a = p.parse_args()
+    if a.cmd == "serve":
+        serve(a.sock, a.modules)
+    else:
+        print(json.dumps(_call(a.sock, {"cmd": "ping"})))

@@ -64,6 +64,37 @@ Source: `legacy/v0` branch, `receipts/overhead-vllm.json`, `docs/overhead.md`.
 | Witness, per call | 34 ns |
 | Repeatability, 32 prompts batched | 1 distinct output in 60 runs |
 
+## Zygote: edits after it started, refreshed in the fork (Qwen3-8B, 1× B200, 2026-11-06)
+
+The zygote (`livelab/services/zygote.py`) imports vLLM and its libraries once and forks each
+`vllm serve` from that state. An edit to a file it already imported used to make it refuse (or,
+accepted, the server ran the old code silently). Now the fork drops the edited modules and their
+importers before the server starts (`livelab/services/zygote_refresh.py`). Source: our 2026-11-06
+run, Qwen3-8B TP1 eager, warm caches, forked engine core; launch to `/health`, one greedy
+completion each (" Paris." in every case); markers printed by the edited code show what ran.
+
+| Case | Modules refreshed | To `/health` (s) | Edited code ran |
+|---|---:|---:|---|
+| fresh `vllm serve` (no zygote) | – | 20.9 | – |
+| fork, no edit | 0 | 10.9 | – |
+| fork, attention backend edited, refresh off | 0 | 10.4 | **no** (old code, silently) |
+| fork, attention backend edited (leaf) | 2 | 10.2 | yes (class body + `__init__`) |
+| fork, `envs.py` + engine core edited (core) | 1,371 (all of vLLM) | 13.7, 12.4 | yes (API server + engine core) |
+
+- The zygote imported 8,631 modules in 12.7 s and builds the import graph of its 1,371 vLLM
+  modules at start (2.3 s, off the start path). Only imports that run at import time count;
+  imports inside functions look the module up at call time and see the new one.
+- vLLM's module graph has one large cycle through `vllm.config` and `vllm.platforms`: an edit to
+  almost any module one of them imports reaches ~760 of ~1,000 modules. Above 100 modules the
+  refresh re-imports all of vLLM instead (+1.5–2.8 s over a plain fork), since a partial
+  re-import would register into package-wide tables (IR ops, CustomOp) twice. Third-party
+  libraries, most of the import time, stay imported. Leaf modules (attention backends, model
+  files, the GPU model runner: 1–35 modules) refresh in milliseconds.
+- Re-imported torch ops: an identical schema is accepted and the new body replaces the old one;
+  a changed schema is refused with the op's name. Opaque types re-register.
+- Still a finding (restart the zygote): an edited extension `.so`, or an edited module outside
+  `FASTRSI_ZYGOTE_REFRESH` (default `vllm`).
+
 ## Not measured yet
 
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each
