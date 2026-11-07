@@ -100,9 +100,14 @@ def real_state(engine):
     return Path.home() / STATE[engine][0]
 
 
+IDENTITY = {"agy": (("auth_method",), ("id_token_email",)),
+            "codex": (("auth_mode",), ("tokens", "account_id"))}
+COPY_BACK_LOCK = threading.Lock()
+
+
 def job_home(engine, workdir):
     """A fresh HOME inside the job directory with copies of the engine's credential files.
-    Returns (env, [(copy, original)])."""
+    Returns (env, [(copy, original, snapshot bytes)])."""
     home = Path(workdir, "home")
     state = home / STATE[engine][0]
     state.mkdir(parents=True)
@@ -110,8 +115,10 @@ def job_home(engine, workdir):
     for name in STATE[engine][1]:
         src = real_state(engine) / name
         if src.exists():
-            shutil.copy2(src, state / name)
-            pairs.append((state / name, src))
+            snap = src.read_bytes()
+            (state / name).write_bytes(snap)
+            os.chmod(state / name, 0o600)
+            pairs.append((state / name, src, snap))
     if engine == "agy":
         (state / "settings.json").write_text("{}")
     env = {"HOME": str(home), "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": workdir}
@@ -120,12 +127,46 @@ def job_home(engine, workdir):
     return env, pairs
 
 
-def copy_back(pairs):
-    """Keep a credential the reviewer refreshed during the job (token rotation)."""
-    for copy, src in pairs:
-        if copy.exists() and copy.read_bytes() != src.read_bytes():
-            tmp = src.with_name(src.name + ".new")
-            shutil.copy2(copy, tmp)
+def _shape(x):
+    return {k: _shape(v) for k, v in x.items()} if isinstance(x, dict) else None
+
+
+def _get(d, path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+
+
+def refresh_ok(engine, snap, new):
+    """True only for a token refresh: JSON with the same keys and the same account. Anything
+    else (garbage, another account's credentials planted by a prompt-injected reviewer) is
+    refused."""
+    try:
+        a, b = json.loads(snap), json.loads(new)
+    except ValueError:
+        return False
+    if not isinstance(a, dict) or _shape(a) != _shape(b):
+        return False
+    return all(_get(a, path) == _get(b, path) for path in IDENTITY[engine])
+
+
+def copy_back(engine, pairs):
+    """Keep a credential the reviewer refreshed (token rotation), but only a genuine refresh of
+    the same account, and only if no other job changed the real file meanwhile."""
+    with COPY_BACK_LOCK:
+        for copy, src, snap in pairs:
+            if not copy.exists():
+                continue
+            new = copy.read_bytes()
+            if new == snap or src.read_bytes() != snap:
+                continue                                  # unchanged, or a newer one is in place
+            if not refresh_ok(engine, snap, new):
+                log(f"refused to copy back {src.name}: not a refresh of the same account")
+                continue
+            fd, tmp = tempfile.mkstemp(dir=src.parent, prefix=f".{src.name}.")
+            with os.fdopen(fd, "wb") as f:
+                f.write(new)
+            os.chmod(tmp, 0o600)
             os.replace(tmp, src)
 
 
@@ -162,7 +203,7 @@ def run_review(job_id, req, bins, secret_files):
         argv, stdin = command(req["engine"], req["prompt"], req["model"], workdir, bins)
         out = subprocess.run(argv, input=stdin, cwd=workdir, env=env, capture_output=True,
                              text=True, timeout=600)
-        secret = secret_strings(list(secret_files) + [str(c) for c, _ in pairs])
+        secret = secret_strings(list(secret_files) + [str(c) for c, _, _ in pairs])
         reply = out.stdout
         if req["engine"] == "codex":
             last = Path(workdir, "last-message.txt")
@@ -180,7 +221,7 @@ def run_review(job_id, req, bins, secret_files):
         update = dict(status="error", error=msg)
     finally:
         try:
-            copy_back(pairs)
+            copy_back(req["engine"], pairs)
         except OSError as e:
             log(f"job {job_id}: could not copy back a refreshed credential: {e}")
         shutil.rmtree(workdir, ignore_errors=True)

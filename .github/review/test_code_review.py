@@ -155,7 +155,8 @@ class JobIsolation(unittest.TestCase):
         self.codex_home = Path(self.tmp.name, "codex-home")
         self.codex_home.mkdir()
         self.secret = "sk_live_0123456789abcdefghij"
-        Path(self.codex_home, "auth.json").write_text(json.dumps({"token": self.secret}))
+        Path(self.codex_home, "auth.json").write_text(json.dumps(
+            {"auth_mode": "chatgpt", "tokens": {"account_id": "acct-1", "access_token": self.secret}}))
         Path(self.codex_home, "history.jsonl").write_text("private past conversation\n")
         self.old = os.environ.get("CODEX_HOME")
         os.environ["CODEX_HOME"] = str(self.codex_home)
@@ -167,16 +168,45 @@ class JobIsolation(unittest.TestCase):
             os.environ["CODEX_HOME"] = self.old
         self.tmp.cleanup()
 
-    def test_job_home_holds_only_credential_copies_and_keeps_a_refresh(self):
-        work = Path(self.tmp.name, "job")
-        work.mkdir()
+    def auth(self, account, access):
+        return json.dumps({"auth_mode": "chatgpt", "tokens": {"account_id": account,
+                                                             "access_token": access}})
+
+    def job(self):
+        work = Path(tempfile.mkdtemp(dir=self.tmp.name))
         env, pairs = server.job_home("codex", str(work))
-        state = Path(env["CODEX_HOME"])
-        self.assertTrue(str(state).startswith(str(work)))
-        self.assertEqual(sorted(p.name for p in state.iterdir()), ["auth.json"])   # no history
-        Path(state, "auth.json").write_text('{"token": "refreshed"}')
-        server.copy_back(pairs)
-        self.assertEqual(json.loads(Path(self.codex_home, "auth.json").read_text())["token"], "refreshed")
+        return Path(env["CODEX_HOME"], "auth.json"), pairs
+
+    def test_job_home_holds_only_credential_copies(self):
+        copy, _ = self.job()
+        self.assertTrue(str(copy).startswith(self.tmp.name))
+        self.assertEqual(sorted(p.name for p in copy.parent.iterdir()), ["auth.json"])  # no history
+
+    def test_copy_back_keeps_only_a_refresh_of_the_same_account(self):
+        """Pain point (found in the second agent review round): a prompt-injected reviewer can
+        write its credential copy. Copying that back unchecked would install garbage, or
+        another account's credentials, as the host's login."""
+        real = self.codex_home / "auth.json"
+        cases = [(self.auth("acct-1", "new-token"), True),       # genuine refresh: kept
+                 (self.auth("attacker", "x"), False),            # another account: refused
+                 ("not json", False)]                            # garbage: refused
+        for planted, kept in cases:
+            real.write_text(self.auth("acct-1", "old-token"))
+            copy, pairs = self.job()
+            copy.write_text(planted)
+            server.copy_back("codex", pairs)
+            self.assertEqual(real.read_text() == planted, kept, planted)
+
+    def test_copy_back_never_overwrites_a_newer_host_credential(self):
+        """Pain point: two jobs refresh concurrently; the later copy-back must not clobber the
+        credential another job (or the user) already put in place."""
+        real = self.codex_home / "auth.json"
+        real.write_text(self.auth("acct-1", "old"))
+        copy, pairs = self.job()
+        real.write_text(self.auth("acct-1", "newer-from-elsewhere"))
+        copy.write_text(self.auth("acct-1", "stale-refresh"))
+        server.copy_back("codex", pairs)
+        self.assertIn("newer-from-elsewhere", real.read_text())
 
     @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
     def test_secret_in_an_engine_error_is_withheld(self):

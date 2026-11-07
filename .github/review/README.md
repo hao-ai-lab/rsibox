@@ -80,15 +80,19 @@ needs GitHub access.
 
 **The server** is `server.py` (standard library only). Requests carry `kind`
 (`pr-description` or `code-review`) and `engine` (`agy`, the default, or `codex` for code
-review). Each job runs in a fresh empty directory with a minimal environment, inside
-`confine.py`: Linux Landlock lets the reviewer read only system paths, its own binary and its
-state directory, and write only the job directory and its state directory. This matters
+review). Each job runs in a fresh empty directory with a minimal environment and a fresh HOME that
+holds only copies of the reviewer's credential files (never its real state directory with
+other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
+only system paths and its own binary, and write only the job directory. A refreshed
+credential is copied back only if it is valid JSON for the same account and the real file was
+not changed meanwhile. This matters
 because agy's file tools cannot be turned off from its command line: in our test an
 unconfined headless `agy -p --sandbox` read a file outside its directory when asked to;
 confined, the same request got "permission denied" even with every agy tool approved. Codex
 runs with its read-only sandbox and its shell, exec, web, browser, app and plugin tools
-disabled. A reply that contains text from a secret file (the service token, the reviewers'
-credentials, SSH keys) is withheld. Every call except `/v1/health` needs
+disabled. A reply or error that contains text from a secret file (the service token, the reviewers'
+credentials, SSH keys) is withheld. In CI the code review runs its script from the PR's base
+commit, never from the PR, because that job holds the service token. Every call except `/v1/health` needs
 `Authorization: Bearer <token>`.
 
 Trap: Cloudflare's Browser Integrity Check answers 403 (error 1010) to the default

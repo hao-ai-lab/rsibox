@@ -33,7 +33,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      # The review code runs from the base commit, never from the PR: this job holds the service
+      # token and a write-enabled GitHub token, and a PR could otherwise change the script that
+      # uses them. The PR itself is read through the API as data.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
       - env:
           GH_TOKEN: ${{ github.token }}
           FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
@@ -41,4 +46,9 @@ jobs:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           PR: ${{ github.event.pull_request.number || inputs.pr }}
-        run: python3 .github/review/code_review.py --pr "$PR" --engines agy,codex --post
+        run: |
+          if [ ! -f .github/review/code_review.py ]; then
+            echo "::notice::The base commit has no code review yet (it arrives with this PR). Skipped."
+            exit 0
+          fi
+          python3 .github/review/code_review.py --pr "$PR" --engines agy,codex --post
