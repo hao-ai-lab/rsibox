@@ -30,6 +30,8 @@
 
 - **Repeatable base:** the base must give bit-identical frames and audio across runs in one
   process and across processes (conformance c0 and c3). Measured: see `costs.md`.
+- **Golden per GPU count:** 1 and 2 GPUs share one golden (bit-identical); 4 GPUs produce a
+  different, repeatable video (`costs.md`), so it has its own golden.
 - **Exact edits:** an edit meant to keep numerics (scheduling, copies, buffers, Python
   overheads) must keep the video and audio hashes identical to base.
 - **Numerics-changing edits** (kernel or fusion changes, dtype or reduction order): video PSNR

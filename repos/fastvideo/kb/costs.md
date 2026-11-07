@@ -11,19 +11,19 @@ Our 2026-11-07 ladder runs, one process per run, timing wraps around the real ca
 
 | Phase | 1 GPU | 2 GPUs | 4 GPUs | Keep warm by |
 |---|---|---|---|---|
-| Imports (numpy, torch, fastvideo) | 93.5 s cold (torch 11.0, fastvideo 81.9) | 21.8 s warm page cache | | a resident process |
-| Model load (`from_config`) | 195.6 s cold page cache | 38.2 s warm, 2 workers | | a resident process; page cache |
-| ↳ text encoder (NVFP4 Qwen3-VL) | 91.1 s | 4.3 s | | |
-| ↳ DiT (NVFP4) | 76.3 s | 2.5 s | | |
-| ↳ VAE / audio VAE | 21.9 s / 3.6 s | 5.0 s / 0.5 s | | |
-| First video (FlashInfer NVFP4 JIT build, VAE compile, Triton JIT) | 217.9 s cold JIT | 18.9 s warm JIT | | JIT caches on disk; resident process |
-| ↳ conditioning stage (FlashInfer `fp4_quantization`, `fp4_gemm_cutlass` JIT) | 174.4 s | 2.4-2.7 s | | |
-| ↳ denoising stage | 30.4 s | 10.0-10.3 s | | |
-| ↳ video decode (VAE compile) | 12.6 s | 5.0 s | | |
-| Warm video (2nd, 3rd) | **6.13 s, 6.09 s** | **4.38 s, 4.38 s** | | |
-| ↳ denoise (8 DiT forwards) | 5.50 s (0.69 s per forward) | 3.86 s (0.48 s per forward) | | |
-| ↳ conditioning / video decode / audio decode | 0.23 / 0.17 / 0.12 s | 0.23 / 0.17 / 0.07 s | | |
-| Shutdown | 0.47 s | 3.4 s | | |
+| Imports (numpy, torch, fastvideo) | 93.5 s cold (torch 11.0, fastvideo 81.9) | 21.8 s warm page cache | 25.4 s warm | a resident process |
+| Model load (`from_config`) | 195.6 s cold page cache | 38.2 s warm, 2 workers | 40.4 s warm, 4 workers | a resident process; page cache |
+| ↳ text encoder (NVFP4 Qwen3-VL) | 91.1 s | 4.3 s | 5.6 s | |
+| ↳ DiT (NVFP4) | 76.3 s | 2.5 s | 3.2 s | |
+| ↳ VAE / audio VAE | 21.9 s / 3.6 s | 5.0 s / 0.5 s | 5.6 s / 0.6 s | |
+| First video (FlashInfer NVFP4 JIT build, VAE compile, Triton JIT) | 217.9 s cold JIT | 18.9 s warm JIT | 16.2 s warm JIT | JIT caches on disk; resident process |
+| ↳ conditioning stage (FlashInfer `fp4_quantization`, `fp4_gemm_cutlass` JIT) | 174.4 s | 2.4-2.7 s | 2.1-2.8 s | |
+| ↳ denoising stage | 30.4 s | 10.0-10.3 s | 8.7-9.4 s | |
+| ↳ video decode (VAE compile) | 12.6 s | 5.0 s | 2.0 s | |
+| Warm video (2nd, 3rd) | **6.13 s, 6.09 s** | **4.38 s, 4.38 s** | **3.12 s** median of 5 (3.06-3.44) | |
+| ↳ denoise (8 DiT forwards) | 5.50 s (0.69 s per forward) | 3.86 s (0.48 s per forward) | 2.50 s (0.31 s per forward) | |
+| ↳ conditioning / video decode / audio decode | 0.23 / 0.17 / 0.12 s | 0.23 / 0.17 / 0.07 s | 0.23 / 0.18 / 0.10 s | |
+| Shutdown | 0.47 s | 3.4 s | 6.3 s | |
 
 - **Repeatable:** the three videos of the 1-GPU run gave bit-identical frames and audio
   (frames hash `d0e55e892690e260`, audio `29b690c8ac7ae3be`), the first one included. The 2-GPU
@@ -31,6 +31,13 @@ Our 2026-11-07 ladder runs, one process per run, timing wraps around the real ca
 - **2 GPUs:** 1.39x on the warm video (6.09 to 4.38 s); denoise scales 1.42x, the rest
   (conditioning, decode, driver) does not. The 2-GPU column ran right after the 1-GPU one on a
   warm page cache, so its imports and load are warm numbers, not a cold start.
+- **4 GPUs:** 1.95x over 1 GPU on the warm video (6.09 to 3.12 s); denoise 2.2x. Warm videos
+  vary more (3.06-3.44 s over 5 videos): measure 5 or more before comparing.
+- **4 GPUs give a different video.** At sequence-parallel size 4 the frames hash is
+  `0134242de77c3f4c` and the audio `8674315c6648fb91` (PSNR 17.7 dB against the 1-GPU video), the
+  same in every 4-GPU run, while 1 and 2 GPUs give identical bits. Not a lab effect (no edit
+  installed). Unexplained; a candidate upstream report. The 4-GPU gate therefore uses its own
+  golden.
 - **A restart costs about 500 s cold** (imports + load + first video) against a 6.1 s video:
   98.8% of a restart-based check is setup. With warm page and JIT caches the earlier GB200 run
   (2026-10-20, `kb/priors.md`) took 65 s imports and 53 s for the first video.
