@@ -11,7 +11,7 @@ import unittest
 from . import coordinator as C
 from . import locate as L
 from . import swap as S
-from .test_detectors import ESTIMATOR, ESTIMATOR_NEW, temp_modules
+from .test_detectors import ESTIMATOR, ESTIMATOR_NEW, _n, temp_modules
 from .test_locate import ENG, OPS, at, edit, fresh
 from .test_witness import wait_for
 
@@ -169,6 +169,61 @@ class LineMapChainTest(unittest.TestCase):
     def test_three_edit_chain_auto(self):
         """The same chain with edit 2's targets left to the kernel ("auto")."""
         self._chain("auto")
+
+
+LAZY = '''import importlib
+
+DEP = "{dep}"
+
+
+def ensure_dep():
+    """vLLM's LazyLoader: at first use, bind the module under its dotted name."""
+    globals()[DEP] = importlib.import_module(DEP)
+    return globals()[DEP].VALUE
+
+
+def scale(x):
+    return x * 2
+'''
+
+
+class LazyImportAtBaseTest(unittest.TestCase):
+
+    def test_a_module_the_engine_imports_lazily_after_base_is_not_an_extra_name(self):
+        """Input (vLLM #62872's shape: backend_guidance's LazyLoader binds `llguidance.hf` and
+        `llguidance.torch` into the module at first use): commit an edit of scale(), let
+        the engine run the lazy import (the module gains the name of the dependency), undo.
+        Expected: at_base is ok, the name is listed in `lazy_imports`, not `extra_names`.
+        Then the same kind of value under a name our transaction added (a patch that adds
+        `import json as kt_json`), left after undo as a failed undo would leave it: that
+        one is an extra name and at_base is false. Fails without the fix: at_base is false
+        after the clean undo (extra_names lists the dependency). Not: names a repair cell
+        writes outside the journal (they would read as the engine's)."""
+        n = next(_n)
+        mod, dep = f"kt_lazy_mod{n}", f"kt_lazy_dep{n}"
+        src = LAZY.format(dep=dep)
+        _, lazy = temp_modules(self, {dep: "VALUE = 7\n", mod: src})
+        p = C.LocalParticipant("core")
+        new = edit(src, ("return x * 2", "return x * 3"))
+        self.assertTrue(p.prepare({"id": "a", "modules": {mod: {"source": new}}})["ok"])
+        self.assertTrue(p.commit("a")["ok"])
+        self.assertEqual((lazy.scale(1), lazy.ensure_dep()), (3, 7))   # the engine runs
+        self.assertTrue(p.undo("a")["ok"])
+        ab = p.at_base()
+        self.assertEqual((ab["ok"], ab["extra_names"]), (True, {}))
+        self.assertEqual(ab["lazy_imports"], {mod: [dep]})
+
+        imp = edit(src, ("import importlib\n", "import importlib\nimport json as kt_json\n"),
+                   ("return x * 2", "return x * len(kt_json.dumps(1))"))
+        self.assertTrue(p.prepare({"id": "b", "modules": {mod: {"source": imp}}})["ok"])
+        self.assertTrue(p.commit("b")["ok"])
+        import json
+        self.assertIs(lazy.kt_json, json)
+        self.assertTrue(p.undo("b")["ok"])
+        lazy.kt_json = json                    # what a failed undo would leave
+        ab = p.at_base()
+        self.assertEqual((ab["ok"], ab["extra_names"], ab["lazy_imports"]),
+                         (False, {mod: ["kt_json"]}, {mod: [dep]}))
 
 
 class _Box:
