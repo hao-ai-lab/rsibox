@@ -113,8 +113,9 @@ FASTRSI_T0=$(date +%s.%N) python -m fastrsi_megatron.zygote start --sock S --npr
     --log-dir D --cwd D --env FASTRSI_RUN=D [--env K=V ...] -- pretrain_gpt.py <megatron args>
 ```
 
-Contract: each rank gets torchrun's variables and the request's, a session of its own and
-`D/rank<r>.log`; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
+Contract: each rank gets torchrun's variables (OMP_NUM_THREADS=1 too, applied to torch's pool)
+and the request's, a session of its own, `D/rank<r>.log`, optionally a CPU list (`--cpus`), and
+torch.cuda's own functions back; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
 time. One rank exiting non-zero stops the others by PID tree. Findings refuse a request unless
 it accepts them: `stale` (an imported source file changed), `env` (a variable a library may
 read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_OVERLAY replaces a
@@ -142,5 +143,8 @@ more. The zygote is ready 12-25 s after its start (64 native threads, one Python
 Same results as `torchrun` (no deterministic mode): loss of steps 1-2 equal to 4 decimals (14B 12.9215, 12.9391; 32B
 12.8841, 12.9135); step 3 within the spread of `torchrun` repeats (14B: zygote 14.1019-14.1043, torchrun 14.1019-14.1059;
 32B: 19.0409-19.0575 vs 19.0453-19.0471); steady step 4.6 s (14B), 6.7-7.2 s (32B) either way.
+Steady state is 2.0-3.2% slower in forked ranks than in torchrun ranks (14B, same CPU binding,
+4.50-4.55 vs 4.40-4.45 s per step over steps 3-12, 10 runs); not the thread pool, not the CUDA-query
+patches; cause not found. Compare throughput only between candidates started the same way.
 What remains per restart is Megatron's own: init 2.2-4.5 s, warm-up 0.6-3 s, build 0.7-1 s, and the first step (9.4-11.4 s
 at 14B, 14-17.4 s at 32B: lazy communicators, cuDNN attention plans, allocator growth; see `kb/costs.md`).
