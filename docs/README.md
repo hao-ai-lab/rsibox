@@ -1,7 +1,7 @@
 # Docs
 
-Docs about FastRSI itself. Docs and measurements about one engine live in
-`repos/<engine>/kb/`, not here.
+Docs about how this repo and its process work. Nothing engine-specific lives here: an engine's
+architecture goes in `repos/<engine>/docs/`, its measurements in `repos/<engine>/kb/`.
 
 ```
 docs/
