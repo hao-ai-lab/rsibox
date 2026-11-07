@@ -1,5 +1,7 @@
 """Golden cases for the engine launcher (engine.py). CPU only: a small fake `vllm` stands in for
-the server and a real zygote.py runs with torch and vLLM stubbed out.
+the server, a stub of vLLM's argument parser (STUB_PARSER: the dests and defaults the launcher
+reads) stands in for vLLM's when the launcher reads the argv, and a real zygote.py runs with
+torch and vLLM stubbed out. The cases that need vLLM's real parser are in test_vllm_args.py.
 
 Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
 """
@@ -38,6 +40,43 @@ sys.modules["vllm"] = None
 sys.argv = sys.argv[1:]
 runpy.run_path(sys.argv[0], run_name="__main__")
 '''
+
+
+# vLLM's parser, cut down to what the launcher reads (same dests, defaults, the model_tag
+# positional and the -tp alias), for a CPU box without vLLM. On PYTHONPATH it shadows a real one.
+# Like vLLM 0.15.1 with VLLM_LOGGING_LEVEL=DEBUG, it logs to stdout while it is imported.
+STUB_PARSER = {
+    "vllm/entrypoints/common/cli_args.py": '''
+print("DEBUG [platforms/__init__.py:61] Checking if CUDA platform is available.")
+
+def make_arg_parser(p):
+    p.add_argument("model_tag", nargs="?")
+    p.add_argument("--model", default="Qwen/Qwen3-0.6B")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--host")
+    p.add_argument("-tp", "--tensor-parallel-size", type=int, default=1)
+    p.add_argument("--load-format", default="auto")
+    p.add_argument("--enforce-eager", action="store_true")
+    p.add_argument("--worker-cls", default="auto")
+    p.add_argument("--max-model-len")
+    return p
+''',
+    "vllm/utils/argparse_utils.py": "import argparse\n"
+                                    "class FlexibleArgumentParser(argparse.ArgumentParser): pass\n",
+}
+
+
+def stub_env(d, **extra):
+    """os.environ plus PYTHONPATH with STUB_PARSER first."""
+    root = Path(d, "stubparser")
+    for name, text in STUB_PARSER.items():
+        p = root / name
+        for parent in [x for x in p.relative_to(root).parents if str(x) != "."]:
+            (root / parent).mkdir(parents=True, exist_ok=True)
+            (root / parent / "__init__.py").touch()
+        p.write_text(text)
+    pp = os.environ.get("PYTHONPATH")
+    return {**os.environ, "PYTHONPATH": str(root) + (os.pathsep + pp if pp else ""), **extra}
 
 
 def _script(d, name, text):
@@ -88,10 +127,10 @@ def test_busy_port_is_a_finding_and_nothing_starts():
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM)
         out = os.path.join(d, "ran.json")
-        r = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port", str(port),
+        r = subprocess.run([sys.executable, ENGINE, "start", "m", "--port", str(port),
                             "--cache-root", d, "--log", os.path.join(d, "serve.log"),
                             "--vllm", fake], capture_output=True, text=True, timeout=60,
-                           env={**os.environ, "FAKE_OUT": out})
+                           env=stub_env(d, FAKE_OUT=out))
         srv.close()
         assert r.returncode == 2, r.stdout + r.stderr
         assert json.loads(r.stdout)["finding"]["check"] == "port_in_use"
@@ -117,29 +156,54 @@ def test_wait_healthy_returns_none_as_soon_as_the_server_exits():
         p.wait()
 
 
-def test_direct_start_loads_from_disk_and_reports_health_seconds():
-    """Input: `engine.py start` with a fake vllm that answers /health after 1.5 s. Expect: the
-    server got `--load-format auto` (weights from disk: a default of ipc_cache waits for a
-    preload daemon that may not exist), 127.0.0.1, and cache roots under --cache-root; the
-    launcher printed healthy_after_s >= 1.5 and exited 0. Not: a real vLLM (GPU receipt)."""
+def test_direct_start_passes_the_vllm_argv_through_and_reports_health_seconds():
+    """Input: `engine.py start` with launcher flags and vLLM flags mixed, `-tp 2` and a port
+    only vLLM's parser knows, and a fake vllm that answers /health after 1.5 s. Expect: the
+    server got the vLLM argv verbatim and in order, plus `--host 127.0.0.1`, and nothing else
+    (before: the launcher added its own `--tensor-parallel-size 1` and `--load-format auto`);
+    cache roots under --cache-root; the report reads model, port and tp 2 back from the parser
+    and healthy_after_s >= 1.5 on that port. Not: vLLM's real parser (test_vllm_args.py)."""
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM)
         out, port = os.path.join(d, "ran.json"), _free_port()
-        r = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port", str(port),
-                            "--cache-root", os.path.join(d, "c"), "--log",
-                            os.path.join(d, "serve.log"), "--vllm", fake, "--timeout", "30",
-                            "--", "--enforce-eager"], capture_output=True, text=True,
-                           timeout=60, env={**os.environ, "FAKE_OUT": out, "FAKE_DELAY": "1.5"})
+        vargv = ["m", "-tp", "2", "--port", str(port), "--enforce-eager"]
+        r = subprocess.run([sys.executable, ENGINE, "start", "--cache-root",
+                            os.path.join(d, "c"), vargv[0], "--log", os.path.join(d, "serve.log"),
+                            *vargv[1:3], "--vllm", fake, "--timeout", "30", *vargv[3:]],
+                           capture_output=True, text=True, timeout=60,
+                           env=stub_env(d, FAKE_OUT=out, FAKE_DELAY="1.5"))
         rep = json.loads(r.stdout)
         _stop(rep["pid"])
         assert r.returncode == 0, r.stdout + r.stderr
-        assert rep["healthy_after_s"] >= 1.5
+        assert rep["healthy_after_s"] >= 1.5 and rep["port"] == port
+        assert rep["vllm_args"]["args"]["model"] == "m"
+        assert rep["vllm_args"]["args"]["tensor_parallel_size"] == 2
         ran = json.loads(Path(out).read_text())
-        argv = ran["argv"]
-        assert argv[argv.index("--load-format") + 1] == "auto"
-        assert argv[argv.index("--host") + 1] == "127.0.0.1"
-        assert argv[-1] == "--enforce-eager"
+        assert ran["argv"] == ["serve", *vargv, "--host", "127.0.0.1"]
         assert ran["env"]["VLLM_CACHE_ROOT"] == str(Path(d, "c", "vllm").resolve())
+
+
+def test_an_argv_vllm_would_not_serve_as_meant_is_a_finding_and_nothing_starts():
+    """Input: three starts: no model (only `--port`), a flag vLLM rejects, `--host 0.0.0.0`.
+    Expect: exit 2, findings vllm_model (naming vLLM's default model), vllm_args (vLLM's
+    message) and vllm_host (naming 0.0.0.0); the fake vllm never ran. Before: the launcher
+    passed what it had and the server served vLLM's default model, or exited on the flag."""
+    with tempfile.TemporaryDirectory() as d:
+        fake = _script(d, "vllm", FAKE_VLLM)
+        out = os.path.join(d, "ran.json")
+        seen = {}
+        for vargv in (["--port", "8123"], ["m", "--no-such-flag"], ["m", "--host", "0.0.0.0"]):
+            r = subprocess.run([sys.executable, ENGINE, "start", "--cache-root", d, "--log",
+                                os.path.join(d, "serve.log"), "--vllm", fake, *vargv],
+                               capture_output=True, text=True, timeout=60,
+                               env=stub_env(d, FAKE_OUT=out))
+            assert r.returncode == 2, r.stdout + r.stderr
+            f = json.loads(r.stdout)["findings"][0]
+            seen[f["check"]] = f["observed"]
+        assert "Qwen/Qwen3-0.6B" in seen["vllm_model"]
+        assert "--no-such-flag" in seen["vllm_args"]
+        assert "0.0.0.0" in seen["vllm_host"]
+        assert not os.path.exists(out)
 
 
 def test_zygote_runs_with_the_engine_env():
@@ -167,12 +231,96 @@ def test_zygote_runs_with_the_engine_env():
         assert other["ok"] is False
         assert other["findings"][0]["check"] == "env"
         assert "VLLM_CACHE_ROOT" in other["findings"][0]["observed"]
-        chk = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port",
+        chk = subprocess.run([sys.executable, ENGINE, "start", "m", "--port",
                               str(_free_port()), "--cache-root", cache, "--log",
                               os.path.join(d, "s.log"), "--zygote", sock, "--zygote-check"],
                              capture_output=True, text=True, timeout=60, env=base)
         assert chk.returncode == 0, chk.stdout + chk.stderr
         assert json.loads(chk.stdout)["zygote_check"]["ok"] is True
+    finally:
+        _stop(rep["pid"])
+
+
+def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
+    """Input: a real zygote.py (torch stubbed, vLLM absent) that pre-imported a module outside
+    the refresh packages; the module is then edited; `engine.py start --zygote S m`. Expect:
+    exit 2 with a `stale` finding naming that file, nothing forked (before: the parse ran on
+    the pre-edit code, so an edit to vLLM's argument code a refresh cannot reach was read with
+    the old flags). With `--zygote-accept stale` the parse runs: here vLLM is absent, so the
+    parse child fails to import its parser, a `zygote_parse` finding. Not: a refresh of an
+    edited vLLM module (the next case)."""
+    d = _short_dir()
+    sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
+    zpy = _script(d, "python", FAKE_PYTHON)
+    lib = Path(d, "lib"); lib.mkdir()
+    (lib / "zt_edited.py").write_text("X = 1\n")
+    Path(d, "mods.txt").write_text("zt_edited\n")
+    env = {**os.environ, "PYTHONPATH": str(lib)}
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log"),
+                        "--zygote-modules", os.path.join(d, "mods.txt")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    rep = json.loads(r.stdout)
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        (lib / "zt_edited.py").write_text("X = 2  # edited\n")
+        start = [sys.executable, ENGINE, "start", "--cache-root", cache, "--log",
+                 os.path.join(d, "s.log"), "--zygote", sock, "m", "--port", str(_free_port())]
+        out = subprocess.run(start, capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["stale"] and "zt_edited.py" in f[0]["observed"]
+        out = subprocess.run(start + ["--zygote-accept", "stale"], capture_output=True,
+                             text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["zygote_parse"] and "vllm" in f[0]["observed"]
+    finally:
+        _stop(rep["pid"])
+
+
+def test_zygote_parse_reads_an_edit_to_vllms_argument_code():
+    """Input: a real zygote.py (torch stubbed) that pre-imported STUB_PARSER as vLLM's parser
+    (a `vllm` package, so its edits refresh); then three parses of `m --new-flag 1`: before any
+    edit, after the parser gains --new-flag, after an edit that does not import. Expect: (1)
+    vLLM's rejection `unrecognized arguments: --new-flag`; (2) ok, and the reply's "refreshed"
+    names the parser's module (before: the child parsed with the zygote's pre-edit parser
+    and rejected the flag); (3) `engine.py start --zygote` exits 2 with a `zygote_parse`
+    finding carrying the SyntaxError (before: a `vllm_args` finding, "fix the vLLM flags"),
+    and nothing started. Not: a refresh of the real vLLM's argument modules (they are the same
+    refresh as a fork's, test_zygote_refresh.py)."""
+    d = _short_dir()
+    sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
+    zpy = _script(d, "python", FAKE_PYTHON.replace('sys.modules["vllm"] = None\n', ""))
+    Path(d, "mods.txt").write_text("vllm.entrypoints.common.cli_args\nvllm.utils.argparse_utils\n")
+    env = stub_env(d)
+    cli = Path(d, "stubparser", "vllm/entrypoints/common/cli_args.py")
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log"),
+                        "--zygote-modules", os.path.join(d, "mods.txt")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    rep = json.loads(r.stdout)
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        argv = ["m", "--new-flag", "1"]
+        before = zygote.parse(sock, argv)
+        assert before["ok"] is False and "unrecognized arguments: --new-flag" in before["error"]
+        assert not before.get("zygote_error"), before
+        text = cli.read_text()
+        cli.write_text(text.replace('    return p\n', '    p.add_argument("--new-flag")\n'
+                                                     '    return p\n'))
+        after = zygote.parse(sock, argv)
+        assert after["ok"] is True and after["args"]["model"] == "m", after
+        assert after["refreshed"]["changed"] == ["vllm.entrypoints.common.cli_args"], after
+        cli.write_text(text + "\ndef broken(:\n")
+        out = subprocess.run([sys.executable, ENGINE, "start", "--cache-root", cache, "--log",
+                              os.path.join(d, "s.log"), "--zygote", sock, *argv],
+                             capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["zygote_parse"], f
+        assert "SyntaxError" in f[0]["observed"], f
+        assert not os.path.exists(os.path.join(d, "s.log"))
     finally:
         _stop(rep["pid"])
 
