@@ -18,6 +18,7 @@ core/                    what agents read
   developer.md           developer agent: edit, install, check, keep or revert
   toolsmith_offline.md   toolsmith, once per repo: mine PRs and tests, build and verify the lab
   toolsmith_online.md    toolsmith, on call: polish slow checks, extend to new modules
+  orchestrator.md        orchestrator agent: run the loop with programs and agents, schedule by GPU
 template/livelab/        the fixed interface (install, check, reset, uninstall) and conformance
 repos/<engine>/          kb/ (costs, workload, mechanisms), livelab/, tools/, examples/
 docs/                    docs about FastRSI itself (see docs/README.md)
