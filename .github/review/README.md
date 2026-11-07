@@ -1,16 +1,45 @@
-# PR description review
+# Agent reviews of PRs
 
-An Antigravity agent polishes each PR's title and description (never the code). A checker then
-makes sure the rewrite kept every fact before it is applied.
+Two reviews share one review service:
+
+- **Description review:** an Antigravity agent polishes each PR's title and description (never
+  the code). A checker makes sure the rewrite kept every fact before it is applied.
+- **Code review:** Antigravity and Codex review the diff against `AGENTS.md`. Their findings are
+  checked and posted as one advisory PR review: it never approves or blocks, a human merges.
 
 | File | Does |
 |---|---|
-| `pr_description.md` | The reviewer prompt |
+| `pr_description.md` | The description reviewer prompt |
 | `review.py` | Fetches the PR, asks the reviewer, checks the reply, applies it |
 | `test_review.py` | Golden cases: rewrites the checker must accept or reject |
-| `../workflows/pr-description-review.yml` | Runs it in CI |
+| `../workflows/pr-description-review.yml` | Runs the description review in CI |
+| `code_review.md` | The code reviewer prompt, sent with every code-review request |
+| `code_review.py` | Fetches diff and description, asks each engine, checks, merges, posts one review |
+| `test_code_review.py` | Golden cases: findings kept, dropped, merged; never an approval; confinement |
+| `../workflows/pr-code-review.yml` | Runs the code review in CI |
+| `server.py`, `confine.py` | The review service and the Landlock wrapper it runs reviewers in |
 
-## What the checker guarantees
+## Code review
+
+On every non-draft PR (opened, new commits, ready for review; add the `review-code` label or
+run the workflow by hand to re-review), `code_review.py`:
+
+1. fetches the diff (cut at 90,000 characters; the review says so when it is cut) and the
+   description, and builds the prompt: `code_review.md`, the PR as untrusted data, `AGENTS.md`;
+2. sends it to each engine through the service (`kind: "code-review"`, `engine: "agy" | "codex"`);
+3. keeps a finding only if it is well-formed JSON and points at a line on the new side of the
+   diff; merges findings from both engines on the same line into one comment naming both;
+4. posts one review with event `COMMENT`. An engine that is down or answers garbage is
+   skipped with a notice; the PR never fails because a reviewer is unavailable.
+
+```bash
+python3 .github/review/code_review.py --pr 22                 # print, post nothing
+python3 .github/review/code_review.py --pr 22 --post          # also post it
+```
+
+It needs the same `FASTRSI_REVIEW_URL` and `FASTRSI_REVIEW_TOKEN` as the description review.
+
+## What the description checker guarantees
 
 A suggestion is applied only if, compared with the original:
 
@@ -34,31 +63,48 @@ python3 .github/review/review.py --pr 3 --apply    # apply if every check passes
 
 ## Run it in CI: the review service
 
-CI cannot run `agy` (it needs your Antigravity login), so CI calls a service you host at
-the review service URL, which runs `agy` for it.
+CI cannot run `agy` or `codex` (they need your logins), so CI calls a service you host at
+the review service URL, which runs them for it.
 
 **Contract (v1), asynchronous** because a review can take minutes and Cloudflare closes proxied
 requests after 100 s:
 
 ```
-POST /v1/review   {"kind": "pr-description", "repo", "pr", "prompt", "model"}  ->  {"id"}
+POST /v1/review   {"kind", "engine", "repo", "pr", "prompt", "model"}  ->  {"id"}
 GET  /v1/review/<id>   ->  {"status": "queued|running|done|error", "reply", "error"}
 ```
 
-`reply` is the raw reviewer output (the TITLE/BODY/NOTES blocks). The service only runs the
-prompt; checking and applying happen in CI, so the service never needs GitHub write access.
+`reply` is the raw reviewer output (TITLE/BODY/NOTES blocks, or the code review's JSON). The
+service only runs the prompt; checking, applying and posting happen in CI, so the service never
+needs GitHub access.
 
-**The server** is `server.py` (standard library only). It runs `agy` headless in a fresh empty
-directory per job. Headless `agy` auto-denies tools that need the "command" permission: a test
-prompt telling it to `touch` a file did not create one. So a hostile PR description cannot run
-shell commands on the host. Every call except `/v1/health` needs `Authorization: Bearer <token>`.
+**The server** is `server.py` (standard library only). Requests carry `kind`
+(`pr-description` or `code-review`) and `engine` (`agy`, the default, or `codex` for code
+review). Each job runs in a fresh empty directory with a minimal environment and a fresh HOME that
+holds only copies of the reviewer's credential files (never its real state directory with
+other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
+only system paths and its own binary, and write only the job directory. A refreshed
+credential is copied back only if it is valid JSON for the same account and the real file was
+not changed meanwhile. Known limit: a prompt-injected reviewer that keeps the account fields
+can still write unusable tokens into its copy, which would log the host CLI out until you log
+in again (denial of service; it cannot plant another account's credentials). Removing
+copy-back closes that, at the risk of a rotated refresh token logging the host out instead. This matters
+because agy's file tools cannot be turned off from its command line: in our test an
+unconfined headless `agy -p --sandbox` read a file outside its directory when asked to;
+confined, the same request got "permission denied" even with every agy tool approved. Codex
+runs with its read-only sandbox and its shell, exec, web, browser, app and plugin tools
+disabled. A reply or error that contains text from a secret file (the service token, the reviewers'
+credentials, SSH keys) is withheld. In CI the code review runs its script from the PR's base
+commit, never from the PR, because that job holds the service token. Every call except `/v1/health` needs
+`Authorization: Bearer <token>`.
 
 Trap: Cloudflare's Browser Integrity Check answers 403 (error 1010) to the default
 `Python-urllib` user agent before the request reaches the server, so `review.py` sends its own.
 
 **Setup steps:**
 
-1. Run `server.py` on a host with `agy`, behind HTTPS. Optionally put a Cloudflare Access policy with a service
+1. Run `server.py` (next to `confine.py`) on a Linux host with Landlock and `agy` and/or `codex`
+   (set `AGY` / `CODEX` if they are not on `PATH`), behind HTTPS. Optionally put a Cloudflare Access policy with a service
    token in front.
 2. In the GitHub repo settings:
    - variable `FASTRSI_REVIEW_URL` = the review service URL
