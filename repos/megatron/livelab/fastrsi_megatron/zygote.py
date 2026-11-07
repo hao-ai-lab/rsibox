@@ -173,10 +173,11 @@ def sources():
     """(mtime, size) of each imported module's source; the zygote's own file (`__main__`) is
     left out: the ranks run the code of their own modules, not this one's."""
     out = {}
+    main = getattr(sys.modules.get("__main__"), "__file__", None)
     for n, m in list(sys.modules.items()):
-        if n == "__main__":
-            continue
         f = getattr(m, "__file__", None)
+        if f == main:                           # also under another name (__mp_main__)
+            continue
         if f and f.endswith(".py") and f not in out:
             try:
                 st = os.stat(f)
