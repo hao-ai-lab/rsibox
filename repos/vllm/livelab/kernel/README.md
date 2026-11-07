@@ -3,7 +3,7 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate and journal.
+findings, locate, journal and witness.
 
 ## Contract
 
@@ -25,6 +25,19 @@ findings, locate and journal.
   can undo), `record_closures`, and `repair(...)` for hand-written repair cells.
   `mark()` returns the log position; `undo_to(mark)` replays inverses newest first, back to
   the same code and attribute objects, with added names removed.
+- **Witness** proves that swapped code ran, per participant. The swap puts
+  `__fastrsi_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
+  after the docstring; for a lambda or generator expression, in the expression: a generator
+  expression counts once per item). The module global is bound to the participant's
+  `Witness.hook`; undo binds the no-op `stub` instead of deleting it, since code compiled or
+  captured while the edit was installed may still call it. `Witness.check(keys, old_codes)`
+  turns counts into findings, so a swap that never ran is never a pass: zero live calls is
+  `running_frame` when a frame of the old code is still running (on a thread stack, or a
+  suspended generator or coroutine), else `zero_witness` (not reached). Calls made while the
+  engine captures a graph (`Witness(capturing=fn)`, `with witness.capture():`) count apart:
+  they prove capture, not a run, so zero live calls with capture calls is a `zero_witness`
+  routed to R1 that asks for a device-side probe. With torch loaded, the hook is marked
+  `assume_constant_result`, so Dynamo calls it while tracing and never traces it.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
   expected, why it matters, the actions and their cost, and the risk of ignoring it.
@@ -36,6 +49,7 @@ findings, locate and journal.
 | `findings.py` | The findings schema, the catalog of checks, `decide`. No imports. |
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
+| `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
 
 ## Invariants
@@ -57,10 +71,14 @@ findings, locate and journal.
 - **The heap scan unfreezes the gc.** Engines call `gc.freeze()` after startup, and
   `gc.get_objects()` and `gc.get_referrers()` both skip frozen objects. The scan yields the
   GIL in slices (`SLICE_S`); the one `get_objects` call cannot be sliced.
+- **The witness's frame check stays cheap.** `check` walks thread stacks, and looks for
+  suspended frames only when an old code can be suspended (generator, coroutine), from that
+  code's referrers. `gc.get_referrers` skips frozen objects, so a generator suspended since
+  before `gc.freeze()` is not seen: the price of not scanning the whole heap.
 
 ## Golden tests
 
-From the repo root (CPU, about 1 s; the torch case is skipped without torch; CI runs the same command in `.github/workflows/cpu-tests.yml`):
+From the repo root (CPU, a few seconds; the torch cases are skipped without torch; CI runs the same command in `.github/workflows/cpu-tests.yml`):
 
 ```
 python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
@@ -78,13 +96,19 @@ Each test's docstring says what it proves and what it does not.
 | `test_undo_restores_descriptor_side_dict_and_doc` | a repair of `__doc__`, a property or a custom `__setattr__` name that undo left in place |
 | `test_undo_restores_parameter_data_and_module_submodules` | the same for torch `Parameter.data` and `nn.Module` submodules |
 | `test_record_call_runs_in_reverse_order_and_a_failure_is_a_finding` | an in-place re-init with no undo entry |
+| `test_calls_are_counted_per_participant_and_zero_calls_is_not_reached` | a swap that never ran on one participant reported as a pass |
+| `test_a_running_loop_and_a_suspended_generator_are_running_frame` | a loop entered before the swap, or a suspended generator on no thread's stack, read as "not reached yet" when it can never run the new code |
+| `test_capture_calls_are_counted_apart_from_live_calls` | 13280 calls per rank after a CUDA-graph recapture, all made while capturing: proof of capture, not of a run |
+| `test_the_counter_keeps_the_docstring_and_counts_lambdas_and_genexprs` | a counter that breaks a docstring, or miscounts code with no statement body |
+| `test_the_witness_is_a_constant_for_dynamo` | a recompile that failed in Dynamo on a traced counter |
 
 ## Not here yet
 
 - **Swap** (stage the patched module, pair old and new code, `apply` through the journal),
   with its line maps and analyzer child. The journal's `record_closures` entry is driven by
-  `apply`, so taking back closures the new code made at run time is tested there.
-  **witness** (counters of the new code, running frames), **jit** (Triton `@jit` targets),
+  `apply`, so taking back closures the new code made at run time is tested there. The swap
+  also adds the per-block witness of changed branches, and drives `Witness.arm` (counters for
+  repair cells). **jit** (Triton `@jit` targets),
   **fields** (fields only the new `__init__` sets).
 - **Coordinator** (two-phase transactions over participants, step-gap commits, deadlines,
   proofs) and **session** (the host's state machine and poisoning), and the receipt writer.
