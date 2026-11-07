@@ -2,20 +2,34 @@
 it answers /health, and report whether its processes were forked or spawned.
 
 Usage:
-  python3 engine.py start --model M --port P --cache-root C --log serve.log \
-      [--tp N] [--max-model-len L] [--fork] [--zygote SOCK] [-- extra vllm serve args]
+  python3 engine.py start --cache-root C --log serve.log [--fork] [--zygote SOCK] \
+      MODEL [any `vllm serve` flag: --port P -tp N --max-model-len L ...]
   python3 engine.py zygote --python <venv python> --zygote SOCK --cache-root C --log z.log \
       [--fork] [--zygote-modules FILE]
   python3 engine.py start ... --zygote SOCK --zygote-check   # would the zygote fork it now?
 
-`start` prints one JSON line: {"pid", "cmd", "t_launch", "healthy_after_s", ...}. pid leads a new
-session (setsid): stop the engine by that pid or its session, never by the caller's group.
+`start` prints one JSON line: {"pid", "cmd", "t_launch", "healthy_after_s", "vllm_args", ...}.
+pid leads a new session (setsid): stop the engine by that pid or its session, never by the
+caller's group.
 
 Contract:
+- Two parsers, no overlap. The launcher's own parser holds only launcher flags (below, parse());
+  every other argument is the `vllm serve` argv and passes through verbatim, in order (a `--`
+  separator is dropped). vLLM's own parser is the one source of truth for it: the launcher reads
+  back the model, port, host, tensor parallel size, load format, eager mode and worker class
+  with vllm_args.py. With --zygote the zygote parses (~0.2 s, vLLM imported already); without
+  it the launcher imports vLLM's parser itself (~5 s), after setting engine_env(), so vLLM's
+  import-time reads of the environment match the engine's. It has to run under the vLLM venv's
+  python then.
+- A start needs the model in the argv (positional or --model): without one vLLM would serve its
+  default model, and that is a finding. An argv vLLM rejects is a finding too, with vLLM's
+  message; nothing starts in either case.
 - engine_env() is the one environment of every engine process. The zygote is started with it
   too, so a start that matches the zygote's settings passes the zygote's "env" check.
-- Weights load from disk (`--load-format auto`) unless the caller asks for another format.
-- The server binds 127.0.0.1 only.
+- Weights load with vLLM's default load format (`auto`: from disk) unless the argv asks for
+  another one.
+- The server binds 127.0.0.1 only: the launcher appends `--host 127.0.0.1`, and an argv that
+  sets another host is a finding.
 - healthy_after_s is seconds from launch until /health answers 200, or null as soon as the
   server exits or its log shows a failed start. A port that already answers is a finding and
   nothing starts, so the number is always about this engine.
@@ -25,14 +39,14 @@ Writes only --log and files under --cache-root (and the zygote's socket).
 
 Not here (other boundaries, later PRs): the weights preload daemon and its `ipc_cache` load
 format; the startup hooks (graph memory, KV plan, overlay, autotune key, forksafe); the lab
-worker extension and dev mode. Pass their flags after `--` or set their variables in the
+worker extension and dev mode. Pass their vLLM flags in the argv or set their variables in the
 environment until they land.
 """
 import argparse, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import zygote  # noqa: E402
+import vllm_args, zygote  # noqa: E402
 
 # One folder per compiler/autotune cache under --cache-root, so later starts with the same
 # config reuse compiled kernels, and concurrent runs with different roots never share a JIT
@@ -107,36 +121,77 @@ def port_in_use(port, host="127.0.0.1"):
         s.close()
 
 
-def serve_cmd(a, extra):
-    """The `vllm serve` argv. --load-format defaults to `auto` (safetensors from disk).
-    TODO(weights boundary): `ipc_cache` needs the preload daemon, which is not in this folder
-    yet; with no daemon a start on it waits for one (seen: a start that never finished)."""
-    cmd = [a.vllm, "serve", a.model, "--load-format", a.load_format, "--host", "127.0.0.1",
-           "--port", str(a.port), "--tensor-parallel-size", str(a.tp)]
-    if a.max_model_len:
-        cmd += ["--max-model-len", str(a.max_model_len)]
-    return cmd + list(extra)
+def read_vllm_args(a, vargv, env):
+    """vllm_args.parse() of the `vllm serve` argv: by the zygote with --zygote, else here, after
+    setting env, since importing vLLM reads it. Adds "via"; {"ok": False, "error"} on failure."""
+    if a.zygote:
+        return {**zygote.parse(a.zygote, vargv), "via": "zygote"}
+    os.environ.update(env)
+    try:
+        r = vllm_args.parse(vargv)
+    except ImportError as e:
+        r = {"ok": False, "error": f"vLLM's parser is not importable by {sys.executable} ({e!r}): "
+                                   "run the launcher with the vLLM venv's python, or use --zygote"}
+    return {**r, "via": "direct"}
+
+
+def argv_findings(v):
+    """Findings about the parsed `vllm serve` argv that stop the start (each names both values
+    or what is missing)."""
+    if not v["ok"]:
+        return [{"check": "vllm_args", "observed": v.get("error"), "expected": "an argv that "
+                 "`vllm serve` accepts", "why": "the server would exit on it",
+                 "actions": ["fix the vLLM flags (vLLM's message above)"]}]
+    args, explicit, found = v["args"], v["explicit"], []
+    if "model" not in explicit:
+        found.append({"check": "vllm_model", "observed": f"no model in the argv; vLLM's default "
+                      f"is {args['model']}", "expected": "the model, positional or --model",
+                      "why": "the server would load vLLM's default model, not the one meant "
+                      "(a flag that takes an optional value can swallow a positional model)",
+                      "actions": ["pass the model as the first vLLM argument"]})
+    if "host" in explicit and args["host"] != "127.0.0.1":
+        found.append({"check": "vllm_host", "observed": f"--host {args['host']}",
+                      "expected": "--host 127.0.0.1 (the launcher's)", "why": "lab engines "
+                      "bind 127.0.0.1 only", "actions": ["drop --host"]})
+    return found
+
+
+def serve_cmd(a, vargv, v):
+    """The `vllm serve` argv: the caller's, verbatim, then what the launcher needs that the
+    caller did not set (the host). Flags go after the caller's: `vllm serve` wants the model
+    first when --served-model-name is given."""
+    cmd = [a.vllm, "serve", *vargv]
+    if "host" not in v["explicit"]:
+        cmd += ["--host", "127.0.0.1"]
+    return cmd
 
 
 def _accept(a):
     return [x for x in a.zygote_accept.split(",") if x]
 
 
-def start(a, extra):
-    """Launch the server; return {"pid", "cmd", "t_launch", ...} or exit 2 with a finding."""
+def start(a, vargv):
+    """Launch the server; return {"pid", "cmd", "t_launch", "port", "vllm_args", ...} or exit 2
+    with a finding."""
     env = engine_env(a)
-    cmd = serve_cmd(a, extra)
     if a.zygote and a.zygote_check:
         # Ask only: would the zygote fork this server now? (callers check before stopping the
         # engine that runs, so a refusal leaves that engine up)
         reply = zygote.check(a.zygote, env, accept=_accept(a))
         print(json.dumps({"zygote_check": reply}))
         sys.exit(0 if reply.get("ok") else 2)
-    if port_in_use(a.port) and not a.accept_port_in_use:
+    v = read_vllm_args(a, vargv, env)
+    found = argv_findings(v)
+    if found:
+        print(json.dumps({"findings": found, "vllm_args": v, "note": "not started"}, indent=1))
+        sys.exit(2)
+    cmd, port = serve_cmd(a, vargv, v), v["args"]["port"]
+    rep = {"port": port, "vllm_args": v}
+    if port_in_use(port) and not a.accept_port_in_use:
         # Another server on this port answers /health at once: wait_healthy would report the
         # new engine healthy after ~0.01 s while it dies on bind.
         print(json.dumps({"finding": {
-            "check": "port_in_use", "observed": f"127.0.0.1:{a.port} already has a listener",
+            "check": "port_in_use", "observed": f"127.0.0.1:{port} already has a listener",
             "expected": "a free port", "why": "the health check would read the other server's "
             "/health as this start's; the new server then fails to bind",
             "actions": ["pick a free port (cost: none)", "--accept-port-in-use: start anyway "
@@ -156,7 +211,7 @@ def start(a, extra):
                               "note": "not started; act on the findings or pass "
                                       "--zygote-accept"}, indent=1))
             sys.exit(2)
-        out = {"pid": reply["pid"], "cmd": cmd, "t_launch": t_launch, "zygote": a.zygote,
+        out = {"pid": reply["pid"], "cmd": cmd, "t_launch": t_launch, **rep, "zygote": a.zygote,
                "zygote_check_seconds": reply.get("check_seconds"),
                "zygote_accepted_findings": reply.get("accepted_findings", [])}
         if reply.get("refreshed"):
@@ -165,7 +220,7 @@ def start(a, extra):
     with open(a.log, "w") as log:
         p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
                              start_new_session=True)
-    return {"pid": p.pid, "cmd": cmd, "t_launch": t_launch}
+    return {"pid": p.pid, "cmd": cmd, "t_launch": t_launch, **rep}
 
 
 def start_zygote(a):
@@ -236,15 +291,14 @@ def fork_finding(fc):
             "risk": "none for correctness; startup is not faster"}
 
 
-def parse(argv=None):
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+def launcher_parser():
+    """Only launcher flags live here; none of them is a `vllm serve` flag (test_vllm_args.py
+    checks this against vLLM's parser), and abbreviations are off, so a vLLM flag never lands
+    here by prefix."""
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     p.add_argument("cmd", choices=["start", "zygote"])
-    p.add_argument("--model"); p.add_argument("--tp", type=int, default=1)
-    p.add_argument("--max-model-len", type=int); p.add_argument("--port", type=int, default=8000)
     p.add_argument("--cache-root", required=True); p.add_argument("--log", required=True)
-    p.add_argument("--load-format", default="auto",
-                   help="vLLM load format (default auto: weights from disk)")
-    p.add_argument("--vllm", default="vllm", help="the vllm executable")
+    p.add_argument("--vllm", default="vllm", help="start: the vllm executable")
     p.add_argument("--fork", action="store_true",
                    help="fork the engine core and workers instead of spawning them")
     p.add_argument("--zygote", default="", help="start: fork from the zygote at this socket; "
@@ -259,18 +313,23 @@ def parse(argv=None):
     p.add_argument("--accept-port-in-use", action="store_true",
                    help="start: launch although the port already has a listener")
     p.add_argument("--timeout", type=float, default=3600, help="start: /health wait, seconds")
-    a, extra = p.parse_known_args(argv)
-    return a, [x for x in extra if x != "--"]
+    return p
+
+
+def parse(argv=None):
+    """(launcher args, `vllm serve` argv: everything the launcher's parser does not know)."""
+    a, vargv = launcher_parser().parse_known_args(argv)
+    return a, [x for x in vargv if x != "--"]
 
 
 def main(argv=None):
-    a, extra = parse(argv)
+    a, vargv = parse(argv)
     if a.cmd == "zygote":
         r = start_zygote(a)
         print(json.dumps(r))
         return 0 if r.get("ready") else 1
-    r = start(a, extra)
-    r["healthy_after_s"] = wait_healthy(a.port, r["pid"], a.log, timeout=a.timeout,
+    r = start(a, vargv)
+    r["healthy_after_s"] = wait_healthy(r["port"], r["pid"], a.log, timeout=a.timeout,
                                         t0=r["t_launch"])
     if a.fork or a.zygote:
         r["fork_check"] = fork_check(a.log)
