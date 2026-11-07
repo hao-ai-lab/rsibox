@@ -81,3 +81,24 @@ node; tokens/s/GPU from the 3 fastest of steps 2..8 was 7,324-7,463 (2% spread a
 Tiny model with `--deterministic-mode`: three checks of the base gave bit-identical loss
 (`12.064836502075195, 12.067537307739258, 11.609490394592285`), before and after an install
 and uninstall of a visible edit.
+
+## Probing a restart-tier setting: NCCL sweep vs a collective microbenchmark
+
+Two nodes, Qwen3-32B architecture, TP 4 x DP 2 (our 2026-11-07 runs). Full restarts, 10 steps each,
+against a repeat of the default (8.85 s per step): `NCCL_PROTO=Simple` 8.75 s, NVLS 8.81 s, NVLSTree
+9.24 s, NVLS + cuMem 11.27 s (+27%), `--ddp-bucket-size 4e8` 8.53 s (-3.6%). Cost: 17.4 min for six
+points (about 160-175 s each).
+
+The same NCCL settings in a collective microbenchmark (one fresh 8-rank process per setting: the TP
+all-gather of a 10.5 MB sequence-parallel shard, the cross-node DP reduce-scatter of 80 and 800 MB,
+and both at once on two streams): every setting within about 3% on every collective (TP all-gather
+135-139 us; DP reduce-scatter 80 MB 177-184 us, 800 MB 1005-1016 us). Cost: 71 s for all five,
+including scheduling.
+
+What the probe got right: the algorithm and protocol do not matter here, and larger messages move more
+bytes per second (800 MB at 2.2x the rate of 80 MB), the direction of the bucket-size gain. What it
+missed: the cuMem regression (+4% in the probe, +27% in training). Inside training the same TP
+all-gather took 1.02 ms (profile), 7.5x the isolated 135 us: the cost is interference in the training
+schedule, not the NCCL settings. Use the probe to screen, then confirm the chosen setting with one
+restart.
+
