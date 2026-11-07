@@ -123,3 +123,125 @@ def test_fork_without_refresh_keeps_torch_duplicate_errors():
         except RuntimeError as e:
             assert "refresh:" not in str(e)        # torch's own error, not the guard's
     assert seen == []
+
+
+def test_refreshed_layer_registers_its_name_again(tmp_path, monkeypatch):
+    """Upstream 61323 edits layernorm.py, whose `@CustomOp.register("rms_norm")` asserts the
+    name is new in a registry that lives in a module the refresh keeps. Re-importing the edited
+    module then dies with "Duplicate op name: rms_norm" and the forked server never starts.
+    Here a small package copies that registration path: the refreshed module registers its name
+    again with the new class, and a real duplicate (another module's name) still fails."""
+    root = _pkg(tmp_path, {
+        "zr2/__init__.py": "",
+        "zr2/custom_op.py": """
+            op_registry = {}
+            def register(name):
+                def deco(cls):
+                    assert name not in op_registry, f"Duplicate op name: {name}"
+                    op_registry[name] = cls
+                    return cls
+                return deco
+        """,
+        "zr2/layers.py": """
+            from zr2.custom_op import register
+            @register("rms_norm")
+            class RMSNorm:
+                eps = 1
+        """,
+        "zr2/other.py": """
+            from zr2.custom_op import register
+            @register("silu")
+            class Silu:
+                pass
+        """,
+    })
+    import zr2.layers, zr2.other
+    monkeypatch.setattr(zr, "NAME_REGISTRIES", {"zr2.custom_op": ("op_registry",)},
+                        raising=False)
+    graph = zr.import_graph(("zr2",))
+    _edit(root / "zr2/layers.py", "eps = 1", "eps = 2")
+
+    def child():
+        p = zr.plan([str(root / "zr2/layers.py")], graph)
+        zr.refresh(p["modules"])
+        seen = []
+        with zr.guard_for(p["modules"], seen.append):
+            import zr2.layers as layers
+            from zr2.custom_op import op_registry, register
+            try:                       # a name the refreshed module does not own stays taken
+                register("silu")(type("Dup", (), {}))
+                dup = "registered"
+            except AssertionError as e:
+                dup = str(e)
+        return {"refreshed": p["modules"], "eps": op_registry["rms_norm"].eps,
+                "is_new": op_registry["rms_norm"] is layers.RMSNorm, "dup": dup,
+                "events": [(e["event"], e.get("name")) for e in seen]}
+    out = _in_child(child)
+    assert "error" not in out, out["error"]   # without the fix: "Duplicate op name: rms_norm"
+    assert out["refreshed"] == ["zr2.layers"]
+    assert out["eps"] == 2 and out["is_new"] is True
+    assert out["dup"] == "Duplicate op name: silu"
+    assert out["events"] == [["zygote_registry_forgot", "rms_norm"]]
+
+
+VLLM_PY = os.environ.get("FASTRSI_VLLM_PYTHON")
+_VLLM_REFRESH = r'''
+import json, sys, torch
+sys.path.insert(0, sys.argv[1])
+import zygote_refresh as zr
+import vllm.model_executor.layers.layernorm as ln
+from vllm.model_executor.custom_op import op_registry
+from vllm.utils.torch_utils import direct_register_custom_op
+from torch.library import Library
+out = {}
+p = zr.plan([ln.__file__], zr.import_graph(("vllm",)))
+zr.refresh(p["modules"])
+seen = []
+with zr.guard_for(p["modules"], seen.append):
+    import vllm.model_executor.layers.layernorm as ln2
+out["new_class"] = ln2 is not ln and op_registry["rms_norm"] is ln2.RMSNorm
+# vLLM's other registration path: direct_register_custom_op -> Library.define, impl, fake
+lib = Library("zrvllm", "FRAGMENT")
+def double(x: torch.Tensor) -> torch.Tensor:
+    return x * 2
+def fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+direct_register_custom_op("probe", double, fake_impl=fake, target_lib=lib, dispatch_key="CPU")
+with zr.guard_for(["zr_probe_module"], seen.append):
+    def triple(x: torch.Tensor) -> torch.Tensor:
+        return x * 3
+    direct_register_custom_op("probe", triple, fake_impl=fake, target_lib=lib,
+                              dispatch_key="CPU")
+    out["same_schema_value"] = torch.ops.zrvllm.probe(torch.ones(1)).tolist()
+    def changed(x: torch.Tensor, k: int) -> torch.Tensor:
+        return x * k
+    try:
+        direct_register_custom_op("probe", changed, target_lib=lib, dispatch_key="CPU")
+        out["changed_schema"] = "registered"
+    except RuntimeError as e:
+        out["changed_schema"] = str(e)
+out["events"] = [e["event"] for e in seen]
+print("RESULT " + json.dumps(out))
+'''
+
+
+@__import__("pytest").mark.skipif(not VLLM_PY, reason="needs vLLM: set FASTRSI_VLLM_PYTHON to a "
+                                  "vLLM venv's python (CPU CI has no vLLM)")
+def test_vllm_layernorm_refresh_reimports_in_real_vllm(tmp_path):
+    """The 61323 failure on real vLLM, on CPU: import vLLM's layernorm, refresh it and import it
+    again. Then vLLM's direct_register_custom_op path: the same schema takes the new body, a
+    changed schema refuses naming the op. Proves the import-time registrations pass; it does
+    not start an engine (the forked-server proof is the next GPU replay)."""
+    import subprocess
+    script = tmp_path / "vllm_refresh.py"
+    script.write_text(_VLLM_REFRESH)
+    r = subprocess.run([VLLM_PY, str(script), os.path.dirname(os.path.abspath(__file__))],
+                       capture_output=True, text=True, timeout=600)
+    lines = [l for l in r.stdout.splitlines() if l.startswith("RESULT ")]
+    assert lines, r.stderr[-3000:]     # without the fix: AssertionError: Duplicate op name
+    out = json.loads(lines[-1][len("RESULT "):])
+    assert out["new_class"] is True
+    assert out["same_schema_value"] == [3.0]
+    assert "zrvllm::probe changed its schema" in out["changed_schema"]
+    assert out["events"][:4] == ["zygote_registry_forgot"] * 4
+    assert "zygote_op_redefined" in out["events"]

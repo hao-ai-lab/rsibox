@@ -17,6 +17,13 @@ implementation still replaces the old one: `Library.impl` overrides) and raises,
 op, when the schema itself changed. Opaque types (torch.compile's custom classes, such as vLLM's
 `LayerName`) are registered by name in C++ and by class in Python: the guard lets the C++ name
 registration repeat, and the Python tables then map the new class.
+
+vLLM also keeps name registries of its own in Python: `CustomOp.register("rms_norm")` asserts the
+name is new in `op_registry` (and `register_oot` in `op_registry_oot`), so re-importing an edited
+layer module fails with "Duplicate op name" (upstream 61323, layernorm.py). Those registries live
+in modules a refresh keeps, so `forget_registrations()` drops the entries whose class came from a
+refreshed module before the re-import, the state a fresh process has before it imports the
+module. Entries from modules that were not refreshed stay, so a real duplicate still fails.
 """
 import ast, contextlib, os, re, sys, time
 
@@ -217,11 +224,54 @@ def op_redefine_guard(report=None):
             torch._C._register_opaque_type = orig_opaque
 
 
+# Python name registries that refuse a name twice, by module: {module: (dict attributes)}.
+NAME_REGISTRIES = {
+    "vllm.model_executor.custom_op": ("op_registry", "op_registry_oot"),
+    "vllm.model_executor.hw_agnostic.custom_op": ("op_registry", "op_registry_oot"),
+}
+
+
+def forget_registrations(refresh_names, registries=None, modules=None, report=None):
+    """Drop registry entries whose registered class (or function) was defined in a refreshed
+    module, so the module's re-import can register the name again with its new class. A
+    registry module that was itself refreshed starts empty anyway and is skipped. Returns the
+    dropped [(registry, name)]."""
+    registries = NAME_REGISTRIES if registries is None else registries
+    modules = sys.modules if modules is None else modules
+    refreshed, dropped = set(refresh_names), []
+    for mod, attrs in registries.items():
+        m = modules.get(mod)
+        if m is None or mod in refreshed:
+            continue
+        for attr in attrs:
+            reg = getattr(m, attr, None)
+            if not isinstance(reg, dict):
+                continue
+            for name, obj in list(reg.items()):
+                if getattr(obj, "__module__", None) in refreshed:
+                    del reg[name]
+                    dropped.append((f"{mod}.{attr}", name))
+                    if report is not None:
+                        report({"event": "zygote_registry_forgot", "registry": f"{mod}.{attr}",
+                                "name": name, "was": f"{obj.__module__}.{obj.__qualname__}"})
+    return dropped
+
+
+@contextlib.contextmanager
+def _refresh_guard(refresh_names, report=None):
+    forget_registrations(refresh_names, report=report)
+    with op_redefine_guard(report):
+        yield
+
+
 def guard_for(refresh_names, report=None):
-    """The op guard for a forked child: active only when the fork refreshed modules. A fork
-    without a refresh (and the engine core and workers it forks later) keeps torch's own
-    duplicate-registration errors."""
-    return op_redefine_guard(report) if refresh_names else contextlib.nullcontext()
+    """The re-registration guard for a forked child: active only when the fork refreshed
+    modules. It forgets the refreshed modules' entries in vLLM's name registries, then guards
+    torch op definitions (op_redefine_guard). A fork without a refresh (and the engine core and
+    workers it forks later) keeps torch's and vLLM's own duplicate-registration errors."""
+    if not refresh_names:
+        return contextlib.nullcontext()
+    return _refresh_guard(refresh_names, report)
 
 
 def print_event(event):
