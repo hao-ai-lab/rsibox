@@ -16,7 +16,8 @@ from fastrsi_megatron import zygote  # noqa: E402
 
 HEAVY = "import os, time\nPID = os.getpid()\nT = time.time()\n"
 SCRIPT = """import heavy, json, os, sys
-out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_PORT", "MY_FLAG")}
+out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_PORT", "MY_FLAG",
+                                      "OMP_NUM_THREADS")}
 out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:])
 json.dump(out, open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w"))
 if os.environ.get("FAIL_RANK") == os.environ["RANK"]:
@@ -67,6 +68,7 @@ class Zygote(unittest.TestCase):
             self.assertEqual(o["argv"], ["--flag", "x"])
             self.assertEqual(o["heavy_pid"], self.ready["pid"])
             self.assertEqual(o["sid"], o["pid"])
+            self.assertEqual(o["OMP_NUM_THREADS"], "1")     # torchrun's default for 2 ranks
 
     def test_one_failing_rank_stops_the_others_and_the_zygote_serves_again(self):
         """Input: rank 1 exits 7 while rank 0 sleeps 60 s. Expect: rank 0 terminated (rc -15)
@@ -120,6 +122,27 @@ class Zygote(unittest.TestCase):
 
 
 class Pieces(unittest.TestCase):
+    def test_set_threads_applies_omp_num_threads_to_torch_in_the_rank(self):
+        """torch reads OMP_NUM_THREADS when it loads (in the zygote), so a forked rank would
+        keep the zygote's pool (every core) and run its CPU work slower than under torchrun.
+        Input: a fake torch module and OMP_NUM_THREADS=1. Expect set_num_threads(1); with no
+        valid value, nothing is called."""
+        calls = []
+
+        class T:
+            def set_num_threads(self, n):
+                calls.append(n)
+        sys.modules["torch"], old = T(), sys.modules.get("torch")
+        try:
+            self.assertEqual(zygote.set_threads({"OMP_NUM_THREADS": "1"}), 1)
+            self.assertIsNone(zygote.set_threads({"OMP_NUM_THREADS": "x"}))
+        finally:
+            if old is not None:
+                sys.modules["torch"] = old
+            else:
+                del sys.modules["torch"]
+        self.assertEqual(calls, [1])
+
     def test_script_imports_reads_top_level_and_guarded_imports(self):
         """pretrain_gpt.py style: plain imports, from-imports, imports under `if`/`try`; a
         relative import is skipped. Expect them in source order, no duplicates."""

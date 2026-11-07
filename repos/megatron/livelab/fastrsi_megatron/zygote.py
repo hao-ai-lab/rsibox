@@ -17,8 +17,10 @@ Contract:
 - The zygote never initializes CUDA or the CUDA driver. If an import does, `serve` exits and
   names the module: no forked rank could use the GPU.
 - A rank gets the variables torchrun sets (RANK, LOCAL_RANK, WORLD_SIZE, LOCAL_WORLD_SIZE,
-  GROUP_RANK, MASTER_ADDR, MASTER_PORT, TORCHELASTIC_RUN_ID) plus the request's `env`, its own
-  session (setsid) and its stdout/stderr in <log-dir>/rank<r>.log.
+  GROUP_RANK, MASTER_ADDR, MASTER_PORT, TORCHELASTIC_RUN_ID, and OMP_NUM_THREADS=1 for more than
+  one rank unless set) plus the request's `env`, its own session (setsid) and its stdout/stderr
+  in <log-dir>/rank<r>.log. OMP_NUM_THREADS is applied to torch's thread pool in the rank
+  (torch.set_num_threads), since torch read the variable when the zygote imported it.
 - When a rank exits non-zero, the zygote terminates the other ranks' process trees by PID (as
   torchrun does), never by a process group it shares.
 - Findings (not gates; a request lists the ones it accepts in `accept`, otherwise no fork):
@@ -247,7 +249,21 @@ def rank_env(req, local_rank):
                GROUP_RANK=str(node), MASTER_ADDR=req.get("master_addr", "127.0.0.1"),
                MASTER_PORT=str(req["port"]), TORCHELASTIC_RUN_ID=str(req.get("run_id", "zygote")),
                FASTRSI_T0=repr(req.get("t0", time.time())))
+    if n > 1 and "OMP_NUM_THREADS" not in env and "OMP_NUM_THREADS" not in os.environ:
+        env["OMP_NUM_THREADS"] = "1"            # torchrun's default for more than one rank
     return env
+
+
+def set_threads(env=os.environ):
+    """Apply OMP_NUM_THREADS to torch's intra-op pool in a forked rank. OpenMP and torch read
+    it when they load, in the zygote, so setting the variable after the fork alone does
+    nothing: without this a rank uses every core, as the zygote does."""
+    t = sys.modules.get("torch")
+    n = env.get("OMP_NUM_THREADS", "")
+    if t is not None and n.isdigit() and int(n) > 0:
+        t.set_num_threads(int(n))
+        return int(n)
+    return None
 
 
 def _child(req, local_rank, lsock, conn):
@@ -260,6 +276,7 @@ def _child(req, local_rank, lsock, conn):
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGCHLD):
             signal.signal(s, signal.SIG_DFL)
         os.environ.update(rank_env(req, local_rank))
+        set_threads()
         d = req.get("log_dir") or "."
         os.makedirs(d, exist_ok=True)
         fd = os.open(os.path.join(d, f"rank{local_rank}.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
