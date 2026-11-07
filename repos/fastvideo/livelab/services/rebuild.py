@@ -70,9 +70,32 @@ def _binding_imports(tree):
         todo.extend(ast.iter_child_nodes(node))
 
 
+_PARSED = {}   # file -> ((size, mtime_ns), names its binding imports may load): parse once per process
+
+
+def _imports_of(name, f, src=None):
+    is_pkg = os.path.basename(f) == "__init__.py"
+    if src is None:
+        st = os.stat(f)
+        stamp = (name, st.st_size, st.st_mtime_ns)
+        hit = _PARSED.get(f)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        with open(f, "rb") as fh:
+            src = fh.read()
+    else:
+        stamp = None
+    names = [d for node in _binding_imports(ast.parse(src, f)) for d in _resolve(name, is_pkg, node)]
+    if stamp is not None:
+        _PARSED[f] = (stamp, names)
+    return names
+
+
 def import_graph(prefixes, modules=None, texts=None):
     """{module: loaded modules it imports at import time} for loaded modules under `prefixes`.
-    `texts`: {module: source} read instead of the file (an edit not written to disk)."""
+    `texts`: {module: source} read instead of the file (an edit not written to disk). Files are
+    parsed once per process and again only when their size or mtime changed (a first graph of
+    FastH3's 357 modules is most of a rebuild's re-import time)."""
     modules = sys.modules if modules is None else modules
     texts = texts or {}
     graph = {}
@@ -81,16 +104,10 @@ def import_graph(prefixes, modules=None, texts=None):
         if not (f and f.endswith(".py") and name.split(".")[0] in prefixes):
             continue
         try:
-            src = texts.get(name)
-            if src is None:
-                with open(f, "rb") as fh:
-                    src = fh.read()
-            tree = ast.parse(src, f)
+            names = _imports_of(name, f, texts.get(name))
         except (OSError, SyntaxError, ValueError):
             continue
-        is_pkg = os.path.basename(f) == "__init__.py"
-        graph[name] = {d for node in _binding_imports(tree) for d in _resolve(name, is_pkg, node)
-                       if d in modules and d != name}
+        graph[name] = {d for d in names if d in modules and d != name}
     return graph
 
 

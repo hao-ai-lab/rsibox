@@ -128,11 +128,13 @@ class FastVideoLab:
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
     `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
     `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
-    `reset("respawn")` skips the workers' imports (T1b)."""
+    `reset("respawn")` skips the workers' imports (T1b). `holder`: also keep the loaded DiT and
+    text encoder in a holder process (services/holder.py) that respawned workers map by CUDA
+    IPC instead of loading; implies `zygote`."""
     name = "fastvideo"
 
     def __init__(self, config, receipts=None, golden=None, modules=MODULES, rpc_timeout=60.0,
-                 check_timeout=600.0, zygote=False):
+                 check_timeout=600.0, zygote=False, holder=False):
         self.config = json.loads(json.dumps(config))
         self.writer = R.ReceiptWriter(receipts) if receipts else None
         self.rpc_timeout, self.check_timeout = rpc_timeout, check_timeout
@@ -143,6 +145,13 @@ class FastVideoLab:
             self.golden = np.load(golden)
         self.lock = threading.RLock()
         self.costs = {}
+        self.holder = None
+        if holder:          # loaded DiT/text encoder outlive the workers (services/holder.py)
+            from services import holder as H
+            sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}.sock")
+            self.holder = H.start(sock)
+            os.environ["FASTRSI_HOLDER_SOCK"] = sock
+            zygote = True   # the loader hook is installed by the zygote's worker entry
         if zygote:          # every worker group, respawns included, forks from preloaded imports
             from services import zygote as Z
             self.zygote_preload = Z.enable()
@@ -226,6 +235,15 @@ class FastVideoLab:
                 self.gen.shutdown()
             except Exception:
                 pass
+            if self.holder is not None:
+                from services import holder as H
+                try:
+                    H._call(os.environ["FASTRSI_HOLDER_SOCK"], {"op": "stop"}, timeout=10)
+                except Exception:
+                    pass
+                self.holder.join(10)
+                if self.holder.is_alive():
+                    self.holder.kill()
 
     # -- verbs ---------------------------------------------------------------------------
     def _base(self, m):
@@ -350,12 +368,19 @@ class FastVideoLab:
                 return {"ok": False, "outcome": "refused", "findings": [refuse], "ranks": {},
                         "cost_s": round(time.perf_counter() - t0, 6)}
             ranks = {}
-            for i in range(self.ranks):
+
+            def one(i):                     # every rank at once: each has its own pipe
                 try:
                     ranks[f"rank{i}"] = self.rank_call(i, "rebuild", {"files": files})
                 except Exception as e:
                     ranks[f"rank{i}"] = {"ok": False, "findings": [finding(
                         "participant_failed", f"{type(e).__name__}: {e}", "the rank answers")]}
+            lanes = [threading.Thread(target=one, args=(i,), daemon=True) for i in range(self.ranks)]
+            for th in lanes:
+                th.start()
+            for th in lanes:
+                th.join()
+            ranks = {k: ranks[k] for k in sorted(ranks, key=lambda k: int(k[4:]))}
             oks = [r.get("ok") for r in ranks.values()]
             findings = [f for r in ranks.values() for f in r.get("findings", [])]
             if any(oks) and not all(oks):              # ranks now run different code
