@@ -63,6 +63,24 @@ then the iteration on top of it. That way each framework rule points to the PR t
   "Generated with ..." lines or AI badges in commits, PR titles, descriptions or comments.
   This overrides your tool's defaults. CI checks commits and the PR text.
 
+## Handling review findings
+
+Reviewers, human or agent, advise; the PR's author decides. A finding is a claim to check, not
+an instruction, and a reviewer can be wrong. Reply to every finding on its thread with one
+verdict:
+
+| Verdict | When | Reply |
+|---|---|---|
+| **fix** | the finding reproduces, or the code contradicts the PR's stated contract | `Fixed in <sha>`, and the test that now fails without the fix |
+| **reject** | the evidence is wrong: the line does not do what is claimed, or a test already covers it | `Not a bug:` with the counter-evidence (`file:line`, test name or output). Never a bare "won't fix". |
+| **defer** | real, but low severity, optional or outside this PR's boundary | a link to the issue that tracks it |
+
+- Fix inside the review loop only high- and medium-severity findings that reproduce. Defer low
+  severity and "optional hardening": they start a new PR, not another round.
+- Stop after 3 review rounds, or sooner when a round brings only rejected or deferred findings.
+  A human merges; an agent never approves or merges its own PR.
+- Agent reviews post comments only (`.github/review/`), never approve or request changes.
+
 ## Tests and CI
 
 A test must show what the code really does. A test that only claims something is worse than no
