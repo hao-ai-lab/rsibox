@@ -143,11 +143,12 @@ def _norm_schema(schema):
 
 
 @contextlib.contextmanager
-def op_redefine_guard(log=None):
+def op_redefine_guard(report=None):
     """While re-importing refreshed modules: `Library.define` of an op that already exists with
     the same schema is skipped (its implementation is still replaced by `Library.impl`, which
     overrides); a changed schema raises with the op's name, since a running process cannot
-    change an op's signature."""
+    change an op's signature. `report(event)` gets one dict per skipped define, replaced
+    implementation and re-registered opaque type. Use it through guard_for()."""
     try:
         from torch.library import Library
         import torch
@@ -155,6 +156,11 @@ def op_redefine_guard(log=None):
         yield
         return
     orig = Library.define
+    skipped = set()
+
+    def _emit(event):
+        if report is not None:
+            report(event)
 
     def define(self, schema, *args, **kw):
         name = schema.split("(", 1)[0].strip()
@@ -171,19 +177,26 @@ def op_redefine_guard(log=None):
         if _norm_schema(old) != _norm_schema(new):
             raise RuntimeError(f"refresh: op {qual} changed its schema ({old} -> {schema}); "
                                "a process cannot change an op's signature: restart the zygote")
-        if log is not None:
-            log.append(qual + (f".{overload}" if overload else ""))
+        skipped.add((self.ns, op))
+        _emit({"event": "zygote_op_redefined", "op": qual + (f".{overload}" if overload else ""),
+               "schema": old})
         return name
 
     orig_impl = Library.impl
     import inspect
     can_override = "allow_override" in inspect.signature(orig_impl).parameters
 
-    def impl(self, *args, **kw):
-        # torch >= 2.9 has the flag; its default is False before 2.14 and True after
-        if can_override:
-            kw.setdefault("allow_override", True)
-        return orig_impl(self, *args, **kw)
+    def impl(self, op_name, *args, **kw):
+        # Override only ops whose define was skipped above: those are the refreshed modules'
+        # re-registrations. Any other duplicate keeps torch's own behavior. (torch >= 2.9 has
+        # the flag; its default is False before 2.14 and True after.)
+        op = op_name.split(".", 1)[0] if isinstance(op_name, str) else None
+        if (self.ns, op) in skipped:
+            if can_override:
+                kw["allow_override"] = True
+            _emit({"event": "zygote_op_impl_replaced", "op": f"{self.ns}::{op_name}",
+                   "dispatch_key": kw.get("dispatch_key", args[1] if len(args) > 1 else "")})
+        return orig_impl(self, op_name, *args, **kw)
     orig_opaque = getattr(torch._C, "_register_opaque_type", None)
 
     def register_opaque(name, *args, **kw):
@@ -192,8 +205,7 @@ def op_redefine_guard(log=None):
         except RuntimeError as e:
             if "already registered" not in str(e):
                 raise
-            if log is not None:
-                log.append(f"opaque:{name}")
+            _emit({"event": "zygote_opaque_reregistered", "type": name})
     Library.define, Library.impl = define, impl
     if orig_opaque is not None:
         torch._C._register_opaque_type = register_opaque
@@ -203,6 +215,19 @@ def op_redefine_guard(log=None):
         Library.define, Library.impl = orig, orig_impl
         if orig_opaque is not None:
             torch._C._register_opaque_type = orig_opaque
+
+
+def guard_for(refresh_names, report=None):
+    """The op guard for a forked child: active only when the fork refreshed modules. A fork
+    without a refresh (and the engine core and workers it forks later) keeps torch's own
+    duplicate-registration errors."""
+    return op_redefine_guard(report) if refresh_names else contextlib.nullcontext()
+
+
+def print_event(event):
+    """Report one guard event as a JSON line in the server log."""
+    import json
+    print(json.dumps(event), flush=True)
 
 
 def refresh(names, modules=None):

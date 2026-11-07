@@ -130,12 +130,13 @@ def _child(req, conns, refresh=()):
             del os.environ[k]
         os.environ.update({k: v for k, v in req["env"].items() if _volatile(k)})
         sys.argv = list(req["argv"])
-        redefined = []
         if refresh:
             r = zygote_refresh.refresh(refresh)
             print(json.dumps({"event": "zygote_refresh", **r, "names": list(refresh)[:50]}),
                   flush=True)
-        with zygote_refresh.op_redefine_guard(redefined):
+        # Only a refreshed fork re-registers ops; each skipped define, replaced implementation
+        # and re-registered opaque type is a JSON line in the server log.
+        with zygote_refresh.guard_for(refresh, zygote_refresh.print_event):
             from vllm.entrypoints.cli.main import main
             main()
         code = 0

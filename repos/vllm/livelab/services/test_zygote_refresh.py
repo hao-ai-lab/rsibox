@@ -94,7 +94,7 @@ def test_reimported_op_with_same_schema_takes_the_new_body():
     lib.define("scale(Tensor x, int k) -> Tensor")
     lib.impl("scale", lambda x, k: x * k, "CPU")
     seen = []
-    with zr.op_redefine_guard(seen):
+    with zr.guard_for(["zrtest_module"], seen.append):
         lib.define("scale(Tensor x, int k) -> Tensor")
         lib.impl("scale", lambda x, k: x + k, "CPU")
         assert torch.ops.zrtest.scale(torch.ones(2), 3).tolist() == [4.0, 4.0]
@@ -103,4 +103,23 @@ def test_reimported_op_with_same_schema_takes_the_new_body():
             raise AssertionError("a changed schema must raise")
         except RuntimeError as e:
             assert "zrtest::scale changed its schema" in str(e)
-    assert seen == ["zrtest::scale"]
+    assert [e["event"] for e in seen] == ["zygote_op_redefined", "zygote_op_impl_replaced"]
+    assert seen[0]["op"] == "zrtest::scale"
+
+
+def test_fork_without_refresh_keeps_torch_duplicate_errors():
+    """The guard must not outlive its purpose: a fork that refreshed nothing (and the engine
+    core and workers forked from it) must still fail on a duplicate op definition, as torch
+    does, instead of silently skipping it."""
+    torch = __import__("pytest").importorskip("torch")
+    from torch.library import Library
+    lib = Library("zrtest2", "FRAGMENT")
+    lib.define("twice(Tensor x) -> Tensor")
+    seen = []
+    with zr.guard_for([], seen.append):
+        try:
+            lib.define("twice(Tensor x) -> Tensor")
+            raise AssertionError("a duplicate define must raise when nothing was refreshed")
+        except RuntimeError as e:
+            assert "refresh:" not in str(e)        # torch's own error, not the guard's
+    assert seen == []
