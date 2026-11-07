@@ -1,0 +1,88 @@
+"""Golden tests of the session (base / edited / poisoned) on toy ranks (CPU, standard library
+only). The whole lab is checked by the template's conformance cases against `toy_lab.ToyLab`
+(CI step "Run the template conformance cases c0-c10 against the toy lab").
+
+Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
+(or python3 -m pytest -q repos/vllm/livelab/kernel)
+"""
+import time
+import unittest
+
+from . import coordinator as C
+from . import session as SS
+from . import test_coordinator as TC
+from .test_locate import ENG, at, edit, fresh
+from .test_witness import wait_for
+
+
+class SessionTest(unittest.TestCase):
+    _cluster, _start, _steps, V1 = (TC.HostTest._cluster, TC.HostTest._start,
+                                    TC.HostTest._steps, TC.HostTest.V1)
+
+    def test_code_changed_outside_the_journal_poisons_the_session(self):
+        """Input: a session over one rank; a transaction commits (step returns y * 100);
+        then someone rebinds Engine.step.__code__ by hand (a REPL edit, not journaled).
+        Expected: status() says poisoned with a `tampered` finding naming the function; a
+        new install is refused with session_poisoned; uninstall (undo) is still allowed and
+        the session stays poisoned. Pain point: a lab that reports "edited" while it runs
+        code no transaction installed. Not: tampering in another process (each rank checks
+        its own fingerprint)."""
+        name, eng, _ = fresh("tamper")
+        e = eng.Engine()
+        sess = SS.Session(C.Coordinator([C.LocalParticipant("rank0", alias={"toy": name})],
+                                        phase2_deadline_s=None), ["toy.engine"])
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        res = sess.install(plan)
+        self.assertEqual((res["outcome"], sess.status()["state"], e.step(3)),
+                         ("committed", "edited", 1700))
+        eng.Engine.step.__code__ = eng.Engine.drain.__code__.replace(
+            co_name="step", co_qualname="Engine.step")                     # by hand
+        st = sess.status()
+        self.assertEqual((st["state"], [f["check"] for f in st["poison"]]),
+                         ("poisoned", ["tampered"]))
+        self.assertIn("toy.engine:Engine.step", st["poison"][0]["observed"])
+        again = sess.install(plan)
+        self.assertEqual((again["outcome"], [f["check"] for f in again["findings"]]),
+                         ("refused", ["session_poisoned"]))
+        self.assertTrue(sess.uninstall()["ok"])
+        self.assertEqual(sess.state(), "poisoned")
+
+    def test_hung_commit_ends_the_gap_at_the_deadline(self):
+        """Proves: with steps running, a rank that hangs 0.6 s in commit does not stall the loop: the gap ends within the 0.2 s deadline, rank0's commit is undone in it, no step ever runs mixed versions (not even after the late commit arrives: it is refused), the outcome is definite (rolled back, state aborted) and the host and session are poisoned (install refused, undo allowed). Not: a participant stuck inside apply (its late switch is undone by the queued undo, after it ran)."""
+        cl, ps, lps = self._cluster("deadline", gap_mode=True, slow={"rank1": {"commit": 0.6}})
+        co = C.StepGapCoordinator(ps, cl.at_gap, phase2_deadline_s=0.2)
+        sess = SS.Session(co, ["toy.engine"])
+        halt = self._start(cl)
+        t0 = time.perf_counter()
+        res = sess.install({"modules": self.V1})
+        took = time.perf_counter() - t0
+        st = co.status(res["txn"])
+        rec = res["receipt"]
+        self.assertEqual((res["outcome"], st["state"], st["poisoned"], st["missed"]),
+                         ("rolled_back", "aborted", True, ["rank1"]))
+        self.assertLess(rec["gap_s"], 0.2 + 0.05)
+        self.assertLess(took, 0.5)
+        self.assertEqual(rec["rollback"]["missed_deadline"], ["rank1"])
+        self.assertIn(("rank1", "deadline_missed"),
+                      [(f.get("participant"), f["check"]) for f in rec["findings"]])
+        self.assertEqual(sess.state(), "poisoned")
+        again = sess.install({"modules": self.V1})
+        self.assertEqual([f["check"] for f in again["findings"]], ["session_poisoned"])
+        self.assertEqual(co.run({"modules": self.V1})["outcome"], "refused")
+        # the hung commit arrives late; then the undo and abort queued behind it run
+        wait_for(lambda: lps[1].status(res["txn"])["state"] != "prepared")
+        self._steps(cl)
+        halt()
+        self.assertLess(cl.longest_stall(), 0.2 + 0.05)  # measured by the loop itself
+        self.assertEqual(set(cl.log), {("base",) * 3})    # never v1 anywhere, never mixed
+        self.assertEqual([p.status(res["txn"])["state"] for p in lps],
+                         ["undone", "undone", "aborted"])   # rank1: its queued undo ran
+        self.assertEqual(lps[1].journal.entries, [])     # the late commit applied nothing
+        self.assertTrue(sess.uninstall()["ok"])          # undo stays allowed while poisoned
+        self.assertEqual(sess.state(), "poisoned")
+
+
+if __name__ == "__main__":
+    unittest.main()
