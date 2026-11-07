@@ -107,6 +107,19 @@ class LabTest(unittest.TestCase):
         r = self.lab.repl(cell)
         self.assertNotIn("new", {v["out"] for v in r["ranks"].values()}.pop())
 
+    def test_proof_is_per_transaction(self):
+        """Input: an edit the workload never runs, then a visible edit on top. Expect: the
+        check's `proven` is False (one live edit did not run), while `proven_by_txn` says the
+        visible edit ran and the startup-only one did not. Proves: a judge can tell whether the
+        NEW edit ran even when an older installed edit no longer runs (a combined reinstall of
+        kept H3 edits held a function a later edit bypasses, and hid a proven new edit). Not:
+        which function of a transaction did not run (the findings say)."""
+        a = self.lab.install(self.lab.patches()["unreached"])
+        b = self.lab.install(self.lab.patches()["visible"])
+        c = self.lab.check()
+        self.assertIs(c["proven"], False)
+        self.assertEqual(c["proven_by_txn"], {a["id"]: False, b["id"]: True})
+
 
 if __name__ == "__main__":
     unittest.main()

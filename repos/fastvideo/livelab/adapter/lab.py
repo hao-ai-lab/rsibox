@@ -294,6 +294,7 @@ class FastVideoLab:
             return {"ok": True, "output": out, "seconds": seconds, **extra,
                     "psnr_vs_golden": golden.get("psnr_vs_golden"),
                     "proven": all(p["ok"] for p in proofs) if proofs else None,
+                    "proven_by_txn": {t: p["ok"] for t, p in zip(self.session.stack, proofs)},
                     "witness": witness,
                     "findings": [f for p in proofs for f in p["receipt"]["findings"]],
                     "cost_s": round(time.perf_counter() - t0, 6)}
