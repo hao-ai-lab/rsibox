@@ -16,14 +16,17 @@
   late, and the RPC itself never times out. The late call keeps the lane; a commit that starts
   after its deadline applies nothing (kernel), and the host's undo queues behind it.
 - **Graph detection** (graphs.py). On a worker whose config runs CUDA graphs or torch.compile,
-  a target in model code (`vllm.model_executor.models` / `.layers`) is checked at prepare:
+  the split decorator itself (`eager_break_during_capture`, in any module, and code nested in
+  it) is a blocking `captured_target` at prepare: it runs only when ops are decorated (import)
+  or graphs captured (vLLM #59941). A target in model code (`vllm.model_executor.models` /
+  `.layers`) is checked at prepare:
   reached only through an op that splits the graph (Python on prefill, graphs on decode) is an
   advisory `captured_partly`; captured only, or undecided, is a blocking `captured_target`.
   Both route R1 (recapture with the commit), which this adapter cannot run yet: the finding
   says so and names T1 (restart, or run eager) as what works today. A blocking finding votes
-  no, so the edit is reported and not applied. A `zero_witness` on model code in graph mode is
-  routed the same way at proof. Calls made while the stream captures a graph count apart from
-  live calls (kernel witness `capturing`).
+  no, so the edit is reported and not applied. A `zero_witness` on model code or on the split
+  decorator in graph mode is routed the same way at proof. Calls made while the stream
+  captures a graph count apart from live calls (kernel witness `capturing`).
 - **Version log** (`tick`, `versions`). At every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as `[step, {key: tag}]` at
   each change, and counts steps whose version changed between the step's two calls
@@ -91,9 +94,22 @@ class Side(Endpoint):
         """Kernel check at prepare, for targets in model code while the worker runs graphs or
         compiled code (see the module doc)."""
         g = self._graph()
-        if g is None or not module.startswith(self.captured_prefixes):
+        if g is None:
             return []
         mode = f"cudagraph_mode {g['cudagraph_mode']}, compile mode {g['compile_mode']}"
+        out, model_items = [], []
+        for k in items:                 # the split decorator: in any module
+            detail = G.decoration_time(k.split(":")[1])
+            if detail is None:
+                model_items.append(k)
+                continue
+            out.append({**F.finding(
+                "captured_target", f"the engine runs {mode}; {detail}; {R1_NOT_HERE}",
+                "a target the engine runs in Python", subject=k),
+                "route": "R1", "today": "T1"})
+        items = model_items
+        if not items or not module.startswith(self.captured_prefixes):
+            return out
         try:
             act = self.lp._actual(module)
             mod = sys.modules.get(act) or importlib.import_module(act)
@@ -104,7 +120,6 @@ class Side(Endpoint):
             roots, err = G.split_roots(mod, g), None
         except Exception as e:
             src, roots, err = None, [], f"{type(e).__name__}: {e}"
-        out = []
         for k in items:
             qual = k.split(":")[1]
             kind, detail = G.reach(src, roots, qual) if src is not None else \
@@ -129,13 +144,15 @@ class Side(Endpoint):
         return out
 
     def _route(self, r):
-        """Proof time: a zero_witness on model code while the engine runs graphs says why."""
+        """Proof time: a zero_witness on model code, or on the split decorator, while the
+        engine runs graphs says why."""
         for f in (r.get("findings") or []) if isinstance(r, dict) else []:
-            mod = str(f.get("subject", "")).split(":")[0]
-            if f.get("check") == "zero_witness" and self._graph() is not None \
-                    and mod.startswith(self.captured_prefixes):
+            mod, _, rest = str(f.get("subject", "")).partition(":")
+            what = "model code" if mod.startswith(self.captured_prefixes) else \
+                "the split decorator" if G.decoration_time(rest.rpartition(":")[0]) else None
+            if f.get("check") == "zero_witness" and what and self._graph() is not None:
                 f.update(route="R1", today="T1")
-                f["observed"] += f" (model code; the engine runs captured graphs; {R1_NOT_HERE})"
+                f["observed"] += f" ({what}; the engine runs captured graphs; {R1_NOT_HERE})"
                 f["actions"] = [R1] + list(f.get("actions", []))
         return r
 

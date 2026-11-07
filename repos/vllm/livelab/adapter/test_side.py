@@ -307,6 +307,98 @@ class SplitOpTest(unittest.TestCase):
                          ("captured_partly", "R1", True))
 
 
+BREAKABLE = '''"""A stand-in for vLLM's graph machinery (vllm.compilation.breakable_cudagraph, outside
+the model-code prefixes): the split decorator decides at decoration time whether to wrap."""
+import functools
+
+ENABLED = False
+
+
+def eager_break_during_capture(fn):
+    if not ENABLED:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+class Capture:
+    def replay(self, x):
+        return x + 1
+
+
+@eager_break_during_capture
+def attention(x):
+    return x * 2
+'''
+
+
+class SplitDecoratorTest(unittest.TestCase):
+    """Pain point (vLLM #59941, Qwen3.5 TP2 graph replay): the edit removed the early
+    `return fn` from eager_break_during_capture, in vllm.compilation (not model code), so
+    captured_target never looked at it; T0 committed with no finding and the witness read 0
+    on every rank, since the decorator ran only when the ops were decorated at import."""
+
+    def setUp(self):
+        import importlib
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.pkg = f"adbreak{next(_n)}"
+        os.makedirs(os.path.join(d, self.pkg))
+        open(os.path.join(d, self.pkg, "__init__.py"), "w").close()
+        with open(os.path.join(d, self.pkg, "breakable.py"), "w") as f:
+            f.write(BREAKABLE)
+        sys.path.insert(0, d)
+        self.addCleanup(sys.path.remove, d)
+        self.mod = self.pkg + ".breakable"
+        importlib.import_module(self.mod)
+
+    def _plan(self, tid, old, new, accept=()):
+        return {"id": f"{tid}-{self.pkg}", "accept": list(accept), "modules": {self.mod: {
+            "base_hash": L.text_hash(BREAKABLE), "source": BREAKABLE.replace(old, new)}}}
+
+    def test_an_edit_of_the_split_decorator_is_refused_on_a_graph_engine(self):
+        """Input: a graph-mode rank (FULL_AND_PIECEWISE, compile NONE) with the model-code
+        prefixes left as vLLM's; the edit drops `if not ENABLED: return fn` from the
+        decorator. Expected: prepare votes no with a blocking captured_target (route R1,
+        today T1) on `eager_break_during_capture`, outside model code. Accepted, it commits,
+        a step of the decorated op and of Capture.replay runs, and the proof's zero_witness
+        on the decorator is routed R1 / today T1 (the check-time backstop). An edit of
+        Capture.replay in the same module has no finding, and on an eager rank the decorator
+        edit has none either. Fails without the fix: prepare votes yes with no finding.
+        Not: vLLM's real graphs (the next GPU replay of 59941)."""
+        side = Side("worker", scope={"worker": worker("FULL_AND_PIECEWISE", "NONE")}, rank=0)
+        edit = ("    if not ENABLED:\n        return fn\n", "")
+        r = side.dispatch("prepare", self._plan("dec", *edit))
+        line = BREAKABLE.splitlines().index("def eager_break_during_capture(fn):") + 1
+        key = f"{self.mod}:eager_break_during_capture:{line}"
+        self.assertEqual((r["ok"], [(f["check"], f["subject"], f.get("route"), f.get("today"))
+                                    for f in r["findings"]]),
+                         (False, [("captured_target", key, "R1", "T1")]))
+        self.assertIn("decorated its ops at import", r["findings"][0]["observed"])
+
+        p2 = self._plan("acc", *edit, accept=[{"check": "captured_target", "subject": key}])
+        self.assertTrue(side.dispatch("prepare", p2)["ok"])
+        self.assertTrue(side.dispatch("commit", p2["id"])["ok"])
+        m = sys.modules[self.mod]
+        self.assertEqual((m.attention(3), m.Capture().replay(3)), (6, 4))
+        w = side.dispatch("witness_check", p2["id"])
+        self.assertEqual([(f["check"], f["subject"], f.get("route"), f.get("today"))
+                          for f in w["findings"]], [("zero_witness", key, "R1", "T1")])
+        self.assertIn("the split decorator", w["findings"][0]["observed"])
+        self.assertTrue(side.dispatch("undo", p2["id"])["ok"])
+
+        r = side.dispatch("prepare", self._plan("replay", "return x + 1", "return x + 2"))
+        self.assertEqual((r["ok"], r["findings"]), (True, []))
+        side.dispatch("abort", r.get("txn") or f"replay-{self.pkg}")
+        eager = Side("worker", scope={"worker": worker(eager=True)}, rank=0)
+        r = eager.dispatch("prepare", self._plan("eager", *edit))
+        self.assertEqual((r["ok"], r["findings"]), (True, []))
+        eager.dispatch("abort", f"eager-{self.pkg}")
+
+
 class VersionLogTest(unittest.TestCase):
 
     def test_the_extension_logs_which_version_each_step_runs(self):
