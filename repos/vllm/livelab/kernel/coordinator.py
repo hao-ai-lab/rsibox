@@ -144,6 +144,12 @@ class Participant:
         return F.not_ok("no at_base")
 
 
+def _imported(mod, name):
+    """Is mod.name a module that the import system holds under its own name (an import)?"""
+    v = vars(mod).get(name)
+    return isinstance(v, types.ModuleType) and sys.modules.get(v.__name__) is v
+
+
 class CallParticipant(Participant):
     """A participant in another process, reached through `call(method, payload) -> dict`."""
 
@@ -230,6 +236,7 @@ class LocalParticipant(Participant):
         self._pending_maps = {}       # prepared txn -> the same, until commit
         self._cell_keys = {}          # committed txn -> witness keys its cells armed
         self._base = {}               # plan module -> (digest, names) when first touched
+        self._ours = {}               # plan module -> names a transaction or cell added to it
         self._scope_keys = None       # scope objects' attribute names at the first prepare
 
     def _live_source(self, module):
@@ -313,15 +320,32 @@ class LocalParticipant(Participant):
         if self._scope_keys is None:
             self._scope_keys = _attr_names(self.scope)
 
+    def _note_added(self, mark):
+        """Remember the names the journal entries since `mark` added to a plan module's
+        namespace, so at_base can tell them from names the engine added on its own."""
+        dicts = {}
+        for m in self._base:
+            mod = sys.modules.get(self._actual(m))
+            if mod is not None:
+                dicts[id(vars(mod))] = dicts[id(mod)] = m
+        for e in self.journal.entries[mark:]:
+            m = dicts.get(id(e.target))
+            if m is not None and e.kind in ("added", "getattr_added"):
+                self._ours.setdefault(m, set()).add(e.name)
+
     def at_base(self, _=None):
         """Is this participant back at its start state? {ok, pending_txns, journal_len,
         modules: {module: [base digest, live digest]}, extra_names (module names added and
         left), extra_attrs (scope attributes added and left), poisoned (an undo that could
         not restore all)}. The witness global stays by design (a no-op stub after undo) and
-        is not an extra. For a warm engine pool: apply, undo, then check before the next job."""
+        is not an extra. A name the engine added since base by importing a module lazily (a
+        module value that is the imported module, under a name no transaction or cell of
+        this participant added: vLLM's LazyLoader binds `llguidance.hf` at first use) is
+        listed apart in `lazy_imports` and does not make at_base false. For a warm engine
+        pool: apply, undo, then check before the next job."""
         pending = sorted(t for t, st in self._state.items()
                          if st in ("prepared", "committed", "partial"))
-        mods, extra_names, engine = {}, {}, {}
+        mods, extra_names, engine, lazy = {}, {}, {}, {}
         for m, (digest, names) in self._base.items():
             fp = self.fingerprint([m])
             live = L.text_hash(json.dumps(fp["code"], sort_keys=True)) if fp["ok"] else None
@@ -334,6 +358,10 @@ class LocalParticipant(Participant):
             if eng:
                 engine[m] = eng
             extra = [n for n in extra if n not in eng]
+            imp = [n for n in extra if n not in self._ours.get(m, ()) and _imported(mod, n)]
+            if imp:
+                lazy[m] = imp
+            extra = [n for n in extra if n not in imp]
             if extra:
                 extra_names[m] = extra
         extra_attrs = {}
@@ -348,7 +376,7 @@ class LocalParticipant(Participant):
               and not extra_attrs and not poisoned and all(a == b for a, b in mods.values()))
         return F.ok(**{"ok": ok}, pending_txns=pending, journal_len=len(self.journal.entries),
                     modules=mods, extra_names=extra_names, extra_attrs=extra_attrs,
-                    engine_names=engine, poisoned=poisoned)
+                    engine_names=engine, lazy_imports=lazy, poisoned=poisoned)
 
     def prepare(self, plan):
         """Phase 1. The plan's "id" is optional: without one the participant names the
@@ -455,6 +483,7 @@ class LocalParticipant(Participant):
             for st in staged:
                 r = S.apply(st, self.journal, self.witness)
                 if not r["ok"]:
+                    self._note_added(mark)
                     u = self.journal.undo_to(mark)
                     self._rolled_back(txn, u, [])
                     return {**r, "findings": r.get("findings", []) + u["findings"]}
@@ -482,6 +511,7 @@ class LocalParticipant(Participant):
                     # what the cell changed outside the journal stays: say so (the audit's
                     # findings), so a rolled-back cell is never read as a clean rollback
                     left = list(rep.findings) if rep is not None else []
+                    self._note_added(mark)
                     u = self.journal.undo_to(mark)
                     self._rolled_back(txn, u, fs + left)
                     return F.not_ok("repair failed", [F.finding(
@@ -491,6 +521,7 @@ class LocalParticipant(Participant):
             d = F.decide([{**f, "participant": self.name} for f in fs], accept)
             fs = d["findings"]
             rebuild_routes = routes()
+            self._note_added(mark)
             if not d["proceed"]:
                 u = self.journal.undo_to(mark)
                 self._rolled_back(txn, u, fs)
