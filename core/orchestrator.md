@@ -95,11 +95,12 @@ before passing a claim on.
     machines, downloads, public exposure and anything that writes receipts.
 
 13. **Keep a standing replay per engine.** A fixed set of real upstream PRs (vLLM: the 19 of the v1
-    replay) runs on main after each merge batch, by program, on GPUs the runner claims. Diff its outcome
-    table against the last run. Any regression (live→restart, undo not at base, zero witness)
+    replay) runs on main after each merge batch, by program, on GPUs the runner claims. Diff its
+    outcome table against the last run. Any regression (live→restart, undo not at base, zero witness)
     becomes a fix PR. A fix that comes from the replay is done only when the replay shows it.
     *Why:* the first v1 replay found 4 bugs that the toy conformance cases passed (`docs/lessons.md`
-    lesson 5); their fixes #52–#55 are CPU-tested only until the replay runs again.
+    lesson 5). Only the rerun on main proved their fixes (#52–#55): a 113 s fallback became a 9.2 s
+    forked restart, and it showed one fix's cost (a 0.38 s swap became a 16.6 s restart).
 
 14. **When GPU receipts are due.** A PR that changes behavior on an engine path carries a GPU
     receipt. Until it has one, its "Not verified" says "pending replay", the leader schedules that
@@ -122,7 +123,8 @@ before passing a claim on.
 17. **Report.** Use one table per report: what ran, GPU receipt vs CPU only vs pending replay,
     links to PRs and records, and times in the user's time zone. End with what waits on the owner
     (merges in order, decisions) as a short list.
-    *Why:* relays misread "verified on 4 GPUs" as "in progress", and CPU-only results were reported as done.
+    *Why:* relays misread "verified on 4 GPUs" as "in progress", and CPU-only results were
+    reported as done.
 
 ## Know the environment before the first job
 
@@ -132,8 +134,9 @@ Keep a private fact sheet per cluster (never in the repo) covering:
   allocation were reaped about 10.5–12 min after start);
 - how jobs are launched and which kills are safe (a process-group kill on a launcher's job took down
   the node's scheduler daemon: kill only the PIDs or groups you created);
-- model locations and engine versions, compile and kernel cache roots (seed new ones from a
-  verified warm copy), socket path limits (Unix sockets ≤107 bytes), which GPUs are yours.
+- model locations and engine versions, compile and kernel cache roots (reuse a warm root in place;
+  a copy is warm only if every tool in it is path-independent, so verify each cache), socket path
+  limits (Unix sockets ≤107 bytes), which GPUs are yours.
 
 ## Failure taxonomy for live changes
 

@@ -14,8 +14,8 @@ monkeypatches: about 45k lines and 245 run records. Its records show 51 hand rep
 every hard bug was in aligning long-lived state in place (new fields, constructors, caches,
 captured graphs, copies in other processes), not in swapping a function body. The v1 redesign keeps
 one mechanism per restart tier: T0 swap, T1 component restart, T2 warm restart. It is about 7.7k
-lines of code plus 4.4k of tests, and on the same 19 upstream PRs it went live in place on 8
-(prototype: 6) and needed a full restart on 0 (prototype: 2).
+lines of code plus 4.4k of tests, and on the same 19 upstream PRs it needed a full restart on 0
+(prototype: 2) and went live in place on 8 (prototype: 6; 7 once constructor edits always block).
 
 **Rule.** Swap only code that holds no state of its own. Restart the lowest component that owns the
 invalidated state, with expensive state kept outside it. Detectors classify; they do not repair.
@@ -30,8 +30,8 @@ invalidated state, with expensive state kept outside it. Detectors classify; the
 **What happened.** The kernel passed all 11 conformance cases on the CPU toy lab (about 1.5 s per
 PR). The toy is there because CI has no GPU and faults (crash, hang, lost rank, tampering) must be
 deterministic. The first replay of real PRs through v1 on GPUs still found 4 bugs the toy could not
-show (lesson 5). The fix PRs that followed (#52–#55) carry CPU tests only; none is proven on an
-engine until the replay runs again.
+show (lesson 5). The fix PRs that followed (#52–#55) passed their CPU tests; only the replay rerun
+on main proved them on an engine, and it also showed the trade-off one of them brought (lesson 4).
 
 **Rule.** CPU tests are a precondition. A change on an engine path is done when a live run shows
 it.
@@ -46,7 +46,8 @@ it.
 **What happened.** A one-line scheduler edit on one GB200 took 228 s to check with a restart; setup
 was 204 s of it. Keeping one more piece of state at each step cut the check to 157 s (autotune
 config), 100 s (+ weights), 58 s (+ CUDA graphs) and 23.6 s (+ the live process); a cheaper check
-then gave 14.1 s and 2.4 s, 95× in all (LiveLab-MLSys paper draft, Fig. 1). Our 2026-11-06 start-up
+then gave 14.1 s and 2.4 s, 95× in all (our earlier GB200 measurement, warm on-disk caches; see
+`repos/vllm/kb/costs.md`). Our 2026-11-06 start-up
 runs put cold vs warm at 181.9 vs 54.9 s (eager) and 223.6 vs 59.1 s (CUDA graphs). Two intended
 cold runs failed, so the runs that copied their empty caches were cold in effect while labeled
 warm.
@@ -57,16 +58,26 @@ and compilation, not Python, decide edit-to-run.
 **Apply it.**
 - Record start-up per phase from process start, and label every run by what its caches really
   held.
+- Reuse a warm cache root in place. A copied root is warm only once a start from it rebuilds
+  nothing: some tools key their caches on absolute paths.
 - Keep the cost map in `repos/<engine>/kb/costs.md` and pick work by expected seconds removed.
 
 ### 4. Replay real upstream PRs as the end-to-end proof
 
-**What happened.** We replayed 19 merged upstream vLLM PRs through v1 on GB200 (50 runs; two
-models; TP1 and TP2; eager and CUDA graphs; our 2026-11-06/07 replay run). 8 went live in place at
-0.38–1.94 s edit-to-run. 11 went live through a fast restart (T1) forked from a warm process:
-9.2–68.8 s on Qwen3-8B, 115–185 s on Qwen3.5-35B-A3B-FP8 at TP2 with CUDA graphs; two runs fell
-back to a plain restart (113 s, 195 s) when the fork died. A warm plain restart took 43–231 s in
-the same runs. Real PRs chose the hard cases for us: constructors, decorators, Triton kernels, op
+**What happened.** We replayed 19 merged upstream vLLM PRs through v1 on GB200 (two models; TP1
+and TP2; eager and CUDA graphs; our 2026-11-06/07 replay run). On the first pass 8 went live in
+place at 0.38–1.94 s edit-to-run and 11 through a fast restart (T1) forked from a warm process; a
+warm plain restart took 43–231 s. It found 4 bugs (lesson 5). After their fixes (#52–#55) we reran
+the affected PRs and the in-place ones on main:
+- vllm-project/vllm#61323 went from a plain-restart fallback (113 s eager, 195 s graph) to a forked
+  restart (9.2 s, 44.9 s);
+- vllm-project/vllm#59941 was refused before commit instead of committing with witness 0;
+- vllm-project/vllm#62872 now undoes back to base, but costs 16.6 s (eager) and 51.2 s (graph)
+  instead of 0.38 s, because a constructor edit now always goes to T1;
+- the 7 other in-place PRs were unchanged.
+
+Across both passes T1 took 9.2–68.8 s on Qwen3-8B and 115–185 s on Qwen3.5-35B-A3B-FP8 at TP2 with
+CUDA graphs. Real PRs chose the hard cases for us: constructors, decorators, Triton kernels, op
 registries.
 
 **Rule.** The replay is the standing gate for each engine. A rule or fix counts once the replay
@@ -91,7 +102,8 @@ compile or capture time, or from engine state read as ours:
   duplicates, and every forked server died (#52);
 - names the engine imported lazily during the workload were read as our undo leftovers (#55).
 
-The last four came from the v1 replay (our 2026-11-06/07 run).
+The last four came from the first v1 replay (our 2026-11-06/07 run); the rerun on main showed each
+fix working.
 
 **Rule.** Before a swap, ask when the target runs. Build-, import- and capture-time code goes to a
 restart tier, and registries are refreshed together with their modules.
