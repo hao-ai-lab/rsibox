@@ -12,7 +12,10 @@ import sys
 import tempfile
 import unittest
 
-import torch
+try:
+    import torch
+except ImportError:                 # CI without torch: these cases skip
+    torch = None
 
 from services import rebuild as RB
 
@@ -51,6 +54,7 @@ def edit(src, old, new):
     return src.replace(old, new)
 
 
+@unittest.skipIf(torch is None, "needs torch")
 class RebuildTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="rbtest-")

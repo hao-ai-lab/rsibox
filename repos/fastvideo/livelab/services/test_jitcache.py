@@ -13,6 +13,12 @@ import unittest
 
 from services import jitcache as J
 
+try:
+    import torch  # noqa: F401
+    HAVE_TORCH = True
+except ImportError:                 # CI without torch: the torch_key case skips
+    HAVE_TORCH = False
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEY = ("import json, sys; from services import jitcache as J; r = J.preset_torch_key(sys.argv[1]); "
        "from torch._inductor import codecache; print(json.dumps({**r, 'key': codecache.torch_key().hex()}))")
@@ -53,6 +59,7 @@ class JitCacheTest(unittest.TestCase):
             self.assertTrue(env[k].startswith(os.path.abspath(self.dir)), k)
         self.assertEqual(env["TRITON_CACHE_AUTOTUNING"], "1")
 
+    @unittest.skipUnless(HAVE_TORCH, "needs torch")
     def test_preset_torch_key_equals_the_computed_key(self):
         """Input: process 1 computes and stores torch_key; process 2 presets it from the file;
         process 3 computes it from scratch. Expect: 1 is a miss, 2 a hit, and all three keys
