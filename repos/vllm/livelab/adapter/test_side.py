@@ -89,6 +89,31 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         self.assertEqual([ran(n) for n in names], ["base", "base"])
 
 
+class IdentityTest(unittest.TestCase):
+
+    def test_fingerprint_names_the_same_code_objects_after_undo(self):
+        """Input: the host's fingerprint op on the toy engine module, before a commit, after
+        it and after undo. Expected: every rank answers with the module's functions (content
+        hash, code object id); Engine.step differs after the commit and the whole fingerprint
+        is identical to the start after undo. Pain point: the GB200 TP2 run's fingerprint came
+        back empty on both ranks (the fault hook hashed the list payload and the reply was
+        not-ok), so "identical after undo" compared two empty dicts. Not: real ranks."""
+        h, names, _ = make_host(self, "fp")
+
+        def fp():
+            r = h.handle({"op": "fingerprint", "modules": ["toy.engine"]})["workers"]
+            self.assertTrue(r["ok"], r.get("error"))
+            return {x["rank"]: x["code"] for x in r["ranks"]}
+        before = fp()
+        key = f"toy.engine:Engine.step:{STEP_LINE}"
+        self.assertEqual(sorted(before), [0, 1])
+        self.assertIn(key, before[0])
+        self.assertEqual(h.handle({"op": "txn", "plan": plan("fp")})["outcome"], "committed")
+        self.assertNotEqual(fp()[0][key], before[0][key])
+        self.assertTrue(h.handle({"op": "undo", "txn": "fp"})["ok"])
+        self.assertEqual(fp(), before)
+
+
 class GraphTest(unittest.TestCase):
 
     def test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied(self):

@@ -197,7 +197,7 @@ class Side(Endpoint):
     # -- protocol -------------------------------------------------------------------------
     def _fault(self, method, txn):
         txn, _ = C.txn_ref(txn)
-        f = self._faults.get(txn)
+        f = self._faults.get(txn) if isinstance(txn, str) else None   # fingerprint: a list
         if not f or f["method"] != method:
             return None
         if f["delay_s"]:
