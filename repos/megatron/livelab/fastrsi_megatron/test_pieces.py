@@ -163,6 +163,18 @@ class StartState(unittest.TestCase):
         self.assertTrue(any(n.endswith("master_param") for n in unknown), unknown)
         self.assertEqual(opt.optimizer.state[p]["master_param"].tolist(), [7.0, 7.0])
 
+    def test_unknown_state_finding_is_built_not_raised(self):
+        """Lab setup reports unknown optimizer state as a finding. It used to call the kernel's
+        catalogued `finding()` with a check it does not know and an unexpected keyword, so a run
+        with `--use-precision-aware-optimizer` died at lab setup with a TypeError (2026-11-07)."""
+        sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "vllm", "livelab"))
+        from fastrsi_megatron import hook
+        f = hook.unknown_state_finding(["opt0.state.3.master_param", "opt0.state.4.master_param"])
+        self.assertEqual(f["check"], "optimizer_state_unknown")
+        self.assertIn("master_param", f["observed"])
+        self.assertEqual(f["n_unknown"], 2)
+        json.dumps(f)   # findings travel in replies and receipts
+
 
 if __name__ == "__main__":
     unittest.main()
