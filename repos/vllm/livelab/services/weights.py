@@ -10,8 +10,9 @@ Usage:
       [--max-model-len L] [--timeout S] [-- extra vllm preload args]
   python3 weights.py probe --socket-dir D [--tp N]   # would an ipc_cache start find a daemon?
 
-Both print one JSON line. `start` prints {"pid", "cmd", "ready", "seconds"}; pid leads its own
-session (setsid): stop the daemon by that pid, never by the caller's group.
+Both print one JSON line. `start` prints {"pid", "cmd", "ready", "seconds"} (and "error",
+"stopped" when not ready); pid leads its own session (setsid): stop the daemon by that pid,
+never by the caller's group.
 
 Contract:
 - socket_paths() is the socket vLLM's loader dials for each GPU the engine uses: the daemon
@@ -19,13 +20,17 @@ Contract:
   and then fails.
 - probe() connects to each socket (no request: the daemon handles a closed connection) and
   returns the ones that did not answer. engine.py runs it before every ipc_cache start and
-  starts nothing when one is missing (a finding instead of a 300 s wait).
+  starts nothing when one is missing (a finding instead of a 300 s wait). When it cannot name
+  the engine's GPUs (no nvidia-smi, or CUDA_VISIBLE_DEVICES lists fewer GPUs than tp) it
+  cannot tell whether a socket is this engine's, so it fails too, saying so.
+- start() stops the daemon it started (its session) when the daemon does not get ready: a
+  failed or timed-out daemon never stays behind holding GPU memory.
 - loader_config() turns the disk fallback off: an engine that asked for resident weights
   either maps them or fails at load; it never reads the checkpoint silently.
 
 Writes only --log (and the daemon's sockets in --socket-dir).
 """
-import argparse, hashlib, json, os, re, socket, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, re, signal, socket, subprocess, sys, tempfile, time
 
 READY = re.compile(r"Weight cache daemon READY")
 FAILED = ("Traceback (most recent call last)", "exited during startup")
@@ -82,29 +87,33 @@ def _answers(path, timeout=2.0):
 
 def probe(socket_dir, visible=None, tp=1):
     """{"ok", "socket_dir", "missing", "matched_gpus", "seconds"}. With GPU uuids known, every
-    rank's socket must answer. Without them (no nvidia-smi), any daemon socket in the folder
-    that answers counts, and matched_gpus is False (the GPU match is then not checked)."""
+    rank's socket must answer. Without them (no nvidia-smi, or fewer visible GPUs than tp) the
+    probe cannot match a socket to a GPU: ok is False, matched_gpus False, "error" says why and
+    "answering" lists the daemon sockets in the folder that answer (any GPU's)."""
     t0 = time.time()
     paths = socket_paths(socket_dir, visible, tp)
-    matched = paths is not None
     if paths is None:
         try:
-            paths = sorted(os.path.join(socket_dir, n) for n in os.listdir(socket_dir)
+            found = sorted(os.path.join(socket_dir, n) for n in os.listdir(socket_dir)
                            if n.startswith("vllm_weight_cache_") and n.endswith(".sock"))
         except OSError:
-            paths = []
-        live = [p for p in paths if _answers(p)]
-        missing = [] if live else (paths or [os.path.join(socket_dir, "vllm_weight_cache_*.sock")])
-    else:
-        missing = [p for p in paths if not _answers(p)]
+            found = []
+        return {"ok": False, "socket_dir": socket_dir, "missing": [], "matched_gpus": False,
+                "answering": [p for p in found if _answers(p)],
+                "error": f"cannot name the {tp} GPU(s) of this engine (nvidia-smi failed, or "
+                         f"CUDA_VISIBLE_DEVICES={visible!r} lists fewer than {tp})",
+                "seconds": round(time.time() - t0, 3)}
+    missing = [p for p in paths if not _answers(p)]
     return {"ok": not missing, "socket_dir": socket_dir, "missing": missing,
-            "matched_gpus": matched, "seconds": round(time.time() - t0, 3)}
+            "matched_gpus": True, "seconds": round(time.time() - t0, 3)}
 
 
 def daemon_finding(pr):
     """The finding for a failed probe (checks advise; the caller decides)."""
-    return {"check": "weights_daemon",
-            "observed": f"no weight cache daemon answers at {', '.join(pr['missing'])}",
+    observed = (f"{pr['error']}; {len(pr.get('answering', []))} daemon socket(s) of unknown "
+                f"GPUs answer in {pr['socket_dir']}" if pr.get("error") else
+                f"no weight cache daemon answers at {', '.join(pr['missing'])}")
+    return {"check": "weights_daemon", "observed": observed,
             "expected": "one daemon socket per GPU of this engine, answering",
             "why": "an ipc_cache start waits up to state_timeout_s (300 s) for the daemon and "
                    "then fails; a run waited the full 300 s for a daemon that never started",
@@ -153,12 +162,34 @@ def _exited(pid):
         return True
 
 
+def stop(p, grace=10):
+    """Stop the daemon's session (SIGTERM, SIGKILL after `grace` s); True if it was running.
+    Only a session this module started: its pid leads it (start_new_session)."""
+    if p.poll() is not None:
+        return False
+    try:
+        if os.getpgid(p.pid) != p.pid:
+            return False
+        os.killpg(p.pid, signal.SIGTERM)
+        try:
+            p.wait(grace)
+        except subprocess.TimeoutExpired:
+            os.killpg(p.pid, signal.SIGKILL)
+            p.wait(grace)
+    except ProcessLookupError:
+        pass
+    return True
+
+
 def start(a, extra):
     os.makedirs(os.path.dirname(os.path.abspath(a.log)), exist_ok=True)
     cmd = daemon_cmd(a.model, a.socket_dir, a.tp, a.max_model_len, a.vllm, extra)
     with open(a.log, "w") as log:
         p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-    return {"pid": p.pid, "cmd": cmd, **wait_ready(a.log, p.pid, a.timeout)}
+    r = {"pid": p.pid, "cmd": cmd, **wait_ready(a.log, p.pid, a.timeout)}
+    if not r["ready"]:
+        r["stopped"] = stop(p)
+    return r
 
 
 def main(argv=None):

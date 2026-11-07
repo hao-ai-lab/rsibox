@@ -21,7 +21,9 @@ Contract:
   configs names the fields that differ (finding "kvplan_mismatch"). FASTRSI_KVPLAN_FORCE=1
   reuses despite less free memory.
 - With TP > 1 every rank takes the same branch (all-reduce MIN of "can reuse"): the profile run
-  has collectives, and one rank skipping it would hang the others.
+  has collectives, and one rank skipping it would hang the others. When torch.distributed is
+  initialized but the ranks cannot agree (no vLLM world group), every rank profiles (finding
+  "kvplan_no_agreement"): no rank decides alone.
 - Every outcome is one log line, `fastrsi kvplan: {json}` or `fastrsi kvplan finding: {json}`,
   with the seconds the step took. engine.py counts them (kvplan_report).
 
@@ -100,16 +102,24 @@ def nearest(plan_dir, idn):
 
 def all_agree(ok):
     """True only if every rank says True (all-reduce MIN over the world group); `ok` itself
-    when torch.distributed is not initialized or the world has one rank."""
+    when torch.distributed is not initialized or the world has one rank. None when
+    torch.distributed is initialized but vLLM's world group cannot be had: other ranks may
+    exist, and a rank-local answer could split them between reuse and the profile run."""
     try:
         import torch
         import torch.distributed as dist
-        if not dist.is_available() or not dist.is_initialized():
-            return ok
+    except Exception:  # noqa: BLE001  (no torch: one process)
+        return ok
+    if not dist.is_available() or not dist.is_initialized():
+        return ok
+    try:
         from vllm.distributed.parallel_state import get_world_group
         group = get_world_group().cpu_group
-    except Exception:  # noqa: BLE001  (no torch, or no vLLM world group: one process)
-        return ok
+    except Exception as e:  # noqa: BLE001
+        _say("kvplan_no_agreement", finding=True, error=repr(e)[:300],
+             why="torch.distributed is up but vLLM's world group is not; this rank profiles "
+                 "rather than decide alone (every rank gets the same error and profiles too)")
+        return None
     if dist.get_world_size(group) <= 1:
         return ok
     t = torch.tensor([1 if ok else 0], dtype=torch.int32)
@@ -182,6 +192,8 @@ def wrap(orig):
                      why="no plan for this config; profiling (+ the profile run's seconds)",
                      actions=["accept: the plan is recorded for this config now",
                               "align the differing fields to reuse the other plan"])
+        elif agreed is None:
+            pass                                  # all_agree logged kvplan_no_agreement
         elif not local:
             _say("kvplan_free_memory", finding=True, key=key(idn), rank=idn["rank"],
                  free_now=free, free_then=rec["init_free"],

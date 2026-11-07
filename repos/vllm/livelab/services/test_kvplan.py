@@ -92,6 +92,34 @@ def test_plan_of_another_config_is_a_finding_and_the_profile_runs(plan_dir, capl
     assert _events(caplog, True)[-1]["event"] == "kvplan_free_memory"
 
 
+# Two real torch.distributed ranks (gloo, CPU) without vLLM's world group: rank 0 can reuse its
+# plan, rank 1 cannot.
+AGREE = r'''
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+import torch.distributed as dist, kvplan
+dist.init_process_group("gloo", rank=int(os.environ["RANK"]), world_size=2)
+print(json.dumps(kvplan.all_agree(os.environ["RANK"] == "0")))
+dist.destroy_process_group()
+'''
+
+
+def test_ranks_that_cannot_agree_never_decide_alone():
+    """Input: two torch.distributed ranks (gloo) with no vLLM world group; rank 0 asks
+    all_agree(True), rank 1 all_agree(False). Expect: None on both (each then profiles, and
+    logs kvplan_no_agreement). Before: each got its own answer, True and False, so rank 0
+    would skip the profile run whose collectives rank 1 enters: a hang at TP > 1. Not: vLLM's
+    real world group (GPU receipt, TP2 case)."""
+    pytest.importorskip("torch")
+    env = {**os.environ, "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(_free_port())}
+    ps = [subprocess.Popen([sys.executable, "-c", AGREE, str(HERE)], stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, text=True, env={**env, "RANK": str(r)})
+          for r in (0, 1)]
+    outs = [p.communicate(timeout=300) for p in ps]
+    assert all(p.returncode == 0 for p in ps), [o[1][-2000:] for o in outs]
+    assert [json.loads(o[0].strip().splitlines()[-1]) for o in outs] == [None, None]
+
+
 # A stand-in for `vllm serve` that records argv and the KV plan env, logs one plan line as a
 # worker would, and serves /health.
 FAKE_VLLM_KV = r'''#!{py}

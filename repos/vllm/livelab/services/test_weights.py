@@ -115,3 +115,114 @@ def test_weights_with_an_explicit_other_load_format_is_a_finding(d):
     assert [x["check"] for x in f] == ["weights_load_format"]
     assert "--weights" in f[0]["observed"] and "--load-format auto" in f[0]["observed"]
     assert not os.path.exists(out)
+
+
+def _refused(r):
+    """Assert the start exited 2 with nothing started; stop the server if one did start."""
+    if r.returncode == 0:
+        _stop(json.loads(r.stdout)["pid"])
+    assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_weights_with_an_explicit_config_that_keeps_the_disk_fallback_is_a_finding(d):
+    """Input: a listener on GPU 1's daemon socket; `engine.py start --weights m
+    --model-loader-extra-config C` with C = {"socket_dir": S} (fallback unset; vLLM's
+    default is true) and C = {"socket_dir": S, "fallback": true}. Expect: exit 2, a
+    weights_fallback finding naming the value; the fake vllm never ran. With "fallback": false
+    it starts. Before: the launcher passed the config through and the engine read the
+    checkpoint from disk whenever the mapping failed, though --weights promises no fallback."""
+    sock_dir = os.path.join(d, "s"); os.makedirs(sock_dir)
+    daemon = _listen(os.path.join(sock_dir, socket_name("GPU-fake-1")))
+    try:
+        seen = []
+        for cfg in ({"socket_dir": sock_dir}, {"socket_dir": sock_dir, "fallback": True}):
+            r, _, out = _start(d, sock_dir, _free_port(), [
+                "--weights", "--model-loader-extra-config", json.dumps(cfg)])
+            _refused(r)
+            f = json.loads(r.stdout)["findings"]
+            assert [x["check"] for x in f] == ["weights_fallback"], f
+            seen.append(f[0]["observed"])
+            assert not os.path.exists(out)
+        assert "unset (vLLM's default: true)" in seen[0] and seen[1].endswith("fallback true")
+        r, _, out = _start(d, sock_dir, _free_port(), [
+            "--weights", "--model-loader-extra-config",
+            json.dumps({"socket_dir": sock_dir, "fallback": False})])
+    finally:
+        daemon.close()
+    _stop(json.loads(r.stdout)["pid"])
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_probe_checks_the_folder_vllm_dials(d):
+    """Input: a daemon socket for GPU 1 in folder A only; `engine.py start --weights
+    --weights-socket-dir A m --model-loader-extra-config {"socket_dir": B, "fallback": false}`.
+    Expect: exit 2, a weights_socket_dir finding naming A and B; nothing started. Without
+    --weights-socket-dir the probe checks B (what vLLM dials): a weights_daemon finding naming
+    B's socket. Before: the probe checked A, passed, and vLLM waited 300 s on B."""
+    a_dir, b_dir = os.path.join(d, "a"), os.path.join(d, "b")
+    os.makedirs(a_dir); os.makedirs(b_dir)
+    cfg = json.dumps({"socket_dir": b_dir, "fallback": False})
+    daemon = _listen(os.path.join(a_dir, socket_name("GPU-fake-1")))
+    try:
+        r, _, out = _start(d, a_dir, _free_port(), ["--weights", "--model-loader-extra-config",
+                                                    cfg])
+        r2, _, _ = _start(d, "", _free_port(), ["--weights", "--model-loader-extra-config", cfg])
+    finally:
+        daemon.close()
+    _refused(r)
+    f = json.loads(r.stdout)["findings"]
+    assert [x["check"] for x in f] == ["weights_socket_dir"], f
+    assert a_dir in f[0]["observed"] and b_dir in f[0]["observed"]
+    assert not os.path.exists(out)
+    _refused(r2)
+    assert json.loads(r2.stdout)["weights_probe"]["missing"] == [
+        os.path.join(b_dir, socket_name("GPU-fake-1"))]
+
+
+def test_a_probe_that_cannot_name_the_gpus_does_not_pass(d):
+    """Input: CUDA_VISIBLE_DEVICES=1 but `-tp 2` (nvidia-smi names one GPU, not two), and a
+    daemon socket for GPU 1 answering. Expect: exit 2, a weights_daemon finding that says the
+    GPUs could not be named and that 1 socket of unknown GPUs answers; matched_gpus false;
+    nothing started. Before: any one answering socket passed a TP2 probe."""
+    sock_dir = os.path.join(d, "s"); os.makedirs(sock_dir)
+    daemon = _listen(os.path.join(sock_dir, socket_name("GPU-fake-1")))
+    try:
+        r, _, out = _start(d, sock_dir, _free_port(), ["--weights", "-tp", "2"])
+    finally:
+        daemon.close()
+    _refused(r)
+    rep = json.loads(r.stdout)
+    assert rep["weights_probe"]["ok"] is False and rep["weights_probe"]["matched_gpus"] is False
+    assert "cannot name the 2 GPU(s)" in rep["findings"][0]["observed"]
+    assert "1 daemon socket(s) of unknown GPUs" in rep["findings"][0]["observed"]
+    assert not os.path.exists(out)
+
+
+# A `vllm preload` that never gets ready: it logs a traceback (FAKE_FAIL=1) or stays silent,
+# and keeps running either way, as a daemon stuck after an error would.
+FAKE_PRELOAD = r'''#!{py}
+import os, sys, time
+if os.environ.get("FAKE_FAIL") == "1":
+    print("Traceback (most recent call last):", flush=True)
+time.sleep(120)
+'''
+
+
+def test_a_daemon_that_does_not_get_ready_is_stopped(d):
+    """Input: `weights.py start` with a fake `vllm preload` that logs a traceback and keeps
+    running, then one that stays silent past --timeout 2. Expect: ready false, stopped true,
+    and the daemon's pid is gone right after (it would hold GPU memory). Before: start()
+    returned and the daemon kept running in its own session."""
+    fake = _script(d, "vllm", FAKE_PRELOAD)
+    for fail, timeout in (("1", "60"), ("0", "2")):
+        r = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
+                            "--socket-dir", os.path.join(d, "s"), "--log",
+                            os.path.join(d, "preload.log"), "--vllm", fake,
+                            "--timeout", timeout], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "FAKE_FAIL": fail})
+        rep = json.loads(r.stdout)
+        try:
+            assert rep["ready"] is False and rep.get("stopped") is True, rep
+            assert not os.path.exists(f"/proc/{rep['pid']}"), rep
+        finally:
+            _stop(rep["pid"])

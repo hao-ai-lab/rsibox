@@ -32,7 +32,11 @@ Contract:
   ("explicit": given in the argv, even at vLLM's default). An explicit value the holder cannot
   use is a finding naming both values, and nothing starts:
   - --weights appends `--load-format ipc_cache` (and the loader config, unless the argv has
-    `--model-loader-extra-config`); an explicit `--load-format` other than ipc_cache conflicts.
+    `--model-loader-extra-config`); an explicit `--load-format` other than ipc_cache conflicts,
+    and so does an explicit loader config that leaves vLLM's disk fallback on (`"fallback"`
+    true or missing: vLLM's default is true), since --weights promises no disk fallback.
+    The daemon folder is the explicit config's socket_dir when the argv has a config (that is
+    what vLLM dials), else --weights-socket-dir; both given and different is a finding.
     With ipc_cache (from --weights or the argv) the weights daemon of weights.py is probed
     first: when none answers for a GPU of this engine, the launcher prints a weights_daemon
     finding (exit 2) instead of a start that waits 300 s.
@@ -167,12 +171,22 @@ def load_format(a, v):
     return v["args"]["load_format"]
 
 
-def socket_dir(a, v):
-    """The daemon socket folder this start dials: --weights-socket-dir, else the socket_dir of
-    the argv's --model-loader-extra-config, else vLLM's default."""
+def explicit_loader_config(v):
+    """The argv's --model-loader-extra-config as a dict, or None when the argv has none."""
+    if "model_loader_extra_config" not in v["explicit"]:
+        return None
     cfg = v["args"].get("model_loader_extra_config")
-    given = cfg.get("socket_dir") if isinstance(cfg, dict) else None
-    return a.weights_socket_dir or given or weights.default_socket_dir()
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def socket_dir(a, v):
+    """The daemon socket folder this start dials. With an explicit --model-loader-extra-config
+    vLLM gets that config unchanged, so its socket_dir (else vLLM's default); otherwise
+    --weights-socket-dir (else vLLM's default), which the launcher's loader config names."""
+    cfg = explicit_loader_config(v)
+    if cfg is not None:
+        return cfg.get("socket_dir") or weights.default_socket_dir()
+    return a.weights_socket_dir or weights.default_socket_dir()
 
 
 def argv_findings(a, v):
@@ -208,6 +222,25 @@ def argv_findings(a, v):
                       "ipc_cache, or none (--weights adds it)", "why": "--weights maps the "
                       "daemon's weights over IPC; the argv asks vLLM to load them another way",
                       "actions": ["drop --load-format", "drop --weights"]})
+    cfg = explicit_loader_config(v)
+    if a.weights and cfg is not None and cfg.get("fallback", True) is not False:
+        found.append({"check": "weights_fallback", "observed": "--weights and the argv's "
+                      "--model-loader-extra-config with fallback " + (json.dumps(cfg["fallback"])
+                      if "fallback" in cfg else "unset (vLLM's default: true)"),
+                      "expected": '"fallback": false in that config, or no config (--weights '
+                      "adds one)", "why": "with the fallback on, an engine that cannot map the "
+                      "daemon's weights reads the checkpoint from disk silently; --weights "
+                      "promises resident weights or a failed load",
+                      "actions": ['add "fallback": false to the config',
+                                  "drop --model-loader-extra-config", "drop --weights"]})
+    if (a.weights_socket_dir and cfg is not None and load_format(a, v) == "ipc_cache"
+            and os.path.abspath(a.weights_socket_dir) != os.path.abspath(socket_dir(a, v))):
+        found.append({"check": "weights_socket_dir", "observed": f"--weights-socket-dir "
+                      f"{a.weights_socket_dir} and the argv's loader config, whose socket "
+                      f"folder is {socket_dir(a, v)}", "expected": "one folder", "why": "vLLM "
+                      "dials the config's folder; the daemon probe would check the other one",
+                      "actions": ["drop --weights-socket-dir", "set socket_dir in the config "
+                                  "to the same folder"]})
     if a.kvplan is not None and "worker_cls" in explicit and args["worker_cls"] != KVPLAN_WORKER:
         found.append({"check": "kvplan_worker_cls", "observed": f"--kvplan and the argv's "
                       f"--worker-cls {args['worker_cls']}", "expected": f"--worker-cls "
