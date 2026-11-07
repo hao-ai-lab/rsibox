@@ -1,6 +1,6 @@
 """Golden cases for reading a `vllm serve` argv with vLLM's own parser (vllm_args.py), through the
-launcher (engine.py) and through the zygote. They need a real vLLM: the python running pytest if
-it imports vLLM, else the one in FASTRSI_VLLM_PYTHON. Without either (CPU CI) they skip. They run
+launcher (engine.py) and through the zygote. They need a real vLLM: the python in FASTRSI_VLLM_PYTHON,
+else the python running pytest if it imports vLLM. Without either (CPU CI) they skip. They run
 on CPU; no case touches a GPU.
 
 Run: FASTRSI_VLLM_PYTHON=<vLLM venv python> python3 -m pytest \
@@ -16,8 +16,8 @@ sys.path.insert(0, str(HERE))
 import engine, zygote  # noqa: E402
 from test_engine import FAKE_VLLM, _free_port, _script, _short_dir, _stop  # noqa: E402
 
-VLLM_PY = sys.executable if importlib.util.find_spec("vllm") else \
-    os.environ.get("FASTRSI_VLLM_PYTHON")
+VLLM_PY = os.environ.get("FASTRSI_VLLM_PYTHON") or \
+    (sys.executable if importlib.util.find_spec("vllm") else None)
 pytestmark = pytest.mark.skipif(not VLLM_PY, reason="needs vLLM: run with FASTRSI_VLLM_PYTHON "
                                 "set to a vLLM venv's python (CPU CI has no vLLM)")
 ENGINE = str(HERE / "engine.py")
@@ -128,6 +128,11 @@ def test_zygote_parse_equals_direct_parse():
             keep = ("ok", "args", "explicit", "error")
             assert {x: z.get(x) for x in keep} == {x: direct[k].get(x) for x in keep}, k
             assert z["zygote_seconds"] < 2, z
+        # The launcher's path to it: `start --zygote S` reads the argv through the zygote.
+        a, vargv = engine.parse(["start", "--cache-root", cache, "--log", "x", "--zygote", sock,
+                                 *CASES["tp_short"]])
+        v = engine.read_vllm_args(a, vargv, engine.engine_env(a))
+        assert v["via"] == "zygote" and v["args"] == direct["tp_short"]["args"], v
     finally:
         _stop(rep["pid"])
 
@@ -136,7 +141,8 @@ def test_launcher_reads_the_argv_with_vllms_parser():
     """Input: `engine.py start` under the vLLM python, flags mixed: `--cache-root C Qwen/Qwen3-8B
     --log L -tp 2 --vllm FAKE --port P`. Expect: the report's vllm_args say model Qwen/Qwen3-8B
     (not vLLM's default), tp 2, port P, via "direct"; the fake server got exactly
-    `serve Qwen/Qwen3-8B -tp 2 --port P --host 127.0.0.1` and answered /health on P."""
+    `serve Qwen/Qwen3-8B -tp 2 --port P --host 127.0.0.1` and answered /health on P; stdout
+    is that one JSON line (vLLM's import-time log lines must not land there)."""
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM)
         out, port = os.path.join(d, "ran.json"), _free_port()
@@ -145,10 +151,13 @@ def test_launcher_reads_the_argv_with_vllms_parser():
                             "--vllm", fake, "--port", str(port), "--timeout", "60"],
                            capture_output=True, text=True, timeout=300,
                            env={**os.environ, "FAKE_OUT": out})
-        rep = json.loads(r.stdout.strip().splitlines()[-1])
-        if rep.get("pid"):
-            _stop(rep["pid"])
+        try:
+            rep = json.loads(r.stdout.strip().splitlines()[-1])
+        finally:
+            if "rep" in locals() and rep.get("pid"):
+                _stop(rep["pid"])
         assert r.returncode == 0, r.stdout + r.stderr[-3000:]
+        assert len(r.stdout.strip().splitlines()) == 1, r.stdout[:2000]
         v = rep["vllm_args"]
         assert (v["via"], v["args"]["model"], v["args"]["tensor_parallel_size"],
                 v["args"]["port"]) == ("direct", "Qwen/Qwen3-8B", 2, port)

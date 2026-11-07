@@ -125,7 +125,7 @@ def read_vllm_args(a, vargv, env):
     """vllm_args.parse() of the `vllm serve` argv: by the zygote with --zygote, else here, after
     setting env, since importing vLLM reads it. Adds "via"; {"ok": False, "error"} on failure."""
     if a.zygote:
-        return {**zygote.parse(a.zygote, vargv), "via": "zygote"}
+        return {**zygote.parse(a.zygote, vargv, accept=_accept(a)), "via": "zygote"}
     os.environ.update(env)
     try:
         r = vllm_args.parse(vargv)
@@ -138,6 +138,8 @@ def read_vllm_args(a, vargv, env):
 def argv_findings(v):
     """Findings about the parsed `vllm serve` argv that stop the start (each names both values
     or what is missing)."""
+    if not v["ok"] and v.get("findings"):        # the zygote refused to parse (stale)
+        return v["findings"]
     if not v["ok"]:
         return [{"check": "vllm_args", "observed": v.get("error"), "expected": "an argv that "
                  "`vllm serve` accepts", "why": "the server would exit on it",

@@ -163,6 +163,20 @@ def _refresh_plan(sources, graph, refresh_on=True):
     return fix
 
 
+def _stale_finding(fix, what="the forked server"):
+    """The "stale" finding for changed files a refresh cannot apply, or None."""
+    if not (fix and fix["blocked"]):
+        return None
+    return {"check": "stale", "observed": f"{len(fix['blocked'])} changed files a refresh "
+            f"cannot apply: {fix['blocked'][:5]}",
+            "expected": "edited files the fork can refresh (Python source under "
+                        f"{','.join(REFRESH_PREFIXES) or 'no package'})",
+            "why": f"{what} would run the code the zygote imported",
+            "actions": ["restart the zygote (~25 s of imports, off the start path)",
+                        "start without the zygote", "accept 'stale'"],
+            "risk": "an edit is silently not applied"}
+
+
 def _parse_in_child(argv, refresh, conns):
     """vllm_args.parse(argv) in a forked child, after the same refresh a fork would apply: an
     edit to vLLM's argument code is read, and the zygote's own state (modules, heap) stays as
@@ -252,7 +266,14 @@ def serve(sock_path, modules_file):
             elif req.get("cmd") == "parse":
                 t = time.time()
                 fix = _refresh_plan(sources, graph)
-                reply = _parse_in_child(req["argv"], fix["modules"] if fix else [], [conn, srv])
+                stale = _stale_finding(fix, "the parse")
+                if stale and "stale" not in req.get("accept", []):
+                    # Same refusal as a fork: vLLM's argument code may be among the files the
+                    # child cannot refresh, so its parse would read the pre-edit flags.
+                    reply = {"ok": False, "findings": [stale]}
+                else:
+                    reply = _parse_in_child(req["argv"], fix["modules"] if fix else [],
+                                            [conn, srv])
                 reply["zygote_seconds"] = round(time.time() - t, 3)
                 if fix and fix["changed"]:
                     reply["refreshed"] = {"changed": fix["changed"],
@@ -272,16 +293,8 @@ def serve(sock_path, modules_file):
                             "accept 'env' if these variables are not read at import time"],
                         "risk": "the server runs with the zygote's values of these variables"})
                 fix = _refresh_plan(sources, graph, req.get("refresh", True))
-                if fix and fix["blocked"]:
-                    findings.append({
-                        "check": "stale", "observed": f"{len(fix['blocked'])} changed files a "
-                        f"refresh cannot apply: {fix['blocked'][:5]}",
-                        "expected": "edited files the fork can refresh (Python source under "
-                                    f"{','.join(REFRESH_PREFIXES) or 'no package'})",
-                        "why": "the forked server would run the code the zygote imported",
-                        "actions": ["restart the zygote (~25 s of imports, off the start path)",
-                                    "start without the zygote", "accept 'stale'"],
-                        "risk": "an edit is silently not applied"})
+                if _stale_finding(fix):
+                    findings.append(_stale_finding(fix))
                 refresh = fix["modules"] if fix else []
                 check_s = round(time.time() - t, 3)
                 open_findings = [f for f in findings if f["check"] not in req.get("accept", [])]
@@ -330,10 +343,13 @@ def request(sock_path, argv, env, log, cwd=None, accept=()):
                              "cwd": cwd or os.getcwd(), "accept": list(accept)})
 
 
-def parse(sock_path, argv, timeout=60):
+def parse(sock_path, argv, accept=(), timeout=60):
     """Read a `vllm serve` argv with the zygote's vLLM parser: vllm_args.parse()'s reply, plus
-    "zygote_seconds" (and "refreshed" when edited modules were re-imported for the parse)."""
-    return _call(sock_path, {"cmd": "parse", "argv": list(argv)}, timeout=timeout)
+    "zygote_seconds" (and "refreshed" when edited modules were re-imported for the parse). Edits
+    a refresh cannot apply refuse it like a fork: {"ok": False, "findings": [stale]}, unless
+    accept has "stale"."""
+    return _call(sock_path, {"cmd": "parse", "argv": list(argv), "accept": list(accept)},
+                 timeout=timeout)
 
 
 def check(sock_path, env, accept=()):

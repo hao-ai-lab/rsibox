@@ -238,6 +238,43 @@ def test_zygote_runs_with_the_engine_env():
         _stop(rep["pid"])
 
 
+def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
+    """Input: a real zygote.py (torch stubbed, vLLM absent) that pre-imported a module outside
+    the refresh packages; the module is then edited; `engine.py start --zygote S m`. Expect:
+    exit 2 with a `stale` finding naming that file, nothing forked (before: the parse ran on
+    the pre-edit code, so an edit to vLLM's argument code a refresh cannot reach was read with
+    the old flags). With `--zygote-accept stale` the parse runs: here it fails on the absent
+    vLLM, a `vllm_args` finding. Not: a refresh of an edited vLLM module (needs a real vLLM)."""
+    d = _short_dir()
+    sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
+    zpy = _script(d, "python", FAKE_PYTHON)
+    lib = Path(d, "lib"); lib.mkdir()
+    (lib / "zt_edited.py").write_text("X = 1\n")
+    Path(d, "mods.txt").write_text("zt_edited\n")
+    env = {**os.environ, "PYTHONPATH": str(lib)}
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log"),
+                        "--zygote-modules", os.path.join(d, "mods.txt")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    rep = json.loads(r.stdout)
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        (lib / "zt_edited.py").write_text("X = 2  # edited\n")
+        start = [sys.executable, ENGINE, "start", "--cache-root", cache, "--log",
+                 os.path.join(d, "s.log"), "--zygote", sock, "m", "--port", str(_free_port())]
+        out = subprocess.run(start, capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["stale"] and "zt_edited.py" in f[0]["observed"]
+        out = subprocess.run(start + ["--zygote-accept", "stale"], capture_output=True,
+                             text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["vllm_args"] and "vllm" in f[0]["observed"]
+    finally:
+        _stop(rep["pid"])
+
+
 def test_fork_check_reads_vllms_spawn_fallback():
     """Input: a server log where vLLM fell back to spawn, and one where it did not. Expect:
     spawn_forced and a fork finding for the first; none for the second."""
