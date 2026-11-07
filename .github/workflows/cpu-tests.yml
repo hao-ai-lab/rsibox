@@ -43,3 +43,15 @@ jobs:
           python-version: "3.12"
       - name: Run the adapter's unittest cases (host, worker group, sides, graph detection; collective_rpc is an in-process loop)
         run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
+  vllm-services:
+    name: vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install pytest
+      - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (FASTRSI_VLLM_PYTHON) or torch skip and are listed (-rs)
+        run: python3 -m pytest -v -rs repos/vllm/livelab/services
