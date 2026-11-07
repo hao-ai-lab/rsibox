@@ -1,0 +1,18 @@
+name: CPU tests
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  conformance-cases:
+    name: Conformance cases fail labs that lack their property (fake labs, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - working-directory: template/livelab
+        run: python3 -m unittest discover -s conformance -t . -v
