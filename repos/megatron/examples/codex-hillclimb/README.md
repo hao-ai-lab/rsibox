@@ -65,7 +65,8 @@ run. Sweeping NCCL protocol, algorithm and DDP bucket size is a restart per sett
 median gain at least 1%, loss inside the gate): 11 (LM-head grad cast after the SP all-gather, +1.2%),
 61/71 (gather before TE's fused LayerNorm+linear, +3.0%), 119 (plain residual add without bias or dropout,
 +5.0%; also +6.0% on 32B, 2 nodes) and 130 (vocab-parallel cross-entropy through TE's parallel kernel,
-+1.6%: 1.017, 1.002, 1.015, 1.020; Codex gpt-6-astra; Antigravity: correct). Plus the private
++1.6%: 1.017, 1.002, 1.015, 1.020; Codex gpt-6-astra; Antigravity: correct, and equivalent to Megatron's
+`--cross-entropy-loss-fusion` flag, which the run had off; differs for unmasked `-100` labels). Plus the private
 fused-weight-gradient cell (12). Six more were kept on two pairs and reverted by their re-measure (27, 69,
 77, 124, 160, 203).
 
