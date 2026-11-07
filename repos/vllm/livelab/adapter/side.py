@@ -6,6 +6,9 @@
   transaction is committed, aborted or undone (a rank that finished early is asked again while
   others are pending, and must not answer "no prepare started"). The host polls every rank with
   one collective_rpc, so the loop holds each poll for milliseconds, not for the whole stage.
+  An abort (or undo) that arrives while this side is still staging cancels it: a prepare
+  that has not started never stages, and one that is running drops what it staged (and its
+  watches) as soon as it finishes, so nothing of an aborted transaction stays on any rank.
 - **Per-rank deadline.** Phase-2 calls with a deadline (`{"txn", "deadline_at"}`: validate,
   commit, abort, undo) run on this side's own lane thread (kernel `Lane`), and the side
   answers by the deadline: a call still running is `deadline_missed` naming this rank. So
@@ -70,7 +73,7 @@ class Side(Endpoint):
                          engine_names=dynamo_name,
                          capturing=stream_capturing if worker else None, **participant)
         self.captured_prefixes = CAPTURED_PREFIXES
-        self._jobs = {}        # txn -> {"result", "t0"}, until commit / abort / undo
+        self._jobs = {}        # txn -> {"result", "t0", "lock", "cancelled"}, until the vote ends
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None
         self.watch, self._watch_new = {}, {}   # key -> function; new keys join at a step start
@@ -228,12 +231,22 @@ class Side(Endpoint):
         if method == "prepare":
             return self._prepare_once(payload)
         if method == "prepare_start":
-            job = self._jobs[payload["id"]] = {"t0": time.perf_counter(), "result": None}
+            txn = payload["id"]
+            job = self._jobs[txn] = {"t0": time.perf_counter(), "result": None,
+                                     "lock": threading.Lock(), "cancelled": False}
 
             def run():
-                r = self._prepare_once(payload)
+                with job["lock"]:
+                    cancelled = job["cancelled"]
+                r = F.not_ok("prepare cancelled before it started") if cancelled else \
+                    self._prepare_once(payload)
                 r["prepare_s"] = round(time.perf_counter() - job["t0"], 6)
-                job["result"] = r
+                with job["lock"]:
+                    job["result"] = r
+                    cancelled = job["cancelled"]
+                if cancelled:        # aborted while staging: drop what this prepare staged
+                    Endpoint._dispatch(self, "abort", txn)
+                    self._drop_watch(txn)
             threading.Thread(target=run, daemon=True,
                              name=f"fastrsi-prepare-{payload['id']}").start()
             return F.ok(started=True)
@@ -244,7 +257,10 @@ class Side(Endpoint):
             return F.ok(pending=True) if job["result"] is None else dict(job["result"])
         txn, deadline_at = C.txn_ref(payload)
         if method in ("commit", "abort", "undo") and isinstance(txn, str):
-            self._jobs.pop(txn, None)          # the vote is over
+            job = self._jobs.pop(txn, None)    # the vote is over
+            if job is not None and method != "commit":
+                with job["lock"]:              # still staging: it cleans up when done
+                    job["cancelled"] = job["result"] is None
             if method == "abort":
                 self._drop_watch(txn)          # vetoed here or on another rank
             else:

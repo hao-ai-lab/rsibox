@@ -101,6 +101,8 @@ each rank with its own copy of the toy engine.
 | `test_a_gap_job_waits_for_the_batch_in_flight_and_nothing_new_is_scheduled` | a commit while a batch is in flight, finishing it on mixed code |
 | `test_the_core_comes_from_the_overlay_and_is_patched` | a false `base_mismatch` when an overlay serves the engine core |
 | `test_ranks_that_finish_early_keep_their_vote` | ranks that answered "no prepare started" after their first finished poll: a false abort |
+| `test_a_no_vote_waits_for_the_rank_still_preparing` | a no vote that ends the poll while another rank is still preparing: its vote lost, its staging racing the abort |
+| `test_an_abort_while_staging_drops_what_the_prepare_staged` | an abort during a background prepare, after which the prepare stages the transaction and watches its keys anyway |
 | `test_a_rank_that_hangs_in_commit_is_named_by_the_deadline` | one hung rank holding every step, or a late RPC reply misaligning the next call |
 | `test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied` | a model-code edit that committed with no finding and never ran (graphs only) |
 | `test_accepted_captured_target_proves_nothing_and_says_why` | an accepted graph edit whose zero witness gives no reason |

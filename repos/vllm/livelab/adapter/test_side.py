@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace as NS
@@ -41,6 +42,15 @@ def worker(cudagraph="FULL_AND_PIECEWISE", compile_mode="VLLM_COMPILE", eager=Fa
         splitting_ops=list(splitting_ops), max_cudagraph_capture_size=512)))
 
 
+def prepared(txn, timeout=5.0):
+    """Wait until no background prepare of txn is running in this process."""
+    end = time.time() + timeout
+    while any(t.name == f"fastrsi-prepare-{txn}" for t in threading.enumerate()):
+        if time.time() > end:
+            raise AssertionError(f"prepare of {txn} still running")
+        time.sleep(0.005)
+
+
 class PrepareAndDeadlineTest(unittest.TestCase):
 
     def test_ranks_that_finish_early_keep_their_vote(self):
@@ -63,6 +73,45 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         self.assertTrue(g.abort(p["id"])["ok"])
         self.assertEqual({x["error"] for x in g._rpc("prepare_poll", p["id"])["ranks"]},
                          {f"no prepare started for {p['id']}"})
+
+    def test_a_no_vote_waits_for_the_rank_still_preparing(self):
+        """Input: 2 ranks; rank 0 vetoes its prepare at once, rank 1 takes 0.3 s longer to
+        stage. Expected: the group's prepare returns only once rank 1 is done, with both
+        final votes (rank 0 no, rank 1 yes, none pending); after the abort rank 1 keeps no
+        staged transaction and watches nothing. Fails before the fix: the group returned at
+        the first poll with rank 1 still pending (its vote and findings lost), and the abort
+        raced rank 1's staging, which then stayed staged and watched. Not: the real
+        collective_rpc."""
+        sides = [Side("worker", rank=r) for r in range(2)]
+        from .test_host import Executor
+        g = WorkerGroup(NS(core=NS(model_executor=Executor(sides)), in_loop=lambda fn: fn()))
+        p = own_plan("veto", {"worker:0": "prepare",
+                              "worker:1": {"method": "prepare", "delay_s": 0.3, "fail": False}})
+        t0 = time.perf_counter()
+        r = g.prepare(p)
+        self.assertGreaterEqual(time.perf_counter() - t0, 0.3)
+        self.assertEqual([(x["rank"], x["ok"], x.get("pending")) for x in r["ranks"]],
+                         [(0, False, None), (1, True, None)])
+        self.assertTrue(g.abort(p["id"])["ok"])
+        prepared(p["id"])
+        sides[1].tick(True)
+        self.assertEqual((p["id"] in sides[1].lp._staged, sides[1].watch), (False, {}))
+
+    def test_an_abort_while_staging_drops_what_the_prepare_staged(self):
+        """Input: one rank's background prepare takes 0.3 s; the abort arrives at once (the
+        host gave up, or another rank's prepare_start failed). Expected: once the prepare
+        finishes, nothing of the transaction is staged, its state is "aborted", and no key is
+        watched at the next step start. Fails before the fix: the abort only dropped the job,
+        so the late prepare staged the transaction and added its watches afterwards. Not: a
+        prepare that never finishes (the host then poisons; test_host)."""
+        side = Side("worker", rank=0)
+        p = own_plan("late", {"worker:0": {"method": "prepare", "delay_s": 0.3, "fail": False}})
+        self.assertTrue(side.dispatch("prepare_start", p)["ok"])
+        self.assertTrue(side.dispatch("abort", p["id"])["ok"])
+        prepared(p["id"])
+        side.tick(True)
+        self.assertEqual((p["id"] in side.lp._staged, side.lp._state.get(p["id"]), side.watch),
+                         (False, "aborted", {}))
 
     def test_a_rank_that_hangs_in_commit_is_named_by_the_deadline(self):
         """Input: 2 ranks, rank 1's commit sleeps 0.6 s; phase-2 deadline 0.4 s (commit by

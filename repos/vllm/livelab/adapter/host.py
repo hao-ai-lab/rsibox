@@ -159,7 +159,7 @@ class WorkerGroup(C.Participant):
         while True:
             time.sleep(0.02)
             r = self._rpc("prepare_poll", plan["id"])
-            if not r["ok"] or not r.get("pending"):
+            if not r.get("pending"):     # a no vote waits for the ranks still preparing
                 return r
             if time.perf_counter() - t > PREPARE_TIMEOUT_S:
                 return F.not_ok(f"workers did not prepare within {PREPARE_TIMEOUT_S} s")
