@@ -1,0 +1,191 @@
+"""Golden cases for the engine launcher (engine.py). CPU only: a small fake `vllm` stands in for
+the server and a real zygote.py runs with torch and vLLM stubbed out.
+
+Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
+"""
+import json, os, signal, socket, subprocess, sys, tempfile, time, types
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import engine, zygote  # noqa: E402
+
+ENGINE = str(HERE / "engine.py")
+
+# A stand-in for `vllm serve`: records its argv and two env variables, then serves /health
+# (200) on --port after DELAY seconds, like a server that loads for a while.
+FAKE_VLLM = r'''#!{py}
+import http.server, json, os, sys, time
+argv = sys.argv[1:]
+open(os.environ["FAKE_OUT"], "w").write(json.dumps({{"argv": argv, "env": {{
+    k: os.environ.get(k) for k in ("VLLM_CACHE_ROOT", "TRITON_CACHE_DIR")}}}}))
+time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(argv[argv.index("--port") + 1])), H).serve_forever()
+'''
+
+# Starts the real zygote.py with torch stubbed (CUDA "not initialized") and vLLM made
+# unimportable, so its import list fails fast and the zygote serves ping/check on a CPU box.
+FAKE_PYTHON = r'''#!{py}
+import runpy, sys, types
+torch = types.ModuleType("torch")
+torch.cuda = types.SimpleNamespace(is_initialized=lambda: False)
+sys.modules["torch"] = torch
+sys.modules["vllm"] = None
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+
+
+def _script(d, name, text):
+    p = os.path.join(d, name)
+    Path(p).write_text(text.format(py=sys.executable))
+    os.chmod(p, 0o755)
+    return p
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _short_dir():
+    """AF_UNIX paths are limited to 107 bytes; the default temp dir can be longer."""
+    return tempfile.mkdtemp(prefix="eng", dir="/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
+
+
+def _stop(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def test_port_in_use_means_a_listener_answers():
+    """A listening port is in use; a port that is only bound (no listen) or free is not: the
+    check asks whether a /health probe would reach another server, not whether bind() works."""
+    listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
+    bound = socket.socket(); bound.bind(("127.0.0.1", 0))
+    try:
+        assert engine.port_in_use(listener.getsockname()[1]) is True
+        assert engine.port_in_use(bound.getsockname()[1]) is False
+        assert engine.port_in_use(_free_port()) is False
+    finally:
+        listener.close(); bound.close()
+
+
+def test_busy_port_is_a_finding_and_nothing_starts():
+    """Input: a listener holds 127.0.0.1:P; `engine.py start --port P`. Expect: a port_in_use
+    finding, exit 2, the fake vllm never ran (without the check wait_healthy read the other
+    server's /health and reported a start healthy after ~0.01 s). Not covered: a port taken
+    after the check (a race)."""
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    port = srv.getsockname()[1]
+    with tempfile.TemporaryDirectory() as d:
+        fake = _script(d, "vllm", FAKE_VLLM)
+        out = os.path.join(d, "ran.json")
+        r = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port", str(port),
+                            "--cache-root", d, "--log", os.path.join(d, "serve.log"),
+                            "--vllm", fake], capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "FAKE_OUT": out})
+        srv.close()
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert json.loads(r.stdout)["finding"]["check"] == "port_in_use"
+        assert not os.path.exists(out)
+
+
+def test_wait_healthy_returns_none_as_soon_as_the_server_exits():
+    """Input: a direct start whose server exits at once with an argument error (no Traceback in
+    the log) and is not reaped yet, so /proc/<pid> still exists as a zombie. Expect: None within
+    a few seconds, not after the full timeout (before: it polled /health until the timeout,
+    an hour by default)."""
+    with tempfile.TemporaryDirectory() as d:
+        log = os.path.join(d, "serve.log")
+        with open(log, "w") as f:
+            p = subprocess.Popen([sys.executable, "-c", "import sys; print('vllm: error: "
+                                  "unrecognized arguments: --bogus'); sys.exit(2)"],
+                                 stdout=f, stderr=subprocess.STDOUT)
+        time.sleep(0.5)
+        assert os.path.exists(f"/proc/{p.pid}")          # a zombie: exited, not reaped
+        t = time.time()
+        assert engine.wait_healthy(_free_port(), p.pid, log, timeout=30, poll=0.1) is None
+        assert time.time() - t < 5
+        p.wait()
+
+
+def test_direct_start_loads_from_disk_and_reports_health_seconds():
+    """Input: `engine.py start` with a fake vllm that answers /health after 1.5 s. Expect: the
+    server got `--load-format auto` (weights from disk: a default of ipc_cache waits for a
+    preload daemon that may not exist), 127.0.0.1, and cache roots under --cache-root; the
+    launcher printed healthy_after_s >= 1.5 and exited 0. Not: a real vLLM (GPU receipt)."""
+    with tempfile.TemporaryDirectory() as d:
+        fake = _script(d, "vllm", FAKE_VLLM)
+        out, port = os.path.join(d, "ran.json"), _free_port()
+        r = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port", str(port),
+                            "--cache-root", os.path.join(d, "c"), "--log",
+                            os.path.join(d, "serve.log"), "--vllm", fake, "--timeout", "30",
+                            "--", "--enforce-eager"], capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "FAKE_OUT": out, "FAKE_DELAY": "1.5"})
+        rep = json.loads(r.stdout)
+        _stop(rep["pid"])
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert rep["healthy_after_s"] >= 1.5
+        ran = json.loads(Path(out).read_text())
+        argv = ran["argv"]
+        assert argv[argv.index("--load-format") + 1] == "auto"
+        assert argv[argv.index("--host") + 1] == "127.0.0.1"
+        assert argv[-1] == "--enforce-eager"
+        assert ran["env"]["VLLM_CACHE_ROOT"] == str(Path(d, "c", "vllm").resolve())
+
+
+def test_zygote_runs_with_the_engine_env():
+    """Input: `engine.py zygote` starts a real zygote.py; then the zygote's own env check is
+    asked about (1) the env a start with the same options builds and (2) one with another
+    cache root. Expect: (1) ok with no env finding, also through `start --zygote-check`
+    (exit 0); (2) an env finding naming VLLM_CACHE_ROOT. Proves the zygote is started with
+    engine_env(); not: a fork of a real `vllm serve` (GPU receipt)."""
+    d = _short_dir()
+    sock = os.path.join(d, "z.sock")
+    zpy = _script(d, "python", FAKE_PYTHON)
+    cache = os.path.join(d, "c")
+    base = dict(os.environ)     # the launcher's env, fixed (pytest edits os.environ in-process)
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log")],
+                       capture_output=True, text=True, timeout=120, env=base)
+    rep = json.loads(r.stdout)
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        a, _ = engine.parse(["start", "--cache-root", cache, "--log", "x"])
+        same = zygote.check(sock, engine.engine_env(a, base))
+        assert same["ok"] is True and same["accepted_findings"] == [], same
+        a2, _ = engine.parse(["start", "--cache-root", os.path.join(d, "other"), "--log", "x"])
+        other = zygote.check(sock, engine.engine_env(a2, base))
+        assert other["ok"] is False
+        assert other["findings"][0]["check"] == "env"
+        assert "VLLM_CACHE_ROOT" in other["findings"][0]["observed"]
+        chk = subprocess.run([sys.executable, ENGINE, "start", "--model", "m", "--port",
+                              str(_free_port()), "--cache-root", cache, "--log",
+                              os.path.join(d, "s.log"), "--zygote", sock, "--zygote-check"],
+                             capture_output=True, text=True, timeout=60, env=base)
+        assert chk.returncode == 0, chk.stdout + chk.stderr
+        assert json.loads(chk.stdout)["zygote_check"]["ok"] is True
+    finally:
+        _stop(rep["pid"])
+
+
+def test_fork_check_reads_vllms_spawn_fallback():
+    """Input: a server log where vLLM fell back to spawn, and one where it did not. Expect:
+    spawn_forced and a fork finding for the first; none for the second."""
+    with tempfile.TemporaryDirectory() as d:
+        bad, good = os.path.join(d, "bad.log"), os.path.join(d, "good.log")
+        Path(bad).write_text("WARNING We must use the `spawn` multiprocessing start method. "
+                             "Overriding VLLM_WORKER_MULTIPROC_METHOD to 'spawn'. Reasons: "
+                             "CUDA is initialized\n")
+        Path(good).write_text("INFO Application startup complete.\n")
+        fb, fg = engine.fork_check(bad), engine.fork_check(good)
+        assert fb["spawn_forced"] is True and engine.fork_finding(fb)["check"] == "fork"
+        assert fg["spawn_forced"] is False and engine.fork_finding(fg) is None
