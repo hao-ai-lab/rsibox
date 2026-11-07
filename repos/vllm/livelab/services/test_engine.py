@@ -59,6 +59,7 @@ def make_arg_parser(p):
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--worker-cls", default="auto")
     p.add_argument("--max-model-len")
+    p.add_argument("--model-loader-extra-config", type=__import__("json").loads, default={})
     return p
 ''',
     "vllm/utils/argparse_utils.py": "import argparse\n"
