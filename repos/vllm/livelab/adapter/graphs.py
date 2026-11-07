@@ -28,6 +28,13 @@ does not define at top level or in a top-level class, or one also called from co
 reaches, is "unknown": the check stays blocking and says why. Calls from other modules are not
 seen (static, this module only). Steps above the largest capture size run with no graph; the
 table does not count them.
+
+The split decorator itself is graph machinery, wherever it is defined: its body runs once per
+op, when vLLM decorates the op at import, and decides there whether and how the op breaks the
+graphs; its wrapper's capture path runs only while a graph is captured. The decorated ops and
+the captured graphs keep the old decision, so a swap of it changes nothing the engine runs
+(vLLM #59941 removed an early `return fn` from the decorator's body: T0 committed, witness 0 on
+every rank). `decoration_time` names such targets, in any module.
 """
 import ast
 import hashlib
@@ -148,6 +155,17 @@ def reach(source, roots, qual):
         return "unknown", (f"{qual} is reached through {via}, but also called from {outside}, "
                            "which no split op reaches (they may run inside the graphs)")
     return "split", f"{qual} is reached only through the split op(s) {via}"
+
+
+def decoration_time(qual):
+    """Why the target `qual` (a qualname) runs only when vLLM decorates its ops or captures its
+    graphs, or None: the split decorator, or code nested in it."""
+    if qual == SPLIT_DECORATOR or qual.startswith(SPLIT_DECORATOR + ".<locals>."):
+        return (f"{qual} is the decorator that makes ops break the graphs: it ran when vLLM "
+                "decorated its ops at import, and its wrapper's capture path runs only while "
+                "graphs are captured; the decorated ops and the captured graphs keep the old "
+                "code's decision")
+    return None
 
 
 def where(g, kind):

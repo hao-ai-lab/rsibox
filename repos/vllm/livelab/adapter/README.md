@@ -47,7 +47,10 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   blocking `captured_target`, so every rank votes no and the edit is reported, not applied.
   Both route R1 (recapture with the commit), which this adapter cannot run yet; the finding
   says so and names T1 (restart with the edit, or run eager) as what works today. Accepted,
-  the edit commits, and a `zero_witness` at proof is routed the same way. Calls made while the
+  the edit commits, and a `zero_witness` at proof is routed the same way. The split decorator
+  itself (`eager_break_during_capture` and code nested in it, in any module) is a blocking
+  `captured_target` too: it runs only when vLLM decorates its ops at import or captures its
+  graphs (vLLM #59941 committed T0 with witness 0 on every rank). Calls made while the
   stream captures a graph count apart from live calls.
 - **Version log.** Each side records which code version every watched function runs at each
   step (`versions`), and any change between a step's two calls (`execute_model`,
@@ -107,6 +110,7 @@ each rank with its own copy of the toy engine.
 | `test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied` | a model-code edit that committed with no finding and never ran (graphs only) |
 | `test_accepted_captured_target_proves_nothing_and_says_why` | an accepted graph edit whose zero witness gives no reason |
 | `test_split_op_target_is_advisory_and_captured_only_stays_blocking` | a veto of code that does run in Python on prefill through a split op |
+| `test_an_edit_of_the_split_decorator_is_refused_on_a_graph_engine` | an edit of the graph-split decorator (outside model code) that committed with no finding and a zero witness on every rank (vLLM #59941) |
 | `test_the_extension_logs_which_version_each_step_runs` | a mid-step change logged that was only a key joining between a step's two calls |
 | `test_an_aborted_transaction_leaves_nothing_watched` | ranks whose version logs differ after an aborted transaction |
 
