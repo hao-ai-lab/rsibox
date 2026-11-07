@@ -10,9 +10,9 @@ path*. Measured (kb/costs.md, "Why a restart costs what it costs"):
   by content and survive a move.
 - Triton autotuning (VSA `_attn_fwd_sparse`: 12 benchmark rounds, about 2 s) is not cached
   unless `TRITON_CACHE_AUTOTUNING=1`.
-- Inductor's `torch_key()` hashes every torch source file (about 2-2.5 s per process) before
-  its first cache lookup, and keeps the result in memory only. `preset_torch_key` stores it
-  on disk under a stamp of the files' sizes and mtimes, and presets it in the next process.
+- Inductor's `torch_key()` hashes every torch source file (0.8-2.6 s per process) before its
+  first cache lookup, and keeps the result in memory only. `preset_torch_key` stores it on
+  disk under a stamp of torch's install record, and presets it in the next process.
 
 `env_for(root)` gives the variables that pin every cache under one root; `check_root(root)`
 records where the root was first used and reports a finding when it is used from another
@@ -58,16 +58,23 @@ def check_root(root):
 
 
 def _stamp(top):
-    """Sizes and mtimes of every .py file under `top`: what torch_key hashes, without reading."""
+    """What identifies the installed torch without reading it: size and mtime of its install
+    record (pip rewrites it on every install) and of the files that define the key. A walk
+    over every source file cost 1.5-4.0 s on a network filesystem (2187 files), more than the
+    hash it replaces; a hand edit of torch's sources is not seen: delete the cache file."""
+    import glob
+    site = os.path.dirname(top)
+    files = sorted(glob.glob(os.path.join(site, "torch-*.dist-info", "RECORD"))) + [
+        os.path.join(top, "version.py"), os.path.join(top, "_inductor", "codecache.py")]
     h = hashlib.sha256()
     n = 0
-    for d, dirs, files in os.walk(top):
-        dirs.sort()
-        for f in sorted(files):
-            if f.endswith(".py"):
-                st = os.stat(os.path.join(d, f))
-                h.update(f"{d}/{f}:{st.st_size}:{st.st_mtime_ns}\n".encode())
-                n += 1
+    for f in files:
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        h.update(f"{f}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+        n += 1
     return h.hexdigest(), n
 
 
