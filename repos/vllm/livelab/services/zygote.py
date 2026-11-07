@@ -24,11 +24,17 @@ caller can accept it with `accept`; nothing passes silently):
 A finding without acceptance means no fork: the reply carries the finding and the suggested
 actions. The zygote itself stops if its imports initialized CUDA or the CUDA driver, since no
 forked child could then use the GPU; it names the module, which the modules file can exclude.
+
+Before its imports the zygote installs forksafe.py (FASTRSI_ZYGOTE_FORKSAFE=0 turns it off):
+torch.cuda.get_device_capability and current_device answer from NVML while CUDA is not
+initialized. Every forked server inherits it, so a library that asks for the GPU's capability
+at import (FlashInfer, imported by the API server at TP>1) no longer initializes CUDA there,
+and vLLM keeps forking the engine core and the workers instead of spawning them.
 """
 import argparse, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vllm_args, zygote_refresh
+import forksafe, vllm_args, zygote_refresh
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.
 REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
@@ -215,6 +221,10 @@ def serve(sock_path, modules_file):
     if err:                      # fail before minutes of imports, not after them
         raise SystemExit(err)
     t0 = time.time()
+    fs = {"installed": False, "why": "FASTRSI_ZYGOTE_FORKSAFE=0"}
+    if os.environ.get("FASTRSI_ZYGOTE_FORKSAFE", "1") == "1":
+        import torch
+        fs = forksafe.install(torch.cuda)
     mods = list(BASE_MODULES)
     skip = set()
     if modules_file:
@@ -252,7 +262,8 @@ def serve(sock_path, modules_file):
     print(json.dumps({"event": "zygote_ready", "pid": os.getpid(), "import_seconds":
                       round(time.time() - t0, 2), "modules": len(sys.modules),
                       "source_files": len(sources), "graph_modules": len(graph),
-                      "graph_seconds": graph_s, "failed_imports": failed[:50]}), flush=True)
+                      "graph_seconds": graph_s, "failed_imports": failed[:50],
+                      "forksafe": {**fs, "counts": dict(forksafe.COUNTS)}}), flush=True)
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)   # children are reaped automatically
     if os.path.exists(sock_path):
         os.unlink(sock_path)
