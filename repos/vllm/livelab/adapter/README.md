@@ -33,7 +33,9 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   it off). `collective_rpc` gets the time left plus `FASTRSI_KERNEL_RPC_GRACE` (2 s) as its
   timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
   refuses every call (`deadline_missed`) and the kernel poisons the host: undo only, then
-  respawn.
+  respawn. The same for a call from outside the loop (prepare, status) whose job the loop
+  started but did not finish while the caller waited: it may still apply, so the group
+  refuses every later call and poisons the host itself.
 - **Import order.** The host's import finder asks the other finders on `sys.meta_path` for
   `vllm.v1.engine.core` (an overlay first), so the core runs the same text the plan's base is.
 
@@ -73,6 +75,8 @@ each rank with its own copy of the toy engine.
 | `test_two_ranks_switch_in_one_gap_and_undo_restores_the_same_code` | a rank that keeps the edit after undo, or a one-role edit vetoed by the other role's `empty_change` |
 | `test_a_rank_that_raises_replies_and_the_others_roll_back` | a raising RPC method that misaligns every later reply |
 | `test_a_timed_out_rpc_poisons_the_host_and_refuses_later_calls` | a late reply read by the next call |
+| `test_a_loop_job_that_outlives_its_wait_poisons_the_host` | a prepare still staging in the loop after its caller counted it as a no vote, with the group still in use |
+| `test_a_rank_that_raises_systemexit_still_replies` | a `SystemExit` escaping the RPC, so a rank sends no reply |
 | `test_a_missing_rank_or_dp_group_refuses_the_transaction` | witness, receipt and undo that covered 1 of 4 DP groups with no word |
 | `test_a_cell_for_one_role_commits_while_the_other_abstains` | a repair cell dropped, so no live run could use one |
 | `test_status_without_a_txn_is_the_hosts_overall_status` | `status` without a txn raising KeyError |

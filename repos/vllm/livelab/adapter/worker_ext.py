@@ -77,7 +77,7 @@ class Endpoint:
         t0 = time.perf_counter()
         try:
             r = self._dispatch(method, payload)
-        except Exception as e:                       # never raise across the RPC
+        except BaseException as e:   # never raise across the RPC, not even SystemExit
             r = F.not_ok(f"{method} on {self.who()}: {type(e).__name__}: {e}",
                          traceback=traceback.format_exc()[-1500:])
         if not isinstance(r, dict) or "ok" not in r:
@@ -114,7 +114,7 @@ class KernelWorkerExtension:
         """The kernel participant protocol on this rank. Returns an ok-dict, never raises."""
         try:
             ep = self.fastrsi_kernel_endpoint()
-        except Exception as e:
+        except BaseException as e:
             return {"ok": False, "error": f"endpoint: {type(e).__name__}: {e}",
                     "rank": getattr(self, "rank", None), "pid": os.getpid()}
         return ep.dispatch(method, payload)

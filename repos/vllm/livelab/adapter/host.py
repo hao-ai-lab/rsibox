@@ -26,7 +26,9 @@ How a transaction runs (kernel `StepGapCoordinator`):
   op; 0 turns it off). collective_rpc gets `timeout` = the time left +
   FASTRSI_KERNEL_RPC_GRACE (default 2 s). A timeout leaves the late reply in the executor's
   response queue, where the next call would read it, so after one the worker group refuses
-  every call (`deadline_missed`; respawn the engine) and the kernel poisons the host.
+  every call (`deadline_missed`; respawn the engine) and the kernel poisons the host. The
+  same holds for a call made from outside the loop (prepare, status, ...) whose job the loop
+  started but did not finish while the caller waited (`in_loop`): it may still apply.
 - The worker group expects a reply from every rank this engine core reaches (TP x PP); a
   missing one is a blocking `participant_missing`. At data parallel >1 vLLM runs one engine
   core per DP group and this host reaches only its own, so the other groups are expected too
@@ -84,6 +86,10 @@ class _Job:
         self.done.set()
 
 
+class LateJob(TimeoutError):
+    """The loop started the job but it did not finish in time: it may still be running."""
+
+
 class WorkerGroup(C.Participant):
     """All worker ranks as one participant: each call is one collective_rpc from the loop, and
     the reply keeps every rank's own reply (kernel `merge_ranks`). Bounded by the RPC timeout
@@ -114,15 +120,27 @@ class WorkerGroup(C.Participant):
                 return e
         try:
             rs = self.host.in_loop(call)
-        except Exception as e:            # includes the loop not running the job in time
+        except LateJob as e:              # started and still running: it may yet apply
+            return self._break(method, deadline_at, e, (
+                f"collective_rpc {method}: {e}; it may still apply: respawn"),
+                f"{method} finishes in the loop while its caller waits")
+        except Exception as e:            # the loop never started the job: it never runs
             return F.not_ok(f"collective_rpc {method}: {type(e).__name__}: {e}")
         if isinstance(rs, TimeoutError):
-            self.broken = (f"collective_rpc {method} timed out after {timeout} s; a late "
-                           "reply stays in the executor's queue: respawn")
-            return F.not_ok(f"collective_rpc {method}: TimeoutError: {rs}", [{**F.finding(
-                "deadline_missed", self.broken, f"{method} answers within {timeout} s"),
-                "participant": self.name}])
+            return self._break(method, deadline_at, rs, (
+                f"collective_rpc {method} timed out after {timeout} s; a late reply stays "
+                "in the executor's queue: respawn"), f"{method} answers within {timeout} s")
         return C.merge_ranks(method, rs)
+
+    def _break(self, method, deadline_at, err, why, expected):
+        """A call the group cannot account for: refuse every later call and poison the host.
+        A phase-2 call with a deadline is poisoned by the kernel (`deadline_missed` in the
+        reply of a bounded participant); any other call (prepare, status, ...) here."""
+        self.broken = why
+        f = {**F.finding("deadline_missed", why, expected), "participant": self.name}
+        if deadline_at is None:
+            self.host.co.poison.append(f)
+        return F.not_ok(f"collective_rpc {method}: {type(err).__name__}: {err}", [f])
 
     def prepare(self, plan):
         return self._rpc("prepare", plan)
@@ -211,8 +229,8 @@ class Host:
                     job.cancelled = True
                     raise TimeoutError(f"the engine loop did not run the job within {timeout} s")
         if not job.done.wait(timeout):
-            raise TimeoutError(f"the engine loop started the job but it did not finish within "
-                               f"{timeout} s")
+            raise LateJob(f"the engine loop started the job but it did not finish within "
+                          f"{timeout} s")
         if job.error is not None:
             raise job.error
         return job.value

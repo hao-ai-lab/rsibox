@@ -11,9 +11,12 @@ and the kernel are the real code.
 import importlib
 import itertools
 import os
+import queue
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from types import SimpleNamespace as NS
@@ -144,6 +147,68 @@ class TransactionTest(unittest.TestCase):
         self.assertEqual((again["outcome"], again["findings"][0]["check"]),
                          ("refused", "session_poisoned"))
         self.assertIn("unusable", h.workers.status("hx")["error"])
+
+    def test_a_loop_job_that_outlives_its_wait_poisons_the_host(self):
+        """Input: the host driven from a control thread with a stand-in busy loop on its own
+        thread; the first collective_rpc (prepare) takes 0.5 s, the worker group waits 0.2 s
+        for its job. Expected: the transaction aborts with `deadline_missed` from the
+        workers, the host is poisoned, the next transaction is refused with
+        `session_poisoned`, and the worker group refuses every later call. Fails before the
+        fix: the late prepare was an ordinary no vote, the group stayed usable and the next
+        transaction ran while the first prepare was still staging in the loop. Not: vLLM's
+        real busy loop (LoopTest covers the patched loop)."""
+        h, names, _ = make_host(self, "late")
+        q = queue.SimpleQueue()
+        h.core.input_queue = q
+
+        def loop():
+            while True:
+                _, job = q.get()
+                if job is None:
+                    return
+                job.run()
+        th = threading.Thread(target=loop, daemon=True)
+        th.start()
+        h.loop_thread = th
+        self.addCleanup(th.join, 5)
+        self.addCleanup(q.put, (H.TAG, None))
+        wait = h.in_loop        # the group's wait for its job: 0.2 s instead of 60 s
+        h.in_loop = lambda fn, gap=False, timeout=60.0: wait(fn, gap, timeout if gap else 0.2)
+        ex = h.core.model_executor
+        full, slow = ex.collective_rpc, [0.5]
+
+        def rpc(name, timeout=None, args=()):
+            if slow:                     # the first call: prepare
+                time.sleep(slow.pop())
+            return full(name, timeout, args)
+        ex.collective_rpc = rpc
+        r = h.handle({"op": "txn", "plan": plan("late")})
+        prep = r["receipt"]["participants"]["workers"]["prepare"]
+        self.assertEqual((r["outcome"], [f["check"] for f in prep["findings"]]),
+                         ("aborted", ["deadline_missed"]))
+        self.assertEqual([f["participant"] for f in h.co.poison], ["workers"])
+        again = h.handle({"op": "txn", "plan": plan("late2")})
+        self.assertEqual((again["outcome"], again["findings"][0]["check"]),
+                         ("refused", "session_poisoned"))
+        self.assertIn("unusable", h.workers.status("late")["error"])
+        self.assertEqual([ran(n) for n in names], ["base", "base"])
+
+    def test_a_rank_that_raises_systemexit_still_replies(self):
+        """Input: rank 1's commit raises SystemExit (a repair cell or method calling
+        sys.exit). Expected: every rank replies (rank 1 not-ok naming SystemExit), the
+        transaction is rolled_back and both ranks run "base". Fails before the fix: dispatch
+        caught only Exception, so SystemExit escaped the RPC (here: out of handle itself)."""
+        h, names, eps = make_host(self, "exit")
+
+        def bye(txn):
+            raise SystemExit(3)
+        eps[1].lp.commit = bye
+        r = h.handle({"op": "txn", "plan": plan("ex")})
+        commit = r["receipt"]["participants"]["workers"]["commit"]
+        self.assertEqual([(x["rank"], x["ok"]) for x in commit["ranks"]], [(0, True), (1, False)])
+        self.assertIn("SystemExit", commit["ranks"][1]["error"])
+        self.assertEqual((r["outcome"], [ran(n) for n in names]),
+                         ("rolled_back", ["base", "base"]))
 
     def test_a_missing_rank_or_dp_group_refuses_the_transaction(self):
         """Input: (a) the parallel config says TP 2 x DP 2 (this is DP rank 0); (b) DP 1, but
