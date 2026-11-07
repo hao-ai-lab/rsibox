@@ -40,8 +40,9 @@ then the iteration on top of it. That way each framework rule points to the PR t
     `feat(livelab)!: ...`.
   - CI (`.github/workflows/pr-rules.yml`) fails titles that don't match.
 - **Description:** fill `.github/pull_request_template.md`. Say what you did not verify.
-  An Antigravity reviewer then polishes the title and description in CI, and the change is
-  applied only if every fact is kept (`.github/review/`). Run it locally before opening a PR:
+  An Antigravity reviewer can polish the title and description, applied only if every fact is
+  kept (`.github/review/`). It is optional and never blocks a merge: the owner comments
+  `/describe` on a PR, before or after merge, or you run it locally:
   `python3 .github/review/review.py --pr <n> --apply`.
 - **Loop record:** a PR that changes `repos/<engine>/` is a loop iteration. Its description
   fills the "Loop record" section: engine, upstream PRs, function groups, the rule added,
@@ -75,8 +76,8 @@ verdict:
 | **reject** | the evidence is wrong: the line does not do what is claimed, or a test already covers it | `Not a bug:` with the counter-evidence (`file:line`, test name or output). Never a bare "won't fix". |
 | **defer** | real, but low severity, optional or outside this PR's boundary | a link to the issue that tracks it |
 
-- Agent code review is opt-in: the repository owner comments `/review` on a PR. Merging never
-  waits for it. Findings on merged PRs are answered afterwards in batches: one fix PR per
+- Agent code review is opt-in: the repository owner comments `/review` on a PR, before or
+  after merge. Merging never waits for it. Findings on merged PRs are answered afterwards in batches: one fix PR per
   boundary, with the verdict table in its description.
 - Fix only high- and medium-severity findings that reproduce. Defer low severity and "optional
   hardening" to an issue.

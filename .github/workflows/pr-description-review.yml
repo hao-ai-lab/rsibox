@@ -1,7 +1,13 @@
 name: PR description review
+# Description review is opt-in, before or after merge: the repository owner comments `/describe`
+# on a PR (open or merged), or runs the workflow by hand. On a merged PR it updates the PR page
+# only; the squash commit keeps the description it was merged with.
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, labeled]
+    types: [opened, synchronize, reopened]
+    paths: ['.github/review/**', '.github/workflows/pr-description-review.yml']
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       pr:
@@ -11,11 +17,12 @@ permissions:
   contents: read
   pull-requests: write
 concurrency:
-  group: description-review-${{ github.event.pull_request.number || inputs.pr }}
+  group: description-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
   cancel-in-progress: true
 jobs:
   checker:
     name: Description checker rejects changed facts (golden cases)
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -23,20 +30,33 @@ jobs:
       - run: python3 .github/review/test_review.py -v
   review:
     name: Polish title and description via the review service, apply only if facts are kept
-    needs: checker
-    # On "labeled", run only for the review-description label (to re-review after edits).
-    if: github.event.action != 'labeled' || github.event.label.name == 'review-description'
+    # Only on demand: a `/describe` comment on a PR by the repository owner, or a manual run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/describe') &&
+       github.event.comment.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
+      # Runs the default branch's review code (github.sha), never the PR's; the PR is read as data.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Acknowledge the /describe comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
       - env:
           GH_TOKEN: ${{ github.token }}
           FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
           FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          PR: ${{ github.event.issue.number || inputs.pr }}
         run: |
           if [ -z "$FASTRSI_REVIEW_URL" ] || [ -z "$FASTRSI_REVIEW_TOKEN" ]; then
             echo "::notice::Review service not configured (vars.FASTRSI_REVIEW_URL, secrets.FASTRSI_REVIEW_TOKEN). Skipped; nothing changed."

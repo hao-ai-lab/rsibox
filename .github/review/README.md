@@ -21,8 +21,8 @@ Two reviews share one review service:
 
 ## Code review
 
-On every non-draft PR (opened, new commits, ready for review; add the `review-code` label or
-run the workflow by hand to re-review), `code_review.py`:
+On demand only: when the repository owner comments `/review` on a PR (open or merged), or the
+workflow is run by hand with the PR number. Merging never waits for it. `code_review.py`:
 
 1. fetches the diff (cut at 90,000 characters; the review says so when it is cut) and the
    description, and builds the prompt: `code_review.md`, the PR as untrusted data, `AGENTS.md`;
@@ -116,8 +116,11 @@ The golden cases run either way.
 
 **Things to know:**
 
-- Runs on opened, reopened and ready-for-review. To review again after editing, add the
-  `review-description` label or run the workflow by hand with the PR number.
+- Runs on demand only: the repository owner comments `/describe` on a PR (open or merged), or
+  the workflow is run by hand. On a merged PR it updates the PR page only; the squash commit
+  keeps the description it was merged with.
+- `/review` and `/describe` count only from the repository owner's account. Agents that post
+  with that account can trigger them too, so they do it only when asked.
 - Edits made with the workflow's `GITHUB_TOKEN` do not trigger other workflows, so the PR rules
   check does not rerun on the new title. The checker enforces the same title and attribution
   rules itself.
