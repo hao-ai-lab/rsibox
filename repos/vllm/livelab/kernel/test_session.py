@@ -49,6 +49,36 @@ class SessionTest(unittest.TestCase):
         self.assertTrue(sess.uninstall()["ok"])
         self.assertEqual(sess.state(), "poisoned")
 
+    def test_group_participant_gives_every_ranks_fingerprint(self):
+        """Input: a session over one GroupParticipant of two ranks (each its own copy of the
+        toy module); an install of `return y * 100`; then a hand edit of Engine.step on rank 1
+        only. Expected: the session starts at base and the install commits ("edited"); after
+        the hand edit status() is poisoned with a `tampered` finding naming rank 1's
+        Engine.step. Pain point: the group did not forward fingerprint, so it answered "no
+        fingerprint" and a session over a group was poisoned before its first install. Not:
+        ranks in other processes (adapter host test_side)."""
+        n0, eng0, _ = fresh("grp0")
+        n1, eng1, _ = fresh("grp1")
+        grp = C.GroupParticipant("workers", [C.LocalParticipant("r0", alias={"toy": n0}),
+                                             C.LocalParticipant("r1", alias={"toy": n1})])
+        fp = grp.fingerprint(["toy.engine"])
+        self.assertTrue(fp["ok"], fp.get("error"))
+        self.assertIn(f"rank1/toy.engine:Engine.step:{at(ENG, 'def step')}", fp["code"])
+        sess = SS.Session(C.Coordinator([grp], phase2_deadline_s=None), ["toy.engine"])
+        self.assertEqual(sess.state(), "base", sess.status())
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        res = sess.install(plan)
+        self.assertEqual((res["outcome"], sess.status()["state"]), ("committed", "edited"))
+        self.assertEqual((eng0.Engine().step(3), eng1.Engine().step(3)), (1700, 1700))
+        eng1.Engine.step.__code__ = eng1.Engine.drain.__code__.replace(
+            co_name="step", co_qualname="Engine.step")                     # by hand, rank 1
+        st = sess.status()
+        self.assertEqual((st["state"], [f["check"] for f in st["poison"]]),
+                         ("poisoned", ["tampered"]))
+        self.assertIn("workers:rank1/toy.engine:Engine.step", st["poison"][0]["observed"])
+
     def test_install_after_an_unjournaled_edit_is_refused(self):
         """Input: a session over one rank at base; someone rebinds Engine.drain.__code__ by
         hand; with no status() call in between, an install of an edit to Engine.step.
