@@ -258,10 +258,7 @@ def _weigh(v, seen, depth=0):
     if id(v) in seen or depth > 4:
         return 0, 0, 0
     seen.add(id(v))
-    try:
-        import torch
-    except ImportError:
-        torch = None
+    torch = sys.modules.get("torch")    # a process that never imported torch holds no tensors
     if torch is not None:
         if isinstance(v, torch.Tensor):
             try:
@@ -343,13 +340,10 @@ def release_held(old_modules):
                                   f"{h['where']}: {type(v).__name__} holding {h['bytes']} bytes ({h['cuda_bytes']} on CUDA), "
                                   f"{h['graphs']} CUDA graphs", "state the refreshed code builds again, released"))
     gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available() and torch.cuda.is_initialized():
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-    except ImportError:
-        pass
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.cuda.is_initialized():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
     return {"released": released, "findings": fs,
             "cuda_bytes_released": sum(h["cuda_bytes"] for h in released),
             "graphs_released": sum(h["graphs"] for h in released)}
