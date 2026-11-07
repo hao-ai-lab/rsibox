@@ -1,0 +1,43 @@
+name: PR code review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to review
+        required: true
+permissions:
+  contents: read
+  pull-requests: write
+concurrency:
+  group: code-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+jobs:
+  checker:
+    name: Code review checker keeps only diff-anchored findings and never approves (golden cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/review/test_code_review.py -v
+  review:
+    name: Agent code review (agy, codex) via the review service, posted as one COMMENT review
+    needs: checker
+    # Non-draft PRs only. On "labeled", run only for the review-code label (to re-review on demand).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       (github.event.action != 'labeled' || github.event.label.name == 'review-code'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
+          FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: python3 .github/review/code_review.py --pr "$PR" --engines agy,codex --post
