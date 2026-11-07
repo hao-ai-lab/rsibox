@@ -20,6 +20,10 @@ Contract:
   Otherwise the worker logs a finding and profiles as usual. A miss next to plans of other
   configs names the fields that differ (finding "kvplan_mismatch"). FASTRSI_KVPLAN_FORCE=1
   reuses despite less free memory.
+- A plan holds a positive KV size only. A measurement of zero or less (vLLM then fails this
+  start with "No available memory for the cache blocks") is not recorded, and a plan file that
+  holds one is not reused: each is a finding ("kvplan_not_recorded", "kvplan_unusable"), so one
+  start that ran while another process held GPU memory cannot fail every later start.
 - With TP > 1 every rank takes the same branch (all-reduce MIN of "can reuse"): the profile run
   has collectives, and one rank skipping it would hang the others. When torch.distributed is
   initialized but the ranks cannot agree (no vLLM world group), every rank profiles (finding
@@ -173,6 +177,15 @@ def wrap(orig):
         idn = ident(self)
         free = int(self.init_snapshot.free_memory)
         rec = load(plan_dir, idn)
+        unusable = rec is not None and int(rec.get("result", 0)) <= 0
+        if unusable:
+            _say("kvplan_unusable", finding=True, key=key(idn), rank=idn["rank"],
+                 bytes=rec.get("result"), free_then=rec.get("init_free"),
+                 why="the plan holds no positive KV size (measured while GPU memory was held "
+                     "elsewhere?); profiling and replacing it",
+                 actions=["accept: this start records a new plan if its measurement is "
+                          "positive", "free the GPU memory held by other processes"])
+            rec = None
         local = rec is not None and (free >= rec["init_free"]
                                      or os.environ.get("FASTRSI_KVPLAN_FORCE") == "1")
         agreed = all_agree(local)
@@ -185,26 +198,35 @@ def wrap(orig):
                  free_then=rec["init_free"], free_now=free, workspace=ws,
                  seconds=round(time.perf_counter() - t0, 3))
             return rec["result"]
-        if rec is None:
+        if rec is None and not unusable:
             near = nearest(plan_dir, idn)
             if near is not None:
                 _say("kvplan_mismatch", finding=True, key=key(idn), rank=idn["rank"], **near,
                      why="no plan for this config; profiling (+ the profile run's seconds)",
                      actions=["accept: the plan is recorded for this config now",
                               "align the differing fields to reuse the other plan"])
-        elif agreed is None:
-            pass                                  # all_agree logged kvplan_no_agreement
+        elif rec is None or agreed is None:
+            pass                # kvplan_unusable, or all_agree's kvplan_no_agreement, is logged
         elif not local:
             _say("kvplan_free_memory", finding=True, key=key(idn), rank=idn["rank"],
                  free_now=free, free_then=rec["init_free"],
                  why="less free GPU memory than when the plan was measured; profiling",
                  actions=["FASTRSI_KVPLAN_FORCE=1 reuses it (risk: OOM at the first large "
                           "batch)", "free the GPU memory held by other processes"])
-        else:
+        elif rec is not None:
             _say("kvplan_rank_disagrees", finding=True, key=key(idn), rank=idn["rank"],
                  why="another rank cannot reuse its plan; every rank profiles so the profile "
                      "run's collectives match")
         result = orig(self, *a, **k)
+        if int(result) <= 0:
+            _say("kvplan_not_recorded", finding=True, key=key(idn), rank=idn["rank"],
+                 bytes=int(result), free_now=free,
+                 why="the profile run left no memory for the KV cache; a plan with this size "
+                     "would make every later start with this config fail",
+                 actions=["free the GPU memory held by other processes, then start again",
+                          "raise --gpu-memory-utilization"],
+                 seconds=round(time.perf_counter() - t0, 3))
+            return result
         attrs = {n: (int(getattr(self, n)) if getattr(self, n, None) is not None else None)
                  for n in ATTRS}
         path = save(plan_dir, idn, {"result": int(result), "init_free": free, "attrs": attrs,

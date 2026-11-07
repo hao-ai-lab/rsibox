@@ -92,6 +92,33 @@ def test_plan_of_another_config_is_a_finding_and_the_profile_runs(plan_dir, capl
     assert _events(caplog, True)[-1]["event"] == "kvplan_free_memory"
 
 
+def test_a_measurement_with_no_kv_memory_is_never_recorded_or_reused(plan_dir, caplog):
+    """Input: a start whose profile run leaves -9.64 GiB for the KV cache (another process held
+    GPU memory on one rank in our TP2 run), then a start with more free memory and the same
+    config; also an old plan file that holds such a size. Expect: no plan is written for the
+    bad measurement (finding kvplan_not_recorded); the next start profiles and records 90 GiB;
+    the old bad file is not reused (finding kvplan_unusable) but replaced. Before: the bad
+    size was saved, and every later start with this config reused it and failed with "No
+    available memory for the cache blocks". Not: why that GPU had memory held (GPU only)."""
+    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    bad = -int(9.64 * GiB)
+    Bad = type("Bad", (FakeWorker,), {"determine_available_memory": kvplan.wrap(
+        lambda self: (setattr(FakeWorker, "profiles", FakeWorker.profiles + 1), bad)[1])})
+    assert Bad(free=148 * GiB).determine_available_memory() == bad
+    assert list(plan_dir.glob("*.json")) == []
+    assert _events(caplog, True)[-1]["event"] == "kvplan_not_recorded"
+    assert Planned(free=150 * GiB).determine_available_memory() == 90 * GiB
+    assert FakeWorker.profiles == 2
+    # An old plan file holding a non-positive size, as written before this check.
+    (f,) = plan_dir.glob("*.json")
+    rec = json.loads(f.read_text())
+    f.write_text(json.dumps({**rec, "result": bad, "init_free": 140 * GiB}))
+    assert Planned(free=150 * GiB).determine_available_memory() == 90 * GiB
+    assert FakeWorker.profiles == 3
+    assert _events(caplog, True)[-1]["event"] == "kvplan_unusable"
+    assert json.loads(f.read_text())["result"] == 90 * GiB
+
+
 # Two real torch.distributed ranks (gloo, CPU) without vLLM's world group: rank 0 can reuse its
 # plan, rank 1 cannot.
 AGREE = r'''
