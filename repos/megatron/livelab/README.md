@@ -143,8 +143,13 @@ more. The zygote is ready 12-25 s after its start (64 native threads, one Python
 Same results as `torchrun` (no deterministic mode): loss of steps 1-2 equal to 4 decimals (14B 12.9215, 12.9391; 32B
 12.8841, 12.9135); step 3 within the spread of `torchrun` repeats (14B: zygote 14.1019-14.1043, torchrun 14.1019-14.1059;
 32B: 19.0409-19.0575 vs 19.0453-19.0471); steady step 4.6 s (14B), 6.7-7.2 s (32B) either way.
-Steady state is 2.0-3.2% slower in forked ranks than in torchrun ranks (14B, same CPU binding,
-4.50-4.55 vs 4.40-4.45 s per step over steps 3-12, 10 runs); not the thread pool, not the CUDA-query
-patches; cause not found. Compare throughput only between candidates started the same way.
+Steady state is slower in forked ranks than in torchrun ranks: 14B, same CPU binding, steps 3-12,
+torchrun 4.40-4.46 s per step (16 runs) against 4.50-4.93 s for forked ranks (22 runs), +2% early in
+the day and +8-11% later on the same node while torchrun stayed put. Bisected without finding the
+cause: it stays when the zygote imported nothing before the fork, and does not depend on the
+OpenMP pool, the CUDA-query patches, garbage collection (same collections, gc.freeze no help),
+TORCH_NCCL_ASYNC_ERROR_HANDLING or where the rendezvous store runs. A forked rank has 31 more
+native threads than a torchrun rank (176 vs 144). Do not compare throughput between a forked and a
+torchrun start; use torchrun for throughput and the zygote for fast loss and correctness checks.
 What remains per restart is Megatron's own: init 2.2-4.5 s, warm-up 0.6-3 s, build 0.7-1 s, and the first step (9.4-11.4 s
 at 14B, 14-17.4 s at 32B: lazy communicators, cuDNN attention plans, allocator growth; see `kb/costs.md`).
