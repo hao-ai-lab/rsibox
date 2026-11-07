@@ -41,6 +41,13 @@ lab runs (`megatron-core` 0.20 dev, upstream commit ae76c60e6). Source: our 2026
 Base vs base, same 4 steps: loss equal to 3 decimals (`12.948, 12.928, 14.255, 15.599`); 7,134 and
 7,537 tokens/s/GPU.
 
+Code restart from the zygote (https://github.com/GindaChen/fastrsi/pull/88): the forked ranks re-import
+only `megatron`, while torch and Transformer Engine stay loaded. #7575 was ready 40.9 s after the
+request, against 78.8 s for the plain restart. It reached the step start at 19.0 s, of which the
+re-import took 1.4 s, and its loss stayed within 1.6e-3 of the base. #8579 took 148.7 s: it was the
+first fork after the zygote started (40.4 s), and its kernel warm-up took 65.8 s instead of 4-5 s,
+not explained yet.
+
 Costs: the live-swap pass over six PRs took 218 s in all (two base checks, six installs, two 4-step checks),
 against 450 s predicted. Each code-restart PR took 3.5-7.5 min (restart 79-89 s, an 8-step check, exit). The
 #7575 record also includes 22 minutes of waiting for the restart GPUs.
