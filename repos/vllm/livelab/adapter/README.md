@@ -12,9 +12,11 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   runs the kernel's `StepGapCoordinator` over two participants: the workers (`WorkerGroup`,
   every rank behind one `collective_rpc`) and the engine core (an `Endpoint` in its own
   process). It serves a file control channel (`ctl.json` -> `reply/<seq>.json`) with the ops
-  `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `at_base`, `ping`.
-- **Phase 1** (prepare) runs in the host thread for the core and as one `collective_rpc` from
-  the loop for the workers. **Phase 2** (validate, commit or abort, undo of a failed commit) is
+  `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `versions`, `at_base`, `ping`.
+- **Phase 1** (prepare) runs in a thread on every side (`side.Side`): the host sends
+  `prepare_start` and then `prepare_poll` every 20 ms until no rank is pending, each one
+  `collective_rpc` from the loop, so the engine keeps stepping while the ranks stage. A rank
+  that finished early repeats its vote until the transaction ends. **Phase 2** (validate, commit or abort, undo of a failed commit) is
   one loop job that runs only when no batch is in flight; while it waits, nothing new is
   scheduled ("pause keep"). Every collective_rpc is issued from the loop thread, so every rank
   handles it between the same two steps.
@@ -30,19 +32,35 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   all). A role with nothing to do abstains (votes yes, changes nothing) instead of vetoing with
   `empty_change`.
 - **Deadline.** Phase 2 has a deadline (`FASTRSI_KERNEL_PHASE2_DEADLINE`, default 5 s; 0 turns
-  it off). `collective_rpc` gets the time left plus `FASTRSI_KERNEL_RPC_GRACE` (2 s) as its
-  timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
+  it off). Each side runs its phase-2 calls on its own lane thread and answers by the
+  deadline, so every rank replies and a late one is `deadline_missed` naming its rank; the
+  kernel rolls the others back in the same gap and poisons the host. `collective_rpc` gets the
+  time left plus `FASTRSI_KERNEL_RPC_GRACE` (2 s) as a backstop timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
   refuses every call (`deadline_missed`) and the kernel poisons the host: undo only, then
   respawn. The same for a call from outside the loop (prepare, status) whose job the loop
   started but did not finish while the caller waited: it may still apply, so the group
   refuses every later call and poisons the host itself.
+- **Graph detection** (`graphs.py`, `side.Side`). On a worker whose config runs CUDA graphs
+  or torch.compile, a target in model code (`vllm.model_executor.models` / `.layers`) is
+  checked at prepare. Reached only through an op that splits the graph: an advisory
+  `captured_partly` (Python on prefill, graphs on decode). Captured only, or undecided: a
+  blocking `captured_target`, so every rank votes no and the edit is reported, not applied.
+  Both route R1 (recapture with the commit), which this adapter cannot run yet; the finding
+  says so and names T1 (restart with the edit, or run eager) as what works today. Accepted,
+  the edit commits, and a `zero_witness` at proof is routed the same way. Calls made while the
+  stream captures a graph count apart from live calls.
+- **Version log.** Each side records which code version every watched function runs at each
+  step (`versions`), and any change between a step's two calls (`execute_model`,
+  `sample_tokens`), so the ranks' logs show whether a step ran mixed versions.
 - **Import order.** The host's import finder asks the other finders on `sys.meta_path` for
   `vllm.v1.engine.core` (an overlay first), so the core runs the same text the plan's base is.
 
 | File | What it owns |
 |---|---|
 | `host.py` | `Host` (coordinator, control channel, step timings), `WorkerGroup`, `parallel`, the `EngineCoreProc` patch, the import finder. |
-| `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`). |
+| `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`; serves a `Side` and wraps the step calls). |
+| `side.py` | `Side(Endpoint)`: background prepare, per-rank phase-2 lane and deadline, graph detection and routing, version log, a fault hook for tests. |
+| `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
 
 ## Run it
@@ -61,7 +79,7 @@ python3 -m adapter.client <dir> '{"op": "txn", "plan": {...}}'
 
 ## Golden tests
 
-From the repo root (CPU, under a second; CI runs the same command):
+From the repo root (CPU, about 2 s; CI runs the same command):
 
 ```
 python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
@@ -82,9 +100,16 @@ each rank with its own copy of the toy engine.
 | `test_status_without_a_txn_is_the_hosts_overall_status` | `status` without a txn raising KeyError |
 | `test_a_gap_job_waits_for_the_batch_in_flight_and_nothing_new_is_scheduled` | a commit while a batch is in flight, finishing it on mixed code |
 | `test_the_core_comes_from_the_overlay_and_is_patched` | a false `base_mismatch` when an overlay serves the engine core |
+| `test_ranks_that_finish_early_keep_their_vote` | ranks that answered "no prepare started" after their first finished poll: a false abort |
+| `test_a_no_vote_waits_for_the_rank_still_preparing` | a no vote that ends the poll while another rank is still preparing: its vote lost, its staging racing the abort |
+| `test_an_abort_while_staging_drops_what_the_prepare_staged` | an abort during a background prepare, after which the prepare stages the transaction and watches its keys anyway |
+| `test_a_rank_that_hangs_in_commit_is_named_by_the_deadline` | one hung rank holding every step, or a late RPC reply misaligning the next call |
+| `test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied` | a model-code edit that committed with no finding and never ran (graphs only) |
+| `test_accepted_captured_target_proves_nothing_and_says_why` | an accepted graph edit whose zero witness gives no reason |
+| `test_split_op_target_is_advisory_and_captured_only_stays_blocking` | a veto of code that does run in Python on prefill through a split op |
+| `test_the_extension_logs_which_version_each_step_runs` | a mid-step change logged that was only a key joining between a step's two calls |
+| `test_an_aborted_transaction_leaves_nothing_watched` | ranks whose version logs differ after an aborted transaction |
 
 ## Not here yet
 
-- Prepare runs inside one `collective_rpc`, so the loop stalls one step for as long as the
-  ranks take to stage. Per-rank lanes, background prepare and graph detection come next.
 - R1 and R6 (rebuilds after the commit) and their routes; DP>1; pipeline parallel.
