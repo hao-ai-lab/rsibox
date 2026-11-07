@@ -88,7 +88,10 @@ template's conformance cases c0-c10.
   this process; `CallParticipant` reaches one in another process through `call(method,
   payload)`. Chained edits: a later plan for a module is staged against the text the last
   committed transaction installed, with that participant's own code and line maps. A plan
-  that would change nothing is `empty_change`.
+  that would change nothing is `empty_change`. `at_base` tells names its transactions and
+  cells added to a module (journaled) from modules the engine imported lazily into it since
+  base (vLLM's LazyLoader binds `llguidance.hf` at first use, #62872): the first stay
+  `extra_names` and make it false, the second are listed in `lazy_imports` and do not.
 - **Host** (`coordinator.py`, part 2) runs one transaction over every participant.
   `Coordinator.run(plan)`: phase 1, prepare on all while steps go on (a no vote, or a
   participant missing from a group's reply, aborts all); phase 2, validate on all, then
@@ -203,6 +206,7 @@ Each test's docstring says what it proves and what it does not.
 | `test_edit_that_changes_no_code_is_refused` | a transaction that "commits" while nothing changed |
 | `test_running_frame_never_runs_the_new_code` | a loop frame that never runs the new code reported as a pass |
 | `test_a_new_field_votes_no_and_routes_to_t1` | a participant that votes yes on an edit that would raise AttributeError |
+| `test_a_module_the_engine_imports_lazily_after_base_is_not_an_extra_name` | a clean undo reported as not at base because the engine imported a module lazily meanwhile (vLLM #62872) |
 | `test_three_edit_chain_explicit` / `_auto` | a second transaction refused after the first shifted lines; an undo that leaves the wrong text as the base |
 | `test_step_gap_commit_and_undo_never_mix_versions` | ranks that run one step on different versions (all-or-nothing in one gap) |
 | `test_vote_no_changes_nobody` | one rank on another build that votes no while the others switch |
