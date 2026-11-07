@@ -9,7 +9,8 @@ among same-named definitions, so a patch may move lines), adds the witness, and 
 running code object of the target and of its enclosing functions with its new version (so
 closures made later run the new code too). It runs the checks and returns findings:
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
-(free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`.
+(free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`,
+`new_fields` and `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks).
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
 classes are built in a scratch namespace (methods get the real class for `super()`). New
 methods and new defaults of methods are evaluated in a scratch class body that reads the live
@@ -372,7 +373,8 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
         changed = auto or ast.dump(bq[q][i]) != ast.dump(node)
         _inject(node, k, undo)
         todo.append((q, i))
-        tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node)})
+        tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node),
+                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node)})
 
     # 2. added definitions: top-level ones, and methods of classes that exist in the base
     added = []
@@ -454,6 +456,51 @@ def _defaults_key(node):
     keyword-only parameter with the same default needs new defaults too)."""
     a = node.args
     return ast.dump(ast.Tuple(a.defaults + a.kw_defaults)), [x.arg for x in a.kwonlyargs]
+
+
+_JIT = ("jit", "autotune", "heuristics")
+_JIT_TYPES = ("JITFunction", "Autotuner", "Heuristics", "InterpretedFunction")
+
+
+def _jit_decorator(node):
+    """`triton.jit` (or `triton.autotune(...)`, `triton.heuristics(...)`, also as
+    `triton.language.jit`) among the def's decorators, as text; else None. A bare `@jit`
+    from-import is left to the live check (`_jit_holder`)."""
+    for d in getattr(node, "decorator_list", ()):
+        f = d.func if isinstance(d, ast.Call) else d
+        if isinstance(f, ast.Attribute) and f.attr in _JIT:
+            root = f.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in ("triton", "tl"):
+                return ast.unparse(f)
+    return None
+
+
+def _jit_holder(mod, q):
+    """The type name of the JIT object (Triton's JITFunction, Autotuner, Heuristics) that the
+    live module holds under qualname q and that keeps the target in `.fn`; else None."""
+    obj = mod
+    for part in q.split("."):
+        try:
+            d = object.__getattribute__(obj, "__dict__")
+        except Exception:
+            return None
+        obj = d.get(part) if isinstance(d, (dict, types.MappingProxyType)) else None
+        if obj is None:
+            return None
+    outer = obj
+    for _ in range(8):                   # autotune(heuristics(jit(fn))): follow .fn
+        if isinstance(obj, types.FunctionType):
+            break
+        t = type(obj)
+        if t.__name__ in _JIT_TYPES or t.__module__.split(".")[0] == "triton":
+            return type(outer).__name__
+        try:
+            obj = object.__getattribute__(obj, "__dict__").get("fn")
+        except Exception:
+            return None
+    return None
 
 
 def _self_name(fn):
@@ -818,6 +865,16 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
+
+    # 6a. Triton kernels: the engine runs what the JIT compiled from the text, not the
+    # function's bytecode, and v1 has no JIT rebuild: the swap would commit as a GPU no-op.
+    for q, line, r, k, olds in todo:
+        why = r.get("jit") or _jit_holder(mod, q)
+        if why:
+            fs.append({**F.finding(
+                "jit_target", f"{q} is a JIT kernel ({why}): a code swap changes the Python "
+                "function, the launches keep the compiled kernel",
+                "a target the engine runs as Python bytecode", subject=k), "route": "T1"})
 
     # 6b. fields only the new __init__ sets, read by new code: live instances lack them.
     # No backfill here: the finding blocks and routes to T1 (rebuild the objects or restart).

@@ -268,6 +268,16 @@ CATALOG = {
           "compile per specialization (seconds), on the first launch after the commit"}],
         "none if the rebuild runs; kernels in other modules that inline this one keep the old "
         "compiled code", ["Proving an edit applied"], True),
+    "jit_target": (
+        "the target is a JIT kernel (@triton.jit, @triton.autotune, @triton.heuristics, or a "
+        "live JITFunction holds it): the engine runs what the JIT compiled from the source "
+        "text, never the function's bytecode, and v1 has no JIT rebuild, so a code swap "
+        "commits and the GPU keeps the old kernel (witness 0)",
+        [RESTART,
+         {"action": "accept only to swap the Python function itself (e.g. for the "
+                    "interpreter mode); the compiled kernel stays", "cost": "none"}],
+        "the edit reads as committed while every launch runs the old kernel",
+        ["Proving an edit applied"], True),
     "new_fields": (
         "the new code of a method reads an attribute that only the edited __init__ sets; "
         "every live instance was built by the old __init__ and lacks it, so the first call of "

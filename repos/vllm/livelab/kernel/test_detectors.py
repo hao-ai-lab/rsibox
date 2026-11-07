@@ -157,6 +157,56 @@ class NewFieldsReviewTest(unittest.TestCase):
                          ["new_fields", "outside_changes"])
 
 
+FAKE_TRITON = '''import types
+
+
+class JITFunction:
+    """Triton's shape: keeps the Python function in .fn and runs what it compiled from it at
+    the first launch (here: a copy of the function made from the code it had then)."""
+
+    def __init__(self, fn):
+        self.fn = fn
+        self.compiled = None
+
+    def __call__(self, *args):
+        if self.compiled is None:
+            self.compiled = types.FunctionType(self.fn.__code__, self.fn.__globals__)
+        return self.compiled(*args)
+
+
+def jit(fn):
+    return JITFunction(fn)
+'''
+
+
+class JitTargetTest(unittest.TestCase):
+
+    def test_an_edit_of_a_jit_kernel_is_refused_not_committed_as_a_no_op(self):
+        """Input: a kernel under a fake `triton.jit` (a JITFunction that keeps .fn and runs
+        the copy it compiled at the first launch), decorated as `@triton.jit` or as a bare
+        `@jit` from-import, launched once (add_one(1) = 2); the edit changes its body to
+        x + 2. Expected: a blocking jit_target finding (route T1, subject the kernel) and
+        nothing applied: launch(1) is still 2, the journal is empty. Pain point (vLLM
+        #58231, #62046, #61213 replayed): the edit committed with no finding and the GPU
+        kept the old kernel (witness 0). Not: rebuilding the kernel (the JIT rebuild path
+        is not in v1)."""
+        for deco in ("import {t} as triton\n\n\n@triton.jit\n",
+                     "from {t} import jit\n\n\n@jit\n"):
+            t, name = f"kt_triton{next(_n)}", f"kt_kern{next(_n)}"
+            base = deco.format(t=t) + "def add_one(x):\n    return x + 1\n\n\n" \
+                "def launch(x):\n    return add_one(x)\n"
+            _, m = temp_modules(self, {t: FAKE_TRITON, name: base})
+            self.assertEqual(m.launch(1), 2)
+            j = J.Journal()
+            r = S.stage_and_apply(name, base.replace("x + 1", "x + 2"), j, W.Witness())
+            line = at(base, "@")
+            self.assertEqual((r["ok"], [(f["check"], f.get("route"), f["subject"], f["accepted"])
+                                        for f in r["findings"]]),
+                             (False, [("jit_target", "T1", f"{name}:add_one:{line}", False)]),
+                             deco)
+            self.assertEqual((m.launch(1), j.entries), (2, []))
+
+
 class LineShiftTest(unittest.TestCase):
     """Case: swap `scale` from text v1 (lines longer), then edit `make_shift` (below it) from
     text v2 with base_source = v1. The live `make_shift` still carries the original file's
