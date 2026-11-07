@@ -70,6 +70,33 @@ class SessionTest(unittest.TestCase):
         self.assertIn("toy.engine:Engine.drain", sess.poisoned()[0]["observed"])
         self.assertEqual(sess.status()["state"], "poisoned")
 
+    def test_uninstall_past_a_tampered_function_still_poisons(self):
+        """Input: two transactions commit (t1 edits Engine.step, t2 edits Engine.drain); then
+        someone rebinds Engine.step.__code__ by hand; with no status() call in between,
+        uninstall(t1) undoes t2 and t1. Expected: both undone, Engine.step back at base, and
+        the session poisoned with `tampered` naming Engine.step. Fails before the fix: undoing
+        t1 wrote the base code over the hand edit before the only check ran, so the session
+        reported a clean base and the evidence was gone."""
+        name, eng, _ = fresh("tamper3")
+        e = eng.Engine()
+        sess = SS.Session(C.Coordinator([C.LocalParticipant("rank0", alias={"toy": name})],
+                                        phase2_deadline_s=None), ["toy.engine"])
+        step = ("return y", "return y * 100")
+        drain = ("self.tokens.clear()", "self.tokens.clear(); self.ran.append('drained')")
+        t1 = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, step), "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        t2 = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, step, drain),
+            "targets": [["Engine.drain", at(ENG, "def drain")]]}}})
+        self.assertEqual((t1["outcome"], t2["outcome"]), ("committed", "committed"))
+        eng.Engine.step.__code__ = eng.Engine.drain.__code__.replace(
+            co_name="step", co_qualname="Engine.step")                     # by hand
+        u = sess.uninstall(t1["txn"])
+        self.assertEqual((u["undone"], e.step(3)), ([t2["txn"], t1["txn"]], 17))
+        self.assertEqual(sess.state(), "poisoned")
+        self.assertEqual([f["check"] for f in sess.poisoned()], ["tampered"])
+        self.assertIn("toy.engine:Engine.step", sess.poisoned()[0]["observed"])
+
     def test_no_fingerprint_never_verifies(self):
         """Input: a session whose only participant cannot give a fingerprint (its call
         fails), so the expected one is None too. Expected: verify() is not ok and the session

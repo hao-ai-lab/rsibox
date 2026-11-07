@@ -137,6 +137,9 @@ class Session:
         txn = txn or self.stack[-1]
         if txn not in self.stack:
             return F.not_ok(f"{txn} is not committed in this session")
+        # check before the first undo: undoing a transaction writes its base code back, which
+        # would overwrite (and hide) a hand edit of a function it had installed
+        self.verify()
         undone, results = [], []
         while self.stack and txn in self.stack:
             t = self.stack[-1]
