@@ -16,3 +16,14 @@ jobs:
           python-version: "3.12"
       - working-directory: template/livelab
         run: python3 -m unittest discover -s conformance -t . -v
+  vllm-kernel:
+    name: vLLM kernel golden tests on the toy engine (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run the kernel's unittest cases on the toy engine (standard library only; torch cases skip)
+        run: python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
