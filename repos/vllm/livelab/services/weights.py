@@ -6,9 +6,9 @@ maps the daemon's GPU memory through CUDA IPC (zero copy) instead of reading the
 Start the daemon once; it outlives every engine.
 
 Usage:
-  python3 weights.py start --model M --socket-dir D --log preload.log [--tp N]
+  python3 weights.py start --model M --log preload.log [--socket-dir D] [--tp N]
       [--max-model-len L] [--timeout S] [-- extra vllm preload args]
-  python3 weights.py probe --socket-dir D [--tp N]   # would an ipc_cache start find a daemon?
+  python3 weights.py probe [--socket-dir D] [--tp N]   # would an ipc_cache start find a daemon?
 
 Both print one JSON line. `start` prints {"pid", "cmd", "ready", "seconds"} (and "error",
 "stopped" when not ready); pid leads its own session (setsid): stop the daemon by that pid,

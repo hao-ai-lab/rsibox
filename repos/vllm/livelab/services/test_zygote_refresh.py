@@ -4,7 +4,7 @@ Each case imports a small real package in the parent (the zygote), edits a file,
 checks in the child what a server would see. They run on CPU; the vLLM-sized numbers come from
 the GPU receipt (repos/vllm/kb/costs.md).
 """
-import json, os, sys, textwrap, time
+import json, os, sys, textwrap
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import zygote, zygote_refresh as zr
 
@@ -231,7 +231,7 @@ def test_vllm_layernorm_refresh_reimports_in_real_vllm(tmp_path):
     """The 61323 failure on real vLLM, on CPU: import vLLM's layernorm, refresh it and import it
     again. Then vLLM's direct_register_custom_op path: the same schema takes the new body, a
     changed schema refuses naming the op. Proves the import-time registrations pass; it does
-    not start an engine (the forked-server proof is the next GPU replay)."""
+    not start an engine (the forked-server run is in repos/vllm/kb/costs.md, Zygote)."""
     import subprocess
     script = tmp_path / "vllm_refresh.py"
     script.write_text(_VLLM_REFRESH)

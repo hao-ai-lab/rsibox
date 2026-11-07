@@ -37,7 +37,7 @@ Contract:
     true or missing: vLLM's default is true), since --weights promises no disk fallback.
     The daemon folder is the explicit config's socket_dir when the argv has a config (that is
     what vLLM dials), else --weights-socket-dir; both given and different is a finding.
-    With ipc_cache (from --weights or the argv) the weights daemon of weights.py is probed
+    With ipc_cache (from --weights or the argv) the weight cache daemon of weights.py is probed
     first: when none answers for a GPU of this engine, the launcher prints a weights_daemon
     finding (exit 2) instead of a start that waits 300 s.
   - --kvplan appends `--worker-cls kvplan.KVPlanWorker`; an explicit other `--worker-cls`
@@ -49,14 +49,17 @@ Contract:
   sets another host is a finding.
 - healthy_after_s is seconds from launch until /health answers 200, or null as soon as the
   server exits or its log shows a failed start. A port that already answers is a finding and
-  nothing starts, so the number is always about this engine.
+  nothing starts, so the number is about this engine; with --accept-port-in-use it starts
+  anyway, and the number may describe another server.
 - With --fork, fork_check() reports whether vLLM fell back to spawning its processes.
 
-Writes only --log and files under --cache-root (and the zygote's socket).
+Writes only --log, files under --cache-root, the --kvplan=DIR folder when given, and the
+zygote's socket.
 
-Not here (other boundaries, later PRs): the startup hooks (graph memory, overlay, autotune
-key, forksafe); the lab worker extension and dev mode. Pass their vLLM flags in the argv or set
-their variables in the environment until they land.
+Not here: the zygote installs forksafe.py (zygote.py); the lab worker extension is
+adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune key) and dev
+mode are not built. Pass their vLLM flags in the argv or set their variables in the
+environment.
 """
 import argparse, json, os, socket, subprocess, sys, time, urllib.request
 from pathlib import Path
@@ -431,7 +434,8 @@ def launcher_parser():
     here by prefix."""
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     p.add_argument("cmd", choices=["start", "zygote"])
-    p.add_argument("--cache-root", required=True); p.add_argument("--log", required=True)
+    p.add_argument("--cache-root", required=True, help="folder for the launcher's caches")
+    p.add_argument("--log", required=True, help="the server's log file")
     p.add_argument("--vllm", default="vllm", help="start: the vllm executable")
     p.add_argument("--weights", action="store_true",
                    help="start: map the weights held by the daemon of weights.py (adds "
