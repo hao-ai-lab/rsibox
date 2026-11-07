@@ -1,7 +1,13 @@
 name: PR code review
+# Agent code review is opt-in: the repository owner comments `/review` on a PR (or runs the
+# workflow by hand). Pushes run only the fast checker; merging never waits for a review, and
+# findings are fixed afterwards in batches (AGENTS.md, "Handling review findings").
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, labeled]
+    types: [opened, synchronize, reopened]
+    paths: ['.github/review/**', '.github/workflows/pr-code-review.yml']
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       pr:
@@ -11,6 +17,7 @@ permissions: {}
 jobs:
   checker:
     name: Code review checker keeps only diff-anchored findings and never approves (golden cases)
+    if: github.event_name == 'pull_request'
     # Runs the PR's own code, so it gets a read-only token that checkout does not keep.
     permissions:
       contents: read
@@ -23,15 +30,16 @@ jobs:
       - run: python3 .github/review/test_code_review.py -v
   review:
     name: Agent code review (agy, codex) via the review service, posted as one COMMENT review
-    needs: checker
-    # Non-draft PRs only. On "labeled", run only for the review-code label (to re-review on demand).
+    # Only on demand: a `/review` comment on a PR by the repository owner, or a manual run.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.draft == false &&
-       (github.event.action != 'labeled' || github.event.label.name == 'review-code'))
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/review') &&
+       github.event.comment.user.login == github.repository_owner)
     # Job-level, so a run that skips this job (another label added) cannot cancel a review.
     concurrency:
-      group: code-review-${{ github.event.pull_request.number || inputs.pr }}
+      group: code-review-${{ github.event.issue.number || inputs.pr }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -42,17 +50,23 @@ jobs:
       # The review code runs from the base commit, never from the PR: this job holds the service
       # token and a write-enabled GitHub token, and a PR could otherwise change the script that
       # uses them. The PR itself is read through the API as data.
+      # issue_comment and workflow_dispatch both run on the default branch (github.sha).
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Acknowledge the /review comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
       - env:
           GH_TOKEN: ${{ github.token }}
           FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
           FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          PR: ${{ github.event.issue.number || inputs.pr }}
         run: |
           if [ ! -f .github/review/code_review.py ]; then
             echo "::notice::The base commit has no code review yet (it arrives with this PR). Skipped."

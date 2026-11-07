@@ -75,10 +75,13 @@ verdict:
 | **reject** | the evidence is wrong: the line does not do what is claimed, or a test already covers it | `Not a bug:` with the counter-evidence (`file:line`, test name or output). Never a bare "won't fix". |
 | **defer** | real, but low severity, optional or outside this PR's boundary | a link to the issue that tracks it |
 
-- Fix inside the review loop only high- and medium-severity findings that reproduce. Defer low
-  severity and "optional hardening": they start a new PR, not another round.
+- Agent code review is opt-in: the repository owner comments `/review` on a PR. Merging never
+  waits for it. Findings on merged PRs are answered afterwards in batches: one fix PR per
+  boundary, with the verdict table in its description.
+- Fix only high- and medium-severity findings that reproduce. Defer low severity and "optional
+  hardening" to an issue.
 - Stop after 3 review rounds, or sooner when a round brings only rejected or deferred findings.
-  A human merges; an agent never approves or merges its own PR.
+  An agent never approves its own PR; it merges only what the owner asked it to merge.
 - Agent reviews post comments only (`.github/review/`), never approve or request changes.
 
 ## Tests and CI
