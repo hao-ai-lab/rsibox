@@ -144,7 +144,7 @@ Same results as `torchrun` (no deterministic mode): loss of steps 1-2 equal to 4
 12.8841, 12.9135); step 3 within the spread of `torchrun` repeats (14B: zygote 14.1019-14.1043, torchrun 14.1019-14.1059;
 32B: 19.0409-19.0575 vs 19.0453-19.0471); steady step 4.6 s (14B), 6.7-7.2 s (32B) either way.
 Steady state is slower in forked ranks than in torchrun ranks: 14B, same CPU binding, steps 3-12,
-torchrun 4.40-4.46 s per step (16 runs) against 4.50-4.93 s for forked ranks (22 runs), +2% early in
+torchrun 4.40-4.46 s per step (14 runs) against 4.50-4.93 s for forked ranks (22 runs), +2% early in
 the day and +8-11% later on the same node while torchrun stayed put. Bisected without finding the
 cause: it stays when the zygote imported nothing before the fork, and does not depend on the
 OpenMP pool, the CUDA-query patches, garbage collection (same collections, gc.freeze no help),
