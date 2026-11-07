@@ -61,7 +61,7 @@ Measured shape of these steps:
   re-trace 4.6, capture 6.0, warmups 1.9, split/reset 1.3, Inductor 0.2) is 14.4 s. A
   per-region rebuild, when the edit sits under an opaque op (Triton kernel, attention
   launcher), is 3.0-5.6 s; a traced Python edit still pays Dynamo, 12-14.8 s (our 2026-11-05
-  kernel R1 measurement on B200, warm cache).
+  R1 swap-and-recapture measurement on B200, warm cache).
 
 ## 3. Atomic units
 
@@ -96,8 +96,9 @@ Parallelism or weight-format changes touch every holder, so T2.
 
 The kernel's detectors (new fields, captured targets, closures that outlive the call, removed
 definitions, edits outside the patched function, Triton JIT) are the classifier: their action is
-"route to T1", not "repair in place". Triton `@jit` rebuild stays in T0 because it is a pure
-artifact with exact undo (0.07 s vs a 61.5 s restart).
+"route to T1", not "repair in place". A Triton `@jit` rebuild belongs in T0 once built, because
+it is a pure artifact with exact undo (0.07 s vs a 61.5 s restart); until then `jit_target`
+routes to T1.
 
 **Propagation.** After restarting a box, recheck only what is downstream of it, top to bottom,
 and stop when the value crossing the interface is unchanged. Example: a worker restart that
@@ -124,7 +125,7 @@ built, so every T1 row is an estimate.
 |---|---:|---|---|
 | T0 swap (one function) | < 1 s; install 22 ms median, undo 4 ms (v0) | measured | v0 overhead receipt, `kb/costs.md` |
 | Triton `@jit` rebuild | 0.07 s | measured | 2026-11-05 kernel run |
-| Per-region graph rebuild, op edit | 3.0-5.6 s | measured | 2026-11-05 kernel R1, Qwen3-8B TP1 |
+| Per-region graph rebuild, op edit | 3.0-5.6 s | measured | 2026-11-05 R1 swap-and-recapture run, Qwen3-8B TP1 |
 | Full graph rebuild, in place | 14.4 s | measured | same |
 | Fork a server from the zygote | 10.9 s to `/health` | measured | 2026-11-06 zygote run |
 | Zygote with a core edit (re-import all of vLLM) | 12.4-13.7 s | measured | same |
@@ -147,9 +148,9 @@ edit-to-run of about 2.6 s (a 5 s T1 estimate and a replay mix of 69% T0) is pro
 
 | Piece | Where | State |
 |---|---|---|
-| Kernel (T0) | `livelab/kernel/` | locate, swap, journal, witness, findings, two-phase coordinator; in review as stacked PRs, not on main yet |
-| Adapter | engine-core host plus worker extension | replies per rank; in review, not on main yet |
-| Services | `livelab/services/` | `zygote.py`, `zygote_refresh.py`: imports vLLM once, forks servers, refreshes edited modules before the fork |
+| Kernel (T0) | `livelab/kernel/` | locate, swap, journal, witness, findings, two-phase coordinator |
+| Adapter | `livelab/adapter/`: engine-core host plus worker extension | replies per rank |
+| Services | `livelab/services/` | `engine.py` launcher; `zygote.py`, `zygote_refresh.py`, `forksafe.py`: imports vLLM once, forks servers, refreshes edited modules before the fork; `weights.py`, `kvplan.py`: state holders for weights and the KV plan |
 | Interface | `template/livelab/INTERFACE-v1.md` | draft with conformance cases; on main |
 
 Not built:

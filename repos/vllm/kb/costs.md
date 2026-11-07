@@ -1,6 +1,6 @@
 # vLLM costs
 
-Prior measurements, gathered before any new run. Each table says where it came from.
+Measured costs. Each table says where it came from.
 
 ## Restart vs live, one-line scheduler edit (1 GB200)
 
@@ -67,9 +67,8 @@ Source: `legacy/v0` branch, `receipts/overhead-vllm.json`, `docs/overhead.md`.
 ## Zygote: edits after it started, refreshed in the fork (Qwen3-8B, 1× B200, 2026-11-06)
 
 The zygote (`livelab/services/zygote.py`) imports vLLM and its libraries once and forks each
-`vllm serve` from that state. An edit to a file it already imported used to make it refuse (or,
-accepted, the server ran the old code silently). Now the fork drops the edited modules and their
-importers before the server starts (`livelab/services/zygote_refresh.py`). Source: our 2026-11-06
+`vllm serve` from that state. Before the server starts, the fork drops the edited
+modules and their importers, so the server imports their new source (`livelab/services/zygote_refresh.py`). Source: our 2026-11-06
 run, Qwen3-8B TP1 eager, warm caches, forked engine core; launch to `/health`, one greedy
 completion each (" Paris." in every case); markers printed by the edited code show what ran.
 
@@ -94,6 +93,20 @@ completion each (" Paris." in every case); markers printed by the edited code sh
   a changed schema is refused with the op's name. Opaque types re-register.
 - Still a finding (restart the zygote): an edited extension `.so`, or an edited module outside
   `FASTRSI_ZYGOTE_REFRESH` (default `vllm`).
+
+## Edit-to-run by restart boundary (GB200)
+
+Source: our 2026-11-05 runs. Graphs and compilation, not Python, decide edit-to-run.
+
+| Boundary | Edit-to-run |
+|---|---|
+| function swap | 0.2–2 s |
+| Triton kernel rebuild | 1–5 s |
+| CUDA graph recapture | 4.5–10 s |
+| torch.compile recompile | 16–37 s |
+| model module rebuild in place | 4–10 s |
+| forked restart from a warm process | 16–35 s |
+| warm restart | 25–166 s |
 
 ## Not measured yet
 

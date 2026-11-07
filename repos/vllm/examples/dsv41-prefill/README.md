@@ -1,4 +1,4 @@
-# DeepSeek-V4.1-Flash prefill: three PRs, hot-reloaded
+# DeepSeek-V4.1-Flash prefill: three PRs to hot-reload
 
 From vLLM's post "Serving DeepSeek-V4.1-Flash at Scale" (2026-10-23): three changes raise new-token
 prefill throughput by 35.6–43.9% (4K–64K new tokens after a 128K cached prefix, DEP2 on GB300).

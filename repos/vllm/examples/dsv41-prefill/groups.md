@@ -13,7 +13,7 @@ Groups are from reading the code; nothing here is measured yet.
 **Install rule (first general rule):** the decorator uses `functools.wraps`, and breakable-graph
 replay records `lambda: fn(...)` over the *inner* function. So install swaps
 `sparse_attn_indexer.__wrapped__.__code__`. Swapping the module attribute or the wrapper's code
-would change nothing: the v0 silent no-op. Exception: batches captured in `CUDAGraphMode.FULL`
+would change nothing: a silent no-op. Exception: batches captured in `CUDAGraphMode.FULL`
 call `fn` inside the graph, so for those the change is GRAPH and needs a recapture.
 
 **Check:** witness that the inner function ran the new code; compare top-k indices with the old
