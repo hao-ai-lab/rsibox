@@ -3,7 +3,7 @@
 The live-edit transaction kernel, built bottom up: find the code a running engine executes,
 record every change to it so undo is exact, then swap, witness and coordinate. Pure Python,
 standard library only; it imports no engine. This folder holds the bottom layer so far:
-findings, locate, journal and witness.
+findings, locate, journal, witness, and the swap's change analysis.
 
 ## Contract
 
@@ -25,6 +25,17 @@ findings, locate, journal and witness.
   can undo), `record_closures`, and `repair(...)` for hand-written repair cells.
   `mark()` returns the log position; `undo_to(mark)` replays inverses newest first, back to
   the same code and attribute objects, with added names removed.
+- **Change analysis** (`swap.py`, the text half of the swap) reads only the two module
+  texts. `changed_targets(base, new)` lists every definition (function, method, nested
+  function, lambda, generator expression) whose AST differs, with the functions that enclose
+  it (they make its closures). `analyze(base, new, targets, filename, key_module, live)`
+  resolves the targets (auto: that list; explicit: by qualname and ordinal, so a patch may
+  move lines), adds the witness call to each new body, compiles the patched module, and
+  finds added, removed and imported names. It blanks target bodies, added definitions,
+  imports and docstrings in both trees and compares them: any other difference is
+  `outside_changes`, an edit a code swap would not apply. A docstring edit alone is not a
+  target. It touches no live object and returns plain data and code objects; trees a caller
+  passes (`trees=`) come back unchanged.
 - **Witness** proves that swapped code ran, per participant. The swap puts
   `__fastrsi_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
   after the docstring; for a lambda or generator expression, in the expression: a generator
@@ -49,6 +60,7 @@ findings, locate, journal and witness.
 | `findings.py` | The findings schema, the catalog of checks, `decide`. No imports. |
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
+| `swap.py` | So far the change analysis: `analyze`, `changed_targets`, `removed_definitions`, and the stubs that evaluate new defaults. Imports `locate` and `witness`. |
 | `witness.py` | `Witness` (live and capture counts, `check`), `inject`, `stub`, `trace_safe`, and the running-frame scans `stack_codes` / `live_codes`. Imports `findings` and `locate`. |
 | `toy/` | A toy engine for the tests: ops with a decorator and a closure factory, an `Engine` that saves a bound-method callback, a busy loop, and `load_copy`, which gives each test its own module copy. |
 
@@ -101,15 +113,22 @@ Each test's docstring says what it proves and what it does not.
 | `test_capture_calls_are_counted_apart_from_live_calls` | 13280 calls per rank after a CUDA-graph recapture, all made while capturing: proof of capture, not of a run |
 | `test_the_counter_keeps_the_docstring_and_counts_lambdas_and_genexprs` | a counter that breaks a docstring, or miscounts code with no statement body |
 | `test_the_witness_is_a_constant_for_dynamo` | a recompile that failed in Dynamo on a traced counter |
+| `test_a_changed_body_is_a_target_and_its_new_code_counts_its_calls` | an analysis that misses a closure's maker, or compiles a body that never says it ran |
+| `test_comment_and_docstring_edits_are_no_target_and_a_constant_edit_is_outside` | a docstring swap reported as a false zero_witness; a constant edit a code swap silently does not apply |
+| `test_targets_that_do_not_resolve_are_reported_and_new_names_are_found` | a target that does not resolve crashing the analysis; an added helper or import read as an outside change |
+| `test_the_callers_trees_come_back_unchanged` | a planner that plans its next edit on a tree still holding the last edit's witness calls |
 
 ## Not here yet
 
-- **Swap** (stage the patched module, pair old and new code, `apply` through the journal),
-  with its line maps and analyzer child. The journal's `record_closures` entry is driven by
-  `apply`, so taking back closures the new code made at run time is tested there. The swap
-  also adds the per-block witness of changed branches, and drives `Witness.arm` (counters for
-  repair cells). **jit** (Triton `@jit` targets),
-  **fields** (fields only the new `__init__` sets).
+- **Stage and apply** (the live half of the swap: locate, base check, scratch builds of new
+  names, pairing old and new code, running frames, `validate`, `apply` through the journal).
+  The journal's `record_closures` entry is driven by `apply`, so taking back closures the
+  new code made at run time is tested there.
+- Later swap parts of the prototype (fastrsi#12): new fields (`_new_fields`, backfill) with
+  `fields.py`; Triton `@jit` targets with `jit.py`; the per-block witness of changed
+  branches; compile units (compile only the statements holding the changed definitions) and
+  the analyzer child process; line maps of chained edits; `overlay` / `staged_names` and
+  `docstring_only` for the coordinator; `Witness.arm` (counters for repair cells).
 - **Coordinator** (two-phase transactions over participants, step-gap commits, deadlines,
   proofs) and **session** (the host's state machine and poisoning), and the receipt writer.
 
