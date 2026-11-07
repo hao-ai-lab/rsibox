@@ -7,6 +7,7 @@ Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kern
 Toy arithmetic: see test_locate.py (step(3) = 17 at base).
 """
 import gc
+import itertools
 import threading
 import unittest
 
@@ -15,8 +16,11 @@ from . import journal as J
 from . import locate as L
 from . import swap as S
 from . import witness as W
+from .test_detectors import temp_modules
 from .test_locate import ENG, OPS, at, edit, fresh
 from .test_witness import wait_for
+
+_n = itertools.count()
 
 
 def install(module, source, targets, journal, witness, accept=()):
@@ -168,6 +172,57 @@ class SwapTest(unittest.TestCase):
         finally:
             stop.set()
             th.join()
+
+
+class SwapReviewTest(unittest.TestCase):
+    """Review follow-ups of #24 and #25 (each case failed before its fix)."""
+
+    def _apply(self, base, new, call):
+        name = f"kt_sw{next(_n)}"
+        (m,) = temp_modules(self, {name: base})
+        r = S.stage_and_apply(name, new, J.Journal(), W.Witness())
+        return r, call(m)
+
+    def test_a_renamed_keyword_only_parameter_gets_its_default(self):
+        """Input: `def f(*, old=False)` edited to `def f(*, new=False)` (same default value).
+        Expected: the swap applies and f() returns False. Pain point: __kwdefaults__ stayed
+        {"old": False} and every call raised TypeError (missing keyword-only argument
+        'new'). Not: positional defaults (a tuple, names do not matter)."""
+        r, out = self._apply("def f(*, old=False):\n    return old\n",
+                             "def f(*, new=False):\n    return new\n", lambda m: m.f())
+        self.assertEqual((r["ok"], out), (True, False))
+
+    def test_a_nested_generator_or_lambda_of_a_live_function_is_live(self):
+        """Input: (a) the inner generator of `sum(sum(z * 2 for z in row) for row in mat)`
+        edited to z * 3; (b) a lambda inside a local helper of a live function edited.
+        Expected: both swap through the live outer function (total([[1, 2]]) = 9,
+        outer(1) = 3). Pain point: a blocking no_live_function for code two levels inside a
+        live function. Not: code inside a function that nothing holds."""
+        base = "def total(mat):\n    return sum(sum(z * 2 for z in row) for row in mat)\n"
+        r, out = self._apply(base, base.replace("z * 2", "z * 3"),
+                             lambda m: m.total([[1, 2]]))
+        self.assertEqual((r["ok"], [f["check"] for f in r["findings"]], out), (True, [], 9))
+        base = ("def outer(v):\n    def inner(w):\n        return (lambda y: y * 2)(w)\n"
+                "    return inner(v)\n")
+        r, out = self._apply(base, base.replace("y * 2", "y * 3"), lambda m: m.outer(1))
+        self.assertEqual((r["ok"], [f["check"] for f in r["findings"]], out), (True, [], 3))
+
+    def test_added_top_level_definitions_see_each_other(self):
+        """Input: the edit adds (a) a decorator and a helper decorated by it, (b) a class and
+        a subclass of it, (c) a helper used as the new default of an edited function.
+        Expected: each stages and applies, and the edited f runs. Pain point: patch_invalid
+        (NameError) for (a) and (b), defaults_not_evaluated for (c). Not: an added
+        definition that uses one added below it (the file order is kept)."""
+        cases = [
+            ("def my_dec(fn):\n    return fn\n\n@my_dec\ndef helper(x):\n    return x + 1\n\n"
+             "def f(x):\n    return helper(x)\n", 2),
+            ("class A:\n    k = 1\n\nclass B(A):\n    pass\n\ndef f(x):\n    return x + B.k\n", 2),
+            ("def default_fn(x):\n    return x + 1\n\ndef f(x, fn=default_fn):\n"
+             "    return fn(x)\n", 2)]
+        for new, want in cases:
+            r, out = self._apply("def f(x, fn=None):\n    return x\n", new, lambda m: m.f(1))
+            self.assertEqual((r["ok"], [f["check"] for f in r["findings"]], out),
+                             (True, [], want), new)
 
 
 if __name__ == "__main__":

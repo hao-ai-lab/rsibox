@@ -107,6 +107,56 @@ class NewFieldsTest(unittest.TestCase):
             self.assertEqual([f["check"] for f in r["findings"]], [])
 
 
+COUNTER = '''class Counter:
+    def __init__(self):
+        self.a = 1
+
+    def step(self):
+        return self.a
+'''
+
+
+class NewFieldsReviewTest(unittest.TestCase):
+    """Review follow-ups of #28 (each case failed before its fix): edits that read a field
+    only the new __init__ sets, on an instance built before the edit."""
+
+    def _blocks(self, base, new):
+        name = f"kt_nf{next(_n)}"
+        (m,) = temp_modules(self, {name: base})
+        c = m.Counter()
+        r = S.stage_and_apply(name, new, J.Journal(), W.Witness())
+        self.assertEqual((r["ok"], [x["check"] for x in r["findings"]
+                                    if not x["accepted"]]), (False, ["new_fields"]))
+        self.assertEqual(c.step(), 1)            # still the old code, no AttributeError
+
+    def test_an_augmented_assignment_reads_the_field(self):
+        """Input: __init__ gains `self._calls = 0`, step() gains `self._calls += 1`.
+        Expected: new_fields blocks; the old instance keeps running. Pain point: no finding,
+        the swap applied, and the next step raised AttributeError ('_calls'). Not: a field
+        read through getattr(self, name)."""
+        self._blocks(COUNTER, COUNTER.replace(
+            "        self.a = 1\n", "        self.a = 1\n        self._calls = 0\n").replace(
+            "        return self.a", "        self._calls += 1\n        return self.a"))
+
+    def test_a_bare_annotation_or_a_new_class_default_gives_old_instances_nothing(self):
+        """Input: (a) the class body has `x: int` (no value), __init__ gains self.x = 2 and
+        step returns self.x; (b) the edit itself adds `x = 0` to the class body (a code swap
+        does not run the class body; outside_changes is accepted here). Expected:
+        new_fields blocks both. Pain point: both applied and old instances raised
+        AttributeError ('x'). Not: dataclass fields (no explicit __init__)."""
+        new = "        self.a = 1\n        self.x = 2\n"
+        bare = COUNTER.replace("class Counter:\n", "class Counter:\n    x: int\n\n")
+        self._blocks(bare, bare.replace("        self.a = 1\n", new).replace(
+            "return self.a", "return self.x"))
+        name = f"kt_nf{next(_n)}"
+        (m,) = temp_modules(self, {name: COUNTER})
+        r = S.stage(name, COUNTER.replace("class Counter:\n", "class Counter:\n    x = 0\n\n")
+                    .replace("        self.a = 1\n", new).replace("return self.a",
+                                                                 "return self.x"))
+        self.assertEqual(sorted(f["check"] for f in r["findings"]),
+                         ["new_fields", "outside_changes"])
+
+
 class LineShiftTest(unittest.TestCase):
     """Case: swap `scale` from text v1 (lines longer), then edit `make_shift` (below it) from
     text v2 with base_source = v1. The live `make_shift` still carries the original file's
@@ -160,6 +210,28 @@ class LineShiftTest(unittest.TestCase):
         self.assertEqual(r2["timings"]["line_aliases"], [["make_shift", line_v1, line_live]])
         self.assertTrue(S.apply(r2["staged"], j, w)["ok"])
         self.assertEqual(ops.make_shift(10)(1), 11)
+
+    def test_closures_made_before_a_line_shift_get_the_next_edit(self):
+        """Input: an engine whose `shift` closure was made at init; edit 1 adds a line in
+        make_shift above the nested `def shift` (shift's code moves down one line in the new
+        make_shift, the live closure keeps the old line); edit 2 changes shift's body (x + k
+        to x + k + 100), staged with edit 1's text, own codes and line map. Expected: both
+        the closure made before edit 1 and a new one compute 111. Pain point: the old
+        closure kept running x + k (11) with no finding. Not: closures made by an older
+        make_shift that no line map reaches."""
+        _, eng, ops = fresh("closureshift")
+        e = eng.Engine()
+        j, w = J.Journal(), W.Witness()
+        v1 = edit(OPS, ("    bias = 0\n", "    bias = 0\n    bias = bias + 0\n"))
+        r1 = S.stage(ops.__name__, v1)
+        self.assertTrue(S.apply(r1["staged"], j, w)["ok"])
+        v2 = edit(v1, ("        return x + k", "        return x + k + 100"))
+        r2 = S.stage(ops.__name__, v2, base_source=v1,
+                     own_codes=[c for _, c, _, _ in r1["staged"].swaps],
+                     line_maps=[r1["staged"].line_map])
+        self.assertEqual((r2["ok"], r2["findings"]), (True, []))
+        self.assertTrue(S.apply(r2["staged"], j, w)["ok"])
+        self.assertEqual((e.shift(1), ops.make_shift(10)(1)), (111, 111))
 
 
 if __name__ == "__main__":
