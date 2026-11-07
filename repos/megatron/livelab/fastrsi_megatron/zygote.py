@@ -38,7 +38,12 @@ EARLY_ENV_PREFIXES = ("NVTE_", "PYTORCH_", "TORCH_", "TORCHINDUCTOR_", "TRITON_"
                       "PYTHON", "MEGATRON_")
 # ... except these, read at process-group or communicator creation, after the fork.
 LATE_ENV_PREFIXES = ("TORCH_NCCL_", "TORCH_DISTRIBUTED_")
-DEFAULT_PRELOAD = ["torch", "megatron.training.training"]
+# torch._dynamo and torch._inductor are imported lazily at the first torch.compile, in Megatron's
+# kernel warm-up: preloading them takes 1.5-2 s off each restart (with
+# TORCHINDUCTOR_COMPILE_THREADS=1 in the zygote's environment, our 14B runs: warm-up 0.6-1.4 s
+# instead of 2.2-2.8 s).
+DEFAULT_PRELOAD = ["torch", "megatron.training.training", "torch._dynamo",
+                   "torch._inductor.compile_fx", "torch._inductor.codecache"]
 
 
 def install_forksafe():
