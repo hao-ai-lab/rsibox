@@ -10,21 +10,24 @@ How a transaction runs (kernel `StepGapCoordinator`):
   in the engine-core process runs it and writes <dir>/reply/<seq>.json. Ops: `txn {plan,
   edit_time, baseline_restart}`, `prove {txn, golden}`, `undo {txn}`, `status {txn}` (without
   txn: the host's own state), `pstatus {txn}` (every rank's own state), `fingerprint
-  {modules}` (per rank: content hash and code object id of every function), `at_base`, `ping`.
+  {modules}` (per rank: content hash and code object id of every function), `versions` (per
+  rank: the per-step version log), `at_base`, `ping`.
   Receipts also go to <dir>/receipts.jsonl (kernel `ReceiptWriter`).
 - Two participants: the workers (every rank behind one collective_rpc, `WorkerGroup`) and the
-  engine core (an `Endpoint` in this process).
+  engine core (a `Side` in this process).
 - Every call to the workers is `model_executor.collective_rpc` issued FROM the busy loop (a
   job put on the engine core's input queue), never from another thread: the executor's
   message queue is not thread-safe, and from the loop every rank handles the call between the
-  same two steps. A call holds the loop while it runs, so phase 1 here stalls one step for as
-  long as the ranks take to prepare.
+  same two steps. Phase 1 runs in a thread on every side (side.py): the loop is held only for
+  `prepare_start` and the `prepare_poll`s, every 20 ms, while the engine steps between them.
 - Phase 2 (validate, commit or abort, undo of a failed commit) is one job that runs only when
   no batch is in flight. While it waits, the loop schedules nothing new ("pause keep":
   `scheduler.has_requests` is shadowed to False while `batch_queue` drains).
 - Phase 2 has a deadline (FASTRSI_KERNEL_PHASE2_DEADLINE, default 5 s; `phase2_deadline_s` per
-  op; 0 turns it off). collective_rpc gets `timeout` = the time left +
-  FASTRSI_KERNEL_RPC_GRACE (default 2 s). A timeout leaves the late reply in the executor's
+  op; 0 turns it off). Every side answers its phase-2 calls by the deadline from its own lane
+  (`deadline_missed` naming the late rank), and collective_rpc gets `timeout` = the time left
+  + FASTRSI_KERNEL_RPC_GRACE (default 2 s) as a backstop for a process that cannot answer at
+  all. A timeout leaves the late reply in the executor's
   response queue, where the next call would read it, so after one the worker group refuses
   every call (`deadline_missed`; respawn the engine) and the kernel poisons the host. The
   same holds for a call made from outside the loop (prepare, status, ...) whose job the loop
@@ -53,13 +56,14 @@ from kernel import coordinator as C
 from kernel import findings as F
 from kernel import receipt as R
 
-from .worker_ext import Endpoint
+from .side import Side
 
 TAG = "FASTRSI_KERNEL"
 DIR = os.environ.get("FASTRSI_KERNEL_DIR")
 GAP_TIMEOUT_S = float(os.environ.get("FASTRSI_KERNEL_GAP_TIMEOUT", "30"))
 PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5")) or None
 RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
+PREPARE_TIMEOUT_S = 300.0
 _HOST = []
 
 
@@ -130,7 +134,10 @@ class WorkerGroup(C.Participant):
             return self._break(method, deadline_at, rs, (
                 f"collective_rpc {method} timed out after {timeout} s; a late reply stays "
                 "in the executor's queue: respawn"), f"{method} answers within {timeout} s")
-        return C.merge_ranks(method, rs)
+        out = C.merge_ranks(method, rs)
+        if any(r.get("pending") for r in out["ranks"]):
+            out["pending"] = True
+        return out
 
     def _break(self, method, deadline_at, err, why, expected):
         """A call the group cannot account for: refuse every later call and poison the host.
@@ -143,7 +150,22 @@ class WorkerGroup(C.Participant):
         return F.not_ok(f"collective_rpc {method}: {type(err).__name__}: {err}", [f])
 
     def prepare(self, plan):
-        return self._rpc("prepare", plan)
+        """Every rank stages in its own thread (side.py); the loop is held only for the start
+        call and the polls, while the engine keeps stepping between them."""
+        r = self._rpc("prepare_start", plan)
+        if not r["ok"]:
+            return r
+        t = time.perf_counter()
+        while True:
+            time.sleep(0.02)
+            r = self._rpc("prepare_poll", plan["id"])
+            if not r["ok"] or not r.get("pending"):
+                return r
+            if time.perf_counter() - t > PREPARE_TIMEOUT_S:
+                return F.not_ok(f"workers did not prepare within {PREPARE_TIMEOUT_S} s")
+
+    def versions(self, _=None):
+        return self._rpc("versions", None)
 
     def validate(self, txn):
         return self._rpc("validate", txn)
@@ -205,11 +227,11 @@ class Host:
         self.held_steps = 0
         self.gap_timeout = GAP_TIMEOUT_S
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
-        self.core_side = Endpoint("core", scope={"core": core})
+        self.core_side = Side("core", scope={"core": core})
         self.dp = parallel(core)
         self.workers = WorkerGroup(self, self.dp["expected"])
         self.co = C.StepGapCoordinator(
-            [self.workers, C.CallParticipant("core", self.core_side.dispatch)],
+            [self.workers, C.CallParticipant("core", self.core_side.dispatch, bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
@@ -262,6 +284,8 @@ class Host:
             mods = list(cmd.get("modules") or [])
             return F.ok(workers=self.workers.fingerprint(mods),
                         core=self.core_side.dispatch("fingerprint", mods))
+        if op == "versions":                 # per-step version logs, per rank and core
+            return F.ok(workers=self.workers.versions(), core=self.core_side.versions())
         if op == "at_base":                  # back at the start state? (warm engine pool)
             return self.co.at_base()
         if op == "ping":

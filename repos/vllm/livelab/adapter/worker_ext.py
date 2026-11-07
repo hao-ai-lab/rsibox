@@ -15,7 +15,8 @@ rank and pid.
   undo change nothing. Without that, the kernel calls its empty sub-plan an `empty_change` and
   vetoes every one-role edit. A plan that changes nothing anywhere still goes to the kernel.
 
-`KernelWorkerExtension` is vLLM's `--worker-extension-cls`: the engine-core host (host.py) calls
+`KernelWorkerExtension` is vLLM's `--worker-extension-cls` (each rank serves a `Side`, side.py, built
+on this `Endpoint`): the engine-core host (host.py) calls
 `collective_rpc("fastrsi_kernel", args=(method, payload))` from inside its busy loop, so every
 rank handles the same call between the same two steps. The rank's endpoint is made at its first
 call. Lab use only: it runs code sent to it.
@@ -102,12 +103,28 @@ class Endpoint:
 _ENDPOINT = []
 
 
+def _wrap(side, fn, first):
+    def wrapped(*a, **k):
+        side.tick(first)
+        return fn(*a, **k)
+    wrapped.__wrapped__ = fn
+    return wrapped
+
+
 class KernelWorkerExtension:
     def fastrsi_kernel_endpoint(self):
-        """This rank's endpoint, made at the first call."""
+        """This rank's side (side.py), made at the first call. It wraps this rank's
+        execute_model (a step starts) and sample_tokens (the same step, later) to keep the
+        side's per-step version log."""
         if not _ENDPOINT:
-            _ENDPOINT.append(Endpoint("worker", scope={"worker": self},
-                                      rank=getattr(self, "rank", None)))
+            from .side import Side
+            side = Side("worker", scope={"worker": self}, rank=getattr(self, "rank", None))
+            _ENDPOINT.append(side)
+            try:
+                self.execute_model = _wrap(side, self.execute_model, True)
+                self.sample_tokens = _wrap(side, self.sample_tokens, False)
+            except Exception:              # the version log is optional; the protocol is not
+                pass
         return _ENDPOINT[0]
 
     def fastrsi_kernel(self, method, payload=None):

@@ -26,7 +26,7 @@ from kernel import locate as L
 from kernel import toy
 
 from . import host as H
-from .worker_ext import Endpoint
+from .side import Side
 
 ENG = toy.source("engine")
 STEP_LINE = next(i for i, x in enumerate(ENG.splitlines(), 1) if "def step" in x)
@@ -54,13 +54,13 @@ def plan(tid, **kw):
 
 
 def make_host(case, tag, ranks=2):
-    """The real Host over `ranks` worker Endpoints (each its own toy copy) and a core."""
+    """The real Host over `ranks` worker Sides (each its own toy copy) and a core."""
     names, eps = [], []
     for r in range(ranks):
         name = f"adh{next(_n)}_{tag}{r}"
         toy.load_copy(name)
         names.append(name)
-        eps.append(Endpoint("worker", scope={"worker": NS()}, rank=r, alias={"toy": name}))
+        eps.append(Side("worker", scope={"worker": NS()}, rank=r, alias={"toy": name}))
     d = tempfile.mkdtemp()
     case.addCleanup(shutil.rmtree, d, True)
     core = NS(model_executor=Executor(eps))

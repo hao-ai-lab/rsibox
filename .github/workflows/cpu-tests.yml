@@ -41,5 +41,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run the adapter's unittest cases (host, worker group, endpoints; collective_rpc is an in-process loop)
+      - name: Run the adapter's unittest cases (host, worker group, sides, graph detection; collective_rpc is an in-process loop)
         run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
