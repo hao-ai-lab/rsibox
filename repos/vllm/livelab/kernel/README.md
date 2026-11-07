@@ -47,7 +47,7 @@ template's conformance cases c0-c10.
   closures made later run the new code. Nothing is visible yet. Findings: `no_live_function`,
   `not_in_patch`, `base_mismatch`, `outside_changes`, `removed_definition`, `closure_changed`
   (free variables differ; not overridable), `defaults_not_evaluated`, `running_frame`
-  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `line_aliased`. `validate(staged)` re-checks at
+  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `constructor_edit`, `line_aliased`. `validate(staged)` re-checks at
   the apply point: the same code objects are installed, and no thread stack holds a frame of
   the old code. `apply(staged, journal, witness)` makes it visible, every change through the
   journal (closure pairs first, so undo also takes back closures the new code made).
@@ -57,7 +57,13 @@ template's conformance cases c0-c10.
   where only the edited `__init__` sets X (no old method sets it, no class body defines it),
   gives a blocking `new_fields` finding with `"route": "T1"`: instances built before the swap
   lack X, so the new code would raise AttributeError at its first call. The fix is a rebuild
-  of the objects or a restart (T1); nothing here sets fields on live objects. *Line maps:* a
+  of the objects or a restart (T1); nothing here sets fields on live objects. *Constructors:*
+  a target named `__init__`, `__new__` or `__post_init__` gives a blocking, overridable
+  `constructor_edit` finding with `"route": "T1"`: instances built before the swap keep what
+  the old constructor set (vLLM #61323 edits `RMSNorm.__init__`; the model's norms were built
+  at start-up, so the commit changed nothing they hold and the witness read 0). The kernel
+  does not search the heap for instances, so every constructor edit blocks; accept it when the
+  class is built per request or per step. *Line maps:* a
   second edit of a module whose first edit shifted its lines passes `base_source` (the
   installed text), `own_codes` and `line_maps` (each committed swap's `staged.line_map`,
   newest first); a definition no swap replaced still carries its original lines, and the maps
@@ -197,6 +203,8 @@ Each test's docstring says what it proves and what it does not.
 | `test_a_loop_frame_live_at_apply_blocks_through_the_helper` | a loop that never leaves the old code, swapped with no blocking finding |
 | `test_a_field_only_the_new_init_sets_blocks_and_routes_to_t1` | a swap that applied with no finding, then killed the engine with AttributeError at the next step (vLLM #63819's shape) |
 | `test_a_class_default_or_an_old_setter_is_not_a_new_field` | a false new_fields block when old instances do have the attribute |
+| `test_a_constructor_edit_blocks_and_routes_to_t1` | an `__init__` (or `__post_init__`) edit that commits with no finding while the objects built at start-up keep the old state (vLLM #61323) |
+| `test_an_edit_to_another_method_is_not_a_constructor_edit` | a constructor detector keyed on the class that would block every layer edit |
 | `test_edit_again_after_a_line_shift_follows_the_line_map` | a second edit refused with no_live_function + outside_changes after the first shifted the module's lines |
 | `test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias` | the same with no line map: the one live definition is taken, and said |
 | `test_two_ranks_switch_together_and_undo_to_the_same_code_objects` | a rank that runs the edit before commit, or keeps it after undo |

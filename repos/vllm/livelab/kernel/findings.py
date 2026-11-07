@@ -289,6 +289,18 @@ CATALOG = {
          RESTART],
         "the engine dies at the first step that runs the new code",
         ["Keeping state across edits"], True),
+    "constructor_edit": (
+        "the target is a constructor (__init__, __new__, __post_init__): the engine built its "
+        "long-lived objects (model layers, scheduler, managers) at start-up, so they keep "
+        "what the old constructor set; the swap reaches only instances built after it, and "
+        "the commit reads as done while the running objects never see the edit (witness 0). "
+        "The kernel does not look for live instances: every constructor edit blocks",
+        [REBUILD, RESTART,
+         {"action": "accept when the class is built per request or per step (its new "
+                    "instances run the edit) or the edit changes nothing live objects hold",
+          "cost": "none"}],
+        "the edit reads as committed while the objects the engine holds keep the old state",
+        ["Keeping state across edits"], True),
     "participant_missing": (
         "a participant the host expects (a rank of a worker group, a data-parallel engine) "
         "sent no reply: the transaction, its witness, receipt and undo would cover only the "

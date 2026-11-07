@@ -217,7 +217,10 @@ class ToyLab:
             "multi": p(ops=_edit(a2, "    return x * STEP_SCALE",
                                  "    return x * STEP_SCALE + 1"),
                        engine=_edit(eng, "        return y\n", "        return y - 1\n")),
-            "unreached": p(engine=_edit(eng, "make_shift(10)", "make_shift(11)")),
+            # Engine.__init__ edit: stage blocks it (constructor_edit); accepted here so c10
+            # can show that an installed edit the workload never runs is not proven.
+            "unreached": {**p(engine=_edit(eng, "make_shift(10)", "make_shift(11)")),
+                          "accept": ["constructor_edit"]},
             "refused": {
                 "syntax": p(ops=_edit(ops, "    return x + 1", "    return x +")),
                 "closure": p(ops=_edit(ops, "        return x + k",

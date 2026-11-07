@@ -106,8 +106,9 @@ class ParticipantTest(unittest.TestCase):
 
     def test_a_new_field_votes_no_and_routes_to_t1(self):
         """Input: the estimator edit (only the new __init__ sets _block, step reads it) as a
-        plan, with a live estimator. Expected: the participant votes no with one blocking
-        new_fields finding, route T1, tagged with the participant's name; nothing is staged,
+        plan, with a live estimator. Expected: the participant votes no with blocking
+        new_fields and constructor_edit findings (the edit is in Estimator.__init__), route
+        T1, tagged with the participant's name; nothing is staged,
         and the live step still returns 256. Not: a rebuild or restart that resolves it."""
         (m,) = temp_modules(self, {"kt_part_est": ESTIMATOR})
         est = m.Runner().speculator.acceptance_estimator
@@ -115,7 +116,8 @@ class ParticipantTest(unittest.TestCase):
         r = p.prepare({"id": "nf", "modules": {"kt_part_est": {"source": ESTIMATOR_NEW}}})
         self.assertEqual((r["ok"], [(f["check"], f["route"], f["accepted"], f["participant"])
                                     for f in r["findings"]]),
-                         (False, [("new_fields", "T1", False, "workers")]))
+                         (False, [("new_fields", "T1", False, "workers"),
+                                  ("constructor_edit", "T1", False, "workers")]))
         self.assertEqual((p.status("nf")["state"], est.step(5000)), ("aborted", 256))
 
 
