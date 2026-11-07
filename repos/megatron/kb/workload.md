@@ -69,5 +69,12 @@ random init.
 
 ## Two nodes
 
-Staged, not run: Qwen3-32B architecture on 2 x 4 GB200, TP 4 within a node, DP 2 across nodes
-(or PP 2), global batch 32, sequence 4096. Same data, gate and metric (tokens/s/GPU over 8 GPUs).
+Staged, not run (the pair of nodes was not free): Qwen3-32B architecture on 2 x 4 GB200, TP 4
+within a node, DP 2 across nodes, distributed optimizer, overlapped gradient reduce and parameter
+gather, global batch 32, sequence 4096. Same data, gate and metric (tokens/s/GPU over 8 GPUs).
+
+The same script run on one node (TP 4, global batch 16, our 2026-11-07 run): 7.48 s per step,
+about 2,190 tokens/s/GPU, 141 GB peak memory per GPU, 94.7 s from process start to the first step
+done. Expected on two nodes: 7.6-8.2 s per step for twice the tokens, 2,000-2,150 tokens/s/GPU
+(the data-parallel gradient traffic, mostly overlapped), about 92 GB per GPU (optimizer state
+sharded over DP 2). Not measured.

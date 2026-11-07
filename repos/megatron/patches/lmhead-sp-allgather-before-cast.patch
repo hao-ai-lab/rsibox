@@ -1,0 +1,33 @@
+diff --git a/megatron/core/tensor_parallel/layers.py b/megatron/core/tensor_parallel/layers.py
+--- a/megatron/core/tensor_parallel/layers.py
++++ b/megatron/core/tensor_parallel/layers.py
+@@ -744,9 +744,6 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
+         input, weight = ctx.saved_tensors
+         main_grad = ctx.main_grad
+         use_bias = ctx.use_bias
+-        # TE owns only the forward GEMM here; Megatron retains the backward contract.
+-        # Cast dY to the input dtype to match the legacy FP32-logit-cast backward path.
+-        grad_output = grad_output.to(ctx.input_dtype)
+ 
+         # GTP: re-gather weight for dgrad
+         if ctx.gtp_remat_size > 1:
+@@ -764,6 +761,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
+ 
+         wgrad_compute = True
+         if grad_output_buffer is not None:
++            # Deferred weight gradients must retain the original compute dtype.
++            grad_output = grad_output.to(ctx.input_dtype)
+             if wgrad_deferral_limit == 0 or len(grad_output_buffer) < wgrad_deferral_limit:
+                 grad_output_buffer.append(grad_output)
+                 wgrad_compute = False
+@@ -785,6 +784,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
+                 total_input = all_gather_buffer
+             else:
+                 total_input = input
++        # Launch the input all-gather before the potentially large FP32-logit
++        # gradient conversion, allowing communication to overlap this conversion.
++        # Preserve the legacy FP32-logit-cast backward compute dtype.
++        grad_output = grad_output.to(ctx.input_dtype)
+         grad_input = grad_output.matmul(weight)
+ 
+         if ctx.sequence_parallel and wgrad_compute:

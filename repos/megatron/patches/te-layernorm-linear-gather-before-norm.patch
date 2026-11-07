@@ -1,0 +1,50 @@
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -1888,8 +1888,44 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
+         if x.dtype != self.layer_norm_weight.dtype:
+             x = x.to(self.layer_norm_weight.dtype)
+ 
+-        with quant_context:
+-            out = super().forward(x, is_first_microbatch=_is_first_microbatch)
++        gather_before_norm = (
++            self.training
++            and torch.is_grad_enabled()
++            and self.sequence_parallel
++            and self.tp_size > 1
++            and self.parallel_mode == "column"
++            and self.te_quant_params is None
++            and not self.config.tp_comm_overlap
++            and not self.config.delay_wgrad_compute
++            and getattr(self.config, "gtp_weight_remat_size", 1) == 1
++        )
++        if gather_before_norm:
++            from megatron.core.tensor_parallel.mappings import (
++                gather_from_sequence_parallel_region,
++            )
++
++            # Gather before normalization so TE retains full-sequence activations
++            # for wgrad without another all-gather in backward. The gather's
++            # backward reduces and scatters the partial input gradients.
++            x = gather_from_sequence_parallel_region(
++                x, tensor_parallel_output_grad=True, group=self._tp_group
++            )
++            sequence_parallel = self.sequence_parallel
++            parallel_mode = self.parallel_mode
++            tp_size = self.tp_size
++            try:
++                self.sequence_parallel = False
++                self.parallel_mode = None
++                self.tp_size = 1
++                with quant_context:
++                    out = super().forward(x, is_first_microbatch=_is_first_microbatch)
++            finally:
++                self.sequence_parallel = sequence_parallel
++                self.parallel_mode = parallel_mode
++                self.tp_size = tp_size
++        else:
++            with quant_context:
++                out = super().forward(x, is_first_microbatch=_is_first_microbatch)
+ 
+         self.is_first_microbatch = False
+ 
