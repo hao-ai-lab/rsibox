@@ -49,12 +49,22 @@ print(json.dumps({"cases": out, "overlap": sorted(ours & theirs),
 '''
 
 
+# A --config YAML file (vLLM reads it into the argv): a non-default port, tp, and the load
+# format at its default; one argv also gives --port itself.
+CONFIG_YAML = "port: 8124\ntensor-parallel-size: 2\nload-format: auto\n"
+
+
 @pytest.fixture(scope="module")
 def parsed():
     ours = [o for a in engine.launcher_parser()._actions for o in a.option_strings
             if o not in ("-h", "--help")]
-    r = subprocess.run([VLLM_PY, "-c", PARSE_ALL, str(HERE), json.dumps(CASES),
-                        json.dumps(ours)], capture_output=True, text=True, timeout=300)
+    with tempfile.TemporaryDirectory() as d:
+        cfg = Path(d, "serve.yaml")
+        cfg.write_text(CONFIG_YAML)
+        cases = {**CASES, "config": ["M", "--config", str(cfg)],
+                 "config_and_flag": ["M", "--port", "9000", "--config", str(cfg)]}
+        r = subprocess.run([VLLM_PY, "-c", PARSE_ALL, str(HERE), json.dumps(cases),
+                            json.dumps(ours)], capture_output=True, text=True, timeout=300)
     assert r.returncode == 0, r.stderr[-3000:]
     return json.loads(r.stdout.strip().splitlines()[-1])
 
@@ -91,6 +101,19 @@ def test_explicit_means_given_even_at_the_default(parsed):
     e = parsed["cases"]["eager_worker"]
     assert e["args"]["enforce_eager"] is True and e["args"]["worker_cls"] == "a.B"
     assert {"enforce_eager", "worker_cls"} <= set(e["explicit"])
+
+
+def test_a_config_file_reads_like_flags(parsed):
+    """Input: `M --config serve.yaml` (port 8124, tensor-parallel-size 2, load-format auto),
+    and the same with `--port 9000` before it. Expect: port 8124 and tp 2 read from the file,
+    and port, tensor_parallel_size and load_format explicit (load_format although it is vLLM's
+    default: a holder flag must not override it); the argv's --port 9000 wins over the file's,
+    as in `vllm serve`."""
+    c = parsed["cases"]["config"]
+    assert c["ok"] and (c["args"]["port"], c["args"]["tensor_parallel_size"]) == (8124, 2), c
+    assert {"model", "port", "tensor_parallel_size", "load_format"} <= set(c["explicit"]), c
+    assert "worker_cls" not in c["explicit"]
+    assert parsed["cases"]["config_and_flag"]["args"]["port"] == 9000
 
 
 def test_a_rejected_flag_is_vllms_message(parsed):
@@ -142,7 +165,8 @@ def test_launcher_reads_the_argv_with_vllms_parser():
     --log L -tp 2 --vllm FAKE --port P`. Expect: the report's vllm_args say model Qwen/Qwen3-8B
     (not vLLM's default), tp 2, port P, via "direct"; the fake server got exactly
     `serve Qwen/Qwen3-8B -tp 2 --port P --host 127.0.0.1` and answered /health on P; stdout
-    is that one JSON line (vLLM's import-time log lines must not land there)."""
+    is that one JSON line, also with VLLM_LOGGING_LEVEL=DEBUG (vLLM 0.15.1 then logs 16 lines
+    to stdout while its parser is imported)."""
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM)
         out, port = os.path.join(d, "ran.json"), _free_port()
@@ -150,7 +174,7 @@ def test_launcher_reads_the_argv_with_vllms_parser():
                             "Qwen/Qwen3-8B", "--log", os.path.join(d, "s.log"), "-tp", "2",
                             "--vllm", fake, "--port", str(port), "--timeout", "60"],
                            capture_output=True, text=True, timeout=300,
-                           env={**os.environ, "FAKE_OUT": out})
+                           env={**os.environ, "FAKE_OUT": out, "VLLM_LOGGING_LEVEL": "DEBUG"})
         try:
             rep = json.loads(r.stdout.strip().splitlines()[-1])
         finally:

@@ -19,7 +19,7 @@ Contract:
   (test_vllm_args.py checks this in a fresh process). Cost on our host: import 4.7-4.9 s, build
   0.16 s, parse 1 ms. The zygote has these imported already (zygote.py, request "parse").
 """
-import argparse, contextlib, io, time
+import argparse, contextlib, io, sys, time
 
 # What the launcher reads back: dest names of vLLM's parser.
 FIELDS = ("model", "port", "host", "tensor_parallel_size", "load_format", "enforce_eager",
@@ -28,18 +28,21 @@ _UNSET = object()
 
 
 def build():
-    """vLLM's `vllm serve` parser and the seconds its import and build took."""
+    """vLLM's `vllm serve` parser and the seconds its import and build took. What the import
+    and build print goes to stderr: vLLM's logger writes to stdout (with VLLM_LOGGING_LEVEL=DEBUG,
+    vLLM 0.15.1 printed 16 lines at import), and the launcher's stdout is one JSON line."""
     t = time.time()
-    try:
-        from vllm.entrypoints.common.cli_args import make_arg_parser
-    except ImportError:                       # vLLM releases before the common/ split
-        from vllm.entrypoints.openai.cli_args import make_arg_parser
-    try:
-        from vllm.utils.argparse_utils import FlexibleArgumentParser
-    except ImportError:
-        from vllm.utils import FlexibleArgumentParser
-    t1 = time.time()
-    parser = make_arg_parser(FlexibleArgumentParser(prog="vllm serve"))
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            from vllm.entrypoints.common.cli_args import make_arg_parser
+        except ImportError:                   # vLLM releases before the common/ split
+            from vllm.entrypoints.openai.cli_args import make_arg_parser
+        try:
+            from vllm.utils.argparse_utils import FlexibleArgumentParser
+        except ImportError:
+            from vllm.utils import FlexibleArgumentParser
+        t1 = time.time()
+        parser = make_arg_parser(FlexibleArgumentParser(prog="vllm serve"))
     return parser, {"import": round(t1 - t, 3), "build": round(time.time() - t1, 3)}
 
 

@@ -44,8 +44,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 
 # vLLM's parser, cut down to what the launcher reads (same dests, defaults, the model_tag
 # positional and the -tp alias), for a CPU box without vLLM. On PYTHONPATH it shadows a real one.
+# Like vLLM 0.15.1 with VLLM_LOGGING_LEVEL=DEBUG, it logs to stdout while it is imported.
 STUB_PARSER = {
     "vllm/entrypoints/common/cli_args.py": '''
+print("DEBUG [platforms/__init__.py:61] Checking if CUDA platform is available.")
+
 def make_arg_parser(p):
     p.add_argument("model_tag", nargs="?")
     p.add_argument("--model", default="Qwen/Qwen3-0.6B")
@@ -243,8 +246,9 @@ def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
     the refresh packages; the module is then edited; `engine.py start --zygote S m`. Expect:
     exit 2 with a `stale` finding naming that file, nothing forked (before: the parse ran on
     the pre-edit code, so an edit to vLLM's argument code a refresh cannot reach was read with
-    the old flags). With `--zygote-accept stale` the parse runs: here it fails on the absent
-    vLLM, a `vllm_args` finding. Not: a refresh of an edited vLLM module (needs a real vLLM)."""
+    the old flags). With `--zygote-accept stale` the parse runs: here vLLM is absent, so the
+    parse child fails to import its parser, a `zygote_parse` finding. Not: a refresh of an
+    edited vLLM module (the next case)."""
     d = _short_dir()
     sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
     zpy = _script(d, "python", FAKE_PYTHON)
@@ -270,7 +274,53 @@ def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
                              text=True, timeout=60, env=env)
         assert out.returncode == 2, out.stdout + out.stderr
         f = json.loads(out.stdout)["findings"]
-        assert [x["check"] for x in f] == ["vllm_args"] and "vllm" in f[0]["observed"]
+        assert [x["check"] for x in f] == ["zygote_parse"] and "vllm" in f[0]["observed"]
+    finally:
+        _stop(rep["pid"])
+
+
+def test_zygote_parse_reads_an_edit_to_vllms_argument_code():
+    """Input: a real zygote.py (torch stubbed) that pre-imported STUB_PARSER as vLLM's parser
+    (a `vllm` package, so its edits refresh); then three parses of `m --new-flag 1`: before any
+    edit, after the parser gains --new-flag, after an edit that does not import. Expect: (1)
+    vLLM's rejection `unrecognized arguments: --new-flag`; (2) ok, and the reply's "refreshed"
+    names the parser's module (before: the child parsed with the zygote's pre-edit parser
+    and rejected the flag); (3) `engine.py start --zygote` exits 2 with a `zygote_parse`
+    finding carrying the SyntaxError (before: a `vllm_args` finding, "fix the vLLM flags"),
+    and nothing started. Not: a refresh of the real vLLM's argument modules (they are the same
+    refresh as a fork's, test_zygote_refresh.py)."""
+    d = _short_dir()
+    sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
+    zpy = _script(d, "python", FAKE_PYTHON.replace('sys.modules["vllm"] = None\n', ""))
+    Path(d, "mods.txt").write_text("vllm.entrypoints.common.cli_args\nvllm.utils.argparse_utils\n")
+    env = stub_env(d)
+    cli = Path(d, "stubparser", "vllm/entrypoints/common/cli_args.py")
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log"),
+                        "--zygote-modules", os.path.join(d, "mods.txt")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    rep = json.loads(r.stdout)
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        argv = ["m", "--new-flag", "1"]
+        before = zygote.parse(sock, argv)
+        assert before["ok"] is False and "unrecognized arguments: --new-flag" in before["error"]
+        assert not before.get("zygote_error"), before
+        text = cli.read_text()
+        cli.write_text(text.replace('    return p\n', '    p.add_argument("--new-flag")\n'
+                                                     '    return p\n'))
+        after = zygote.parse(sock, argv)
+        assert after["ok"] is True and after["args"]["model"] == "m", after
+        assert after["refreshed"]["changed"] == ["vllm.entrypoints.common.cli_args"], after
+        cli.write_text(text + "\ndef broken(:\n")
+        out = subprocess.run([sys.executable, ENGINE, "start", "--cache-root", cache, "--log",
+                              os.path.join(d, "s.log"), "--zygote", sock, *argv],
+                             capture_output=True, text=True, timeout=60, env=env)
+        assert out.returncode == 2, out.stdout + out.stderr
+        f = json.loads(out.stdout)["findings"]
+        assert [x["check"] for x in f] == ["zygote_parse"], f
+        assert "SyntaxError" in f[0]["observed"], f
+        assert not os.path.exists(os.path.join(d, "s.log"))
     finally:
         _stop(rep["pid"])
 

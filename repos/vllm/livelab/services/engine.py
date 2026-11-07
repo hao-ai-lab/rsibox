@@ -140,6 +140,13 @@ def argv_findings(v):
     or what is missing)."""
     if not v["ok"] and v.get("findings"):        # the zygote refused to parse (stale)
         return v["findings"]
+    if not v["ok"] and v.get("zygote_error"):    # vLLM never judged the argv
+        return [{"check": "zygote_parse", "observed": v.get("error"), "expected": "the "
+                 "zygote's parse child reads the argv with vLLM's parser", "why": "the child "
+                 "failed before vLLM's parser ran (an edited module that does not import, or a "
+                 "refresh that failed); a forked server would fail the same way",
+                 "actions": ["fix the edited module (the error above)", "start without "
+                             "--zygote to see the full traceback", "restart the zygote"]}]
     if not v["ok"]:
         return [{"check": "vllm_args", "observed": v.get("error"), "expected": "an argv that "
                  "`vllm serve` accepts", "why": "the server would exit on it",

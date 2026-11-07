@@ -185,7 +185,7 @@ def _parse_in_child(argv, refresh, conns):
     sys.stdout.flush(); sys.stderr.flush()
     pid = os.fork()
     if pid == 0:
-        out = {"ok": False, "error": "parse child failed"}
+        out = {"ok": False, "error": "parse child failed", "zygote_error": True}
         try:
             os.close(r)
             for c in conns:
@@ -194,8 +194,8 @@ def _parse_in_child(argv, refresh, conns):
                 zygote_refresh.refresh(refresh)
             with zygote_refresh.guard_for(refresh):
                 out = vllm_args.parse(argv)
-        except BaseException as e:
-            out = {"ok": False, "error": repr(e)}
+        except BaseException as e:            # not vLLM judging the argv: the refresh or
+            out = {"ok": False, "error": repr(e), "zygote_error": True}   # the import failed
         finally:
             try:
                 data = json.dumps(out).encode()
@@ -206,7 +206,8 @@ def _parse_in_child(argv, refresh, conns):
     os.close(w)
     with os.fdopen(r, "rb") as f:
         data = f.read()
-    return json.loads(data) if data else {"ok": False, "error": "parse child died"}
+    return json.loads(data) if data else {"ok": False, "error": "parse child died",
+                                          "zygote_error": True}
 
 
 def serve(sock_path, modules_file):
@@ -319,7 +320,8 @@ def serve(sock_path, modules_file):
             conn.sendall((json.dumps(reply) + "\n").encode())
         except Exception as e:
             try:
-                conn.sendall((json.dumps({"ok": False, "error": repr(e)}) + "\n").encode())
+                conn.sendall((json.dumps({"ok": False, "error": repr(e), "zygote_error": True})
+                              + "\n").encode())
             except OSError:
                 pass
         finally:
@@ -347,7 +349,8 @@ def parse(sock_path, argv, accept=(), timeout=60):
     """Read a `vllm serve` argv with the zygote's vLLM parser: vllm_args.parse()'s reply, plus
     "zygote_seconds" (and "refreshed" when edited modules were re-imported for the parse). Edits
     a refresh cannot apply refuse it like a fork: {"ok": False, "findings": [stale]}, unless
-    accept has "stale"."""
+    accept has "stale". A failure that is not vLLM's verdict on the argv (the refresh or the
+    parser's import raised, the child died) is {"ok": False, "error", "zygote_error": True}."""
     return _call(sock_path, {"cmd": "parse", "argv": list(argv), "accept": list(accept)},
                  timeout=timeout)
 
