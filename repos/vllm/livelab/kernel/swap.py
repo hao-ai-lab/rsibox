@@ -1,14 +1,16 @@
 """Swap: one code-swap primitive, in two steps.
 
 `stage(module, source, targets)` parses the patched module source, compiles it, and plans
-the swap, with no visible change. Targets omitted ("auto"):
+the swap, with no visible change (when the patch adds definitions it binds the no-op witness
+stub, as an undo leaves it, so an added decorator can run). Targets omitted ("auto"):
 the analysis takes every definition whose AST changed, from its own parse. For each target it
 finds the new code object (by qualname and its ordinal
 among same-named definitions, so a patch may move lines), adds the witness, and pairs every
 running code object of the target and of its enclosing functions with its new version (so
 closures made later run the new code too). It runs the checks and returns findings:
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
-(free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`.
+(free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`,
+`new_fields` and `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks).
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
 classes are built in a scratch namespace (methods get the real class for `super()`). New
 methods and new defaults of methods are evaluated in a scratch class body that reads the live
@@ -78,14 +80,16 @@ def qual_index(tree):
         elif isinstance(node, ast.GeneratorExp):
             # its own code object, a constant of the enclosing code (list/set/dict
             # comprehensions are inlined since 3.12 and have none). The first iterable is
-            # evaluated by the enclosing code, so it is named there.
+            # evaluated by the enclosing code, so it is named there. CPython adds ".<locals>"
+            # only below a function or lambda: code nested in a generator expression is
+            # named "<genexpr>.<genexpr>", "<genexpr>.<lambda>".
             q = pre + "<genexpr>"
             idx.setdefault(q, []).append(node)
             visit(node.generators[0].iter, pre)
             for x in [node.elt] + node.generators[0].ifs + node.generators[1:]:
-                visit(x, q + ".<locals>.")
+                visit(x, q + ".")
             for g in node.generators:
-                visit(g.target, q + ".<locals>.")
+                visit(g.target, q + ".")
         else:
             for x in ast.iter_child_nodes(node):
                 visit(x, pre)
@@ -129,9 +133,10 @@ def _blank(tree, targets, added, undo):
     idx = qual_index(tree)
     for q, i in targets:
         n = idx[q][i]
-        if isinstance(n, _DEF):
-            _set(undo, n, body=[ast.Pass()],
-                 args=ast.arguments([], [], None, [], [], None, []))
+        if isinstance(n, _DEF):          # a code swap installs no annotation: blank them too
+            _set(undo, n, body=[ast.Pass()], returns=None,
+                 args=ast.arguments([], [], None, [], [], None, []),
+                 **({"type_params": []} if hasattr(n, "type_params") else {}))
         elif isinstance(n, ast.GeneratorExp):    # keep the first iterable (enclosing code)
             g = n.generators[0]
             _set(undo, n, elt=ast.Constant(None), generators=[
@@ -368,7 +373,8 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
         changed = auto or ast.dump(bq[q][i]) != ast.dump(node)
         _inject(node, k, undo)
         todo.append((q, i))
-        tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node)})
+        tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node),
+                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node)})
 
     # 2. added definitions: top-level ones, and methods of classes that exist in the base
     added = []
@@ -417,9 +423,8 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     # 6. new defaults: a stub the caller evaluates in the module's globals
     for (q, i), r in zip(todo, [r for r in tres if r["status"] == "ok"]):
         bnode, pnode = bq[q][i], pq[q][i]
-        if "<locals>" not in q and isinstance(pnode, _DEF) and (
-                ast.dump(ast.Tuple(bnode.args.defaults + bnode.args.kw_defaults))
-                != ast.dump(ast.Tuple(pnode.args.defaults + pnode.args.kw_defaults))):
+        if "<locals>" not in q and isinstance(pnode, _DEF) and \
+                _defaults_key(bnode) != _defaults_key(pnode):
             r["defaults"] = _defaults_stub(q, pnode, futures)
 
     # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
@@ -445,17 +450,78 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             "aliases": aliases, "new_fields": new_fields}
 
 
+def _defaults_key(node):
+    """What the function object's __defaults__ and __kwdefaults__ are made of: the default
+    expressions, and the keyword-only names (__kwdefaults__ is keyed by name, so a renamed
+    keyword-only parameter with the same default needs new defaults too)."""
+    a = node.args
+    return ast.dump(ast.Tuple(a.defaults + a.kw_defaults)), [x.arg for x in a.kwonlyargs]
+
+
+_JIT = ("jit", "autotune", "heuristics")
+_JIT_TYPES = ("JITFunction", "Autotuner", "Heuristics", "InterpretedFunction")
+
+
+def _jit_decorator(node):
+    """`triton.jit` (or `triton.autotune(...)`, `triton.heuristics(...)`, also as
+    `triton.language.jit`) among the def's decorators, as text; else None. A bare `@jit`
+    from-import is left to the live check (`_jit_holder`)."""
+    for d in getattr(node, "decorator_list", ()):
+        f = d.func if isinstance(d, ast.Call) else d
+        if isinstance(f, ast.Attribute) and f.attr in _JIT:
+            root = f.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in ("triton", "tl"):
+                return ast.unparse(f)
+    return None
+
+
+def _jit_holder(mod, q):
+    """The type name of the JIT object (Triton's JITFunction, Autotuner, Heuristics) that the
+    live module holds under qualname q and that keeps the target in `.fn`; else None."""
+    obj = mod
+    for part in q.split("."):
+        try:
+            d = object.__getattribute__(obj, "__dict__")
+        except Exception:
+            return None
+        obj = d.get(part) if isinstance(d, (dict, types.MappingProxyType)) else None
+        if obj is None:
+            return None
+    outer = obj
+    for _ in range(8):                   # autotune(heuristics(jit(fn))): follow .fn
+        if isinstance(obj, types.FunctionType):
+            break
+        t = type(obj)
+        if t.__name__ in _JIT_TYPES or t.__module__.split(".")[0] == "triton":
+            return type(outer).__name__
+        try:
+            obj = object.__getattribute__(obj, "__dict__").get("fn")
+        except Exception:
+            return None
+    return None
+
+
 def _self_name(fn):
     args = fn.args.posonlyargs + fn.args.args
     return args[0].arg if args else None
 
 
 def _self_attrs(node, me, ctx):
-    """Attribute names X of `me.X` in node with the given context (ast.Load / ast.Store)."""
+    """Attribute names X of `me.X` in node with the given context (ast.Load / ast.Store).
+    `me.X += 1` both reads and writes X (its target has the Store context only)."""
     if me is None:
         return set()
-    return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name) and n.value.id == me and isinstance(n.ctx, ctx)}
+
+    def mine(n):
+        return isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+            and n.value.id == me
+    out = {n.attr for n in ast.walk(node) if mine(n) and isinstance(n.ctx, ctx)}
+    if ctx is ast.Load:
+        out |= {n.target.attr for n in ast.walk(node)
+                if isinstance(n, ast.AugAssign) and mine(n.target)}
+    return out
 
 
 def _class_names(cls):
@@ -465,7 +531,8 @@ def _class_names(cls):
             out.add(n.name)
         elif isinstance(n, ast.Assign):
             out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
-        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name) \
+                and n.value is not None:      # a bare `x: int` defines no class attribute
             out.add(n.target.id)
     return out
 
@@ -473,7 +540,8 @@ def _class_names(cls):
 def _new_fields(base_tree, tree, meths, filename):
     """[{cls, field, readers, init_line}] for each attribute that a changed or added method
     of a top-level class reads on `self`, that the edited __init__ sets, and that no method
-    of the base class sets nor any class body defines."""
+    of the base class sets nor the base class body defines (a code swap does not run the
+    patched class body; stage still skips a name the live class has)."""
     bcls = {n.name: n for n in base_tree.body if isinstance(n, ast.ClassDef)}
     pcls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     out = []
@@ -487,7 +555,7 @@ def _new_fields(base_tree, tree, meths, filename):
         for m in b.body:
             if isinstance(m, _DEF):
                 old |= _self_attrs(m, _self_name(m), ast.Store)
-        old |= _class_names(b) | _class_names(p)
+        old |= _class_names(b)
         me = _self_name(init)
         sets = _self_attrs(init, me, ast.Store)
         readers = {}
@@ -703,16 +771,22 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         timings["parse_compile_s"] = round(timings["parse_s"] + timings["compile_s"], 6)
         # 5. added definitions, built in a scratch namespace
         built = {}                         # class -> {name: member added so far}
+        top = dict(st.imports)             # new imports and top-level definitions so far
+        if a["added"]:
+            # an added decorator runs here and starts with the witness call: bind the no-op
+            # stub (what undo leaves anyway; at_base ignores it), apply binds the hook
+            mod.__dict__.setdefault(W.HIT, W.stub)
         for ad in a["added"]:
-            ns = dict(st.imports)
+            ns = dict(top)
             if ad["cls"] is not None:      # decorators and defaults see the live class body
-                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), st.imports,
+                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), top,
                                           built.get(ad["cls"]))
             exec(_raise(ad), mod.__dict__, ns)
             q, cls_name, name = ad["q"], ad["cls"], ad["name"]
             if cls_name is not None:
                 built.setdefault(cls_name, {})[name] = ns[cls_name].__dict__[name]
             if cls_name is None:
+                top[name] = ns[name]       # a later added definition may use it
                 st.adds.append((mod.__dict__, name, ns[name]))
             else:
                 obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
@@ -762,7 +836,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         defaults = kwdefaults = J.KEEP
         if "defaults" in r:
             try:
-                defaults, kwdefaults = _defaults(mod, q, r["defaults"], st.imports)
+                defaults, kwdefaults = _defaults(mod, q, r["defaults"], top)
             except Exception as e:
                 fs.append(F.finding("defaults_not_evaluated", _err(e),
                                     "the new defaults evaluate", subject=k))
@@ -791,6 +865,16 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
+
+    # 6a. Triton kernels: the engine runs what the JIT compiled from the text, not the
+    # function's bytecode, and v1 has no JIT rebuild: the swap would commit as a GPU no-op.
+    for q, line, r, k, olds in todo:
+        why = r.get("jit") or _jit_holder(mod, q)
+        if why:
+            fs.append({**F.finding(
+                "jit_target", f"{q} is a JIT kernel ({why}): a code swap changes the Python "
+                "function, the launches keep the compiled kernel",
+                "a target the engine runs as Python bytecode", subject=k), "route": "T1"})
 
     # 6b. fields only the new __init__ sets, read by new code: live instances lack them.
     # No backfill here: the finding blocks and routes to T1 (rebuild the objects or restart).
@@ -829,13 +913,26 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
 
 
 def _live_of(targets, run, held):
-    """{(qualname, line): does a function object run this code, or directly enclose it?}"""
+    """{(qualname, line): does a function object run this code, or enclose it at any depth?}
+    (as `stage` pairs it: through every enclosing code up to one a function holds)"""
     live = {}
     for q, line in targets:
-        olds = run.get((q, int(line)), [])
-        live[(q, int(line))] = any(held.get(o) for o in olds) or any(
-            held.get(p) for o in olds for p in _enclosing(o, run))
+        live[(q, int(line))] = any(_held_up(o, run, held) for o in run.get((q, int(line)), []))
     return live
+
+
+def _held_up(code, run, held):
+    """Is `code`, or a code that encloses it at any depth, run by a function object?"""
+    seen, stack = set(), [code]
+    while stack:
+        c = stack.pop()
+        if id(c) in seen:
+            continue
+        seen.add(id(c))
+        if held.get(c):
+            return True
+        stack += _enclosing(c, run)
+    return False
 
 
 def _alias_shifted(targets, run):
@@ -858,34 +955,33 @@ def _alias_shifted(targets, run):
 def _follow_line_maps(run, line_maps):
     """Add to `run` the keys of base_source's text that earlier swaps' line maps (newest
     first) lead to live code: a definition no swap replaced still carries the line of the
-    text it was compiled from. Returns [[qualname, base_source line, live line]]."""
+    text it was compiled from. The codes of every step back are merged into the key: a
+    swapped enclosing function makes new closures at the new line while the closures it
+    made before still run the code at the old line, and both must be swapped. Returns
+    [[qualname, base_source line, live line]] for each step that added code."""
     out = []
     if not line_maps:
         return out
     for q, line in list(line_maps[0]):
-        if run.get((q, line)):
-            continue
         cur = line
         for m in line_maps:
             cur = m.get((q, cur))
             if cur is None:
                 break
-            if run.get((q, cur)):
-                run[(q, line)] = run[(q, cur)]
+            have = run.get((q, line), [])
+            more = [c for c in run.get((q, cur), ()) if not any(c is x for x in have)]
+            if more:
+                run[(q, line)] = list(have) + more
                 out.append([q, line, cur])
-                break
     return out
 
 
 def _live_keys(held, mapped=()):
-    """`_live_of` for every code of the module at once: a held code and the codes it
-    directly contains; `mapped` ([qualname, line, live line]) adds the line-mapped keys."""
+    """`_live_of` for every code of the module at once: a held code and every code nested
+    in it; `mapped` ([qualname, line, live line]) adds the line-mapped keys."""
     live = {}
-    for o in held:
-        live[(o.co_qualname, o.co_firstlineno)] = True
-        for c in o.co_consts:
-            if hasattr(c, "co_code"):
-                live[(c.co_qualname, c.co_firstlineno)] = True
+    for c in _nested(list(held)):
+        live[(c.co_qualname, c.co_firstlineno)] = True
     for q, line, ll in mapped:
         if live.get((q, ll)):
             live[(q, line)] = True
@@ -1007,18 +1103,19 @@ def _doc(body):
 
 
 def _dump_code(node):
-    """ast.dump of a definition without its own docstring: an edit of the docstring alone
-    changes no behaviour, so it is not a target (a live run swapped one and then reported a
-    false zero_witness)."""
-    body = getattr(node, "body", None)
-    d = _doc(body) if isinstance(body, list) else None
-    if d is None:
-        return ast.dump(node)
-    node.body = body[1:] or [ast.Pass()]
+    """ast.dump of a definition without its docstrings (its own and those of the functions
+    and classes nested in it): an edit of a docstring alone changes no behaviour, so it is
+    not a target, nor is the function that encloses it (a live run swapped one and then
+    reported a false zero_witness)."""
+    undo = []
+    for n in ast.walk(node):
+        b = getattr(n, "body", None)
+        if isinstance(n, (*_DEF, ast.ClassDef)) and isinstance(b, list) and _doc(b):
+            _set(undo, n, body=b[1:] or [ast.Pass()])
     try:
         return ast.dump(node)
     finally:
-        node.body = body
+        _restore(undo)
 
 
 def removed_definitions(base_tree, tree):

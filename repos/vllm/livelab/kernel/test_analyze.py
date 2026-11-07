@@ -119,5 +119,29 @@ class ChangeAnalysisTest(unittest.TestCase):
                                             ["make_shift.<locals>.shift", SHIFT]])
 
 
+class AnalysisReviewTest(unittest.TestCase):
+    """Review follow-ups of #24 (each case failed before its fix)."""
+
+    def test_a_signature_annotation_edit_is_not_outside_the_target(self):
+        """Input: scale gains a return annotation (`-> int`), or type parameters
+        (`def scale[T](x: T)`), with a body edit. Expected: scale is the one target and
+        outside_changes is False, as for a parameter annotation (a code swap installs
+        neither). Pain point: the edit was refused as outside_changes. Not: annotations on
+        the live function (they stay the old ones)."""
+        for sig in ("def scale(x) -> int:", "def scale[T](x: T):"):
+            a = analyze(edit(OPS, ("def scale(x):", sig), ("x * STEP_SCALE", "x * 3")))
+            self.assertEqual((a["resolved"], a["outside_changes"]),
+                             ([["scale", SCALE]], False), sig)
+
+    def test_a_docstring_edit_of_a_nested_function_targets_nothing(self):
+        """Input: the nested `shift` in make_shift gains a docstring. Expected: no target
+        (not make_shift either) and no outside_changes. Pain point: make_shift, which runs
+        only at engine init, was swapped and then reported a false zero_witness. Not: a
+        docstring that the code reads (`__doc__`)."""
+        new = edit(OPS, ("    def shift(x):\n", '    def shift(x):\n        """Add k."""\n'))
+        self.assertEqual(S.changed_targets(OPS, new), [])
+        self.assertFalse(analyze(new)["outside_changes"])
+
+
 if __name__ == "__main__":
     unittest.main()
