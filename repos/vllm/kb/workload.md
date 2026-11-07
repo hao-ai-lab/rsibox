@@ -1,6 +1,6 @@
 # vLLM target workload
 
-Source: LiveLab-MLSys paper draft, Appendix A.
+Source: our target-workload definition for DeepSeek-V4.1-Flash on one GB200 tray.
 
 - **Model:** DeepSeek-V4.1-Flash, real weights.
 - **Hardware:** one GB200 tray, 4 GPUs, 4 data-parallel replicas with expert parallelism (EP4DP4).
