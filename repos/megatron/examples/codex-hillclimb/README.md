@@ -59,6 +59,42 @@ all-reduce over the cross-node data-parallel pair reached about 533 GB/s of bus 
 collectives were 74% of CUDA time, all-gathers 1.02 ms each against 0.22 ms on the 14B single-node
 run. Sweeping NCCL protocol, algorithm and DDP bucket size is a restart per setting, not a live edit.
 
+### Final 2-node result (11:02 PST)
+
+The kept set after the 2-node session: iterations 11, 61, 12 (cell) and 119, the plain residual add found
+on 14B. Kept set vs base, 4 paired rounds in the same 2-node job (default DDP bucket): **median +8.5%
+tokens/s/GPU** (1.097, 1.097, 1.072, 1.067; kept 1,490-1,527 vs base 1,389-1,407), every round inside the
+gate (loss at most 1.7e-3, grad norm at most 3.9e-3). Iteration 119 alone on 2 nodes: 4-pair re-measure
+median +6.0% (1.062, 1.059, 1.051, 1.064).
+
+A plain sweep made `--ddp-bucket-size 4e8` look like a gain; in the lab it changed the loss with no edits
+at all (step 6: 47.5 against 14.9), so it is not one (`../../kb/costs.md`).
+
+2-node Codex iterations (Qwen3-32B architecture, TP 4 x DP 2; iteration 1 ran on an earlier lab whose
+harness lacked the crash record; 2 is the 14B transfer; 13 was refused by the known-crasher filter):
+
+| iter | idea (agent's words) | by | edit | install s | paired ratios (cand/base) | gain % (median) | max rel loss diff | decision |
+|---|---|---|---|---|---|---|---|---|
+| 1 | Dispatch equal-split CUDA sequence-parallel collectives directly through their process group to reduce Python frontend overhead while preserving synch | Codex | diff tensor_parallel.mappings | 0.123435 |  |  |  | check failed |
+| 2 | transfer of 14B iteration 118/119 (bias-free zero-dropout residual -> plain add) to the 32B 2-node run | Codex | diff transformer.transformer_layer | 0.297953 | 1.046, 1.063 | 5.45 | 2.02e-03 | keep |
+| 3 | none | Codex |   |  |  |  |  | skip |
+| 4 | none | Codex |   |  |  |  |  | skip |
+| 5 | Route the loss head through the existing Blackwell fused linear cross-entropy kernel while preserving module hooks, testing whether avoiding materiali | Codex | cell  | 0.088967 |  |  |  | refused |
+| 6 | re-measure of iter 2: transfer of 14B iteration 118/119 (bias-free zero-dropout residual -> plain add) to the 32B 2-node run | Codex | diff transformer.transformer_layer | 0.416002 | 1.062, 1.059, 1.051, 1.064 | 6.03 | 2.86e-03 | keep |
+| 7 | none | Codex |   |  |  |  |  | skip |
+| 8 | Copy reduced gradients back into separate FP32 accumulation buffers only for locally owned optimizer shards, avoiding conversion and writes for the ot | Codex | diff distributed.param_and_grad_buffer | 0.18609 | 0.990, 0.998 | -0.59 | 5.55e-04 | revert (no paired gain >= 1%) |
+| 9 | none | Codex |   |  |  |  |  | skip |
+| 10 | none | Codex |   |  |  |  |  | skip |
+| 11 | Fuse DP=2 gradient prescaling into eligible FP32-to-BF16 communication-buffer copies to eliminate a separate full-buffer scaling pass, retaining the o | Codex | diff distributed.param_and_grad_buffer | 0.225403 | 0.994, 1.013 | 0.36 | 1.88e-03 | revert (no paired gain >= 1%) |
+| 12 | none | Codex |   |  |  |  |  | skip |
+| 13 | Test TP=4 all-reduce followed by a local shard copy to let NCCL select potentially faster all-reduce algorithms for the profiled sequence-parallel red | Codex | diff tensor_parallel.mappings |  |  |  |  | skip (touches a known crasher: climb2n/1: megatron/core/tensor_parallel/mappings.py ['_reduce_scatter_along_first_dim']) |
+| 14 | Skip redundant communication-buffer zeroing when every parameter has separate accumulation storage, preserving padding zeros and batching the remainin | Codex | diff distributed.param_and_grad_buffer | 0.179554 | 0.984, 1.009 | -0.37 | 4.28e-04 | revert (no paired gain >= 1%) |
+| 15 | none | Codex |   |  |  |  |  | skip |
+| 16 | none | Codex |   |  |  |  |  | skip |
+| 17 | Batch zeroing of separate accumulation gradients with foreach to reduce kernel launches while preserving all gradient-buffer initialization. | Codex | diff distributed.param_and_grad_buffer | 0.169146 | 0.998, 1.010 | 0.37 | 5.98e-04 | revert (no paired gain >= 1%) |
+| 18 | Test skipping masked row-zero accumulation in embedding backward while preserving genuine row-zero gradients through a broadcast reduction, reducing r | Codex | diff tensor_parallel.layers | 0.14968 | 0.998, 1.005 | 0.17 | 4.93e-04 | revert (no paired gain >= 1%) |
+
+
 ## Where the time is (profile of 2 steps, rank 0, after iterations 11 and 12)
 
 Sequence-parallel all-gather 21.5% and reduce-scatter 14.7% of CUDA time (NCCL ring, LL protocol,
