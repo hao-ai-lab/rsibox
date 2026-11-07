@@ -1,4 +1,4 @@
-"""Golden tests of the in-place rebuild (T1 restart tier) on real torch modules (CPU).
+"""Golden tests of the in-place rebuild on real torch modules (CPU).
 
 Run from the repo root:
     python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
@@ -137,6 +137,79 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(r["findings"][0]["check"], "refresh_failed")
         self.assertIs(sys.modules["rbpkg.block"], old[0])
         self.assertIs(sys.modules["rbpkg.user"], old[1])
+
+
+CACHED = '''import torch
+
+_TABLE = {}
+
+
+def step(x):
+    """Keeps per-shape state on the function, as captured CUDA graphs and static buffers are."""
+    cache = step.__dict__.setdefault("_graphs", {})
+    if x.shape not in cache:
+        cache[x.shape] = torch.zeros(1024, 1024)          # 4 MiB of "static buffer"
+    _TABLE[x.shape] = cache[x.shape]
+    return x + 1
+'''
+
+
+@unittest.skipIf(torch is None, "needs torch")
+class HeldStateTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="rbheld-")
+        os.makedirs(os.path.join(self.dir, "hcpkg"))
+        for n, t in (("__init__.py", ""), ("ops.py", CACHED)):
+            with open(os.path.join(self.dir, "hcpkg", n), "w") as f:
+                f.write(t)
+        sys.path.insert(0, self.dir)
+        importlib.invalidate_caches()
+
+    def tearDown(self):
+        for n in [n for n in sys.modules if n.split(".")[0] == "hcpkg"]:
+            del sys.modules[n]
+        sys.path.remove(self.dir)
+
+    def test_old_function_caches_are_released_not_carried(self):
+        """Input: ops.step keeps a cache dict on itself and a module-level table (4 MiB each
+        way, the same tensor); the module is refreshed with an edit. Expect: release_held names
+        `hcpkg.ops.step._graphs` and `hcpkg.ops._TABLE` with 4 MiB, deletes the function
+        attribute and empties the table; the new step starts with no cache, and the old
+        tensor is unreachable (weakref dead). Proves: a rebuild does not keep the old code's
+        captured state alive next to the new code's (the 77 GB CUDA-graph leak). Not: state
+        held by objects outside the refreshed modules."""
+        import weakref
+        import hcpkg.ops as ops
+        ops.step(torch.zeros(2))
+        ref = weakref.ref(ops.step._graphs[(2,)])
+        old_step = ops.step
+        r = RB.refresh({"hcpkg.ops": CACHED.replace("x + 1", "x + 2")}, prefixes=("hcpkg",))
+        self.assertTrue(r["ok"], r["findings"])
+        rel = RB.release_held(r["old"])
+        where = sorted(h["where"] for h in rel["released"])
+        self.assertEqual(where, ["hcpkg.ops._TABLE", "hcpkg.ops.step._graphs"])
+        self.assertEqual(rel["released"][0]["bytes"], 4 << 20)
+        self.assertEqual(rel["findings"], [])
+        self.assertFalse(hasattr(old_step, "_graphs"))
+        new = sys.modules["hcpkg.ops"]
+        self.assertFalse(hasattr(new.step, "_graphs"))
+        self.assertTrue(torch.equal(new.step(torch.zeros(2)), torch.full((2,), 2.0)))
+        del old_step
+        import gc
+        gc.collect()
+        self.assertIsNone(ref())
+
+    def test_a_bare_tensor_global_is_a_finding(self):
+        """Input: a module-level tensor (not in a container) the old module holds. Expect: a
+        finding `held_state_not_released` naming it with its size, not a silent leak."""
+        src = "import torch\nBUF = torch.zeros(256, 1024)\n"
+        with open(os.path.join(self.dir, "hcpkg", "buf.py"), "w") as f:
+            f.write(src)
+        import hcpkg.buf  # noqa: F401
+        r = RB.refresh({"hcpkg.buf": src + "# edit\n"}, prefixes=("hcpkg",))
+        rel = RB.release_held(r["old"])
+        self.assertEqual([f["check"] for f in rel["findings"]], ["held_state_not_released"])
+        self.assertIn("hcpkg.buf.BUF", rel["findings"][0]["observed"])
 
 
 if __name__ == "__main__":

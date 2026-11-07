@@ -20,7 +20,7 @@ import traceback
 _STATE = {"participant": None, "faults": {}, "hooks": []}
 
 if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
-    # T2: the worker imports this module at the session's first call, before the first
+    # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
     # compile; preset Inductor's torch_key from disk (services/jitcache.py)
     from services import jitcache as _jitcache
     _STATE["torch_key"] = _jitcache.preset_torch_key()
@@ -170,7 +170,7 @@ def _reset_stages(pipe):
 
 
 def rebuild(worker, payload):
-    """T1 restart in this warm worker: re-import the edited modules (and their importers) from
+    """In-place rebuild in this warm worker: re-import the edited modules (and their importers) from
     the new text, give the live objects the new classes, merge constructor edits into the
     loaded torch components (their tensors stay), and build the pipeline's stages again. The
     CUDA context, weights, JIT modules and compile caches stay. On a finding nothing changes.
@@ -230,6 +230,12 @@ def rebuild(worker, payload):
         else:
             merged[name] = {**RB.merge_fields(m, *bn), "meta_build_s": merged[name]["meta_build_s"]}
     sw = RB.swap_classes([worker, pipe], cmap)
+    # caches the old code kept on its functions or globals (CUDA graphs, static buffers) would
+    # stay alive next to the new code's own: release them before the first new call
+    held = RB.release_held(r["old"])
+    out["held_released"] = [{k: h[k] for k in ("where", "cuda_bytes", "graphs")} for h in held["released"]]
+    out["held_findings"] = held["findings"]
+    out["cuda_bytes_released"] = held["cuda_bytes_released"]
     ts = time.perf_counter()
     stages = []
     if pipe is not None and hasattr(pipe, "create_pipeline_stages"):

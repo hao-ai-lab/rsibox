@@ -1,4 +1,4 @@
-"""In-place rebuild in a warm process: the T1 restart tier.
+"""In-place rebuild in a warm process, without a restart.
 
 A warm worker keeps its CUDA context, its weights on the GPU, its JIT modules (FlashInfer,
 Triton) and its compile caches. An edit the R0 swap refuses (a constructor edit, a new field,
@@ -33,6 +33,7 @@ import linecache
 import os
 import sys
 import time
+import types
 
 _SKIP = {"_parameters", "_buffers", "_modules", "_non_persistent_buffers_set", "training",
          "_forward_hooks", "_forward_pre_hooks", "_backward_hooks", "_backward_pre_hooks",
@@ -248,6 +249,110 @@ def class_map(old_modules, modules=None):
                 if isinstance(new, type) and new is not v:
                     out[v] = new
     return out
+
+
+# -- 1b. state the old modules still hold --------------------------------------------------------
+def _weigh(v, seen, depth=0):
+    """(tensor bytes, CUDA bytes, CUDA graphs) reachable from v through containers and plain
+    objects (bounded depth)."""
+    if id(v) in seen or depth > 4:
+        return 0, 0, 0
+    seen.add(id(v))
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    if torch is not None:
+        if isinstance(v, torch.Tensor):
+            try:
+                n = v.untyped_storage().nbytes()
+            except Exception:
+                n = v.numel() * v.element_size()
+            return n, (n if v.is_cuda else 0), 0
+        if type(v).__name__ == "CUDAGraph":
+            return 0, 0, 1
+        if isinstance(v, torch.nn.Module):
+            return 0, 0, 0              # live components are not module state of the old code
+    if isinstance(v, (str, bytes, int, float, bool, type(None), type)) or callable(v) and not hasattr(v, "__dict__"):
+        return 0, 0, 0
+    items = ()
+    if isinstance(v, dict):
+        items = list(v.values())
+    elif isinstance(v, (list, tuple, set, frozenset)):
+        items = list(v)
+    elif hasattr(v, "__dict__") and not isinstance(v, types.ModuleType) and not callable(v):
+        items = list(vars(v).values())
+    t = c = g = 0
+    for x in items:
+        a, b, d = _weigh(x, seen, depth + 1)
+        t, c, g = t + a, c + b, g + d
+    return t, c, g
+
+
+def held_state(old_modules):
+    """State the replaced module objects still hold that the new code will build again: function
+    attributes (caches kept on a function, such as per-layer CUDA graphs) and module globals
+    that reach tensors or CUDA graphs. [{"where", "kind", "bytes", "cuda_bytes", "graphs"}]."""
+    out = []
+    for name, om in old_modules.items():
+        new = vars(sys.modules.get(name) or types.ModuleType(name))
+        for k, v in list(vars(om).items()):
+            if k.startswith("__") or isinstance(v, types.ModuleType) or new.get(k) is v:
+                continue            # shared with the new module (imported from a kept one)
+            fn = getattr(v, "__func__", v)
+            if isinstance(fn, types.FunctionType) and fn.__module__ == name:
+                for a, av in list(vars(fn).items()):
+                    if a.startswith("__"):
+                        continue
+                    t, c, g = _weigh(av, set())
+                    if t or g:
+                        out.append({"where": f"{name}.{k}.{a}", "kind": "function_attribute",
+                                    "obj": (fn, a), "bytes": t, "cuda_bytes": c, "graphs": g})
+            elif not callable(v) or isinstance(v, (dict, list)):
+                t, c, g = _weigh(v, set())
+                if t or g:
+                    out.append({"where": f"{name}.{k}", "kind": "module_global", "obj": (om, k),
+                                "bytes": t, "cuda_bytes": c, "graphs": g})
+    return out
+
+
+def release_held(old_modules):
+    """Release what `held_state` finds, before the new code's first call: a function attribute
+    is deleted, a container global emptied. The old code captured it, so it is never carried
+    over. A held object that is neither (a bare tensor or graph global) is a finding, not
+    released silently. Then gc and `torch.cuda.empty_cache()`. Returns {"released", "findings",
+    "cuda_bytes_released", "graphs_released"}."""
+    import gc
+    held = held_state(old_modules)
+    released, fs = [], []
+    for h in held:
+        owner, attr = h.pop("obj")
+        if h["kind"] == "function_attribute":
+            try:
+                delattr(owner, attr)
+                released.append(h)
+            except AttributeError:
+                fs.append(finding("held_state_not_released", f"{h['where']}: cannot delete", "released"))
+        else:
+            v = vars(owner).get(attr)
+            if isinstance(v, (dict, list, set)):
+                v.clear()
+                released.append(h)
+            else:
+                fs.append(finding("held_state_not_released",
+                                  f"{h['where']}: {type(v).__name__} holding {h['bytes']} bytes ({h['cuda_bytes']} on CUDA), "
+                                  f"{h['graphs']} CUDA graphs", "state the refreshed code builds again, released"))
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return {"released": released, "findings": fs,
+            "cuda_bytes_released": sum(h["cuda_bytes"] for h in released),
+            "graphs_released": sum(h["graphs"] for h in released)}
 
 
 # -- 2. class swap ----------------------------------------------------------------------------
