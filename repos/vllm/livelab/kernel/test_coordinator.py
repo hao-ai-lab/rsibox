@@ -193,6 +193,73 @@ class HostTest(unittest.TestCase):
         self.assertEqual(set(cl.log), {("base",) * 3})
         self.assertEqual(lps[0].journal.entries, [])
 
+    def test_late_commit_poisons_and_steps_may_mix(self):
+        """Input: 3 ranks stepping together, phase2_deadline_s=0.2 (commit by 0.1 s); rank1's
+        commit starts in time and applies v1, then takes 0.5 s more to answer. Expected:
+        rolled_back, rank1 in missed_deadline, the host poisoned and the next run refused with
+        session_poisoned; after the gap, steps run with rank1 on v1 and the others on base
+        until rank1's queued undo lands, then all base again. Proves what the README states:
+        no mixed step only within the deadline; a miss poisons the host, and steps may mix
+        until the lab respawns. Not: a host that keeps the loop stopped until the undo is
+        confirmed (deferred)."""
+        def slow_answer(fn):
+            r = fn()
+            time.sleep(0.5)
+            return r
+        cl, ps, lps = self._cluster("gaplate", gap_mode=True, quiesce={"rank1": slow_answer})
+        co = C.StepGapCoordinator(ps, cl.at_gap, phase2_deadline_s=0.2)
+        halt = self._start(cl)
+        res = co.run({"modules": self.V1})
+        wait_for(lambda: lps[1]._state.get(res["txn"]) == "undone", timeout=5)
+        self._steps(cl)
+        refused = co.run({"modules": self.V1})
+        halt()
+        self.assertEqual((res["outcome"], res["receipt"]["rollback"]["missed_deadline"],
+                          res["receipt"]["rollback"]["poisoned"]),
+                         ("rolled_back", ["rank1"], True))
+        self.assertEqual((co.status()["state"], refused["outcome"],
+                          [f["check"] for f in refused["findings"]]),
+                         ("poisoned", "refused", ["session_poisoned"]))
+        self.assertIn(("base", "v1", "base"), cl.log)        # mixed steps after the miss
+        self.assertEqual(cl.log[-1], ("base",) * 3)          # until the queued undo landed
+
+    def test_receipt_written_only_after_append_succeeds(self):
+        """Input: a writer whose first append blocks, then fails; later appends succeed.
+        Expected: status(txn) during the append says written=False (and does not raise); run
+        returns the failed append; the next status(txn) retries and the file holds the
+        receipt. Fails before the fix: status said written=True during and after the failed
+        append, and the receipt was never written."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "receipts.jsonl")
+        entered, release = threading.Event(), threading.Event()
+
+        class Flaky(R.ReceiptWriter):
+            calls = 0
+
+            def append(self, rec):
+                Flaky.calls += 1
+                if Flaky.calls == 1:
+                    entered.set()
+                    release.wait(5)
+                    return {"ok": False, "error": "disk full"}
+                return super().append(rec)
+        parts = self._three("flaky")
+        co = C.Coordinator([p for p, _, _ in parts], Flaky(path))
+        spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        box = {}
+        th = threading.Thread(target=lambda: box.update(r=co.run(
+            {"id": "flaky", "modules": {"toy.engine": spec}})))
+        th.start()
+        self.assertTrue(entered.wait(5))
+        during = co.status("flaky")
+        release.set()
+        th.join()
+        self.assertEqual((during["written"], box["r"]["outcome"], box["r"]["written"]),
+                         (False, "committed", {"ok": False, "error": "disk full"}))
+        self.assertEqual(co.status("flaky")["written"], True)
+        self.assertEqual([r["id"] for r in R.read(path)], ["flaky"])
+
 
 class ParticipantMissingTest(unittest.TestCase):
     def test_a_dp_client_that_drops_replies_blocks_the_transaction(self):
@@ -225,6 +292,34 @@ class ParticipantMissingTest(unittest.TestCase):
         self.assertEqual({(tuple(f["missing"]), f["overridable"]) for f in fs},
                          {(("dp1/0", "dp1/1"), False)})
         self.assertEqual([m.f() for m in mods], ["base"] * 4)
+
+    def test_a_rank_missing_from_proof_is_in_the_receipt(self):
+        """Input: the same 4-rank group, but the client drops DP group 1's replies only for
+        the post-commit `proof`. Expected: committed (every rank switched), and the receipt
+        carries the proof's participant_missing naming dp1/0 and dp1/1, with
+        commit_hashes.agree False. Fails before the fix: the proof's findings were dropped
+        and the receipt said the ranks agree, from the 2 ranks that answered."""
+        mods = []
+        for i in range(4):
+            (m,) = temp_modules(self, {f"kt_pm{next(_n)}": "def f():\n    return 'base'\n"})
+            mods.append(m)
+        ranks = [(f"dp{i // 2}/{i % 2}", C.LocalParticipant(
+            "workers", alias={"pkg": mods[i].__name__})) for i in range(4)]
+
+        def dp_client(method, payload):
+            rs = [{**getattr(lp, method)(payload), "rank": rid} for rid, lp in ranks]
+            return C.merge_ranks(method, rs[:2] if method == "proof" else rs)
+        g = C.CallParticipant("workers", dp_client)
+        g.expected = [rid for rid, _ in ranks]
+        r = C.Coordinator([g], phase2_deadline_s=None).run({"id": "pm", "modules": {"pkg": {
+            "source": "def f():\n    return 'edit'\n"}}})
+        rec = r["receipt"]
+        self.assertEqual((r["outcome"], [m.f() for m in mods]), ("committed", ["edit"] * 4))
+        self.assertEqual([(f["check"], f["missing"]) for f in rec["findings"]
+                          if f["check"] == "participant_missing"],
+                         [("participant_missing", ["dp1/0", "dp1/1"])])
+        self.assertEqual((rec["commit_hashes"]["ranks_agree"], rec["commit_hashes"]["agree"]),
+                         ({"workers": False}, False))
 
 
 if __name__ == "__main__":

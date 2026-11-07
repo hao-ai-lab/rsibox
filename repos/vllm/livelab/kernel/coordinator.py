@@ -991,7 +991,8 @@ class Coordinator:
         t = self.txns[txn] = {"plan": plan, "edit": tl["edit"], "tl": tl, "state": "prepared",
                               "res": {p.name: {} for p in self.participants},
                               "started": False, "cancelled": False, "done": False,
-                              "receipt": False, "baseline": baseline_restart}
+                              "receipt": False, "baseline": baseline_restart,
+                              "fin": threading.Lock()}
         # phase 1: outside the gap, steps go on
         tl["prepare_start"] = now()
         for p in self.participants:
@@ -1046,16 +1047,40 @@ class Coordinator:
     def _finish(self, txn):
         """Build and append the `txn` receipt once phase 2 is over (or phase 1 aborted)."""
         t = self.txns[txn]
-        with self._lock:
-            if t["receipt"]:
-                return {"ok": t["outcome"] == "committed", "outcome": t["outcome"], "txn": txn,
-                        "receipt": t["rec"], "written": {"ok": True, "note": "already written"}}
-            t["receipt"] = True
+        ok = t["outcome"] == "committed"
+        # One finisher at a time. `receipt` turns True only once the append succeeded, so a
+        # failed append is retried by the next status(txn), and nobody reads a missing `rec`.
+        if not t["fin"].acquire(blocking=False):
+            return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": None,
+                    "written": {"ok": False, "error": "receipt being written: ask status(txn)"}}
+        try:
+            with self._lock:
+                if t["receipt"]:
+                    return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": t["rec"],
+                            "written": {"ok": True, "note": "already written"}}
+                rec = t.get("rec")
+            if rec is None:
+                rec = self._build(txn)
+                with self._lock:
+                    t["rec"] = rec
+            w = self._write(rec)
+            if w.get("ok"):
+                with self._lock:
+                    t["receipt"] = True
+            return {"ok": ok, "outcome": t["outcome"], "txn": txn, "receipt": rec, "written": w}
+        finally:
+            t["fin"].release()
+
+    def _build(self, txn):
+        """The `txn` receipt record; reads the code hashes of a committed transaction."""
+        t = self.txns[txn]
         plan, tl, out, res = t["plan"], t["tl"], t["out"], t["res"]
         rank_hashes, ranks_agree = {}, {}
         if out["outcome"] == "committed":       # code hashes, read after the gap
             for p in self.participants:
-                r = _call(p, "proof", txn)
+                # kept in the receipt: its findings (participant_missing, participant_failed)
+                # count like those of any other call
+                r = res[p.name]["proof"] = _call(p, "proof", txn)
                 out["hashes"][p.name] = r.get("hashes")
                 if r.get("ranks"):              # a group: every rank's hashes, compared
                     rank_hashes[p.name] = {str(x.get("rank")): x.get("hashes")
@@ -1069,6 +1094,13 @@ class Coordinator:
                             "participant": p.name,
                             # the same function differs: no accept can make that safe
                             **({"overridable": False} if same_key else {})})
+                if not r["ok"]:        # a failed proof, or one lacking ranks, shows no agreement
+                    ranks_agree[p.name] = False
+                    if not r.get("findings"):
+                        out["extra"].append({**F.finding(
+                            "participant_failed", f"proof: {r.get('error')}",
+                            "proof answers with every rank's code hashes"),
+                            "participant": p.name})
         fs = [f for r in res.values() for x in r.values()
               for f in x.get("findings", [])] + out["extra"]
         modules = plan.get("modules", {})
@@ -1119,9 +1151,7 @@ class Coordinator:
                          "missed_deadline": sorted(t.get("missed", ())),
                          "poisoned": bool(t.get("missed"))},
         }
-        t["rec"] = rec
-        return {"ok": out["outcome"] == "committed", "outcome": out["outcome"], "txn": txn,
-                "receipt": rec, "written": self._write(rec)}
+        return rec
 
     def prove(self, txn, golden=None, tolerance=WITNESS_TOLERANCE):
         """After the workload ran: collect witness counts and findings from every participant;
@@ -1220,7 +1250,10 @@ class StepGapCoordinator(Coordinator):
     """The host for participants that step together (worker ranks + engine core), living in
     the loop owner: phase 1 (prepare) runs in the caller's thread while steps go on; phase 2
     (validate, commit or abort, undo of a failed commit) runs in ONE gap between two steps.
-    So no step ever sees participants on different versions, and the loop stalls only for
+    So while every participant answers by the phase-2 deadline, no step sees participants on
+    different versions. One that misses it poisons the host and the gap ends anyway: until the
+    lab respawns, steps may run mixed (a late commit lands before its queued undo runs).
+    The loop stalls only for
     phase 2 (`gap_s` in the receipt). `gap(fn)` queues fn to the loop owner and returns its
     result (for vLLM: the engine-core busy loop, which calls the workers by collective_rpc;
     that completes on every worker before the next step). Participants must not quiesce on

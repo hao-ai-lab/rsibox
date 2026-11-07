@@ -93,8 +93,12 @@ transactions (participants and their host).
   participant missing from a group's reply, aborts all); phase 2, validate on all, then
   commit on all or abort on all, and a commit that fails undoes every participant that
   committed (`rolled_back`). `StepGapCoordinator` runs phase 2 inside one gap between two
-  steps of the loop owner, so ranks that step together never run a step on different
-  versions. A group participant (several ranks behind one call) merges its ranks' replies
+  steps of the loop owner, so when every participant answers within `phase2_deadline_s`,
+  ranks that step together never run a step on different versions. When one misses it (a
+  commit or undo that started but has not returned), the gap still ends at the deadline:
+  the host is poisoned, and until the lab respawns the participants, steps may run on mixed
+  versions (the late commit can land after steps resumed, before its queued undo runs;
+  `test_late_commit_poisons_and_steps_may_mix`). A group participant (several ranks behind one call) merges its ranks' replies
   (`merge_ranks`); one that declares `expected` ranks and lacks some is a blocking, not
   overridable `participant_missing`. With `phase2_deadline_s`, a participant that misses
   the deadline is treated as failed and poisons the host (only undo, until `recovered()`).
@@ -190,6 +194,9 @@ Each test's docstring says what it proves and what it does not.
 | `test_commit_failure_undoes_the_committed` | a rank lost at commit leaving the others on the new code |
 | `test_half_committed_group_is_undone` | a group whose ranks committed in part |
 | `test_step_gap_failed_commit_is_undone_in_the_same_gap` | a step that ran the edit on some ranks before the rollback |
+| `test_late_commit_poisons_and_steps_may_mix` | a commit that misses the deadline read as a clean rollback: shows the host poisoned, the next run refused, and the mixed steps until the queued undo |
+| `test_receipt_written_only_after_append_succeeds` | a failed receipt append reported as written (and never retried) |
+| `test_a_rank_missing_from_proof_is_in_the_receipt` | a rank missing from the post-commit proof dropped from the receipt, which then says the ranks agree |
 
 ## Not here yet
 
