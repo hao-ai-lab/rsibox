@@ -9,7 +9,8 @@ among same-named definitions, so a patch may move lines), adds the witness, and 
 running code object of the target and of its enclosing functions with its new version (so
 closures made later run the new code too). It runs the checks and returns findings:
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
-(free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`,
+(free variables differ), `removed_definition`, `line_aliased` (advisory),
+`defaults_not_evaluated`, `running_frame`, `patch_invalid`,
 `new_fields`, `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks) and
 `constructor_edit` (an `__init__`, `__new__` or `__post_init__` target: built instances keep
 the old state, so it blocks and routes to T1).
@@ -30,7 +31,7 @@ targets and which targets are live, and returns plain data and code objects. The
 (import, locate, base check against running code, exec of imports, added definitions and
 defaults, pairing, running frames) is the live half. This file compiles the whole patched
 module; compiling only the changed definitions, the analysis in a child process, per-block
-witnesses, a backfill of new fields and Triton targets are later PRs (README).
+witnesses, a backfill of new fields and Triton targets are not built (README).
 """
 import ast
 import collections
@@ -198,9 +199,6 @@ class Staged:
         self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
 
 
-_compile = compile          # `stage` has a parameter named compile
-
-
 LIVE_BODY = "__fastrsi_class_body__"
 
 
@@ -306,9 +304,9 @@ def analyze(base_src, source, targets, filename, key_module, live, trees=None):
     """The text half of `stage`: everything that needs only the two texts, the targets and
     which targets have a live function (`live`: {(qualname, line): bool}). It parses both
     texts, matches targets, adds the witness, compiles the module, finds added, removed and
-    imported names, and compares the blanked trees. It touches no live object, so it can run
-    in another process (`ProcessAnalyzer`). targets "auto" (or None): the changed definitions
-    of the two texts, found from the trees parsed here (as `changed_targets`), so the caller
+    imported names, and compares the blanked trees. It touches no live object, so it could run
+    in another process (the analyzer child, not built). targets "auto" (or None): the changed
+    definitions of the two texts, found from the trees parsed here (as `changed_targets`), so the caller
     needs no parse of its own; `live` then holds every live (qualname, line) of the module.
     Returns plain data and code objects (marshal can carry them): {"error"} when a text does
     not parse, else {"targets": [per-target dict in order], "resolved": [[qualname, line]]
@@ -346,7 +344,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
         targets = _changed(base_src, bq, source, pq)
         timings["targets_s"] = round(time.perf_counter() - t, 6)
     t = time.perf_counter()
-    base_units = [_compile(base_tree, filename, "exec", dont_inherit=True)]
+    base_units = [compile(base_tree, filename, "exec", dont_inherit=True)]
     compile_s = time.perf_counter() - t
     line_map = {}
     for q, nodes in pq.items():
@@ -411,7 +409,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     t = time.perf_counter()
     new_units, new_error = [], None
     try:
-        new_units = [_compile(ast.fix_missing_locations(tree), filename, "exec",
+        new_units = [compile(ast.fix_missing_locations(tree), filename, "exec",
                               dont_inherit=True)]
     except Exception as e:
         new_error = f"{type(e).__name__}: {e}"
@@ -441,7 +439,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     for q, cls_name, n in added:
         if cls_name is not None and isinstance(n, _DEF):
             meths.setdefault(cls_name, []).append(n)
-    new_fields = _new_fields(base_tree, tree, meths, filename) if meths else []
+    new_fields = _new_fields(base_tree, tree, meths) if meths else []
 
     # 7. anything else changed? Last, because blanking edits the two trees (logged in undo).
     t = time.perf_counter()
@@ -542,7 +540,7 @@ def _class_names(cls):
     return out
 
 
-def _new_fields(base_tree, tree, meths, filename):
+def _new_fields(base_tree, tree, meths):
     """[{cls, field, readers, init_line}] for each attribute that a changed or added method
     of a top-level class reads on `self`, that the edited __init__ sets, and that no method
     of the base class sets nor the base class body defines (a code swap does not run the
@@ -578,7 +576,7 @@ def _new_fields(base_tree, tree, meths, filename):
 
 def _try_compile(mod, filename):
     try:
-        return {"code": _compile(mod, filename, "exec")}
+        return {"code": compile(mod, filename, "exec")}
     except Exception as e:
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -613,7 +611,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     by construction and are not reported as `base_mismatch`; key_module: the module name used in
     witness keys (participants that load a module under another name pass the shared one);
     scan: "auto" (heap scan only when the module namespace cannot find a target, suspended
-    frames only for generator / coroutine targets) or "always" (both scans, as before v2.2).
+    frames only for generator / coroutine targets) or "always" (both scans).
     trees: (base tree, patch tree), `ast.parse` of exactly the base text (`base_source`, or
     the module's file) and `source`, for a caller that parsed them already (its own planner):
     the analysis uses them instead of parsing again and leaves them unchanged.

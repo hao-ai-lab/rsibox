@@ -228,6 +228,9 @@ class AcceptRecordTest(unittest.TestCase):
                 "code_hash": code_hash}
 
     def test_standing_accept_expires_when_code_changes(self):
+        """Input: a standing accept record for zero_witness on code hash h1. Expected: it
+        accepts the finding on h1 (and is returned as used), but not the same finding on h2.
+        Pain point: an accept that outlives the code it was judged on. Not: subject scoping."""
         rec = {"check": "zero_witness", "scope": "standing", "by": "agent-e5",
                "reason": "false positive on processed weights", "participant": "worker",
                "code_hash": "h1"}
@@ -250,6 +253,9 @@ class AcceptRecordTest(unittest.TestCase):
         self.assertTrue(F.decide(fs[:1], [rec])["proceed"])
 
     def test_name_and_txn_record_still_accept(self):
+        """Input: a bare check name, then a record without scope or code hash. Expected: both
+        accept the finding on any code. Pain point: the standing-accept rule breaking the plain
+        forms. Not: standing records (the test above)."""
         self.assertTrue(F.decide([self._f("h2")], ["zero_witness"])["proceed"])
         rec = {"check": "zero_witness", "by": "agent", "reason": "rank-specific"}
         d = F.decide([self._f("h2")], [rec])

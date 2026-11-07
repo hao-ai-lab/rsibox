@@ -79,7 +79,7 @@ class NewFieldsTest(unittest.TestCase):
         stage_and_apply applies nothing and the live estimator still runs the old step
         (step(5000) = 256). Fails without the detector: the swap applies with no finding and
         the next step raises AttributeError (a live run killed the engine this way). Not:
-        setting the field on live objects (a backfill is a later PR)."""
+        setting the field on live objects (a backfill is not built; README)."""
         name = f"kt_est{next(_n)}"
         (m,) = temp_modules(self, {name: ESTIMATOR})
         est = m.Runner().speculator.acceptance_estimator

@@ -12,8 +12,7 @@ It leaves out the file, the qualname and line numbers, which form the identity, 
 function does not change its hash. First 16 hex digits.
 `text_hash(s)` is sha256 of UTF-8 text, 16 hex digits, for sources and plans.
 
-The live functions of a module are found by scanning the gc heap (as
-`fastrsi_lab_cov.install_batch` does): every function object whose globals are the module's
+The live functions of a module are found by scanning the gc heap: every function object whose globals are the module's
 dict. Swapping `__code__` on those objects reaches every holder at once: module dicts (also
 `from x import f` copies), class dicts, closure cells of decorator wrappers, bound methods
 saved as callbacks. `holders(fn)` lists them for the record.

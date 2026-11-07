@@ -36,7 +36,7 @@ class ChangeAnalysisTest(unittest.TestCase):
         outside change; the compiled new module, run with the witness global bound, gives
         scale(3) = 30 and one call counted under "toy.ops:scale:<line>". Pain point: an
         analysis that misses the closure's maker (closures made later keep the old code), or
-        compiles a body that never says it ran. Not: installing the code (`apply`, next PR)."""
+        compiles a body that never says it ran. Not: installing the code (`apply`, test_swap.py)."""
         new = edit(OPS, ("return x * STEP_SCALE", "return x * STEP_SCALE * 5"))
         self.assertEqual(S.changed_targets(OPS, new), [["scale", SCALE]])
         shift = edit(OPS, ("return x + k", "return x + 2 * k"))
@@ -74,7 +74,7 @@ class ChangeAnalysisTest(unittest.TestCase):
         no_definition and no_live_function; the auto analysis finds `double` as added, the
         `math` import, `make_shift` as removed, and no outside change (added, imported and
         removed names are not outside changes). Not: whether `stage` blocks on them (it
-        turns these into findings, next PR)."""
+        turns these into findings; test_detectors.py)."""
         start = OPS.index("def make_shift")
         new = edit(OPS[:start].rstrip() + "\n",
                    ("import functools", "import functools\nimport math"),

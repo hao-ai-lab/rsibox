@@ -6,7 +6,8 @@
       then commit on all, or abort on all; a commit that fails undoes the committed ones
 
 `StepGapCoordinator` runs phase 2 inside ONE gap between two steps of the loop owner, so
-participants that step together never run a step on different versions, and the loop stalls
+participants that step together never run a step on different versions while every one answers
+by the phase-2 deadline (a missed deadline poisons the session), and the loop stalls
 only for phase 2. `Coordinator` runs phase 2 right away, each participant switching at its
 own quiesce point: between two commits a step can see mixed versions (the toy test shows it).
 The host answers `status(txn)`: prepared, committed, aborted, undone or in-doubt. Receipts are
@@ -28,6 +29,7 @@ is not an ok-dict counts as not-ok):
     witness_check(txn) -> {"ok", "counts", "findings"}  after the workload
     reset(kind)   -> {"ok", ...}                     data reset hook: "R2", "R3", ...
     fingerprint(modules) -> {"ok", "code"}           {key: [content hash, code object id]}
+    at_base()     -> {"ok", ...}                     back at the start state (cheap, no heap scan)
 
 `ref` is a transaction id, or `{"txn": id, "deadline_at": unix seconds}` when the host gives
 phase 2 a deadline (`phase2_deadline_s`). A participant must not switch after `deadline_at`
@@ -73,7 +75,7 @@ side implements: one `call(method, payload) -> dict` per participant (for vLLM: 
 to a worker rank, or the engine-core input-queue channel), which on the far side dispatches
 to a LocalParticipant.
 
-Not in v1 (later PRs; see the kernel README): rebuilds after the commit (R1 recapture, R6
+Not built (see the kernel README, Not built): rebuilds after the commit (R1 recapture, R6
 weight reload), the analyzer child, cross-module overlays, the docstring-only label, per-block
 witness keys, compile units, and the new-field backfill. A `new_fields` finding (route T1)
 blocks like any other.
@@ -275,7 +277,7 @@ class LocalParticipant(Participant):
         return F.ok(txn=txn, state=self._state.get(txn, "unknown"))
 
     def validate(self, txn):
-        """Phase 2, in the gap, before the vote: is the staged plan still valid?"""
+        """Phase 2, in the gap, before commit: is the staged plan still valid?"""
         txn, _ = txn_ref(txn)
         if txn not in self._staged:
             return F.not_ok(f"nothing staged for {txn}")
@@ -1272,7 +1274,7 @@ class Coordinator:
     def at_base(self):
         """Every participant (every rank of a group) back at its start state? Cheap: no heap
         scan, only the modules a transaction touched (LocalParticipant.at_base). Returns
-        {ok, participants: {name: reply}, poisoned, missing}."""
+        {ok, participants: {name: reply}, poisoned, findings}."""
         res = {p.name: _call(p, "at_base", None) for p in self.participants}
         ok = all(r["ok"] for r in res.values()) and not self.poison
         return F.ok(**{"ok": ok}, participants=res, poisoned=bool(self.poison),
@@ -1299,7 +1301,6 @@ class Coordinator:
         t = self.txns.get(txn, {})
         resets = t.get("plan", {}).get("undo_resets", [])
         tl = {"queued": now()}
-        rb = {}
         try:
             res, err = self._in_gap(lambda: self._undo_phases(txn, resets, tl)), None
         except Exception as e:
@@ -1311,16 +1312,14 @@ class Coordinator:
         fs = [{**f, "participant": n} for n, r in res.items()
               for x in [r.get("undo")] + list(r.get("reset", {}).values()) if x
               for f in x.get("findings", [])]
-        ok = err is None and all(x["ok"] for x in calls) and rb.get("ok", True)
+        ok = err is None and all(x["ok"] for x in calls)
         rec = {"schema": R.SCHEMA, "kind": "undo", "id": txn, "participants": res,
                "resets": list(resets), "status": "undone" if ok else "partial",
                "findings": fs + ([F.finding("undo_incomplete", f"undo did not finish: {err}",
                                             "a step gap within the timeout")] if err else []),
-               "rebuild": rb or None,
-               "recapture_s": (rb.get("seconds") or {}).get("R1"),
+               "rebuild": None,             # no post-commit rebuild yet (README, Not built)
+               "recapture_s": None,
                "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
-        if t and rb.get("ok"):
-            t["rebuilt"] = []
         if t:                          # partial: an undo ran but could not restore everything
             with self._lock:
                 t["state"] = "undone" if ok else "partial"

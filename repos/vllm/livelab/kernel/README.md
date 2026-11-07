@@ -47,7 +47,7 @@ template's conformance cases c0-c10.
   closures made later run the new code. Nothing is visible yet. Findings: `no_live_function`,
   `not_in_patch`, `base_mismatch`, `outside_changes`, `removed_definition`, `closure_changed`
   (free variables differ; not overridable), `defaults_not_evaluated`, `running_frame`
-  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `constructor_edit`, `line_aliased`. `validate(staged)` re-checks at
+  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `jit_target`, `constructor_edit`, `line_aliased`. `validate(staged)` re-checks at
   the apply point: the same code objects are installed, and no thread stack holds a frame of
   the old code. `apply(staged, journal, witness)` makes it visible, every change through the
   journal (closure pairs first, so undo also takes back closures the new code made).
@@ -156,7 +156,7 @@ template's conformance cases c0-c10.
   limits (`no_live_function`, ...) are not overridable.
 - **Undo is exact for code, not for data.** The journal restores the same code and attribute
   objects and removes every name it added. Data the new code wrote (a token it appended, a
-  cache entry) is not the journal's: a later PR adds declared resets.
+  cache entry) is not the journal's: the plan's `undo_resets` (R2, R3, ...) restore it.
 - **Attributes outside `__dict__` go through `getattr` / `setattr`.** `record_attr` reads the
   instance dict only when that is exact (default `__setattr__` and `__delattr__`, and no data
   descriptor of the type owns the name). A function's `__doc__`, a property, torch's
@@ -215,7 +215,7 @@ Each test's docstring says what it proves and what it does not.
 | `test_running_frame_never_runs_the_new_code` | a loop frame that never runs the new code reported as a pass |
 | `test_a_new_field_votes_no_and_routes_to_t1` | a participant that votes yes on an edit that would raise AttributeError |
 | `test_a_module_the_engine_imports_lazily_after_base_is_not_an_extra_name` | a clean undo reported as not at base because the engine imported a module lazily meanwhile (vLLM #62872) |
-| `test_three_edit_chain_explicit` / `_auto` | a second transaction refused after the first shifted lines; an undo that leaves the wrong text as the base |
+| `test_two_edit_chain_explicit` / `_auto` | a second transaction refused after the first shifted lines; an undo that leaves the wrong text as the base |
 | `test_step_gap_commit_and_undo_never_mix_versions` | ranks that run one step on different versions (all-or-nothing in one gap) |
 | `test_vote_no_changes_nobody` | one rank on another build that votes no while the others switch |
 | `test_a_dp_client_that_drops_replies_blocks_the_transaction` | a commit on 4 ranks whose witness, receipt and undo covered 2 (a DP client that returned DP group 0's replies only) |
@@ -233,24 +233,22 @@ Each test's docstring says what it proves and what it does not.
 The conformance cases c0-c10 (`template/livelab/conformance/cases.py`) run against the toy
 lab in CI; all 11 pass (no XFAIL).
 
-## Not here yet
+## Not built
 
-The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in later PRs:
+The kernel does R0 (swap) only. Not built yet:
 
 - **New-field backfill** (`_backfill_code`, `fields.py`, plan `"backfill": true`) and
   `rebuilds=` (a recipe that rebuilds the objects resolves the finding). Until then
   `new_fields` blocks and routes to T1.
-- **Triton `@jit` targets** (`jit_rebuild`, rebuild in place, launch counters) with `jit.py`.
-  Until then such a target is swapped as bytecode the kernel compiler never runs, and its
-  witness reads zero (`zero_witness`).
+- **Triton `@jit` targets** (`jit_rebuild`, rebuild in place, launch counters). Until then
+  `stage` reports a blocking `jit_target` finding that routes to T1; accepting it swaps only
+  the Python bytecode, which the compiled kernel never runs, and the witness reads zero.
 - **Per-block witness** (`_inject_hunks`: a key per changed branch, #62206's shape).
 - **Compile units** (compile only the statements holding the changed definitions; a whole
   3,800-line module compile stalls a step) and the **analyzer child process**
-  (`ProcessAnalyzer`, `analyze_fallback`), which keep the GIL free during prepare.
+  (`analyze_fallback`), which keep the GIL free during prepare.
 - **Transaction-level parts**: `overlay=` and `staged_names` (a module importing a name
   another module of the same transaction adds), `docstring_only`, and the participant's
   analyzer.
 - **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes: the receipt's
   `rebuild` and `recapture_s` stay None.
-
-These come in later PRs, each importing and testing on top of this series.

@@ -8,7 +8,7 @@ One schema for every check in the kernel:
      "why": str,               # why the difference matters
      "actions": [{"action": str, "cost": str}],
      "risk_if_ignored": str,
-     "lessons": [str],         # related rows of repos/<engine>/kb/lessons.md
+     "lessons": [str],         # related rows of repos/<engine>/kb/
      "overridable": bool}      # False: physical, accepting it cannot make the change happen
 
 plus two optional annotations: "subject" (what was checked, e.g. a witness key) and
@@ -343,8 +343,9 @@ def _matches(rec, f):
 
 
 def decide(findings, accept=()):
-    """Proceed only if every finding is accepted. A finding is accepted when it is overridable
-    and `accept` is "all", names its check, or holds an accept record matching it. Returns
+    """Proceed only if every finding is accepted. An advisory finding is always accepted; any
+    other is accepted when it is overridable and `accept` is "all", names its check, or holds an
+    accept record matching it. Returns
     {"proceed": bool, "accepted": [check], "blocking": [check], "accepts": [record used],
      "findings": [annotated]}. Records for name-only accepts have by/reason None."""
     recs = None if accept == "all" else [

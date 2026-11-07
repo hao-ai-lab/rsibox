@@ -17,7 +17,7 @@ from .test_locate import ENG, OPS, at, edit, fresh
 
 def compiled(module, source, qualname, line):
     """The code object of `qualname` at `line` in `source` compiled as `module`'s file: what a
-    swap would install. (The swap's own staging is a later kernel PR.)"""
+    swap would install, without the swap's own staging (test_swap.py)."""
     return L.code_tree(compile(source, module.__file__, "exec"))[0][(qualname, line)][0]
 
 

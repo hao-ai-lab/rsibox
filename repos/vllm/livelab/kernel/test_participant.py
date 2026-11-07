@@ -1,6 +1,6 @@
 """Golden tests of the participant side of a transaction (`coordinator.LocalParticipant`) on
 the toy engine (CPU, standard library only). Here the test drives the two phases by hand, as
-a host does; the host itself (`Coordinator`) is the next kernel PR.
+a host does; the host itself (`Coordinator`) is tested in test_coordinator.py.
 
 Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
 (or python3 -m pytest -q repos/vllm/livelab/kernel)
@@ -30,7 +30,7 @@ class ParticipantTest(unittest.TestCase):
         "prepared"; nothing runs the edit before commit (step(3) = 17); after commit both
         compute 1700, report the same code hash for the target and state "committed"; after
         undo both run their exact base code objects again (17), state "undone", empty
-        journals. Not: the host's all-or-nothing rules (next PR), real RPC."""
+        journals. Not: the host's all-or-nothing rules (test_coordinator.py), real RPC."""
         ranks = []
         for r in ("rank0", "rank1"):
             name, eng, _ = fresh(r)
@@ -157,7 +157,7 @@ class LineMapChainTest(unittest.TestCase):
         self.assertEqual((ops.scale(3), ops.make_shift(10)(1)), (6, 11))
         self.assertEqual(ops.scale.__code__.co_firstlineno, at(OPS, "def scale"))
 
-    def test_three_edit_chain_explicit(self):
+    def test_two_edit_chain_explicit(self):
         """Input: edit 1 adds 2 lines in `scale` (above), edit 2 changes `bias` in
         `make_shift` (below) with the target at the installed text's line, then undo edit 2,
         then undo edit 1. Expected: edit 2 stages through the line map (no line_aliased),
@@ -166,7 +166,7 @@ class LineMapChainTest(unittest.TestCase):
         qualname defined twice in the module (not covered here)."""
         self._chain("explicit")
 
-    def test_three_edit_chain_auto(self):
+    def test_two_edit_chain_auto(self):
         """The same chain with edit 2's targets left to the kernel ("auto")."""
         self._chain("auto")
 
