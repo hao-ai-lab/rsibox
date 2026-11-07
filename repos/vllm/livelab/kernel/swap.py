@@ -26,7 +26,7 @@ targets and which targets are live, and returns plain data and code objects. The
 (import, locate, base check against running code, exec of imports, added definitions and
 defaults, pairing, running frames) is the live half. This file compiles the whole patched
 module; compiling only the changed definitions, the analysis in a child process, per-block
-witnesses, line maps of chained edits, new fields and Triton targets are later PRs (README).
+witnesses, a backfill of new fields and Triton targets are later PRs (README).
 """
 import ast
 import collections
@@ -185,7 +185,7 @@ class Staged:
         self.expect = []         # (function, code it ran at stage time, its hash): validate
         self.removes = []        # (owner: module dict or class, name) the edit deletes
         self.items = {}          # key -> JSON summary
-        self.line_map = {}       # (qualname, patch line) -> base line
+        self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
 
 
 _compile = compile          # `stage` has a parameter named compile
@@ -345,7 +345,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
                 line_map[(q, first_line(n))] = first_line(b)
 
     # 1. targets: match base and patch, add the witness (the live checks are the caller's)
-    tres, todo = [], []
+    tres, todo, aliases = [], [], []
     for q, line in targets:
         line = int(line)
         k = L.key_of(key_module, q, line)
@@ -354,8 +354,13 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             tres.append({"status": "no_definition"})
             continue
         if not live.get((q, line)):
-            tres.append({"status": "no_live_function"})
-            continue
+            # fallback when no line map led here (see stage's `line_maps`): the one live code
+            # with this qualname is taken as it; stage reports it as a finding
+            cands = [kl for kl in live if kl[0] == q and live[kl]]
+            if len(cands) != 1:
+                tres.append({"status": "no_live_function"})
+                continue
+            aliases.append([q, line, cands[0][1]])
         if len(pq.get(q, [])) != len(bq[q]):
             tres.append({"status": "count", "patch": len(pq.get(q, [])), "base": len(bq[q])})
             continue
@@ -417,6 +422,17 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
                 != ast.dump(ast.Tuple(pnode.args.defaults + pnode.args.kw_defaults))):
             r["defaults"] = _defaults_stub(q, pnode, futures)
 
+    # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
+    meths = {}
+    for q, i in todo:
+        parts = q.split(".")
+        if len(parts) == 2 and isinstance(pq[q][i], _DEF):
+            meths.setdefault(parts[0], []).append(pq[q][i])
+    for q, cls_name, n in added:
+        if cls_name is not None and isinstance(n, _DEF):
+            meths.setdefault(cls_name, []).append(n)
+    new_fields = _new_fields(base_tree, tree, meths, filename) if meths else []
+
     # 7. anything else changed? Last, because blanking edits the two trees (logged in undo).
     t = time.perf_counter()
     outside = _blank(base_tree, todo, set(removed), undo) != _blank(
@@ -425,7 +441,66 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     return {"targets": tres, "resolved": [[q, int(line)] for q, line in targets],
             "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
-            "imports": imports, "outside_changes": outside, "timings": timings}
+            "imports": imports, "outside_changes": outside, "timings": timings,
+            "aliases": aliases, "new_fields": new_fields}
+
+
+def _self_name(fn):
+    args = fn.args.posonlyargs + fn.args.args
+    return args[0].arg if args else None
+
+
+def _self_attrs(node, me, ctx):
+    """Attribute names X of `me.X` in node with the given context (ast.Load / ast.Store)."""
+    if me is None:
+        return set()
+    return {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name) and n.value.id == me and isinstance(n.ctx, ctx)}
+
+
+def _class_names(cls):
+    out = set()
+    for n in cls.body:
+        if isinstance(n, (*_DEF, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, ast.Assign):
+            out |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+    return out
+
+
+def _new_fields(base_tree, tree, meths, filename):
+    """[{cls, field, readers, init_line}] for each attribute that a changed or added method
+    of a top-level class reads on `self`, that the edited __init__ sets, and that no method
+    of the base class sets nor any class body defines."""
+    bcls = {n.name: n for n in base_tree.body if isinstance(n, ast.ClassDef)}
+    pcls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    out = []
+    for c, nodes in meths.items():
+        b, p = bcls.get(c), pcls.get(c)
+        init = next((m for m in (p.body if p else ()) if isinstance(m, _DEF)
+                     and m.name == "__init__"), None)
+        if b is None or init is None:
+            continue
+        old = set()
+        for m in b.body:
+            if isinstance(m, _DEF):
+                old |= _self_attrs(m, _self_name(m), ast.Store)
+        old |= _class_names(b) | _class_names(p)
+        me = _self_name(init)
+        sets = _self_attrs(init, me, ast.Store)
+        readers = {}
+        for m in nodes:
+            if m.name == "__init__":
+                continue
+            for x in _self_attrs(m, _self_name(m), ast.Load):
+                if x in sets and x not in old:
+                    readers.setdefault(x, []).append(f"{c}.{m.name}")
+        for x in sorted(readers):
+            out.append({"cls": c, "field": x, "readers": sorted(set(readers[x])),
+                        "init_line": first_line(init)})
+    return out
 
 
 def _try_compile(mod, filename):
@@ -453,7 +528,7 @@ def _err(e):
 
 
 def stage(module, source, targets="auto", base_hash=None, key_module=None, scan="auto",
-          base_source=None, own_codes=(), trees=None):
+          base_source=None, own_codes=(), line_maps=(), trees=None):
     """module: the live module's name; source: the full patched module text; targets:
     [(qualname, firstlineno in the base)], or "auto" (the default; None too): the analysis
     finds the changed definitions itself from its one parse of the two texts (the same list
@@ -471,6 +546,13 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     the analysis uses them instead of parsing again and leaves them unchanged.
     With `changed_targets(..., trees=)` a caller can also pick a subset of the changed
     definitions and pass them as explicit targets, still without a parse.
+    line_maps: when base_source is the text of earlier swaps, their line maps, newest first:
+    each {(qualname, line in that swap's patch): line in its base} (the `line_map` of each
+    staged swap). A definition no swap replaced still carries the line of the text it was
+    compiled from, so a target keyed at base_source's line is found by walking the maps back
+    to that text (`timings["line_map_aliases"]`). Without a map that leads there, the one live
+    code with the target's qualname is taken as it: a `line_aliased` finding (advisory; the
+    content check against the base text still guards it).
     Returns {"ok", "staged", "items", "findings", "timings", "targets"}; ok is False only
     when nothing can be staged (bad patch, import error). Each target's item says whether its definition
     `changed` (AST, before the witness is added). Never raises."""
@@ -491,14 +573,18 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     t = time.perf_counter()
     auto = targets is None or targets == "auto"
     run, held = L.index_module(mod, None if scan == "always" else L.module_functions(mod))
+    mapped = _follow_line_maps(run, line_maps)
     timings["scan"] = "heap" if scan == "always" else "namespace"
     if not auto and scan == "auto" and any(_needs_heap(run.get((q, int(line)), ()), run, held)
                                            for q, line in targets):
         run, held = L.index_module(mod)
+        mapped = _follow_line_maps(run, line_maps)
         timings["scan"] = "heap"
     timings["locate_s"] = round(time.perf_counter() - t, 6)
+    # explicit targets that no line map resolved: the qualname fallback (auto: in analyze)
+    fallback = [] if auto else _alias_shifted(targets, run)
     # auto: the targets are known only after the analysis, so it gets every live key
-    live = _live_keys(held) if auto else _live_of(targets, run, held)
+    live = _live_keys(held, mapped) if auto else _live_of(targets, run, held)
     req = {"base_src": base_src, "source": source,
            "targets": "auto" if auto else [[q, int(line)] for q, line in targets],
            "filename": mod.__file__, "key_module": kname, "live": live}
@@ -511,6 +597,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                                   for q, line in targets):
             t2 = time.perf_counter()
             run, held = L.index_module(mod)
+            mapped = _follow_line_maps(run, line_maps)
             timings["scan"] = "heap"
             timings["locate_s"] = round(timings["locate_s"] + time.perf_counter() - t2, 6)
             heap_live = _live_of(targets, run, held)
@@ -524,6 +611,23 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     at = a["timings"]
     if "error" in a:
         return _invalid(a["error"], kname)
+    if mapped:
+        timings["line_map_aliases"] = mapped
+    for q, bl, ll in a.get("aliases") or ():
+        if (q, int(bl)) not in run and (q, int(ll)) in run:
+            run[(q, int(bl))] = run[(q, int(ll))]
+            fallback.append([q, int(bl), int(ll)])
+    nodef = {(q, int(line)) for (q, line), r in zip(a["resolved"], a["targets"])
+             if r["status"] == "no_definition"}
+    fallback = [x for x in fallback if (x[0], x[1]) not in nodef]   # not_in_patch says it
+    for q, bl, ll in fallback:
+        fs.append({**F.finding(
+            "line_aliased", f"no line map leads from line {bl} of the base text to live "
+            f"code; the one live {q} (line {ll}) is taken as it",
+            "a line map from the earlier swaps to the live code",
+            subject=L.key_of(kname, q, bl)), "advisory": True})
+    if fallback:
+        timings["line_aliases"] = fallback
     timings["parse_s"] = at["parse_s"]
     if "trees" in at:
         timings["trees"] = at["trees"]
@@ -688,6 +792,22 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             st.swaps.append((fn, c, d, kw))
             st.expect.append((fn, o, L.content_hash(o)))
 
+    # 6b. fields only the new __init__ sets, read by new code: live instances lack them.
+    # No backfill here: the finding blocks and routes to T1 (rebuild the objects or restart).
+    for nf in a.get("new_fields") or ():
+        cls = getattr(mod, nf["cls"], None)
+        x = nf["field"]
+        attr = f"_{nf['cls'].lstrip('_')}{x}" if x.startswith("__") and not x.endswith("__") \
+            else x
+        if not isinstance(cls, type) or hasattr(cls, attr):
+            continue                       # a class-level default covers old instances
+        f = F.finding(
+            "new_fields", f"{', '.join(nf['readers'])} read self.{x}, which only the edited "
+            f"{nf['cls']}.__init__ sets; instances built before the swap lack it",
+            f"every live {nf['cls']} has {x}", subject=f"{kname}:{nf['cls']}.{x}")
+        f["actions"] = [act for act in f["actions"] if "backfill" not in act["action"]]
+        fs.append({**f, "route": "T1"})
+
     # 7. anything else changed? (compared by the analysis)
     if a["outside_changes"]:
         fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
@@ -716,6 +836,45 @@ def _live_of(targets, run, held):
         live[(q, int(line))] = any(held.get(o) for o in olds) or any(
             held.get(p) for o in olds for p in _enclosing(o, run))
     return live
+
+
+def _alias_shifted(targets, run):
+    """Fallback for explicit targets whose (qualname, base line) runs no code while exactly
+    one running code has that qualname: alias the target to it in `run` (the base_mismatch
+    content check still compares it with the base text's code). Returns [[qualname, base
+    line, live line]]."""
+    out = []
+    for q, line in targets:
+        line = int(line)
+        if run.get((q, line)):
+            continue
+        cands = [k for k in run if k[0] == q and run[k]]
+        if len(cands) == 1:
+            run[(q, line)] = run[cands[0]]
+            out.append([q, line, cands[0][1]])
+    return out
+
+
+def _follow_line_maps(run, line_maps):
+    """Add to `run` the keys of base_source's text that earlier swaps' line maps (newest
+    first) lead to live code: a definition no swap replaced still carries the line of the
+    text it was compiled from. Returns [[qualname, base_source line, live line]]."""
+    out = []
+    if not line_maps:
+        return out
+    for q, line in list(line_maps[0]):
+        if run.get((q, line)):
+            continue
+        cur = line
+        for m in line_maps:
+            cur = m.get((q, cur))
+            if cur is None:
+                break
+            if run.get((q, cur)):
+                run[(q, line)] = run[(q, cur)]
+                out.append([q, line, cur])
+                break
+    return out
 
 
 def _live_keys(held, mapped=()):

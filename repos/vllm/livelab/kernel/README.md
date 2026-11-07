@@ -45,12 +45,23 @@ findings, locate, journal, witness, and the R0 swap (a function-body swap).
   closures made later run the new code. Nothing is visible yet. Findings: `no_live_function`,
   `not_in_patch`, `base_mismatch`, `outside_changes`, `removed_definition`, `closure_changed`
   (free variables differ; not overridable), `defaults_not_evaluated`, `running_frame`
-  (advisory at stage: a step in flight), `patch_invalid`. `validate(staged)` re-checks at
+  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `line_aliased`. `validate(staged)` re-checks at
   the apply point: the same code objects are installed, and no thread stack holds a frame of
   the old code. `apply(staged, journal, witness)` makes it visible, every change through the
   journal (closure pairs first, so undo also takes back closures the new code made).
   `stage_and_apply` is stage, decide, validate, apply in one call for a host with no two
   phases.
+- **Detectors** in `stage`. *New fields:* a changed or added method that reads `self.X`,
+  where only the edited `__init__` sets X (no old method sets it, no class body defines it),
+  gives a blocking `new_fields` finding with `"route": "T1"`: instances built before the swap
+  lack X, so the new code would raise AttributeError at its first call. The fix is a rebuild
+  of the objects or a restart (T1); nothing here sets fields on live objects. *Line maps:* a
+  second edit of a module whose first edit shifted its lines passes `base_source` (the
+  installed text), `own_codes` and `line_maps` (each committed swap's `staged.line_map`,
+  newest first); a definition no swap replaced still carries its original lines, and the maps
+  lead from the installed text's line to it (`timings["line_map_aliases"]`). Without a map
+  that leads there, the one live function with the target's qualname is taken, with an
+  advisory `line_aliased` finding.
 - **Witness** proves that swapped code ran, per participant. The swap puts
   `__fastrsi_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
   after the docstring; for a lambda or generator expression, in the expression: a generator
@@ -137,14 +148,18 @@ Each test's docstring says what it proves and what it does not.
 | `test_closure_change_is_a_finding_not_an_exception` | a new free variable that crashes the swap, or is accepted and breaks the closure |
 | `test_an_edit_a_code_swap_cannot_install_is_a_finding` | a module-constant edit that "succeeds" while the engine runs what it ran before |
 | `test_a_loop_frame_live_at_apply_blocks_through_the_helper` | a loop that never leaves the old code, swapped with no blocking finding |
+| `test_a_field_only_the_new_init_sets_blocks_and_routes_to_t1` | a swap that applied with no finding, then killed the engine with AttributeError at the next step (vLLM #63819's shape) |
+| `test_a_class_default_or_an_old_setter_is_not_a_new_field` | a false new_fields block when old instances do have the attribute |
+| `test_edit_again_after_a_line_shift_follows_the_line_map` | a second edit refused with no_live_function + outside_changes after the first shifted the module's lines |
+| `test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias` | the same with no line map: the one live definition is taken, and said |
 
 ## Not here yet
 
 The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in later PRs:
 
-- **New fields** (`_new_fields`, `_backfill_code`, the `new_fields` finding, `rebuilds=`)
-  with `fields.py`. Until then a changed method that reads a field only the edited
-  `__init__` sets is swapped with no finding, and fails on instances built before the swap.
+- **New-field backfill** (`_backfill_code`, `fields.py`, plan `"backfill": true`) and
+  `rebuilds=` (a recipe that rebuilds the objects resolves the finding). Until then
+  `new_fields` blocks and routes to T1.
 - **Triton `@jit` targets** (`jit_rebuild`, rebuild in place, launch counters) with `jit.py`.
   Until then such a target is swapped as bytecode the kernel compiler never runs, and its
   witness reads zero (`zero_witness`).
@@ -152,7 +167,6 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
 - **Compile units** (compile only the statements holding the changed definitions; a whole
   3,800-line module compile stalls a step) and the **analyzer child process**
   (`ProcessAnalyzer`, `analyze_fallback`), which keep the GIL free during prepare.
-- **Chained edits**: `line_maps=`, the `line_aliased` fallback (the prototype's `test_line_shift.py`).
 - **Transaction-level parts**, with the coordinator: `overlay=` and `staged_names` (a module
   importing a name another module of the same transaction adds), `docstring_only`, the
   `empty_change` verdict, `Witness.arm` (counters for repair cells), and the
