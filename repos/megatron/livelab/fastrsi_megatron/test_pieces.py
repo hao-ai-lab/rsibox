@@ -176,7 +176,8 @@ class StartState(unittest.TestCase):
         from fastrsi_megatron import hook
         f = hook.unknown_state_finding(["opt0.state.3.master_param", "opt0.state.4.master_param"])
         self.assertEqual(f["check"], "optimizer_state_unknown")
-        self.assertIn("master_param", f["observed"])
+        self.assertEqual(f["observed"],
+                         "state keys not reset: ['opt0.state.3.master_param', 'opt0.state.4.master_param']")
         self.assertEqual(f["n_unknown"], 2)
         json.dumps(f)   # findings travel in replies and receipts
 
