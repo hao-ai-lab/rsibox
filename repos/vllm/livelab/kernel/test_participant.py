@@ -30,7 +30,7 @@ class ParticipantTest(unittest.TestCase):
         "prepared"; nothing runs the edit before commit (step(3) = 17); after commit both
         compute 1700, report the same code hash for the target and state "committed"; after
         undo both run their exact base code objects again (17), state "undone", empty
-        journals. Not: the host's all-or-nothing rules (next PR), real RPC."""
+        journals. Not: the host's all-or-nothing rules (adapter/test_host.py), real RPC."""
         ranks = []
         for r in ("rank0", "rank1"):
             name, eng, _ = fresh(r)
@@ -233,8 +233,9 @@ class _Box:
 SCALE3 = edit(OPS, ("x * STEP_SCALE", "x * 3"))       # scale(1): 2 -> 3
 
 
-class ParticipantReviewTest(unittest.TestCase):
-    """Review follow-ups of #29 (each case failed before its fix)."""
+class ParticipantEdgeCaseTest(unittest.TestCase):
+    """Malformed plans, reused txn ids, partial rollbacks and undos, and witness checks of a
+    txn not committed here."""
 
     def _part(self, tag, **kw):
         name, _, ops = fresh(tag)

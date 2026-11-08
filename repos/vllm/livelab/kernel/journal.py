@@ -279,10 +279,10 @@ class Journal:
 
     def need_rebuild(self, route):
         """A repair cell changed engine state that only a rebuild can restore (it released
-        and recaptured graphs: R1). The participant reports the route with its commit, and the
-        host runs it again from the base code after an undo or a rollback, OUTSIDE the
-        phase-2 gap (a recompile takes seconds; in the gap it missed the deadline and killed a
-        live engine). Not an inverse: nothing runs at undo_to."""
+        and recaptured graphs: R1). The participant reports the route with its commit
+        (`rebuild_routes`). Running it again from the base code after an undo or a rollback,
+        outside the phase-2 gap, is a post-commit rebuild, not implemented on main (kernel
+        README). Not an inverse: nothing runs at undo_to."""
         self.routes.append(route)
 
     def record_closures(self, pairs):

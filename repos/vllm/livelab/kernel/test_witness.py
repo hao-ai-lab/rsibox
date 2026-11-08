@@ -4,8 +4,8 @@ imports torch on CPU and is skipped without it).
 Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
 (or python3 -m pytest -q repos/vllm/livelab/kernel)
 
-The swap that stages and applies edits is a later kernel PR, so `install` below does by hand
-what it will do for a witness: add the counter call to the new body (`witness.inject`),
+These tests use the witness without the swap, so `install` below does by hand what the swap
+does for a witness: add the counter call to the new body (`witness.inject`),
 compile the module text (`inject` leaves the
 new name's location to `ast.fix_missing_locations`, as the swap's compile does), put the code on every live holder and bind `__fastrsi_hit__` to the
 participant's hook, each through the journal. Toy arithmetic: see test_locate.py.

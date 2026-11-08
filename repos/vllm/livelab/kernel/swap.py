@@ -294,8 +294,9 @@ def _member_functions(obj):
 
 def _set_class_cell(obj, cls):
     """Point the `__class__` cell (zero-argument super()) of an added member's functions at
-    the live class (they were built in a scratch class). An added @property crashed stage
-    here ("'property' object has no attribute '__closure__'", vLLM #62359)."""
+    the live class (they were built in a scratch class). A member that is not a plain function
+    (a @property, a staticmethod) has no `__closure__` of its own, so its functions come from
+    `_member_functions`."""
     for fn in _member_functions(obj):
         code = fn.__code__
         if fn.__closure__ and "__class__" in code.co_freevars:
