@@ -174,8 +174,9 @@ class SwapTest(unittest.TestCase):
             th.join()
 
 
-class SwapReviewTest(unittest.TestCase):
-    """Review follow-ups of #24 and #25 (each case failed before its fix)."""
+class SwapEdgeCaseTest(unittest.TestCase):
+    """Renamed keyword-only parameters, nested generators and lambdas of a live function, and
+    added top-level definitions that refer to each other."""
 
     def _apply(self, base, new, call):
         name = f"kt_sw{next(_n)}"

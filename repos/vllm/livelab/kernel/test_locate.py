@@ -120,8 +120,9 @@ class _Proxy:
         raise RuntimeError(f"proxy has no {name}")
 
 
-class LocateReviewTest(unittest.TestCase):
-    """Review follow-ups of #18 (each case failed before its fix)."""
+class LocateEdgeCaseTest(unittest.TestCase):
+    """Content hashes of edits that keep the bytecode, error replies, lru_cache wrappers, and
+    one scan at a time."""
 
     def test_content_hash_tells_apart_edits_that_keep_the_bytecode(self):
         """Input: (a) a statement moved out of a try block, which on 3.12 keeps co_code and

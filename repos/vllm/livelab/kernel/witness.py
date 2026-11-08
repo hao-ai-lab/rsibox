@@ -198,10 +198,9 @@ def live_codes(suspended=True, codes=None):
     code), only for the codes that can be suspended, with one C-level `gc.get_referrers` call
     over the objects made since the engine's `gc.freeze()` (vLLM freezes after start-up). A
     generator made before the freeze and still suspended is not seen: the price of not
-    traversing the whole heap (with the frozen heap included, the call alone took 0.2-0.3 s
-    per stage on a loaded Qwen3-8B worker). Without codes, every suspended frame is found
-    with a heap scan (one get_objects, then a sliced pass): 0.42 s of a 0.49 s stage per rank
-    for a generator target in load-time code (DeepSeek-V4.1 TP4)."""
+    traversing the whole frozen heap of a loaded worker. Without codes, every suspended frame
+    is found with a heap scan (one get_objects, then a sliced pass), which can be most of a
+    stage's time."""
     out = set()
     for fr in sys._current_frames().values():
         while fr is not None:

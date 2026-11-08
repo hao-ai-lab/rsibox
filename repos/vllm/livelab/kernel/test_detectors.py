@@ -79,7 +79,7 @@ class NewFieldsTest(unittest.TestCase):
         stage_and_apply applies nothing and the live estimator still runs the old step
         (step(5000) = 256). Fails without the detector: the swap applies with no finding and
         the next step raises AttributeError (a live run killed the engine this way). Not:
-        setting the field on live objects (a backfill is a later PR)."""
+        setting the field on live objects (backfill is not implemented on main)."""
         name = f"kt_est{next(_n)}"
         (m,) = temp_modules(self, {name: ESTIMATOR})
         est = m.Runner().speculator.acceptance_estimator
@@ -122,9 +122,9 @@ COUNTER = '''class Counter:
 '''
 
 
-class NewFieldsReviewTest(unittest.TestCase):
-    """Review follow-ups of #28 (each case failed before its fix): edits that read a field
-    only the new __init__ sets, on an instance built before the edit."""
+class NewFieldsReadFormsTest(unittest.TestCase):
+    """Less direct reads of a field only the new __init__ sets, on an instance built before
+    the edit: augmented assignment, bare annotations and new class defaults."""
 
     def _blocks(self, base, new):
         name = f"kt_nf{next(_n)}"

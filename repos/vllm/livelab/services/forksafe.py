@@ -4,9 +4,8 @@ servers the zygote forks can fork their engine core and workers too.
 vLLM forks the engine core and the workers when VLLM_WORKER_MULTIPROC_METHOD=fork, so they
 inherit the parent's imports. It falls back to spawn ("We must use the `spawn` multiprocessing
 start method ... Reasons: CUDA is initialized") as soon as anything in the API server has
-initialized CUDA. Spawned processes import vLLM again: on a shared filesystem that cost 33 s
-and 121 s in two of our TP2 starts (engine core plus workers). In our TP2 runs a warm forked
-start reached /health in 22-24 s, against 64-157 s when vLLM fell back to spawn.
+initialized CUDA. Spawned processes (engine core plus workers) import vLLM again, which is
+slow on a shared filesystem, so a start that falls back to spawn loses the warm imports.
 
 In the API server CUDA gets initialized only to read the compute capability. At TP>1 the
 config imports FlashInfer (for the all-reduce fusion size), and FlashInfer calls

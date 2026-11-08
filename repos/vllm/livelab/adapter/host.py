@@ -388,8 +388,8 @@ def _patch_core(mod):
 class _After(importlib.abc.MetaPathFinder):
     """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
     finders load it: it asks the finders after it on sys.meta_path, in order (an overlay
-    finder first, then the installed package), instead of PathFinder directly, which bypassed
-    the overlay and gave a false base_mismatch (the prototype hit it)."""
+    finder first, then the installed package), instead of PathFinder directly, which would
+    bypass the overlay and report a false base_mismatch."""
 
     def find_spec(self, name, path, target=None):
         if name != "vllm.v1.engine.core":
