@@ -3,7 +3,8 @@
 A standing check, like the one we keep for vLLM: take recent merged Megatron-LM PRs that touch code
 this workload runs, apply each one to the running training job, and record what the lab did with it.
 Each PR goes to the cheapest action that can run it: first a live swap of function bodies into the
-running job (recipe R0; install 0.07-0.60 s, no restart, measured). When the lab refuses the swap, a
+running job: the lab replaces the changed function bodies in place on every rank (install
+0.07-0.60 s, no restart, measured). When the lab refuses the swap, a
 code restart: a fresh job with the PR's modules loaded at import (79-89 s from request to lab ready,
 measured).
 
@@ -34,7 +35,7 @@ lab runs (`megatron-core` 0.20 dev, upstream commit ae76c60e6). Source: our 2026
 | NVIDIA/Megatron-LM#8844 | cache `get_start_time_from_progress_log` | committed in 0.37 s | 0 calls (start-up only) | | installed, not reached; loss within 1.5e-4 |
 | NVIDIA/Megatron-LM#7575 | partial activation offload fix | refused in 0.60 s: `constructor_edit`, `new_fields`, `removed_definition` | | restart 78.8 s; loss within 1.5e-3, grad norm 3.9e-3 | runs, no regression (code restart); one hunk left out: its file (an experimental attention variant) is not in this tree |
 | NVIDIA/Megatron-LM#8524 | step-wise LR multipliers | refused in 0.16 s: `constructor_edit`, `new_fields`, `outside_changes`, `patch_invalid` | | not run: fuzz put a hunk in the wrong place (`pretrain` signature, a non-default parameter after defaults); the compile check caught it in 0.1 s | needs a manual rebase |
-| NVIDIA/Megatron-LM#8246 | RMSNorm gamma weight-decay multiplier | not sent (harness bug: a package's `__init__` module name; fixed) | | not run: fuzz put the new argument inside another `add_argument` call (syntax error, caught in 0.1 s) | needs a manual rebase |
+| NVIDIA/Megatron-LM#8246 | RMSNorm gamma weight-decay multiplier | not attempted: the fuzzy apply misplaced a hunk (next column) | | not run: fuzz put the new argument inside another `add_argument` call (syntax error, caught in 0.1 s) | needs a manual rebase |
 | NVIDIA/Megatron-LM#7158 | per-group optimizer step counts | | | | does not apply (drift) |
 | NVIDIA/Megatron-LM#8424 | residual contracts refactor | | | | does not apply (drift) |
 
@@ -73,7 +74,8 @@ The hill-climb ran next to the replay (13:36-15:25, 42 rows, the same lab). Code
 actions with their measured restart overhead and price: live swap, flag restart from the zygote,
 environment restart (not offered). It chose 4 flag restarts and 20 live swaps; 16 answers had no
 edit. Kept, each on 4 independent pairs: fused weight-gradient accumulation on the TE linears (a
-cell; the flag fails at the first step without apex), gather-before-norm, and a plain residual add.
+small script that sets an attribute on each live TE module through the lab's undo journal; the
+launch flag fails at the first step without apex), gather-before-norm, and a plain residual add.
 The kept set against the plain base, 2 paired rounds: +11.8% tokens/s/GPU (1.122, 1.114), with
 loss within 2.3e-3. Flag-restart candidates and the base ran on different GPU pairs, divided by a
 measured ratio. Zygote-forked jobs run 2-11% slower in steady state than torchrun jobs (not
