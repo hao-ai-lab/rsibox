@@ -1,5 +1,8 @@
 __pycache__/
 *.pyc
+# backups left by patch(1) after a fuzzy or failed apply
+*.orig
+*.rej
 .venv/
 .fastrsi/
 .pytest_cache/
