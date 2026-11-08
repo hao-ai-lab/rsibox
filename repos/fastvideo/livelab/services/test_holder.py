@@ -68,8 +68,10 @@ class HolderTest(unittest.TestCase):
 
     def test_served_module_equals_the_deposit(self):
         """Input: a module deposited, then asked for with an unchanged stamp. Expect: the same
-        class and bit-equal weights, in another tensor (the holder owns a copy). Proves: a
-        respawned worker gets the loaded weights without a load."""
+        class and bit-equal weights, in another tensor (the holder owns a copy). Proves: the
+        holder's put/get round trip returns the deposited module as a copy. Not: a respawned
+        worker or the loader hook (the GPU receipt of the zygote respawn with weights holder
+        covers those)."""
         files = self.deposit()
         r = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertTrue(r["ok"], r)

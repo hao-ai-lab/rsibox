@@ -65,7 +65,7 @@ Order on a cold start. "Warm" means the cost can stay resident in a running lab.
 | 6 | VAE and audio VAE load | H3 VAE (optionally NVFP4 decoder), audio VAE | `pipelines/basic/minimax_h3/minimax_h3_pipeline.py:507-523` | Yes | 21.9 + 3.6 s cold, 5.0 + 0.5 s warm |
 | 7 | Optional compile setup | Per-block compile wrappers attached; compile itself runs at the first call | `pipelines/composed_pipeline_base.py:271-294`, `models/loader/fsdp_load.py:572-600` | Wrappers: yes. Compiled code: no, per edit | off in the workload |
 | 8 | Triton JIT and autotune | First call of each `@triton.jit` kernel per shape and constexpr set | section 3 | JIT cache on disk; autotune in process | 23 kernel loads 0.39-1.26 s; VSA autotune 1.94-2.64 s per process |
-| 9 | First request | Lazy compile, JIT, flashinfer kernel setup, allocator warm-up | earlier GB200 run | Yes after the first request | 217.9 s cold JIT, 13.9-15.1 s warm JIT; warm video 6.1 s |
+| 9 | First request | Lazy compile, JIT, flashinfer kernel setup, allocator warm-up | `../kb/costs.md` | Yes after the first request | 217.9 s cold JIT, 13.9-15.1 s warm JIT; warm video 6.1 s |
 
 Notes:
 
@@ -75,8 +75,7 @@ Notes:
    modules, run denoise and decode). Both default to on for unified-memory hosts and off
    otherwise (`minimax_h3_pipeline.py:422-448`, `fastvideo_args.py:1141`). On a discrete-GPU
    node, check the effective setting at startup; if on, module identity changes per request
-   and a patch applied to a module instance is lost on reload (an earlier source survey made
-   the same point for lazy ownership).
+   and a patch applied to a module instance is lost on reload.
 2. Phase 8 on a restart: the Triton disk cache survives a restart; the in-process autotune
    table does not unless `TRITON_CACHE_AUTOTUNING=1` (`livelab/services/jitcache.py`). Besides
    VSA's `_attn_fwd_sparse`, `minimax_h3_sparse_int8.py:36` uses `@triton.autotune` on the H3
@@ -95,7 +94,7 @@ each class and what it costs.
 | Denoise loop body (`minimax_h3_denoising.py:298-360`) | OP | Live, takes effect on the next request | The loop runs inside one `forward` call. A swap during a request does not reach the running call |
 | DiT block `forward` (`minimax_h3.py:677-749`), attention module `forward` (`:352`) | OP, or GRAPH if compiled | Live when eager (default). If `inference_torch_compile` is on, the bound `forward` is wrapped by `torch.compile` per block (`fsdp_load.py:823`): swapping Python does not change the compiled graph | `fsdp_load.py:572-600` attaches the compile wrapper after load. Recompile the affected blocks |
 | Fused Triton helpers (`models/dits/minimax_h3_fusions/*.py`) | OP for the wrapper, GRAPH for the kernel | Live for the wrapper. A kernel body edit re-JITs on its next call | `@triton.jit` at `exact.py:45-127`, `modulation.py:33,72`, `qknorm_rope.py:23`, `swiglu.py:36`. Which helper runs is chosen once per DiT at construction from the env (`minimax_h3.py:794`, `:805`), so enabling a fusion that was off needs the DiT blocks rebuilt (STATE) or a restart |
-| Attention backend selection (`attention/selector.py`, `MiniMaxH3Attention.__init__`) | STATE | Restart, or rebuild the attention modules | The backend class is chosen in `MiniMaxH3Attention.__init__` (`minimax_h3.py:252-262`) and held by `distributed_attention.attn_impl`. The resolver is `@cache`d on all its inputs (`selector.py:275`), so it needs no cache clear but existing layers keep their backend. The attention instructions in the repo forbid changing the backend env var mid-process (older pin, from an earlier CPU pilot; re-check `attention/AGENTS.md` at 376e445f) |
+| Attention backend selection (`attention/selector.py`, `MiniMaxH3Attention.__init__`) | STATE | Restart, or rebuild the attention modules | The backend class is chosen in `MiniMaxH3Attention.__init__` (`minimax_h3.py:252-262`) and held by `distributed_attention.attn_impl`. The resolver is `@cache`d on all its inputs (`selector.py:275`), so it needs no cache clear but existing layers keep their backend. FastVideo's `attention/AGENTS.md` forbids changing the backend env var mid-process (read at an older pin; not checked at `376e445f`) |
 | VSA-H3 impl (`attention/backends/video_sparse_attn_h3.py`: `forward` `:783`, `tile` `:682`, metadata builder `:398`) | OP | Live in eager mode | Per-call Python. The tile buffer holder is state owned by the metadata builder (`:350-393`); a swap that changes buffer shape or dtype must drop the holder |
 | VSA Triton kernels (`fastvideo_kernel/triton_kernels/*`, `block_sparse_attn.py`) | GRAPH (re-JIT) | Live | Imported by function at call time (`block_sparse_attn.py:165`), so a reload plus re-JIT takes effect. Installed library lives outside the engine tree: patch the installed copy or rebind |
 | Native `fastvideo-kernel` CUDA/CuTe (`csrc`, `attn_qat_infer/blackwell/*.cu`, `block_sparse_attn_ptx_blackwell.py`) | NATIVE | Live only as a versioned side library plus rebind; otherwise restart | Built by scikit-build-core/CMake (`fastvideo-kernel/pyproject.toml:30-33`, `build.sh`). A loaded shared library cannot be unloaded. `_C.fastvideo_kernel_ops` is looked up at call time (`block_sparse_attn.py:15-22`) |
@@ -156,8 +155,7 @@ ones is not recorded.
   under `models/dits/minimax_h3*` and `attention/backends/*h3*` finds only comments. The
   denoise loop calls `torch.compiler.cudagraph_mark_step_begin()` each step
   (`minimax_h3_denoising.py:326`); it matters only if a user sets
-  `torch_compile_kwargs={"mode": "reduce-overhead"}`. The earlier source survey (older pin
-  `02a027c`) also found no DiT graphs; this re-check agrees. Inductor with
+  `torch_compile_kwargs={"mode": "reduce-overhead"}`. Inductor with
   `reduce-overhead` is the only way a DiT graph could appear.
 - **VAE: yes.** The NVFP4 fused decoder replays small calls as per-shape CUDA graphs, on by
   default (`FASTVIDEO_H3_VAE_NVFP4_CUDA_GRAPH`, `envs.py:729`; `minimax_h3_nvfp4_fused.py:635-663`).
