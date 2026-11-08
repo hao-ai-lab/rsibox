@@ -192,3 +192,87 @@ on merged PRs were answered later in batch fix PRs, one per boundary (#46–#48)
 
 **Apply it.**
 - Link the record instead of retelling it; never retype a number, a hash or a secret.
+
+### 12. Most real changes need a restart, so make restarts cheap, and name them in words
+
+**What happened.** Replaying real upstream PRs in three engines, about half could not be swapped
+live: they change constructors, module-level defaults or environment registries. In FastVideo,
+three of four needed a restart at 86-107 s each (#85); in Megatron, a code restart cost 79-89 s
+(#86). We then built cheaper restart actions and measured each (our 2026-11-07 runs, GB200; sources
+#87 for FastVideo, #82, #83 and #88 for Megatron). Each cell says what the time runs to:
+
+| Action | FastVideo MiniMax H3 video model, 1 GPU | Megatron, Qwen3-14B architecture, TP 2 |
+|---|---|---|
+| live swap | 0.06 s to installed | 0.07-0.6 s to installed |
+| in-place rebuild (constructor edits, new fields) | 0.19-1.27 s to rebuilt | not built |
+| zygote respawn with a weights holder | 4.8-5.6 s to ready | not built |
+| flag or code restart from the zygote | 14.1-15.3 s to ready | 15-16.5 s to first step (code: 19 s) |
+| environment restart, environment on local disk | 51.4 s to ready | 29.3-29.7 s to first step |
+| plain restart | 43-45 s to ready (respawn), 69.5 s (warm restart) | 58 s to first step |
+
+What stays: work that only a live process keeps, such as communicators, allocator and
+optimizer state, and kernel plans (9-17 s of Megatron's first step; disk caches saved 1.3-1.7 s).
+Labels like "T1" hid these costs from readers and agents alike.
+
+**Rule.** Give every engine a ladder of restart actions, each priced, and name each action in
+words with its overhead and whether that figure is measured or anticipated: "code restart from the
+zygote (19 s to first step, measured)", never "T1".
+
+**Apply it.**
+- Build the ladder from the start-up breakdown: one action per piece of state that can be kept
+  (imports, weights, compiled caches, the live process).
+- A zygote that has imported the engine must re-import the edited package in each child, or
+  refuse; otherwise children run old code.
+- Anything kept across a restart (a weights holder, a cache) is stamped with what it depends on
+  and refuses when that changes, with a finding naming the file.
+- An in-place rebuild must release what the replaced modules held: CUDA graph pools held by old
+  functions ran a GPU out of memory on the first use after a rebuild.
+- Show agents the priced menu in the same words. With it, agents chose flag restarts for
+  configuration ideas and live swaps for code; without it they rarely chose a restart.
+
+### 13. A gain measured in one long-running lab is a hypothesis until a fresh process repeats it
+
+**What happened.** (Sources: #79, #87.) A FastVideo optimization run (an agent proposing edits, each kept only if faster) reported 4.21 → 3.947 s per video inside one engine
+instance, every kept edit at least 1% faster than the run before it in paired measurements. Re-measured in fresh processes with alternating pairs, the
+same set ran about 4.18 s, within noise of the start. A forked Megatron worker ran 2-11% slower in
+steady state than a launcher-started one with the same CPU binding, and an unbound job ran at
+0.72x of a bound one.
+
+**Rule.** Keep a change only after fresh processes confirm it, paired and alternating, with
+identical placement. Compare throughput only between processes started the same way.
+
+**Apply it.**
+- Bind CPUs and memory to the GPUs' socket in every timed run, and report the binding.
+- Use forked workers for start-up cost and correctness checks, not for throughput comparisons
+  against launcher-started ones.
+- Before a final number is claimed, re-measure the whole kept set from a fresh start.
+
+### 14. Test a second input shape before keeping a speedup
+
+**What happened.** (Source: #79.) Two kept FastVideo edits passed the correctness gate at one sequence length. A
+second length showed one recompiling at every new length, and the earlier per-layer CUDA graph
+patches holding 74.9 GiB, so a 243-frame video after a 124-frame one ran out of memory.
+
+**Rule.** The correctness gate runs at least two input shapes in one process, and counts recompiles.
+
+**Apply it.**
+- Add a second shape to the workload's correctness gate (`kb/workload.md`).
+- Run with recompile logging and report the count; a change that recompiles per shape is
+  benchmark-only unless guarded by a flag.
+- Put memory that grows per shape (graph pools, caches) behind an opt-in flag with a budget.
+
+### 15. A second reviewer checks every kept change
+
+**What happened.** (Sources: #79, #86.) A reviewer running a different model rated 10 of 11 retained FastVideo edits sound and one
+wrong: it argued the diff could not produce the measured gain. A GPU A/B agreed, and the
+re-measurement also withdrew the run's headline number. All four retained Megatron edits were rated sound,
+with named risks we recorded.
+
+**Rule.** Before a gain is reported, a reviewer that did not write the change checks each kept
+change against its measurement and rates it sound, suspect or wrong. This rates a kept change; it
+is separate from the fix / reject / defer answers to review findings in `AGENTS.md`. A "wrong"
+rating is settled on the GPU, not by argument.
+
+**Apply it.**
+- One review call per keep, with the diff, the hypothesis, the gate result and the paired timings.
+- Post the verdict table on the PR that carries the retained edits, risks included.
