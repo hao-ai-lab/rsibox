@@ -232,8 +232,8 @@ zygote (19 s to first step, measured)", never "T1".
 
 ### 13. A gain measured in one long-running lab is a hypothesis until a fresh process repeats it
 
-**What happened.** (Sources: #79, #87.) A FastVideo climb reported 4.21 → 3.947 s per video inside one engine
-instance, every pair passing the 1% bar. Re-measured in fresh processes with alternating pairs, the
+**What happened.** (Sources: #79, #87.) A FastVideo optimization run (an agent proposing edits, each kept only if faster) reported 4.21 → 3.947 s per video inside one engine
+instance, every kept edit at least 1% faster than the run before it in paired measurements. Re-measured in fresh processes with alternating pairs, the
 same set ran about 4.18 s, within noise of the start. A forked Megatron worker ran 2-11% slower in
 steady state than a launcher-started one with the same CPU binding, and an unbound job ran at
 0.72x of a bound one.
@@ -263,9 +263,9 @@ patches holding 74.9 GiB, so a 243-frame video after a 124-frame one ran out of 
 
 ### 15. A second reviewer checks every kept change
 
-**What happened.** (Sources: #79, #86.) A reviewer running a different model rated 10 of 11 FastVideo keeps sound and one
+**What happened.** (Sources: #79, #86.) A reviewer running a different model rated 10 of 11 retained FastVideo edits sound and one
 wrong: it argued the diff could not produce the measured gain. A GPU A/B agreed, and the
-re-measurement also withdrew the climb's headline number. All four Megatron keeps were rated sound,
+re-measurement also withdrew the run's headline number. All four retained Megatron edits were rated sound,
 with named risks we recorded.
 
 **Rule.** Before a gain is reported, a reviewer that did not write the change checks each kept
@@ -275,4 +275,4 @@ rating is settled on the GPU, not by argument.
 
 **Apply it.**
 - One review call per keep, with the diff, the hypothesis, the gate result and the paired timings.
-- Post the verdict table on the PR that carries the keeps, risks included.
+- Post the verdict table on the PR that carries the retained edits, risks included.
