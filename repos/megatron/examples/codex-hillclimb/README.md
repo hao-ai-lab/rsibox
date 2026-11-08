@@ -107,6 +107,38 @@ harness lacked the crash record; 2 is the 14B transfer; 13 was refused by the kn
 | 18 | Test skipping masked row-zero accumulation in embedding backward while preserving genuine row-zero gradients through a broadcast reduction, reducing r | Codex | diff tensor_parallel.layers | 0.14968 | 0.998, 1.005 | 0.17 | 4.93e-04 | revert (no paired gain >= 1%) |
 
 
+## Choosing between a live swap and a flag restart
+
+The agent can also ask for a restart with launch flags instead of a code edit. Each round it sees
+a priced table:
+
+| Action | Restart overhead (measured) | Cost to decide one candidate |
+|---|---|---|
+| live swap: function bodies replaced in the running job | none: install 0.1 s | about 250 s |
+| flag restart: a fresh job forked from a process that already holds the imports | about 18 s to the first step, plus 25 s of lab setup | about 225 s |
+| environment restart (NCCL variables, rebuilt extensions) | 30-85 s of imports plus setup | not offered |
+
+The table also shows each flag's result in this lab. A flag-restart candidate runs on two other GPUs
+of the node, and its A/B against the running base is divided by the measured speed ratio of the two
+GPU pairs.
+
+Over 42 rounds (Qwen3-14B architecture, TP 2; our 2026-11-07 run), the agent chose a flag restart
+for 4 launch-config ideas and a live swap for 20 code ideas, and gave no edit 16 times. Three of the
+four flags fail here: `--gradient-accumulation-fusion` (no apex for the LM head's non-TE linear),
+`--use-precision-aware-optimizer` (lab setup, fixed in https://github.com/GindaChen/fastrsi/pull/84)
+and the TE cross-entropy fusion (Megatron's argument check).
+
+Kept, each confirmed on 4 independent pairs:
+- fused weight-gradient accumulation on the TE linears: an attribute set on each live module
+  through the lab's undo journal, since the launch flag fails here;
+- gather-before-norm;
+- a plain residual add.
+
+Against the plain base, the kept set gives +11.8% tokens/s/GPU (2 paired rounds, 1.122 and 1.114),
+with loss within 2.3e-3. Jobs forked from the zygote run 2-11% slower in steady state than torchrun
+jobs (cause not found), so a flag restart's speed is compared only through the measured GPU-pair
+ratio, and none was kept on speed.
+
 ## Where the time is (profile of 2 steps, rank 0, after iterations 11 and 12)
 
 Sequence-parallel all-gather 21.5% and reduce-scatter 14.7% of CUDA time (NCCL ring, LL protocol,

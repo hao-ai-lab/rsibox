@@ -67,16 +67,3 @@ against 450 s predicted. Each code-restart PR took 3.5-7.5 min (restart 79-89 s,
 
 Not shown: a witness in the code restart (that the PR's code ran in the fresh job); the two PRs that need a rebase; any
 speed effect (none of these PRs is a speedup on this workload); more than one check per PR.
-
-## The same session's hill-climb, with a priced menu
-
-The hill-climb ran next to the replay (13:36-15:25, 42 rows, the same lab). Codex saw a table of
-actions with their measured restart overhead and price: live swap, flag restart from the zygote,
-environment restart (not offered). It chose 4 flag restarts and 20 live swaps; 16 answers had no
-edit. Kept, each on 4 independent pairs: fused weight-gradient accumulation on the TE linears (a
-small script that sets an attribute on each live TE module through the lab's undo journal; the
-launch flag fails at the first step without apex), gather-before-norm, and a plain residual add.
-The kept set against the plain base, 2 paired rounds: +11.8% tokens/s/GPU (1.122, 1.114), with
-loss within 2.3e-3. Flag-restart candidates and the base ran on different GPU pairs, divided by a
-measured ratio. Zygote-forked jobs run 2-11% slower in steady state than torchrun jobs (not
-explained), so no flag restart was kept on speed.
