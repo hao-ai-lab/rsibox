@@ -59,7 +59,7 @@ Our 2026-11-07 runs on the 1-GPU H3 lab (`livelab/`), from the lab's replies and
 
 | Call | Cost | What it covers |
 |---|---|---|
-| install (R0 swap of one stage method, 1 rank) | 0.06 s in the lab | stage, vote, commit in the request gap, fingerprint |
+| install (live swap of one stage method, 1 rank) | 0.06 s in the lab | stage, vote, commit in the request gap, fingerprint |
 | edit-to-run (receipt `edit_to_run_s`) | 0.72 s | from the edit's timestamp on the agent's machine to commit, incl. the agent's network hop |
 | check (one warm video) | 6.00-6.02 s | the workload; same frames and audio hashes as the in-process executor run |
 | uninstall | 0.014 s in the lab | undo + fingerprint |
@@ -98,7 +98,7 @@ was built at. Workload of `workload.md`, all outputs bit-exact to the 1-GPU gold
 | Inductor `torch_key()` (hashes every torch source file) | 2.55 s | 0.8-2.6 s | yes | preset from disk (`jitcache.preset_torch_key`) | warm restart with path-stable caches |
 | Dynamo: 5 frames (VAE + DiT `@torch.compile` helper), Inductor FX cache hit | | 1.1-1.2 s besides `torch_key` (bytecode tracing 0.72-1.02 s) | no, per process | keep the process | in-place rebuild |
 | Triton kernel loads (23 kernels from the disk cache) | | 0.39-1.26 s | no, per process | keep the process | in-place rebuild |
-| Triton autotune (VSA `_attn_fwd_sparse`, 12 configs) | | 1.94-2.64 s | yes (12 benches gone with the cache on; warm videos no slower, A/B `ab-*`) | `TRITON_CACHE_AUTOTUNING=1` | warm restart with path-stable caches |
+| Triton autotune (VSA `_attn_fwd_sparse`, 12 configs) | | 1.94-2.64 s | yes (12 benches gone with the cache on; warm videos no slower in an A/B with and without the cache) | `TRITON_CACHE_AUTOTUNING=1` | warm restart with path-stable caches |
 | FlashInfer autotune lookups (3,150 per video) | | 0.17 s (also on warm videos) | | | |
 | cuBLAS / cuDNN handles, allocator growth | | 0.04 s / 0.09-0.14 s / 0.003 s per 40 GiB (micro) | no | | |
 | **First video** | 217.9 s cold JIT; 174.0 s after a cache move | 13.95 s alone (warm 6.03-6.13 s): +1.0 s conditioning, +5.55 s denoise, +1.25 s decode | | | |
@@ -115,8 +115,8 @@ was built at. Workload of `workload.md`, all outputs bit-exact to the 1-GPU gold
 - **The warm load's 31 s is half imports:** the spawned worker imports torch and FastVideo again
   (16-19 s); the component loads take 11-12 s, the VAE (5.1 s) the largest.
 - **Noise:** from 13:04 PST the tray's other GPUs ran H3 checks too, and our warm videos read
-  9.0-15.0 s instead of 6.0-6.1 s, with or without the Triton autotune cache (A/B `ab-noauto`
-  10.6-10.8 s, `ab-auto` 11.4-15.0 s), so the cache is not the cause; which shared resource is,
+  9.0-15.0 s instead of 6.0-6.1 s, with or without the Triton autotune cache (A/B: without the cache
+  10.6-10.8 s, with it 11.4-15.0 s), so the cache is not the cause; which shared resource is,
   is not isolated (`lessons.md`). The phase rows above come from runs alone or from
   per-process work (imports, loads, JIT) that the noise moves less.
 
@@ -132,13 +132,12 @@ measured per-process first-video work plus a 6.1 s video.
 | Action | What survives | Overhead | Request to first video, measured | Quiet (estimated) | Source |
 |---|---|---|---|---|---|
 | Live swap (`install`) | everything | install 0.06 s, no restart (measured) | 6.7 s (0.72 s edit-to-run + 6.0 s check) | 6.7 s | live lab table above |
-| In-place rebuild (`rebuild`) | process, CUDA context, weights, JIT and compile state | 0.19-1.27 s at 1 GPU, 0.31-1.16 s at 2 ranks (measured) | 12.6-16.4 s (first video 10.9-15.3 s; the next warm video 11.5-15.0 s) | **6.4-7.5 s** (+0.1 s Dynamo recompile; +2.8-3.2 s to re-capture per-layer CUDA graphs when the edited module keeps them) | `rebuild-a/b/c/d`, `rebuild-2g-b`, `rebuild-kept` |
-| Zygote respawn with weights holder (`FastVideoLab(holder=True)`) | lab host, imports (forked from the zygote), DiT, text encoder and VAE on the GPU (holder) | 4.78 s and 5.62 s at 1 GPU with the VAE held (measured); 9.98-12.46 s at 1 GPU and 13.56-14.56 s at 2 ranks with DiT and text encoder only (measured) | 18.9-22.0 s (first video 14.1-16.4 s) | about 15 s (5.2 s + 2.2 s JIT + 1.5 s first calls + 6.1 s) | `holder-1g-all`, `holder-1g-b`, `holder-2g` |
-| Zygote respawn (`FastVideoLab(zygote=True)`) | lab host, imports | 14.05-15.33 s at 1 GPU; 18.30-18.33 s at 2 ranks (measured, paired) | 28.5-34.8 s (first video 14.2-20.1 s) | about 24 s | `resp-zygote3`, `zyg-1g-pair`, `zyg-2g-pair` |
-| Plain respawn (`reset("respawn")`, spawned workers) | lab host | 43.0-45.0 s (measured, paired) | 58.1-62.1 s (first video 15.1-17.1 s) | about 47 s | `resp-spawn2` |
-| Warm restart with path-stable caches (fresh process; FlashInfer, Triton, Inductor caches at a fixed path, autotune cache, `torch_key` preset) | page cache, JIT caches | 51.4 s to ready (18.1 s imports + 33.3 s load, measured) | 66.4 s (first video 15.1 s; its per-process JIT 2.2 s instead of 6.3 s) | about 58 s | `ab-auto`, `t2-*` |
-| Warm restart, before (same, no autotune cache, no preset) | page cache, JIT caches at their path | 69.5 s to ready (38.4 + 31.1, measured) | 83.5 s (first video 13.95 s) | about 62 s with 17 s imports | `base-b` |
-| Restart after the JIT cache root moved | page cache | 58-60 s to ready (measured) | moved, unfixed: 223.4 s (first video 174.0 s; FlashInfer rebuild 153-159 s), also through a re-pointed symlink (first video 170.0 s); staged back at its real path: first video 37.9 s on the cold copy (FlashInfer 11.8 s, no ninja step re-ran), 17.1 s on the next start (FlashInfer 0.60 s) | about 66 s once staged | `base-a`, `fi-moved`, `fi-restore`, `fi-restore-2` |
+| In-place rebuild (`rebuild`) | process, CUDA context, weights, JIT and compile state | 0.19-1.27 s at 1 GPU, 0.31-1.16 s at 2 ranks (measured) | 12.6-16.4 s (first video 10.9-15.3 s; the next warm video 11.5-15.0 s) | **6.4-7.5 s** (+0.1 s Dynamo recompile; +2.8-3.2 s to re-capture per-layer CUDA graphs when the edited module keeps them) | four 1-GPU rebuild runs, one at 2 ranks, one with the kept H3 patches (2026-11-07) |
+| Zygote respawn with weights holder (`FastVideoLab(holder=True)`) | lab host, imports (forked from the zygote), DiT, text encoder and VAE on the GPU (holder) | 4.78 s and 5.62 s at 1 GPU with the VAE held (measured); 9.98-12.46 s at 1 GPU and 13.56-14.56 s at 2 ranks with DiT and text encoder only (measured) | 18.9-22.0 s (first video 14.1-16.4 s) | about 15 s (5.2 s + 2.2 s JIT + 1.5 s first calls + 6.1 s) | holder runs at 1 GPU (with and without the VAE held) and 2 ranks (2026-11-07) |
+| Zygote respawn (`FastVideoLab(zygote=True)`) | lab host, imports | 14.05-15.33 s at 1 GPU; 18.30-18.33 s at 2 ranks (measured, paired) | 28.5-34.8 s (first video 14.2-20.1 s) | about 24 s | one zygote run and two paired runs against plain respawn, 1 and 2 GPUs (2026-11-07) |
+| Plain respawn (`reset("respawn")`, spawned workers) | lab host | 43.0-45.0 s (measured, paired) | 58.1-62.1 s (first video 15.1-17.1 s) | about 47 s | plain respawn run (2026-11-07) |
+| Warm restart with path-stable caches (fresh process; FlashInfer, Triton, Inductor caches at a fixed path, autotune cache, `torch_key` preset) | page cache, JIT caches | 51.4 s to ready (18.1 s imports + 33.3 s load, measured) | 66.4 s (first video 15.1 s; its per-process JIT 2.2 s instead of 6.3 s) | about 58 s | fresh-process runs with path-stable caches (2026-11-07) |
+| Restart after the JIT cache root moved | page cache | 58-60 s to ready (measured) | moved, unfixed: 223.4 s (first video 174.0 s; FlashInfer rebuild 153-159 s), also through a re-pointed symlink (first video 170.0 s); staged back at its real path: first video 37.9 s on the cold copy (FlashInfer 11.8 s, no ninja step re-ran), 17.1 s on the next start (FlashInfer 0.60 s) | about 66 s once staged | moved-cache and staged-back runs (2026-11-07) |
 | Cold restart | nothing | 289 s to ready (93.5 + 195.6, measured earlier) | about 507 s (first video 217.9 s) | | ladder above |
 
 - **In-place rebuild** covers the edits the live swap refuses (a constructor, a new field, a
@@ -146,7 +145,7 @@ measured per-process first-video work plus a 6.1 s video.
   re-imported), a DiT block constructor edit that adds a field (merged into 50 live blocks), a
   DiT edit that changes `norm1.eps` (output changed, `9eadd39e7674caf0`), and a revert
   (bit-exact again). The first video after a rebuild costs what the next warm video costs
-  (paired, `rebuild-c`: 10.9 vs 13.3, 12.4 vs 12.4, 11.0 vs 11.8, 15.3 vs 15.0 s); the only JIT
+  (paired: 10.9 vs 13.3, 12.4 vs 12.4, 11.0 vs 11.8, 15.3 vs 15.0 s); the only JIT
   work is one Dynamo recompile of the DiT's `@torch.compile` helper (0.08-0.09 s, Inductor cache
   hit). Cost, ranks in parallel and each file's imports parsed once per process: DiT edits
   0.19-0.64 s (re-import 0.04-0.17 s, meta builds of the old and new DiT 0.13-0.47 s), a stage
@@ -156,8 +155,8 @@ measured per-process first-video work plus a 6.1 s video.
   the first video after a rebuild ran out of GPU memory in the hill-climb lab. The rebuild now
   releases them (`rebuild.release_held`): each of 4 rebuilds of `minimax_h3.py` on the kept tree
   released 100 CUDA graphs and 62.3 GiB of static buffers, reserved memory stayed at
-  158.7-158.9 GiB, every video bit-exact (`rebuild-kept`).
-- **Zygote respawn, where its 14 s go** (1 GPU, `zyg-1g-pair`, forked worker timers): component
+  158.7-158.9 GiB, every video bit-exact (with the kept H3 patches).
+- **Zygote respawn, where its 14 s go** (1 GPU, paired run, forked worker timers): component
   loads 10.9 s (VAE 5.0 s, DiT 2.45 s, text encoder 2.35 s, audio VAE 0.56 s, tokenizer and
   processor 0.5 s, schedulers 0.2 s), CUDA context, device and distributed init 0.17 s, the rest
   (old group shutdown, fork, ready handshake) about 2.6 s. Weights the holder serves (DiT and
@@ -170,7 +169,7 @@ measured per-process first-video work plus a 6.1 s video.
   the whole package the edit reached), and served again at the next respawn. At 2 ranks each
   rank's entries were served (text encoder 0.18-0.36 s, DiT 0.26-0.48 s): respawn 13.56-14.56 s
   against 18.30-18.33 s without the holder (paired runs, distributed init 1.9-2.2 s each time),
-  every first video bit-exact. With the VAE held too (`holder-1g-all`), the VAE came in
+  every first video bit-exact. With the VAE held too, the VAE came in
   0.05-0.09 s instead of 5.0-5.3 s, the forked worker's init took 2.25-2.7 s, and the respawn
   4.78 s and 5.62 s. The audio VAE holds a non-leaf tensor that requires grad, which torch will
   not share across processes: its deposit fails and the worker loads it (0.9 s).
@@ -186,9 +185,9 @@ measured per-process first-video work plus a 6.1 s video.
   ninja's log records outputs and command hashes by those paths, so a copy at another path
   rebuilds (153-159 s). The path is the *resolved* one (`flashinfer/jit/cpp_ext.py`,
   `(output_dir / obj_name).resolve()`): a fixed symlink re-pointed at the copy rebuilt too
-  (`fi-moved`: 155.2 s, first video 170.0 s). The fix keeps the real path: build the root at a
+  (155.2 s, first video 170.0 s). The fix keeps the real path: build the root at a
   fixed path and stage shipped copies back at it (`jitcache.stage_root`, mtimes kept). Receipt:
-  built cold at a path (`fi-cold`: FlashInfer 153.2 s, first video 169.0 s), moved away, copied
+  built cold at a path (FlashInfer 153.2 s, first video 169.0 s), moved away, copied
   back to the same path: no ninja step re-ran (logs unchanged), FlashInfer 11.8 s on the first
   start from the cold copy and 0.60 s on the next; bit-exact. Keying FlashInfer on content would
   need its ninja files written with relative paths (an upstream change), not done.
