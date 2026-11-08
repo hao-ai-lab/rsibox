@@ -5,7 +5,7 @@ Megatron's own setup and the first step.
 
     python -m fastrsi_megatron.zygote serve --sock S [--preload M1,M2] [--script pretrain_gpt.py]
     python -m fastrsi_megatron.zygote start --sock S --nproc N [--port P] [--log-dir D]
-        [--env K=V ...] [--accept stale,env] [--timeout SEC] -- pretrain_gpt.py <megatron args>
+        [--env K=V ...] [--accept stale,env] [--refresh megatron] [--timeout SEC] -- pretrain_gpt.py <megatron args>
     python -m fastrsi_megatron.zygote stop --sock S
 
 `start` sends one request and waits until every rank has exited; it prints one JSON line per
@@ -36,7 +36,8 @@ Contract:
   script's own modules and our modules that hold references to them (run, hook, gap, state,
   client) from sys.modules, install the overlay finder, and import them again, so an overlaid
   edit runs while torch, Transformer Engine and the rest stay loaded. Stale and overlay findings
-  for refreshed modules do not count. Measured cost: see the PR (re-import about 1.4 s at 14B).
+  for refreshed modules do not count. Cost (our 2026-11-07 run, Qwen3-14B architecture, TP 2): the
+  re-import took 1.4 s, and the lab was ready 40.9 s after the request, against 78.8 s for torchrun.
 """
 import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
 
@@ -213,15 +214,18 @@ def preload(mods, script=None, check=cuda_initialized):
     return took
 
 
+# our own modules that hold references to megatron's: re-imported with it
+REFRESH_OWN = ("run", "hook", "gap", "state", "client")
+# packages a code restart never drops even when they sit next to the script: this lab, the live-lab
+# kernel it hosts (`from kernel import ...` in hook.py) and the services that hold forksafe
+KEEP_LOADED = ("fastrsi_megatron", "kernel", "services")
+
+
 def refreshed(req, name):
     """Is module `name` re-imported in the ranks of this request (a code restart)?"""
     if name.startswith("fastrsi_megatron.") and name.rsplit(".", 1)[1] in REFRESH_OWN:
         return bool(req.get("refresh"))
     return any(name == p or name.startswith(p + ".") for p in req.get("refresh", []))
-
-
-# our own modules that hold references to megatron's: re-imported with it
-REFRESH_OWN = ("run", "hook", "gap", "state", "client")
 
 
 def findings(req, src):
@@ -231,7 +235,8 @@ def findings(req, src):
     if stale:
         out.append({"kind": "stale", "files": stale[:20], "n": len(stale),
                     "why": "the ranks would run the code imported when the zygote started",
-                    "do": "restart the zygote (warm restart), or apply the edit in the live lab"})
+                    "do": "restart the zygote (warm restart), apply the edit in the live lab, or "
+                          "start with --refresh <package> to re-import it in the ranks"})
     env = [k for k, v in req.get("env", {}).items()
            if START_ENV.get(k) != v and k.startswith(EARLY_ENV_PREFIXES)
            and not k.startswith(LATE_ENV_PREFIXES)]
@@ -247,7 +252,8 @@ def findings(req, src):
             out.append({"kind": "overlay", "modules": pre,
                         "why": "the zygote imported these before the overlay could replace them, "
                                "so the ranks would run the original code",
-                        "do": "start fresh (torchrun) for code edits, or use the live lab"})
+                        "do": "start with --refresh <top-level package> (the ranks re-import it from the "
+                          "overlay), start fresh (torchrun), or use the live lab"})
     acc = set(req.get("accept", []))
     return [f for f in out if f["kind"] not in acc], out
 
@@ -356,7 +362,7 @@ def _child(req, local_rank, lsock, conn):
             # ranks import them again, from the overlay where it has them; torch, TE and the rest stay loaded
             here = os.path.dirname(os.path.abspath(req["argv"][0])) + os.sep if req.get("argv") else None
             drop = [n for n, m in list(sys.modules.items()) if refreshed(req, n)
-                    or (here and not n.startswith(("fastrsi_megatron", "kernel", "services"))
+                    or (here and not n.startswith(KEEP_LOADED)
                         and os.path.abspath(getattr(m, "__file__", None) or "/").startswith(here))]
             for n in drop:
                 sys.modules.pop(n, None)

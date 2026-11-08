@@ -121,6 +121,26 @@ class Zygote(unittest.TestCase):
         os.rename(os.path.join(ov, "heavy.py"), os.path.join(ov, "light.py"))
         self.assertEqual(self.start(env={"FASTRSI_OVERLAY": ov})[-1]["rc"], [0, 0])
 
+    def test_code_restart_reimports_the_refreshed_package_from_the_overlay(self):
+        """Input: the zygote preloaded `heavy` (PID = the zygote's pid); an overlay replaces `heavy`
+        with PID = -1. Without refresh the request is refused ("overlay"). With refresh=["heavy"],
+        each rank drops `heavy` and imports the overlay text: heavy_pid is -1 in both ranks.
+        Proves a code edit to a preloaded package runs in a zygote rank; not that Megatron
+        re-imports cleanly (that is the GPU receipt)."""
+        ov = os.path.join(self.d, "ov")
+        os.makedirs(ov)
+        with open(os.path.join(ov, "heavy.py"), "w") as f:
+            f.write("PID = -1\n")
+        ev = self.start(env={"FASTRSI_OVERLAY": ov})
+        self.assertEqual(ev[0]["event"], "refused")
+        self.assertEqual(ev[0]["findings"][0]["kind"], "overlay")
+        ev = self.start(env={"FASTRSI_OVERLAY": ov}, refresh=["heavy"])
+        self.assertEqual([e["event"] for e in ev], ["forked", "exited"], ev)
+        self.assertEqual(ev[-1]["rc"], [0, 0])
+        for r in (0, 1):
+            out = json.load(open(os.path.join(self.d, "r%d.json" % r)))
+            self.assertEqual(out["heavy_pid"], -1)
+
     def test_each_rank_is_pinned_to_its_cpu_list(self):
         """A fork keeps the zygote's CPU affinity; ranks on GPUs of different sockets need
         their own. Input: cpus ["0", "0"] for 2 ranks (CPU 0 always exists). Expect: each
