@@ -103,9 +103,10 @@ class RanksParticipant(C.Participant):
 
 def unknown_state_finding(unknown):
     """Optimizer state the first step created that the lab cannot reset (not a fresh Adam's zeros,
-    e.g. the precision-aware optimizer's master copies). Megatron-only, so not in the kernel's
-    catalog: built here in the same shape as kernel findings. The lab still starts; checks then
-    begin from the warm-up's values of these tensors, which the loss gate will show."""
+    e.g. the precision-aware optimizer's master copies), as a finding in the kernel's shape. The
+    check is Megatron-only, so it is built here, not from the kernel's catalog. The lab still
+    starts; checks then begin from the warm-up's values of these tensors, which the loss gate
+    shows."""
     return {"check": "optimizer_state_unknown", "observed": f"state keys not reset: {unknown[:5]}",
             "expected": f"only {sorted(ST.ZERO_KEYS)} keys are created by the first optimizer step",
             "why": "a check would start from the warm-up's values of these tensors",
