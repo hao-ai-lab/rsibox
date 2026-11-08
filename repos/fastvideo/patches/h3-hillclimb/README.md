@@ -82,7 +82,13 @@ Fresh processes, our 2026-11-07 12:03-12:38 PST runs, base and patched alternati
 | 16 | Feed the FFN graph's output straight into the gated residual (no clone) | 3.009 -> 2.940 | 0.90 s (0.20 s) | correct | Claude review: safe only while every consumer is done with the output before that layer's next replay; true for the denoise loop as written, not enforced |
 | 17 | Replay the NVFP4 QKV and gate projections plus fused qk-norm/RoPE from per-layer CUDA graphs | 3.005 -> 2.959 | 1.10 s (0.22 s) | correct | Same caveats as 15 |
 | 18 | Fused strided q/k/v/gate remote packing and local tiling; scatter only remote rows | 2.958 -> 2.902 | 1.89 s (0.26 s) | correct | |
-| 19 | Contiguous row/head partitions for the SP=2 gated return | 2.931 -> 2.901 | 1.25 s (0.26 s) | pending | |
+| 19 | Contiguous row/head partitions for the SP=2 gated return | 2.931 -> 2.901 | 1.25 s (0.26 s) | correct | |
+
+**Patches 15-17 break a second sequence length (measured).** After a 124-frame video, a 243-frame
+video in the same process ran out of GPU memory (174.5 GiB allocated, 74.9 GiB in CUDA-graph private
+pools): the per-layer graphs keep their pools for the first length while the second needs new ones.
+Our 2026-11-07 16:19 PST run, 1 GPU. Use 15-17 only for a fixed request shape; they need an opt-in flag
+and a memory budget (evict graphs of other shapes) first.
 
 Lab seconds per video drift between iterations (the baseline is the median of the recent
 baselines on the same engine); the fresh-process table is the result.
