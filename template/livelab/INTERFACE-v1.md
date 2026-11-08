@@ -73,12 +73,12 @@ Signatures and plan format: `repos/vllm/livelab/kernel/coordinator.py`.
   code with no blocking finding.
 - The witness global (`__fastrsi_hit__`) is never deleted: code compiled or captured while an
   edit was installed may still call it. Undo binds a no-op stub.
-- JIT targets (a Triton `@jit` kernel) are rebuilt in place from the new text at commit
-  (`jit_rebuild`, advisory), with the module's JIT objects that call them reset; their witness
-  is their launches; undo restores the old compiled kernels.
+- JIT targets (a Triton `@jit` kernel) are a `jit_target` finding: the swap changes the
+  Python function and the launches keep the old compiled kernel. A JIT rebuild at commit
+  (`jit_rebuild`, launches as the witness) is not implemented on main.
 - Fields only the edited `__init__` sets and new code reads are a `new_fields` finding
-  (blocking unless accepted). A plan with `"backfill": true` sets them at commit on the live
-  instances found from the participant's scope (journaled).
+  (blocking unless accepted). Setting them on the live instances at commit (a plan with
+  `"backfill": true`) is not implemented on main; a repair cell can set them by hand.
 - A group participant may declare the ranks it must reach (`expected`, e.g. every rank of
   every data-parallel group); a reply that lacks some is a blocking, not-overridable
   `participant_missing` naming them.
