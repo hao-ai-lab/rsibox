@@ -150,10 +150,9 @@ measured per-process first-video work plus a 6.1 s video.
   hit). Cost, ranks in parallel and each file's imports parsed once per process: DiT edits
   0.19-0.64 s (re-import 0.04-0.17 s, meta builds of the old and new DiT 0.13-0.47 s), a stage
   edit 1.16-1.27 s (the process's first import graph: 1.1 s), stages < 1 ms.
-- **State the old code held is released.** A module that keeps per-layer CUDA graphs on its
-  functions (the hill-climb's kept tree) left them alive next to the new code's captures, and
-  the first video after a rebuild ran out of GPU memory in the hill-climb lab. The rebuild now
-  releases them (`rebuild.release_held`): each of 4 rebuilds of `minimax_h3.py` on the kept tree
+- **State the old code held is released** (`rebuild.release_held`). A module that keeps
+  per-layer CUDA graphs on its functions would otherwise keep them alive next to the new
+  code's captures, and the next video runs out of GPU memory (`lessons.md`). Each of 4 rebuilds of `minimax_h3.py` on the kept tree
   released 100 CUDA graphs and 62.3 GiB of static buffers, reserved memory stayed at
   158.7-158.9 GiB, every video bit-exact (with the kept H3 patches).
 - **Zygote respawn, where its 14 s go** (1 GPU, paired run, forked worker timers): component
