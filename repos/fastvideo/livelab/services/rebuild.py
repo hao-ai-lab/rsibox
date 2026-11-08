@@ -1,7 +1,7 @@
 """In-place rebuild in a warm process, without a restart.
 
 A warm worker keeps its CUDA context, its weights on the GPU, its JIT modules (FlashInfer,
-Triton) and its compile caches. An edit the R0 swap refuses (a constructor edit, a new field,
+Triton) and its compile caches. An edit the live swap refuses (a constructor edit, a new field,
 a module constant, a new class) does not need a new process if the process can (1) run the
 edited modules' new source and (2) rebuild the objects built from them, keeping their tensors.
 
@@ -19,7 +19,7 @@ edited modules' new source and (2) rebuild the objects built from them, keeping 
    - otherwise the live value stays (it may hold state set after construction, such as caches).
    Tensors cannot come from the meta build: a new parameter or buffer, a new submodule that
    holds tensors, or a changed parameter shape is a finding (the edit needs a real load: a
-   restart tier), and nothing is changed.
+   restart), and nothing is changed.
 
 Not covered (findings or a restart): native code (extension `.so`), torch op schemas that a
 re-import would register again, code captured in CUDA graphs, and objects held outside the
@@ -155,7 +155,7 @@ class TextFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
-def _unbind(modules, n):
+def unbind(modules, n):
     parent, _, child = n.rpartition(".")
     p = modules.get(parent)
     if p is not None and child in getattr(p, "__dict__", {}):
@@ -191,7 +191,7 @@ def refresh(files, prefixes, modules=None, max_modules=200):
     origins = {n: old[n].__file__ for n in files}
     for n in order:
         modules.pop(n)
-        _unbind(modules, n)
+        unbind(modules, n)
     importlib.invalidate_caches()
     finder = TextFinder(dict(files), origins)
     sys.meta_path.insert(0, finder)
@@ -426,7 +426,7 @@ def merge_fields(live, base, new, dry_run=False):
         if lm is None:
             if _holds_tensors(nm):
                 fs.append(finding("new_submodule", f"{path or '<root>'}: {type(nm).__name__} holds tensors",
-                                  "no new weights (a load restart tier)"))
+                                  "no new weights (needs a restart that loads them)"))
             else:
                 plan.append(("module", path, nm))
             continue
@@ -434,7 +434,7 @@ def merge_fields(live, base, new, dry_run=False):
             lt, nt = getattr(lm, kind), getattr(nm, kind)
             for k, v in nt.items():
                 if k not in lt:
-                    fs.append(finding("new_tensor", f"{path}.{k}", "no new weights (a load restart tier)"))
+                    fs.append(finding("new_tensor", f"{path}.{k}", "no new weights (needs a restart that loads them)"))
                 elif v is not None and lt[k] is not None and tuple(v.shape) != tuple(lt[k].shape):
                     fs.append(finding("tensor_shape_changed", f"{path}.{k}: {tuple(lt[k].shape)} -> "
                                       f"{tuple(v.shape)}", "the loaded shapes"))

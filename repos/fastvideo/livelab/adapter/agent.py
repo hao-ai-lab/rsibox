@@ -23,7 +23,7 @@ if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
     # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
     # compile; preset Inductor's torch_key from disk (services/jitcache.py)
     from services import jitcache as _jitcache
-    _STATE["torch_key"] = _jitcache.preset_torch_key()
+    _jitcache.preset_torch_key()
 
 
 def rank_of(worker):

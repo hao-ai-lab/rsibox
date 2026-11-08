@@ -74,7 +74,10 @@ class JitCacheTest(unittest.TestCase):
         self.assertEqual(os.stat(os.path.join(a, "x.o")).st_mtime_ns, 1_700_000_000_123_456_789)
 
     def test_env_pins_every_cache_under_the_root(self):
-        """Input: env_for(root). Expect: the four cache roots under root, autotune caching on."""
+        """Input: env_for(root). Expect: the four cache roots under root, autotune caching on.
+        Proves: a process started with this env writes every JIT cache under one root it can find
+        again (the FlashInfer rebuild after a move needs the same path). Not: that FlashInfer's
+        build files keep relative paths (they do not; see kb/costs.md)."""
         env = J.env_for(self.dir)
         for k in J.ROOTS:
             self.assertTrue(env[k].startswith(os.path.abspath(self.dir)), k)

@@ -50,7 +50,7 @@ class HolderTest(unittest.TestCase):
 
     def tearDown(self):
         try:
-            H._call(self.sock, {"op": "stop"}, timeout=10)
+            H.call(self.sock, {"op": "stop"}, timeout=10)
         except Exception:
             pass
         self.proc.join(10)
@@ -61,7 +61,7 @@ class HolderTest(unittest.TestCase):
     def deposit(self):
         files = H.stamp_files(self.net, prefixes=("hpkg.loader",))
         self.assertIn("hpkg.net", files)
-        r = H._call(self.sock, {"op": "put", "key": "rank0:transformer", "module": self.net,
+        r = H.call(self.sock, {"op": "put", "key": "rank0:transformer", "module": self.net,
                                 "files": files, "stamp": H.stamp(files)})
         self.assertTrue(r["ok"], r)
         return files
@@ -71,7 +71,7 @@ class HolderTest(unittest.TestCase):
         class and bit-equal weights, in another tensor (the holder owns a copy). Proves: a
         respawned worker gets the loaded weights without a load."""
         files = self.deposit()
-        r = H._call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
+        r = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertTrue(r["ok"], r)
         m = r["module"]
         self.assertEqual(type(m).__name__, "Net")
@@ -86,11 +86,11 @@ class HolderTest(unittest.TestCase):
         files = self.deposit()
         with open(os.path.join(self.dir, "hpkg", "net.py"), "a") as f:
             f.write("\n# an edit\n")
-        r = H._call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
+        r = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertFalse(r["ok"])
         self.assertEqual(r["findings"][0]["check"], "holder_stale")
         self.assertIn("files:hpkg.net", r["findings"][0]["observed"])
-        r2 = H._call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
+        r2 = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertEqual(r2["findings"][0]["check"], "holder_empty")
 
 

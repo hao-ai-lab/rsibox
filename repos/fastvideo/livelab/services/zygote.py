@@ -34,7 +34,6 @@ PREFIXES = ("fastvideo",)
 PRELOAD = ["torch", "fastvideo", "fastvideo.worker.multiproc_executor", "fastvideo.worker.gpu_worker",
            "fastvideo.pipelines.basic.minimax_h3.minimax_h3_pipeline", "fastvideo.models.dits.minimax_h3"]
 _SNAPSHOT = {}
-_REPORT = {}
 
 
 def _sources(prefixes=PREFIXES, modules=None):
@@ -79,7 +78,7 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
         dropped = sorted(dropped)
         for n in dropped:
             modules.pop(n, None)
-            RB._unbind(modules, n)
+            RB.unbind(modules, n)
         importlib.invalidate_caches()
     return {"stale": stale, "dropped": dropped, "blocked": blocked,
             "seconds": round(time.perf_counter() - t0, 4)}
@@ -98,7 +97,6 @@ def _install_worker_hook():
 
     def prepare(data):
         rep = refresh_stale()
-        _REPORT.update(rep)
         if rep["stale"] or rep["blocked"]:
             print(f"[fastrsi-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
                   f"dropped={len(rep['dropped'])} blocked={rep['blocked']} in {rep['seconds']} s",

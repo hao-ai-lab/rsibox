@@ -176,7 +176,7 @@ def _handle(conn, entries):
         conn.send({"ok": False, "error": f"unknown op {op}"})
 
 
-def _call(sock_path, msg, timeout=120.0):
+def call(sock_path, msg, timeout=120.0):
     _ipc()
     from multiprocessing.connection import Client
     c = Client(sock_path, family="AF_UNIX")
@@ -228,10 +228,10 @@ def install_loader_hook(sock_path, components=DEFAULT_COMPONENTS, report=None):
         t0 = time.perf_counter()
         ev = {"key": key}
         try:
-            prev = _call(sock_path, {"op": "files", "key": key})
+            prev = call(sock_path, {"op": "files", "key": key})
             if prev.get("ok"):
                 st = stamp(prev["files"], component_model_path)
-                r = _call(sock_path, {"op": "get", "key": key, "stamp": st})
+                r = call(sock_path, {"op": "get", "key": key, "stamp": st})
                 if r.get("ok"):
                     ev.update(served=True, seconds=round(time.perf_counter() - t0, 4))
                     report.append(ev)
@@ -245,7 +245,7 @@ def install_loader_hook(sock_path, components=DEFAULT_COMPONENTS, report=None):
         try:
             files = stamp_files(module)
             t1 = time.perf_counter()
-            pr = _call(sock_path, {"op": "put", "key": key, "module": module, "files": files,
+            pr = call(sock_path, {"op": "put", "key": key, "module": module, "files": files,
                                    "stamp": stamp(files, component_model_path)}, timeout=600)
             ev.update(deposited=pr.get("ok"), deposit_s=round(time.perf_counter() - t1, 4))
         except Exception as e:

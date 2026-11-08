@@ -73,13 +73,11 @@ class ZygoteRefreshTest(unittest.TestCase):
         self.assertEqual(sys.modules["zpkg.user"].get(), 1)
 
     def test_no_edit_drops_nothing(self):
-        """Input: no edit. Expect: the child drops nothing and keeps the preloaded modules."""
+        """Input: no edit. Expect: the child drops nothing and keeps the preloaded modules.
+        Proves: a respawn without an edit pays no re-import (the zygote's point). Not: a GPU
+        worker (the zygote respawn receipt covers that)."""
         out = fork_and_read(self.child)
         self.assertEqual((out["stale"], out["dropped"], out["value"]), ([], [], 1))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 def _child_poisoned(env):
@@ -105,7 +103,13 @@ class ForkPoisonTest(unittest.TestCase):
     def test_runtime_check_poisons_forks_nvml_check_does_not(self):
         """Input: a process calls torch.cuda.is_available() (as FastVideo does at import), then
         forks. Expect: through the CUDA runtime the child is "in bad fork" (cannot use CUDA);
-        with PYTORCH_NVML_BASED_CUDA_CHECK=1 (what `enable` sets) it is not. Proves: the zygote
-        server can import FastVideo without poisoning its workers. Not: other CUDA calls."""
+        with PYTORCH_NVML_BASED_CUDA_CHECK=1 (the setting `enable` makes) it is not. Proves: the
+        environment `enable` sets keeps a forked child able to use CUDA after the parent asked
+        torch whether CUDA is available. Not: an import of FastVideo or `enable` itself (the GPU
+        receipt of the zygote respawn covers those), or other CUDA calls."""
         self.assertTrue(_child_poisoned({"PYTORCH_NVML_BASED_CUDA_CHECK": "0"}))
         self.assertFalse(_child_poisoned({"PYTORCH_NVML_BASED_CUDA_CHECK": "1"}))
+
+
+if __name__ == "__main__":
+    unittest.main()

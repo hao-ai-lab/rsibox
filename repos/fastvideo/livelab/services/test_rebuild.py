@@ -86,7 +86,7 @@ class RebuildTest(unittest.TestCase):
         return r, RB.merge_fields(self.live, base, new)
 
     def test_constructor_edit_keeps_weights_and_live_state(self):
-        """Input: Norm's constructor now sets eps = 1e-2 (a constructor edit R0 refuses).
+        """Input: Norm's constructor now sets eps = 1e-2 (a constructor edit the live swap refuses).
         Expect: the live Norm gets eps 1e-2 and the new class; the weights are the same tensor
         objects (no load); `calls` (set after construction, ctor unchanged) stays 1; the output
         equals a fresh eps=1e-2 module with the same weights. Proves: the 3-way merge applies

@@ -30,9 +30,9 @@ class RebuildTest(unittest.TestCase):
 
     def test_constructor_edit_refused_by_install_runs_after_rebuild(self):
         """Input: VideoDecodingStage gains `__init__` setting `self.bias = 2`, used in forward.
-        Expect: install refuses it (R0 cannot run a constructor again); rebuild applies it on
+        Expect: install refuses it (a live swap cannot run a constructor again); rebuild applies it on
         both ranks without a respawn (same worker pids); the next video is the +2 output
-        [124, 178, 232, 35]; revert gives the base output back. Proves: the edit R0 routes to
+        [124, 178, 232, 35]; revert gives the base output back. Proves: the edit the live swap routes to
         a restart runs in the warm workers. Not: a GPU engine (see kb/costs.md receipts)."""
         pids = [self.lab.rank_call(i, "ping")["pid"] for i in range(2)]
         self.assertEqual(self.lab.check()["output"], BASE)
@@ -73,7 +73,7 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual(self.lab.check()["output"], BASE)
 
     def test_rebuild_refused_while_live_edits_are_installed(self):
-        """Input: a committed R0 edit, then a rebuild. Expect: refused with
+        """Input: a committed live-swap edit, then a rebuild. Expect: refused with
         live_edits_installed (the rebuild would make the edit's base stale)."""
         self.assertEqual(self.lab.install(self.lab.patches()["visible"])["outcome"], "committed")
         b = self.lab.rebuild({"files": {STAGES: self.ctor}})

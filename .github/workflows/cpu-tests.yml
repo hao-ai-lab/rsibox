@@ -59,7 +59,7 @@ jobs:
           python-version: "3.12"
       - name: Run the adapter's unittest cases (spawned workers in FastVideo's pipe protocol, deadlines, a killed worker, respawn)
         run: python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab -v
-      - name: Run the restart-tier services' unittest cases (zygote refresh with a real fork; the torch cases of rebuild and jitcache skip without torch)
+      - name: Run the restart services' unittest cases (zygote refresh with a real fork; the torch cases of rebuild, jitcache and holder skip without torch)
         run: python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
       - name: Run the template conformance cases c0-c10 against the lab host on the toy engine (2 worker processes)
         working-directory: template/livelab

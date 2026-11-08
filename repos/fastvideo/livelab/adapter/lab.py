@@ -128,8 +128,8 @@ class FastVideoLab:
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
     `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
     `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
-    `reset("respawn")` skips the workers' imports (zygote respawn). `holder`: also keep the loaded DiT and
-    text encoder in a holder process (services/holder.py) that respawned workers map by CUDA
+    `reset("respawn")` skips the workers' imports (zygote respawn). `holder`: also keep the loaded DiT, text
+    encoder and VAE in a holder process (services/holder.py) that respawned workers map by CUDA
     IPC instead of loading; implies `zygote`."""
     name = "fastvideo"
 
@@ -146,7 +146,7 @@ class FastVideoLab:
         self.lock = threading.RLock()
         self.costs = {}
         self.holder = None
-        if holder:          # loaded DiT/text encoder outlive the workers (services/holder.py)
+        if holder:          # loaded DiT, text encoder and VAE outlive the workers (services/holder.py)
             from services import holder as H
             sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}.sock")
             self.holder = H.start(sock)
@@ -154,7 +154,7 @@ class FastVideoLab:
             zygote = True   # the loader hook is installed by the zygote's worker entry
         if zygote:          # every worker group, respawns included, forks from preloaded imports
             from services import zygote as Z
-            self.zygote_preload = Z.enable()
+            self.costs["zygote_preload"] = Z.enable()
         self._spawn()
 
     # -- process layout ------------------------------------------------------------------
@@ -238,7 +238,7 @@ class FastVideoLab:
             if self.holder is not None:
                 from services import holder as H
                 try:
-                    H._call(os.environ["FASTRSI_HOLDER_SOCK"], {"op": "stop"}, timeout=10)
+                    H.call(os.environ["FASTRSI_HOLDER_SOCK"], {"op": "stop"}, timeout=10)
                 except Exception:
                     pass
                 self.holder.join(10)
@@ -341,14 +341,14 @@ class FastVideoLab:
                 self._spawn()
                 return {"ok": not self.session.poisoned(), "reset": ["worker group", "session"],
                         "cost_s": round(time.perf_counter() - t0, 6)}
-            res = [C._call(p, "reset", "R3") for p in self.co.participants]
+            res = [C._call(p, "reset", "R3") for p in self.co.participants]  # "R3": CUDA cache
             return {"ok": all(r["ok"] for r in res), "reset": ["cuda cache"],
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
     def rebuild(self, patch):
         """In-place rebuild: every warm worker re-imports the edited modules from `patch["files"]`
         and rebuilds what was built from them (adapter/agent.py `rebuild`): for the edits the
-        R0 swap refuses (constructors, new fields, module constants, new classes). The edited
+        live swap refuses (constructors, new fields, module constants, new classes). The edited
         text becomes the new base: the session starts over (no live edits may be installed).
         `{"revert": True}` rebuilds every module rebuilt so far back to its file on disk."""
         t0 = time.perf_counter()
