@@ -6,6 +6,7 @@ architecture goes in `repos/<engine>/docs/`, its measurements in `repos/<engine>
 ```
 docs/
   README.md        this index
+  lessons.md       framework lessons from building a live lab
   core/            how the skill and the agent prompts work
   livelab/         the interface, receipts, conformance
 ```
@@ -18,4 +19,4 @@ Rules:
 
 ## Index
 
-(none yet)
+- [Lessons from building a live lab](lessons.md): framework lessons and rules for applying them.

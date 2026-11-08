@@ -51,6 +51,8 @@ then the iteration on top of it. That way each framework rule points to the PR t
   text is true.
 - **One iteration per PR.** Keep it small enough to review in one sitting. Stack PRs when one
   step depends on another.
+- **Stacks:** merge only when the PR's base is `main`; after merging check the files are on
+  main (`git ls-tree origin/main`).
 - **One boundary per PR.** A code PR changes one folder of `livelab/` (one boundary), with at
   most about 600 lines of non-test code. Its description states the contract (interface,
   invariants, what the folder owns), and it carries its own tests: at least one case that fails
@@ -124,6 +126,7 @@ test, because it misleads the reader.
   change: bump its version and say so in the PR.
 - `docs/`: how this repo and its process work, following `docs/README.md`. No engine
   architecture, and no loose files at the root.
+  `docs/lessons.md` holds framework lessons; `repos/<engine>/kb/lessons.md` holds engine lessons.
 - `repos/<engine>/`: everything about one engine:
   - `docs/`: its architecture: the process tree, the restart boundaries and what each costs,
     and how the live lab maps onto them.
@@ -161,3 +164,5 @@ The repo will be public. Experiments and the machines they ran on are not part o
   a receipt by hand.
 - Never claim a speedup without the receipt that measured it. Every number in `kb/` names its
   source.
+- Each engine keeps a standing replay of real upstream PRs (`core/orchestrator.md`). A fix found
+  by the replay is done when the replay shows it, not when CPU tests pass.
