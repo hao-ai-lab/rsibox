@@ -179,6 +179,65 @@ class StartState(unittest.TestCase):
         self.assertEqual(f["n_unknown"], 2)
         json.dumps(f)   # findings travel in replies and receipts
 
+    def test_lab_setup_freezes_batches_restores_start_state_and_records_unknown_state(self):
+        """Lab._setup freezes the batches, snapshots S0, runs warm-up steps, restores S0, zeroes
+        Adam moments, snapshots S, and records an optimizer_state_unknown finding when the first
+        optimizer step creates a non-Adam state key. Input: a toy model, a Megatron-like optimizer
+        whose step adds `master_param` to state, and a fake train step on CPU. Expect: the lab
+        starts, restores the initial weights, zeroes the 6 Adam tensors, keeps `master_param` untouched,
+        records `optimizer_state_unknown` in `setup_findings`, and repeats the same warm-up losses on
+        `_restore() + _steps()`."""
+        from unittest import mock
+        from fastrsi_megatron import hook
+        torch.manual_seed(0)
+        batches = [torch.randn(4, 8) for _ in range(6)]
+        model = torch.nn.Linear(8, 4)
+        initial_weight = model.weight.detach().clone()
+        optimizer = _MegatronLikeOptimizer(model)
+        scheduler = _Sched()
+        original_step = optimizer.step
+
+        def step_with_master():
+            original_step()
+            first_param = optimizer.shard_fp32_from_float16_groups[0][0]
+            optimizer.optimizer.state[first_param].setdefault("master_param", torch.full((2,), 7.0))
+        optimizer.step = step_with_master
+
+        def fake_train_step(forward_func, data_iterator, models, step_optimizer, step_scheduler, *rest, **kwargs):
+            batch = next(data_iterator)
+            models[0].zero_grad()
+            loss = models[0](batch).square().mean()
+            loss.backward()
+            step_optimizer.step()
+            step_scheduler.step(1)
+            return ({"lm loss": loss.detach()}, False, False, False, 0, 1.25)
+
+        fake_ranks = type("_FakeRanks", (), {"rank": 0, "world": 1})
+        env = {"FASTRSI_WARMUP": "2", "FASTRSI_CHECK_STEPS_MAX": "4", "FASTRSI_CHECK_STEPS": "2"}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(hook.G, "Ranks", return_value=fake_ranks()), \
+             mock.patch.object(hook.Lab, "_mb", return_value=1):
+            lab = hook.Lab(fake_train_step, [None, iter(batches), [model], optimizer, scheduler], {"iteration": 0})
+            self.assertTrue(torch.equal(model.weight.data, initial_weight))
+            self.assertEqual(scheduler.num_steps, 0)
+            self.assertEqual(lab.timings["zeroed"], 3 * 2)  # weight + bias x (exp_avg, exp_avg_sq, step)
+            self.assertEqual(len(lab.setup_findings), 1)
+            finding = lab.setup_findings[0]
+            self.assertEqual(finding["check"], "optimizer_state_unknown")
+            self.assertEqual(finding["n_unknown"], 1)
+            self.assertIn("opt0.state.0.master_param", finding["observed"])
+            first_param = optimizer.shard_fp32_from_float16_groups[0][0]
+            self.assertEqual(optimizer.optimizer.state[first_param]["master_param"].tolist(), [7.0, 7.0])
+            first_check = lab._steps(2)
+            lab._restore()
+            second_check = lab._steps(2)
+            self.assertEqual(first_check["loss"], second_check["loss"])
+            status = lab.verb("status", {"verb": "status"})
+            self.assertEqual(status["setup_findings"], [finding])
+            self.assertEqual(status["timings"]["zeroed"], 6)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
