@@ -13,6 +13,9 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+# hook.py hosts the live-lab kernel, which still lives in the vLLM artifact (AGENTS.md: shared code moves to
+# the framework when a second engine needs it); at run time FASTRSI_KERNEL points at it, here the repo copy
+KERNEL = os.environ.get("FASTRSI_KERNEL") or os.path.join(HERE, "..", "..", "..", "vllm", "livelab")
 from fastrsi_megatron import client, gap  # noqa: E402
 
 try:
@@ -162,6 +165,21 @@ class StartState(unittest.TestCase):
         zeroed, unknown = ST.zero_new_state(opt, set())
         self.assertTrue(any(n.endswith("master_param") for n in unknown), unknown)
         self.assertEqual(opt.optimizer.state[p]["master_param"].tolist(), [7.0, 7.0])
+
+    def test_unknown_state_finding_is_built_not_raised(self):
+        """Input: two optimizer state keys the lab cannot reset (master copies, as the precision-aware
+        optimizer creates). Expect: a finding in the kernel's shape (check optimizer_state_unknown,
+        the keys in `observed`, n_unknown 2) that serializes to JSON, built without the kernel's
+        catalog, which does not know this Megatron-only check. Does not run Lab._setup itself."""
+        if KERNEL not in sys.path:
+            sys.path.insert(0, KERNEL)
+        from fastrsi_megatron import hook
+        f = hook.unknown_state_finding(["opt0.state.3.master_param", "opt0.state.4.master_param"])
+        self.assertEqual(f["check"], "optimizer_state_unknown")
+        self.assertEqual(f["observed"],
+                         "state keys not reset: ['opt0.state.3.master_param', 'opt0.state.4.master_param']")
+        self.assertEqual(f["n_unknown"], 2)
+        json.dumps(f)   # findings travel in replies and receipts
 
 
 if __name__ == "__main__":

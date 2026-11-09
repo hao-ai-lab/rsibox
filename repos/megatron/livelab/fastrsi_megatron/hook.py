@@ -101,6 +101,20 @@ class RanksParticipant(C.Participant):
         return self._all("at_base", None)
 
 
+def unknown_state_finding(unknown):
+    """Optimizer state the first step created that the lab cannot reset (not a fresh Adam's zeros,
+    e.g. the precision-aware optimizer's master copies), as a finding in the kernel's shape. The
+    check is Megatron-only, so it is built here, not from the kernel's catalog. The lab still
+    starts; checks then begin from the warm-up's values of these tensors, which the loss gate
+    shows."""
+    return {"check": "optimizer_state_unknown", "observed": f"state keys not reset: {unknown[:5]}",
+            "expected": f"only {sorted(ST.ZERO_KEYS)} keys are created by the first optimizer step",
+            "why": "a check would start from the warm-up's values of these tensors",
+            "actions": [{"do": "report", "detail": "say which optimizer option created them"}],
+            "risk_if_ignored": "every check starts from a different optimizer state than the base",
+            "lessons": ["Resetting the optimizer for a check"], "overridable": True, "n_unknown": len(unknown)}
+
+
 class Lab:
     def __init__(self, train_step, a, k):
         self.ts, self.a, self.k = train_step, list(a), dict(k)
@@ -140,10 +154,7 @@ class Lab:
         t4 = _now()
         self.setup_findings = []
         if unknown:
-            self.setup_findings.append(F.finding(
-                "optimizer_state_unknown", f"state keys not reset: {unknown[:5]}",
-                f"only {ZERO} keys are created by the first optimizer step",
-                why="a check would start from the warm-up's values of these tensors"))
+            self.setup_findings.append(unknown_state_finding(unknown))
         self.timings.update(freeze_s=round(t1 - t0, 3), snapshot_s=round(t2 - t1, 3),
                             warmup_s=round(t3 - t2, 3), warmup_steps=warm["step_s"],
                             restore_zero_snapshot_s=round(t4 - t3, 3),
