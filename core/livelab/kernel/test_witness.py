@@ -252,5 +252,89 @@ class DynamoWitnessTest(unittest.TestCase):
         self.assertEqual(w.counts, {k: 1})
 
 
+class CodeRestartWitnessTest(unittest.TestCase):
+    """Tests for code-restart execution witnesses (`instrument_module_functions`,
+    `collect_restart_witness`, and `summarize_restart_witness`)."""
+
+    def test_reached_code_restart_edits_are_proven_across_ranks(self):
+        """Input: `ops.scale` and `eng.Engine.step` instrumented via
+        `instrument_module_functions` on two simulated restart ranks; both targets
+        execute during the step loop. Expected: `collect_restart_witness` records exact
+        hit counts while preserving `functools.wraps` metadata, and
+        `summarize_restart_witness` returns `proven: True` with `finding: None`."""
+        _, eng_rank0, ops_rank0 = fresh("restart_rank0")
+        _, eng_rank1, ops_rank1 = fresh("restart_rank1")
+
+        targets_rank0 = {
+            **W.instrument_module_functions(ops_rank0, ["scale"]),
+            **W.instrument_module_functions(eng_rank0, ["Engine.step"]),
+        }
+        targets_rank1 = {
+            **W.instrument_module_functions(ops_rank1, ["scale"]),
+            **W.instrument_module_functions(eng_rank1, ["Engine.step"]),
+        }
+        self.assertEqual(ops_rank0.scale.__name__, "scale")
+        self.assertEqual(eng_rank0.Engine.step.__name__, "step")
+
+        engine0 = eng_rank0.Engine()
+        engine1 = eng_rank1.Engine()
+        for _ in range(3):
+            engine0.step(2)
+        for _ in range(2):
+            engine1.step(2)
+
+        counts_rank0 = W.collect_restart_witness(targets_rank0)
+        counts_rank1 = W.collect_restart_witness(targets_rank1)
+        self.assertEqual(counts_rank0, {"scale": 3, "Engine.step": 3})
+        self.assertEqual(counts_rank1, {"scale": 2, "Engine.step": 2})
+
+        summary = W.summarize_restart_witness(
+            {"rank0": counts_rank0, "rank1": counts_rank1}
+        )
+        self.assertEqual(
+            summary,
+            {
+                "witness": {"scale": 5, "Engine.step": 5},
+                "proven": True,
+                "finding": None,
+            },
+        )
+
+    def test_unreached_code_restart_edits_report_zero_witness(self):
+        """Input: `Engine.step` and `Engine.drain` instrumented on a restarted module,
+        where `Engine.step` runs twice and `Engine.drain` never runs (plus an all-zero
+        case). Expected: `summarize_restart_witness` marks `proven: False` and
+        `finding: "zero_witness"` whenever any edited target has 0 calls or total calls
+        across edited targets is 0."""
+        _, eng_mod, _ = fresh("restart_unreached")
+        targets = W.instrument_module_functions(eng_mod, ["Engine.step", "Engine.drain"])
+
+        unreached_summary = W.summarize_restart_witness(W.collect_restart_witness(targets))
+        self.assertEqual(
+            unreached_summary,
+            {
+                "witness": {"Engine.step": 0, "Engine.drain": 0},
+                "proven": False,
+                "finding": "zero_witness",
+            },
+        )
+
+        engine = eng_mod.Engine()
+        engine.step(4)
+        engine.step(4)
+        partial_counts = W.collect_restart_witness(targets)
+        self.assertEqual(partial_counts, {"Engine.step": 2, "Engine.drain": 0})
+
+        partial_summary = W.summarize_restart_witness(partial_counts)
+        self.assertEqual(
+            partial_summary,
+            {
+                "witness": {"Engine.step": 2, "Engine.drain": 0},
+                "proven": False,
+                "finding": "zero_witness",
+            },
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

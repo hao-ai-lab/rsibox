@@ -33,6 +33,7 @@ pass:
 """
 import ast
 import contextlib
+import functools
 import gc
 import inspect
 import sys
@@ -253,3 +254,191 @@ def inject(node, key):
     at = body[1] if doc and len(body) > 1 else body[0]
     stmt = ast.copy_location(ast.Expr(ast.copy_location(call, at)), at)
     body.insert(1 if doc else 0, stmt)
+
+
+_RESTART_INSTRUMENTED_TARGETS = {}
+
+
+def instrument_module_functions(module, function_names):
+    """Wrap named functions or `class.method` targets on `module` with a lightweight
+    `__fastrsi_hit__` call counter (preserving `functools.wraps` metadata) for
+    code-restart runs (`FASTRSI_OVERLAY` or zygote `--refresh`).
+
+    Returns a dictionary mapping each target name to its instrumented wrapper.
+    """
+    restart_counts = getattr(module, "__fastrsi_restart_counts__", None)
+    if not isinstance(restart_counts, dict):
+        restart_counts = {}
+        setattr(module, "__fastrsi_restart_counts__", restart_counts)
+
+    def module_hit(target_key):
+        restart_counts[target_key] = restart_counts.get(target_key, 0) + 1
+
+    trace_safe(module_hit)
+    setattr(module, HIT, module_hit)
+
+    if isinstance(function_names, str):
+        target_list = [function_names]
+    else:
+        target_list = list(function_names)
+
+    instrumented = {}
+    module_name = getattr(module, "__name__", "<module>")
+    for target_name in target_list:
+        parts = target_name.split(".")
+        parent_obj = module
+        for part in parts[:-1]:
+            parent_obj = getattr(parent_obj, part)
+        leaf_name = parts[-1]
+        try:
+            raw_attr = inspect.getattr_static(parent_obj, leaf_name)
+        except AttributeError:
+            raw_attr = getattr(parent_obj, leaf_name)
+
+        descriptor_kind = None
+        if isinstance(raw_attr, staticmethod):
+            descriptor_kind = "staticmethod"
+            orig_callable = raw_attr.__func__
+        elif isinstance(raw_attr, classmethod):
+            descriptor_kind = "classmethod"
+            orig_callable = raw_attr.__func__
+        else:
+            orig_callable = getattr(parent_obj, leaf_name)
+
+        if getattr(orig_callable, "__fastrsi_target__", None) == target_name:
+            orig_callable = getattr(orig_callable, "__wrapped__", orig_callable)
+
+        restart_counts[target_name] = 0
+
+        def make_wrapper(func_obj, registered_name):
+            @functools.wraps(func_obj)
+            def wrapped_target(*args, **kwargs):
+                module_hit(registered_name)
+                wrapped_target.__fastrsi_calls__ = restart_counts[registered_name]
+                return func_obj(*args, **kwargs)
+
+            wrapped_target.__fastrsi_target__ = registered_name
+            wrapped_target.__fastrsi_module__ = module_name
+            wrapped_target.__fastrsi_calls__ = 0
+            wrapped_target.__fastrsi_counts__ = restart_counts
+            wrapped_target.__fastrsi_hit__ = module_hit
+            return wrapped_target
+
+        wrapper = make_wrapper(orig_callable, target_name)
+        if descriptor_kind == "staticmethod":
+            setattr(parent_obj, leaf_name, staticmethod(wrapper))
+        elif descriptor_kind == "classmethod":
+            setattr(parent_obj, leaf_name, classmethod(wrapper))
+        else:
+            setattr(parent_obj, leaf_name, wrapper)
+            if parent_obj is module:
+                for loaded_mod in list(sys.modules.values()):
+                    loaded_dict = getattr(loaded_mod, "__dict__", None)
+                    if isinstance(loaded_dict, dict):
+                        for attr_key, attr_val in list(loaded_dict.items()):
+                            if attr_val is orig_callable:
+                                loaded_dict[attr_key] = wrapper
+
+        instrumented[target_name] = wrapper
+        _RESTART_INSTRUMENTED_TARGETS[target_name] = wrapper
+        _RESTART_INSTRUMENTED_TARGETS[f"{module_name}:{target_name}"] = wrapper
+
+    return instrumented
+
+
+def collect_restart_witness(targets):
+    """Collect per-target execution call counts from instrumented code-restart targets."""
+    if isinstance(targets, types.ModuleType):
+        return dict(getattr(targets, "__fastrsi_restart_counts__", {}))
+
+    if isinstance(targets, dict):
+        collected = {}
+        for key, val in targets.items():
+            if isinstance(val, int):
+                collected[key] = val
+            elif isinstance(val, dict):
+                for inner_key, inner_val in collect_restart_witness(val).items():
+                    collected[inner_key] = collected.get(inner_key, 0) + int(inner_val)
+            else:
+                unwrapped = (
+                    val.__func__
+                    if isinstance(val, (staticmethod, classmethod))
+                    else val
+                )
+                counts_map = getattr(unwrapped, "__fastrsi_counts__", None)
+                if isinstance(counts_map, dict) and key in counts_map:
+                    collected[key] = int(counts_map[key])
+                else:
+                    collected[key] = int(getattr(unwrapped, "__fastrsi_calls__", 0))
+        return collected
+
+    collected = {}
+    for item in targets:
+        if isinstance(item, types.ModuleType):
+            for key, count in getattr(item, "__fastrsi_restart_counts__", {}).items():
+                collected[key] = collected.get(key, 0) + int(count)
+        elif isinstance(item, tuple) and len(item) == 2 and isinstance(
+            item[0], types.ModuleType
+        ):
+            mod_obj, target_name = item
+            counts_map = getattr(mod_obj, "__fastrsi_restart_counts__", {})
+            collected[target_name] = int(counts_map.get(target_name, 0))
+        elif isinstance(item, str):
+            wrapper = _RESTART_INSTRUMENTED_TARGETS.get(item)
+            if wrapper is not None:
+                target_name = getattr(wrapper, "__fastrsi_target__", item)
+                counts_map = getattr(wrapper, "__fastrsi_counts__", {})
+                collected[item] = int(
+                    counts_map.get(target_name, getattr(wrapper, "__fastrsi_calls__", 0))
+                )
+            else:
+                collected[item] = 0
+        else:
+            unwrapped = (
+                item.__func__
+                if isinstance(item, (staticmethod, classmethod))
+                else item
+            )
+            target_name = getattr(
+                unwrapped,
+                "__fastrsi_target__",
+                getattr(unwrapped, "__qualname__", getattr(unwrapped, "__name__", repr(unwrapped))),
+            )
+            counts_map = getattr(unwrapped, "__fastrsi_counts__", None)
+            if isinstance(counts_map, dict) and target_name in counts_map:
+                collected[target_name] = int(counts_map[target_name])
+            else:
+                collected[target_name] = int(getattr(unwrapped, "__fastrsi_calls__", 0))
+    return collected
+
+
+def summarize_restart_witness(counts_by_target):
+    """Aggregate per-target call counts across ranks and determine whether all edited
+    targets executed at least once (`proven: True`) or any target had 0 calls
+    (`proven: False`, `finding: "zero_witness"`).
+    """
+    aggregated = {}
+    if isinstance(counts_by_target, (list, tuple)):
+        for rank_entry in counts_by_target:
+            rank_counts = collect_restart_witness(rank_entry)
+            for target_name, call_count in rank_counts.items():
+                aggregated[target_name] = aggregated.get(target_name, 0) + int(call_count)
+    elif isinstance(counts_by_target, dict):
+        if counts_by_target and all(isinstance(val, dict) for val in counts_by_target.values()):
+            for rank_counts in counts_by_target.values():
+                for target_name, call_count in rank_counts.items():
+                    aggregated[target_name] = aggregated.get(target_name, 0) + int(call_count)
+        else:
+            aggregated = collect_restart_witness(counts_by_target)
+    else:
+        aggregated = collect_restart_witness(counts_by_target)
+
+    total_calls = sum(aggregated.values())
+    all_targets_reached = bool(aggregated) and total_calls > 0 and all(
+        call_count > 0 for call_count in aggregated.values()
+    )
+    return {
+        "witness": aggregated,
+        "proven": all_targets_reached,
+        "finding": None if all_targets_reached else "zero_witness",
+    }

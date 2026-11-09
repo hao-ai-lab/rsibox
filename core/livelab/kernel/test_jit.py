@@ -19,6 +19,8 @@ import sys
 import unittest
 
 from . import coordinator as C
+from . import jit as jit_module
+from . import journal as journal_module
 from . import locate as L
 from . import session as SS
 from .test_detectors import temp_modules
@@ -346,6 +348,86 @@ class JitRebuildTest(unittest.TestCase):
         self.assertTrue(sess.uninstall()["ok"])
         self.assertEqual((hasattr(leaf, "bump"), leaf.launch([1, 2]), sess.state()),
                          (False, [2, 4], "base"))
+
+    def test_helper_fn_edit_invalidates_outer_kernel_counts_witness_and_restores(self):
+        """Input: `@triton.jit helper_fn` called by `@triton.jit outer_kernel`. Editing
+        `helper_fn` discovers `outer_kernel` via `discover_triton_callers`, invalidates
+        `outer_kernel`'s device cache, counts launches of `outer_kernel` toward
+        `helper_fn`'s witness, and restores cleanly on undo."""
+        helper_src = (
+            "import {t} as triton\n\n"
+            "@triton.jit\n"
+            "def helper_fn(val):\n"
+            "    return val * 3\n\n"
+            "@triton.jit\n"
+            "def outer_kernel(items, count):\n"
+            "    return [helper_fn(item) + 1 for item in items[:count]]\n\n"
+            "def launch(items):\n"
+            "    return outer_kernel[(1,)](items, len(items))\n"
+        )
+        names, texts, mods, participant, session = lab(self, {"kern": helper_src})
+        kern_mod = mods["kern"]
+        mod_name = names["kern"]
+        self.assertEqual(kern_mod.launch([2, 4]), [7, 13])
+        self.assertTrue(bool(kern_mod.outer_kernel.device_caches["cpu"][0]))
+
+        discovered = jit_module.discover_triton_callers(
+            {"helper_fn"}, modules=[kern_mod]
+        )
+        self.assertEqual([caller.fn.__name__ for caller in discovered], ["outer_kernel"])
+
+        edited_src = texts["kern"].replace("val * 3", "val * 10")
+        install_res = install(session, mod_name, edited_src)
+        self.assertEqual(install_res["outcome"], "committed", install_res)
+        self.assertEqual(kern_mod.outer_kernel.device_caches, {})
+
+        self.assertEqual(kern_mod.launch([2, 4]), [21, 41])
+        helper_key = L.key_of(
+            mod_name, "helper_fn", at(texts["kern"], "@triton.jit")
+        )
+        prove_res = session.co.prove(install_res["txn"])
+        self.assertTrue(prove_res["ok"])
+        self.assertEqual(prove_res["receipt"]["witness"]["rank0"][helper_key], 1)
+
+        self.assertTrue(session.uninstall()["ok"])
+        self.assertEqual(kern_mod.launch([2, 4]), [7, 13])
+        self.assertEqual(kern_mod.outer_kernel.pre_run_hooks, [])
+        self.assertTrue(participant.at_base()["ok"])
+
+    def test_selective_compiled_frame_invalidation_and_restore(self):
+        """Input: a target callable carrying per-callable TorchDynamo cache attributes
+        (`_torchdynamo_orig_callable`, `_torchdynamo_cache`, `_dynamo_cache_entries`).
+        Expected: `invalidate_compiled_frames` clears the Dynamo attributes without
+        disturbing `_dynamo_marked_constant`, and restores them cleanly on undo."""
+        def original_fn(val):
+            return val + 1
+
+        def compiled_target(val):
+            return val + 1
+
+        compiled_target._torchdynamo_orig_callable = original_fn
+        compiled_target._torchdynamo_cache = {"guard_0": "compiled_code_0"}
+        compiled_target._dynamo_cache_entries = ["entry_a", "entry_b"]
+        compiled_target._dynamo_marked_constant = True
+
+        journal = journal_module.Journal("rank0")
+        mark = journal.mark("frame_invalidation")
+        result = jit_module.invalidate_compiled_frames([compiled_target], journal=journal)
+
+        self.assertIn(compiled_target.__qualname__, result["invalidated"])
+        self.assertFalse(hasattr(compiled_target, "_torchdynamo_orig_callable"))
+        self.assertEqual(compiled_target._torchdynamo_cache, {})
+        self.assertEqual(compiled_target._dynamo_cache_entries, [])
+        self.assertTrue(compiled_target._dynamo_marked_constant)
+
+        self.assertTrue(journal.undo_to(mark)["ok"])
+        self.assertIs(compiled_target._torchdynamo_orig_callable, original_fn)
+        self.assertEqual(
+            compiled_target._torchdynamo_cache, {"guard_0": "compiled_code_0"}
+        )
+        self.assertEqual(
+            compiled_target._dynamo_cache_entries, ["entry_a", "entry_b"]
+        )
 
 
 def _gpu():
