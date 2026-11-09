@@ -33,6 +33,8 @@ CASES = {
     "eager_worker": ["M", "--enforce-eager", "--worker-cls", "a.B"],
     "no_model": ["--port", "8123"],
     "bad_flag": ["M", "--no-such-flag"],
+    "reconfig_base": ["Qwen/Qwen3-8B", "--port", "8000", "--max-model-len", "4096",
+                      "--enforce-eager"],
 }
 PARSE_ALL = r'''
 import json, sys
@@ -187,3 +189,50 @@ def test_launcher_reads_the_argv_with_vllms_parser():
                 v["args"]["port"]) == ("direct", "Qwen/Qwen3-8B", 2, port)
         assert json.loads(Path(out).read_text())["argv"] == [
             "serve", "Qwen/Qwen3-8B", "-tp", "2", "--port", str(port), "--host", "127.0.0.1"]
+
+
+def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
+    """Input: `reconfig_base` (`Qwen/Qwen3-8B --port 8000 --max-model-len 4096 --enforce-eager`),
+    overridden with (1) `--max-model-len 32768 --no-enforce-eager --max-num-batched-tokens 8192`,
+    (2) `-tp 2 --enable-expert-parallel`, and (3) `--kv-cache-dtype fp8`.
+    Expect:
+    - (1) `override()` produces `['Qwen/Qwen3-8B', '--port', '8000', '--max-model-len', '32768',
+      '--max-num-batched-tokens', '8192']`, and `classify_reconfig` reports `tier1_warm_ipc`
+      (`weights_compatible: True`);
+    - (2) `classify_reconfig` reports `tier2a_reshard` (`weights_compatible: False`,
+      `reshard_fields: ['tensor_parallel_size']`);
+    - (3) `classify_reconfig` reports `tier2b_weight_format` (`weights_compatible: False`,
+      `weight_format_fields: ['kv_cache_dtype']`)."""
+    import vllm_args
+    base_argv = CASES["reconfig_base"]
+    merged_argv = vllm_args.override(
+        base_argv,
+        ["--max-model-len", "32768", "--no-enforce-eager", "--max-num-batched-tokens", "8192"],
+    )
+    assert merged_argv == [
+        "Qwen/Qwen3-8B", "--port", "8000", "--max-model-len", "32768",
+        "--max-num-batched-tokens", "8192",
+    ]
+    base_parsed = parsed["cases"]["reconfig_base"]
+    tier1_parsed = {
+        **base_parsed,
+        "args": {
+            **base_parsed["args"],
+            "max_model_len": 32768,
+            "enforce_eager": False,
+            "max_num_batched_tokens": 8192,
+        },
+    }
+    tier1_delta = vllm_args.classify_reconfig(base_parsed, tier1_parsed)
+    assert tier1_delta["tier"] == "tier1_warm_ipc" and tier1_delta["weights_compatible"] is True
+    assert set(tier1_delta["warm_ipc_fields"]) == {
+        "max_model_len", "enforce_eager", "max_num_batched_tokens",
+    }
+    tier2a_delta = vllm_args.classify_reconfig(base_parsed, parsed["cases"]["tp_short"])
+    assert tier2a_delta["tier"] == "tier2a_reshard" and tier2a_delta["weights_compatible"] is False
+    assert tier2a_delta["reshard_fields"] == ["tensor_parallel_size"]
+    tier2b_parsed = {**base_parsed, "args": {**base_parsed["args"], "kv_cache_dtype": "fp8"}}
+    tier2b_delta = vllm_args.classify_reconfig(base_parsed, tier2b_parsed)
+    assert (tier2b_delta["tier"] == "tier2b_weight_format"
+            and tier2b_delta["weights_compatible"] is False)
+    assert tier2b_delta["weight_format_fields"] == ["kv_cache_dtype"]
