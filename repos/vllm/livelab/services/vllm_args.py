@@ -5,7 +5,11 @@ flags: the launcher passes the argv through verbatim and only reads back what it
                   "seconds": {"import", "build", "parse"}}
               or {"ok": False, "error": "<vLLM's argparse message>"}
   override(base_argv, patch_argv) -> merged `vllm serve` argv with patch flags overriding base
-  classify_reconfig(old_v, new_v) -> Tier 1 (warm_ipc) vs Tier 2a (reshard) vs Tier 2b (weight_format)
+  classify_reconfig(old_v, new_v) -> 4-tier classification (see kb/reconfiguration_matrix.md):
+      - in_process_instant (< 100 ms scheduler/runtime config mutation, no process restart)
+      - in_process_graph   (0.5-2 s live dispatch toggle or CUDA graph recapture, no process restart)
+      - warm_weights_ipc   (7-20 s worker restart with WeightHolder CUDA IPC, zero disk read)
+      - live_reshard_or_cold (WeightCacheKey sharding or weight-format change)
 
 Contract:
 - The parser is `make_arg_parser(FlexibleArgumentParser())`, the one `vllm serve` builds, so
@@ -47,24 +51,42 @@ WEIGHT_FORMAT_FIELDS = (
     "linear_backend_per_quant",
 )
 
-# Tier 1: runtime, scheduler, KV-cache allocation, compilation and CUDA graph flags that leave
-# WeightCacheKey unchanged, so resident weights in weights.py can be remapped via zero-copy IPC.
-WARM_IPC_FIELDS = (
+# Tier 1A (in_process_instant, < 100 ms): scheduler and admission flags mutated in-process at the
+# step gap without restarting workers or recapturing CUDA graphs.
+IN_PROCESS_INSTANT_FIELDS = (
+    "max_num_seqs",
+    "max_num_batched_tokens",
     "max_model_len",
+    "enable_prefix_caching",
+    "scheduling_policy",
+    "enable_chunked_prefill",
+    "async_scheduling",
+)
+
+# Tier 1B (in_process_graph, 0.5-2 s): execution/compilation flags applied in-process by toggling
+# eager vs CUDAGraphWrapper dispatch or recapturing CUDA graphs via RecaptureCoordinator.
+IN_PROCESS_GRAPH_FIELDS = (
     "enforce_eager",
-    "compilation_config",
     "cudagraph_capture_sizes",
     "max_cudagraph_capture_size",
+    "compilation_config",
     "optimization_level",
-    "max_num_batched_tokens",
-    "max_num_seqs",
-    "gpu_memory_utilization",
-    "enable_prefix_caching",
-    "block_size",
-    "async_scheduling",
-    "swap_space",
-    "enable_chunked_prefill",
     "speculative_config",
+)
+
+# Tier 2 (warm_weights_ipc, 7-20 s): KV pool sizing flags that require restarting the worker
+# process while WeightHolder keeps post-processed weights resident in GPU memory over CUDA IPC.
+WARM_WEIGHTS_IPC_FIELDS = (
+    "gpu_memory_utilization",
+    "block_size",
+    "swap_space",
+)
+
+# All WeightCacheKey-preserving runtime flags (in_process_instant + in_process_graph + warm_weights_ipc).
+WARM_IPC_FIELDS = (
+    *IN_PROCESS_INSTANT_FIELDS,
+    *IN_PROCESS_GRAPH_FIELDS,
+    *WARM_WEIGHTS_IPC_FIELDS,
 )
 
 # Server/holder plumbing fields read by the launcher.
@@ -171,7 +193,7 @@ def parse(argv, parser=None):
         with contextlib.redirect_stderr(out), contextlib.redirect_stdout(out):
             ns = parser.parse_args(list(argv))
             seen = parser.parse_args(list(argv), namespace=argparse.Namespace(
-                kernel_config=_UNSET, **{f: _UNSET for f in FIELDS}))
+                kernel_config=_UNSET, **{field_name: _UNSET for field_name in FIELDS}))
     except SystemExit:                        # argparse error (or --help): its last line
         lines = out.getvalue().strip().splitlines()
         return {"ok": False, "error": lines[-1] if lines else "vllm serve: exited parsing"}
@@ -281,25 +303,92 @@ def override(base_argv, patch_argv):
     return merged_argv
 
 
+def _build_control_actions(changed, new_args, instant_fields, graph_fields):
+    """Build the ordered list of in-process control actions for `in_process_instant` and
+    `in_process_graph` reconfigurations (see `repos/vllm/kb/reconfiguration_matrix.md`)."""
+    actions = []
+    sched_fields = [
+        field_name for field_name in instant_fields
+        if field_name in ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy",
+                          "enable_chunked_prefill", "async_scheduling")
+    ]
+    if sched_fields:
+        actions.append({
+            "action": "mutate_scheduler_config",
+            "target": "EngineCore.scheduler.scheduler_config",
+            "fields": {field_name: new_args.get(field_name) for field_name in sched_fields},
+            "target_latency_s": 0.05,
+        })
+    if "max_model_len" in instant_fields:
+        actions.append({
+            "action": "mutate_max_model_len",
+            "target": "EngineCore.model_config.max_model_len + Scheduler.max_model_len",
+            "fields": {"max_model_len": new_args.get("max_model_len")},
+            "target_latency_s": 0.05,
+        })
+    if "enable_prefix_caching" in instant_fields:
+        actions.append({
+            "action": "toggle_prefix_caching",
+            "target": "KVCacheManager.enable_caching",
+            "fields": {"enable_prefix_caching": new_args.get("enable_prefix_caching")},
+            "target_latency_s": 0.05,
+        })
+    if "enforce_eager" in graph_fields:
+        actions.append({
+            "action": "toggle_cudagraph_dispatch",
+            "target": "GPUModelRunner.compilation_config.cudagraph_mode",
+            "fields": {"enforce_eager": new_args.get("enforce_eager")},
+            "target_latency_s": 0.5,
+        })
+    recapture_fields = [
+        field_name for field_name in graph_fields if field_name != "enforce_eager"
+    ]
+    if recapture_fields:
+        actions.append({
+            "action": "recapture_cudagraphs",
+            "target": "RecaptureCoordinator.recapture",
+            "fields": {field_name: new_args.get(field_name) for field_name in recapture_fields},
+            "target_latency_s": 1.5,
+        })
+    return actions
+
+
 def classify_reconfig(old_parsed, new_parsed):
     """Classify the config delta between two parsed `vllm serve` argvs (`old_parsed`, `new_parsed`
-    from `parse()`):
-    - `tier1_warm_ipc`: only engine/runtime/scheduler/KV/compilation flags changed; `weights.py`
-      WeightCacheKey is unchanged and resident GPU weights remap via zero-copy CUDA IPC.
-    - `tier2a_reshard`: TP/PP/DP/EP sharding flags changed; weights must be resharded/reloaded.
-    - `tier2b_weight_format`: model, dtype, quantization, kv_cache_dtype, or kernel weight-layout
-      flags changed; weights must be re-processed/reloaded.
-    - `noop`: no engine or weight flag changed."""
+    from `parse()`) into 4 operational tiers (documented in `repos/vllm/kb/reconfiguration_matrix.md`):
+    - `in_process_instant` (< 100 ms): scheduler/admission/KV-policy mutation in-process (`in_process=True`).
+    - `in_process_graph` (0.5-2 s): eager/CUDAGraph dispatch toggle or graph recapture in-process
+      (`in_process=True`).
+    - `warm_weights_ipc` (7-20 s): worker restart with resident `WeightHolder` CUDA IPC weights,
+      zero disk reload (`in_process=False`, `weights_compatible=True`).
+    - `live_reshard_or_cold`: `WeightCacheKey` sharding (`subtier='tier2a_reshard'`) or
+      weight-format (`subtier='tier2b_weight_format'`) changed (`in_process=False`,
+      `weights_compatible=False`).
+    - `noop`: no engine or weight flag changed (`in_process=True`, `weights_compatible=True`)."""
     old_args = old_parsed.get("args") or {}
     new_args = new_parsed.get("args") or {}
     changed = {
         field_name: [old_args.get(field_name), new_args.get(field_name)]
         for field_name in FIELDS
-        if field_name not in LAUNCHER_FIELDS and old_args.get(field_name) != new_args.get(field_name)
+        if field_name not in LAUNCHER_FIELDS
+        and old_args.get(field_name) != new_args.get(field_name)
     }
     reshard_fields = [field_name for field_name in RESHARD_FIELDS if field_name in changed]
     weight_format_fields = [
         field_name for field_name in WEIGHT_FORMAT_FIELDS if field_name in changed
+    ]
+    in_process_instant_fields = [
+        field_name for field_name in IN_PROCESS_INSTANT_FIELDS if field_name in changed
+    ]
+    in_process_graph_fields = [
+        field_name for field_name in IN_PROCESS_GRAPH_FIELDS if field_name in changed
+    ]
+    warm_restart_fields = [
+        field_name for field_name in changed
+        if field_name not in RESHARD_FIELDS
+        and field_name not in WEIGHT_FORMAT_FIELDS
+        and field_name not in IN_PROCESS_INSTANT_FIELDS
+        and field_name not in IN_PROCESS_GRAPH_FIELDS
     ]
     warm_ipc_fields = [
         field_name for field_name in changed
@@ -308,20 +397,44 @@ def classify_reconfig(old_parsed, new_parsed):
     weight_key_changed = reshard_fields + weight_format_fields
     if not changed:
         tier = "noop"
-    elif not weight_key_changed:
-        tier = "tier1_warm_ipc"
-    elif reshard_fields:
-        tier = "tier2a_reshard"
+        subtier = "noop"
+        in_process = True
+    elif weight_key_changed:
+        tier = "live_reshard_or_cold"
+        subtier = "tier2a_reshard" if reshard_fields else "tier2b_weight_format"
+        in_process = False
+    elif warm_restart_fields:
+        tier = "warm_weights_ipc"
+        subtier = "tier1_warm_ipc"
+        in_process = False
+    elif in_process_graph_fields:
+        tier = "in_process_graph"
+        subtier = "tier1_in_process_graph"
+        in_process = True
     else:
-        tier = "tier2b_weight_format"
+        tier = "in_process_instant"
+        subtier = "tier1_in_process_instant"
+        in_process = True
+    control_actions = (
+        _build_control_actions(
+            changed, new_args, in_process_instant_fields, in_process_graph_fields
+        )
+        if in_process and changed else []
+    )
     return {
         "tier": tier,
+        "subtier": subtier,
+        "in_process": in_process,
         "weights_compatible": not weight_key_changed,
         "changed": changed,
+        "in_process_instant_fields": in_process_instant_fields,
+        "in_process_graph_fields": in_process_graph_fields,
+        "warm_restart_fields": warm_restart_fields,
         "warm_ipc_fields": warm_ipc_fields,
         "reshard_fields": reshard_fields,
         "weight_format_fields": weight_format_fields,
         "weight_key_changed": weight_key_changed,
+        "control_actions": control_actions,
     }
 
 

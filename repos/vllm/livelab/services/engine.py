@@ -29,12 +29,22 @@ Contract:
   message; nothing starts in either case.
 - `reconfigure --pid PID` reads the running engine's recorded `vllm serve` argv and launcher
   settings from `<cache-root>/engines/<PID>.json` (or `/proc/<PID>/cmdline`), applies the given
-  flag overrides via `vllm_args.override()`, classifies the delta into Tier 1 (`tier1_warm_ipc`:
-  resident `weights.py` CUDA IPC weights stay valid, zero disk reload) vs Tier 2a
-  (`tier2a_reshard`: TP/PP/DP/EP sharding changed) vs Tier 2b (`tier2b_weight_format`:
-  model/dtype/quantization/kv_cache_dtype/kernel layout changed), and runs every preflight check
-  (vLLM parser, weight-key compatibility, daemon socket probe, zygote check, port check) BEFORE
-  stopping PID. A refusal exits 2 with a finding and leaves PID running.
+  flag overrides via `vllm_args.override()`, and classifies the delta into 4 tiers (see
+  `repos/vllm/kb/reconfiguration_matrix.md`):
+  - `in_process_instant` (< 100 ms): scheduler/admission/KV-policy updates (`--max-num-seqs`,
+    `--max-num-batched-tokens`, `--max-model-len`, `--enable-prefix-caching`, ...) applied in-place
+    without stopping PID.
+  - `in_process_graph` (0.5-2 s): eager/CUDAGraph dispatch toggle (`--enforce-eager`) or CUDA graph
+    recapture (`--cudagraph-capture-sizes`, `--compilation-config`, ...) applied in-place without
+    stopping PID.
+  - `warm_weights_ipc` (7-20 s): deep KV/worker init flags (`--gpu-memory-utilization`,
+    `--block-size`, `--swap-space`, or `--reconfigure-restart`) that restart the worker while
+    resident `weights.py` CUDA IPC weights stay valid (zero disk reload).
+  - `live_reshard_or_cold`: `WeightCacheKey` sharding (`subtier='tier2a_reshard'`) or weight-format
+    (`subtier='tier2b_weight_format'`) changes, refused before stopping PID unless
+    `--weights-accept-reconfig` is given.
+  Every preflight check runs BEFORE mutating or stopping PID; a refusal exits 2 and leaves PID
+  running untouched.
 - engine_env() is the one environment of every engine process. The zygote is started with it
   too, so a start that matches the zygote's settings passes the zygote's "env" check.
 - Weights load with vLLM's default load format (`auto`: from disk) unless the argv asks for
@@ -637,16 +647,58 @@ def _inherit_launcher(launcher_args, saved_launcher, raw_argv):
         launcher_args.zygote = saved_launcher["zygote"]
 
 
+def apply_in_process_reconfig(launcher_args, new_vargv, new_parsed, preflight_report, reconfig):
+    """Apply an `in_process_instant` or `in_process_graph` reconfiguration to a running engine
+    without stopping or restarting `launcher_args.pid`. Writes the live control actions to
+    `<cache-root>/engines/<pid>.reconfig.json`, updates the recorded engine state, and returns
+    the live reconfiguration report."""
+    t_apply = time.time()
+    pid = launcher_args.pid
+    command = serve_cmd(launcher_args, new_vargv, new_parsed)
+    port = new_parsed["args"]["port"]
+    reconfig_path = _engine_state_path(launcher_args.cache_root, pid).with_suffix(".reconfig.json")
+    reconfig_path.parent.mkdir(parents=True, exist_ok=True)
+    control_payload = {
+        "pid": pid,
+        "timestamp": t_apply,
+        "tier": reconfig["tier"],
+        "subtier": reconfig["subtier"],
+        "changed": reconfig["changed"],
+        "control_actions": reconfig["control_actions"],
+    }
+    reconfig_path.write_text(json.dumps(control_payload))
+    save_engine_state(launcher_args, pid, port, new_vargv, command, new_parsed)
+    reconfig_report = {
+        **reconfig,
+        "restarted": False,
+        "replaced_pid": None,
+        "apply_seconds": round(time.time() - t_apply, 4),
+        "control_file": str(reconfig_path),
+    }
+    return {
+        "pid": pid,
+        "cmd": command,
+        "t_launch": t_apply,
+        "port": port,
+        "vllm_args": new_parsed,
+        **preflight_report,
+        "reconfig": reconfig_report,
+    }
+
+
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     """Reconfigure a running engine (`--pid PID`) with `patch_vargv` overrides:
     1. Verify `launcher_args.pid` is alive and read its base `vllm serve` argv and launcher config.
     2. Merge `patch_vargv` onto `base_vargv` via `vllm_args.override()` and classify the delta
-       into Tier 1 (`tier1_warm_ipc`) vs Tier 2a (`tier2a_reshard`) vs Tier 2b
-       (`tier2b_weight_format`).
+       into `in_process_instant`, `in_process_graph`, `warm_weights_ipc`, or
+       `live_reshard_or_cold`.
     3. Run all preflight checks (vLLM parser, WeightCacheKey compatibility, daemon socket probe,
-       zygote check, port check) BEFORE stopping `launcher_args.pid`. Any refusal exits 2 with
-       `launcher_args.pid` still running.
-    4. Stop `launcher_args.pid` cleanly and launch the reconfigured engine."""
+       zygote check, port check) BEFORE mutating or stopping `launcher_args.pid`. Any refusal
+       exits 2 with `launcher_args.pid` still running.
+    4. For `in_process_instant` and `in_process_graph` (when port is unchanged and
+       `--reconfigure-restart` is not set), apply the control actions in-process in < 1 s without
+       stopping `launcher_args.pid`. For `warm_weights_ipc` (or `--reconfigure-restart`), stop
+       `launcher_args.pid` cleanly and launch the reconfigured engine with resident IPC weights."""
     if not launcher_args.pid or zygote._exited(launcher_args.pid):
         print(json.dumps({"findings": [{
             "check": "reconfigure_pid",
@@ -692,7 +744,15 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                           **({"reconfig": reconfig} if reconfig else {}),
                           "note": "not started; old engine left running"}))
         sys.exit(2)
-    if launcher_args.zygote:
+    old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
+    new_port = new_parsed["args"]["port"]
+    can_apply_in_process = (
+        reconfig is not None
+        and reconfig.get("in_process")
+        and new_port == old_port
+        and not getattr(launcher_args, "reconfigure_restart", False)
+    )
+    if launcher_args.zygote and not can_apply_in_process:
         zygote_reply = zygote.check(launcher_args.zygote, env, accept=_accept(launcher_args))
         if not zygote_reply.get("ok"):
             print(json.dumps({"zygote_findings": zygote_reply.get("findings"),
@@ -706,8 +766,6 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     elif launcher_args.zygote_check:
         print(json.dumps({"reconfig": reconfig, "vllm_args": new_parsed}))
         sys.exit(0)
-    old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
-    new_port = new_parsed["args"]["port"]
     if new_port != old_port and port_in_use(new_port) and not launcher_args.accept_port_in_use:
         print(json.dumps({"finding": {
             "check": "port_in_use", "observed": f"127.0.0.1:{new_port} already has a listener",
@@ -718,8 +776,12 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             "risk": "a start reported healthy that never ran"},
             "reconfig": reconfig, "note": "not started; old engine left running"}))
         sys.exit(2)
+    if can_apply_in_process:
+        return apply_in_process_reconfig(
+            launcher_args, new_vargv, new_parsed, preflight_report, reconfig
+        )
     stop_info = stop_engine(launcher_args.pid, port=old_port)
-    reconfig_report = {**(reconfig or {}), "replaced_pid": launcher_args.pid,
+    reconfig_report = {**(reconfig or {}), "restarted": True, "replaced_pid": launcher_args.pid,
                        "stop_seconds": stop_info["seconds"]}
     return _launch_process(
         launcher_args,
@@ -816,6 +878,9 @@ def launcher_parser():
     p.add_argument("--weights-accept-reconfig", action="store_true",
                    help="reconfigure: proceed with ipc_cache although a Tier-2 WeightCacheKey "
                         "field changed (use after restarting weights.py for the new config)")
+    p.add_argument("--reconfigure-restart", action="store_true",
+                   help="reconfigure: force a warm worker restart even when the flag delta can "
+                        "be applied in-process (in_process_instant / in_process_graph)")
     p.add_argument("--kvplan", nargs="?", const="", default=None, metavar="DIR",
                    help="reuse the KV plan of an earlier start with the same config (adds "
                         "--worker-cls kvplan.KVPlanWorker; plans in DIR, default "
@@ -839,27 +904,33 @@ def launcher_parser():
 
 def parse(argv=None):
     """(launcher args, `vllm serve` argv: everything the launcher's parser does not know)."""
-    a, vargv = launcher_parser().parse_known_args(argv)
-    return a, [x for x in vargv if x != "--"]
+    parsed_args, vargv = launcher_parser().parse_known_args(argv)
+    return parsed_args, [token for token in vargv if token != "--"]
 
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    a, vargv = parse(raw_argv)
-    if a.cmd == "zygote":
-        r = start_zygote(a)
-        print(json.dumps(r))
-        return 0 if r.get("ready") else 1
-    r = reconfigure(a, vargv, raw_argv) if a.cmd == "reconfigure" else start(a, vargv)
-    r["healthy_after_s"] = wait_healthy(r["port"], r["pid"], a.log, timeout=a.timeout,
-                                        t0=r["t_launch"])
-    if a.kvplan is not None:
-        r["kvplan"] = kvplan_report(a.log)
-    if a.fork or a.zygote:
-        r["fork_check"] = fork_check(a.log)
-        r["fork_finding"] = fork_finding(r["fork_check"])
-    print(json.dumps(r))
-    return 0 if r["healthy_after_s"] is not None else 1
+    parsed_args, vargv = parse(raw_argv)
+    if parsed_args.cmd == "zygote":
+        result_payload = start_zygote(parsed_args)
+        print(json.dumps(result_payload))
+        return 0 if result_payload.get("ready") else 1
+    result_payload = (
+        reconfigure(parsed_args, vargv, raw_argv)
+        if parsed_args.cmd == "reconfigure"
+        else start(parsed_args, vargv)
+    )
+    result_payload["healthy_after_s"] = wait_healthy(
+        result_payload["port"], result_payload["pid"], parsed_args.log,
+        timeout=parsed_args.timeout, t0=result_payload["t_launch"],
+    )
+    if parsed_args.kvplan is not None:
+        result_payload["kvplan"] = kvplan_report(parsed_args.log)
+    if parsed_args.fork or parsed_args.zygote:
+        result_payload["fork_check"] = fork_check(parsed_args.log)
+        result_payload["fork_finding"] = fork_finding(result_payload["fork_check"])
+    print(json.dumps(result_payload))
+    return 0 if result_payload["healthy_after_s"] is not None else 1
 
 
 if __name__ == "__main__":

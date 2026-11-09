@@ -193,16 +193,12 @@ def test_launcher_reads_the_argv_with_vllms_parser():
 
 def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
     """Input: `reconfig_base` (`Qwen/Qwen3-8B --port 8000 --max-model-len 4096 --enforce-eager`),
-    overridden with (1) `--max-model-len 32768 --no-enforce-eager --max-num-batched-tokens 8192`,
-    (2) `-tp 2 --enable-expert-parallel`, and (3) `--kv-cache-dtype fp8`.
-    Expect:
-    - (1) `override()` produces `['Qwen/Qwen3-8B', '--port', '8000', '--max-model-len', '32768',
-      '--max-num-batched-tokens', '8192']`, and `classify_reconfig` reports `tier1_warm_ipc`
-      (`weights_compatible: True`);
-    - (2) `classify_reconfig` reports `tier2a_reshard` (`weights_compatible: False`,
-      `reshard_fields: ['tensor_parallel_size']`);
-    - (3) `classify_reconfig` reports `tier2b_weight_format` (`weights_compatible: False`,
-      `weight_format_fields: ['kv_cache_dtype']`)."""
+    overridden across all 4 reconfiguration tiers:
+    - (1a) `in_process_instant` (`--max-model-len 32768 --max-num-batched-tokens 8192`);
+    - (1b) `in_process_graph` (`--no-enforce-eager`);
+    - (2) `warm_weights_ipc` (`--gpu-memory-utilization 0.85`);
+    - (3a) `live_reshard_or_cold` / `tier2a_reshard` (`-tp 2`);
+    - (3b) `live_reshard_or_cold` / `tier2b_weight_format` (`--kv-cache-dtype fp8`)."""
     import vllm_args
     base_argv = CASES["reconfig_base"]
     merged_argv = vllm_args.override(
@@ -214,25 +210,48 @@ def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
         "--max-num-batched-tokens", "8192",
     ]
     base_parsed = parsed["cases"]["reconfig_base"]
-    tier1_parsed = {
+    instant_parsed = {
         **base_parsed,
         "args": {
             **base_parsed["args"],
             "max_model_len": 32768,
-            "enforce_eager": False,
             "max_num_batched_tokens": 8192,
         },
     }
-    tier1_delta = vllm_args.classify_reconfig(base_parsed, tier1_parsed)
-    assert tier1_delta["tier"] == "tier1_warm_ipc" and tier1_delta["weights_compatible"] is True
-    assert set(tier1_delta["warm_ipc_fields"]) == {
-        "max_model_len", "enforce_eager", "max_num_batched_tokens",
+    instant_delta = vllm_args.classify_reconfig(base_parsed, instant_parsed)
+    assert instant_delta["tier"] == "in_process_instant"
+    assert instant_delta["in_process"] is True and instant_delta["weights_compatible"] is True
+    assert set(instant_delta["in_process_instant_fields"]) == {
+        "max_model_len", "max_num_batched_tokens",
     }
+
+    graph_parsed = {
+        **instant_parsed,
+        "args": {**instant_parsed["args"], "enforce_eager": False},
+    }
+    graph_delta = vllm_args.classify_reconfig(base_parsed, graph_parsed)
+    assert graph_delta["tier"] == "in_process_graph"
+    assert graph_delta["in_process"] is True and graph_delta["weights_compatible"] is True
+    assert graph_delta["in_process_graph_fields"] == ["enforce_eager"]
+
+    warm_ipc_parsed = {
+        **graph_parsed,
+        "args": {**graph_parsed["args"], "gpu_memory_utilization": 0.85},
+    }
+    warm_ipc_delta = vllm_args.classify_reconfig(base_parsed, warm_ipc_parsed)
+    assert warm_ipc_delta["tier"] == "warm_weights_ipc"
+    assert warm_ipc_delta["in_process"] is False and warm_ipc_delta["weights_compatible"] is True
+    assert warm_ipc_delta["warm_restart_fields"] == ["gpu_memory_utilization"]
+
     tier2a_delta = vllm_args.classify_reconfig(base_parsed, parsed["cases"]["tp_short"])
-    assert tier2a_delta["tier"] == "tier2a_reshard" and tier2a_delta["weights_compatible"] is False
+    assert tier2a_delta["tier"] == "live_reshard_or_cold"
+    assert tier2a_delta["subtier"] == "tier2a_reshard"
+    assert tier2a_delta["weights_compatible"] is False
     assert tier2a_delta["reshard_fields"] == ["tensor_parallel_size"]
+
     tier2b_parsed = {**base_parsed, "args": {**base_parsed["args"], "kv_cache_dtype": "fp8"}}
     tier2b_delta = vllm_args.classify_reconfig(base_parsed, tier2b_parsed)
-    assert (tier2b_delta["tier"] == "tier2b_weight_format"
-            and tier2b_delta["weights_compatible"] is False)
+    assert tier2b_delta["tier"] == "live_reshard_or_cold"
+    assert tier2b_delta["subtier"] == "tier2b_weight_format"
+    assert tier2b_delta["weights_compatible"] is False
     assert tier2b_delta["weight_format_fields"] == ["kv_cache_dtype"]

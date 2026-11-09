@@ -380,18 +380,19 @@ def test_fork_check_reads_vllms_spawn_fallback():
         assert fg == {"spawn_forced": False} and engine.fork_finding(fg) is None
 
 
-def test_reconfigure_tier1_warm_ipc_replaces_engine_and_keeps_weights_daemon():
+def test_reconfigure_in_process_and_warm_ipc_tiers():
     """Input: an engine started with `--weights --kvplan` (`m --port P --max-model-len 4096
-    --enforce-eager`), then `engine.py reconfigure --pid PID --max-model-len 32768
-    --no-enforce-eager --max-num-batched-tokens 8192`. Expect:
-    1. `reconfigure` inherits `--vllm`, `--weights`, `--weights-socket-dir`, `--kvplan`, model
-       and port from the running engine's recorded state;
-    2. Classifies the change as `tier1_warm_ipc` (`weights_compatible: True`) with changed
-       fields `max_model_len: [4096, 32768]`, `enforce_eager: [True, False]`,
-       `max_num_batched_tokens: [None, 8192]`;
-    3. Stops the old pid, binds the same port P without a `port_in_use` refusal, passes the
-       merged `vllm serve` argv with `--load-format ipc_cache` (`fallback: False`) and
-       `--worker-cls kvplan.KVPlanWorker`, and answers /health."""
+     --enforce-eager`), followed by three `engine.py reconfigure --pid PID` calls:
+    1. `in_process_instant`: `--max-model-len 32768 --max-num-batched-tokens 8192` -> applies
+       in-process in < 1 s without stopping `pid1` (`restarted: False`, `pid == pid1`,
+       `tier == 'in_process_instant'`);
+    2. `in_process_graph`: `--no-enforce-eager` -> applies in-process in < 1 s without stopping
+       `pid1` (`restarted: False`, `pid == pid1`, `tier == 'in_process_graph'`);
+    3. `warm_weights_ipc`: `--gpu-memory-utilization 0.85` -> restarts the worker process using
+       resident `weights.py` CUDA IPC (`restarted: True`, `replaced_pid == pid1`, `pid2 != pid1`,
+       `tier == 'warm_weights_ipc'`) with merged flags (`--max-model-len 32768`,
+       `--max-num-batched-tokens 8192`, `--gpu-memory-utilization 0.85`, `--load-format ipc_cache`,
+       `--worker-cls kvplan.KVPlanWorker`)."""
     from weights import socket_name
     work_dir = _short_dir()
     smi_dir = os.path.join(work_dir, "bin")
@@ -419,51 +420,84 @@ def test_reconfigure_tier1_warm_ipc_replaces_engine_and_keeps_weights_daemon():
     )
     start_report = _one_json_line(start_proc.stdout)
     pid1 = start_report["pid"]
+    pid2 = None
     try:
         assert start_proc.returncode == 0, start_proc.stdout + start_proc.stderr
+        # 1. in_process_instant (< 100 ms): pid1 stays alive!
+        instant_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
+             "--max-model-len", "32768", "--max-num-batched-tokens", "8192"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert instant_proc.returncode == 0, instant_proc.stdout + instant_proc.stderr
+        instant_report = _one_json_line(instant_proc.stdout)
+        assert instant_report["pid"] == pid1 and not zygote._exited(pid1)
+        assert instant_report["reconfig"]["tier"] == "in_process_instant"
+        assert instant_report["reconfig"]["in_process"] is True
+        assert instant_report["reconfig"]["restarted"] is False
+        assert instant_report["reconfig"]["replaced_pid"] is None
+        assert len(instant_report["reconfig"]["control_actions"]) == 2
+
+        # 2. in_process_graph (0.5-2 s): pid1 still stays alive!
+        graph_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
+             "--no-enforce-eager"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert graph_proc.returncode == 0, graph_proc.stdout + graph_proc.stderr
+        graph_report = _one_json_line(graph_proc.stdout)
+        assert graph_report["pid"] == pid1 and not zygote._exited(pid1)
+        assert graph_report["reconfig"]["tier"] == "in_process_graph"
+        assert graph_report["reconfig"]["in_process"] is True
+        assert graph_report["reconfig"]["restarted"] is False
+        assert graph_report["reconfig"]["control_actions"][0]["action"] == (
+            "toggle_cudagraph_dispatch"
+        )
+
+        # 3. warm_weights_ipc (7-20 s): worker restarts with resident WeightHolder IPC!
         reconfig_proc = subprocess.run(
             [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
              "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
-             "--max-model-len", "32768", "--no-enforce-eager",
-             "--max-num-batched-tokens", "8192"],
+             "--gpu-memory-utilization", "0.85"],
             capture_output=True, text=True, timeout=60, env=env,
         )
         reconfig_report = _one_json_line(reconfig_proc.stdout)
         pid2 = reconfig_report.get("pid")
-        try:
-            assert reconfig_proc.returncode == 0, reconfig_proc.stdout + reconfig_proc.stderr
-            assert zygote._exited(pid1), "old engine pid must be stopped"
-            assert pid2 and pid2 != pid1 and reconfig_report["healthy_after_s"] is not None
-            reconfig_delta = reconfig_report["reconfig"]
-            assert reconfig_delta["tier"] == "tier1_warm_ipc"
-            assert reconfig_delta["weights_compatible"] is True
-            assert reconfig_delta["replaced_pid"] == pid1
-            assert reconfig_delta["changed"] == {
-                "max_model_len": [4096, 32768],
-                "enforce_eager": [True, False],
-                "max_num_batched_tokens": [None, 8192],
-            }
-            ran_argv = json.loads(Path(out_file).read_text())["argv"]
-            assert ran_argv == [
-                "serve", "m", "--port", str(port), "--max-model-len", "32768",
-                "--max-num-batched-tokens", "8192", "--host", "127.0.0.1",
-                "--load-format", "ipc_cache", "--model-loader-extra-config",
-                json.dumps({"socket_dir": sock_dir, "mode": "zero_copy", "fallback": False}),
-                "--worker-cls", "kvplan.KVPlanWorker",
-            ]
-        finally:
-            if pid2:
-                _stop(pid2)
+        assert reconfig_proc.returncode == 0, reconfig_proc.stdout + reconfig_proc.stderr
+        assert zygote._exited(pid1), "old engine pid must be stopped on warm_weights_ipc"
+        assert pid2 and pid2 != pid1 and reconfig_report["healthy_after_s"] is not None
+        reconfig_delta = reconfig_report["reconfig"]
+        assert reconfig_delta["tier"] == "warm_weights_ipc"
+        assert reconfig_delta["in_process"] is False
+        assert reconfig_delta["restarted"] is True
+        assert reconfig_delta["weights_compatible"] is True
+        assert reconfig_delta["replaced_pid"] == pid1
+        assert reconfig_delta["changed"] == {"gpu_memory_utilization": [0.9, 0.85]}
+        ran_argv = json.loads(Path(out_file).read_text())["argv"]
+        assert ran_argv == [
+            "serve", "m", "--port", str(port), "--max-model-len", "32768",
+            "--max-num-batched-tokens", "8192", "--gpu-memory-utilization", "0.85",
+            "--host", "127.0.0.1", "--load-format", "ipc_cache",
+            "--model-loader-extra-config",
+            json.dumps({"socket_dir": sock_dir, "mode": "zero_copy", "fallback": False}),
+            "--worker-cls", "kvplan.KVPlanWorker",
+        ]
     finally:
         _stop(pid1)
+        if pid2:
+            _stop(pid2)
         daemon.close()
 
 
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
     """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:
     (1) `--bogus-flag` (rejected by vLLM's parser);
-    (2) `-tp 2` (`tier2a_reshard`: changes TP sharding in WeightCacheKey);
-    (3) `--kv-cache-dtype fp8` (`tier2b_weight_format`: changes KV cache dtype in WeightCacheKey).
+    (2) `-tp 2` (`live_reshard_or_cold`, `subtier: tier2a_reshard`: changes TP sharding in
+        WeightCacheKey);
+    (3) `--kv-cache-dtype fp8` (`live_reshard_or_cold`, `subtier: tier2b_weight_format`: changes
+        KV cache dtype in WeightCacheKey).
     Expect: all three exit 2 with findings (`vllm_args`, `weights_reconfig_tier2` for tier2a
     and tier2b), and the original engine PID stays alive and serving /health on port P!
     Then (4) with `--weights-accept-reconfig --kv-cache-dtype fp8`, preflight accepts the Tier-2
@@ -498,7 +532,7 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
     pid2 = None
     try:
         assert start_proc.returncode == 0
-        for patch_flags, want_check, want_tier in (
+        for patch_flags, want_check, want_subtier in (
             (["--bogus-flag"], "vllm_args", None),
             (["-tp", "2"], "weights_reconfig_tier2", "tier2a_reshard"),
             (["--kv-cache-dtype", "fp8"], "weights_reconfig_tier2", "tier2b_weight_format"),
@@ -512,8 +546,9 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
             assert refused_proc.returncode == 2, refused_proc.stdout + refused_proc.stderr
             refused_report = _one_json_line(refused_proc.stdout)
             assert refused_report["findings"][0]["check"] == want_check, refused_report
-            if want_tier:
-                assert refused_report["reconfig"]["tier"] == want_tier, refused_report
+            if want_subtier:
+                assert refused_report["reconfig"]["tier"] == "live_reshard_or_cold", refused_report
+                assert refused_report["reconfig"]["subtier"] == want_subtier, refused_report
             assert not zygote._exited(pid1), "running engine must stay up on preflight refusal"
             assert engine.port_in_use(port) is True
         accepted_proc = subprocess.run(
@@ -526,7 +561,8 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         accepted_report = _one_json_line(accepted_proc.stdout)
         pid2 = accepted_report["pid"]
         assert zygote._exited(pid1)
-        assert accepted_report["reconfig"]["tier"] == "tier2b_weight_format"
+        assert accepted_report["reconfig"]["tier"] == "live_reshard_or_cold"
+        assert accepted_report["reconfig"]["subtier"] == "tier2b_weight_format"
         assert accepted_report["vllm_args"]["args"]["kv_cache_dtype"] == "fp8"
     finally:
         _stop(pid1)
