@@ -1,7 +1,8 @@
 # Adapter: the transaction kernel inside a live vLLM engine
 
-The engine side of `../kernel`: one transaction swaps code on every worker rank and in the
-engine core together, between the same two engine steps, with receipts. This folder holds the
+The engine side of the transaction kernel (`template/livelab/kernel`): one transaction swaps
+code on every worker rank and in the engine core together, between the same two engine steps,
+with receipts. This folder holds the
 T0 path (R0, a function-body swap). Rebuilds after a commit (R1 recapture or recompile, R6
 weight reload) are not here: an edit that needs one is a finding, not a silent swap.
 
@@ -68,8 +69,9 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
 
 ## Run it
 
-The adapter and `kernel` on `PYTHONPATH` (both live in `repos/vllm/livelab`), a sitecustomize
-that imports `adapter.host` when `FASTRSI_KERNEL_DIR` is set, and:
+The adapter on `PYTHONPATH` (`repos/vllm/livelab`; importing it puts the kernel's folder,
+`template/livelab` or `FASTRSI_LIVELAB`, on `sys.path`), a sitecustomize that imports
+`adapter.host` when `FASTRSI_KERNEL_DIR` is set, and:
 
 ```
 FASTRSI_KERNEL_DIR=<dir> vllm serve <model> --distributed-executor-backend mp \

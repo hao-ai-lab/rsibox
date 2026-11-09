@@ -1,7 +1,7 @@
 # Megatron-LM live lab
 
 A running Megatron-LM training job that takes code edits between two train steps and proves
-they ran, with the vLLM lab's transaction kernel (`repos/vllm/livelab/kernel`, pure Python)
+they ran, with the framework's transaction kernel (`template/livelab/kernel`, pure Python)
 unchanged. Interface: `template/livelab/INTERFACE-v1.md` (draft).
 
 ## Process layout
@@ -52,9 +52,9 @@ rebuild: R5 in Megatron terms), optimizer construction, TE C++ code.
 
 ## Kernel location
 
-The kernel is imported from `repos/vllm/livelab/kernel` (put on `sys.path` by
-`fastrsi_megatron/__init__.py`, or `FASTRSI_KERNEL`). Megatron is the second engine that needs
-it; moving it to the framework is its own PR.
+The kernel and the pre-fork guards are imported from `template/livelab` (`kernel/`,
+`forksafe.py`), which `fastrsi_megatron/__init__.py` puts on `sys.path`; `FASTRSI_LIVELAB` (or
+`FASTRSI_KERNEL`) names another folder.
 
 ## Conformance
 
@@ -122,12 +122,12 @@ read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_O
 module the zygote has imported).
 
 Keeping CUDA uninitialized: Megatron's import reaches three libraries that ask about the GPU at
-import. quack (through TE) calls `get_device_capability`: answered from NVML by the vLLM lab's
-`forksafe.py`. tvm_ffi calls `is_available`: answered by NVML with
+import. quack (through TE) calls `get_device_capability`: answered from NVML by the framework's
+`forksafe.py` (`template/livelab`). tvm_ffi calls `is_available`: answered by NVML with
 PYTORCH_NVML_BASED_CUDA_CHECK=1. flashinfer's gdn kernels read
 `get_device_properties(0).multi_processor_count` at module level: answered with the values CUDA
-reported in a one-off helper process (1.5-1.9 s at zygote start). Without these the zygote stops
-and names the module.
+reported in a one-off helper process (`forksafe.install_properties`, 1.5-1.9 s at zygote
+start). Without these the zygote stops and names the module.
 
 Receipt (our 2026-11-07 runs, 4x GB200, environment copied to node-local RAM disk; from the request to the first train
 step done):

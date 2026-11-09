@@ -20,12 +20,13 @@ core/                    what agents read
   toolsmith_online.md    toolsmith, on call: polish slow checks, extend to new modules
   orchestrator.md        orchestrator agent: run the loop with programs and agents, schedule by GPU
 template/livelab/        blueprint for a new engine: the fixed interface (install, check, reset,
-                         uninstall), a stub and conformance cases
+                         uninstall), conformance cases, and the code every lab shares: the
+                         transaction kernel/ with its toy lab, forksafe.py (pre-fork CUDA guards)
 docs/                    how this repo and its process work (see docs/README.md)
 repos/<engine>/          everything about one engine:
   docs/                  architecture: process tree, restart boundaries and their costs
   kb/                    measured facts: costs, workload, lessons
-  livelab/               all code, one folder per boundary (kernel/, adapter/, services/, ...)
+  livelab/               the engine's own code, one folder per boundary (adapter/, services/, ...)
   tools/ patches/        proven probes; our edits to the engine, with an upstreaming ledger
   examples/<name>/       one walkthrough per replayed change, with its receipt
 ```
