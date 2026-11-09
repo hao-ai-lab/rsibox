@@ -88,6 +88,11 @@ shows it.
   table against the last run.
 - Choose each PR's workload from its diff and prove the base reaches the changed lines first; a
   zero witness means "not reached", never a pass.
+- After a fuzzy patch apply onto an older engine commit, check that each hunk landed in the
+  function upstream put it in and added the same lines, then compile on CPU before touching a GPU.
+  In the Megatron replay (#86), two upstream diffs (#8246, #8524) applied with fuzz 3 into the
+  wrong function; compilation caught those in 0.1 s, and a misplacement that still compiles is
+  caught only by the function-placement check.
 
 ### 5. Code that runs at build, import or capture time is not reached by a swap
 
@@ -132,16 +137,21 @@ job in the background and checks for free GPUs every 60 s.
 **What happened.** Agents sharing nodes hit: one GPU locked under two spellings of the node name; a
 leader that assumed a node was idle while another agent had locked all four GPUs two minutes
 earlier; a GPU taken in the middle of a measurement run; another agent's server answering `/health`
-on the same port, so a launcher reported a dead engine healthy after 0.01 s; and a pool daemon that
-died and left four warm engines holding about 150 GB per GPU at 0% use for about a day. The cluster
+on the same port, so a launcher reported a dead engine healthy after 0.01 s; a pool daemon that
+died and left four warm engines holding about 150 GB per GPU at 0% use for about a day; and a
+Megatron harness killed while holding the restart-GPU lock, leaving the lock and an idle candidate
+job behind so the next user waited 22 minutes (#86). The cluster
 also reaps GPU processes that run without an allocation (after about 10.5–12 min), and one
 process-group kill took a whole node down.
 
 **Rule.** One lock per GPU under one canonical name, taken atomically; check and take in the same
-step; a holder that dies must not keep its GPUs (`core/orchestrator.md` rule 16).
+step; a lock records its holder's PID so a waiter breaks it when that process is gone, and a holder
+that dies must not keep its GPUs (`core/orchestrator.md` rule 16).
 
 **Apply it.**
 - Read locks and the port before launch, never "it looked idle".
+- Record the holder's PID in every lock, break locks whose holder process is gone, and give every
+  started candidate job an explicit exit.
 - Kill only processes or groups you created.
 
 ### 8. Merge a stack only when the PR's base is main
@@ -276,3 +286,18 @@ rating is settled on the GPU, not by argument.
 **Apply it.**
 - One review call per keep, with the diff, the hypothesis, the gate result and the paired timings.
 - Post the verdict table on the PR that carries the retained edits, risks included.
+
+### 16. Stop a harness only between evaluations, and reconcile live transactions at start
+
+**What happened.** (Source: #86.) In Megatron's 2026-11-07 hill-climb, a harness killed in the
+middle of an evaluation (14:10) left the candidate's swap installed in the base lab. When the stray
+transaction was found and undone an hour later (15:16), undoing it also rolled back the two kept
+swaps installed after it, because rollback unwinds from the target transaction through the newest.
+
+**Rule.** Stop a harness only between evaluations, and at start compare the lab's live transactions
+with the kept record before running a new candidate.
+
+**Apply it.**
+- Have the harness check a `STOP` file between evaluations instead of killing it mid-evaluation.
+- At harness start, read the lab's active transactions (`status()`), compare them against the kept
+  record, and undo any unknown transaction immediately before new swaps stack on top of it.
