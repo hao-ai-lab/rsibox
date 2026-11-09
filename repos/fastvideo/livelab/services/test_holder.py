@@ -69,9 +69,9 @@ class HolderTest(unittest.TestCase):
     def test_served_module_equals_the_deposit(self):
         """Input: a module deposited, then asked for with an unchanged stamp. Expect: the same
         class and bit-equal weights, in another tensor (the holder owns a copy). Proves: the
-        holder's put/get round trip returns the deposited module as a copy. Not: a respawned
-        worker or the loader hook (the GPU receipt of the zygote respawn with weights holder
-        covers those)."""
+        holder's put/get round trip returns the deposited module as a copy. Not: the loader
+        hook (covered below) or a respawned GPU worker (covered by the zygote-with-holder
+        receipt)."""
         files = self.deposit()
         r = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertTrue(r["ok"], r)
@@ -94,6 +94,61 @@ class HolderTest(unittest.TestCase):
         self.assertIn("files:hpkg.net", r["findings"][0]["observed"])
         r2 = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertEqual(r2["findings"][0]["check"], "holder_empty")
+
+    def test_loader_hook_deposits_then_serves_and_reloads_when_stale(self):
+        """Input: `install_loader_hook` wraps `PipelineComponentLoader.load_module` (each raw
+        disk load increments a counter and seeds new weights); load `transformer` twice, then
+        edit `hpkg/net.py` and load a third time, plus load an unhooked `scheduler`. Expect:
+        load 1 runs the disk loader (count 1) and deposits; load 2 is served by the holder
+        without calling the disk loader (count stays 1, weights bit-equal to load 1); after the
+        source edit, load 3 gets `holder_stale`, runs the disk loader (count 2, new weights)
+        and re-deposits; `scheduler` bypasses the holder (count 3). Proves: `install_loader_hook`
+        redirects component loads through the holder and falls back to disk on a miss or stale
+        stamp. Not: CUDA IPC tensor sharing (covered by the GPU receipt)."""
+        loader_dir = os.path.join(self.dir, "fastvideo", "models", "loader")
+        os.makedirs(loader_dir)
+        for rel in (("fastvideo", "__init__.py"),
+                    ("fastvideo", "models", "__init__.py"),
+                    ("fastvideo", "models", "loader", "__init__.py")):
+            with open(os.path.join(self.dir, *rel), "w") as f:
+                f.write("")
+        with open(os.path.join(loader_dir, "component_loader.py"), "w") as f:
+            f.write(
+                "import torch\n"
+                "from hpkg.net import Net\n\n"
+                "class PipelineComponentLoader:\n"
+                "    disk_loads = 0\n\n"
+                "    @staticmethod\n"
+                "    def load_module(module_name, component_model_path, transformers_or_diffusers, fastvideo_args):\n"
+                "        PipelineComponentLoader.disk_loads += 1\n"
+                "        torch.manual_seed(100 + PipelineComponentLoader.disk_loads)\n"
+                "        return Net()\n"
+            )
+        importlib.invalidate_caches()
+        from fastvideo.models.loader import component_loader
+        try:
+            report = H.install_loader_hook(self.sock)
+            first_model = component_loader.PipelineComponentLoader.load_module("transformer", self.dir, "diffusers", None)
+            second_model = component_loader.PipelineComponentLoader.load_module("transformer", self.dir, "diffusers", None)
+            self.assertEqual(component_loader.PipelineComponentLoader.disk_loads, 1)
+            self.assertTrue(torch.equal(second_model.proj.weight, first_model.proj.weight))
+            self.assertEqual([entry["served"] for entry in report], [False, True])
+            self.assertTrue(report[0]["deposited"])
+
+            with open(os.path.join(self.dir, "hpkg", "net.py"), "a") as handle:
+                handle.write("\n# an edit\n")
+            third_model = component_loader.PipelineComponentLoader.load_module("transformer", self.dir, "diffusers", None)
+            self.assertEqual(component_loader.PipelineComponentLoader.disk_loads, 2)
+            self.assertFalse(report[-1]["served"])
+            self.assertEqual(report[-1]["findings"][0]["check"], "holder_stale")
+            self.assertFalse(torch.equal(third_model.proj.weight, first_model.proj.weight))
+
+            component_loader.PipelineComponentLoader.load_module("scheduler", self.dir, "diffusers", None)
+            self.assertEqual(component_loader.PipelineComponentLoader.disk_loads, 3)
+            self.assertEqual(len(report), 3)
+        finally:
+            for module_name in [name for name in sys.modules if name.split(".")[0] == "fastvideo"]:
+                del sys.modules[module_name]
 
 
 if __name__ == "__main__":
