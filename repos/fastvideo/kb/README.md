@@ -10,4 +10,4 @@ Current workload: MiniMax H3 / FastH3 inference (FastH3-QAD-v2). Pinned source: 
 | [workload.md](workload.md) | The target workload F(x) and its correctness gate |
 | [costs.md](costs.md) | Measured startup, restart and check costs: where the time goes |
 | [lessons.md](lessons.md) | Generic lessons learned while running the live lab |
-
+| [prices.md](prices.md) | The restart action, predicted cost, noise and cheapest probe of each kind of experiment the loop runs |
