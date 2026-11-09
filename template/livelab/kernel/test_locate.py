@@ -256,3 +256,27 @@ class AcceptRecordTest(unittest.TestCase):
         d = F.decide([self._f("h2")], [rec])
         self.assertTrue(d["proceed"])
         self.assertEqual(d["accepts"], [rec])
+
+    def test_unknown_scope_and_none_standing_keys_do_not_accept(self):
+        """Input (#43): accept records with an unknown scope ("standng", "session", None) or a
+        standing scope whose participant or code_hash is None (or missing), checked against a
+        finding with and without those keys (validate's running_frame carries no code_hash).
+        Expected: none of the malformed records match; every finding remains blocking."""
+        f_with = self._f("h1")
+        f_no_hash = {**F.finding("running_frame", "o", "e"), "participant": "worker"}
+        f_bare = F.finding("running_frame", "o", "e")
+        for bad in (
+            {"check": "zero_witness", "scope": "standng", "by": "a", "reason": "r"},
+            {"check": "zero_witness", "scope": "session", "by": "a", "reason": "r"},
+            {"check": "zero_witness", "scope": None, "by": "a", "reason": "r"},
+            {"check": "running_frame", "scope": "standing", "by": "a", "reason": "r",
+             "participant": "worker", "code_hash": None},
+            {"check": "running_frame", "scope": "standing", "by": "a", "reason": "r",
+             "participant": None, "code_hash": None},
+            {"check": "running_frame", "scope": "standing", "by": "a", "reason": "r"},
+        ):
+            for f in (f_with, f_no_hash, f_bare):
+                if f["check"] == bad["check"]:
+                    d = F.decide([f], [bad])
+                    self.assertFalse(d["proceed"], (bad, f))
+                    self.assertEqual(d["accepts"], [])

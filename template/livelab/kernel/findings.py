@@ -340,13 +340,14 @@ def finding(check, observed, expected, subject=None):
 
 
 def _matches(rec, f):
-    if rec.get("check") != f["check"]:
+    scope = rec.get("scope", "txn")
+    if scope not in ("txn", "standing") or rec.get("check") != f["check"]:
         return False
     if "subject" in rec and f.get("subject") != rec["subject"]:
         return False
-    if rec.get("scope", "txn") == "standing":
+    if scope == "standing":
         for k in ("participant", "code_hash"):
-            if k not in rec or f.get(k) != rec[k]:
+            if rec.get(k) is None or f.get(k) != rec[k]:
                 return False
     return True
 

@@ -39,7 +39,7 @@ import sys
 import types
 
 from . import findings as F
-from .locate import all_objects, sliced
+from .locate import _FROZEN_GENS, all_objects, sliced
 
 HIT = "__fastrsi_hit__"
 
@@ -209,15 +209,16 @@ def live_codes(suspended=True, codes=None):
     if not suspended:
         return out
     if codes is not None:
-        want = [c for c in codes if c.co_flags & SUSPENDABLE]
+        want = {c for c in codes if c.co_flags & SUSPENDABLE}
         if not want:
             return out
         refs = gc.get_referrers(*want)     # objects made since gc.freeze() (see above)
         try:
-            for o in refs:
+            for o in (*refs, *list(_FROZEN_GENS)):
                 fr = _frame(o)
                 while fr is not None:
-                    out.add(fr.f_code)
+                    if fr.f_code in want:
+                        out.add(fr.f_code)
                     fr = fr.f_back
         finally:
             del refs

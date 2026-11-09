@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 
 
 def _const_repr(c):
@@ -86,6 +87,8 @@ def code_tree(code, parent=None, out=None):
 
 _scan_lock = threading.RLock()
 _scan = {"depth": 0, "frozen": 0, "gc_on": False}
+_GENS = (types.GeneratorType, types.CoroutineType, types.AsyncGeneratorType)
+_FROZEN_GENS = weakref.WeakSet()
 
 
 class unfrozen:
@@ -96,8 +99,9 @@ class unfrozen:
     the outer window): a second thread's scan never has the heap frozen again under it. While
     the heap is unfrozen, automatic collection is off, so no full collection of it can start
     in the window (it would stall the engine). Freezing again also freezes what was made
-    after startup: witness.live_codes does not see suspended generators made before a scan
-    (#42)."""
+    after startup, so before unfreezing it records weak references to any generators,
+    coroutines and async generators made since the last freeze in `_FROZEN_GENS` for
+    `witness.live_codes` (#42)."""
 
     def __enter__(self):
         _scan_lock.acquire()
@@ -107,6 +111,9 @@ class unfrozen:
                 if _scan["frozen"]:
                     _scan["gc_on"] = gc.isenabled()
                     gc.disable()
+                    for o in gc.get_objects():
+                        if type(o) in _GENS:
+                            _FROZEN_GENS.add(o)
                     gc.unfreeze()
             _scan["depth"] += 1
         except BaseException:

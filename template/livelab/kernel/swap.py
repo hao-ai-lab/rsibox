@@ -551,37 +551,60 @@ def _class_names(cls):
     return out
 
 
+def _is_dataclass(cls):
+    for d in cls.decorator_list:
+        f = d.func if isinstance(d, ast.Call) else d
+        if (isinstance(f, ast.Name) and f.id == "dataclass") or (
+                isinstance(f, ast.Attribute) and f.attr == "dataclass"):
+            return True
+    return False
+
+
+def _dataclass_fields(cls):
+    """Bare annotated field names (`x: T`, no default) of a @dataclass body: the generated
+    __init__ sets them on instances, while the class body itself defines no attribute."""
+    if not _is_dataclass(cls):
+        return set()
+    return {n.target.id for n in cls.body
+            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+            and n.value is None}
+
+
 def _new_fields(base_tree, tree, meths, filename):
     """[{cls, field, readers, init_line}] for each attribute that a changed or added method
-    of a top-level class reads on `self`, that the edited __init__ sets, and that no method
-    of the base class sets nor the base class body defines (a code swap does not run the
-    patched class body; stage still skips a name the live class has)."""
+    of a top-level class reads on `self`, that the edited __init__ / __post_init__ or a new
+    bare @dataclass field sets, and that no method of the base class sets nor the base class
+    body defines (a code swap does not run the patched class body; stage still skips a name
+    the live class has)."""
     bcls = {n.name: n for n in base_tree.body if isinstance(n, ast.ClassDef)}
     pcls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
     out = []
     for c, nodes in meths.items():
         b, p = bcls.get(c), pcls.get(c)
-        init = next((m for m in (p.body if p else ()) if isinstance(m, _DEF)
-                     and m.name == "__init__"), None)
-        if b is None or init is None:
+        if b is None or p is None:
             continue
-        old = set()
+        inits = [m for m in p.body if isinstance(m, _DEF)
+                 and m.name in ("__init__", "__post_init__")]
+        sets = _dataclass_fields(p)
+        for m in inits:
+            sets |= _self_attrs(m, _self_name(m), ast.Store)
+        if not sets:
+            continue
+        old = _class_names(b) | _dataclass_fields(b)
         for m in b.body:
             if isinstance(m, _DEF):
                 old |= _self_attrs(m, _self_name(m), ast.Store)
-        old |= _class_names(b)
-        me = _self_name(init)
-        sets = _self_attrs(init, me, ast.Store)
         readers = {}
         for m in nodes:
-            if m.name == "__init__":
+            if m.name in ("__init__", "__post_init__"):
                 continue
             for x in _self_attrs(m, _self_name(m), ast.Load):
                 if x in sets and x not in old:
                     readers.setdefault(x, []).append(f"{c}.{m.name}")
+        line = first_line(inits[0]) if inits else first_line(p)
         for x in sorted(readers):
             out.append({"cls": c, "field": x, "readers": sorted(set(readers[x])),
-                        "init_line": first_line(init)})
+                        "init_line": line})
     return out
 
 
