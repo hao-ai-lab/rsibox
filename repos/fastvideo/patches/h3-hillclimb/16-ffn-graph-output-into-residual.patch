@@ -1,0 +1,119 @@
+diff --git a/fastvideo/models/dits/minimax_h3.py b/fastvideo/models/dits/minimax_h3.py
+index dfb6271..b5d3509 100644
+--- a/fastvideo/models/dits/minimax_h3.py
++++ b/fastvideo/models/dits/minimax_h3.py
+@@ -160,8 +160,8 @@ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:
+     return HAVE_TRITON and tensor.is_cuda and not torch.is_grad_enabled()
+ 
+ 
+-def _h3_ff_graph_forward(ff, hidden_states):
+-    """Replay the original inference FFN, or return None for eager fallback."""
++def _h3_ff_graph_forward(ff, hidden_states, residual_args=None):
++    """Replay the unchanged FFN; optionally consume its output before returning."""
+     if (torch.compiler.is_compiling()
+             or torch.is_grad_enabled()
+             or type(ff) is not MiniMaxH3FeedForward
+@@ -182,6 +182,28 @@ def _h3_ff_graph_forward(ff, hidden_states):
+             or torch.cuda.get_device_capability(hidden_states.device) != (10, 0)):
+         return None
+ 
++    if residual_args is not None:
++        residual, gate_table, indices = residual_args
++        # This entry bypasses ff.forward, so retain its chunking policy.
++        if ff.chunk_tokens and hidden_states.shape[1] > ff.chunk_tokens:
++            return None
++        if (residual.shape != hidden_states.shape
++                or residual.dtype != hidden_states.dtype
++                or residual.device != hidden_states.device
++                or residual.requires_grad
++                or not residual.is_contiguous()
++                or gate_table.ndim != 2
++                or gate_table.shape[1] != hidden_states.shape[2]
++                or gate_table.dtype != hidden_states.dtype
++                or gate_table.device != hidden_states.device
++                or gate_table.requires_grad
++                or indices.ndim != 1
++                or indices.shape[0] != hidden_states.shape[1]
++                or indices.dtype != torch.int64
++                or indices.device != hidden_states.device
++                or not indices.is_contiguous()):
++            return None
++
+     with torch.cuda.device(hidden_states.device):
+         if torch.cuda.is_current_stream_capturing():
+             return None
+@@ -198,7 +220,6 @@ def _h3_ff_graph_forward(ff, hidden_states):
+ 
+         state = cache.get(ff)
+         if state is None or state[0] != signature:
+-            # Each layer owns its graph pool and stable input/output storage.
+             cache.pop(ff, None)
+             static_input = torch.empty_like(hidden_states)
+             side = torch.cuda.Stream(device=hidden_states.device)
+@@ -236,11 +257,15 @@ def _h3_ff_graph_forward(ff, hidden_states):
+         if graph is None:
+             return None
+ 
+-        # FFN projections are replicated, with no SP collective inside this
+-        # graph. Every rank independently copies its current local shard.
+         static_input.copy_(hidden_states)
+         graph.replay()
+-        # Preserve the original fresh-output ownership across later replays.
++        if residual_args is not None:
++            # Same consumer, operands, and output layout as the original
++            # clone followed by _gated_residual. The clone performed no math.
++            # The consumer runs on the replay stream before a later replay
++            # can overwrite static_output, and returns fresh owned storage.
++            residual, gate_table, indices = residual_args
++            return _gated_residual(residual, gate_table, indices, static_output)
+         return static_output.clone(memory_format=torch.preserve_format)
+ 
+ 
+@@ -835,7 +860,6 @@ class MiniMaxH3TransformerBlock(nn.Module):
+                 t.to(hidden_states.dtype) for t in self.adaln_proj(temb))
+ 
+         use_modulate_fusion = self.fuse_modulate and _can_run_minimax_h3_fusion(hidden_states)
+-        # The bit-exact kernels replace only the eager expressions below.
+         use_exact_modulate = (not use_modulate_fusion and self.exact_modulate and adaln_indices.is_contiguous()
+                               and exact_kernels.supports_rowwise(hidden_states, shift_msa, scale_msa, gate_msa,
+                                                                  shift_mlp, scale_mlp, gate_mlp))
+@@ -860,8 +884,6 @@ class MiniMaxH3TransformerBlock(nn.Module):
+                     1.0 + scale_msa.index_select(0, adaln_indices)) + shift_msa.index_select(0, adaln_indices)
+         with nvtx_range("minimax_h3.transformer_block.self_attention"):
+             attention_output = self.attn(norm_hidden_states, rotary_emb, original_seq_len)
+-        # The attention input is dead now. Keeping it until assignment below
+-        # overlaps three full-width activations during the residual fusion.
+         del norm_hidden_states
+         if use_modulate_fusion:
+             with nvtx_range("minimax_h3.transformer_block.modulate_fusion"):
+@@ -888,6 +910,30 @@ class MiniMaxH3TransformerBlock(nn.Module):
+                     1.0 + scale_mlp.index_select(0, adaln_indices)) + shift_mlp.index_select(0, adaln_indices)
+         del attention_output
+         with nvtx_range("minimax_h3.transformer_block.feed_forward"), STAGES.span("feed_forward"):
++            if (use_modulate_fusion and not torch.compiler.is_compiling()
++                    and type(self.ff) is MiniMaxH3FeedForward
++                    and "forward" not in vars(self.ff)
++                    and "_forward" not in vars(self.ff)
++                    and getattr(self.ff, "_compiled_call_impl", None) is None):
++                # Preserve module-call semantics when global hooks are present.
++                from torch.nn.modules import module as module_state
++                global_hooks = any(
++                    bool(getattr(module_state, name, None))
++                    for name in (
++                        "_global_forward_pre_hooks",
++                        "_global_forward_hooks",
++                        "_global_backward_pre_hooks",
++                        "_global_backward_hooks",
++                    )
++                )
++                if not global_hooks and not self.ff._backward_pre_hooks:
++                    result = _h3_ff_graph_forward(
++                        self.ff,
++                        norm_hidden_states,
++                        residual_args=(hidden_states, gate_mlp, adaln_indices),
++                    )
++                    if result is not None:
++                        return result
+             feed_forward_output = self.ff(norm_hidden_states)
+         if use_modulate_fusion and not torch.compiler.is_compiling():
+             return _gated_residual(hidden_states, gate_mlp, adaln_indices, feed_forward_output)

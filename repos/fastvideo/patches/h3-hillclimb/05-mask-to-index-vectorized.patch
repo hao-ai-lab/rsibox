@@ -1,0 +1,118 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index dbe8fb3..54e6306 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -573,6 +573,104 @@ def _h3_gated_merge(out_bshd_view: torch.Tensor, out_c: torch.Tensor, gate: torc
+     return result
+ 
+ 
++def _h3_mask_to_index_kernel():
++    """Return the row-parallel bool block map -> (q2k_idx, q2k_num) kernel.
++
++    One program per (b, h, q) row; the whole KV row is handled as one vector
++    (cumsum compaction) instead of the reference kernel's scalar loop. Every
++    output slot is written once: kept columns in ascending order at slots
++    [0, num), then -1 for the rest, so the result equals
++    ``fastvideo_kernel.triton_kernels.index.map_to_index`` exactly. Built once
++    on first use and cached on this function.
++    """
++    kernel = getattr(_h3_mask_to_index_kernel, "kernel", None)
++    if kernel is None:
++        g = globals()
++        if "_h3_tl" not in g:
++            g["_h3_triton"] = __import__("triton")
++            g["_h3_tl"] = __import__("triton.language").language
++
++        @g["_h3_triton"].jit
++        def _kernel(
++            map_ptr,
++            idx_ptr,
++            num_ptr,
++            m_sb, m_sh, m_sq, m_sk,
++            heads,
++            num_q,
++            num_kv,
++            BLOCK_KV: _h3_tl.constexpr,
++        ):
++            row = _h3_tl.program_id(0).to(_h3_tl.int64)
++            q = row % num_q
++            bh = row // num_q
++            h = bh % heads
++            b = bh // heads
++            cols = _h3_tl.arange(0, BLOCK_KV)
++            valid = cols < num_kv
++            m = _h3_tl.load(map_ptr + b * m_sb + h * m_sh + q * m_sq + cols * m_sk, mask=valid, other=0)
++            keep = (m != 0).to(_h3_tl.int32)
++            cs = _h3_tl.cumsum(keep, axis=0)
++            num = _h3_tl.sum(keep, axis=0)
++            # kept column -> slot cs-1; dropped column -> slot num + (#dropped up to it) - 1
++            slot = _h3_tl.where(keep != 0, cs - 1, num + cols - cs)
++            val = _h3_tl.where(keep != 0, cols, -1)
++            _h3_tl.store(idx_ptr + row * num_kv + slot, val, mask=valid)
++            _h3_tl.store(num_ptr + row, num)
++
++        kernel = _kernel
++        _h3_mask_to_index_kernel.kernel = kernel
++    return kernel
++
++
++def _h3_map_to_index(block_map: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++    """Vectorized, bit-identical ``map_to_index`` for a [B, H, Q, KV] bool CUDA map."""
++    bs, heads, num_q, num_kv = block_map.shape
++    index = torch.empty((bs, heads, num_q, num_kv), dtype=torch.int32, device=block_map.device)
++    index_num = torch.empty((bs, heads, num_q), dtype=torch.int32, device=block_map.device)
++    rows = bs * heads * num_q
++    if rows == 0 or num_kv == 0:
++        index.fill_(-1)
++        index_num.zero_()
++        return index, index_num
++    block_kv = max(16, 1 << (num_kv - 1).bit_length())
++    _h3_mask_to_index_kernel()[(rows, )](
++        block_map.view(torch.uint8),
++        index,
++        index_num,
++        block_map.stride(0), block_map.stride(1), block_map.stride(2), block_map.stride(3),
++        heads,
++        num_q,
++        num_kv,
++        BLOCK_KV=block_kv,
++        num_warps=4 if block_kv <= 2048 else 8,
++    )
++    return index, index_num
++
++
++def _h3_block_sparse_attn_64(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor,
++                             variable_block_sizes: torch.Tensor) -> tuple[torch.Tensor, Any]:
++    """``block_sparse_attn_64_bhsd`` with the bool map compacted by the vectorized kernel.
++
++    Only the stock fastvideo_kernel bool-mask wrapper is replaced (its body is
++    ``_map_to_index`` + ``block_sparse_attn_from_indices``); any other entry,
++    non-CUDA/non-bool/oversized maps, or a missing index-native entry use the
++    original call.
++    """
++    fn = block_sparse_attn_64_bhsd
++    from_indices = None
++    if getattr(fn, "__module__", None) == "fastvideo_kernel.block_sparse_attn" and getattr(
++            fn, "__name__", None) == "block_sparse_attn":
++        import sys
++        from_indices = getattr(sys.modules.get("fastvideo_kernel.block_sparse_attn"),
++                               "block_sparse_attn_from_indices", None)
++    if (from_indices is None or not mask.is_cuda or mask.dtype != torch.bool or mask.dim() != 4
++            or mask.shape[-1] > 8192):
++        return fn(q, k, v, mask, variable_block_sizes)
++    q2k_idx, q2k_num = _h3_map_to_index(mask)
++    return from_indices(q, k, v, q2k_idx, q2k_num, variable_block_sizes)
++
++
+ def tile_rows_stacked(impl: Any, xs: list[torch.Tensor], attn_metadata: Any) -> torch.Tensor | None:
+     """``impl.tile(torch.cat(xs, dim=0), attn_metadata)`` without the cat, or None.
+ 
+@@ -1163,7 +1261,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):
+                                                      attn_metadata.variable_block_sizes,
+                                                      int8_qk=self._sm89_kernel == "int8")
+                 else:
+-                    out_bhsd, _ = block_sparse_attn_64_bhsd(
++                    out_bhsd, _ = _h3_block_sparse_attn_64(
+                         q_bhsd,
+                         k_bhsd,
+                         v_bhsd,

@@ -1,0 +1,37 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 031003b..f4bb48b 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -1289,7 +1289,7 @@ def _build_block_mask(
+     video_tile_spans: tuple[tuple[int, int], ...],
+     span_sparsities: tuple[float, ...],
+ ) -> torch.Tensor:
+-    """Build the original mask, with compact video-only CUDA top-k inputs."""
++    """Build the original mask using compact video-only top-k on SP=1/2."""
+     n_tiles = scores.shape[-1]
+     if VSA_sparsity <= 0.0:
+         span_sparsities = tuple(VSA_sparsity for _ in video_tile_spans)
+@@ -1321,14 +1321,18 @@ def _build_block_mask(
+     if fast:
+         from fastvideo.distributed.parallel_state import get_sp_world_size
+         fast = (
+-            get_sp_world_size() == 1
++            get_sp_world_size() in (1, 2)
+             and torch.cuda.get_device_capability(scores.device) == (10, 0)
+         )
+     if fast:
+-        # At these row widths CUDA uses single-block top-k. Contiguous
+-        # packing retains each row's element order and float bit patterns.
+-        # Removing the optional output sort changes only index order;
+-        # scatter membership and subsequent ascending mask compaction agree.
++        # Selection is independent per local head: SP has already
++        # redistributed the complete sequence before scores are computed.
++        # Keep each candidate row's exact values and column order.
++        #
++        # At these widths CUDA uses single-block top-k. sorted=False
++        # omits sorting the already-selected entries; membership, including
++        # the selection of tied entries, is unchanged. Subsequent bool-mask
++        # compaction still visits selected key tiles in ascending order.
+         prefix = num_prefix_tiles
+         width = n_tiles - prefix
+         candidates = scores[:, :, prefix:, prefix:].contiguous()

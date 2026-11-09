@@ -1,0 +1,302 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index f4bb48b..0ec001a 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -902,7 +902,7 @@ def tile_rows_stacked(impl: Any, xs: list[torch.Tensor], attn_metadata: Any) ->
+ 
+ 
+ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+-    """Exchange remote heads only; tile local rows directly from their inputs."""
++    """Pack remote heads and tile local heads directly from strided inputs."""
+     if (torch.compiler.is_compiling() or torch.is_grad_enabled()
+             or type(impl) is not MiniMaxH3VSAImpl
+             or type(metadata) is not MiniMaxH3VSAMetadata
+@@ -928,9 +928,13 @@ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+             or x.shape[1] <= 0 or x.shape[2] <= 0 or x.shape[2] % 2
+             or torch.cuda.get_device_capability(x.device) != (10, 0)):
+         return None
+-    if any(t.shape != x.shape or t.device != x.device or t.dtype != x.dtype
+-           or not t.is_contiguous() or t.requires_grad for t in xs):
+-        return None
++    for tensor in xs:
++        if (tensor.shape != x.shape or tensor.device != x.device
++                or tensor.dtype != x.dtype or tensor.requires_grad
++                or tensor.layout != torch.strided
++                or tensor.stride(-1) != 1
++                or any(stride < 0 for stride in tensor.stride())):
++            return None
+ 
+     slots = metadata.untile_combined_index
+     sizes = metadata.variable_block_sizes
+@@ -948,128 +952,168 @@ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+     rank = dist.get_rank(group)
+     if rank not in (0, 1):
+         return None
++
+     n = len(xs)
+-    s, heads = x.shape[1:3]
++    seq, heads = x.shape[1:3]
+     half = heads // 2
+     tiled_len = sizes.numel() * 64
+ 
+-    # Match the original scatter eligibility check without allocating a
+-    # full receive buffer solely to describe its layout.
+-    layout_probe = torch.empty_strided(
+-        (n, original_seq_len, half, 128),
+-        (2 * s * half * 128, half * 128, 128, 1),
+-        dtype=x.dtype, device="meta",
+-    )
+-    # The predicate requires a CUDA tensor; retain the original CUDA
+-    # layout probe and allocation only for its supported-layout check.
+-    del layout_probe
+     probe = torch.empty(
+-        (n, 2 * s, half, 128), dtype=x.dtype, device=x.device,
++        (n, 2 * seq, half, 128), dtype=x.dtype, device=x.device,
++    )
++    supported = supports_heads_first_scatter(
++        probe[:, :original_seq_len], slots,
+     )
+-    if not supports_heads_first_scatter(probe[:, :original_seq_len], slots):
+-        return None
+     del probe
++    if not supported:
++        return None
++
++    buffer = holder.heads_first_buffer
++    if buffer is not None:
++        storage_ptr = buffer.untyped_storage().data_ptr()
++        if any(t.untyped_storage().data_ptr() == storage_ptr for t in xs):
++            return None
+ 
+-    kernels = getattr(_h3_sp2_transport_tile, "remote_only_kernels", None)
++    kernels = getattr(_h3_sp2_transport_tile, "_strided_fused_kernels_v35", None)
+     if kernels is None:
+         g = globals()
+-        g["_h3_remote_triton"] = __import__("triton")
+-        g["_h3_remote_tl"] = __import__("triton.language").language
+-
+-        @g["_h3_remote_triton"].jit
+-        def pack_remote(
+-            Q, K, V, G, Send,
+-            S: _h3_remote_tl.constexpr,
+-            H: _h3_remote_tl.constexpr,
+-            RANK: _h3_remote_tl.constexpr,
+-            BLOCK: _h3_remote_tl.constexpr,
++        g["_h3_sp35_triton"] = __import__("triton")
++        g["_h3_sp35_tl"] = __import__("triton.language").language
++
++        @g["_h3_sp35_triton"].jit
++        def pack_and_tile_local(
++            Q, K, V, G, Send, Slots, Out,
++            Q_S, Q_H, K_S, K_H, V_S, V_H, G_S, G_H,
++            S: _h3_sp35_tl.constexpr,
++            H: _h3_sp35_tl.constexpr,
++            P: _h3_sp35_tl.constexpr,
++            T: _h3_sp35_tl.constexpr,
++            RANK: _h3_sp35_tl.constexpr,
++            BLOCK: _h3_sp35_tl.constexpr,
+         ):
+             offset = (
+-                _h3_remote_tl.program_id(0).to(_h3_remote_tl.int64) * BLOCK
+-                + _h3_remote_tl.arange(0, BLOCK)
++                _h3_sp35_tl.program_id(0).to(_h3_sp35_tl.int64) * BLOCK
++                + _h3_sp35_tl.arange(0, BLOCK)
+             )
+-            member = _h3_remote_tl.program_id(1)
+-            half = H // 2
+-            valid = offset < S * half * 128
++            member = _h3_sp35_tl.program_id(1).to(_h3_sp35_tl.int64)
++            valid = offset < S * H * 128
+             d = offset % 128
+-            h = (offset // 128) % half
+-            row = offset // (half * 128)
+-            src = (row * H + (1 - RANK) * half + h) * 128 + d
++            h = (offset // 128) % H
++            row = offset // (H * 128)
++            packed_row = RANK * S + row
++            local_valid = valid & (packed_row < P)
++            local_head = RANK * H + h
++            remote_head = (1 - RANK) * H + h
++
+             if member == 0:
+-                bits = _h3_remote_tl.load(Q + src, valid, other=0)
++                local_bits = _h3_sp35_tl.load(
++                    Q + row * Q_S + local_head * Q_H + d,
++                    mask=local_valid, other=0,
++                )
++                remote_bits = _h3_sp35_tl.load(
++                    Q + row * Q_S + remote_head * Q_H + d,
++                    mask=valid, other=0,
++                )
+             elif member == 1:
+-                bits = _h3_remote_tl.load(K + src, valid, other=0)
++                local_bits = _h3_sp35_tl.load(
++                    K + row * K_S + local_head * K_H + d,
++                    mask=local_valid, other=0,
++                )
++                remote_bits = _h3_sp35_tl.load(
++                    K + row * K_S + remote_head * K_H + d,
++                    mask=valid, other=0,
++                )
+             elif member == 2:
+-                bits = _h3_remote_tl.load(V + src, valid, other=0)
++                local_bits = _h3_sp35_tl.load(
++                    V + row * V_S + local_head * V_H + d,
++                    mask=local_valid, other=0,
++                )
++                remote_bits = _h3_sp35_tl.load(
++                    V + row * V_S + remote_head * V_H + d,
++                    mask=valid, other=0,
++                )
+             else:
+-                bits = _h3_remote_tl.load(G + src, valid, other=0)
+-            _h3_remote_tl.store(
+-                Send + member * S * half * 128 + offset, bits, valid,
++                local_bits = _h3_sp35_tl.load(
++                    G + row * G_S + local_head * G_H + d,
++                    mask=local_valid, other=0,
++                )
++                remote_bits = _h3_sp35_tl.load(
++                    G + row * G_S + remote_head * G_H + d,
++                    mask=valid, other=0,
++                )
++
++            _h3_sp35_tl.store(
++                Send + member * S * H * 128 + offset,
++                remote_bits, mask=valid,
++            )
++            slot = _h3_sp35_tl.load(
++                Slots + packed_row, mask=local_valid, other=0,
++            ).to(_h3_sp35_tl.int64)
++            destination = ((member * H + h) * T + slot) * 128 + d
++            _h3_sp35_tl.store(
++                Out + destination, local_bits, mask=local_valid,
+             )
+ 
+-        @g["_h3_remote_triton"].jit
+-        def tile_local_and_remote(
+-            Q, K, V, G, Recv, Slots, Out,
+-            S: _h3_remote_tl.constexpr,
+-            H: _h3_remote_tl.constexpr,
+-            P: _h3_remote_tl.constexpr,
+-            T: _h3_remote_tl.constexpr,
+-            RANK: _h3_remote_tl.constexpr,
+-            BLOCK: _h3_remote_tl.constexpr,
++        @g["_h3_sp35_triton"].jit
++        def tile_received(
++            Recv, Slots, Out,
++            S: _h3_sp35_tl.constexpr,
++            H: _h3_sp35_tl.constexpr,
++            P: _h3_sp35_tl.constexpr,
++            T: _h3_sp35_tl.constexpr,
++            RANK: _h3_sp35_tl.constexpr,
++            BLOCK: _h3_sp35_tl.constexpr,
+         ):
+             offset = (
+-                _h3_remote_tl.program_id(0).to(_h3_remote_tl.int64) * BLOCK
+-                + _h3_remote_tl.arange(0, BLOCK)
++                _h3_sp35_tl.program_id(0).to(_h3_sp35_tl.int64) * BLOCK
++                + _h3_sp35_tl.arange(0, BLOCK)
+             )
+-            h = _h3_remote_tl.program_id(1)
+-            member = _h3_remote_tl.program_id(2)
+-            p = offset // 128
++            member = _h3_sp35_tl.program_id(1).to(_h3_sp35_tl.int64)
+             d = offset % 128
+-            valid = p < P
+-            slot = _h3_remote_tl.load(
+-                Slots + p, valid, other=0,
+-            ).to(_h3_remote_tl.int64)
+-            local_row = p % S
+-            is_local = p // S == RANK
+-            local_mask = valid & is_local
+-            src = (local_row * (2 * H) + RANK * H + h) * 128 + d
+-            if member == 0:
+-                local_bits = _h3_remote_tl.load(Q + src, local_mask, other=0)
+-            elif member == 1:
+-                local_bits = _h3_remote_tl.load(K + src, local_mask, other=0)
+-            elif member == 2:
+-                local_bits = _h3_remote_tl.load(V + src, local_mask, other=0)
+-            else:
+-                local_bits = _h3_remote_tl.load(G + src, local_mask, other=0)
+-            remote_src = ((member * S + local_row) * H + h) * 128 + d
+-            remote_bits = _h3_remote_tl.load(
+-                Recv + remote_src, valid & ~is_local, other=0,
++            h = (offset // 128) % H
++            row = offset // (H * 128)
++            packed_row = (1 - RANK) * S + row
++            valid = (offset < S * H * 128) & (packed_row < P)
++            slot = _h3_sp35_tl.load(
++                Slots + packed_row, mask=valid, other=0,
++            ).to(_h3_sp35_tl.int64)
++            bits = _h3_sp35_tl.load(
++                Recv + member * S * H * 128 + offset,
++                mask=valid, other=0,
+             )
+-            bits = _h3_remote_tl.where(is_local, local_bits, remote_bits)
+-            dst = ((member * H + h) * T + slot) * 128 + d
+-            _h3_remote_tl.store(Out + dst, bits, valid)
++            destination = ((member * H + h) * T + slot) * 128 + d
++            _h3_sp35_tl.store(Out + destination, bits, mask=valid)
+ 
+-        kernels = (pack_remote, tile_local_and_remote)
+-        _h3_sp2_transport_tile.remote_only_kernels = kernels
++        kernels = (pack_and_tile_local, tile_received)
++        _h3_sp2_transport_tile._strided_fused_kernels_v35 = kernels
+ 
+     shape = (n, half, tiled_len, 128)
+-    buffer = holder.heads_first_buffer
+     if (buffer is None or buffer.shape != shape or buffer.dtype != x.dtype
+             or buffer.device != x.device or not buffer.is_contiguous()):
+         buffer = torch.zeros(shape, dtype=x.dtype, device=x.device)
+     elif holder.heads_first_geometry is not slots:
+         buffer.zero_()
+ 
+-    count = n * s * half * 128
++    count = n * seq * half * 128
+     send = torch.empty((count,), dtype=x.dtype, device=x.device)
+     recv = torch.empty_like(send)
+-    bits = [t.view(torch.int16) for t in xs]
+-    gate_bits = bits[3] if n == 4 else bits[0]
+-    pack_remote, tile_local_and_remote = kernels
+-    pack_remote[((s * half * 128 + 511) // 512, n)](
+-        bits[0], bits[1], bits[2], gate_bits, send.view(torch.int16),
+-        S=s, H=heads, RANK=rank, BLOCK=512, num_warps=4,
++    gate = xs[3] if n == 4 else xs[0]
++    bits = [tensor.view(torch.int16) for tensor in xs[:3]]
++    gate_bits = gate.view(torch.int16)
++    pack_and_tile_local, tile_received = kernels
++    grid = ((seq * half * 128 + 1023) // 1024, n)
++
++    pack_and_tile_local[grid](
++        bits[0], bits[1], bits[2], gate_bits,
++        send.view(torch.int16), slots, buffer.view(torch.int16),
++        xs[0].stride(1), xs[0].stride(2),
++        xs[1].stride(1), xs[1].stride(2),
++        xs[2].stride(1), xs[2].stride(2),
++        gate.stride(1), gate.stride(2),
++        S=seq, H=half, P=original_seq_len, T=tiled_len,
++        RANK=rank, BLOCK=1024, num_warps=4,
+     )
++
+     splits = [0, count] if rank == 0 else [count, 0]
+     dist.all_to_all_single(
+         recv, send,
+@@ -1077,13 +1121,11 @@ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+         input_split_sizes=splits,
+         group=group,
+     )
+-    tile_local_and_remote[
+-        ((original_seq_len * 128 + 511) // 512, half, n)
+-    ](
+-        bits[0], bits[1], bits[2], gate_bits,
++
++    tile_received[grid](
+         recv.view(torch.int16), slots, buffer.view(torch.int16),
+-        S=s, H=half, P=original_seq_len, T=tiled_len,
+-        RANK=rank, BLOCK=512, num_warps=4,
++        S=seq, H=half, P=original_seq_len, T=tiled_len,
++        RANK=rank, BLOCK=1024, num_warps=4,
+     )
+     holder.heads_first_buffer = buffer
+     holder.heads_first_geometry = slots

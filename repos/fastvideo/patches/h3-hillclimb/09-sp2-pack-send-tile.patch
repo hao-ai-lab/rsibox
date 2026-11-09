@@ -1,0 +1,210 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 5e20026..7007ea4 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -901,6 +901,153 @@ def tile_rows_stacked(impl: Any, xs: list[torch.Tensor], attn_metadata: Any) ->
+     return buffer.transpose(1, 2)
+ 
+ 
++def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
++    """Pack SP=2 sends and scatter receives directly into the tile buffer."""
++    if (torch.compiler.is_compiling() or torch.is_grad_enabled()
++            or type(impl) is not MiniMaxH3VSAImpl
++            or type(metadata) is not MiniMaxH3VSAMetadata
++            or metadata.tile_elems != 64
++            or envs.FASTVIDEO_VSA_PTX_BLACKWELL.get()
++            or len(xs) not in (3, 4)):
++        return None
++
++    import torch.distributed as dist
++    from fastvideo.distributed.parallel_state import get_sp_group, get_sp_world_size
++
++    if not dist.is_initialized() or get_sp_world_size() != 2:
++        return None
++    group = getattr(get_sp_group(), "device_group", None)
++    if (not isinstance(group, dist.ProcessGroup)
++            or dist.get_world_size(group) != 2
++            or dist.get_backend(group) != "nccl"):
++        return None
++
++    x = xs[0]
++    if (x.ndim != 4 or x.shape[0] != 1 or not x.is_cuda
++            or x.dtype != torch.bfloat16 or x.shape[-1] != 128
++            or x.shape[1] <= 0 or x.shape[2] <= 0 or x.shape[2] % 2
++            or torch.cuda.get_device_capability(x.device) != (10, 0)):
++        return None
++    if any(t.shape != x.shape or t.device != x.device or t.dtype != x.dtype
++           or not t.is_contiguous() or t.requires_grad for t in xs):
++        return None
++
++    slots = metadata.untile_combined_index
++    sizes = metadata.variable_block_sizes
++    holder = metadata.tile_buf_holder
++    if (holder is None or original_seq_len != metadata.total_seq_length
++            or not 0 < original_seq_len <= 2 * x.shape[1]
++            or slots.device != x.device or slots.dtype != torch.int64
++            or slots.ndim != 1 or not slots.is_contiguous()
++            or slots.numel() != original_seq_len
++            or sizes.device != x.device or sizes.ndim != 1
++            or sizes.dtype not in (torch.int32, torch.int64)
++            or sizes.numel() == 0):
++        return None
++
++    n = len(xs)
++    s, heads = x.shape[1:3]
++    half = heads // 2
++    tiled_len = sizes.numel() * 64
++    send = torch.empty((2, n, s, half, 128), dtype=x.dtype, device=x.device)
++    recv = torch.empty_like(send)
++
++    # Check the ordinary post-collective layout, whose sequence is global.
++    # Local inputs have only s rows and cannot be checked against global slots.
++    layout_probe = recv.view(n, 2 * s, half, 128)[:, :original_seq_len]
++    if not supports_heads_first_scatter(layout_probe, slots):
++        return None
++
++    kernels = getattr(_h3_sp2_transport_tile, "kernels", None)
++    if kernels is None:
++        g = globals()
++        g["_h3_sp_triton"] = __import__("triton")
++        g["_h3_sp_tl"] = __import__("triton.language").language
++
++        @g["_h3_sp_triton"].jit
++        def pack(
++            Q, K, V, G, Send,
++            S: _h3_sp_tl.constexpr,
++            H: _h3_sp_tl.constexpr,
++            N: _h3_sp_tl.constexpr,
++            BLOCK: _h3_sp_tl.constexpr,
++        ):
++            x = (_h3_sp_tl.program_id(0).to(_h3_sp_tl.int64) * BLOCK
++                 + _h3_sp_tl.arange(0, BLOCK))
++            member = _h3_sp_tl.program_id(1)
++            dest = _h3_sp_tl.program_id(2)
++            half = H // 2
++            valid = x < S * half * 128
++            d = x % 128
++            h = (x // 128) % half
++            s = x // (half * 128)
++            src = (s * H + dest * half + h) * 128 + d
++            if member == 0:
++                value = _h3_sp_tl.load(Q + src, valid, other=0)
++            elif member == 1:
++                value = _h3_sp_tl.load(K + src, valid, other=0)
++            elif member == 2:
++                value = _h3_sp_tl.load(V + src, valid, other=0)
++            else:
++                value = _h3_sp_tl.load(G + src, valid, other=0)
++            dst = (dest * N + member) * S * half * 128 + x
++            _h3_sp_tl.store(Send + dst, value, valid)
++
++        @g["_h3_sp_triton"].jit
++        def tile_received(
++            Recv, Slots, Out,
++            S: _h3_sp_tl.constexpr,
++            H: _h3_sp_tl.constexpr,
++            N: _h3_sp_tl.constexpr,
++            P: _h3_sp_tl.constexpr,
++            T: _h3_sp_tl.constexpr,
++            BLOCK: _h3_sp_tl.constexpr,
++        ):
++            x = (_h3_sp_tl.program_id(0).to(_h3_sp_tl.int64) * BLOCK
++                 + _h3_sp_tl.arange(0, BLOCK))
++            h = _h3_sp_tl.program_id(1)
++            member = _h3_sp_tl.program_id(2)
++            p = x // 128
++            d = x % 128
++            valid = p < P
++            slot = _h3_sp_tl.load(Slots + p, valid, other=0).to(_h3_sp_tl.int64)
++            source_rank = p // S
++            local_s = p % S
++            src = (((source_rank * N + member) * S + local_s) * H + h) * 128 + d
++            value = _h3_sp_tl.load(Recv + src, valid, other=0)
++            dst = ((member * H + h) * T + slot) * 128 + d
++            _h3_sp_tl.store(Out + dst, value, valid)
++
++        kernels = (pack, tile_received)
++        _h3_sp2_transport_tile.kernels = kernels
++
++    shape = (n, half, tiled_len, 128)
++    buffer = holder.heads_first_buffer
++    if (buffer is None or buffer.shape != shape or buffer.dtype != x.dtype
++            or buffer.device != x.device or not buffer.is_contiguous()):
++        buffer = torch.zeros(shape, dtype=x.dtype, device=x.device)
++    elif holder.heads_first_geometry is not slots:
++        buffer.zero_()
++
++    # Integer views make both custom kernels pure 16-bit copies.
++    bits = [t.view(torch.int16) for t in xs]
++    pack, tile_received = kernels
++    pack[((s * half * 128 + 511) // 512, n, 2)](
++        bits[0], bits[1], bits[2], bits[3] if n == 4 else bits[0],
++        send.view(torch.int16),
++        S=s, H=heads, N=n, BLOCK=512, num_warps=4,
++    )
++    dist.all_to_all_single(recv, send, group=group)
++    tile_received[((original_seq_len * 128 + 511) // 512, half, n)](
++        recv.view(torch.int16), slots, buffer.view(torch.int16),
++        S=s, H=half, N=n, P=original_seq_len, T=tiled_len,
++        BLOCK=512, num_warps=4,
++    )
++    holder.heads_first_buffer = buffer
++    holder.heads_first_geometry = slots
++    return buffer.transpose(1, 2)
++
++
+ def _build_block_mask(
+     scores: torch.Tensor,
+     num_prefix_tiles: int,
+diff --git a/fastvideo/attention/layer.py b/fastvideo/attention/layer.py
+index 60f6917..2a0af87 100644
+--- a/fastvideo/attention/layer.py
++++ b/fastvideo/attention/layer.py
+@@ -207,7 +207,7 @@ class DistributedAttention_VSA(DistributedAttention):
+         gate_compress: torch.Tensor | None = None,
+         freqs_cis: tuple[torch.Tensor, torch.Tensor] | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+-        """Distributed VSA with a guarded direct packed-gate merge."""
++        """Distributed VSA with fused SP=2 transport packing and tiling."""
+         assert replicated_q is None and replicated_k is None and replicated_v is None, "Replicated QKV is not supported for VSA now"
+         assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "Expected 4D tensors"
+ 
+@@ -266,16 +266,29 @@ class DistributedAttention_VSA(DistributedAttention):
+                 output = self.attn_impl.forward(q, k, v, gate_compress, ctx_attn_metadata)
+                 return self.attn_impl.postprocess_output(output, ctx_attn_metadata), None
+ 
+-        qkvg = torch.cat(stack, dim=0)
+-        qkvg = sequence_model_parallel_all_to_all_4D(qkvg, scatter_dim=2, gather_dim=1)
+-        pad_seq_len = qkvg.shape[1] - original_seq_len
+-        qkvg = qkvg[:, :original_seq_len, :, :]
+-        if freqs_cis is not None:
+-            cos, sin = freqs_cis
+-            qkvg[:batch_size * 2] = _apply_rotary_emb(
+-                qkvg[:batch_size * 2], cos, sin, is_neox_style=False,
++        tiled = None
++        if (freqs_cis is None and get_sp_world_size() == 2
++                and type(self.attn_impl).__name__ == "MiniMaxH3VSAImpl"):
++            from fastvideo.attention.backends.video_sparse_attn_h3 import _h3_sp2_transport_tile
++            tiled = _h3_sp2_transport_tile(
++                self.attn_impl, stack, ctx_attn_metadata, original_seq_len,
+             )
+-        qkvg = self.attn_impl.preprocess_qkv(qkvg, ctx_attn_metadata)
++
++        if tiled is not None:
++            qkvg = tiled
++            pad_seq_len = 2 * seq_len - original_seq_len
++        else:
++            qkvg = torch.cat(stack, dim=0)
++            qkvg = sequence_model_parallel_all_to_all_4D(qkvg, scatter_dim=2, gather_dim=1)
++            pad_seq_len = qkvg.shape[1] - original_seq_len
++            qkvg = qkvg[:, :original_seq_len, :, :]
++            if freqs_cis is not None:
++                cos, sin = freqs_cis
++                qkvg[:batch_size * 2] = _apply_rotary_emb(
++                    qkvg[:batch_size * 2], cos, sin, is_neox_style=False,
++                )
++            qkvg = self.attn_impl.preprocess_qkv(qkvg, ctx_attn_metadata)
++
+         if gate_compress is None:
+             q, k, v = qkvg.chunk(3, dim=0)
+         else:

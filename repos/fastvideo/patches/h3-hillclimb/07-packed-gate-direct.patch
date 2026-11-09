@@ -1,0 +1,157 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 3d207de..661495b 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -488,7 +488,7 @@ def _pool_tiles(x: torch.Tensor, variable_block_sizes: torch.Tensor, tile_elems:
+     return pooled.permute(0, 2, 1, 3)
+ 
+ 
+-def _h3_forward_packed(impl, query, key, value, gate, metadata):
++def _h3_forward_packed(impl, query, key, value, gate, metadata, gate_is_packed=False):
+     """Return fused packed output for eligible inference, otherwise None."""
+     if (torch.compiler.is_compiling() or torch.is_grad_enabled()
+             or type(impl) is not MiniMaxH3VSAImpl
+@@ -513,11 +513,19 @@ def _h3_forward_packed(impl, query, key, value, gate, metadata):
+     n_tiles = sizes.numel()
+     if n_tiles == 0 or query.shape[1] != n_tiles * 64:
+         return None
+-    for tensor in (query, key, value, gate):
++    for tensor in (query, key, value):
+         if (tensor.shape != query.shape or tensor.device != query.device
+                 or tensor.dtype != query.dtype or tensor.requires_grad
+                 or tensor.stride(-1) != 1):
+             return None
++    expected_gate_shape = (
++        (query.shape[0], metadata.total_seq_length, query.shape[2], query.shape[3])
++        if gate_is_packed else query.shape
++    )
++    if (gate.shape != expected_gate_shape or gate.device != query.device
++            or gate.dtype != query.dtype or gate.requires_grad
++            or gate.stride(-1) != 1):
++        return None
+     slots = metadata.untile_combined_index
+     if (slots.device != query.device or slots.dtype != torch.int64
+             or slots.ndim != 1 or not slots.is_contiguous()
+@@ -550,7 +558,8 @@ def _h3_forward_packed(impl, query, key, value, gate, metadata):
+     result = torch.empty(
+         (batch, packed_len, heads, dim), dtype=query.dtype, device=query.device,
+     )
+-    _h3_packed_gated_merge_kernel()[(batch * heads, (packed_len + 31) // 32)](
++    builder = _h3_direct_gate_merge_kernel if gate_is_packed else _h3_packed_gated_merge_kernel
++    builder()[(batch * heads, (packed_len + 31) // 32)](
+         result, out_bhsd, out_c, gate, slots,
+         packed_len, heads,
+         out_bhsd.stride(0), out_bhsd.stride(1), out_bhsd.stride(2),
+@@ -698,6 +707,58 @@ def _h3_packed_gated_merge_kernel():
+     return kernel
+ 
+ 
++def _h3_direct_gate_merge_kernel():
++    """Existing packed merge arithmetic, reading the original packed gate."""
++    kernel = getattr(_h3_direct_gate_merge_kernel, "kernel", None)
++    if kernel is None:
++        g = globals()
++        if "_h3_tl" not in g:
++            g["_h3_triton"] = __import__("triton")
++            g["_h3_tl"] = __import__("triton.language").language
++
++        @g["_h3_triton"].jit
++        def _kernel(
++            result_ptr, out_ptr, compress_ptr, gate_ptr, slots_ptr,
++            packed_len, heads,
++            o_sb, o_sh, o_ss,
++            c_sb, c_st, c_sh,
++            g_sb, g_ss, g_sh,
++            BLOCK_S: _h3_tl.constexpr,
++            HEAD_DIM: _h3_tl.constexpr,
++        ):
++            bh = _h3_tl.program_id(0)
++            b = bh // heads
++            h = bh % heads
++            p = (_h3_tl.program_id(1).to(_h3_tl.int64) * BLOCK_S
++                 + _h3_tl.arange(0, BLOCK_S).to(_h3_tl.int64))
++            d = _h3_tl.arange(0, HEAD_DIM)
++            valid = p < packed_len
++            s = _h3_tl.load(slots_ptr + p, mask=valid, other=0).to(_h3_tl.int64)
++            t = s // 64
++            o = _h3_tl.load(
++                out_ptr + b * o_sb + h * o_sh + s[:, None] * o_ss + d[None, :],
++                mask=valid[:, None], other=0.0,
++            ).to(_h3_tl.float32)
++            gv = _h3_tl.load(
++                gate_ptr + b * g_sb + h * g_sh + p[:, None] * g_ss + d[None, :],
++                mask=valid[:, None], other=0.0,
++            ).to(_h3_tl.float32)
++            cv = _h3_tl.load(
++                compress_ptr + b * c_sb + h * c_sh + t[:, None] * c_st + d[None, :],
++                mask=valid[:, None], other=0.0,
++            ).to(_h3_tl.float32)
++            res = o + cv * gv
++            _h3_tl.store(
++                result_ptr + ((b * packed_len + p[:, None]) * heads + h) * HEAD_DIM + d[None, :],
++                res.to(result_ptr.dtype.element_ty),
++                mask=valid[:, None],
++            )
++
++        kernel = _kernel
++        _h3_direct_gate_merge_kernel.kernel = kernel
++    return kernel
++
++
+ def _h3_mask_to_index_kernel():
+     """Return the row-parallel bool block map -> (q2k_idx, q2k_num) kernel.
+ 
+diff --git a/fastvideo/attention/layer.py b/fastvideo/attention/layer.py
+index ec61396..60f6917 100644
+--- a/fastvideo/attention/layer.py
++++ b/fastvideo/attention/layer.py
+@@ -207,7 +207,7 @@ class DistributedAttention_VSA(DistributedAttention):
+         gate_compress: torch.Tensor | None = None,
+         freqs_cis: tuple[torch.Tensor, torch.Tensor] | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+-        """Distributed VSA with a guarded fused H3 merge and untile."""
++        """Distributed VSA with a guarded direct packed-gate merge."""
+         assert replicated_q is None and replicated_k is None and replicated_v is None, "Replicated QKV is not supported for VSA now"
+         assert q.dim() == 4 and k.dim() == 4 and v.dim() == 4, "Expected 4D tensors"
+ 
+@@ -218,9 +218,40 @@ class DistributedAttention_VSA(DistributedAttention):
+         if (freqs_cis is None and get_sp_world_size() == 1 and original_seq_len == seq_len
+                 and type(self.attn_impl).__name__ == "MiniMaxH3VSAImpl"):
+             from fastvideo.attention.backends.video_sparse_attn_h3 import (
++                MiniMaxH3VSAImpl,
++                MiniMaxH3VSAMetadata,
+                 _h3_forward_packed,
+                 tile_rows_stacked,
+             )
++            direct_gate = (
++                not torch.compiler.is_compiling()
++                and not torch.is_grad_enabled()
++                and type(self.attn_impl) is MiniMaxH3VSAImpl
++                and type(ctx_attn_metadata) is MiniMaxH3VSAMetadata
++                and ctx_attn_metadata.tile_elems == 64
++                and gate_compress is not None
++                and gate_compress.shape == q.shape
++                and gate_compress.dtype == q.dtype == torch.bfloat16
++                and gate_compress.device == q.device
++                and not gate_compress.requires_grad
++                and gate_compress.stride(-1) == 1
++                and q.is_cuda and head_dim == 128
++                and torch.cuda.get_device_capability(q.device) == (10, 0)
++                and self.attn_impl.fine_attention_override is None
++                and self.attn_impl._sm89_kernel == "original"
++                and not envs.FASTVIDEO_VSA_PTX_BLACKWELL.get()
++            )
++            if direct_gate:
++                tiled_qkv = tile_rows_stacked(self.attn_impl, [q, k, v], ctx_attn_metadata)
++                if tiled_qkv is not None:
++                    tq, tk, tv = tiled_qkv.chunk(3, dim=0)
++                    output = _h3_forward_packed(
++                        self.attn_impl, tq, tk, tv, gate_compress,
++                        ctx_attn_metadata, gate_is_packed=True,
++                    )
++                    if output is not None:
++                        return output, None
++
+             qkvg = tile_rows_stacked(self.attn_impl, stack, ctx_attn_metadata)
+             if qkvg is not None:
+                 if gate_compress is None:

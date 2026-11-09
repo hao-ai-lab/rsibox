@@ -1,0 +1,211 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 57d5e8f..031003b 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -1091,7 +1091,7 @@ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+ 
+ 
+ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_len):
+-    """Exact gated attention with fused SP=2 return packing, or None."""
++    """Exact gated SP=2 return with direct local stores and remote-only exchange."""
+     if (torch.compiler.is_compiling() or torch.is_grad_enabled()
+             or type(impl) is not MiniMaxH3VSAImpl
+             or type(metadata) is not MiniMaxH3VSAMetadata
+@@ -1115,6 +1115,9 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+             or dist.get_world_size(group) != 2
+             or dist.get_backend(group) != "nccl"):
+         return None
++    rank = dist.get_rank(group)
++    if rank not in (0, 1):
++        return None
+ 
+     if (query.ndim != 4 or query.shape[0] != 1
+             or not query.is_cuda or query.dtype != torch.bfloat16
+@@ -1141,80 +1144,92 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+             or packed_len not in (2 * local_seq_len, 2 * local_seq_len - 1)):
+         return None
+ 
+-    # This function is called on every dispatch; kernels are built lazily.
+-    kernels = getattr(_h3_sp2_forward_return, "kernels", None)
++    # Lazy construction is reached on every eligible dispatch. A distinct
++    # cache name prevents reuse of kernels from the previous live function.
++    kernels = getattr(_h3_sp2_forward_return, "remote_return_kernels", None)
+     if kernels is None:
+         g = globals()
+-        g["_h3_ret_triton"] = __import__("triton")
+-        g["_h3_ret_tl"] = __import__("triton.language").language
+-
+-        @g["_h3_ret_triton"].jit
+-        def merge_send(
+-            Send, Out, Compress, Gate, Slots,
+-            S: _h3_ret_tl.constexpr,
+-            P: _h3_ret_tl.constexpr,
+-            H: _h3_ret_tl.constexpr,
++        g["_h3_peer_ret_triton"] = __import__("triton")
++        g["_h3_peer_ret_tl"] = __import__("triton.language").language
++
++        @g["_h3_peer_ret_triton"].jit
++        def merge_local_and_send(
++            Send, Result, Out, Compress, Gate, Slots,
++            S: _h3_peer_ret_tl.constexpr,
++            P: _h3_peer_ret_tl.constexpr,
++            H: _h3_peer_ret_tl.constexpr,
++            RANK: _h3_peer_ret_tl.constexpr,
+             O_H, O_S,
+             C_T, C_H,
+             G_S, G_H,
+-            BLOCK_S: _h3_ret_tl.constexpr,
++            BLOCK_S: _h3_peer_ret_tl.constexpr,
+         ):
+-            h = _h3_ret_tl.program_id(0)
++            h = _h3_peer_ret_tl.program_id(0)
+             local_s = (
+-                _h3_ret_tl.program_id(1).to(_h3_ret_tl.int64) * BLOCK_S
+-                + _h3_ret_tl.arange(0, BLOCK_S).to(_h3_ret_tl.int64)
++                _h3_peer_ret_tl.program_id(1).to(_h3_peer_ret_tl.int64) * BLOCK_S
++                + _h3_peer_ret_tl.arange(0, BLOCK_S).to(_h3_peer_ret_tl.int64)
+             )
+-            dest = _h3_ret_tl.program_id(2)
++            dest = _h3_peer_ret_tl.program_id(2)
+             p = dest * S + local_s
+             valid = (local_s < S) & (p < P)
+-            slot = _h3_ret_tl.load(
++            slot = _h3_peer_ret_tl.load(
+                 Slots + p, mask=valid, other=0,
+-            ).to(_h3_ret_tl.int64)
+-            d = _h3_ret_tl.arange(0, 128)
+-            o = _h3_ret_tl.load(
++            ).to(_h3_peer_ret_tl.int64)
++            d = _h3_peer_ret_tl.arange(0, 128)
++            o = _h3_peer_ret_tl.load(
+                 Out + h * O_H + slot[:, None] * O_S + d[None, :],
+                 mask=valid[:, None], other=0.0,
+-            ).to(_h3_ret_tl.float32)
+-            gv = _h3_ret_tl.load(
++            ).to(_h3_peer_ret_tl.float32)
++            gv = _h3_peer_ret_tl.load(
+                 Gate + h * G_H + slot[:, None] * G_S + d[None, :],
+                 mask=valid[:, None], other=0.0,
+-            ).to(_h3_ret_tl.float32)
+-            cv = _h3_ret_tl.load(
++            ).to(_h3_peer_ret_tl.float32)
++            cv = _h3_peer_ret_tl.load(
+                 Compress + h * C_H + (slot[:, None] // 64) * C_T + d[None, :],
+                 mask=valid[:, None], other=0.0,
+-            ).to(_h3_ret_tl.float32)
+-            # Identical expression and rounding to _h3_gated_merge_kernel.
++            ).to(_h3_peer_ret_tl.float32)
++            # Preserve the previous merge expression, FP32 operands,
++            # BF16 store conversion, and explicit transport padding.
+             res = o + cv * gv
+-            res = _h3_ret_tl.where(valid[:, None], res, 0.0)
+-            dst = ((dest * H + h) * S + local_s[:, None]) * 128 + d[None, :]
+-            _h3_ret_tl.store(
+-                Send + dst, res.to(Send.dtype.element_ty),
+-                mask=(local_s < S)[:, None],
+-            )
++            res = _h3_peer_ret_tl.where(valid[:, None], res, 0.0)
++            rounded = res.to(Send.dtype.element_ty)
++            if dest == RANK:
++                dst = (
++                    (local_s[:, None] * (2 * H) + RANK * H + h) * 128
++                    + d[None, :]
++                )
++                _h3_peer_ret_tl.store(
++                    Result + dst, rounded,
++                    mask=(local_s < S)[:, None],
++                )
++            else:
++                dst = (local_s[:, None] * H + h) * 128 + d[None, :]
++                _h3_peer_ret_tl.store(
++                    Send + dst, rounded,
++                    mask=(local_s < S)[:, None],
++                )
+ 
+-        @g["_h3_ret_triton"].jit
+-        def unpack_received(
++        @g["_h3_peer_ret_triton"].jit
++        def unpack_remote(
+             Recv, Result,
+-            S: _h3_ret_tl.constexpr,
+-            H: _h3_ret_tl.constexpr,
+-            BLOCK: _h3_ret_tl.constexpr,
++            S: _h3_peer_ret_tl.constexpr,
++            H: _h3_peer_ret_tl.constexpr,
++            RANK: _h3_peer_ret_tl.constexpr,
++            BLOCK: _h3_peer_ret_tl.constexpr,
+         ):
+             x = (
+-                _h3_ret_tl.program_id(0).to(_h3_ret_tl.int64) * BLOCK
+-                + _h3_ret_tl.arange(0, BLOCK)
++                _h3_peer_ret_tl.program_id(0).to(_h3_peer_ret_tl.int64) * BLOCK
++                + _h3_peer_ret_tl.arange(0, BLOCK)
+             )
+-            valid = x < S * 2 * H * 128
+-            d = x % 128
+-            full_h = (x // 128) % (2 * H)
+-            s = x // (2 * H * 128)
+-            source = full_h // H
+-            h = full_h % H
+-            src = ((source * H + h) * S + s) * 128 + d
+-            bits = _h3_ret_tl.load(Recv + src, mask=valid, other=0)
+-            _h3_ret_tl.store(Result + x, bits, mask=valid)
+-
+-        kernels = (merge_send, unpack_received)
+-        _h3_sp2_forward_return.kernels = kernels
++            valid = x < S * H * 128
++            s = x // (H * 128)
++            hd = x % (H * 128)
++            dst = s * (2 * H * 128) + (1 - RANK) * H * 128 + hd
++            bits = _h3_peer_ret_tl.load(Recv + x, mask=valid, other=0)
++            _h3_peer_ret_tl.store(Result + dst, bits, mask=valid)
++
++        kernels = (merge_local_and_send, unpack_remote)
++        _h3_sp2_forward_return.remote_return_kernels = kernels
+ 
+     # Preserve pooling layouts, reduction order, selection, and attention.
+     layer_sparsity = 0.0 if impl.layer_idx in metadata.dense_layers else metadata.VSA_sparsity
+@@ -1236,28 +1251,32 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+     out_c = out_c.permute(0, 2, 1, 3).to(out_bhsd.dtype)
+ 
+     heads = query.shape[2]
+-    send = torch.empty(
+-        (2, heads, local_seq_len, 128),
+-        dtype=query.dtype, device=query.device,
+-    )
++    count = local_seq_len * heads * 128
++    send = torch.empty((count,), dtype=query.dtype, device=query.device)
+     recv = torch.empty_like(send)
+     result = torch.empty(
+         (1, local_seq_len, 2 * heads, 128),
+         dtype=query.dtype, device=query.device,
+     )
+-    merge_send, unpack_received = kernels
+-    merge_send[(heads, (local_seq_len + 31) // 32, 2)](
+-        send, out_bhsd, out_c, gate, slots,
+-        S=local_seq_len, P=packed_len, H=heads,
++    merge_local_and_send, unpack_remote = kernels
++    merge_local_and_send[(heads, (local_seq_len + 31) // 32, 2)](
++        send, result, out_bhsd, out_c, gate, slots,
++        S=local_seq_len, P=packed_len, H=heads, RANK=rank,
+         O_H=out_bhsd.stride(1), O_S=out_bhsd.stride(2),
+         C_T=out_c.stride(1), C_H=out_c.stride(2),
+         G_S=gate.stride(1), G_H=gate.stride(2),
+         BLOCK_S=32, num_warps=4,
+     )
+-    dist.all_to_all_single(recv, send, group=group)
+-    unpack_received[((result.numel() + 511) // 512,)](
++    splits = [0, count] if rank == 0 else [count, 0]
++    dist.all_to_all_single(
++        recv, send,
++        output_split_sizes=splits,
++        input_split_sizes=splits,
++        group=group,
++    )
++    unpack_remote[((count + 511) // 512,)](
+         recv.view(torch.int16), result.view(torch.int16),
+-        S=local_seq_len, H=heads, BLOCK=512, num_warps=4,
++        S=local_seq_len, H=heads, RANK=rank, BLOCK=512, num_warps=4,
+     )
+     return result
+ 

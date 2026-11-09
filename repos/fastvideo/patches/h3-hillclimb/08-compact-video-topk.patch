@@ -1,0 +1,89 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 661495b..5e20026 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -909,18 +909,7 @@ def _build_block_mask(
+     video_tile_spans: tuple[tuple[int, int], ...],
+     span_sparsities: tuple[float, ...],
+ ) -> torch.Tensor:
+-    """scores: [B, H, n_tiles, n_tiles] -> bool mask, same shape.
+-
+-    Prefix rows (non-video queries) stay dense. With ``exempt``, every query
+-    keeps every prefix column, and every video query keeps its own top-k of
+-    EACH video region, with the budget from that region's ``span_sparsities``
+-    entry. Without ``exempt`` (compete mode, generated-video region only),
+-    prefix and video columns compete for one FLOP-matched top-k.
+-    ``VSA_sparsity <= 0`` (dense steps and layers) keeps every tile.
+-    ``video_tile_spans`` come from the cached geometry, which lays them out
+-    contiguously after the prefix tiles, with one ``span_sparsities`` entry
+-    each.
+-    """
++    """Build the original mask, with compact video-only CUDA top-k inputs."""
+     n_tiles = scores.shape[-1]
+     if VSA_sparsity <= 0.0:
+         span_sparsities = tuple(VSA_sparsity for _ in video_tile_spans)
+@@ -930,6 +919,54 @@ def _build_block_mask(
+     ]
+     if all(k == end - start for k, (start, end) in zip(span_topk, video_tile_spans, strict=True)):
+         return torch.ones_like(scores, dtype=torch.bool)
++
++    fast = (
++        not torch.compiler.is_compiling()
++        and not torch.is_grad_enabled()
++        and not scores.requires_grad
++        and scores.is_cuda
++        and scores.dtype == torch.float32
++        and scores.ndim == 4
++        and scores.shape[0] == 1
++        and scores.shape[1] > 0
++        and scores.shape[-2] == n_tiles
++        and scores.is_contiguous()
++        and 256 <= n_tiles <= 2048
++        and 0 < num_prefix_tiles < n_tiles
++        and exempt
++        and len(video_tile_spans) == 1
++        and video_tile_spans[0] == (num_prefix_tiles, n_tiles)
++        and 0 < span_topk[0] < n_tiles - num_prefix_tiles
++    )
++    if fast:
++        from fastvideo.distributed.parallel_state import get_sp_world_size
++        fast = (
++            get_sp_world_size() == 1
++            and torch.cuda.get_device_capability(scores.device) == (10, 0)
++        )
++    if fast:
++        # At these row widths CUDA uses single-block top-k. Contiguous
++        # packing retains each row's element order and float bit patterns.
++        # Removing the optional output sort changes only index order;
++        # scatter membership and subsequent ascending mask compaction agree.
++        prefix = num_prefix_tiles
++        width = n_tiles - prefix
++        candidates = scores[:, :, prefix:, prefix:].contiguous()
++        indices = candidates.view(-1, width).topk(
++            span_topk[0], dim=-1, largest=True, sorted=False,
++        ).indices
++        indices = indices.view(
++            scores.shape[0], scores.shape[1], width, span_topk[0],
++        )
++
++        mask = torch.empty_like(scores, dtype=torch.bool)
++        mask[:, :, :prefix, :].fill_(True)
++        mask[:, :, prefix:, :prefix].fill_(True)
++        video_mask = mask[:, :, prefix:, prefix:]
++        video_mask.zero_()
++        video_mask.scatter_(-1, indices, True)
++        return mask
++
+     mask = torch.zeros_like(scores, dtype=torch.bool)
+     if exempt or num_prefix_tiles == 0:
+         for (start, end), k_span in zip(video_tile_spans, span_topk, strict=True):
+@@ -940,9 +977,6 @@ def _build_block_mask(
+             mask.scatter_(-1, idx, True)
+         mask[..., :num_prefix_tiles] = True
+     else:
+-        # compete: prefix keys enter the top-k under a FLOP-matched budget,
+-        # which is defined for the generated-video region alone (the builder
+-        # rejects compete mode with reference-video regions)
+         k_total = min(span_topk[0] + num_prefix_tiles, n_tiles)
+         idx = scores.topk(k_total, dim=-1).indices
+         mask.scatter_(-1, idx, True)

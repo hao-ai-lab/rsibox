@@ -1,0 +1,233 @@
+diff --git a/fastvideo/attention/backends/video_sparse_attn_h3.py b/fastvideo/attention/backends/video_sparse_attn_h3.py
+index 0ec001a..7522555 100644
+--- a/fastvideo/attention/backends/video_sparse_attn_h3.py
++++ b/fastvideo/attention/backends/video_sparse_attn_h3.py
+@@ -1133,7 +1133,7 @@ def _h3_sp2_transport_tile(impl, xs, metadata, original_seq_len):
+ 
+ 
+ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_len):
+-    """Exact gated SP=2 return with direct local stores and remote-only exchange."""
++    """Exact SP=2 gated return with contiguous row/head work partitions."""
+     if (torch.compiler.is_compiling() or torch.is_grad_enabled()
+             or type(impl) is not MiniMaxH3VSAImpl
+             or type(metadata) is not MiniMaxH3VSAMetadata
+@@ -1170,7 +1170,9 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+     for tensor in (query, key, value, gate):
+         if (tensor.shape != query.shape or tensor.device != query.device
+                 or tensor.dtype != query.dtype or tensor.requires_grad
+-                or tensor.stride(-1) != 1):
++                or tensor.layout != torch.strided
++                or tensor.stride(-1) != 1
++                or any(stride < 0 for stride in tensor.stride())):
+             return None
+ 
+     sizes = metadata.variable_block_sizes
+@@ -1186,94 +1188,10 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+             or packed_len not in (2 * local_seq_len, 2 * local_seq_len - 1)):
+         return None
+ 
+-    # Lazy construction is reached on every eligible dispatch. A distinct
+-    # cache name prevents reuse of kernels from the previous live function.
+-    kernels = getattr(_h3_sp2_forward_return, "remote_return_kernels", None)
+-    if kernels is None:
+-        g = globals()
+-        g["_h3_peer_ret_triton"] = __import__("triton")
+-        g["_h3_peer_ret_tl"] = __import__("triton.language").language
++    # Invoke the separate lazy builder on every eligible dispatch.
++    merge_local_and_send, unpack_remote = _h3_sp2_flat_return_kernels()
+ 
+-        @g["_h3_peer_ret_triton"].jit
+-        def merge_local_and_send(
+-            Send, Result, Out, Compress, Gate, Slots,
+-            S: _h3_peer_ret_tl.constexpr,
+-            P: _h3_peer_ret_tl.constexpr,
+-            H: _h3_peer_ret_tl.constexpr,
+-            RANK: _h3_peer_ret_tl.constexpr,
+-            O_H, O_S,
+-            C_T, C_H,
+-            G_S, G_H,
+-            BLOCK_S: _h3_peer_ret_tl.constexpr,
+-        ):
+-            h = _h3_peer_ret_tl.program_id(0)
+-            local_s = (
+-                _h3_peer_ret_tl.program_id(1).to(_h3_peer_ret_tl.int64) * BLOCK_S
+-                + _h3_peer_ret_tl.arange(0, BLOCK_S).to(_h3_peer_ret_tl.int64)
+-            )
+-            dest = _h3_peer_ret_tl.program_id(2)
+-            p = dest * S + local_s
+-            valid = (local_s < S) & (p < P)
+-            slot = _h3_peer_ret_tl.load(
+-                Slots + p, mask=valid, other=0,
+-            ).to(_h3_peer_ret_tl.int64)
+-            d = _h3_peer_ret_tl.arange(0, 128)
+-            o = _h3_peer_ret_tl.load(
+-                Out + h * O_H + slot[:, None] * O_S + d[None, :],
+-                mask=valid[:, None], other=0.0,
+-            ).to(_h3_peer_ret_tl.float32)
+-            gv = _h3_peer_ret_tl.load(
+-                Gate + h * G_H + slot[:, None] * G_S + d[None, :],
+-                mask=valid[:, None], other=0.0,
+-            ).to(_h3_peer_ret_tl.float32)
+-            cv = _h3_peer_ret_tl.load(
+-                Compress + h * C_H + (slot[:, None] // 64) * C_T + d[None, :],
+-                mask=valid[:, None], other=0.0,
+-            ).to(_h3_peer_ret_tl.float32)
+-            # Preserve the previous merge expression, FP32 operands,
+-            # BF16 store conversion, and explicit transport padding.
+-            res = o + cv * gv
+-            res = _h3_peer_ret_tl.where(valid[:, None], res, 0.0)
+-            rounded = res.to(Send.dtype.element_ty)
+-            if dest == RANK:
+-                dst = (
+-                    (local_s[:, None] * (2 * H) + RANK * H + h) * 128
+-                    + d[None, :]
+-                )
+-                _h3_peer_ret_tl.store(
+-                    Result + dst, rounded,
+-                    mask=(local_s < S)[:, None],
+-                )
+-            else:
+-                dst = (local_s[:, None] * H + h) * 128 + d[None, :]
+-                _h3_peer_ret_tl.store(
+-                    Send + dst, rounded,
+-                    mask=(local_s < S)[:, None],
+-                )
+-
+-        @g["_h3_peer_ret_triton"].jit
+-        def unpack_remote(
+-            Recv, Result,
+-            S: _h3_peer_ret_tl.constexpr,
+-            H: _h3_peer_ret_tl.constexpr,
+-            RANK: _h3_peer_ret_tl.constexpr,
+-            BLOCK: _h3_peer_ret_tl.constexpr,
+-        ):
+-            x = (
+-                _h3_peer_ret_tl.program_id(0).to(_h3_peer_ret_tl.int64) * BLOCK
+-                + _h3_peer_ret_tl.arange(0, BLOCK)
+-            )
+-            valid = x < S * H * 128
+-            s = x // (H * 128)
+-            hd = x % (H * 128)
+-            dst = s * (2 * H * 128) + (1 - RANK) * H * 128 + hd
+-            bits = _h3_peer_ret_tl.load(Recv + x, mask=valid, other=0)
+-            _h3_peer_ret_tl.store(Result + dst, bits, mask=valid)
+-
+-        kernels = (merge_local_and_send, unpack_remote)
+-        _h3_sp2_forward_return.remote_return_kernels = kernels
+-
+-    # Preserve pooling layouts, reduction order, selection, and attention.
++    # Keep every numerical operation upstream of the merge unchanged.
+     layer_sparsity = 0.0 if impl.layer_idx in metadata.dense_layers else metadata.VSA_sparsity
+     q_pooled = _pool_tiles(query, sizes, 64)
+     k_pooled = _pool_tiles(key, sizes, 64)
+@@ -1300,14 +1218,13 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+         (1, local_seq_len, 2 * heads, 128),
+         dtype=query.dtype, device=query.device,
+     )
+-    merge_local_and_send, unpack_remote = kernels
+-    merge_local_and_send[(heads, (local_seq_len + 31) // 32, 2)](
++    merge_local_and_send[((count + 1023) // 1024, 2)](
+         send, result, out_bhsd, out_c, gate, slots,
++        out_bhsd.stride(1), out_bhsd.stride(2),
++        out_c.stride(1), out_c.stride(2),
++        gate.stride(1), gate.stride(2),
+         S=local_seq_len, P=packed_len, H=heads, RANK=rank,
+-        O_H=out_bhsd.stride(1), O_S=out_bhsd.stride(2),
+-        C_T=out_c.stride(1), C_H=out_c.stride(2),
+-        G_S=gate.stride(1), G_H=gate.stride(2),
+-        BLOCK_S=32, num_warps=4,
++        BLOCK=1024, num_warps=4,
+     )
+     splits = [0, count] if rank == 0 else [count, 0]
+     dist.all_to_all_single(
+@@ -1323,6 +1240,90 @@ def _h3_sp2_forward_return(impl, query, key, value, gate, metadata, local_seq_le
+     return result
+ 
+ 
++def _h3_sp2_flat_return_kernels():
++    """Build and cache the contiguous-segment return kernels on dispatch."""
++    kernels = getattr(_h3_sp2_flat_return_kernels, "_kernels_v37", None)
++    if kernels is None:
++        g = globals()
++        g["_h3_ret37_triton"] = __import__("triton")
++        g["_h3_ret37_tl"] = __import__("triton.language").language
++
++        @g["_h3_ret37_triton"].jit
++        def merge_local_and_send(
++            Send, Result, Out, Compress, Gate, Slots,
++            O_H, O_S, C_T, C_H, G_S, G_H,
++            S: _h3_ret37_tl.constexpr,
++            P: _h3_ret37_tl.constexpr,
++            H: _h3_ret37_tl.constexpr,
++            RANK: _h3_ret37_tl.constexpr,
++            BLOCK: _h3_ret37_tl.constexpr,
++        ):
++            x = (
++                _h3_ret37_tl.program_id(0).to(_h3_ret37_tl.int64) * BLOCK
++                + _h3_ret37_tl.arange(0, BLOCK)
++            )
++            dest = _h3_ret37_tl.program_id(1)
++            local_s = x // (H * 128)
++            h = (x // 128) % H
++            d = x % 128
++            p = dest * S + local_s
++            transport_valid = x < S * H * 128
++            valid = transport_valid & (p < P)
++            slot = _h3_ret37_tl.load(
++                Slots + p, mask=valid, other=0,
++            ).to(_h3_ret37_tl.int64)
++            o = _h3_ret37_tl.load(
++                Out + h * O_H + slot * O_S + d,
++                mask=valid, other=0.0,
++            ).to(_h3_ret37_tl.float32)
++            gv = _h3_ret37_tl.load(
++                Gate + h * G_H + slot * G_S + d,
++                mask=valid, other=0.0,
++            ).to(_h3_ret37_tl.float32)
++            cv = _h3_ret37_tl.load(
++                Compress + h * C_H + (slot // 64) * C_T + d,
++                mask=valid, other=0.0,
++            ).to(_h3_ret37_tl.float32)
++            res = o + cv * gv
++            res = _h3_ret37_tl.where(valid, res, 0.0)
++            rounded = res.to(Send.dtype.element_ty)
++            if dest == RANK:
++                dst = (
++                    local_s * (2 * H * 128)
++                    + RANK * H * 128 + h * 128 + d
++                )
++                _h3_ret37_tl.store(
++                    Result + dst, rounded, mask=transport_valid,
++                )
++            else:
++                _h3_ret37_tl.store(
++                    Send + x, rounded, mask=transport_valid,
++                )
++
++        @g["_h3_ret37_triton"].jit
++        def unpack_remote(
++            Recv, Result,
++            S: _h3_ret37_tl.constexpr,
++            H: _h3_ret37_tl.constexpr,
++            RANK: _h3_ret37_tl.constexpr,
++            BLOCK: _h3_ret37_tl.constexpr,
++        ):
++            x = (
++                _h3_ret37_tl.program_id(0).to(_h3_ret37_tl.int64) * BLOCK
++                + _h3_ret37_tl.arange(0, BLOCK)
++            )
++            valid = x < S * H * 128
++            s = x // (H * 128)
++            hd = x % (H * 128)
++            dst = s * (2 * H * 128) + (1 - RANK) * H * 128 + hd
++            bits = _h3_ret37_tl.load(Recv + x, mask=valid, other=0)
++            _h3_ret37_tl.store(Result + dst, bits, mask=valid)
++
++        kernels = (merge_local_and_send, unpack_remote)
++        _h3_sp2_flat_return_kernels._kernels_v37 = kernels
++    return kernels
++
++
+ def _build_block_mask(
+     scores: torch.Tensor,
+     num_prefix_tiles: int,
