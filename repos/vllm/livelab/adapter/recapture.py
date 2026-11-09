@@ -73,7 +73,7 @@ def vllm_engine(worker):
     import torch
     from vllm.compilation.cuda_graph import CUDAGraphWrapper
     from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-    from vllm.distributed import parallel_state as ps
+    from vllm.distributed import parallel_state
     kinds = [CUDAGraphWrapper]
     try:
         from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
@@ -81,15 +81,15 @@ def vllm_engine(worker):
     except ImportError:
         pass
     runner = worker.model_runner
-    disp = getattr(runner, "cudagraph_dispatcher", None)
-    if disp is None:     # the V2 runner keeps graphs in CudaGraphManager.graphs: not bound yet
+    dispatcher = getattr(runner, "cudagraph_dispatcher", None)
+    if dispatcher is None:     # the V2 runner keeps graphs in CudaGraphManager.graphs: not bound yet
         raise NotImplementedError(f"R1 knows vLLM's V1 GPUModelRunner; this worker runs "
                                   f"{type(runner).__name__} (VLLM_USE_V2_MODEL_RUNNER=0)")
-    if not any(disp.cudagraph_keys.values()):
+    if not any(dispatcher.cudagraph_keys.values()):
         return None
 
     def wrappers():
-        return [w for k in kinds for w in list(k._all_instances)]
+        return [wrapper for kind in kinds for wrapper in list(kind._all_instances)]
 
     def capture(mode, desc):
         runner._warmup_and_capture(desc, cudagraph_runtime_mode=mode)
@@ -104,12 +104,14 @@ def vllm_engine(worker):
         stream = _STREAMS.get(runner.device)
         if stream is None:
             stream = _STREAMS[runner.device] = torch.cuda.Stream(device=runner.device)
-        ctx = ps.GraphCaptureContext(stream)
+        ctx = parallel_state.GraphCaptureContext(stream)
         set_cudagraph_capturing_enabled(True)
         try:
-            with runner._freeze_gc(), contextlib.ExitStack() as st:
-                for g in (ps.get_tp_group(), ps.get_pp_group(), ps.get_dp_group()):
-                    st.enter_context(g.graph_capture(ctx))
+            with runner._freeze_gc(), contextlib.ExitStack() as stack:
+                for group in (parallel_state.get_tp_group(),
+                              parallel_state.get_pp_group(),
+                              parallel_state.get_dp_group()):
+                    stack.enter_context(group.graph_capture(ctx))
                 yield
         finally:
             set_cudagraph_capturing_enabled(False)
@@ -120,28 +122,29 @@ def vllm_engine(worker):
         free, _total = torch.cuda.mem_get_info()
         return {"reserved": torch.cuda.memory_reserved(), "allocated":
                 torch.cuda.memory_allocated(), "device_free": free}
-    return Engine(wrappers, disp.cudagraph_keys, capture, session, memory,
+    return Engine(wrappers, dispatcher.cudagraph_keys, capture, session, memory,
                   torch.cuda.synchronize)
 
 
-def _attr(w):
-    return next((a for a in ENTRY_ATTRS if isinstance(getattr(w, a, None), dict)), None)
+def _attr(wrapper):
+    return next((attr for attr in ENTRY_ATTRS if isinstance(getattr(wrapper, attr, None), dict)), None)
 
 
-def _size(d):
-    return getattr(d, "num_tokens", d)
+def _size(desc):
+    return getattr(desc, "num_tokens", desc)
 
 
-def graphs(eng):
+def graphs(engine):
     """{"keys": {mode: [num_tokens]}, "wrappers": [{mode, entries}]}: what the worker can
     replay now (the `graphs` op; tests and receipts compare it before and after)."""
-    if eng is None:
+    if engine is None:
         return {"keys": {}, "wrappers": []}
-    ws = [(w, _attr(w)) for w in eng.wrappers()]
-    return {"keys": {name(m): sorted((_size(d) for d in ds), reverse=True)
-                     for m, ds in eng.keys.items()},
-            "wrappers": [{"mode": name(getattr(w, "runtime_mode", None)),
-                          "entries": len(getattr(w, a))} for w, a in ws if a]}
+    wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers()]
+    return {"keys": {name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
+                     for mode, descriptors in engine.keys.items()},
+            "wrappers": [{"mode": name(getattr(wrapper, "runtime_mode", None)),
+                          "entries": len(getattr(wrapper, attr))}
+                         for wrapper, attr in wrappers if attr]}
 
 
 class Recapture:
@@ -150,114 +153,138 @@ class Recapture:
     def __init__(self):
         self.live = {}       # txn -> {"modes", "chosen": {mode: set}, "left": {mode: [desc]}}
 
-    def run(self, eng, txn, journal, witness, modes=None, sizes=None):
+    def _select(self, engine, modes, sizes):
+        """Partition dispatcher keys and wrapper dicts into chosen and left sets."""
+        keys = engine.keys
+        selected = [mode for mode in keys if keys[mode] and (modes is None or name(mode) in modes)]
+        old_keys = {mode: set(keys[mode]) for mode in selected}
+        wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers()
+                    if _attr(wrapper) and (getattr(wrapper, "runtime_mode", None) is None
+                                           or getattr(wrapper, "runtime_mode") in selected)]
+        old_entries = [(wrapper, attr, getattr(wrapper, attr)) for wrapper, attr in wrappers]
+        want = None if sizes is None else {int(s) for s in sizes}
+        chosen = {mode: [desc for desc in old_keys[mode] if want is None or _size(desc) in want]
+                  for mode in selected}
+        left = {mode: [desc for desc in old_keys[mode] if desc not in chosen[mode]]
+                for mode in selected}
+        return selected, old_keys, wrappers, old_entries, chosen, left
+
+    def _swap_dicts(self, wrappers, selected, engine):
+        """Install empty entry dicts on selected wrappers and clear dispatcher keys."""
+        for wrapper, attr in wrappers:
+            setattr(wrapper, attr, {})
+        for mode in selected:
+            engine.keys[mode].clear()
+
+    def run(self, engine, txn, journal, witness, modes=None, sizes=None):
         """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds and
         memory before/after; on failure the old graphs are back and the reply is not-ok."""
-        if eng is None:
+        if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
             return F.not_ok(f"R1 already ran for {txn}; use extend")
         if not journal.marks or journal.marks[-1][0] != txn:
             return F.not_ok(f"{txn} is not this rank's newest committed transaction: its undo "
                             "would not restore the graphs R1 replaces")
-        keys = eng.keys
-        sel = [m for m in keys if keys[m] and (modes is None or name(m) in modes)]
-        old_keys = {m: set(keys[m]) for m in sel}
-        ws = [(w, _attr(w)) for w in eng.wrappers()
-              if _attr(w) and (getattr(w, "runtime_mode", None) is None
-                               or getattr(w, "runtime_mode") in sel)]
-        old = [(w, a, getattr(w, a)) for w, a in ws]
-        want = None if sizes is None else {int(s) for s in sizes}
+
+        selected, old_keys, wrappers, old_entries, chosen, left = self._select(
+            engine, modes, sizes
+        )
 
         def restore():
-            for w, a, d in old:
-                setattr(w, a, d)
-            for m in sel:
-                keys[m].clear()
-                keys[m].update(old_keys[m])
-        mem0 = eng.memory()
+            for wrapper, attr, old_dict in old_entries:
+                setattr(wrapper, attr, old_dict)
+            for mode in selected:
+                engine.keys[mode].clear()
+                engine.keys[mode].update(old_keys[mode])
+
+        mem0 = engine.memory()
         try:
-            for w, a in ws:
-                setattr(w, a, {})
-            for m in sel:
-                keys[m].clear()
-            chosen = {m: [d for d in old_keys[m] if want is None or _size(d) in want] for m in sel}
-            left = {m: [d for d in old_keys[m] if d not in chosen[m]] for m in sel}
-            r = self._capture(eng, chosen, witness)
-            if not r["ok"]:
+            self._swap_dicts(wrappers, selected, engine)
+            result = self._capture(engine, chosen, witness)
+            if not result["ok"]:
                 restore()
-                eng.sync()
-                return r
+                engine.sync()
+                return result
         except BaseException:
             restore()
-            eng.sync()
+            engine.sync()
             raise
+
         journal.record_call(restore, f"R1 graphs of {txn}")
-        self.live[txn] = {"left": left, "restore": restore, "ws": ws, "old_keys": old_keys}
+        self.live[txn] = {
+            "left": left,
+            "restore": restore,
+            "wrappers": wrappers,
+            "old_keys": old_keys,
+        }
 
         def forget():
             self.live.pop(txn, None)
         journal.record_call(forget, f"R1 state of {txn}")
-        return F.ok(**r["report"], modes=[name(m) for m in sel], wrappers=len(ws),
-                    eager={name(m): sorted((_size(d) for d in ds), reverse=True)
-                           for m, ds in left.items() if ds},
-                    memory={"before": mem0, "after": eng.memory()})
 
-    def extend(self, eng, txn, journal, witness, sizes=None):
+        return F.ok(**result["report"], modes=[name(mode) for mode in selected],
+                    wrappers=len(wrappers),
+                    eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
+                           for mode, descriptors in left.items() if descriptors},
+                    memory={"before": mem0, "after": engine.memory()})
+
+    def extend(self, engine, txn, journal, witness, sizes=None):
         """Capture more of the descriptors R1 left out for txn (default: all of them)."""
-        st = self.live.get(txn)
-        if st is None:
+        state = self.live.get(txn)
+        if state is None:
             return F.not_ok(f"no R1 for {txn} on this rank")
         if not journal.marks or journal.marks[-1][0] != txn:
             return F.not_ok(f"{txn} is not this rank's newest committed transaction")
         want = None if sizes is None else {int(s) for s in sizes}
-        chosen = {m: [d for d in ds if want is None or _size(d) in want]
-                  for m, ds in st["left"].items()}
-        r = self._capture(eng, chosen, witness)
-        if not r["ok"]:
-            return r
-        for m, ds in chosen.items():
-            st["left"][m] = [d for d in st["left"][m] if d not in ds]
-        ws = st["ws"]
+        chosen = {mode: [desc for desc in descriptors if want is None or _size(desc) in want]
+                  for mode, descriptors in state["left"].items()}
+        result = self._capture(engine, chosen, witness)
+        if not result["ok"]:
+            return result
+        for mode, descriptors in chosen.items():
+            state["left"][mode] = [desc for desc in state["left"][mode] if desc not in descriptors]
+        wrappers = state["wrappers"]
 
         def unextend():
-            for m, ds in chosen.items():
-                for d in ds:
-                    eng.keys[m].discard(d)
-                    for w, a in ws:
-                        if getattr(w, "runtime_mode", None) in (None, m):
-                            getattr(w, a).pop(d, None)
-                st["left"][m] = [d for d in st["old_keys"][m] if d not in eng.keys[m]]
-        journal.record_call(unextend, f"R1 extend of {txn}")
-        return F.ok(**r["report"])
+            for mode, descriptors in chosen.items():
+                for desc in descriptors:
+                    engine.keys[mode].discard(desc)
+                    for wrapper, attr in wrappers:
+                        if getattr(wrapper, "runtime_mode", None) in (None, mode):
+                            getattr(wrapper, attr).pop(desc, None)
+            state["left"][mode] = [desc for desc in state["old_keys"][mode] if desc not in engine.keys[mode]]
 
-    def _capture(self, eng, chosen, witness):
+        journal.record_call(unextend, f"R1 extend of {txn}")
+        return F.ok(**result["report"])
+
+    def _capture(self, engine, chosen, witness):
         """Capture `chosen` ({mode: [desc]}); every key goes in just before its capture (the
         runner's dummy run asks the dispatcher for the mode). On error the keys of this call
         come out again, so no step dispatches to a half-captured descriptor."""
-        done, per = [], []
+        done, timings = [], []
         t0 = time.perf_counter()
-        order = sorted(chosen, key=lambda m: ORDER.index(name(m)) if name(m) in ORDER else 9)
+        order = sorted(chosen, key=lambda mode: ORDER.index(name(mode)) if name(mode) in ORDER else 9)
         try:
-            with witness.capture(), eng.session():
-                for m in order:
-                    for d in sorted(chosen[m], key=_size, reverse=True):
+            with witness.capture(), engine.session():
+                for mode in order:
+                    for desc in sorted(chosen[mode], key=_size, reverse=True):
                         t = time.perf_counter()
-                        eng.keys[m].add(d)
-                        done.append((m, d))
-                        eng.capture(m, d)
-                        per.append([name(m), _size(d), round(time.perf_counter() - t, 6)])
+                        engine.keys[mode].add(desc)
+                        done.append((mode, desc))
+                        engine.capture(mode, desc)
+                        timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
         except Exception as e:
-            ws = [(w, _attr(w)) for w in eng.wrappers() if _attr(w)]
-            for m, d in done:
-                eng.keys[m].discard(d)
-                for w, a in ws:
-                    if getattr(w, "runtime_mode", None) in (None, m):
-                        getattr(w, a).pop(d, None)
-            eng.sync()
+            wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
+            for mode, desc in done:
+                engine.keys[mode].discard(desc)
+                for wrapper, attr in wrappers:
+                    if getattr(wrapper, "runtime_mode", None) in (None, mode):
+                        getattr(wrapper, attr).pop(desc, None)
+            engine.sync()
             return F.not_ok(f"R1 capture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"capture of {name(done[-1][0]) if done else '?'} "
                 f"{_size(done[-1][1]) if done else '?'} raised {type(e).__name__}: {e}",
-                "every chosen descriptor captured")], captured=per)
-        return F.ok(report={"captured": per, "graphs": len(per),
+                "every chosen descriptor captured")], captured=timings)
+        return F.ok(report={"captured": timings, "graphs": len(timings),
                             "seconds": round(time.perf_counter() - t0, 6)})
