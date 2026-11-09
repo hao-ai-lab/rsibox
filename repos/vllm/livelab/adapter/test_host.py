@@ -353,5 +353,21 @@ class OverlayTest(unittest.TestCase):
             self.assertIn("_patch_core", mod.EngineCoreProc.run_busy_loop.__qualname__)
 
 
+class ImportTest(unittest.TestCase):
+
+    def test_importing_the_adapter_leaves_the_environment_alone(self):
+        # the zygote refuses to fork for a client whose env differs from its own, so a client
+        # that imports the adapter before `zygote.request(...)` must not grow FASTRSI_LIVELAB
+        import subprocess
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {k: v for k, v in os.environ.items() if k != "FASTRSI_LIVELAB"}
+        code = ("import os, adapter, kernel; "
+                "print(repr(os.environ.get('FASTRSI_LIVELAB')), adapter.LIVELAB, kernel.__file__)")
+        out = subprocess.run([sys.executable, "-c", code], cwd=here, env=env, check=True,
+                             capture_output=True, text=True).stdout.split()
+        self.assertEqual(out[0], "None")
+        self.assertTrue(out[2].startswith(os.path.join(out[1], "")))
+
+
 if __name__ == "__main__":
     unittest.main()

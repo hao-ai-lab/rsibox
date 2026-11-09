@@ -14,8 +14,16 @@ call raise ConnectionError until the process is respawned, as a dead worker woul
 import importlib.util
 import linecache
 import os
+import sys
 import time
 import traceback
+
+# the kernel lives in the framework's live-lab folder; the package __init__ adds it too, this
+# covers a worker that imports this module by path
+_LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "template", "livelab"))
+if _LIVELAB not in sys.path:
+    sys.path.insert(0, _LIVELAB)
 
 _STATE = {"participant": None, "faults": {}, "hooks": []}
 
@@ -102,7 +110,6 @@ def inject(worker, fault, **kw):
     elif fault == "lost":
         _STATE["faults"]["lost"] = True
     elif fault == "tamper":
-        import sys
         mod = sys.modules[kw.get("module", "fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_decoding")]
         fn = getattr(mod, kw.get("function", "_layout"))
         # a REPL edit, not journaled: same behavior, another code object

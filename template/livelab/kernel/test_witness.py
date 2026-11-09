@@ -1,8 +1,8 @@
 """Golden tests of the witness on the toy engine (CPU, standard library only; one test
 imports torch on CPU and is skipped without it).
 
-Run from the repo root:  python3 -m unittest discover -s repos/fastvideo/livelab/kernel -t repos/fastvideo/livelab -v
-(or python3 -m pytest -q repos/fastvideo/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 
 These tests use the witness without the swap, so `install` below does by hand what the swap
 does for a witness: add the counter call to the new body (`witness.inject`),

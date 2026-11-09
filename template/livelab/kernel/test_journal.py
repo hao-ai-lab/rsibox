@@ -1,8 +1,8 @@
 """Golden tests of the journal on the toy engine (CPU, standard library only; one test
 imports torch on CPU and is skipped without it).
 
-Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
-(or python3 -m pytest -q repos/vllm/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 
 Toy arithmetic and helpers: see test_locate.py (step(3) = 17 at base).
 """

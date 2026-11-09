@@ -194,6 +194,7 @@ built as a versioned side library and rebound.
 
 The lab host owns a `MultiprocExecutor` worker group, one worker per rank, at every GPU count
 (`../livelab/README.md`). Each worker runs the agent (`livelab/adapter/agent.py`), which
-installs edits through the transaction kernel (`livelab/kernel/`) in the gap between requests.
+installs edits through the transaction kernel (`template/livelab/kernel/`) in the gap between
+requests.
 The services (`livelab/services/`) are the restart actions above below a plain respawn: each
 keeps one more box warm (weights, imports, JIT caches) and refuses when its box is stale.

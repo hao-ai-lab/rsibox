@@ -72,9 +72,9 @@ c10_not_proven        pass      0.057  proven False, findings ['zero_witness', '
 
 ## The toy lab
 
-The toy lab is not in `template/`: it drives the vLLM reference kernel, so it lives with it in
-`repos/vllm/livelab/kernel/toy_lab.py`. This folder tests its own cases against small fake
-labs (`test_cases.py`). The output above is from the toy lab.
+The toy lab lives with the kernel it drives, in `../kernel/toy_lab.py`
+(`--lab kernel.toy_lab:ToyLab` from `template/livelab`). This folder tests its own cases
+against small fake labs (`test_cases.py`). The output above is from the toy lab.
 
 The toy lab: two worker ranks, each its own copy of the kernel's toy engine, step together in
 a `Cluster` loop thread; a `StepGapCoordinator` runs phase 2 of every transaction in one gap
@@ -90,7 +90,7 @@ at the RPC and step boundary; respawn rebuilds the module copies in the same pro
 
 ## Kernel pieces the cases rely on
 
-See `repos/vllm/livelab/kernel/README.md`:
+See `../kernel/README.md`:
 
 - `empty_change` (c6): an edit that changes no code is refused, not committed as a success.
 - Chained edits (c7, c3): participants stage against the text they installed, so a second

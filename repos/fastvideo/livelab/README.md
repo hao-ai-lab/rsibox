@@ -4,9 +4,10 @@ A warm FastVideo engine (today: MiniMax H3 / FastH3, `kb/workload.md`) that take
 live and proves they ran. Implements `template/livelab/INTERFACE.md` (the v1 draft verbs) and
 the conformance harness of `template/livelab/conformance/`.
 
-- `kernel/`: the transaction kernel, a copy of `repos/vllm/livelab/kernel/` (engine-agnostic,
-  standard library only). It starts here as a copy because AGENTS.md keeps code with its engine
-  until a framework PR moves it; diff it against the vLLM copy before changing either.
+The transaction kernel and the pre-fork guards are the framework's: `template/livelab/kernel/`
+and `template/livelab/forksafe.py`. Importing `adapter` (or `services.zygote`) puts
+`template/livelab` on `sys.path` (`FASTRSI_LIVELAB` overrides the folder).
+
 - `adapter/`: the kernel inside FastVideo: `agent.py` runs in every worker process,
   `lab.py` is the lab host (the verbs), `patches.py` the conformance edits on real H3 code,
   `fresh.py` the fresh process `fresh_check` starts.
@@ -16,7 +17,8 @@ the conformance harness of `template/livelab/conformance/`.
   - `jitcache.py`: path-stable JIT cache roots and a `torch_key` preset (warm restart with
     path-stable caches; first-video JIT 6.3 -> 2.2 s, measured);
   - `zygote.py`: fork workers from a preloaded forkserver, refreshing modules edited since it
-    imported them (zygote respawn; 14.1 s to ready, measured);
+    imported them, with Triton's GPU target pinned while it imports (`forksafe.pin_triton_target`)
+    (zygote respawn; 14.1 s to ready, measured);
   - `holder.py`: keep the loaded DiT, text encoder and VAE in a holder process that respawned
     workers map by CUDA IPC, and refuse to serve when loader, quantization or model code changed
     (zygote respawn with weights holder; 4.8 s to ready, measured).

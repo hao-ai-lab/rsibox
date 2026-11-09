@@ -19,8 +19,8 @@ We build FastRSI one engine and a few real PRs at a time.
 
 The repo holds three things. Keep them apart.
 
-- **Framework:** blueprints that hold for any engine, and no engine code. `core/`, `template/`,
-  `docs/`, `AGENTS.md`, `.github/`.
+- **Framework:** blueprints and shared code that hold for any engine, and no code for one
+  engine. `core/`, `template/`, `docs/`, `AGENTS.md`, `.github/`.
 - **Artifact:** what the loop produced for one engine, code and architecture included.
   `repos/<engine>/`. It shows the current state only: edit `docs/` and `kb/` in place, never
   append history.
@@ -121,9 +121,11 @@ test, because it misleads the reader.
 
 - `core/`: blueprints only: the skill, the agent prompts (developer, toolsmith offline and
   online, orchestrator) and the method. No code, and nothing about one engine.
-- `template/livelab/`: the blueprint for a new engine's live lab: the fixed interface, a stub,
-  and the conformance cases, run against a toy lab. Changing `INTERFACE.md` is a breaking
-  change: bump its version and say so in the PR.
+- `template/livelab/`: the blueprint for a new engine's live lab and the code every engine's
+  lab shares: the fixed interface, the conformance cases, the transaction `kernel/` (pure
+  Python, imports no engine) with its toy lab, and `forksafe.py` (pre-fork CUDA guards for an
+  engine zygote). Engine labs import them from this folder (`FASTRSI_LIVELAB` overrides it).
+  Changing `INTERFACE.md` is a breaking change: bump its version and say so in the PR.
 - `docs/`: how this repo and its process work, following `docs/README.md`. No engine
   architecture, and no loose files at the root.
   `docs/lessons.md` holds framework lessons; `repos/<engine>/kb/lessons.md` holds engine lessons.
@@ -131,9 +133,10 @@ test, because it misleads the reader.
   - `docs/`: its architecture: the process tree, the restart boundaries and what each costs,
     and how the live lab maps onto them.
   - `kb/`: measured facts with their sources (costs, workload, lessons).
-  - `livelab/`: all code, one folder per boundary (for example `kernel/`, `adapter/`,
-    `services/`). Code that looks engine-agnostic still starts here. Move it to the framework
-    only when a second engine needs it, in a framework PR of its own.
+  - `livelab/`: the engine's own code, one folder per boundary (for example `adapter/`,
+    `services/`). Code that looks engine-agnostic still starts here. Move it to
+    `template/livelab/` only when a second engine needs it, in a framework PR of its own. Code
+    under `repos/<engine>/` never imports from another `repos/<other>/` (CI checks it).
   - `tools/`: proven probes. `patches/`: our edits to the engine itself, with a ledger for
     upstreaming. `examples/<name>/`: one walkthrough per replayed change, with its receipt.
 - No decision logs, ADRs or changelogs. Update the doc that describes the thing instead.

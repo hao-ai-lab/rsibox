@@ -51,7 +51,7 @@ measurements, and the cost of each call.
 ## Proposed for v1: receipt schema (not part of version 0)
 
 > **Proposal.** Not binding for version 0 labs. Adopting it is the v1 bump. The writer is
-> `repos/vllm/livelab/kernel/receipt.py` (`ReceiptWriter`): one JSON object per line, appended under an exclusive
+> `template/livelab/kernel/receipt.py` (`ReceiptWriter`): one JSON object per line, appended under an exclusive
 > lock, never rewritten. It was written by an agent and **needs a human owner** before its
 > receipts count (see "Trust" in AGENTS.md).
 

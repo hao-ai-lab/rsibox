@@ -4,12 +4,12 @@
 it, which is a breaking change: its own PR, titled `feat(livelab)!: ...`.
 
 Every `repos/<engine>/livelab/` implements this. How is up to the engine; what is fixed here.
-The reference implementation is the vLLM kernel (`repos/vllm/livelab/kernel/`, CPU-tested on a toy engine) and `conformance/`.
+The reference implementation is the shared transaction kernel (`template/livelab/kernel/`, CPU-tested on a toy engine) and `conformance/`.
 
 ## What changed from version 0, and why
 
 `§` references are to the loop design notes (2026-11), kept outside the repo; toy numbers are
-in `repos/vllm/livelab/kernel/README.md`.
+in `template/livelab/kernel/README.md`.
 
 | v0 | v1 | Why (measured) |
 |---|---|---|
@@ -48,7 +48,7 @@ phase 2, one step gap:  validate on every participant (staged code still current
 
 Participant calls: `prepare(plan)`, `validate(id)`, `commit(id)`, `abort(id)`, `undo(id)`,
 `status(id)`, `proof(id)`, `witness_check(id)`, `reset(kind)`, `fingerprint(modules)`.
-Signatures and plan format: `repos/vllm/livelab/kernel/coordinator.py`.
+Signatures and plan format: `template/livelab/kernel/coordinator.py`.
 
 - Outcomes: `committed` (all switched), `aborted` (none switched), `rolled_back` (switched and
   undone in the same gap).
@@ -154,7 +154,7 @@ The caller's `accept` list (check names, accept records, or `"all"`) decides: a 
 every finding is accepted, and only overridable findings can be. Physical limits are not
 overridable: `patch_invalid`, `no_live_function`, `not_in_patch`, `closure_changed`,
 `changed_since_prepare`, `empty_change`, `repair_failed`, `participant_failed`, `reset_failed`,
-`undo_incomplete`, `closure_not_restored`, `tampered`, `session_poisoned`. Catalog: `repos/vllm/livelab/kernel/findings.py`.
+`undo_incomplete`, `closure_not_restored`, `tampered`, `session_poisoned`. Catalog: `template/livelab/kernel/findings.py`.
 A check that could not run as designed says so as a finding too: a prepare whose analysis
 fell back from its child process to the engine's own process reports `analyze_fallback`
 (overridable) with the reason and the time it held the engine's GIL.
@@ -176,9 +176,9 @@ records that share its `id`, appended as JSON lines: `txn` (plan, every particip
 outcome, rollback, findings and decisions, timeline, edit-to-run), `proof` (witness counts,
 findings, the caller's golden results, edit-to-finish), `undo` (code undo, then each reset;
 `undone` or `partial`). Fields: the "Proposed for v1" section of `INTERFACE.md`, and
-`repos/vllm/livelab/kernel/receipt.py`.
+`template/livelab/kernel/receipt.py`.
 
-The writer, `repos/vllm/livelab/kernel/receipt.py`, was written by an agent and **needs a human owner** before
+The writer, `template/livelab/kernel/receipt.py`, was written by an agent and **needs a human owner** before
 its receipts count (AGENTS.md, Trust). It has no record kind for a conformance run yet, so the
 conformance runner prints its verdict and does not write it.
 

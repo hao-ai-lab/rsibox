@@ -2,8 +2,8 @@
 only). The whole lab is checked by the template's conformance cases against `toy_lab.ToyLab`
 (CI step "Run the template conformance cases c0-c10 against the toy lab").
 
-Run from the repo root:  python3 -m unittest discover -s repos/fastvideo/livelab/kernel -t repos/fastvideo/livelab -v
-(or python3 -m pytest -q repos/fastvideo/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 """
 import time
 import unittest

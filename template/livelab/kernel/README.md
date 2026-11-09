@@ -125,8 +125,8 @@ template's conformance cases c0-c10.
   (`install`, `check`, `reset`, `uninstall`, `status`) and the conformance harness
   (`patches`, `fresh_check`, `inject`): two ranks step together in a loop thread, the host
   is a `StepGapCoordinator` inside a `Session`, ranks are reached through `CallParticipant`.
-  CI runs `python3 -m conformance --lab kernel.toy_lab:ToyLab` from `template/livelab` with
-  `repos/vllm/livelab` on `PYTHONPATH`.
+  CI runs `python3 -m conformance --lab kernel.toy_lab:ToyLab` from `template/livelab`, the
+  folder that holds `kernel/`.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
   expected, why it matters, the actions and their cost, and the risk of ignoring it.
@@ -175,7 +175,7 @@ template's conformance cases c0-c10.
 From the repo root (CPU, a few seconds; the torch cases are skipped without torch; CI runs the same command in `.github/workflows/cpu-tests.yml`):
 
 ```
-python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
+python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
 ```
 
 Each test's docstring says what it proves and what it does not.
