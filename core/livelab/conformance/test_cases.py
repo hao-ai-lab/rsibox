@@ -5,7 +5,7 @@ case against an honest fake lab, which must pass, and, where the test has one, a
 lacks exactly the property the case names, which must fail. The fakes are not live labs (their "code" is one
 number per participant); they exercise the cases' own logic, nothing else.
 
-Run from template/livelab:  python3 -m unittest discover -s conformance -t . -v
+Run from core/livelab:  python3 -m unittest discover -s conformance -t . -v
 """
 import unittest
 

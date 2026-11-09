@@ -1,9 +1,10 @@
-# Live lab template
+# Core live-lab runtime
 
-The blueprint every engine's live lab follows, and the code every engine's lab shares. No code
+The shared engine-agnostic runtime every engine's live lab builds on. No code
 for one engine lives here: each engine's adapter and restart services are in
 `repos/<engine>/livelab/`, which import the shared code from this folder (the engine packages
-put it on `sys.path`; `FASTRSI_LIVELAB` overrides the folder).
+put it on `sys.path`; `FASTRSI_LIVELAB` overrides the folder). Onboarding scaffold for a new
+engine: `template/`.
 
 - `INTERFACE.md`: the fixed verbs and receipt format (version 0). `INTERFACE-v1.md` is the
   draft of version 1, on top of the transaction kernel; it is not adopted yet.

@@ -84,7 +84,7 @@ Notes:
 ## 3. Restart classes: what an edit invalidates
 
 Groups (OP, GRAPH, STATE, RESOURCE, RANKS, NATIVE) are the function groups defined in
-`core/livelab_overview.md`. "Live" means the engine process keeps running (the live swap,
+`core/agents/livelab_overview.md`. "Live" means the engine process keeps running (the live swap,
 `install`); it does not mean the check is free. Section 5 says which restart action covers
 each class and what it costs.
 
@@ -194,7 +194,7 @@ built as a versioned side library and rebound.
 
 The lab host owns a `MultiprocExecutor` worker group, one worker per rank, at every GPU count
 (`../livelab/README.md`). Each worker runs the agent (`livelab/adapter/agent.py`), which
-installs edits through the transaction kernel (`template/livelab/kernel/`) in the gap between
+installs edits through the transaction kernel (`core/livelab/kernel/`) in the gap between
 requests.
 The services (`livelab/services/`) are the restart actions above below a plain respawn: each
 keeps one more box warm (weights, imports, JIT caches) and refuses when its box is stale.

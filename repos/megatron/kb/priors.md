@@ -53,7 +53,7 @@ What the first step pays (all lazy, by design or by library):
 
 ## 2. Restart classes
 
-Mapped to the groups in `core/livelab_overview.md` and recipes R0–R10 in `template/livelab/INTERFACE-v1.md`.
+Mapped to the groups in `core/agents/livelab_overview.md` and recipes R0–R10 in `core/livelab/INTERFACE-v1.md`.
 The "where" column says what holds a reference to the code.
 
 | Edit | Group | Recipe | Notes |

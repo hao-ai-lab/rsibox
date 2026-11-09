@@ -2,7 +2,7 @@
 
 What each kind of experiment the loop runs costs before it runs: the restart action it needs,
 its predicted cost from `costs.md`, the base-to-base noise of its metric, and the cheapest
-probe that answers its question (`core/toolsmith_online.md`). A kind not in this table is not
+probe that answers its question (`core/agents/toolsmith_online.md`). A kind not in this table is not
 priced, and the loop does not run it.
 
 | Kind | Restart action | Predicted cost | Base-to-base noise | Cheapest probe | Source |

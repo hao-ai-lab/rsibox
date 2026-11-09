@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - working-directory: template/livelab
+      - working-directory: core/livelab
         run: python3 -m unittest discover -s conformance -t . -v
   livelab-framework:
     name: Framework kernel, forksafe, and conformance c0-c10 on the toy lab (CPU)
@@ -26,11 +26,11 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run the kernel's unittest cases on the toy engine (standard library only; torch cases skip)
-        run: python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+        run: python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
       - name: Run forksafe's unittest cases with stand-in torch.cuda, NVML and Triton (no GPU; the real-torch case skips without torch)
-        run: python3 -m unittest discover -s template/livelab -p 'test_forksafe.py' -v
-      - name: Run the template conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)
-        working-directory: template/livelab
+        run: python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
+      - name: Run the conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)
+        working-directory: core/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
   fastvideo-adapter:
     name: FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
@@ -45,8 +45,8 @@ jobs:
         run: python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab -v
       - name: Run the restart services' unittest cases (zygote refresh with a real fork; the torch cases of rebuild, jitcache and holder skip without torch)
         run: python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
-      - name: Run the template conformance cases c0-c10 against the lab host on the toy engine (2 worker processes)
-        working-directory: template/livelab
+      - name: Run the conformance cases c0-c10 against the lab host on the toy engine (2 worker processes)
+        working-directory: core/livelab
         env:
           PYTHONPATH: ${{ github.workspace }}/repos/fastvideo/livelab
         run: python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab

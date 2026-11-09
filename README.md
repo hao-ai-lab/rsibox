@@ -9,7 +9,7 @@ FastRSI provides autonomous coding agents and human engineers with a **live lab*
 The repository is organized into four distinct layers:
 
 ```
-template/livelab/        Shared live-lab framework and blueprint for any engine:
+core/livelab/            Shared engine-agnostic live-lab runtime:
   kernel/                Pure-Python transaction kernel (locate, swap, findings, witness,
                          journal, coordinator, session) with zero engine dependencies;
                          includes ToyLab for self-contained testing.
@@ -20,6 +20,15 @@ template/livelab/        Shared live-lab framework and blueprint for any engine:
                          soak stability, and unproven execution detection.
   INTERFACE.md           The live lab protocol contract (verbs, state, findings, receipts).
 
+core/agents/             Agent prompts, protocols, and engineering discipline:
+  livelab_overview.md    Live lab overview: interface verbs, boundaries, and function groups.
+  developer.md           Developer agent prompt: edit, stage, verify, commit, and undo.
+  toolsmith_offline.md   Offline toolsmith: mine PRs and tests to build engine knowledge.
+  toolsmith_online.md    Online toolsmith: diagnose slow checks, account for state pollution,
+                         and avoid over-conservative micro-edits.
+  toolsmith_distill.md   Distillation toolsmith: promote proven mechanisms across 2+ engines.
+  orchestrator.md        Orchestrator prompt: live streamer and human interface of the loop.
+
 repos/<engine>/          Engine-specific live labs, knowledge bases, and PR replays:
   docs/                  Engine architecture: process tree, restart boundaries, and costs.
   kb/                    Measured facts and ground truth: costs, workloads, priors, lessons.
@@ -28,13 +37,7 @@ repos/<engine>/          Engine-specific live labs, knowledge bases, and PR repl
   patches/               Engine patches with upstreaming ledgers.
   examples/<name>/       Reproducible walkthroughs replaying real PRs with receipts.
 
-core/                    Agent prompts, protocols, and engineering discipline:
-  livelab_overview.md    Live lab overview: interface verbs, boundaries, and function groups.
-  developer.md           Developer agent prompt: edit, stage, verify, commit, and undo.
-  toolsmith_offline.md   Offline toolsmith: mine PRs and tests to build engine knowledge.
-  toolsmith_online.md    Online toolsmith: diagnose slow checks, account for state pollution,
-                         and avoid over-conservative micro-edits.
-  orchestrator.md        Orchestrator prompt: live streamer and human interface of the loop.
+template/                Minimal onboarding scaffold for bootstrapping a new engine under repos/.
 
 docs/                    Process documentation, rules, and framework lessons (docs/lessons.md).
 ```
@@ -60,13 +63,13 @@ Run CPU-only unittests and conformance checks locally:
 
 ```sh
 # Shared kernel unittests
-python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 
 # Run the 11 conformance cases on the ToyLab
-cd template/livelab && python3 -m conformance --lab kernel.toy_lab:ToyLab
+cd core/livelab && python3 -m conformance --lab kernel.toy_lab:ToyLab
 
 # Pre-fork CUDA guards test suite
-python3 -m unittest discover -s template/livelab -p 'test_forksafe.py' -v
+python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
 
 # vLLM live lab adapter tests
 python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v

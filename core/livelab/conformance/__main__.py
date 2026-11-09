@@ -1,6 +1,6 @@
 """Run the conformance cases against a lab and print a pass table.
 
-    python3 -m conformance --lab module:Class          # from template/livelab
+    python3 -m conformance --lab module:Class          # from core/livelab
     python3 -m conformance --lab module:Class --only c4_uninstall,c7_chain
     python3 -m conformance --lab module:Class --receipts receipts.jsonl --json
 
@@ -9,7 +9,7 @@ lab lives in `repos/<engine>/livelab/`.
 `--receipts` keeps the txn / proof / undo receipts the suite's transactions write.
 
 The run's own verdict is printed, not written as a receipt: the receipt proposal
-(template/livelab/kernel/receipt.py) has no record kind for a conformance run, and adding one extends the
+(core/livelab/kernel/receipt.py) has no record kind for a conformance run, and adding one extends the
 receipt writer, which needs its human owner first (AGENTS.md, Trust).
 """
 import argparse

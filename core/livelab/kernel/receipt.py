@@ -9,7 +9,7 @@ record; they never write the file. Each record is one JSON object on one line; t
 opens the file in append mode under an exclusive lock and never rewrites a line.
 
 A transaction leaves up to three records that share its `id` (schema proposed for INTERFACE
-v1; see template/livelab/INTERFACE.md):
+v1; see core/livelab/INTERFACE.md):
 
 - `txn` (from Coordinator.run): plan, each participant's prepare / validate / commit / abort
   replies, the outcome, in-transaction rollback, findings and decisions, edit_to_run_s,

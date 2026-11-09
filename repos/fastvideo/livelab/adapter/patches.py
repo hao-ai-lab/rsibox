@@ -1,4 +1,4 @@
-"""The conformance edits on real MiniMax H3 code (template/livelab/conformance, `patches()`).
+"""The conformance edits on real MiniMax H3 code (core/livelab/conformance, `patches()`).
 
 Each edit is a string replacement on the base text of one H3 module, so a FastVideo change
 that moves these lines makes `h3_patches` fail loudly (AssertionError) instead of building an

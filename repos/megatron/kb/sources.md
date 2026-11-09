@@ -26,6 +26,6 @@ Comparison tree: megatron-core 0.13.0rc0.
 | Rerun state machine | `megatron/core/rerun_state_machine.py:RerunStateMachine`, `RerunDataIterator`; default mode in `megatron/training/config/resilience_config.py` |
 | CUDA graph impls | `megatron/core/transformer/transformer_config.py:cuda_graph_impl`, `megatron/core/transformer/cuda_graphs.py:CudaGraphManager`, `TECudaGraphHelper` |
 | Determinism | `megatron/training/determinism.py`, `megatron/training/arguments.py` (deterministic-mode hook) |
-| Lab vocabulary | `core/livelab_overview.md`, `template/livelab/INTERFACE-v1.md`, `repos/vllm/kb/mechanisms.md` |
+| Lab vocabulary | `core/agents/livelab_overview.md`, `core/livelab/INTERFACE-v1.md`, `repos/vllm/kb/mechanisms.md` |
 
 No external documents or published numbers are cited.

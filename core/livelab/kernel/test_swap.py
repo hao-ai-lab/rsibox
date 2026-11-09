@@ -1,8 +1,8 @@
 """Golden tests of the swap (R0: a function-body swap) on the toy engine (CPU, standard
 library only).
 
-Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
-(or python3 -m pytest -q template/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
+(or python3 -m pytest -q core/livelab/kernel)
 
 Toy arithmetic: see test_locate.py (step(3) = 17 at base).
 """

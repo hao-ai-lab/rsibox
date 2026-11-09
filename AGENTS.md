@@ -111,7 +111,7 @@ test, because it misleads the reader.
 
 - Settle guarantees at development time (offline toolsmith), not on every run. Prefer designs
   that make the bad case impossible (fail closed, read-only) and prove them once with a test
-  that tries the bad case. See `core/toolsmith_offline.md`.
+  that tries the bad case. See `core/agents/toolsmith_offline.md`.
 - Online checks are allowed only when small (a service's own start-up self-check, seconds) and
   must state their cost.
 - Every component must report its timings, and every experiment must report time to first
@@ -119,13 +119,15 @@ test, because it misleads the reader.
 
 ## Where things go
 
-- `core/`: blueprints only: the skill, the agent prompts (developer, toolsmith offline and
-  online, orchestrator) and the method. No code, and nothing about one engine.
-- `template/livelab/`: the blueprint for a new engine's live lab and the code every engine's
-  lab shares: the fixed interface, the conformance cases, the transaction `kernel/` (pure
-  Python, imports no engine) with its toy lab, and `forksafe.py` (pre-fork CUDA guards for an
-  engine zygote). Engine labs import them from this folder (`FASTRSI_LIVELAB` overrides it).
-  Changing `INTERFACE.md` is a breaking change: bump its version and say so in the PR.
+- `core/agents/`: blueprints only: the skill, the agent prompts (developer, toolsmith offline,
+  toolsmith online, toolsmith distill, orchestrator) and the method. No code, and nothing about
+  one engine.
+- `core/livelab/`: the shared engine-agnostic live-lab runtime every engine's lab builds on: the
+  fixed interface, the conformance cases, the transaction `kernel/` (pure Python, imports no
+  engine) with its toy lab, and `forksafe.py` (pre-fork CUDA guards for an engine zygote). Engine
+  labs import them from this folder (`FASTRSI_LIVELAB` overrides it). Changing `INTERFACE.md` is a
+  breaking change: bump its version and say so in the PR.
+- `template/`: minimal onboarding scaffold for bootstrapping a new engine under `repos/<new-engine>/`.
 - `docs/`: how this repo and its process work, following `docs/README.md`. No engine
   architecture, and no loose files at the root.
   `docs/lessons.md` holds framework lessons; `repos/<engine>/kb/lessons.md` holds engine lessons.
@@ -135,7 +137,7 @@ test, because it misleads the reader.
   - `kb/`: measured facts with their sources (costs, workload, lessons).
   - `livelab/`: the engine's own code, one folder per boundary (for example `adapter/`,
     `services/`). Code that looks engine-agnostic still starts here. Move it to
-    `template/livelab/` only when a second engine needs it, in a framework PR of its own. Code
+    `core/livelab/` only when a second engine needs it, in a framework PR of its own. Code
     under `repos/<engine>/` never imports from another `repos/<other>/` (CI checks it).
   - `tools/`: proven probes. `patches/`: our edits to the engine itself, with a ledger for
     upstreaming. `examples/<name>/`: one walkthrough per replayed change, with its receipt.
@@ -162,10 +164,10 @@ The repo will be public. Experiments and the machines they ran on are not part o
 ## Trust
 
 - A result counts only if it comes with a receipt from a live lab that passes
-  `template/livelab/conformance/`.
+  `core/livelab/conformance/`.
 - Agents may write tools and checks, but never the code that writes receipts, and never edit
   a receipt by hand.
 - Never claim a speedup without the receipt that measured it. Every number in `kb/` names its
   source.
-- Each engine keeps a standing replay of real upstream PRs (`core/orchestrator.md`). A fix found
+- Each engine keeps a standing replay of real upstream PRs (`core/agents/orchestrator.md`). A fix found
   by the replay is done when the replay shows it, not when CPU tests pass.

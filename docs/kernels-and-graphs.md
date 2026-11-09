@@ -1,12 +1,12 @@
 # Bytecode swap, kernel rebuild, and CUDA graph replay
 
-A live-edit transaction in `template/livelab/kernel/` must update what the hardware actually runs, prove that the updated code executed on a live workload step, and restore the exact prior state on undo. In a GPU inference or training worker, a single Python function edit can sit behind three distinct execution boundaries:
+A live-edit transaction in `core/livelab/kernel/` must update what the hardware actually runs, prove that the updated code executed on a live workload step, and restore the exact prior state on undo. In a GPU inference or training worker, a single Python function edit can sit behind three distinct execution boundaries:
 
 1. **CPython bytecode (`FunctionType.__code__`)**: evaluated by the Python interpreter on every call unless bypassed by a JIT compiler or a recorded graph.
 2. **Triton JIT kernels (`@triton.jit`, `@triton.autotune`, `@triton.heuristics`)**: compiled from source text (`JITFunction._src`) into device binaries (`cubin` / `CUfunction`), cached in memory by argument specialization, and inlined into calling Triton kernels across modules at compile time.
 3. **Captured CUDA graphs (`torch.cuda.CUDAGraph`)**: recorded once by the CUDA driver during stream capture into an opaque `cudaGraphExec_t` handle that binds raw `CUfunction` pointers, grid dimensions, and pooled device addresses, then replayed from C++ (`cudaGraphLaunch`) without entering Python.
 
-This document explains why a bytecode swap stops at the JIT and CUDA graph boundaries, how `template/livelab/kernel/jit.py` rebuilds `@triton.jit` kernels in place with sub-millisecond zero-recompile undo, how `torch.compile` (Dynamo/Inductor) interacts with Triton kernels and CUDA graphs, how the two-ledger witness (`live` vs. `capture`) in `template/livelab/kernel/witness.py` prevents false-positive proofs, how three-level selective and lazy graph recapture avoids multi-second full-sweep stalls, and how the whole-sweep all-shapes update hierarchy (`cuGraphExecKernelNodeSetParams` $\to$ `cuGraphExecUpdate` $\to$ piecewise/lazy recapture) updates all ~50 captured shape graphs when every bucket must be refreshed at once.
+This document explains why a bytecode swap stops at the JIT and CUDA graph boundaries, how `core/livelab/kernel/jit.py` rebuilds `@triton.jit` kernels in place with sub-millisecond zero-recompile undo, how `torch.compile` (Dynamo/Inductor) interacts with Triton kernels and CUDA graphs, how the two-ledger witness (`live` vs. `capture`) in `core/livelab/kernel/witness.py` prevents false-positive proofs, how three-level selective and lazy graph recapture avoids multi-second full-sweep stalls, and how the whole-sweep all-shapes update hierarchy (`cuGraphExecKernelNodeSetParams` $\to$ `cuGraphExecUpdate` $\to$ piecewise/lazy recapture) updates all ~50 captured shape graphs when every bucket must be refreshed at once.
 
 ---
 
@@ -63,9 +63,9 @@ Python call site
 
 ---
 
-## 2. In-place kernel rebuild and zero-recompile undo (`template/livelab/kernel/jit.py`)
+## 2. In-place kernel rebuild and zero-recompile undo (`core/livelab/kernel/jit.py`)
 
-`template/livelab/kernel/jit.py` bridges Path A and Path B inside the standard two-phase transaction without importing `triton` (all Triton objects are duck-typed against `jit.NEED`), without restarting the worker process, and without recompiling or re-tuning on undo.
+`core/livelab/kernel/jit.py` bridges Path A and Path B inside the standard two-phase transaction without importing `triton` (all Triton objects are duck-typed against `jit.NEED`), without restarting the worker process, and without recompiling or re-tuning on undo.
 
 ### Step-by-step lifecycle
 
@@ -282,14 +282,14 @@ When recapturing graphs in place after a kernel rebuild:
 
 ## 4. Two-ledger launch witness (`live` vs. `capture`) — zero false positives
 
-A core invariant of the transaction kernel (`template/livelab/kernel/README.md`) is that **a committed edit that never ran on a live workload step is never reported as proven**. With `@triton.jit` kernels and CUDA graphs, two opposite failure modes threaten a naive single-counter witness:
+A core invariant of the transaction kernel (`core/livelab/kernel/README.md`) is that **a committed edit that never ran on a live workload step is never reported as proven**. With `@triton.jit` kernels and CUDA graphs, two opposite failure modes threaten a naive single-counter witness:
 
 1. **False positive from unrecaptured graph replay**: An edit to a `@triton.jit` kernel commits, but the engine keeps replaying a `CUDAGraph` captured before the edit. The GPU runs the old `cubin`. If commit alone counted as proof, the transaction would pass while testing the old kernel.
 2. **False positive from capture-only execution**: After the edit commits, the engine recaptures its CUDA graphs. During recapture, Python runs warm-up iterations and the stream-capture pass, firing `__fastrsi_hit__` and `JITFunction.pre_run_hooks` thousands of times (for example, `13,280` calls per rank across layers and batch sizes in `test_witness.py` `CaptureWitnessTest`). If capture-time calls incremented the live witness counter, `prove` would report thousands of hits even when the live verification workload never replayed any captured graph.
 
 ### How `Witness` separates `counts` (`live`) and `capture_counts` (`capture`)
 
-`template/livelab/kernel/witness.py` maintains two separate per-key dictionaries on each participant's `Witness` instance:
+`core/livelab/kernel/witness.py` maintains two separate per-key dictionaries on each participant's `Witness` instance:
 
 ```python
 class Witness:
@@ -537,14 +537,14 @@ When an edit changes graph topology (splitting 1 kernel into 2, adding an interm
 
 ### Boundary between the shared kernel and engine adapters
 
-Per `AGENTS.md`, the shared transaction kernel (`template/livelab/kernel/`) stays pure Python (standard library only, importing no engine, `torch`, or `triton`), while each engine's live lab (`repos/<engine>/livelab/`) supplies the engine-specific graph hooks:
+Per `AGENTS.md`, the shared transaction kernel (`core/livelab/kernel/`) stays pure Python (standard library only, importing no engine, `torch`, or `triton`), while each engine's live lab (`repos/<engine>/livelab/`) supplies the engine-specific graph hooks:
 
 | Responsibility | Owner | Mechanism |
 |---|---|---|
-| Bytecode swap (`fn.__code__`), closure pairing, and exact code undo | `template/livelab/kernel/swap.py`, `journal.py` | `stage`, `validate`, `apply`, `Journal.set_code`, `Journal.undo_to` |
-| In-place `@triton.jit` rebuild, cross-module transitive caller reset, `seeded_lines`, and zero-recompile undo | `template/livelab/kernel/jit.py` | `text_of`, `plan`, `apply`, `arm_added`, `seeded_lines` (duck-typed via `jit.NEED`) |
-| Two-ledger witness (`counts` vs. `capture_counts`), Dynamo constant marking, and `pre_run_hooks` arming | `template/livelab/kernel/witness.py` | `Witness(capturing=...)`, `with witness.capture():`, `witness.arm`, `witness.check`, `trace_safe` |
-| Finding catalog (`jit_rebuild`, `jit_target`, `captured_target`, `captured_partly`, `zero_witness`, `running_frame`) | `template/livelab/kernel/findings.py` | `CATALOG`, `finding`, `decide` |
+| Bytecode swap (`fn.__code__`), closure pairing, and exact code undo | `core/livelab/kernel/swap.py`, `journal.py` | `stage`, `validate`, `apply`, `Journal.set_code`, `Journal.undo_to` |
+| In-place `@triton.jit` rebuild, cross-module transitive caller reset, `seeded_lines`, and zero-recompile undo | `core/livelab/kernel/jit.py` | `text_of`, `plan`, `apply`, `arm_added`, `seeded_lines` (duck-typed via `jit.NEED`) |
+| Two-ledger witness (`counts` vs. `capture_counts`), Dynamo constant marking, and `pre_run_hooks` arming | `core/livelab/kernel/witness.py` | `Witness(capturing=...)`, `with witness.capture():`, `witness.arm`, `witness.check`, `trace_safe` |
+| Finding catalog (`jit_rebuild`, `jit_target`, `captured_target`, `captured_partly`, `zero_witness`, `running_frame`) | `core/livelab/kernel/findings.py` | `CATALOG`, `finding`, `decide` |
 | Static graph-boundary detection (`captured_target` / `captured_partly`) and stream-capture probe | `repos/<engine>/livelab/adapter/` | Engine `LocalParticipant(checks=[...], capturing=...)` hooks |
 | Generation-stamped `CUDAGraph` entries, replay witness crediting, surgical node patching (`cuGraphExecKernelNodeSetParams`), `cuGraphExecUpdate`, and selective / lazy bucket recapture | `repos/<engine>/livelab/` | Retains `keep_graph=True` / node tables, patches or recaptures under `with witness.capture():`, and credits `captured_keys` on generation-matched `replay()` |
 

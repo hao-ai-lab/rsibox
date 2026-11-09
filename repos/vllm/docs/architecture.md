@@ -147,10 +147,10 @@ edit-to-run of about 2.6 s (a 5 s component restart estimate and a replay mix of
 
 | Piece | Where | State |
 |---|---|---|
-| Kernel | `template/livelab/kernel/` (shared by every engine's lab) | locate, swap, journal, witness, findings, two-phase coordinator, session |
+| Kernel | `core/livelab/kernel/` (shared by every engine's lab) | locate, swap, journal, witness, findings, two-phase coordinator, session |
 | Adapter | engine-core host plus worker extension | replies per rank; in review, not on main yet |
 | Services | `livelab/services/` | `zygote.py`, `zygote_refresh.py`: imports vLLM once, forks servers, refreshes edited modules before the fork |
-| Interface | `template/livelab/INTERFACE-v1.md` | draft with conformance cases; on main |
+| Interface | `core/livelab/INTERFACE-v1.md` | draft with conformance cases; on main |
 
 Not built:
 
