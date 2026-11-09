@@ -10,7 +10,8 @@ running code object of the target and of its enclosing functions with its new ve
 closures made later run the new code too). It runs the checks and returns findings:
 `no_live_function`, `not_in_patch`, `base_mismatch`, `outside_changes`, `closure_changed`
 (free variables differ), `defaults_not_evaluated`, `running_frame`, `patch_invalid`,
-`new_fields`, `jit_target` (a Triton kernel: v1 has no JIT rebuild, so it blocks) and
+`new_fields`, `jit_rebuild` (advisory: a Triton kernel, rebuilt in place by `jit.py`),
+`jit_target` (a Triton kernel that cannot be rebuilt in place, so it blocks) and
 `constructor_edit` (an `__init__`, `__new__` or `__post_init__` target: built instances keep
 the old state, so it blocks and routes to T1).
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
@@ -30,7 +31,7 @@ targets and which targets are live, and returns plain data and code objects. The
 (import, locate, base check against running code, exec of imports, added definitions and
 defaults, pairing, running frames) is the live half. This file compiles the whole patched
 module; compiling only the changed definitions, the analysis in a child process, per-block
-witnesses, a backfill of new fields and Triton targets are later PRs (README).
+witnesses and a backfill of new fields are later PRs (README).
 """
 import ast
 import collections
@@ -41,6 +42,7 @@ import time
 import types
 
 from . import findings as F
+from . import jit as JIT
 from . import journal as J
 from . import locate as L
 from . import witness as W
@@ -196,6 +198,8 @@ class Staged:
         self.removes = []        # (owner: module dict or class, name) the edit deletes
         self.items = {}          # key -> JSON summary
         self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
+        self.jits = []           # (jit.plan's plan, witness key): JIT kernels to rebuild
+        self.jit_adds = []       # (added JIT object, witness key)
 
 
 _compile = compile          # `stage` has a parameter named compile
@@ -357,6 +361,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
 
     # 1. targets: match base and patch, add the witness (the live checks are the caller's)
     tres, todo, aliases = [], [], []
+    lines = source.splitlines(keepends=True)
     for q, line in targets:
         line = int(line)
         k = L.key_of(key_module, q, line)
@@ -377,10 +382,13 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             continue
         node = pq[q][i]
         changed = auto or ast.dump(bq[q][i]) != ast.dump(node)
+        # the text a JIT rebuild compiles: from the clean patch text, before the witness
+        jt = JIT.text_of(lines, bq[q][i], node) if isinstance(node, _DEF) and (
+            node.decorator_list or bq[q][i].decorator_list) else None
         _inject(node, k, undo)
         todo.append((q, i))
         tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node),
-                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node)})
+                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node), "jit_text": jt})
 
     # 2. added definitions: top-level ones, and methods of classes that exist in the base
     added = []
@@ -394,7 +402,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             added += [(f"{n.name}.{m.name}", n.name, m) for m in n.body
                       if isinstance(m, _DEF) and m.name not in bnames]
     for q, _, n in added:
-        if isinstance(n, _DEF):
+        if isinstance(n, _DEF) and not _jit_decorator(n):   # a JIT kernel: launch hooks
             _inject(n, L.key_of(key_module, q, first_line(n)), undo)
 
     # 2b. removed definitions
@@ -787,7 +795,8 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             if ad["cls"] is not None:      # decorators and defaults see the live class body
                 ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), top,
                                           built.get(ad["cls"]))
-            exec(_raise(ad), mod.__dict__, ns)
+            with JIT.seeded_lines(mod.__file__, source):    # @triton.jit reads its lines
+                exec(_raise(ad), mod.__dict__, ns)
             q, cls_name, name = ad["q"], ad["cls"], ad["name"]
             if cls_name is not None:
                 built.setdefault(cls_name, {})[name] = ns[cls_name].__dict__[name]
@@ -802,6 +811,8 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                 k = L.key_of(kname, q, ad["line"])
                 st.keys.append(k)
                 st.items[k] = {"added": True}
+                if cls_name is None and JIT.unwrap(ns[name])[0] is not None:
+                    st.jit_adds.append((ns[name], k))
     except Exception as e:
         fs.append(F.finding("patch_invalid", _err(e),
                             "the patch compiles and its imports run", subject=kname))
@@ -873,13 +884,26 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             st.expect.append((fn, o, L.content_hash(o)))
 
     # 6a. Triton kernels: the engine runs what the JIT compiled from the text, not the
-    # function's bytecode, and v1 has no JIT rebuild: the swap would commit as a GPU no-op.
+    # function's bytecode. jit.plan rebuilds it in place (advisory jit_rebuild) or says why
+    # it cannot: then the swap would commit as a GPU no-op, so it blocks (jit_target).
     for q, line, r, k, olds in todo:
         why = r.get("jit") or _jit_holder(mod, q)
         if why:
+            p = JIT.plan(mod, q, r.get("jit_text"))
+            if p["ok"] and k in st.items:     # not when a check above dropped the swap
+                pl = p["plan"]
+                st.jits.append((pl, k))
+                st.items[k]["jit"] = {"callers": pl["callers"], "autotuners": len(pl["tuners"]),
+                                      "scanned": pl["scanned"], "plan_s": pl["plan_s"]}
+                fs.append({**F.finding(
+                    "jit_rebuild", f"{q} ({why}) is rebuilt in place from the edited text; "
+                    f"{len(pl['callers'])} JIT caller(s) reset: {pl['callers'][:5]}; "
+                    f"{len(pl['tuners'])} autotuner cache(s) cleared",
+                    "the next launch compiles the edited kernel", subject=k), "advisory": True})
+                continue
             fs.append({**F.finding(
-                "jit_target", f"{q} is a JIT kernel ({why}): a code swap changes the Python "
-                "function, the launches keep the compiled kernel",
+                "jit_target", f"{q} is a JIT kernel ({why}) and {p['why']}: a code swap "
+                "changes the Python function, the launches keep the compiled kernel",
                 "a target the engine runs as Python bytecode", subject=k), "route": "T1"})
 
     # 6b. fields only the new __init__ sets, read by new code: live instances lack them.
@@ -1257,6 +1281,10 @@ def apply(st, journal, witness):
                 journal.set_item(owner, name, obj)
             else:
                 journal.set_attr(owner, name, obj)
+        for p, k in st.jits:               # after the code swap: undo restores it first
+            JIT.apply(p, journal, witness, k)
+        for obj, k in st.jit_adds:
+            JIT.arm_added(obj, k, [p for p, _ in st.jits], journal, witness)
         for owner, name in st.removes:     # only reached when removed_definition was accepted
             journal.delete(owner, name)
     except Exception as e:

@@ -47,12 +47,31 @@ template's conformance cases c0-c10.
   closures made later run the new code. Nothing is visible yet. Findings: `no_live_function`,
   `not_in_patch`, `base_mismatch`, `outside_changes`, `removed_definition`, `closure_changed`
   (free variables differ; not overridable), `defaults_not_evaluated`, `running_frame`
-  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `constructor_edit`, `line_aliased`. `validate(staged)` re-checks at
+  (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `constructor_edit`, `line_aliased`,
+  `jit_rebuild` (advisory) and `jit_target` (below). `validate(staged)` re-checks at
   the apply point: the same code objects are installed, and no thread stack holds a frame of
   the old code. `apply(staged, journal, witness)` makes it visible, every change through the
   journal (closure pairs first, so undo also takes back closures the new code made).
   `stage_and_apply` is stage, decide, validate, apply in one call for a host with no two
   phases.
+- **Triton kernels** (`jit.py`). A target held by a JIT object (`@triton.jit`, autotune,
+  heuristics) runs what the JIT compiled from its text, never the swapped bytecode. The
+  analysis cuts the kernel's new text from the clean patch text (no witness call in it) and
+  notes whether the parameters or decorators changed. `stage` then asks `jit.plan`: a Triton
+  `JITFunction` (duck-typed: `jit.NEED`) whose parameters and decorators are unchanged is
+  rebuilt in place (advisory `jit_rebuild`); anything else is a blocking `jit_target`. At
+  apply the kernel gets its new `_src`, `raw_src` and first line, and the kernel and every
+  JIT kernel of any loaded module that calls it, at any depth, lose their memoised `hash`,
+  `used_global_vals` and compiled kernels (`device_caches`); autotuner caches over them are
+  cleared. All of it is snapshotted and journaled first: undo puts back the old compiled
+  kernels and tuning choices, with no recompile. The bytecode swap of the kernel's `.fn`
+  still runs, so fingerprints, chained edits and `base_mismatch` work as for any function.
+  The witness counter goes into `pre_run_hooks` of the kernel and of every caller (a helper
+  inlined into a caller runs only the caller's hooks), so a kernel that never launches, or
+  replays only inside a graph captured before the edit, reads 0. A `@triton.jit` definition
+  the edit adds is built while linecache holds the patch text, so `inspect.getsourcelines`
+  reads its lines; it is counted through the hooks of the rebuilt kernels that name it.
+  Imports no `triton`: CPU CI uses the stand-in runtime in `test_jit.py`.
 - **Detectors** in `stage`. *New fields:* a changed or added method that reads `self.X`,
   where only the edited `__init__` sets X (no old method sets it, no class body defines it),
   gives a blocking `new_fields` finding with `"route": "T1"`: instances built before the swap
@@ -138,7 +157,8 @@ template's conformance cases c0-c10.
 | `findings.py` | The findings schema, the catalog of checks, `decide`. No imports. |
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
-| `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `journal`, `locate`, `witness`. |
+| `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `jit`, `journal`, `locate`, `witness`. |
+| `jit.py` | The Triton rebuild: `text_of` (text half), `plan` (find the JIT object, its callers in every loaded module, its autotuners), `apply` (rebuild, reset, launch hooks, all journaled), `arm_added`, `seeded_lines`. Standard library only; imports nothing of the kernel. |
 | `coordinator.py` | Participants (`Participant`, `CallParticipant`, `LocalParticipant`) and the host (`Coordinator`, `StepGapCoordinator`, `GroupParticipant`, `merge_ranks`, `expect_ranks`, `Lane`). Imports `findings`, `journal`, `locate`, `receipt`, `swap`, `witness`. |
 | `session.py` | `Session`: the transaction stack, expected fingerprints, poison. Imports `coordinator`, `findings`, `locate`. |
 | `toy_lab.py` | `ToyLab`: the conformance lab on the toy engine (2 ranks, step-gap host, session). |
@@ -210,6 +230,12 @@ Each test's docstring says what it proves and what it does not.
 | `test_an_edit_to_another_method_is_not_a_constructor_edit` | a constructor detector keyed on the class that would block every layer edit |
 | `test_edit_again_after_a_line_shift_follows_the_line_map` | a second edit refused with no_live_function + outside_changes after the first shifted the module's lines |
 | `test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias` | the same with no line map: the one live definition is taken, and said |
+| `test_leaf_autotuned_kernel_edit_chained_edit_and_undo` | a Triton kernel edit that commits while every launch runs the old compiled kernel; an undo that recompiles or re-tunes |
+| `test_helper_edit_resets_caller_in_another_module` | a helper edit whose caller in another module keeps (or reloads from the disk cache) the old binary, or fails on a stale global the new helper no longer reads |
+| `test_zero_launch_and_capture_only_are_not_proven` | a kernel edit read as proven while a graph captured before it replays the old kernel |
+| `test_signature_or_decorator_change_is_refused` | a rebuild that launches with the parameter binding or tuning configs Triton built for the old text |
+| `test_added_jit_helper_is_built_from_the_patch_text_and_removed_on_undo` | `@triton.jit` on an added helper reading the file's lines (or raising OSError) instead of the patch's |
+| `test_real_kernel_edit_and_undo` | the same rebuild on real Triton and a GPU (skipped without them) |
 | `test_two_ranks_switch_together_and_undo_to_the_same_code_objects` | a rank that runs the edit before commit, or keeps it after undo |
 | `test_edit_that_changes_no_code_is_refused` | a transaction that "commits" while nothing changed |
 | `test_running_frame_never_runs_the_new_code` | a loop frame that never runs the new code reported as a pass |
@@ -240,9 +266,6 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
 - **New-field backfill** (`_backfill_code`, `fields.py`, plan `"backfill": true`) and
   `rebuilds=` (a recipe that rebuilds the objects resolves the finding). Until then
   `new_fields` blocks and routes to T1.
-- **Triton `@jit` targets** (`jit_rebuild`, rebuild in place, launch counters) with `jit.py`.
-  Until then such a target is swapped as bytecode the kernel compiler never runs, and its
-  witness reads zero (`zero_witness`).
 - **Per-block witness** (`_inject_hunks`: a key per changed branch, #62206's shape).
 - **Compile units** (compile only the statements holding the changed definitions; a whole
   3,800-line module compile stalls a step) and the **analyzer child process**
