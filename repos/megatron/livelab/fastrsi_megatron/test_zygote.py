@@ -70,7 +70,10 @@ class Zygote(unittest.TestCase):
             self.assertEqual(o["heavy_pid"], self.ready["pid"])
             self.assertEqual(o["sid"], o["pid"])
             self.assertEqual(o["OMP_NUM_THREADS"], "1")     # torchrun's default for 2 ranks
-            self.assertEqual(o["TORCHINDUCTOR_COMPILE_THREADS"], "1")
+            self.assertEqual(
+                o["TORCHINDUCTOR_COMPILE_THREADS"],
+                str(zygote.default_compile_threads(2)),
+            )
         self.assertGreater(self.ready["gc_frozen"], 0)
 
     def test_one_failing_rank_stops_the_others_and_the_zygote_serves_again(self):
@@ -225,14 +228,90 @@ class Pieces(unittest.TestCase):
         self.assertEqual(recorded_calls, [1])
 
     def test_clamp_pre_fork_threads_sets_default_single_thread_env_vars(self):
-        """Pre-fork thread clamping must default OMP, OpenBLAS, MKL, and TorchInductor thread
-        variables to 1 when unset without overwriting caller-provided values."""
+        """Pre-fork thread clamping must default OMP, OpenBLAS, and MKL thread variables to 1
+        while allowing multi-threaded TorchInductor compile (PRELOAD_COMPILE_THREADS = 8)
+        during preload/warmup without overwriting caller-provided values."""
         target_env = {"OMP_NUM_THREADS": "4"}
         zygote.clamp_pre_fork_threads(target_env)
         self.assertEqual(target_env["OMP_NUM_THREADS"], "4")
         self.assertEqual(target_env["OPENBLAS_NUM_THREADS"], "1")
         self.assertEqual(target_env["MKL_NUM_THREADS"], "1")
-        self.assertEqual(target_env["TORCHINDUCTOR_COMPILE_THREADS"], "1")
+        self.assertEqual(
+            target_env["TORCHINDUCTOR_COMPILE_THREADS"],
+            str(zygote.PRELOAD_COMPILE_THREADS),
+        )
+        self.assertEqual(zygote.default_compile_threads(2, cpu_count=64), 8)
+        self.assertEqual(zygote.default_compile_threads(8, cpu_count=64), 4)
+        self.assertEqual(zygote.default_compile_threads(16, cpu_count=16), 2)
+
+    def test_quiesce_compile_pools_after_warmup_resets_threads_and_shuts_down_pools(self):
+        """After preload or warmup compilation completes, quiesce_compile_pools_after_warmup()
+        must reset torch's intra-op thread pool to 1, set inductor compile_threads to 1, and
+        shut down any active AsyncCompile thread/process pools so steady-state training steps
+        run with zero background compile threads."""
+        recorded_torch_threads = []
+        shutdown_calls = []
+
+        class FakeTorch:
+            def set_num_threads(self, num_threads):
+                recorded_torch_threads.append(num_threads)
+
+        class FakeInductorConfig:
+            compile_threads = 8
+
+        class FakePool:
+            def __init__(self, pool_name):
+                self.pool_name = pool_name
+
+            def shutdown(self, wait=False):
+                shutdown_calls.append((self.pool_name, wait))
+
+        class FakeAsyncCompile:
+            _pool = FakePool("class_thread_pool")
+            _process_pool = FakePool("class_process_pool")
+
+        class FakeAsyncCompileModule:
+            __name__ = "torch._inductor.async_compile"
+            AsyncCompile = FakeAsyncCompile
+            _pool = FakePool("module_thread_pool")
+
+        fake_async_module = FakeAsyncCompileModule()
+        old_torch = sys.modules.get("torch")
+        old_inductor = sys.modules.get("torch._inductor.config")
+        old_async = sys.modules.get("torch._inductor.async_compile")
+        sys.modules["torch"] = FakeTorch()
+        sys.modules["torch._inductor.config"] = FakeInductorConfig()
+        sys.modules["torch._inductor.async_compile"] = fake_async_module
+        try:
+            summary = zygote.quiesce_compile_pools_after_warmup()
+            self.assertEqual(summary["torch_threads"], 1)
+            self.assertEqual(summary["compile_threads"], 1)
+            self.assertEqual(len(summary["pools_shutdown"]), 3)
+            self.assertIsNone(FakeAsyncCompile._pool)
+            self.assertIsNone(FakeAsyncCompile._process_pool)
+            self.assertIsNone(fake_async_module._pool)
+        finally:
+            if old_torch is not None:
+                sys.modules["torch"] = old_torch
+            else:
+                del sys.modules["torch"]
+            if old_inductor is not None:
+                sys.modules["torch._inductor.config"] = old_inductor
+            else:
+                del sys.modules["torch._inductor.config"]
+            if old_async is not None:
+                sys.modules["torch._inductor.async_compile"] = old_async
+            else:
+                del sys.modules["torch._inductor.async_compile"]
+        self.assertEqual(recorded_torch_threads, [1])
+        self.assertEqual(
+            shutdown_calls,
+            [
+                ("module_thread_pool", False),
+                ("class_thread_pool", False),
+                ("class_process_pool", False),
+            ],
+        )
 
     def test_script_imports_reads_top_level_and_guarded_imports(self):
         """pretrain_gpt.py style: plain imports, from-imports, imports under `if`/`try`; a

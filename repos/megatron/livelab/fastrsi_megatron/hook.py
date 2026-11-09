@@ -146,6 +146,8 @@ class Lab:
         s0 = ST.Snapshot(self.model, self.optimizer, self.scheduler)
         t2 = _now()
         warm = self._steps(self.warmup)
+        from . import zygote
+        zygote.quiesce_compile_pools_after_warmup()
         t3 = _now()
         r = s0.restore()
         zeroed, unknown = ST.zero_new_state(self.optimizer, set(s0.host))
