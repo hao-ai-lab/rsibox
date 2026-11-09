@@ -1,0 +1,33 @@
+diff --git a/megatron/core/transformer/transformer_layer.py b/megatron/core/transformer/transformer_layer.py
+--- a/megatron/core/transformer/transformer_layer.py
++++ b/megatron/core/transformer/transformer_layer.py
+@@ -1120,6 +1120,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
+             exact_pre_mlp_sum = attention_delta.float() + residual.float()
+             hidden_states = exact_pre_mlp_sum.to(attention_delta.dtype)
+             self._sglang_pre_mlp_sum_fp32 = exact_pre_mlp_sum
++        elif (
++            self.hidden_dropout == 0
++            and attention_output_with_bias[1] is None
++            and residual.dtype == attention_output_with_bias[0].dtype
++        ):
++            # Zero dropout is an identity; dispatch only the residual addition.
++            # Keep mixed-dtype inputs on the existing BDA path.
++            hidden_states = residual + attention_output_with_bias[0]
+         else:
+             with self.bias_dropout_add_exec_handler():
+                 hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+@@ -1733,6 +1741,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer, TwoStageAt
+             exact_layer_sum = mlp_delta.float() + residual.float()
+             hidden_states = exact_layer_sum.to(mlp_delta.dtype)
+             self._sglang_residual_sum_fp32 = exact_layer_sum
++        elif (
++            self.hidden_dropout == 0
++            and mlp_output_with_bias[1] is None
++            and residual.dtype == mlp_output_with_bias[0].dtype
++        ):
++            # Zero dropout is an identity; dispatch only the residual addition.
++            # Keep mixed-dtype inputs on the existing BDA path.
++            hidden_states = residual + mlp_output_with_bias[0]
+         else:
+             with self.bias_dropout_add_exec_handler():
+                 hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
