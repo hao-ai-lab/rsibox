@@ -52,7 +52,7 @@ before passing a claim on.
    *Why:* we built these last, under deadline, while GPUs idled.
 
 5. **One owner per layer, pinned commit pairs.** Exactly one agent commits to each layer (kernel,
-   engine adapter, tools); everyone else sends patches with tests. Merge in a fixed order. Every job
+   adapter, services, tools); everyone else sends patches with tests. Merge in a fixed order. Every job
    and record names the exact commits it ran.
    *Why:* two sessions and ten subagents on the same branches meant constant rebases, adapter hashes
    that changed six times, and jobs run on "kernel X checked out over adapter Y".
@@ -146,19 +146,11 @@ Classify every failure by the property it lacks: **locate** (find the running co
 what ran), **quiesce** (change between steps), **channel** (reach every process). Graph capture,
 compilation and data parallelism are where each property fails first.
 
-## Cost map (vLLM on GB200, our 2026-11-05 runs)
+## Cost map
 
-| Boundary | Edit-to-run |
-|---|---|
-| function swap | 0.2–2 s |
-| Triton kernel rebuild | 1–5 s |
-| CUDA graph recapture | 4.5–10 s |
-| torch.compile recompile | 16–37 s |
-| model module rebuild in place | 4–10 s |
-| forked restart from a warm process | 16–35 s |
-| warm restart | 25–166 s |
-
-Graphs and compilation, not Python, decide edit-to-run.
+Each engine keeps its edit-to-run cost per restart boundary, with sources, in
+`repos/<engine>/docs/architecture.md` and `repos/<engine>/kb/costs.md`. Read it before
+scheduling: graphs and compilation, not Python, usually decide edit-to-run.
 
 ## Run record (minimum fields)
 

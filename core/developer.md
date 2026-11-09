@@ -7,8 +7,9 @@ experiment cheap, and let the full evaluation run in the background.
 
 1. **Think.** Plan the next edit. Query `repos/<engine>/kb/` for the right probe and its cost.
 2. **Edit.** Make one candidate change.
-3. **install** it. If refused, read the reason; restart only if the knowledge base says so.
-4. **check** it with the cheapest probe that runs the changed path.
+3. **Install.** Call `install(patch)`. If refused, read the reason; restart only if the knowledge
+   base says so.
+4. **Check.** Call `check(workload)` with the cheapest probe that runs the changed path.
 5. **Decide.** Keep (`reset()`) or revert (`uninstall()`).
 6. **Promote** promising edits to the full evaluation F(x), asynchronously.
 7. When the cost hook alarms (slow check, fallback restart) or you enter an uncovered module,
@@ -25,7 +26,7 @@ experiment cheap, and let the full evaluation run in the background.
 ## Shortcuts when things are not ready
 
 Do not block early development on missing pieces. Use a shortcut, say which one you used, and
-know what it cannot tell you. The engine's list is in `repos/<engine>/kb/shortcuts.md`.
+know what it cannot tell you. The engine's shortcuts are in `repos/<engine>/kb/`.
 
 - **No weights yet:** random weights with a fixed seed. Same shapes and code paths, so timing
   and "did my code run" are meaningful. Answers are not: never claim correctness from them.
