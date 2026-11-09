@@ -311,6 +311,115 @@ class LoopTest(unittest.TestCase):
                                 ("client", "ADD")])
         self.assertEqual((fake.held_steps, core.scheduler.has_requests()), (1, True))
 
+    def test_late_commit_holds_the_step_loop_until_rollback_or_recovery(self):
+        """Input (#41): (a) 3 toy ranks stepped together by Cluster, supervised by
+        RecaptureCoordinator with phase2_deadline_s=0.1; rank1's commit applies v1 and then
+        takes 0.35 s to return, so both commit and undo miss the phase-2 deadline; (b) the
+        patched EngineCoreProc while rollback is pending, with a cancelled gap job and
+        core_side watching a target. Expected: (a) run() returns rolled_back at the deadline,
+        the step loop stays paused at the gap until rank1's queued undo finishes, and
+        cluster.log has zero mixed-version steps; (b) _process_engine_step holds steps until
+        rollback completes or recovered() runs, prunes cancelled pending jobs, and ticks
+        core_side on steps that run."""
+        from kernel import coordinator as C
+
+        def slow_answer(fn):
+            result = fn()
+            time.sleep(0.35)
+            return result
+
+        engines, participants, local_participants = {}, [], []
+        for rank_name in ("rank0", "rank1", "rank2"):
+            mod_name = f"adh{next(_n)}_{rank_name}"
+            toy.load_copy(mod_name)
+            engine_mod = sys.modules[mod_name + ".engine"]
+            engine_obj = engines[rank_name] = engine_mod.Engine()
+            quiesce = slow_answer if rank_name == "rank1" else None
+            local_part = C.LocalParticipant(rank_name, alias={"toy": mod_name}, quiesce=quiesce)
+
+            def rpc(method, payload, inner=local_part):
+                time.sleep(0.001)
+                return getattr(inner, method)(payload)
+
+            local_participants.append(local_part)
+            participants.append(C.CallParticipant(rank_name, rpc))
+
+        cluster = engine_mod.Cluster(engines)
+        coordinator = H.RecaptureCoordinator(
+            participants, cluster.at_gap, phase2_deadline_s=0.1
+        )
+        stop_event = threading.Event()
+        cluster_thread = threading.Thread(target=cluster.run, args=(stop_event,), daemon=True)
+        cluster_thread.start()
+        self.addCleanup(cluster_thread.join, 5)
+        self.addCleanup(stop_event.set)
+        while len(cluster.log) < 3:
+            time.sleep(0.002)
+
+        res = coordinator.run(plan("late41"))
+        self.assertEqual(
+            (res["outcome"], res["receipt"]["rollback"]["missed_deadline"],
+             res["receipt"]["rollback"]["poisoned"]),
+            ("rolled_back", ["rank1"], True),
+        )
+        deadline = time.time() + 5.0
+        while coordinator.poll_rollback() and time.time() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(local_participants[1]._state.get("late41"), "undone")
+        self.assertFalse(coordinator.poll_rollback())
+        steps_after = len(cluster.log)
+        while len(cluster.log) < steps_after + 4 and time.time() < deadline:
+            time.sleep(0.002)
+        stop_event.set()
+        cluster_thread.join(5)
+        mixed_steps = [entry for entry in cluster.log if len(set(entry)) > 1]
+        self.assertEqual(mixed_steps, [])
+        self.assertEqual(set(cluster.log), {("base", "base", "base")})
+
+        # Also verify EngineCoreProc step loop hold, cancelled job pruning, and core_side tick
+        step_runs = []
+
+        class Scheduler:
+            def has_requests(self):
+                return True
+
+        class EngineCoreProc:
+            def __init__(self):
+                self.batch_queue, self.scheduler = [], Scheduler()
+
+            def _handle_client_request(self, request_type, request):
+                pass
+
+            def _process_engine_step(self):
+                step_runs.append("step")
+                return True
+
+            def run_busy_loop(self):
+                pass
+
+        H._patch_core(types.SimpleNamespace(EngineCoreProc=EngineCoreProc))
+        core_proc = EngineCoreProc()
+        host_obj, _, _ = make_host(self, "loop41")
+        cancelled_job = H._Job(lambda: step_runs.append("cancelled"), gap=True)
+        cancelled_job.cancelled = True
+        host_obj.pending.append(cancelled_job)
+        host_obj.co.poison.append({"participant": "workers", "check": "deadline_missed"})
+        host_obj.co.txns["t41"] = {
+            "state": "rolled_back",
+            "started": True,
+            "done": True,
+            "receipt": True,
+            "pending_rollback": [
+                C.CallParticipant("workers", lambda _m, _p: {"ok": True, "state": "mixed"})
+            ],
+        }
+        with mock.patch.object(H, "_HOST", [host_obj]):
+            self.assertFalse(core_proc._process_engine_step())
+            self.assertEqual((step_runs, host_obj.held_steps, host_obj.pending), ([], 1, []))
+            self.assertTrue(host_obj.handle({"op": "recovered"})["ok"])
+            self.assertTrue(core_proc._process_engine_step())
+            self.assertEqual((step_runs, host_obj.core_side.steps), (["step"], 1))
+
 
 class OverlayTest(unittest.TestCase):
 

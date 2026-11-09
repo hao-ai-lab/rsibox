@@ -408,14 +408,18 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     # 2b. removed definitions
     removed = removed_definitions(base_tree, tree)
 
-    # 4. top-level imports, compiled; the caller runs those the module lacks
+    # 4. top-level imports, compiled; the caller runs those the module lacks or that changed
+    base_imports = {ast.dump(stmt) for stmt in base_tree.body
+                    if isinstance(stmt, (ast.Import, ast.ImportFrom))}
     imports = []
-    for n in tree.body:
-        if isinstance(n, (ast.Import, ast.ImportFrom)):
-            names = [(a.asname or a.name).split(".")[0] for a in n.names]
-            imp = {"names": names, **_try_compile(ast.Module([n], []), filename)}
-            if isinstance(n, ast.ImportFrom):     # resolvable against an overlay (see stage)
-                imp["from"] = [n.level, n.module, [[a.name, a.asname] for a in n.names]]
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            names = [(alias.asname or alias.name).split(".")[0] for alias in stmt.names]
+            imp = {"names": names, "changed": ast.dump(stmt) not in base_imports,
+                   **_try_compile(ast.Module([stmt], []), filename)}
+            if isinstance(stmt, ast.ImportFrom):  # resolvable against an overlay (see stage)
+                imp["from"] = [stmt.level, stmt.module,
+                               [[alias.name, alias.asname] for alias in stmt.names]]
             imports.append(imp)
     t = time.perf_counter()
     new_units, new_error = [], None
@@ -793,12 +797,17 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             st.removes.append((owner, name))
 
     try:
-        # 4. imports the module lacks, run in a scratch namespace
+        # 4. imports the module lacks or that the edit changed, run in a scratch namespace
         for imp in a["imports"]:
-            if any(x not in mod.__dict__ for x in imp["names"]):
-                ns = {}
-                exec(_raise(imp), mod.__dict__, ns)
-                st.imports.update({x: v for x, v in ns.items() if x not in mod.__dict__})
+            if imp.get("changed") or any(name not in mod.__dict__ for name in imp["names"]):
+                scratch_ns = {}
+                exec(_raise(imp), mod.__dict__, scratch_ns)
+                st.imports.update({
+                    binding_name: bound_value
+                    for binding_name, bound_value in scratch_ns.items()
+                    if binding_name not in mod.__dict__
+                    or mod.__dict__[binding_name] is not bound_value
+                })
         if a["new_error"] is not None:
             raise _Failed(a["new_error"])
         new_idx, parent = {}, {}

@@ -225,6 +225,24 @@ class SwapEdgeCaseTest(unittest.TestCase):
             self.assertEqual((r["ok"], [f["check"] for f in r["findings"]], out),
                              (True, [], want), new)
 
+    def test_a_changed_top_level_import_updates_the_existing_module_binding_and_undoes(self):
+        """Input: a module with `from math import floor as round_op`, edited to
+        `from math import ceil as round_op` while keeping the binding name `round_op`.
+        Expected: stage and apply replace `round_op` in the module dict, and `undo_to`
+        restores the original `floor` binding."""
+        module_name = f"kt_sw{next(_n)}"
+        base_source = "from math import floor as round_op\n\ndef f(x):\n    return round_op(x)\n"
+        edited_source = "from math import ceil as round_op\n\ndef f(x):\n    return round_op(x)\n"
+        (module_obj,) = temp_modules(self, {module_name: base_source})
+        self.assertEqual(module_obj.f(1.5), 1)
+        journal, witness = J.Journal(), W.Witness()
+        mark = journal.mark("txn-import")
+        result = S.stage_and_apply(module_name, edited_source, journal, witness)
+        self.assertEqual((result["ok"], [f["check"] for f in result["findings"]], module_obj.f(1.5)),
+                         (True, [], 2))
+        undo_result = journal.undo_to(mark)
+        self.assertEqual((undo_result["ok"], module_obj.f(1.5)), (True, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

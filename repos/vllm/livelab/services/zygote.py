@@ -210,7 +210,7 @@ def _stale_finding(fix, what="the forked server"):
             "risk": "an edit is silently not applied"}
 
 
-def _parse_in_child(argv, refresh, conns):
+def _parse_in_child(argv, refresh, conns, cwd=None):
     """vllm_args.parse(argv) in a forked child, after the same refresh a fork would apply: an
     edit to vLLM's argument code is read, and the zygote's own state (modules, heap) stays as
     it was. The child sends its reply through a pipe and exits."""
@@ -223,6 +223,8 @@ def _parse_in_child(argv, refresh, conns):
             os.close(r)
             for c in conns:
                 c.close()
+            if cwd:
+                os.chdir(cwd)
             if refresh:
                 zygote_refresh.refresh(refresh)
             with zygote_refresh.guard_for(refresh):
@@ -310,7 +312,7 @@ def serve(sock_path, modules_file):
                     reply = {"ok": False, "findings": [stale]}
                 else:
                     reply = _parse_in_child(req["argv"], fix["modules"] if fix else [],
-                                            [conn, srv])
+                                            [conn, srv], req.get("cwd"))
                 reply["zygote_seconds"] = round(time.time() - t, 3)
                 if fix and fix["changed"]:
                     reply["refreshed"] = {"changed": fix["changed"],
@@ -383,13 +385,14 @@ def request(sock_path, argv, env, log, cwd=None, accept=()):
                              "cwd": cwd or os.getcwd(), "accept": list(accept)})
 
 
-def parse(sock_path, argv, accept=(), timeout=60):
+def parse(sock_path, argv, accept=(), timeout=60, cwd=None):
     """Read a `vllm serve` argv with the zygote's vLLM parser: vllm_args.parse()'s reply, plus
     "zygote_seconds" (and "refreshed" when edited modules were re-imported for the parse). Edits
     a refresh cannot apply refuse it like a fork: {"ok": False, "findings": [stale]}, unless
     accept has "stale". A failure that is not vLLM's verdict on the argv (the refresh or the
     parser's import raised, the child died) is {"ok": False, "error", "zygote_error": True}."""
-    return _call(sock_path, {"cmd": "parse", "argv": list(argv), "accept": list(accept)},
+    return _call(sock_path, {"cmd": "parse", "argv": list(argv), "accept": list(accept),
+                             "cwd": cwd or os.getcwd()},
                  timeout=timeout)
 
 

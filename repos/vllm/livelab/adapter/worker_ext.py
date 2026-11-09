@@ -54,6 +54,7 @@ class Endpoint:
         """Prepare this role's sub-plan, or abstain when the plan changes only other roles."""
         sub = self.subplan(plan)
         if sub["modules"] or sub["repairs"] or not (plan.get("modules") or plan.get("repairs")):
+            self._abstain.pop(plan.get("id"), None)
             return self.lp.prepare(sub)
         self._abstain[plan["id"]] = "prepared"
         return F.ok(staged={}, abstain=True, note=f"no module or cell for role {self.role}")
@@ -95,8 +96,11 @@ class Endpoint:
             return F.not_ok(f"unknown method {method}")
         if method == "prepare":
             return self.prepare(payload)
-        if method in ("reset", "fingerprint"):
-            return getattr(self.lp, method)(payload)
+        if method == "reset":
+            self._abstain.clear()
+            return self.lp.reset(payload)
+        if method == "fingerprint":
+            return self.lp.fingerprint(payload)
         return self.local(method, payload)
 
 
@@ -130,8 +134,12 @@ class KernelWorkerExtension:
     def fastrsi_kernel(self, method, payload=None):
         """The kernel participant protocol on this rank. Returns an ok-dict, never raises."""
         try:
-            ep = self.fastrsi_kernel_endpoint()
-        except BaseException as e:
-            return {"ok": False, "error": f"endpoint: {type(e).__name__}: {e}",
-                    "rank": getattr(self, "rank", None), "pid": os.getpid()}
-        return ep.dispatch(method, payload)
+            endpoint = self.fastrsi_kernel_endpoint()
+        except BaseException as error:
+            return F.not_ok(
+                f"endpoint: {type(error).__name__}: {error}",
+                traceback=traceback.format_exc()[-1500:],
+                rank=getattr(self, "rank", None),
+                pid=os.getpid(),
+            )
+        return endpoint.dispatch(method, payload)

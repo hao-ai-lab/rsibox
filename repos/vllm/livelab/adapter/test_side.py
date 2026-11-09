@@ -236,10 +236,16 @@ class Attn:
         return out[0] + self.helper(x)
 
     def helper(self, x):
+        return self.leaf(x)
+
+    def leaf(self, x):
         return 0
 
+    def shared(self, x):
+        return x
+
     def _forward_core(self, x, out):
-        out[0] = x * 2 + self.helper(x)
+        out[0] = x * 2 + self.helper(x) + self.shared(x)
 
 
 @eager_break_during_capture
@@ -250,7 +256,10 @@ def gdn_core(x, out, layer):
 
 class MoE:
     def forward(self, x):
-        return x * 3
+        return self.shared(x) * 3
+
+    def shared(self, x):
+        return x
 '''
 
 
@@ -305,6 +314,29 @@ class SplitOpTest(unittest.TestCase):
         comp = worker("FULL_AND_PIECEWISE", "VLLM_COMPILE", splitting_ops=["vllm::gdn_core"])
         self.assertEqual(self._findings(comp, "Attn._forward_core")[0][:3],
                          ("captured_partly", "R1", True))
+        # Class-qualified method resolution: Attn.shared is split-only, MoE.shared is captured
+        (attn_shared,) = self._findings(bk, "Attn.shared")
+        self.assertEqual(attn_shared[:3], ("captured_partly", "R1", True))
+        (moe_shared,) = self._findings(bk, "MoE.shared")
+        self.assertEqual(moe_shared[:3], ("captured_target", "R1", False))
+        # Transitive outside caller: Attn.forward -> Attn.helper -> Attn.leaf
+        (leaf_finding,) = self._findings(bk, "Attn.leaf")
+        self.assertEqual(leaf_finding[:3], ("captured_target", "R1", False))
+        self.assertIn("Attn.forward", leaf_finding[3])
+        # FULL_DECODE_ONLY + compile NONE keeps "unknown" targets blocking
+        full_decode_only = Side("worker", scope={"worker": worker("FULL_DECODE_ONLY", "NONE")},
+                                rank=0)
+        full_decode_only.captured_prefixes = (self.pkg + ".",)
+        module_name = self.pkg + ".gdn"
+        (unknown_decode_only,) = full_decode_only._captured_check(
+            module_name, [f"{module_name}:Attn.forward.<locals>.inner:1"]
+        )
+        self.assertEqual(
+            (unknown_decode_only["check"], unknown_decode_only.get("route"),
+             bool(unknown_decode_only.get("advisory"))),
+            ("captured_target", "R1", False),
+        )
+        self.assertIn("could not decide statically", unknown_decode_only["observed"])
 
 
 BREAKABLE = '''"""A stand-in for vLLM's graph machinery (vllm.compilation.breakable_cudagraph, outside
@@ -463,6 +495,67 @@ class VersionLogTest(unittest.TestCase):
         self.assertTrue(side.dispatch("commit", c["id"])["ok"])
         side.tick(True)
         self.assertEqual(len(side.watch), 1)
+
+    def test_rewatching_a_dropped_target_and_abstain_reset_keep_state_consistent(self):
+        """Input: (a) a transaction whose watched target was queued in `_watch_drop` by an
+        abort before the next step start, then re-prepared by a second transaction; (b)
+        `watch` emptying on a step start and then watching the same target again; (c) `undo`
+        arriving while `prepare_start` is still staging; (d) an abstaining `Endpoint` after
+        `reset` or re-prepare with work. Expected: (a) the re-watched target stays in `watch`;
+        (b) `_cur` resets so `vlog` records the step when watching resumes; (c) the cancelled
+        prepare records state `"undone"` and leaves no watches; (d) `_abstain` clears."""
+        side = Side("worker", rank=0)
+        plan_first = own_plan("rewatch", targets=False)
+        self.assertTrue(side.dispatch("prepare", plan_first)["ok"])
+        side.tick(True)
+        self.assertEqual((len(side.watch), len(side.vlog)), (1, 1))
+        self.assertTrue(side.dispatch("abort", plan_first["id"])["ok"])
+        # Re-watch the same module/target before the next step start drains _watch_drop
+        plan_second = {**plan_first, "id": plan_first["id"] + "-2"}
+        self.assertTrue(side.dispatch("prepare", plan_second)["ok"])
+        self.assertTrue(side.dispatch("commit", plan_second["id"])["ok"])
+        side.tick(True)
+        self.assertEqual(len(side.watch), 1)
+        self.assertTrue(side.dispatch("undo", plan_second["id"])["ok"])
+        # Drop the watch completely and verify _cur resets when watch becomes empty
+        side.watch.clear()
+        side.tick(True)
+        self.assertIsNone(side._cur)
+        plan_third = {**plan_first, "id": plan_first["id"] + "-3"}
+        self.assertTrue(side.dispatch("prepare", plan_third)["ok"])
+        self.assertTrue(side.dispatch("abort", plan_third["id"])["ok"])
+
+        slow_side = Side("worker", rank=0)
+        slow_plan = own_plan("undostage", {"worker:0": {"method": "prepare", "delay_s": 0.2,
+                                                        "fail": False}})
+        self.assertTrue(slow_side.dispatch("prepare_start", slow_plan)["ok"])
+        self.assertTrue(slow_side.dispatch("undo", slow_plan["id"])["ok"])
+        prepared(slow_plan["id"])
+        slow_side.tick(True)
+        self.assertEqual(
+            (slow_plan["id"] in slow_side.lp._staged,
+             slow_side.lp._state.get(slow_plan["id"]),
+             slow_side.watch),
+            (False, "undone", {}),
+        )
+
+        core_ep = WE.Endpoint("core")
+        worker_only = own_plan("abstain_reset")
+        self.assertTrue(core_ep.dispatch("prepare", worker_only)["abstain"])
+        self.assertIn(worker_only["id"], core_ep._abstain)
+        (module_name,) = worker_only["modules"]
+        both_roles = {
+            **worker_only,
+            "modules": {
+                module_name: {**worker_only["modules"][module_name], "on": ["worker", "core"]}
+            },
+        }
+        self.assertFalse(core_ep.dispatch("prepare", both_roles).get("abstain", False))
+        self.assertNotIn(worker_only["id"], core_ep._abstain)
+        core_ep.dispatch("abort", worker_only["id"])
+        self.assertTrue(core_ep.dispatch("prepare", worker_only)["abstain"])
+        core_ep.dispatch("reset", "all")
+        self.assertEqual(core_ep._abstain, {})
 
 
 if __name__ == "__main__":

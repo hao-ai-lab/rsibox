@@ -40,16 +40,17 @@ class HostTest(unittest.TestCase):
     def _group(self, ranks, fail_commit=None):
         """One participant made of several ranks (like vLLM's worker group: one collective
         call per method); `fail_commit`: the rank whose commit returns not-ok."""
-        def call(method, payload):
-            rs = []
-            for i, (p, _, _) in enumerate(ranks):
-                r = (F.not_ok(f"rank{i} commit failed") if method == "commit" and i == fail_commit
-                     else getattr(p, method)(payload))
-                rs.append(r)
-            return {"ok": all(r["ok"] for r in rs), "ranks": rs,
-                    "state": rs[0].get("state"), "error": "; ".join(
-                        str(r.get("error")) for r in rs if not r["ok"]) or None}
-        return C.CallParticipant("workers", call)
+        members = []
+        for index, (participant, _, _) in enumerate(ranks):
+            if index == fail_commit:
+                def call(method, payload, inner=participant, rank_index=index):
+                    if method == "commit":
+                        return F.not_ok(f"rank{rank_index} commit failed")
+                    return getattr(inner, method)(payload)
+                members.append(C.CallParticipant(participant.name, call))
+            else:
+                members.append(participant)
+        return C.GroupParticipant("workers", members)
 
     def test_half_committed_group_is_undone(self):
         """Proves: when one rank of a group participant fails its commit, the ranks of that group that did commit are undone in the same phase 2, so every rank runs its base code. Not: real RPC (TP4 live run shows it on vLLM)."""
@@ -260,6 +261,42 @@ class HostTest(unittest.TestCase):
         self.assertEqual(co.status("flaky")["written"], True)
         self.assertEqual([r["id"] for r in R.read(path)], ["flaky"])
 
+    def test_validate_deadline_miss_refreshes_for_healthy_participants_and_timed_out_undo_cancels(self):
+        """Input: (a) rank0's validate exceeds commit_at (0.05 s) while rank1 and rank2 are
+        healthy; (b) a committed transaction whose undo gap call times out before starting.
+        Expected: (a) only rank0 is in missed_deadline and poison (rank1 and rank2 get fresh
+        per-call validate deadlines instead of an already-expired commit_at); (b) the timed-out
+        undo does not run when the gap drains later."""
+        cluster, participants, local_participants = self._cluster(
+            "valmiss", gap_mode=True, slow={"rank0": {"validate": 0.15}}
+        )
+        coordinator = C.StepGapCoordinator(participants, cluster.at_gap, phase2_deadline_s=0.1)
+        halt = self._start(cluster)
+        res = coordinator.run({"modules": self.V1})
+        halt()
+        self.assertEqual(res["outcome"], "aborted")
+        self.assertEqual(res["receipt"]["rollback"]["missed_deadline"], ["rank0"])
+        self.assertEqual([finding["participant"] for finding in coordinator.poison], ["rank0"])
+
+        parts = self._three("undocancel")
+        gate_Release = threading.Event()
+        def timed_out_gap(_fn):
+            raise TimeoutError("gap did not start undo in time")
+        host_co = C.StepGapCoordinator([p for p, _, _ in parts], lambda fn: fn())
+        spec = {**step_target(), "source": edit(ENG, ("return y", "return y * 100"))}
+        committed = host_co.run({"id": "u1", "modules": {"toy.engine": spec}})
+        self.assertEqual(committed["outcome"], "committed")
+        queued_jobs = []
+        def capture_then_timeout(fn):
+            queued_jobs.append(fn)
+            raise TimeoutError("gap busy")
+        host_co.gap = capture_then_timeout
+        undo_reply = host_co.undo("u1")
+        self.assertFalse(undo_reply["ok"])
+        self.assertEqual(queued_jobs[0](), None)
+        self.assertEqual([e.step(3) for _, _, e in parts], [1700, 1700, 1700])
+        _ = gate_Release
+
 
 class ParticipantMissingTest(unittest.TestCase):
     def test_a_dp_client_that_drops_replies_blocks_the_transaction(self):
@@ -320,6 +357,10 @@ class ParticipantMissingTest(unittest.TestCase):
                          [("participant_missing", ["dp1/0", "dp1/1"])])
         self.assertEqual((rec["commit_hashes"]["ranks_agree"], rec["commit_hashes"]["agree"]),
                          ({"workers": False}, False))
+        empty_group = C.CallParticipant("workers", lambda _m, _p: C.merge_ranks("prepare", []))
+        empty_group.expected = [0, 1]
+        empty_reply = C.expect_ranks(empty_group, "prepare", C.merge_ranks("prepare", []))
+        self.assertIn("replies from none", empty_reply["findings"][0]["observed"])
 
 
 if __name__ == "__main__":
