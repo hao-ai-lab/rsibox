@@ -56,7 +56,7 @@ Measured shape of these steps:
   configs), final graph capture 40 s; 1012.2 s to `/health` (our 2026-10-08 startup
   measurement).
 - In a one-line scheduler edit check on one GB200, setup is 204 s of the 228 s restart
-  (LiveLab-MLSys paper draft, Figure 1).
+  (our one-GB200 restart-vs-live measurement, `kb/costs.md`).
 - CUDA graph capture on Qwen3-8B TP1: 4.5-9 s per size set per rank. A full rebuild (Dynamo
   re-trace 4.6, capture 6.0, warmups 1.9, split/reset 1.3, Inductor 0.2) is 14.4 s. A
   per-region rebuild, when the edit sits under an opaque op (Triton kernel, attention

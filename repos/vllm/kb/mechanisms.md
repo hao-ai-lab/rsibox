@@ -1,6 +1,6 @@
 # vLLM: which edits install live
 
-Source: LiveLab-MLSys paper draft, §3.2. 959 performance PRs found; 80 inspected by hand.
+Source: our survey of vLLM performance PRs. 959 performance PRs found; 80 inspected by hand.
 
 | Mechanism | Share of 80 | Group | Example |
 |---|---:|---|---|

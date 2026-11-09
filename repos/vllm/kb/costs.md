@@ -4,7 +4,8 @@ Prior measurements, gathered before any new run. Each table says where it came f
 
 ## Restart vs live, one-line scheduler edit (1 GB200)
 
-Source: LiveLab-MLSys paper draft, Figure 1. Warm on-disk caches.
+Source: our one-GB200 restart-vs-live measurement of a one-line scheduler edit. Warm on-disk
+caches.
 
 | Step removed | Check time | vs restart |
 |---|---:|---:|
