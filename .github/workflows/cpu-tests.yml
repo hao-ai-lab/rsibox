@@ -55,3 +55,19 @@ jobs:
       - run: python3 -m pip install pytest
       - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (FASTRSI_VLLM_PYTHON) or torch skip and are listed (-rs)
         run: python3 -m pytest -v -rs repos/vllm/livelab/services
+  megatron-livelab:
+    name: Megatron live-lab and tool golden tests (CPU; torch cases skip)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run Megatron live-lab unittest cases (overlay, mailbox, phase stamps, zygote; torch cases skip)
+        run: python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab -v
+      - name: Run Megatron tool unittest cases when present (local-disk environment staging)
+        run: |
+          if [ -d repos/megatron/tools ]; then
+            python3 -m unittest discover -s repos/megatron/tools -v
+          fi
