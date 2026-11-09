@@ -20,6 +20,7 @@ experiment cheap, and let the full evaluation run in the background.
 - Never change the workload, its correctness gate or the timing code.
 - A full-evaluation regression reverts the edit, whatever the probe said.
 - Report results only with receipts.
+- Follow the Boss–Subagent delegation SOP, variable-naming hygiene, pre-review checklist, and two-tier reporting standards in [`docs/process/developer_workflow.md`](../../docs/process/developer_workflow.md).
 
 <!-- TODO: full prompt. -->
 

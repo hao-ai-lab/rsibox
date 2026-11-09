@@ -96,6 +96,32 @@ completion each (" Paris." in every case); markers printed by the edited code sh
 - Still a finding (restart the zygote): an edited extension `.so`, or an edited module outside
   `FASTRSI_ZYGOTE_REFRESH` (default `vllm`).
 
+## Launcher CLI with state holders and zygote (`engine.py start`, Qwen3-8B TP1 eager, 1× GB200, 2026-11-07)
+
+Source: our 2026-11-07 GPU receipt on 1× GB200, Qwen3-8B TP1, `--enforce-eager`, running through `livelab/services/engine.py` with `weights.py` (`vllm preload` daemon) and `kvplan.py` (`KVPlanWorker`). Each start prints one JSON line on stdout; greedy 32-token completion at temperature 0 (`" Paris. The capital of France is Paris..."`) is bit-identical across all started servers.
+
+| Case | Launcher flags | `healthy_after_s` (s) | `load_model` (s) | `determine_available_memory` / `kvplan` | Notes |
+|---|---|---:|---:|---|---|
+| `a` | direct `start` (disk weights, `--load-format auto`) | 51.85 | 6.82 | `1.63 s` (warm profile run) | Baseline fresh-process start with warm disk caches |
+| `b` | direct `start --weights` (`ipc_cache`) | 46.80 | 2.24 | profiled | `weights_probe`: `0.041 s` (`matched_gpus: true`, `fallback: false`) |
+| `c0` | direct `start --kvplan` (first run, record) | 50.71 | 6.82 | `measured: 1` (`2.10 s`) | Records KV plan JSON for `load_format="auto"` |
+| `c` | direct `start --kvplan` (second run, reuse) | 43.97 | 6.82 | `reused: 1` (`0.005 s`) | Skips step-4c profile run; same KV cache size |
+| `d0` | `start --zygote S --fork --kvplan --weights` (first run, record) | 10.42 | 2.24 | `measured: 1` (`1.33 s`) | Separate plan key for `load_format="ipc_cache"`; `fork_check: {"spawn_forced": false}` |
+| `d` | `start --zygote S --fork --kvplan --weights` (second run, reuse) | **7.37** | 2.24 | `reused: 1` (`0.006 s`) | `zygote_check`: `0.205 s`, `fork_check: {"spawn_forced": false}`, zero findings (`7.0×` vs. case `a`) |
+| `e` | `start --weights` after stopping weight daemon | not started (`0.305 s`, exit 2) | – | – | Refuses immediately with `weights_daemon` finding naming the missing GPU socket instead of hanging `state_timeout_s` (`300 s`) |
+
+## GB200 containers without IMEX channels (`#10`)
+
+Source: our TP4 runs on GB200 with vLLM `4e0ad57` (`vllm preload` and `vllm serve`).
+
+- When `/dev/nvidia-caps-imex-channels` is not exposed inside a GB200 container, CUDA refuses NVLink fabric memory handles and multicast objects with `CUDA_ERROR_NOT_PERMITTED` (error 800):
+  ```
+  Failed to initialize FlashInfer All Reduce workspace: CUDA error code=800(b'CUDA_ERROR_NOT_PERMITTED')
+  FlashInfer mnnvl allreduce workspace unavailable (likely no NVSwitch multicast support); falling back ...
+  ```
+- FlashInfer's MNNVL all-reduce workspace fails to initialize and vLLM falls back to a slower all-reduce path. Any multi-GPU throughput or latency measurement recorded in such a container must state that IMEX was unavailable.
+- Cross-process sharing built on NVLink fabric handles cannot run without IMEX channels, whereas intra-node POSIX file-descriptor CUDA IPC handles (`livelab/services/weights.py`) continue to work normally.
+
 ## Not measured yet
 
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each
