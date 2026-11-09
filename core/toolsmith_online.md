@@ -32,7 +32,14 @@ seconds-long microbenchmark of the same collectives would have answered it first
 
 - **Polish** a slow check: for example, capture single-step inputs of a hot submodule and
   replay them instead of the full workload.
-- **Extend** live-coding support to the uncovered module.
+- **Extend** live-coding support to the uncovered module with the smallest concrete mechanism that
+  works for this engine (patching one wrapper dict, refreshing one module class, resetting one
+  cache).
+- **Stay repo-specific.** Specialize to `repos/<engine>/` and its workload. Do not build
+  cross-engine abstractions mid-loop and never import from another `repos/<other>/`
+  (`.github/workflows/pr-rules.yml` `cross-engine-imports`). Local duplication inside
+  `repos/<engine>/` is fine while iterating; cross-repo extraction waits for an offline
+  distillation pass between engine waves (`core/toolsmith_distill.md`).
 - Verify the new or changed tool against a fresh process before handing it back.
 - Save it to `repos/<engine>/tools/` and record it in `repos/<engine>/kb/`.
 
