@@ -59,8 +59,12 @@ R1 = {"action": "recapture the graphs with the commit (plan \"rebuild\": [\"R1\"
                 "restart with the edit or run eager", "cost": "recipe R1 / a restart"}
 
 
-def wants_r1(plan):
-    return "R1" in ((plan or {}).get("rebuild") or ())
+def wants_recapture(plan):
+    rebuild = (plan or {}).get("rebuild") or ()
+    return "recapture" in rebuild or "R1" in rebuild
+
+
+wants_r1 = wants_recapture
 # globals torch.compile (Dynamo) adds to a module it traces: at_base lists them apart
 DYNAMO_GLOBALS = ("__compiled_fn", "__resume_at", "__builtins_dict__", "__subclass_",
                   "__import_", "___")
@@ -93,7 +97,8 @@ class Side(Endpoint):
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps, self.vlog, self.mid_step_changes, self._cur = 0, [], [], None
         self._plan = threading.local()    # the plan this thread prepares (graph checks read it)
-        self.r1 = RC.Recapture()
+        self.recapture = RC.Recapture()
+        self.r1 = self.recapture
 
     # -- graph detection ----------------------------------------------------------------
     def _graph(self):
@@ -264,33 +269,35 @@ class Side(Endpoint):
             self._drop_watch(txn)
         return r
 
-    # -- R1 -------------------------------------------------------------------------------
+    # -- recapture ------------------------------------------------------------------------
     def _engine(self):
-        if "r1_engine" in self.scope:
-            return self.scope["r1_engine"]
+        if "recapture_engine" in self.scope or "r1_engine" in self.scope:
+            return self.scope.get("recapture_engine") or self.scope.get("r1_engine")
         w = self.scope.get("worker")
         return RC.vllm_engine(w) if w is not None and self._graph() is not None else None
 
-    def _r1(self, method, p):
+    def _recapture(self, method, p):
         if self.role != "worker":
-            return F.ok(abstain=True, note="R1 runs on worker ranks")
+            return F.ok(abstain=True, note="recapture runs on worker ranks")
         try:
             eng = self._engine()
         except Exception as e:
-            return F.not_ok(f"R1: {type(e).__name__}: {e}", [F.finding(
-                "rebuild_failed", f"{type(e).__name__}: {e}", "R1 can reach this rank's graphs")])
+            return F.not_ok(f"recapture: {type(e).__name__}: {e}", [F.finding(
+                "rebuild_failed", f"{type(e).__name__}: {e}", "recapture can reach this rank's graphs")])
         if method == "graphs":
             return F.ok(**RC.graphs(eng))
-        if method == "r1_extend":
-            return self.r1.extend(eng, p["txn"], self.lp.journal, self.lp.witness, p.get("sizes"))
+        if method in ("recapture_extend", "r1_extend"):
+            return self.recapture.extend(eng, p["txn"], self.lp.journal, self.lp.witness, p.get("sizes"))
         if self.lp._state.get(p["txn"]) != "committed":
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
-        return self.r1.run(eng, p["txn"], self.lp.journal, self.lp.witness,
-                           p.get("modes"), p.get("sizes"))
+        return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
+                                  p.get("modes"), p.get("sizes"))
+
+    _r1 = _recapture
 
     def _dispatch(self, method, payload):
-        if method in ("recapture", "r1_extend", "graphs"):
-            return self._r1(method, payload or {})
+        if method in ("recapture", "recapture_extend", "r1_extend", "graphs"):
+            return self._recapture(method, payload or {})
         if method == "versions":
             return self.versions()
         if method == "prepare":

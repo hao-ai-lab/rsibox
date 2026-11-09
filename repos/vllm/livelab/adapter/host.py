@@ -13,15 +13,15 @@ How a transaction runs (kernel `StepGapCoordinator`):
   txn: the host's own state), `pstatus {txn}` (every rank's own state), `fingerprint
   {modules}` (per rank: content hash and code object id of every function), `versions` (per
   rank: the per-step version log), `at_base`, `ping`, `graphs` (per rank: the descriptors
-  each mode can replay and every graph wrapper's entry count), `r1_extend {txn, sizes}`
-  (capture more of the descriptors an R1 left eager, in a gap).
-- R1 (`R1Coordinator`): a plan with `"rebuild": ["R1"]` (optional `"r1": {"modes": [mode
-  names], "sizes": [num_tokens]}`) is recaptured on every rank right after its commit, in the
-  same gap, so no step replays a graph of the old code next to Python running the new one.
-  The receipt's `rebuild` and `recapture_s` say what it captured and how long it took; the
-  edit runs on every step from `rebuilt` on (edit_to_run_s). A recapture that fails on any
-  rank is `rebuild_failed`: the transaction is undone on every participant in the same gap
-  (each rank's R1 puts its old graphs back first), outcome rolled_back. Undo of a recaptured
+  each mode can replay and every graph wrapper's entry count), `recapture_extend {txn, sizes}`
+  (capture more of the descriptors a recapture left eager, in a gap).
+- Recapture (`RecaptureCoordinator`): a plan with `"rebuild": ["recapture"]` (or `"rebuild": ["R1"]`,
+  optional `"recapture"` or `"r1"`: `{"modes": [mode names], "sizes": [num_tokens]}`) is recaptured
+  on every rank right after its commit, in the same gap, so no step replays a graph of the old code
+  next to Python running the new one. The receipt's `rebuild` and `recapture_s` say what it captured
+  and how long it took; the edit runs on every step from `rebuilt` on (edit_to_run_s). A recapture that
+  fails on any rank is `rebuild_failed`: the transaction is undone on every participant in the same gap
+  (each rank's recapture puts its old graphs back first), outcome rolled_back. Undo of a recaptured
   transaction puts the base graphs back on every rank (journal; no capture).
   Receipts also go to <dir>/receipts.jsonl (kernel `ReceiptWriter`).
 - Two participants: the workers (every rank behind one collective_rpc, `WorkerGroup`) and the
@@ -211,8 +211,11 @@ class WorkerGroup(C.Participant):
     def recapture(self, payload):
         return self._rpc("recapture", payload)
 
+    def recapture_extend(self, payload):
+        return self._rpc("recapture_extend", payload)
+
     def r1_extend(self, payload):
-        return self._rpc("r1_extend", payload)
+        return self.recapture_extend(payload)
 
     def graphs(self, _=None):
         return self._rpc("graphs", None)
@@ -238,9 +241,9 @@ def parallel(core):
     return {"world": world, "dp": dp, "dp_rank": rank, "expected": expected, "note": note}
 
 
-class R1Coordinator(C.StepGapCoordinator):
-    """StepGapCoordinator plus R1 after a commit, in the same gap (see the module doc).
-    `rebuild(txn, spec)` reaches the worker ranks."""
+class RecaptureCoordinator(C.StepGapCoordinator):
+    """StepGapCoordinator plus selective CUDA graph recapture after a commit, in the same gap
+    (see the module doc). `rebuild(txn, spec)` reaches the worker ranks."""
 
     def __init__(self, *a, rebuild=None, **k):
         super().__init__(*a, **k)
@@ -249,23 +252,26 @@ class R1Coordinator(C.StepGapCoordinator):
     def _phase2(self, txn, tl):
         out = super()._phase2(txn, tl)
         plan = self.txns[txn]["plan"]
-        if out["outcome"] != "committed" or "R1" not in (plan.get("rebuild") or ()):
+        rebuild_keys = plan.get("rebuild") or ()
+        if out["outcome"] != "committed" or not ("recapture" in rebuild_keys or "R1" in rebuild_keys):
             return out
-        spec = dict(plan.get("r1") or {})
+        spec = dict(plan.get("recapture") or plan.get("r1") or {})
         t0 = self.clock()
         r = self.rebuild(txn, spec)
         tl["rebuilt"] = self.clock()
         ranks = r.get("ranks") or []
-        out["rebuild"] = {"ok": bool(r.get("ok")), "routes": ["R1"],
-                          "seconds": {"R1": round(tl["rebuilt"] - t0, 6)}, "spec": spec,
+        dur = round(tl["rebuilt"] - t0, 6)
+        route_name = "recapture" if "recapture" in rebuild_keys else "R1"
+        out["rebuild"] = {"ok": bool(r.get("ok")), "routes": [route_name],
+                          "seconds": {route_name: dur, "R1": dur, "recapture": dur}, "spec": spec,
                           "ranks": {str(x.get("rank")): {k: x.get(k) for k in (
                               "ok", "error", "seconds", "captured", "modes", "wrappers",
                               "eager", "memory", "skipped")} for x in ranks}}
         if r.get("ok"):
-            self.txns[txn]["rebuilt"] = ["R1"]
+            self.txns[txn]["rebuilt"] = [route_name]
             return out
         fs = [f for x in ranks for f in x.get("findings", [])] or [F.finding(
-            "rebuild_failed", str(r.get("error")), "R1 captures on every rank")]
+            "rebuild_failed", str(r.get("error")), "recapture on every rank")]
         out["extra"] += [{**f, "participant": "workers"} for f in fs]
         rb = out["rollback"] = {"status": "undone", "participants": {}}
         res = self.txns[txn]["res"]
@@ -280,6 +286,9 @@ class R1Coordinator(C.StepGapCoordinator):
         return out
 
 
+R1Coordinator = RecaptureCoordinator
+
+
 class Host:
     def __init__(self, core, root):
         import vllm
@@ -292,7 +301,7 @@ class Host:
         self.core_side = Side("core", scope={"core": core})
         self.dp = parallel(core)
         self.workers = WorkerGroup(self, self.dp["expected"])
-        self.co = R1Coordinator(
+        self.co = RecaptureCoordinator(
             [self.workers, C.CallParticipant("core", self.core_side.dispatch, bounded=True)],
             gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
             phase2_deadline_s=PHASE2_DEADLINE_S,
@@ -353,9 +362,9 @@ class Host:
             return self.co.at_base()
         if op == "graphs":
             return F.ok(workers=self.workers.graphs())
-        if op == "r1_extend":                # in a gap: no batch replays half-captured graphs
+        if op in ("recapture_extend", "r1_extend"): # in a gap: no batch replays half-captured graphs
             t0 = time.perf_counter()
-            r = self.in_loop(lambda: self.workers.r1_extend(
+            r = self.in_loop(lambda: self.workers.recapture_extend(
                 {"txn": cmd["txn"], "sizes": cmd.get("sizes")}), gap=True,
                 timeout=self.gap_timeout)
             return {**r, "seconds": round(time.perf_counter() - t0, 6)}

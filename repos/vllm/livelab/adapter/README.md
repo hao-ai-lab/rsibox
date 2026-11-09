@@ -55,14 +55,14 @@ needs one is a finding, not a silent swap.
   `captured_target` too: it runs only when vLLM decorates its ops at import or captures its
   graphs (vLLM #59941 committed T0 with witness 0 on every rank). Calls made while the
   stream captures a graph count apart from live calls.
-- **R1, selective recapture** (`recapture.py`, `host.R1Coordinator`). A plan with
-  `"rebuild": ["R1"]` and optional `"r1": {"modes": ["FULL" | "PIECEWISE"], "sizes":
-  [num_tokens]}` is recaptured on every rank right after its commit, inside the same gap.
-  Per chosen mode, every graph wrapper of that mode gets a new, empty entry dict (the old
-  one is kept) and the dispatcher's keys for the mode are emptied; the chosen descriptors
-  are captured through the runner's own `_warmup_and_capture` (no Dynamo, no Inductor),
-  under `witness.capture()`, and go back into the keys one by one. Descriptors not chosen
-  run eager on the new code (or in a mode R1 left alone) until `r1_extend` captures them.
+- **Selective CUDA graph recapture** (`recapture.py`, `host.RecaptureCoordinator`). A plan with
+  `"rebuild": ["recapture"]` (or `"rebuild": ["R1"]`, optional `"recapture"` or `"r1"`:
+  `{"modes": ["FULL" | "PIECEWISE"], "sizes": [num_tokens]}`) is recaptured on every rank right
+  after its commit, inside the same gap. Per chosen mode, every graph wrapper of that mode gets a
+  new, empty entry dict (the old one is kept) and the dispatcher's keys for the mode are emptied;
+  the chosen descriptors are captured through the runner's own `_warmup_and_capture` (no Dynamo, no
+  Inductor), under `witness.capture()`, and go back into the keys one by one. Descriptors not chosen
+  run eager on the new code (or in a mode left alone) until `recapture_extend` captures them.
   All pieces of one descriptor are captured together (each piece replays at the addresses
   of the previous piece's output). Invariants: no step replays a graph of the old code next
   to Python running the new one; undo of the transaction puts back every old entry dict and
@@ -70,7 +70,7 @@ needs one is a finding, not a silent swap.
   a capture that fails on any rank is `rebuild_failed`, and the transaction is undone on
   every participant in the same gap (outcome rolled_back). The receipt's `rebuild` holds
   each rank's captured descriptors, seconds, eager leftovers and memory before/after, and
-  `recapture_s` the gap's R1 time. R1 runs only on vLLM's V1 `GPUModelRunner`
+  `recapture_s` the gap's recapture time. Selective recapture runs only on vLLM's V1 `GPUModelRunner`
   (`VLLM_USE_V2_MODEL_RUNNER=0`); on another runner it is `rebuild_failed`, said plainly.
   A long recapture needs the op's `gap_timeout_s` above its duration.
 - **Version log.** Each side records which code version every watched function runs at each
@@ -84,7 +84,7 @@ needs one is a finding, not a silent swap.
 | `host.py` | `Host` (coordinator, control channel, step timings), `WorkerGroup`, `parallel`, the `EngineCoreProc` patch, the import finder. |
 | `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`; serves a `Side` and wraps the step calls). |
 | `side.py` | `Side(Endpoint)`: background prepare, per-rank phase-2 lane and deadline, graph detection and routing, version log, a fault hook for tests. |
-| `recapture.py` | R1 on one rank: `Engine` (what R1 needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
+| `recapture.py` | Selective CUDA graph recapture on one rank: `Engine` (what recapture needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
 | `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
 

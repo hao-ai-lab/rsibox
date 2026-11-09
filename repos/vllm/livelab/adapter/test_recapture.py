@@ -1,5 +1,5 @@
-"""CPU golden tests of R1, selective CUDA-graph recapture (recapture.py, the host's
-R1Coordinator, the side's `recapture`). Run as test_host.py says.
+"""CPU golden tests of selective CUDA-graph recapture (recapture.py, the host's
+RecaptureCoordinator, the side's `recapture`). Run as test_host.py says.
 
 The stand-in runner keeps vLLM's semantics where R1 depends on them, and nothing else:
 - a graph wrapper per mode (one FULL wrapper, PIECEWISE wrappers per piece) with a dict
@@ -119,29 +119,29 @@ def entries(r):
     return {w.piece: w.concrete_cudagraph_entries for w in [r.full] + r.pw if w}
 
 
-class R1Test(unittest.TestCase):
+class RecaptureTest(unittest.TestCase):
 
     def test_one_bucket_is_recaptured_in_the_gap_and_undo_puts_the_base_graphs_back(self):
         """Input: 2 ranks, FULL graphs for 8/4/2/1 tokens; an edit of the captured code with
-        `"rebuild": ["R1"], "r1": {"sizes": [4]}`. Expected: committed and rebuilt in the same
+        `"rebuild": ["recapture"], "recapture": {"sizes": [4]}`. Expected: committed and rebuilt in the same
         gap: a 4-token step replays a graph of "v1" (no Python: live witness 0, capture calls
         > 0), 8/2/1-token steps run eager on "v1" (live calls); the receipt's rebuild names
         FULL 4 captured and FULL 8/2/1 eager, with recapture_s. Undo: 4 and 8 replay "base"
         again from the very entry dicts they had, every key is back, and the number of live
-        graphs is what it was before the edit. Fails without R1: after the commit the 4-token
+        graphs is what it was before the edit. Fails without recapture: after the commit the 4-token
         step replays "base", the stale graph. Not: real CUDA graphs (the GPU receipt)."""
         h, rs, _ = host(self, "one")
         before = [entries(r) for r in rs]
         graphs0 = len(LIVE)
         self.assertEqual([r.step(4) for r in rs], [("base", "FULL")] * 2)
-        r = h.handle({"op": "txn", "plan": plan("r1one", rebuild=["R1"], r1={"sizes": [4]})})
+        r = h.handle({"op": "txn", "plan": plan("r1one", rebuild=["recapture"], recapture={"sizes": [4]})})
         rec = r["receipt"]
         self.assertEqual(r["outcome"], "committed", rec["findings"])
         rb = rec["rebuild"]
-        self.assertEqual((rb["ok"], rb["routes"], sorted(rb["ranks"])), (True, ["R1"], ["0", "1"]))
+        self.assertEqual((rb["ok"], rb["routes"], sorted(rb["ranks"])), (True, ["recapture"], ["0", "1"]))
         self.assertEqual([x[:2] for x in rb["ranks"]["0"]["captured"]], [["FULL", 4]])
         self.assertEqual(rb["ranks"]["1"]["eager"], {"FULL": [8, 2, 1]})
-        self.assertEqual(rec["recapture_s"], rb["seconds"]["R1"])
+        self.assertEqual(rec["recapture_s"], rb["seconds"]["recapture"])
         self.assertIn("rebuilt", rec["timeline"])
         self.assertEqual([r.step(4) for r in rs], [("v1", "FULL")] * 2)
         self.assertEqual([r.step(8) for r in rs], [("v1", "NONE")] * 2)
@@ -160,29 +160,29 @@ class R1Test(unittest.TestCase):
         self.assertTrue(h.handle({"op": "at_base"})["ok"])
 
     def test_extend_captures_a_left_out_bucket_later(self):
-        """Input: R1 of size 4 only, then `r1_extend` of size 8. Expected: the 8-token step
+        """Input: recapture of size 4 only, then `recapture_extend` of size 8. Expected: the 8-token step
         ran eager on "v1" before the extend and replays a "v1" graph after it; undo puts both
         back to the base graphs. Pain point: a bucket left eager forever, or captured outside
         a gap while a batch replays. Not: on-demand capture during a step."""
         h, rs, _ = host(self, "ext")
         graphs0 = len(LIVE)
-        h.handle({"op": "txn", "plan": plan("r1ext", rebuild=["R1"], r1={"sizes": [4]})})
+        h.handle({"op": "txn", "plan": plan("r1ext", rebuild=["recapture"], recapture={"sizes": [4]})})
         self.assertEqual(rs[0].step(8), ("v1", "NONE"))
         for x in rs:
             x.fail_at = ("FULL", 2)
-        self.assertFalse(h.handle({"op": "r1_extend", "txn": "r1ext", "sizes": [8, 2]})["ok"])
+        self.assertFalse(h.handle({"op": "recapture_extend", "txn": "r1ext", "sizes": [8, 2]})["ok"])
         self.assertEqual(rs[1].keys, {"FULL": {4}})
         self.assertEqual(set(rs[1].full.concrete_cudagraph_entries), {4})
         for x in rs:
             x.fail_at = None
-        r = h.handle({"op": "r1_extend", "txn": "r1ext", "sizes": [8]})
+        r = h.handle({"op": "recapture_extend", "txn": "r1ext", "sizes": [8]})
         self.assertTrue(r["ok"], r)
         self.assertEqual([x[:2] for x in r["ranks"][0]["captured"]], [["FULL", 8]])
         self.assertEqual([r.step(8) for r in rs], [("v1", "FULL")] * 2)
         self.assertTrue(h.handle({"op": "undo", "txn": "r1ext"})["ok"])
         self.assertEqual([r.step(8) for r in rs], [("base", "FULL")] * 2)
         self.assertEqual(len(LIVE), graphs0)
-        self.assertFalse(h.handle({"op": "r1_extend", "txn": "r1ext"})["ok"])
+        self.assertFalse(h.handle({"op": "recapture_extend", "txn": "r1ext"})["ok"])
 
     def test_pieces_of_a_bucket_are_recaptured_together_and_other_modes_are_untouched(self):
         """Input: FULL_AND_PIECEWISE (a FULL wrapper and 3 piecewise wrappers, graphs for
@@ -265,6 +265,9 @@ class R1Test(unittest.TestCase):
                          {("captured_target", True)})
         self.assertIn("recaptures the graphs", fs[0]["observed"])
         self.assertEqual(rs[0].step(4), ("v1", "FULL"))
+
+
+R1Test = RecaptureTest
 
 
 if __name__ == "__main__":
