@@ -788,7 +788,8 @@ def merge_ranks(method, replies):
     """One reply for a group participant from its ranks' replies (each an ok-dict with its
     `rank`). Keeps every rank's reply in `ranks`; findings carry their rank. witness_check:
     `counts` is the count every rank reached (the minimum), the per-rank counts are in
-    `ranks`. status: one state, or "mixed"."""
+    `ranks`. status: one state, or "mixed". fingerprint: `code` holds every rank's keys,
+    each prefixed with its rank (`rank0/<key>`), since code object ids differ per process."""
     rs = [r if isinstance(r, dict) and "ok" in r else F.not_ok(f"bad reply {r!r}")
           for r in replies]
     for i, r in enumerate(rs):
@@ -807,6 +808,9 @@ def merge_ranks(method, replies):
             out[f] = {k: min(r.get(f, {}).get(k, 0) for r in rs) for k in keys}
     elif method == "proof":
         out["hashes"] = rs[0].get("hashes") if rs else {}
+    elif method == "fingerprint":
+        out["code"] = {f"rank{r['rank']}/{k}": v for r in rs for k, v in
+                       (r.get("code") or {}).items()}
     return out
 
 
@@ -850,6 +854,9 @@ class GroupParticipant(Participant):
 
     def at_base(self, _=None):
         return self._all("at_base", None)
+
+    def fingerprint(self, modules):
+        return self._all("fingerprint", modules)
 
 
 class Lane:
