@@ -162,6 +162,47 @@ class NewFieldsReadFormsTest(unittest.TestCase):
         self.assertEqual(sorted(f["check"] for f in _but_ctor(r["findings"])),
                          ["new_fields", "outside_changes"])
 
+    def test_dataclass_bare_field_and_post_init_field_block_while_defaulted_field_does_not(self):
+        """Input (#45): a @dataclass with `size: int` and `__post_init__` setting `self.ready =
+        True`; (a) adding a bare field `limit: int` and reading `self.limit` in `total()`;
+        (b) setting a new `self.cap = self.size * 2` in `__post_init__` and reading `self.cap`
+        in `total()`; (c) adding a defaulted field `limit: int = 10` and reading `self.limit`
+        in `total()`. Expected: (a) and (b) report `new_fields` (while `self.size` from the
+        base dataclass is not flagged); (c) does not report `new_fields`."""
+        base = ("import dataclasses\n\n\n"
+                "@dataclasses.dataclass\n"
+                "class Batch:\n"
+                "    size: int\n\n"
+                "    def __post_init__(self):\n"
+                "        self.ready = True\n\n"
+                "    def total(self):\n"
+                "        return self.size\n")
+        name = f"kt_dc{next(_n)}"
+        (m,) = temp_modules(self, {name: base})
+        b = m.Batch(4)
+        self.assertEqual(b.total(), 4)
+
+        bare_new = base.replace("    size: int\n", "    size: int\n    limit: int\n").replace(
+            "return self.size", "return self.size + self.limit")
+        r = S.stage(name, bare_new)
+        self.assertEqual([(f["check"], f["subject"]) for f in _but_ctor(r["findings"])],
+                         [("new_fields", f"{name}:Batch.limit"),
+                          ("outside_changes", name)])
+
+        post_new = base.replace(
+            "        self.ready = True\n",
+            "        self.ready = True\n        self.cap = self.size * 2\n").replace(
+            "return self.size", "return self.size + self.cap")
+        r = S.stage(name, post_new)
+        self.assertEqual([(f["check"], f["subject"]) for f in _but_ctor(r["findings"])],
+                         [("new_fields", f"{name}:Batch.cap")])
+
+        default_new = base.replace(
+            "    size: int\n", "    size: int\n    limit: int = 10\n").replace(
+            "return self.size", "return self.size + self.limit")
+        r = S.stage(name, default_new)
+        self.assertEqual([f["check"] for f in _but_ctor(r["findings"])], ["outside_changes"])
+
 
 FAKE_TRITON = '''import types
 

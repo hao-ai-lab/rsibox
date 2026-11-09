@@ -11,6 +11,7 @@ new name's location to `ast.fix_missing_locations`, as the swap's compile does),
 participant's hook, each through the journal. Toy arithmetic: see test_locate.py.
 """
 import ast
+import gc
 import threading
 import time
 import unittest
@@ -18,8 +19,9 @@ import unittest
 from . import findings as F
 from . import journal as J
 from . import locate as L
+from . import swap as S
 from . import witness as W
-from .test_locate import ENG, OPS, at, edit, fresh
+from .test_locate import ENG, OPS, at, edit, fresh, module_from
 
 
 def install(mod, source, targets, journal, witness, key_module):
@@ -133,6 +135,30 @@ class RunningFrameTest(unittest.TestCase):
         r = w.check([k_loop, k_gen], old)
         self.assertEqual([(f["check"], f["subject"]) for f in r["findings"]],
                          [("zero_witness", k_loop), ("zero_witness", k_gen)])
+
+    def test_a_post_startup_generator_stays_visible_after_a_scan_refreezes_the_heap(self):
+        """Input (#42): gc.freeze() after startup, then a serving-time generator `g = mod.gen();
+        next(g)` suspended on its first yield, then a heap scan (`L.all_objects()`) whose exit
+        calls `gc.freeze()` again. Expected: `W.live_codes(codes=[mod.gen.__code__])` still
+        contains `mod.gen.__code__`, and `S.stage` on an edit of `gen` still reports
+        `running_frame` until `g` is exhausted."""
+        src = "def gen():\n    yield 1\n    yield 2\n"
+        name, mod = module_from(self, src)
+        mod.__file__ = name + ".py"
+        gc.freeze()
+        self.addCleanup(gc.unfreeze)
+        g = mod.gen()
+        self.assertEqual(next(g), 1)
+        self.assertIn(mod.gen.__code__, W.live_codes(codes=[mod.gen.__code__]))
+        L.all_objects()
+        self.assertIn(mod.gen.__code__, W.live_codes(codes=[mod.gen.__code__]))
+        patched = src.replace("yield 2", "yield 3")
+        r = S.stage(name, patched, base_source=src)
+        self.assertEqual([f["check"] for f in r["findings"]], ["running_frame"])
+        self.assertEqual(list(g), [2])
+        self.assertNotIn(mod.gen.__code__, W.live_codes(codes=[mod.gen.__code__]))
+        r = S.stage(name, patched, base_source=src)
+        self.assertEqual(r["findings"], [])
 
 
 class CaptureWitnessTest(unittest.TestCase):
