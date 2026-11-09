@@ -2,8 +2,8 @@
 toy's source texts (CPU, standard library only). The analysis touches no live object, so
 these tests import no toy module: they read its files.
 
-Run from the repo root:  python3 -m unittest discover -s repos/fastvideo/livelab/kernel -t repos/fastvideo/livelab -v
-(or python3 -m pytest -q repos/fastvideo/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 """
 import ast
 import unittest

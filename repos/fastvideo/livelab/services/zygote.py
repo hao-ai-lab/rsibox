@@ -7,10 +7,10 @@ Python already has: one server process imports the preload list once, without CU
 every worker from it. A worker group respawned by the lab host then starts from warm imports.
 
 A module edited after the server imported it would be stale in every forked worker. As in the
-vLLM zygote (`repos/vllm/livelab/services/zygote_refresh.py`), the forked child drops the
-edited modules and every module that imports them from `sys.modules` before it builds
-anything, so the worker imports them again from the new source. The server snapshots the
-size and mtime of every preloaded source file; the child compares.
+vLLM lab's zygote refresh, the forked child drops the edited modules and every module that
+imports them from `sys.modules` before it builds anything, so the worker imports them again
+from the new source. The server snapshots the size and mtime of every preloaded source file;
+the child compares.
 
     enable()            # in the lab host, before the first VideoGenerator is built
     ...                 # every later worker group is forked from the preloaded server
@@ -19,7 +19,8 @@ The server must not touch the CUDA runtime (a forked child of such a process can
 At the pin two imports do: FastVideo calls `torch.cuda.is_available()` (the runtime, unless
 `PYTORCH_NVML_BASED_CUDA_CHECK=1`, which `enable` sets), and `fastvideo_kernel` asks Triton for
 the GPU target at module level, which the server answers from NVML while it imports
-(`_pin_triton_target`). `fork_poisoned()` checks the result with a probe fork.
+(`forksafe.pin_triton_target`, FASTRSI_ZYGOTE_CC="10.0" to set it). `fork_poisoned()` checks
+the result with a probe fork.
 
 Not refreshed (a finding in the worker log; restart the lab host): an edited extension `.so`,
 and modules outside `PREFIXES`.
@@ -29,6 +30,14 @@ import multiprocessing
 import os
 import sys
 import time
+
+# the framework's pre-fork guards (template/livelab/forksafe.py; FASTRSI_LIVELAB overrides the
+# folder): the forkserver imports this module first, before the adapter package
+_LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "template", "livelab"))
+if _LIVELAB not in sys.path:
+    sys.path.insert(0, _LIVELAB)
+import forksafe  # noqa: E402
 
 PREFIXES = ("fastvideo",)
 PRELOAD = ["torch", "fastvideo", "fastvideo.worker.multiproc_executor", "fastvideo.worker.gpu_worker",
@@ -114,39 +123,6 @@ def _install_worker_hook():
     SP.prepare = prepare
 
 
-def _capability():
-    """(major, minor) of GPU 0 without initializing CUDA (NVML), or FASTRSI_ZYGOTE_CC="10.0"."""
-    cc = os.environ.get("FASTRSI_ZYGOTE_CC")
-    if cc:
-        major, minor = cc.split(".")
-        return int(major), int(minor)
-    import pynvml
-    pynvml.nvmlInit()
-    try:
-        return tuple(pynvml.nvmlDeviceGetCudaComputeCapability(pynvml.nvmlDeviceGetHandleByIndex(0)))
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def _pin_triton_target():
-    """Importing `fastvideo_kernel` asks Triton for the current GPU target at module level
-    (`st_attn_triton.get_autotune_config`), which initializes CUDA, and a forked child of a
-    process with CUDA initialized cannot use CUDA. While the server imports, answer that
-    question from NVML instead. Returns the function that puts Triton's answer back."""
-    try:
-        from triton.backends.compiler import GPUTarget
-        from triton.backends.nvidia.driver import CudaDriver
-    except Exception:
-        return lambda: None
-    major, minor = _capability()
-    orig = CudaDriver.__dict__["get_current_target"]
-    CudaDriver.get_current_target = lambda self: GPUTarget("cuda", major * 10 + minor, 32)
-
-    def restore():
-        CudaDriver.get_current_target = orig
-    return restore
-
-
 def fork_poisoned():
     """Would a child forked now be unable to use CUDA? torch marks a child "in bad fork" when the
     parent touched the CUDA runtime at all, also through `torch.cuda.is_available()` or
@@ -172,7 +148,7 @@ def fork_poisoned():
 def _serve():
     """In the forkserver: import the preload list without CUDA, snapshot, hook the workers."""
     t0 = time.perf_counter()
-    restore = _pin_triton_target()
+    restore = forksafe.pin_triton_target()
     try:
         for m in filter(None, os.environ.get("FASTRSI_ZYGOTE_PRELOAD", "").split(",")):
             importlib.import_module(m)

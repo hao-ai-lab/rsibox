@@ -41,6 +41,11 @@ Contract:
 """
 import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
 
+# the framework's pre-fork CUDA guards (template/livelab/forksafe.py, on sys.path through the
+# package __init__); PROPS_CODE and Properties are re-exported for callers of this module
+import forksafe
+from forksafe import PROPS_CODE, Properties  # noqa: F401
+
 START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
 EARLY_ENV_PREFIXES = ("NVTE_", "PYTORCH_", "TORCH_", "TORCHINDUCTOR_", "TRITON_", "LD_",
@@ -58,16 +63,11 @@ DEFAULT_PRELOAD = ["torch", "megatron.training.training", "torch._dynamo",
 def install_forksafe():
     """Keep the imports from initializing CUDA. Some imports only ask about the GPU (quack, via
     Transformer Engine, calls torch.cuda.get_device_capability at import, which initializes
-    CUDA; tvm_ffi calls torch.cuda.is_available, which initializes the driver): answer those
-    from NVML, with the vLLM lab's forksafe (FASTRSI_SERVICES, default its folder in this
-    repo) and torch's NVML-based availability check. Returns what was done."""
+    CUDA; tvm_ffi calls torch.cuda.is_available, which initializes the driver; flashinfer reads
+    device properties): answer those from NVML and a probe process, with the framework's
+    forksafe and torch's NVML-based availability check. Returns what was done."""
     os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
-    d = os.environ.get("FASTRSI_SERVICES") or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "vllm", "livelab", "services")
-    if os.path.isfile(os.path.join(d, "forksafe.py")):
-        sys.path.insert(0, os.path.abspath(d))
     try:
-        import forksafe
         import torch
     except ImportError as e:
         return {"installed": False, "why": repr(e)}
@@ -76,67 +76,10 @@ def install_forksafe():
     return out
 
 
-PROPS_CODE = """import json, torch
-out = []
-for i in range(torch.cuda.device_count()):
-    p = torch.cuda.get_device_properties(i)
-    out.append({k: getattr(p, k) for k in dir(p) if not k.startswith("_")
-                and isinstance(getattr(p, k), (int, float, str, bool))})
-print(json.dumps(out))
-"""
-
-
-class Properties:
-    """Stand-in for torch.cuda's device properties, with the values CUDA reported."""
-    def __init__(self, d):
-        self.__dict__.update(d)
-
-    def __repr__(self):
-        return f"Properties({self.__dict__})"
-
-
 def install_properties(cuda, probe=None):
-    """Make cuda.get_device_properties(i) answer, while CUDA is not initialized here, with the
-    values CUDA itself reported for device i in a short helper process (probe: a callable
-    returning the list of dicts; default a subprocess running PROPS_CODE with this
-    environment). Some imports read a value at module level (flashinfer's gdn kernels:
-    get_device_properties(0).multi_processor_count) and would otherwise initialize CUDA.
-    Indices outside the probed devices, or calls after CUDA is initialized, run the original."""
-    import subprocess
-    orig = cuda.get_device_properties
-    if getattr(orig, "_fastrsi_props", False):
-        return {"installed": False, "why": "already installed"}
-    try:
-        t = time.time()
-        props = probe() if probe else json.loads(subprocess.run(
-            [sys.executable, "-c", PROPS_CODE], capture_output=True, text=True, check=True,
-            timeout=300).stdout.strip().splitlines()[-1])
-    except Exception as e:
-        return {"installed": False, "why": repr(e)[:300]}
-
-    def get_device_properties(device=None):
-        if not cuda.is_initialized():
-            i = _device_index(device)
-            if i is not None and 0 <= i < len(props):
-                return Properties(props[i])
-        return orig(device)
-    get_device_properties._fastrsi_props = True
-    get_device_properties.__wrapped__ = orig
-    cuda.get_device_properties = get_device_properties
-    return {"installed": True, "devices": len(props), "probe_s": round(time.time() - t, 2)}
-
-
-def _device_index(device):
-    """0 for None/"cuda", i for i, "cuda:i" or a cuda torch.device (index None -> 0)."""
-    if device is None or device == "cuda":
-        return 0
-    if isinstance(device, int):
-        return device
-    if isinstance(device, str):
-        return int(device.split(":")[1]) if device.startswith("cuda:") else None
-    if getattr(device, "type", None) == "cuda":
-        return device.index or 0
-    return None
+    """forksafe.install_properties: cuda.get_device_properties(i) answers the values a probe
+    process read from CUDA, while CUDA is not initialized here."""
+    return forksafe.install_properties(cuda, probe=probe)
 
 
 def driver_initialized():
@@ -216,9 +159,9 @@ def preload(mods, script=None, check=cuda_initialized):
 
 # our own modules that hold references to megatron's: re-imported with it
 REFRESH_OWN = ("run", "hook", "gap", "state", "client")
-# packages a code restart never drops even when they sit next to the script: this lab, the live-lab
-# kernel it hosts (`from kernel import ...` in hook.py) and the services that hold forksafe
-KEEP_LOADED = ("fastrsi_megatron", "kernel", "services")
+# modules a code restart never drops even when they sit next to the script: this lab, the live-lab
+# kernel it hosts (`from kernel import ...` in hook.py), and forksafe, whose patches the rank removes
+KEEP_LOADED = ("fastrsi_megatron", "kernel", "forksafe")
 
 
 def refreshed(req, name):
@@ -291,24 +234,10 @@ def cpu_list(spec):
 
 def unpatch(cuda=None):
     """In a forked rank: put back the torch.cuda functions the zygote patched for its imports
-    (forksafe's get_device_capability and current_device, the device-properties stand-in), and
+    (forksafe's get_device_capability, current_device and device-properties stand-in), and
     drop PYTORCH_NVML_BASED_CUDA_CHECK if the zygote set it. The rank initializes CUDA itself,
     so it needs neither, and the wrappers cost a check on every call. Returns the names put back."""
-    if cuda is None:
-        t = sys.modules.get("torch")
-        cuda = t.cuda if t is not None else None
-    out = []
-    if cuda is not None:
-        for name in ("get_device_capability", "current_device", "get_device_properties"):
-            f = getattr(cuda, name, None)
-            if f is not None and hasattr(f, "__wrapped__") and (
-                    getattr(f, "_fastrsi_forksafe", False) or getattr(f, "_fastrsi_props", False)
-                    or getattr(f, "__module__", "") == "forksafe"):
-                setattr(cuda, name, f.__wrapped__)
-                out.append(name)
-    if "PYTORCH_NVML_BASED_CUDA_CHECK" not in START_ENV:
-        os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
-    return out
+    return forksafe.unpatch(cuda, clear_env="PYTORCH_NVML_BASED_CUDA_CHECK" not in START_ENV)
 
 
 def bind(req, local_rank):

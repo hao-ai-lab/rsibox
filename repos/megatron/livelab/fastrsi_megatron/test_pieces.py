@@ -13,10 +13,9 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-# hook.py hosts the live-lab kernel, which still lives in the vLLM artifact (AGENTS.md: shared code moves to
-# the framework when a second engine needs it); at run time FASTRSI_KERNEL points at it, here the repo copy
-KERNEL = os.environ.get("FASTRSI_KERNEL") or os.path.join(HERE, "..", "..", "..", "vllm", "livelab")
-from fastrsi_megatron import client, gap  # noqa: E402
+# hook.py hosts the live-lab kernel from the framework's template/livelab, which importing the
+# package puts on sys.path (FASTRSI_LIVELAB overrides it)
+from fastrsi_megatron import LIVELAB, client, gap  # noqa: E402
 
 try:
     import torch
@@ -171,8 +170,7 @@ class StartState(unittest.TestCase):
         optimizer creates). Expect: a finding in the kernel's shape (check optimizer_state_unknown,
         the keys in `observed`, n_unknown 2) that serializes to JSON, built without the kernel's
         catalog, which does not know this Megatron-only check. Does not run Lab._setup itself."""
-        if KERNEL not in sys.path:
-            sys.path.insert(0, KERNEL)
+        self.assertIn(LIVELAB, sys.path)
         from fastrsi_megatron import hook
         f = hook.unknown_state_finding(["opt0.state.3.master_param", "opt0.state.4.master_param"])
         self.assertEqual(f["check"], "optimizer_state_unknown")

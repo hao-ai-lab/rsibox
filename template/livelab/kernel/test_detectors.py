@@ -1,8 +1,8 @@
 """Golden tests of the swap's detectors: fields only the new __init__ sets, and line maps of
 a second edit after a line shift (CPU, standard library only).
 
-Run from the repo root:  python3 -m unittest discover -s repos/fastvideo/livelab/kernel -t repos/fastvideo/livelab -v
-(or python3 -m pytest -q repos/fastvideo/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 """
 import gc
 import importlib

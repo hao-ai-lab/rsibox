@@ -25,15 +25,21 @@ A finding without acceptance means no fork: the reply carries the finding and th
 actions. The zygote itself stops if its imports initialized CUDA or the CUDA driver, since no
 forked child could then use the GPU; it names the module, which the modules file can exclude.
 
-Before its imports the zygote installs forksafe.py (FASTRSI_ZYGOTE_FORKSAFE=0 turns it off):
-torch.cuda.get_device_capability and current_device answer from NVML while CUDA is not
-initialized. Every forked server inherits it, so a library that asks for the GPU's capability
-at import (FlashInfer, imported by the API server at TP>1) no longer initializes CUDA there,
-and vLLM keeps forking the engine core and the workers instead of spawning them.
+Before its imports the zygote installs the framework's forksafe.py (template/livelab;
+FASTRSI_ZYGOTE_FORKSAFE=0 turns it off): torch.cuda.get_device_capability and current_device
+answer from NVML while CUDA is not initialized. Every forked server inherits it, so a library
+that asks for the GPU's capability at import (FlashInfer, imported by the API server at TP>1)
+no longer initializes CUDA there, and vLLM keeps forking the engine core and the workers
+instead of spawning them.
 """
 import argparse, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# forksafe.py is the framework's (template/livelab; FASTRSI_LIVELAB overrides the folder)
+LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "template", "livelab"))
+if LIVELAB not in sys.path:
+    sys.path.insert(1, LIVELAB)
 import forksafe, vllm_args, zygote_refresh
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.

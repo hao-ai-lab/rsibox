@@ -9,7 +9,7 @@ lab lives in `repos/<engine>/livelab/`.
 `--receipts` keeps the txn / proof / undo receipts the suite's transactions write.
 
 The run's own verdict is printed, not written as a receipt: the receipt proposal
-(repos/vllm/livelab/kernel/receipt.py) has no record kind for a conformance run, and adding one extends the
+(template/livelab/kernel/receipt.py) has no record kind for a conformance run, and adding one extends the
 receipt writer, which needs its human owner first (AGENTS.md, Trust).
 """
 import argparse

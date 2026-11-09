@@ -2,8 +2,8 @@
 the toy engine (CPU, standard library only). Here the test drives the two phases by hand, as
 a host does; the host itself (`Coordinator`) is the next kernel PR.
 
-Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
-(or python3 -m pytest -q repos/vllm/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 """
 import threading
 import unittest

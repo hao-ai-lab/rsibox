@@ -1,7 +1,7 @@
 """Golden tests of findings and locate on the toy engine (CPU, standard library only).
 
-Run from the repo root:  python3 -m unittest discover -s repos/vllm/livelab/kernel -t repos/vllm/livelab -v
-(or python3 -m pytest -q repos/vllm/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+(or python3 -m pytest -q template/livelab/kernel)
 
 Toy arithmetic: Engine.step(x) = shift(activate(scale(x))) with scale = x*2, activate = x+1,
 shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy package
