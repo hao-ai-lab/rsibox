@@ -168,8 +168,8 @@ class GraphTest(unittest.TestCase):
     def test_an_edit_inside_a_captured_graph_is_a_finding_and_not_applied(self):
         """Input: the host over 2 ranks whose workers run FULL_AND_PIECEWISE with
         torch.compile; the toy engine plays model code. Expected: the edit of Engine.step is
-        reported by every rank as a blocking `captured_target` (route R1, today T1: this
-        adapter has no R1), the transaction aborts, and both ranks still run "base". The same
+        reported by every rank as a blocking `captured_target` (route R1; the
+        finding names the plan's "rebuild": ["R1"]), the transaction aborts, and both ranks still run "base". The same
         edit with the toy outside the model-code prefixes commits on both ranks. Pain point: a
         model-code edit that committed with no finding and whose witness stayed 0/0 (graphs
         only, TP2 MoE run). Not: vLLM's real graphs (the GPU receipt)."""
@@ -182,7 +182,7 @@ class GraphTest(unittest.TestCase):
               for f in r["receipt"]["findings"]]
         self.assertEqual((r["outcome"], fs), ("aborted", [("captured_target", 0, "R1", "T1"),
                                                           ("captured_target", 1, "R1", "T1")]))
-        self.assertIn("no R1 yet", r["receipt"]["findings"][0]["observed"])
+        self.assertIn('"rebuild": ["R1"]', r["receipt"]["findings"][0]["observed"])
         self.assertEqual([ran(n) for n in names], ["base", "base"])
         for s in sides:
             s.captured_prefixes = ("vllm.model_executor.models.",)
