@@ -76,6 +76,12 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
             # whole package, the state a fresh process starts from (~15 s of imports).
             dropped |= {n for n in modules if n.split(".")[0] in prefixes}
         dropped = sorted(dropped)
+        for n in stale:
+            f = now[n][0]
+            try:
+                os.unlink(importlib.util.cache_from_source(f))
+            except OSError:
+                pass
         for n in dropped:
             modules.pop(n, None)
             RB.unbind(modules, n)
