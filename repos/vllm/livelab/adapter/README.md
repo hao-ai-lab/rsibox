@@ -1,6 +1,6 @@
 # Adapter: the transaction kernel inside a live vLLM engine
 
-The engine side of the transaction kernel (`template/livelab/kernel`): one transaction swaps
+The engine side of the transaction kernel (`core/livelab/kernel`): one transaction swaps
 code on every worker rank and in the engine core together, between the same two engine steps,
 with receipts. This folder holds the
 live code swap path (in-place function-body swap) and selective recapture of CUDA graphs in the
@@ -91,7 +91,7 @@ needs one is a finding, not a silent swap.
 ## Run it
 
 The adapter on `PYTHONPATH` (`repos/vllm/livelab`; importing it puts the kernel's folder,
-`template/livelab` or `FASTRSI_LIVELAB`, on `sys.path`), a sitecustomize that imports
+`core/livelab` or `FASTRSI_LIVELAB`, on `sys.path`), a sitecustomize that imports
 `adapter.host` when `FASTRSI_KERNEL_DIR` is set, and:
 
 ```

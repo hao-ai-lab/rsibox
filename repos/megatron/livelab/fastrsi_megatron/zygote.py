@@ -41,7 +41,7 @@ Contract:
 """
 import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
 
-# the framework's pre-fork CUDA guards (template/livelab/forksafe.py, on sys.path through the
+# the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
 import forksafe
 from forksafe import PROPS_CODE, Properties  # noqa: F401

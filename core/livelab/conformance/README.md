@@ -26,7 +26,7 @@ An install that changes nothing must fail, not report success: `c6_refusal` (`em
 
 ## Run
 
-From `template/livelab`:
+From `core/livelab`:
 
 ```sh
 python3 -m conformance --lab module:Class        # the pass table
@@ -73,7 +73,7 @@ c10_not_proven        pass      0.057  proven False, findings ['zero_witness', '
 ## The toy lab
 
 The toy lab lives with the kernel it drives, in `../kernel/toy_lab.py`
-(`--lab kernel.toy_lab:ToyLab` from `template/livelab`). This folder tests its own cases
+(`--lab kernel.toy_lab:ToyLab` from `core/livelab`). This folder tests its own cases
 against small fake labs (`test_cases.py`). The output above is from the toy lab.
 
 The toy lab: two worker ranks, each its own copy of the kernel's toy engine, step together in

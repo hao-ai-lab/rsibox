@@ -13,7 +13,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-# hook.py hosts the live-lab kernel from the framework's template/livelab, which importing the
+# hook.py hosts the live-lab kernel from the framework's core/livelab, which importing the
 # package puts on sys.path (FASTRSI_LIVELAB overrides it)
 from fastrsi_megatron import LIVELAB, client, gap  # noqa: E402
 

@@ -10,7 +10,7 @@ at compile, and `Autotuner.cache`. "Compiling" builds a Python function from `_s
 a launch runs is what the text said at compile time. The real-Triton case at the end runs only
 when `FASTRSI_TEST_GPU=1` is set with triton and a GPU.
 
-Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 """
 import importlib.util
 import itertools

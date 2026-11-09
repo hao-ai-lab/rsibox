@@ -31,10 +31,10 @@ import os
 import sys
 import time
 
-# the framework's pre-fork guards (template/livelab/forksafe.py; FASTRSI_LIVELAB overrides the
+# the framework's pre-fork guards (core/livelab/forksafe.py; FASTRSI_LIVELAB overrides the
 # folder): the forkserver imports this module first, before the adapter package
 _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "template", "livelab"))
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 import forksafe  # noqa: E402

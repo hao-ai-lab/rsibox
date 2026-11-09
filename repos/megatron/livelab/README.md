@@ -1,8 +1,8 @@
 # Megatron-LM live lab
 
 A running Megatron-LM training job that takes code edits between two train steps and proves
-they ran, with the framework's transaction kernel (`template/livelab/kernel`, pure Python)
-unchanged. Interface: `template/livelab/INTERFACE-v1.md` (draft).
+they ran, with the framework's transaction kernel (`core/livelab/kernel`, pure Python)
+unchanged. Interface: `core/livelab/INTERFACE-v1.md` (draft).
 
 ## Process layout
 
@@ -21,7 +21,7 @@ torchrun (one process per GPU, sessions of their own)
 client.py        one JSON request per call (socket or mailbox)
 zygote.py        restart by fork: torch, TE, Megatron imported once, no CUDA; ranks forked per request
 overlay.py       fresh processes with edited modules, same file names and lines
-conformance_lab.py   LabUnderTest for template/livelab/conformance
+conformance_lab.py   LabUnderTest for core/livelab/conformance
 ```
 
 ## Contract
@@ -52,7 +52,7 @@ rebuild), optimizer construction, TE C++ code.
 
 ## Kernel location
 
-The kernel and the pre-fork guards are imported from `template/livelab` (`kernel/`,
+The kernel and the pre-fork guards are imported from `core/livelab` (`kernel/`,
 `forksafe.py`), which `fastrsi_megatron/__init__.py` puts on `sys.path`; `FASTRSI_LIVELAB` (or
 `FASTRSI_KERNEL`) names another folder.
 
@@ -67,7 +67,7 @@ code outside the journal.
 ```sh
 FASTRSI_MG_CMD='<a command that runs torchrun -m fastrsi_megatron.run pretrain_gpt.py ...>' \
 FASTRSI_MG_ROOT=<Megatron-LM tree> FASTRSI_CHECK_STEPS=3 FASTRSI_CHECK_TIMEOUT=60 \
-python3 -m conformance --lab fastrsi_megatron.conformance_lab:MegatronLab   # from template/livelab
+python3 -m conformance --lab fastrsi_megatron.conformance_lab:MegatronLab   # from core/livelab
 ```
 
 Our 2026-11-07 run: 2 layers, hidden 512, TP 2 on 2 GB200, `--deterministic-mode`, 3-step
@@ -123,7 +123,7 @@ module the zygote has imported).
 
 Keeping CUDA uninitialized: Megatron's import reaches three libraries that ask about the GPU at
 import. quack (through TE) calls `get_device_capability`: answered from NVML by the framework's
-`forksafe.py` (`template/livelab`). tvm_ffi calls `is_available`: answered by NVML with
+`forksafe.py` (`core/livelab`). tvm_ffi calls `is_available`: answered by NVML with
 PYTORCH_NVML_BASED_CUDA_CHECK=1. flashinfer's gdn kernels read
 `get_device_properties(0).multi_processor_count` at module level: answered with the values CUDA
 reported in a one-off helper process (`forksafe.install_properties`, 1.5-1.9 s at zygote

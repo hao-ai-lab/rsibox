@@ -6,7 +6,7 @@ One folder per engine, each with the same structure:
 repos/<engine>/
   docs/        architecture: process tree, restart boundaries, costs
   kb/          knowledge base: costs, workload, mechanisms, reset rules, raw measurements
-  livelab/     the engine's live lab, built on template/livelab/
+  livelab/     the engine's live lab, built on core/livelab/
   tools/       proven probes and tools
   examples/    real upstream PRs, replayed in the lab, with receipts
 ```

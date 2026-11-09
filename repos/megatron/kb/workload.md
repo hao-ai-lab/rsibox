@@ -1,7 +1,7 @@
 # Workload F(x) and its correctness gate
 
 The target the hill-climb optimizes, fixed before any edit. Developers never change it, the gate
-or the timing code (`core/developer.md`).
+or the timing code (`core/agents/developer.md`).
 
 ## Model
 
@@ -16,7 +16,7 @@ backward found no backend in Megatron (flash-attn: "SM100 backward with head_dim
 support local attention"; TE fused attention: "No dot product attention backend is available"),
 seen in our 2026-11-05 RL bring-up. A dense model with head dim 128 runs every path today.
 Why random weights: the hill-climb measures training speed at fixed numerics, which needs the
-same code paths and shapes, not a pretrained start (`core/developer.md`, "No weights yet").
+same code paths and shapes, not a pretrained start (`core/agents/developer.md`, "No weights yet").
 
 A Qwen3-32B-architecture run (64 layers, FFN 25600, 64 heads) is the 2-node target; see
 "Two nodes" below.

@@ -144,7 +144,7 @@ template's conformance cases c0-c10.
   (`install`, `check`, `reset`, `uninstall`, `status`) and the conformance harness
   (`patches`, `fresh_check`, `inject`): two ranks step together in a loop thread, the host
   is a `StepGapCoordinator` inside a `Session`, ranks are reached through `CallParticipant`.
-  CI runs `python3 -m conformance --lab kernel.toy_lab:ToyLab` from `template/livelab`, the
+  CI runs `python3 -m conformance --lab kernel.toy_lab:ToyLab` from `core/livelab`, the
   folder that holds `kernel/`.
 - **Findings** are the one result schema. Every call returns `{"ok": bool, ...,
   "findings": [...]}`. A finding says what was checked, what was observed against what was
@@ -195,7 +195,7 @@ template's conformance cases c0-c10.
 From the repo root (CPU, a few seconds; the torch cases are skipped without torch; CI runs the same command in `.github/workflows/cpu-tests.yml`):
 
 ```
-python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 ```
 
 Each test's docstring says what it proves and what it does not.
@@ -256,7 +256,7 @@ Each test's docstring says what it proves and what it does not.
 | `test_install_after_an_unjournaled_edit_is_refused` | an install that adopts a hand edit made since the last status() as the expected code |
 | `test_no_fingerprint_never_verifies` | a participant with no fingerprint passing verify because none was expected either |
 
-The conformance cases c0-c10 (`template/livelab/conformance/cases.py`) run against the toy
+The conformance cases c0-c10 (`core/livelab/conformance/cases.py`) run against the toy
 lab in CI; all 11 pass (no XFAIL).
 
 ## Not here yet

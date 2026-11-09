@@ -1,6 +1,6 @@
 # Conformance c0-c10 on the real FastH3 lab
 
-The template's conformance cases (`template/livelab/conformance/`) run against
+The template's conformance cases (`core/livelab/conformance/`) run against
 `livelab/adapter/lab.py` hosting a real MiniMax H3 engine (FastH3-QAD-v2, the workload of
 `kb/workload.md`) on GB200 GPUs, our 2026-11-07 runs. The cases drive the lab only through its
 verbs; the edits are real H3 code (`adapter/patches.py`); a "fresh process" is a new FastVideo

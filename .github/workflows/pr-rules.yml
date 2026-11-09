@@ -90,7 +90,7 @@ jobs:
           print("OK: every loop record field has text. Not checked: whether it is true.")
           '
   cross-engine-imports:
-    name: No repos/<engine>/ code imports from another repos/<other>/ (shared code goes to template/livelab)
+    name: No repos/<engine>/ code imports from another repos/<other>/ (shared code goes to core/livelab)
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

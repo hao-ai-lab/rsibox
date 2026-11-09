@@ -1,12 +1,12 @@
 # FastVideo live lab
 
 A warm FastVideo engine (today: MiniMax H3 / FastH3, `kb/workload.md`) that takes code edits
-live and proves they ran. Implements `template/livelab/INTERFACE.md` (the v1 draft verbs) and
-the conformance harness of `template/livelab/conformance/`.
+live and proves they ran. Implements `core/livelab/INTERFACE.md` (the v1 draft verbs) and
+the conformance harness of `core/livelab/conformance/`.
 
-The transaction kernel and the pre-fork guards are the framework's: `template/livelab/kernel/`
-and `template/livelab/forksafe.py`. Importing `adapter` (or `services.zygote`) puts
-`template/livelab` on `sys.path` (`FASTRSI_LIVELAB` overrides the folder).
+The transaction kernel and the pre-fork guards are the framework's: `core/livelab/kernel/`
+and `core/livelab/forksafe.py`. Importing `adapter` (or `services.zygote`) puts
+`core/livelab` on `sys.path` (`FASTRSI_LIVELAB` overrides the folder).
 
 - `adapter/`: the kernel inside FastVideo: `agent.py` runs in every worker process,
   `lab.py` is the lab host (the verbs), `patches.py` the conformance edits on real H3 code,

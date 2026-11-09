@@ -2,7 +2,7 @@
 
 What building FastRSI for vLLM taught us about the method, for any engine. Each lesson says what
 happened, the rule it produced and how to apply it. Engine-specific lessons live in
-`repos/<engine>/kb/lessons.md`; the orchestrator's working rules in `core/orchestrator.md`. Edit
+`repos/<engine>/kb/lessons.md`; the orchestrator's working rules in `core/agents/orchestrator.md`. Edit
 lessons in place when a rule changes; this is not a log.
 
 ### 1. Draw restart boundaries before writing mechanisms
@@ -126,7 +126,7 @@ on one, from mid-afternoon on, no GPU sat idle more than 2–3 min. The runner l
 job in the background and checks for free GPUs every 60 s.
 
 **Rule.** A program claims GPUs and runs scripted steps; agents take only jobs marked `needs_agent`
-(`core/orchestrator.md` rule 2).
+(`core/agents/orchestrator.md` rule 2).
 
 **Apply it.**
 - Build the queue, the runner and a status view before feature work.
@@ -146,7 +146,7 @@ process-group kill took a whole node down.
 
 **Rule.** One lock per GPU under one canonical name, taken atomically; check and take in the same
 step; a lock records its holder's PID so a waiter breaks it when that process is gone, and a holder
-that dies must not keep its GPUs (`core/orchestrator.md` rule 16).
+that dies must not keep its GPUs (`core/agents/orchestrator.md` rule 16).
 
 **Apply it.**
 - Read locks and the port before launch, never "it looked idle".
@@ -198,7 +198,7 @@ on merged PRs were answered later in batch fix PRs, one per boundary (#46–#48)
 4 GPUs" was read as "in progress", and a retyped token was wrong.
 
 **Rule.** Messages carry record paths, commit hashes and copied values; prose is for judgment
-(`core/orchestrator.md` rule 6).
+(`core/agents/orchestrator.md` rule 6).
 
 **Apply it.**
 - Link the record instead of retelling it; never retype a number, a hash or a secret.

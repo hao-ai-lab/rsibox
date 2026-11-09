@@ -10,8 +10,8 @@ engine core and every worker, each importing vLLM again (33 s and 121 s in two o
 starts). Megatron's zygote imports read device properties, FastVideo's read Triton's target.
 
 Run from the repo root (standard library only; the torch case skips without torch):
-    python3 -m unittest discover -s template/livelab -p 'test_forksafe.py' -v
-(or python3 -m pytest -v template/livelab/test_forksafe.py)
+    python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
+(or python3 -m pytest -v core/livelab/test_forksafe.py)
 """
 import os, subprocess, sys, types, unittest
 from pathlib import Path

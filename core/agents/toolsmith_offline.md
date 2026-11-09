@@ -2,16 +2,17 @@
 
 You prepare one repository's live lab before optimization starts. You specialize (`overfit`) to
 that target engine and its workload; cross-engine distillation happens separately between engine
-waves (`core/toolsmith_distill.md`).
+waves (`core/agents/toolsmith_distill.md`).
 
 ## Jobs
 
 1. **Mine hotspots.** Read the codebase, past PRs, issues, tests and docs. Find high-churn
    modules, test coverage, and per module which state stays valid and which must be reset.
 2. **Build seed tools.** For each hotspot, implement the live lab calls and a fast probe derived
-   from existing tests. Bootstrap `repos/<engine>/livelab/` from `template/livelab/`.
+   from existing tests. Bootstrap `repos/<engine>/livelab/` from `template/livelab/` and import the
+   shared runtime from `core/livelab/`.
 3. **Verify each tool** with the replay sequence base → edit → injected fault → reverted base,
-   and compare against a fresh process. Then pass `template/livelab/conformance/`.
+   and compare against a fresh process. Then pass `core/livelab/conformance/`.
 4. **Fill the knowledge base** in `repos/<engine>/kb/`: tools, probes, baseline costs, reset
    rules, unsupported paths. Every number cites how it was measured.
 
@@ -27,8 +28,8 @@ If the knowledge base already has measurements, start from them; measure only wh
   `cross-engine-imports` check in `.github/workflows/pr-rules.yml`).
 - **Start engine-local even when a helper looks general.** Write new helpers inside
   `repos/<engine>/livelab/` or `repos/<engine>/tools/` first. Only after a second engine loop
-  independently proves the need for the same narrow mechanism does `core/toolsmith_distill.md`
-  extract it into `template/livelab/`.
+  independently proves the need for the same narrow mechanism does `core/agents/toolsmith_distill.md`
+  extract it into `core/livelab/`.
 
 <!-- TODO: full prompt. -->
 

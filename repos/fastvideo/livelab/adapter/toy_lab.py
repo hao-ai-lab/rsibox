@@ -5,7 +5,7 @@ each worker's pipe with a deadline, one kernel participant per rank, the session
 fault injection in the workers, and `fresh_check` from an overlay of the package. CI runs the
 conformance cases c0-c10 on it:
 
-    cd template/livelab && PYTHONPATH=<repo>/repos/fastvideo/livelab \\
+    cd core/livelab && PYTHONPATH=<repo>/repos/fastvideo/livelab \\
         python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
 """
 from adapter.lab import FastVideoLab

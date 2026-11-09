@@ -1,8 +1,8 @@
 """Golden tests of the transaction host (`coordinator.Coordinator`, `StepGapCoordinator`) on
 toy ranks (CPU, standard library only).
 
-Run from the repo root:  python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
-(or python3 -m pytest -q template/livelab/kernel)
+Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
+(or python3 -m pytest -q core/livelab/kernel)
 """
 import itertools
 import os

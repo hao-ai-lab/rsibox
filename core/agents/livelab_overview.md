@@ -12,7 +12,7 @@ lab keeps that state resident.
 ## Calls
 
 `install(patch)`, `check(workload)`, `reset()`, `uninstall()`, `status()`.
-Contract: `template/livelab/INTERFACE.md`. Engine specifics: `repos/<engine>/livelab/README.md`.
+Contract: `core/livelab/INTERFACE.md`. Engine specifics: `repos/<engine>/livelab/README.md`.
 
 ## Before every experiment
 

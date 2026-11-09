@@ -21,7 +21,7 @@ import traceback
 # the kernel lives in the framework's live-lab folder; the package __init__ adds it too, this
 # covers a worker that imports this module by path
 _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "template", "livelab"))
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 
