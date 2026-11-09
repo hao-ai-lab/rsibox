@@ -33,7 +33,7 @@ The split decorator itself is graph machinery, wherever it is defined: its body 
 op, when vLLM decorates the op at import, and decides there whether and how the op breaks the
 graphs; its wrapper's capture path runs only while a graph is captured. The decorated ops and
 the captured graphs keep the old decision, so a swap of it changes nothing the engine runs
-(vLLM #59941 removed an early `return fn` from the decorator's body: T0 committed, witness 0 on
+(vLLM #59941 removed an early `return fn` from the decorator's body: live code swap committed, witness 0 on
 every rank). `decoration_time` names such targets, in any module.
 """
 import ast

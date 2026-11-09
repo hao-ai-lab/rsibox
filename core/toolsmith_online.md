@@ -9,9 +9,14 @@ Before anyone runs a kind of change the loop has not run before (a new flag, env
 variable, library setting, parallel layout or tool), answer three questions in writing and put
 the answers in the brief:
 
-1. **Restart class.** Which tier does the change need: a live swap, a component restart or a
-   full restart? A setting read once per process (most library environment variables, process
-   groups built at start-up) is a restart, not a live edit.
+1. **Restart class & state pollution.** Which tier does the change need: a live code swap, a
+   component restart, or a full/warm restart? Account for **dependency and state pollution**:
+   an edit that alters shared module state, caches, singletons, or constructor attributes may
+   pollute future transactions even if it swaps cleanly in place.
+   *Failure mode warning:* beware the failure mode where agents become overly conservative,
+   confining themselves to tiny, suboptimal incremental edits just to avoid crossing
+   state/restart boundaries. When an architectural or structural edit delivers cleaner design
+   or higher performance, price the necessary component or engine restart honestly and take it.
 2. **Predicted cost.** Price it from `repos/<engine>/kb/costs.md`: restarts × seconds each, and
    the base-to-base noise of the metric it will be judged by. A difference smaller than that
    noise needs repeats, not one run per point.

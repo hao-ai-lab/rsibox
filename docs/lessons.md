@@ -13,7 +13,7 @@ save watcher choosing among them, a native side library, a second adapter path),
 monkeypatches: about 45k lines and 245 run records. Its records show 51 hand repairs, and nearly
 every hard bug was in aligning long-lived state in place (new fields, constructors, caches,
 captured graphs, copies in other processes), not in swapping a function body. The v1 redesign keeps
-one mechanism per restart tier: T0 swap, T1 component restart, T2 warm restart. It is about 7.7k
+one mechanism per restart boundary: in-place swap, component restart, warm restart. It is about 7.7k
 lines of code plus 4.4k of tests, and on the same 19 upstream PRs it needed a full restart on 0
 (prototype: 2) and went live in place on 8 (prototype: 6; 7 once constructor edits always block).
 
@@ -66,17 +66,17 @@ and compilation, not Python, decide edit-to-run.
 
 **What happened.** We replayed 19 merged upstream vLLM PRs through v1 on GB200 (two models; TP1
 and TP2; eager and CUDA graphs; our 2026-11-06/07 replay run). On the first pass 8 went live in
-place at 0.38–1.94 s edit-to-run and 11 through a fast restart (T1) forked from a warm process; a
+place at 0.38–1.94 s edit-to-run and 11 through a fast restart forked from a warm process; a
 warm plain restart took 43–231 s. It found 4 bugs (lesson 5). After their fixes (#52–#55) we reran
 the affected PRs and the in-place ones on main:
 - vllm-project/vllm#61323 went from a plain-restart fallback (113 s eager, 195 s graph) to a forked
   restart (9.2 s, 44.9 s);
 - vllm-project/vllm#59941 was refused before commit instead of committing with witness 0;
 - vllm-project/vllm#62872 now undoes back to base, but costs 16.6 s (eager) and 51.2 s (graph)
-  instead of 0.38 s, because a constructor edit now always goes to T1;
+  instead of 0.38 s, because a constructor edit now always routes to a forked restart;
 - the 7 other in-place PRs were unchanged.
 
-Across both passes T1 took 9.2–68.8 s on Qwen3-8B and 115–185 s on Qwen3.5-35B-A3B-FP8 at TP2 with
+Across both passes a forked restart took 9.2–68.8 s on Qwen3-8B and 115–185 s on Qwen3.5-35B-A3B-FP8 at TP2 with
 CUDA graphs. Real PRs chose the hard cases for us: constructors, decorators, Triton kernels, op
 registries.
 

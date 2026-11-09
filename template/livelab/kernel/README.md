@@ -74,11 +74,11 @@ template's conformance cases c0-c10.
   Imports no `triton`: CPU CI uses the stand-in runtime in `test_jit.py`.
 - **Detectors** in `stage`. *New fields:* a changed or added method that reads `self.X`,
   where only the edited `__init__` sets X (no old method sets it, no class body defines it),
-  gives a blocking `new_fields` finding with `"route": "T1"`: instances built before the swap
+  gives a blocking `new_fields` finding with `"route": "component_restart"`: instances built before the swap
   lack X, so the new code would raise AttributeError at its first call. The fix is a rebuild
-  of the objects or a restart (T1); nothing here sets fields on live objects. *Constructors:*
+  of the objects or a restart (component restart); nothing here sets fields on live objects. *Constructors:*
   a target named `__init__`, `__new__` or `__post_init__` gives a blocking, overridable
-  `constructor_edit` finding with `"route": "T1"`: instances built before the swap keep what
+  `constructor_edit` finding with `"route": "component_restart"`: instances built before the swap keep what
   the old constructor set (vLLM #61323 edits `RMSNorm.__init__`; the model's norms were built
   at start-up, so the commit changed nothing they hold and the witness read 0). The kernel
   does not search the heap for instances, so every constructor edit blocks; accept it when the
@@ -100,7 +100,7 @@ template's conformance cases c0-c10.
   suspended generator or coroutine), else `zero_witness` (not reached). Calls made while the
   engine captures a graph (`Witness(capturing=fn)`, `with witness.capture():`) count apart:
   they prove capture, not a run, so zero live calls with capture calls is a `zero_witness`
-  routed to R1 that asks for a device-side probe. With torch loaded, the hook is marked
+  routed to CUDA graph recapture that asks for a device-side probe. With torch loaded, the hook is marked
   `assume_constant_result`, so Dynamo calls it while tracing and never traces it.
 - **Participant** (`coordinator.py`, part 1) is one side of a two-phase transaction: a worker
   rank, the engine core or the API server. Every call returns an ok-dict and never raises:
@@ -261,11 +261,11 @@ lab in CI; all 11 pass (no XFAIL).
 
 ## Not here yet
 
-The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in later PRs:
+The prototype swap (fastrsi#12) had more than a plain live code swap needs; these parts come back in later PRs:
 
 - **New-field backfill** (`_backfill_code`, `fields.py`, plan `"backfill": true`) and
   `rebuilds=` (a recipe that rebuilds the objects resolves the finding). Until then
-  `new_fields` blocks and routes to T1.
+  `new_fields` blocks and routes to component restart.
 - **Per-block witness** (`_inject_hunks`: a key per changed branch, #62206's shape).
 - **Compile units** (compile only the statements holding the changed definitions; a whole
   3,800-line module compile stalls a step) and the **analyzer child process**
@@ -273,7 +273,7 @@ The prototype swap (fastrsi#12) had more than R0 needs; these parts come back in
 - **Transaction-level parts**: `overlay=` and `staged_names` (a module importing a name
   another module of the same transaction adds), `docstring_only`, and the participant's
   analyzer.
-- **Post-commit rebuilds** (R1 recapture, R6 weight reload) and their routes: the receipt's
+- **Post-commit rebuilds** (CUDA graph recapture, warm weight reload) and their routes: the receipt's
   `rebuild` and `recapture_s` stay None.
 
 These come in later PRs, each importing and testing on top of this series.

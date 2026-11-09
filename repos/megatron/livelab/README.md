@@ -46,9 +46,9 @@ conformance_lab.py   LabUnderTest for template/livelab/conformance
 
 ## What install covers here
 
-The kernel's R0 swap (function bodies, every rank) and R10 repair cells. Not yet: edits of
-`jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (they need a model
-rebuild: R5 in Megatron terms), optimizer construction, TE C++ code.
+The kernel's live code swap (function bodies, every rank) and repair cells. Not yet: edits of
+`jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (which require a model
+rebuild), optimizer construction, TE C++ code.
 
 ## Kernel location
 

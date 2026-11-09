@@ -99,7 +99,7 @@ aborted, undone, in-doubt); the record is written once the outcome is known.
 | Field | Type | Meaning |
 |---|---|---|
 | `participants` | `{name: {undo, reset: {kind: reply}}}` | code undo, then each declared data reset |
-| `resets` | [str] | the plan's `undo_resets` (R2 request state, R3 cached data, R8 snapshot) |
+| `resets` | [str] | the plan's `undo_resets` (drain request state, clear cached data, snapshot revert) |
 | `status` | `undone` \| `partial` | `partial` if any undo or reset failed |
 | `findings` | [finding + `participant`] | e.g. `reset_failed`, `undo_incomplete` |
 | `timeline` | `{queued, code_undone, undo_end}` | measured unix seconds |
