@@ -30,7 +30,10 @@ def rank_of(worker):
 
 def _resets(worker):
     def cuda_cache():
-        import torch
+        try:
+            import torch
+        except ImportError:
+            return "no torch"
         if torch.cuda.is_initialized():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
