@@ -17,5 +17,6 @@ Everything about one engine lives here, including its docs and measurements.
 | vllm | prior measurements in | not started (v0 plugin on `legacy/v0`) | `examples/dsv41-prefill` (patches ready) |
 | sglang | | not started (v0 plugin on `legacy/v0`) | |
 | fastvideo | | not started | MiniMax-H3 VAE fusion (FastVideo #2041) |
+| megatron | priors, workload, costs | `fastrsi_megatron` (train-step gap, gloo rounds) | Codex hill-climb on Qwen3-14B architecture |
 
-Planned: megatron, verl, slime, miles, vllm-omni, sglang-omni.
+Planned: verl, slime, miles, vllm-omni, sglang-omni.
