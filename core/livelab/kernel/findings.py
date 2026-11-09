@@ -325,6 +325,35 @@ CATALOG = {
           "changed thing runs, e.g. a Triton pre_run_hook)", "cost": "none"},
          {"action": "prove it by an output change of the workload", "cost": "seconds"}],
         "a cell that changed nothing reads as a pass", ["Proving an edit applied"], True),
+    "numa_mismatch": (
+        "the process is bound to CPUs outside the target GPU's local NUMA node cpulist, "
+        "forcing cross-socket memory and interconnect traffic on host-staged transfers",
+        [{"action": "bind the rank to the GPU's local_cpulist via bind_rank_numa_and_cpus",
+          "cost": "none"}, ACCEPT],
+        "higher host-to-device transfer latency and cross-socket interconnect contention",
+        [], True),
+    "thread_oversubscription": (
+        "OMP_NUM_THREADS multiplied by the local world size exceeds the host's logical CPU "
+        "count, causing OpenMP and BLAS thread pools across local ranks to contend for cores",
+        [{"action": "clamp per-rank thread pools via clamp_thread_pools(num_threads=1)",
+          "cost": "none"}, ACCEPT],
+        "CPU context-switching jitter stalls kernel launch and collective dispatch",
+        [], True),
+    "thp_unfrozen_gc": (
+        "transparent hugepages are set to [always] while cyclic garbage collection was not "
+        "frozen before fork: cyclic GC header writes in the child fault 2 MiB huge pages "
+        "instead of 4 KiB pages",
+        [{"action": "call freeze_gc_before_fork() in the zygote before forking, or set "
+                    "transparent_hugepage/enabled to madvise", "cost": "ms"}, ACCEPT],
+        "copy-on-write page faults duplicate preloaded heap memory across forked ranks",
+        [], True),
+    "imex_channel_missing": (
+        "multi-node NVLink requires an IMEX channel device under /dev/nvidia-caps-imex-channels "
+        "and none is present on this node",
+        [{"action": "create or mount the IMEX channel device before multi-node NVLink launch",
+          "cost": "seconds"}, ACCEPT],
+        "multi-node NVLink domain initialization fails or falls back to slower transport",
+        [], True),
 }
 
 

@@ -111,6 +111,18 @@ def _install_worker_hook():
     orig = SP.prepare
 
     def prepare(data):
+        if not os.environ.get("OMP_NUM_THREADS"):
+            forksafe.clamp_thread_pools(num_threads=1)
+        local_rank_str = os.environ.get("LOCAL_RANK", "").strip()
+        visible_gpu_ids = [
+            token.strip()
+            for token in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
+            if token.strip().isdigit()
+        ]
+        if local_rank_str.isdigit():
+            forksafe.bind_rank_numa_and_cpus(int(local_rank_str))
+        elif len(visible_gpu_ids) == 1:
+            forksafe.bind_rank_numa_and_cpus(0)
         rep = refresh_stale()
         if rep["stale"] or rep["blocked"]:
             print(f"[fastrsi-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
@@ -159,6 +171,8 @@ def _serve():
               file=sys.stderr, flush=True)
     snapshot()
     _install_worker_hook()
+    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
+        forksafe.freeze_gc_before_fork()
     print(f"[fastrsi-zygote] server {os.getpid()} preloaded {len(_SNAPSHOT)} modules in "
           f"{time.perf_counter() - t0:.1f} s", file=sys.stderr, flush=True)
 

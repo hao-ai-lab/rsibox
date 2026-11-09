@@ -13,7 +13,7 @@ Run from the repo root (standard library only; the torch case skips without torc
     python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
 (or python3 -m pytest -v core/livelab/test_forksafe.py)
 """
-import os, subprocess, sys, types, unittest
+import gc, json, os, shutil, subprocess, sys, tempfile, types, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -281,6 +281,216 @@ class TritonTarget(unittest.TestCase):
                                            "triton.backends.nvidia.driver": None}):
             restore = forksafe.pin_triton_target(nvml=object())
             self.assertIsNone(restore())
+
+
+class CacheAndDeviceIndexFixes(unittest.TestCase):
+    def test_cap_of_cache_keys_on_pid_and_visible_devices(self):
+        """Input: default `install(cuda)` (using `cap_of`'s internal `lru_cache`) with a stand-in
+        NVML where GPU 0 is (9, 0) and GPU 1 is (10, 0). Action: query under
+        CUDA_VISIBLE_DEVICES=0, then change CUDA_VISIBLE_DEVICES=1 (as a forked worker does) and
+        query again, and fork a real child with a different visibility. Expected: changing
+        CUDA_VISIBLE_DEVICES or PID re-queries NVML and returns (10, 0) instead of a stale parent
+        (9, 0). Pain point (#117): a 0-arg lru_cache froze the parent's visibility tuple across
+        forks and env updates."""
+        nvml_standin = fake_nvml([(9, 0), (10, 0)])
+        cuda_standin = fake_cuda()
+        with mock.patch.object(forksafe, "_nvml", return_value=nvml_standin):
+            forksafe.install(cuda_standin)
+            with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0"}):
+                self.assertEqual(cuda_standin.get_device_capability(0), (9, 0))
+            with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "1"}):
+                self.assertEqual(cuda_standin.get_device_capability(0), (10, 0))
+            read_fd, write_fd = os.pipe()
+            child_pid = os.fork()
+            if child_pid == 0:
+                os.close(read_fd)
+                os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+                cap = cuda_standin.get_device_capability(0)
+                os.write(write_fd, json.dumps(list(cap)).encode())
+                os._exit(0)
+            os.close(write_fd)
+            child_payload = os.read(read_fd, 64)
+            os.close(read_fd)
+            os.waitpid(child_pid, 0)
+            self.assertEqual(tuple(json.loads(child_payload)), (10, 0))
+
+    def test_malformed_cuda_device_strings_return_none_and_fall_back(self):
+        """Input: `_index` and `get_device_capability` called with malformed device strings
+        `"cuda:abc"` and `"cuda:0:extra"`. Expected: `_index` returns None (never raises
+        ValueError) and `get_device_capability` falls back cleanly to the original function.
+        Pain point (#117): `int(device.split(':')[1])` raised ValueError on `"cuda:abc"` and
+        silently ignored trailing segments on `"cuda:0:extra"`."""
+        self.assertIsNone(forksafe._index("cuda:abc"))
+        self.assertIsNone(forksafe._index("cuda:0:extra"))
+        self.assertEqual(forksafe._index("cuda:0"), 0)
+        self.assertEqual(forksafe._index("cuda:-1"), -1)
+        cuda_standin = fake_cuda()
+        forksafe.install(cuda_standin, capability=lambda: ((10, 0), 2))
+        for bad_device in ("cuda:abc", "cuda:0:extra"):
+            cuda_standin.initialized = False
+            before_fallbacks = forksafe.COUNTS["fallback"]
+            self.assertEqual(cuda_standin.get_device_capability(bad_device), (8, 0))
+            self.assertTrue(cuda_standin.is_initialized())
+            self.assertEqual(forksafe.COUNTS["fallback"], before_fallbacks + 1)
+
+
+class NumaThreadsAndCowHygiene(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp(prefix="forksafe-sysfs-")
+        self.addCleanup(shutil.rmtree, self.temp_dir, True)
+
+    def _write_pci_entry(self, pci_addr, cpulist_text, numa_node_text, vendor="0x10de",
+                         device_class="0x030200"):
+        pci_dir = os.path.join(self.temp_dir, pci_addr)
+        os.makedirs(pci_dir, exist_ok=True)
+        with open(os.path.join(pci_dir, "local_cpulist"), "w", encoding="utf-8") as handle:
+            handle.write(cpulist_text + "\n")
+        with open(os.path.join(pci_dir, "numa_node"), "w", encoding="utf-8") as handle:
+            handle.write(str(numa_node_text) + "\n")
+        if vendor is not None:
+            with open(os.path.join(pci_dir, "vendor"), "w", encoding="utf-8") as handle:
+                handle.write(vendor + "\n")
+        if device_class is not None:
+            with open(os.path.join(pci_dir, "class"), "w", encoding="utf-8") as handle:
+                handle.write(device_class + "\n")
+        return pci_dir
+
+    def test_parse_cpulist_expands_ranges_and_singletons(self):
+        """Input: Linux sysfs cpulist strings (`"0-3,8,10-11"`, `""`, `"4"`). Expected: sorted
+        integer CPU lists (`[0, 1, 2, 3, 8, 10, 11]`, `[]`, `[4]`). Proves: sysfs `local_cpulist`
+        ranges are parsed accurately without external tools."""
+        self.assertEqual(forksafe.parse_cpulist("0-3,8,10-11\n"), [0, 1, 2, 3, 8, 10, 11])
+        self.assertEqual(forksafe.parse_cpulist(""), [])
+        self.assertEqual(forksafe.parse_cpulist("4"), [4])
+
+    def test_detect_gpu_cpu_affinity_reads_fake_sysfs_without_cuda(self):
+        """Input: a fake sysfs root with a non-GPU PCI device (`0000:00:01.0`, vendor `0x8086`)
+        and two NVIDIA GPUs (`0000:01:00.0` on NUMA 0 with CPUs `0-3,8`, `0000:02:00.0` on NUMA 1
+        with CPUs `4-7`). Expected: device 0 resolves to `[0, 1, 2, 3, 8]` on NUMA 0 and device 1
+        to `[4, 5, 6, 7]` on NUMA 1, honoring `CUDA_VISIBLE_DEVICES=1`. Proves: sysfs topology
+        discovery maps logical rank to physical GPU NUMA node without touching CUDA."""
+        self._write_pci_entry("0000:00:01.0", "0-15", 0, vendor="0x8086", device_class="0x060400")
+        self._write_pci_entry("0000:01:00.0", "0-3,8", 0)
+        self._write_pci_entry("0000:02:00.0", "4-7", 1)
+        clean_env = {key: val for key, val in os.environ.items() if key != "CUDA_VISIBLE_DEVICES"}
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            aff0 = forksafe.detect_gpu_cpu_affinity(0, sysfs_root=self.temp_dir)
+            aff1 = forksafe.detect_gpu_cpu_affinity(1, sysfs_root=self.temp_dir)
+            self.assertEqual(aff0, {"cpus": [0, 1, 2, 3, 8], "numa_node": 0, "source": "sysfs"})
+            self.assertEqual(aff1, {"cpus": [4, 5, 6, 7], "numa_node": 1, "source": "sysfs"})
+            os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+            remapped = forksafe.detect_gpu_cpu_affinity(0, sysfs_root=self.temp_dir)
+            self.assertEqual(remapped, {"cpus": [4, 5, 6, 7], "numa_node": 1, "source": "sysfs"})
+
+    def test_bind_rank_numa_and_cpus_sets_process_affinity(self):
+        """Input: `bind_rank_numa_and_cpus` called with `explicit_cpus` and with a fake sysfs root
+        pointing to an online CPU of the current machine. Expected: `os.sched_setaffinity` binds
+        the process to that CPU and returns `bound_cpus`, `numa_node`, and `source`."""
+        if hasattr(os, "sched_getaffinity"):
+            original_affinity = os.sched_getaffinity(0)
+            self.addCleanup(os.sched_setaffinity, 0, original_affinity)
+            first_online_cpu = sorted(original_affinity)[0]
+        else:
+            first_online_cpu = 0
+        self._write_pci_entry("0000:01:00.0", str(first_online_cpu), 0)
+        clean_env = {key: val for key, val in os.environ.items() if key != "CUDA_VISIBLE_DEVICES"}
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            bound = forksafe.bind_rank_numa_and_cpus(0, sysfs_root=self.temp_dir)
+            self.assertEqual(
+                bound,
+                {"bound_cpus": [first_online_cpu], "numa_node": 0, "source": "sysfs"},
+            )
+            if hasattr(os, "sched_getaffinity"):
+                self.assertEqual(os.sched_getaffinity(0), {first_online_cpu})
+            explicit = forksafe.bind_rank_numa_and_cpus(
+                0, explicit_cpus=[first_online_cpu], sysfs_root=self.temp_dir
+            )
+            self.assertEqual(
+                explicit,
+                {"bound_cpus": [first_online_cpu], "numa_node": None, "source": "explicit"},
+            )
+
+    def test_clamp_thread_pools_updates_env_and_loaded_torch(self):
+        """Input: `clamp_thread_pools(num_threads=2, clamp_compile_threads=True)` with a stand-in
+        `torch` module in `sys.modules` exposing `set_num_threads`. Expected: `OMP_NUM_THREADS`,
+        `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, and `TORCHINDUCTOR_COMPILE_THREADS` are set to
+        `"2"`, and `torch.set_num_threads(2)` is called."""
+        recorded_threads = []
+        fake_torch = types.SimpleNamespace(set_num_threads=recorded_threads.append)
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.dict(
+            sys.modules, {"torch": fake_torch}
+        ):
+            summary = forksafe.clamp_thread_pools(num_threads=2, clamp_compile_threads=True)
+            self.assertEqual(summary["num_threads"], 2)
+            self.assertTrue(summary["torch_threads_set"])
+            self.assertEqual(recorded_threads, [2])
+            for env_var in (
+                "OMP_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "TORCHINDUCTOR_COMPILE_THREADS",
+            ):
+                self.assertEqual(os.environ.get(env_var), "2")
+
+    def test_freeze_gc_before_fork_collects_and_freezes_heap(self):
+        """Input: cyclic garbage on the heap before fork. Action: `freeze_gc_before_fork()`.
+        Expected: full collection runs and `gc.get_freeze_count() > 0`."""
+        self.addCleanup(gc.unfreeze)
+        cycle_a, cycle_b = [], []
+        cycle_a.append(cycle_b)
+        cycle_b.append(cycle_a)
+        del cycle_a, cycle_b
+        result = forksafe.freeze_gc_before_fork()
+        self.assertGreaterEqual(result["collected"], 2)
+        self.assertGreater(result["frozen_count"], 0)
+
+    def test_audit_system_environment_reports_all_four_hazards_and_clean_pass(self):
+        """Input: a fake sysfs where GPU 0 is on CPUs `0-3`, THP file set to `[always] madvise`,
+        `OMP_NUM_THREADS=64` across `local_world_size=8`, `bound_cpus=[4, 5]`, `gc_frozen=False`,
+        and `require_imex=True` with a missing IMEX path. Expected: `audit_system_environment`
+        returns findings for `numa_mismatch`, `thread_oversubscription`, `thp_unfrozen_gc`, and
+        `imex_channel_missing`; when aligned, clamped, frozen, and IMEX present, it returns `[]`."""
+        self._write_pci_entry("0000:01:00.0", "0-3", 0)
+        thp_file = os.path.join(self.temp_dir, "thp_enabled")
+        with open(thp_file, "w", encoding="utf-8") as handle:
+            handle.write("[always] madvise never\n")
+        missing_imex = os.path.join(self.temp_dir, "no-imex")
+        clean_env = {key: val for key, val in os.environ.items() if key != "CUDA_VISIBLE_DEVICES"}
+        clean_env["OMP_NUM_THREADS"] = "64"
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            findings_list = forksafe.audit_system_environment(
+                local_rank=0,
+                local_world_size=8,
+                bound_cpus=[4, 5],
+                gc_frozen=False,
+                sysfs_root=self.temp_dir,
+                thp_enabled_path=thp_file,
+                imex_path=missing_imex,
+                require_imex=True,
+            )
+            self.assertEqual(
+                [item["check"] for item in findings_list],
+                [
+                    "numa_mismatch",
+                    "thread_oversubscription",
+                    "thp_unfrozen_gc",
+                    "imex_channel_missing",
+                ],
+            )
+            os.environ["OMP_NUM_THREADS"] = "1"
+            present_imex = os.path.join(self.temp_dir, "imex-ok")
+            os.makedirs(present_imex, exist_ok=True)
+            clean_findings = forksafe.audit_system_environment(
+                local_rank=0,
+                local_world_size=1,
+                bound_cpus=[0, 1],
+                gc_frozen=True,
+                sysfs_root=self.temp_dir,
+                thp_enabled_path=thp_file,
+                imex_path=present_imex,
+                require_imex=True,
+            )
+            self.assertEqual(clean_findings, [])
 
 
 if __name__ == "__main__":
