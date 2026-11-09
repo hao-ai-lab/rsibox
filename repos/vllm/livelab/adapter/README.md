@@ -3,8 +3,9 @@
 The engine side of the transaction kernel (`template/livelab/kernel`): one transaction swaps
 code on every worker rank and in the engine core together, between the same two engine steps,
 with receipts. This folder holds the
-T0 path (R0, a function-body swap). Rebuilds after a commit (R1 recapture or recompile, R6
-weight reload) are not here: an edit that needs one is a finding, not a silent swap.
+in-place swap path (R0, a function-body swap) and R1, the selective recapture of CUDA graphs in the
+commit's gap (`recapture.py`). Recompiles and R6 (weight reload) are not here: an edit that
+needs one is a finding, not a silent swap.
 
 ## Contract
 
@@ -13,7 +14,8 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   runs the kernel's `StepGapCoordinator` over two participants: the workers (`WorkerGroup`,
   every rank behind one `collective_rpc`) and the engine core (an `Endpoint` in its own
   process). It serves a file control channel (`ctl.json` -> `reply/<seq>.json`) with the ops
-  `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `versions`, `at_base`, `ping`.
+  `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `versions`, `at_base`, `ping`,
+  `graphs`, `r1_extend`.
 - **Phase 1** (prepare) runs in a thread on every side (`side.Side`): the host sends
   `prepare_start` and then `prepare_poll` every 20 ms until no rank is pending, each one
   `collective_rpc` from the loop, so the engine keeps stepping while the ranks stage. A rank
@@ -46,13 +48,31 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
   checked at prepare. Reached only through an op that splits the graph: an advisory
   `captured_partly` (Python on prefill, graphs on decode). Captured only, or undecided: a
   blocking `captured_target`, so every rank votes no and the edit is reported, not applied.
-  Both route R1 (recapture with the commit), which this adapter cannot run yet; the finding
-  says so and names T1 (restart with the edit, or run eager) as what works today. Accepted,
-  the edit commits, and a `zero_witness` at proof is routed the same way. The split decorator
+  Both route R1. With `"rebuild": ["R1"]` in the plan they turn advisory (the host
+  recaptures); without it the finding names the plan field, or restarting with the edit (or
+  running eager). Accepted, the edit commits, and a `zero_witness` at proof is routed the same way. The split decorator
   itself (`eager_break_during_capture` and code nested in it, in any module) is a blocking
   `captured_target` too: it runs only when vLLM decorates its ops at import or captures its
   graphs (vLLM #59941 committed T0 with witness 0 on every rank). Calls made while the
   stream captures a graph count apart from live calls.
+- **R1, selective recapture** (`recapture.py`, `host.R1Coordinator`). A plan with
+  `"rebuild": ["R1"]` and optional `"r1": {"modes": ["FULL" | "PIECEWISE"], "sizes":
+  [num_tokens]}` is recaptured on every rank right after its commit, inside the same gap.
+  Per chosen mode, every graph wrapper of that mode gets a new, empty entry dict (the old
+  one is kept) and the dispatcher's keys for the mode are emptied; the chosen descriptors
+  are captured through the runner's own `_warmup_and_capture` (no Dynamo, no Inductor),
+  under `witness.capture()`, and go back into the keys one by one. Descriptors not chosen
+  run eager on the new code (or in a mode R1 left alone) until `r1_extend` captures them.
+  All pieces of one descriptor are captured together (each piece replays at the addresses
+  of the previous piece's output). Invariants: no step replays a graph of the old code next
+  to Python running the new one; undo of the transaction puts back every old entry dict and
+  key set (journal, no capture), so base graphs replay again and the new graphs are freed;
+  a capture that fails on any rank is `rebuild_failed`, and the transaction is undone on
+  every participant in the same gap (outcome rolled_back). The receipt's `rebuild` holds
+  each rank's captured descriptors, seconds, eager leftovers and memory before/after, and
+  `recapture_s` the gap's R1 time. R1 runs only on vLLM's V1 `GPUModelRunner`
+  (`VLLM_USE_V2_MODEL_RUNNER=0`); on another runner it is `rebuild_failed`, said plainly.
+  A long recapture needs the op's `gap_timeout_s` above its duration.
 - **Version log.** Each side records which code version every watched function runs at each
   step (`versions`), and any change between a step's two calls (`execute_model`,
   `sample_tokens`), so the ranks' logs show whether a step ran mixed versions.
@@ -64,6 +84,7 @@ weight reload) are not here: an edit that needs one is a finding, not a silent s
 | `host.py` | `Host` (coordinator, control channel, step timings), `WorkerGroup`, `parallel`, the `EngineCoreProc` patch, the import finder. |
 | `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`; serves a `Side` and wraps the step calls). |
 | `side.py` | `Side(Endpoint)`: background prepare, per-rank phase-2 lane and deadline, graph detection and routing, version log, a fault hook for tests. |
+| `recapture.py` | R1 on one rank: `Engine` (what R1 needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
 | `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
 
@@ -113,9 +134,16 @@ each rank with its own copy of the toy engine.
 | `test_accepted_captured_target_proves_nothing_and_says_why` | an accepted graph edit whose zero witness gives no reason |
 | `test_split_op_target_is_advisory_and_captured_only_stays_blocking` | a veto of code that does run in Python on prefill through a split op |
 | `test_an_edit_of_the_split_decorator_is_refused_on_a_graph_engine` | an edit of the graph-split decorator (outside model code) that committed with no finding and a zero witness on every rank (vLLM #59941) |
+| `test_one_bucket_is_recaptured_in_the_gap_and_undo_puts_the_base_graphs_back` | a committed edit whose graphs replay the old code (stale graph), or an undo that leaves the edit's graphs replaying |
+| `test_extend_captures_a_left_out_bucket_later` | a bucket left eager forever after a selective R1 |
+| `test_pieces_of_a_bucket_are_recaptured_together_and_other_modes_are_untouched` | recapturing one piece only, so the next piece reads another capture's output address |
+| `test_a_capture_that_fails_on_one_rank_undoes_the_edit_on_every_rank` | ranks replaying different code after a failed capture, or a dispatcher key with no graph |
+| `test_five_edit_recapture_undo_cycles_keep_the_graph_count` | graphs of every past edit kept alive (graph-pool leak) |
+| `test_a_plan_asking_for_r1_turns_graph_findings_advisory` | a finding that told users to restart though the host can recapture |
 | `test_the_extension_logs_which_version_each_step_runs` | a mid-step change logged that was only a key joining between a step's two calls |
 | `test_an_aborted_transaction_leaves_nothing_watched` | ranks whose version logs differ after an aborted transaction |
 
 ## Not here yet
 
-- R1 and R6 (rebuilds after the commit) and their routes; DP>1; pipeline parallel.
+- R1 on vLLM's V2 model runner (`CudaGraphManager`), ubatched (DBO) and encoder graphs;
+  recompiles (torch.compile) and R6; DP>1; pipeline parallel.

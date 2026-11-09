@@ -22,11 +22,13 @@
   `.layers`) is checked at prepare:
   reached only through an op that splits the graph (Python on prefill, graphs on decode) is an
   advisory `captured_partly`; captured only, or undecided, is a blocking `captured_target`.
-  Both route R1 (recapture with the commit), which this adapter cannot run yet: the finding
-  says so and names T1 (restart, or run eager) as what works today. A blocking finding votes
-  no, so the edit is reported and not applied. A `zero_witness` on model code or on the split
-  decorator in graph mode is routed the same way at proof. Calls made while the stream
-  captures a graph count apart from live calls (kernel witness `capturing`).
+  Both route R1. A plan with `"rebuild": ["R1"]` asks for the recapture (recapture.py, run by
+  the host in the commit's gap): its graph findings turn advisory and say so. Without it a
+  blocking finding votes no, so the edit is reported and not applied. A `zero_witness` on
+  model code or on the split decorator in graph mode is routed the same way at proof. Calls
+  made while the stream captures a graph (or inside an R1) count apart from live calls.
+- **R1** (`recapture`, `r1_extend`, `graphs`): the worker's side of recapture.py, on this
+  rank's model runner (`scope["r1_engine"]` overrides it in tests).
 - **Version log** (`tick`, `versions`). At every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as `[step, {key: tag}]` at
   each change, and counts steps whose version changed between the step's two calls
@@ -46,13 +48,19 @@ from kernel import findings as F
 from kernel import locate as L
 
 from . import graphs as G
+from . import recapture as RC
 from .worker_ext import Endpoint
 
 CAPTURED_PREFIXES = ("vllm.model_executor.models.", "vllm.model_executor.layers.")
-R1_NOT_HERE = ("this adapter has no R1 yet: today the edit needs T1 (restart with it), or an "
-               "eager engine")
-R1 = {"action": "recapture the graphs with the commit (recipe R1; not in this adapter yet), "
-                "or restart with the edit (T1) or run eager", "cost": "recipe R1 / a restart"}
+R1_NOT_HERE = ("add \"rebuild\": [\"R1\"] to the plan to recapture the graphs in the commit's "
+               "gap, or restart with the edit, or run eager")
+R1_ASKED = "the plan asks for R1: the host recaptures the graphs in the commit's gap"
+R1 = {"action": "recapture the graphs with the commit (plan \"rebuild\": [\"R1\"]), or "
+                "restart with the edit or run eager", "cost": "recipe R1 / a restart"}
+
+
+def wants_r1(plan):
+    return "R1" in ((plan or {}).get("rebuild") or ())
 # globals torch.compile (Dynamo) adds to a module it traces: at_base lists them apart
 DYNAMO_GLOBALS = ("__compiled_fn", "__resume_at", "__builtins_dict__", "__subclass_",
                   "__import_", "___")
@@ -84,6 +92,8 @@ class Side(Endpoint):
         self._watch_txn, self._watch_drop = {}, set()
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps, self.vlog, self.mid_step_changes, self._cur = 0, [], [], None
+        self._plan = threading.local()    # the plan this thread prepares (graph checks read it)
+        self.r1 = RC.Recapture()
 
     # -- graph detection ----------------------------------------------------------------
     def _graph(self):
@@ -97,6 +107,14 @@ class Side(Endpoint):
         if g is None:
             return []
         mode = f"cudagraph_mode {g['cudagraph_mode']}, compile mode {g['compile_mode']}"
+        if wants_r1(getattr(self._plan, "plan", None)):
+            return [{**f, "advisory": True, "observed": f["observed"].replace(
+                R1_NOT_HERE, R1_ASKED).replace("so this stays blocking", "so it blocks "
+                                               "without R1")}
+                    for f in self._graph_findings(module, items, g, mode)]
+        return self._graph_findings(module, items, g, mode)
+
+    def _graph_findings(self, module, items, g, mode):
         out, model_items = [], []
         for k in items:                 # the split decorator: in any module
             detail = G.decoration_time(k.split(":")[1])
@@ -235,14 +253,44 @@ class Side(Endpoint):
         if fault:
             fault = {"method": fault} if isinstance(fault, str) else fault
             self._faults[txn] = {"delay_s": 0, "fail": True, **fault}
-        r = self._fault("prepare", txn) or self.prepare(plan)
+        self._plan.plan = plan
+        try:
+            r = self._fault("prepare", txn) or self.prepare(plan)
+        finally:
+            self._plan.plan = None
         if isinstance(r, dict) and r.get("ok"):
             self._watch_targets(r.get("targets"), txn)
         else:
             self._drop_watch(txn)
         return r
 
+    # -- R1 -------------------------------------------------------------------------------
+    def _engine(self):
+        if "r1_engine" in self.scope:
+            return self.scope["r1_engine"]
+        w = self.scope.get("worker")
+        return RC.vllm_engine(w) if w is not None and self._graph() is not None else None
+
+    def _r1(self, method, p):
+        if self.role != "worker":
+            return F.ok(abstain=True, note="R1 runs on worker ranks")
+        try:
+            eng = self._engine()
+        except Exception as e:
+            return F.not_ok(f"R1: {type(e).__name__}: {e}", [F.finding(
+                "rebuild_failed", f"{type(e).__name__}: {e}", "R1 can reach this rank's graphs")])
+        if method == "graphs":
+            return F.ok(**RC.graphs(eng))
+        if method == "r1_extend":
+            return self.r1.extend(eng, p["txn"], self.lp.journal, self.lp.witness, p.get("sizes"))
+        if self.lp._state.get(p["txn"]) != "committed":
+            return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
+        return self.r1.run(eng, p["txn"], self.lp.journal, self.lp.witness,
+                           p.get("modes"), p.get("sizes"))
+
     def _dispatch(self, method, payload):
+        if method in ("recapture", "r1_extend", "graphs"):
+            return self._r1(method, payload or {})
         if method == "versions":
             return self.versions()
         if method == "prepare":
