@@ -5,7 +5,7 @@ torch and vLLM stubbed out. The cases that need vLLM's real parser are in test_v
 
 Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
 """
-import json, os, signal, socket, subprocess, sys, tempfile, time, types
+import json, os, signal, socket, subprocess, sys, tempfile, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent

@@ -281,7 +281,7 @@ def print_event(event):
 
 
 def refresh(names, modules=None):
-    """In the forked child: drop `names`; returns {"modules": n, "seconds"}. The re-imports
+    """In the forked child: drop `names`; returns {"modules": n, "purge_seconds"}. The re-imports
     happen when the server imports them (inside op_redefine_guard, see zygote._child)."""
     t = time.time()
     purge(names, modules)

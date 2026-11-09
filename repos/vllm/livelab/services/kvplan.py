@@ -28,8 +28,8 @@ Contract:
   has collectives, and one rank skipping it would hang the others. When torch.distributed is
   initialized but the ranks cannot agree (no vLLM world group), every rank profiles (finding
   "kvplan_no_agreement"): no rank decides alone.
-- Every outcome is one log line, `fastrsi kvplan: {json}` or `fastrsi kvplan finding: {json}`,
-  with the seconds the step took. engine.py counts them (kvplan_report).
+- Every outcome is one log line, `fastrsi kvplan: {json}` (with the seconds the step took) or
+  `fastrsi kvplan finding: {json}`. engine.py counts them (kvplan_report).
 
 What moves: kernels the profile run would JIT-compile are compiled at their first use instead
 (warmup, or the first request in eager mode).

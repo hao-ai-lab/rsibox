@@ -83,7 +83,7 @@ def _volatile(k):
 
 
 def _sources():
-    """(path, mtime_ns, size) of every imported module's source file."""
+    """{path: (mtime_ns, size)} of every imported module's file."""
     out = {}
     for m in list(sys.modules.values()):
         f = getattr(m, "__file__", None)
@@ -119,8 +119,9 @@ def _env_diff(env):
 
 
 def _child(req, conns, refresh=()):
-    """In the forked child: become `vllm serve` with the request's argv, env, cwd and log, after
-    dropping the `refresh` modules so the server imports them again from their new source."""
+    """In the forked child: become `vllm serve` with the request's argv, cwd, log and volatile
+    env keys (the rest of the env stays the zygote's), after dropping the `refresh` modules so
+    the server imports them again from their new source."""
     code = 1
     try:
         for c in conns:

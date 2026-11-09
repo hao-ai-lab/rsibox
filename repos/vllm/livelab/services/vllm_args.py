@@ -72,5 +72,5 @@ def parse(argv, parser=None):
 
 
 if __name__ == "__main__":
-    import json, sys
+    import json
     print(json.dumps(parse(sys.argv[1:])))
