@@ -262,10 +262,10 @@ class AcceptRecordTest(unittest.TestCase):
         standing scope whose participant or code_hash is None (or missing), checked against a
         finding with and without those keys (validate's running_frame carries no code_hash).
         Expected: none of the malformed records match; every finding remains blocking."""
-        f_with = self._f("h1")
-        f_no_hash = {**F.finding("running_frame", "o", "e"), "participant": "worker"}
-        f_bare = F.finding("running_frame", "o", "e")
-        for bad in (
+        finding_with_hash = self._f("h1")
+        finding_without_hash = {**F.finding("running_frame", "o", "e"), "participant": "worker"}
+        finding_bare = F.finding("running_frame", "o", "e")
+        for bad_record in (
             {"check": "zero_witness", "scope": "standng", "by": "a", "reason": "r"},
             {"check": "zero_witness", "scope": "session", "by": "a", "reason": "r"},
             {"check": "zero_witness", "scope": None, "by": "a", "reason": "r"},
@@ -275,8 +275,8 @@ class AcceptRecordTest(unittest.TestCase):
              "participant": None, "code_hash": None},
             {"check": "running_frame", "scope": "standing", "by": "a", "reason": "r"},
         ):
-            for f in (f_with, f_no_hash, f_bare):
-                if f["check"] == bad["check"]:
-                    d = F.decide([f], [bad])
-                    self.assertFalse(d["proceed"], (bad, f))
-                    self.assertEqual(d["accepts"], [])
+            for target_finding in (finding_with_hash, finding_without_hash, finding_bare):
+                if target_finding["check"] == bad_record["check"]:
+                    decision = F.decide([target_finding], [bad_record])
+                    self.assertFalse(decision["proceed"], (bad_record, target_finding))
+                    self.assertEqual(decision["accepts"], [])

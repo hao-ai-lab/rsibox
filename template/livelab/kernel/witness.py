@@ -214,8 +214,8 @@ def live_codes(suspended=True, codes=None):
             return out
         refs = gc.get_referrers(*want)     # objects made since gc.freeze() (see above)
         try:
-            for o in (*refs, *list(_FROZEN_GENS)):
-                fr = _frame(o)
+            for obj in (*refs, *list(_FROZEN_GENS)):
+                fr = _frame(obj)
                 while fr is not None:
                     if fr.f_code in want:
                         out.add(fr.f_code)

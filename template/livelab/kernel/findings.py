@@ -339,15 +339,15 @@ def finding(check, observed, expected, subject=None):
     return f
 
 
-def _matches(rec, f):
-    scope = rec.get("scope", "txn")
-    if scope not in ("txn", "standing") or rec.get("check") != f["check"]:
+def _matches(record, finding):
+    scope = record.get("scope", "txn")
+    if scope not in ("txn", "standing") or record.get("check") != finding["check"]:
         return False
-    if "subject" in rec and f.get("subject") != rec["subject"]:
+    if "subject" in record and finding.get("subject") != record["subject"]:
         return False
     if scope == "standing":
-        for k in ("participant", "code_hash"):
-            if rec.get(k) is None or f.get(k) != rec[k]:
+        for key in ("participant", "code_hash"):
+            if record.get(key) is None or finding.get(key) != record[key]:
                 return False
     return True
 
@@ -357,18 +357,22 @@ def decide(findings, accept=()):
     and `accept` is "all", names its check, or holds an accept record matching it. Returns
     {"proceed": bool, "accepted": [check], "blocking": [check], "accepts": [record used],
      "findings": [annotated]}. Records for name-only accepts have by/reason None."""
-    recs = None if accept == "all" else [
-        a if isinstance(a, dict) else {"check": a, "scope": "txn", "by": None, "reason": None}
-        for a in (accept or ())]
+    records = None if accept == "all" else [
+        item if isinstance(item, dict) else {"check": item, "scope": "txn", "by": None, "reason": None}
+        for item in (accept or ())]
     out, accepted, blocking, used = [], [], [], []
-    for f in findings:
-        rec = None if recs is None else next((r for r in recs if _matches(r, f)), None)
+    for finding in findings:
+        matched_record = None if records is None else next(
+            (candidate for candidate in records if _matches(candidate, finding)), None
+        )
         # advisory: reported, never blocks (e.g. a frame seen while steps ran; the gap decides)
-        ok = bool(f.get("advisory")) or (f["overridable"] and (recs is None or rec is not None))
-        out.append({**f, "accepted": ok})
-        (accepted if ok else blocking).append(f["check"])
-        if ok and rec is not None and rec not in used:
-            used.append(rec)
+        ok = bool(finding.get("advisory")) or (
+            finding["overridable"] and (records is None or matched_record is not None)
+        )
+        out.append({**finding, "accepted": ok})
+        (accepted if ok else blocking).append(finding["check"])
+        if ok and matched_record is not None and matched_record not in used:
+            used.append(matched_record)
     return {"proceed": not blocking, "accepted": sorted(set(accepted)),
             "blocking": sorted(set(blocking)), "accepts": used, "findings": out}
 

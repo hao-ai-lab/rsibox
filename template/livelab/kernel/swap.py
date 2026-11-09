@@ -551,23 +551,23 @@ def _class_names(cls):
     return out
 
 
-def _is_dataclass(cls):
-    for d in cls.decorator_list:
-        f = d.func if isinstance(d, ast.Call) else d
-        if (isinstance(f, ast.Name) and f.id == "dataclass") or (
-                isinstance(f, ast.Attribute) and f.attr == "dataclass"):
+def _is_dataclass(cls_def):
+    for decorator in cls_def.decorator_list:
+        func = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if (isinstance(func, ast.Name) and func.id == "dataclass") or (
+                isinstance(func, ast.Attribute) and func.attr == "dataclass"):
             return True
     return False
 
 
-def _dataclass_fields(cls):
+def _dataclass_fields(cls_def):
     """Bare annotated field names (`x: T`, no default) of a @dataclass body: the generated
     __init__ sets them on instances, while the class body itself defines no attribute."""
-    if not _is_dataclass(cls):
+    if not _is_dataclass(cls_def):
         return set()
-    return {n.target.id for n in cls.body
-            if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
-            and n.value is None}
+    return {node.target.id for node in cls_def.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+            and node.value is None}
 
 
 def _new_fields(base_tree, tree, meths, filename):
@@ -576,34 +576,34 @@ def _new_fields(base_tree, tree, meths, filename):
     bare @dataclass field sets, and that no method of the base class sets nor the base class
     body defines (a code swap does not run the patched class body; stage still skips a name
     the live class has)."""
-    bcls = {n.name: n for n in base_tree.body if isinstance(n, ast.ClassDef)}
-    pcls = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+    base_classes = {node.name: node for node in base_tree.body if isinstance(node, ast.ClassDef)}
+    patch_classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     out = []
-    for c, nodes in meths.items():
-        b, p = bcls.get(c), pcls.get(c)
-        if b is None or p is None:
+    for cls_name, nodes in meths.items():
+        base_cls, patch_cls = base_classes.get(cls_name), patch_classes.get(cls_name)
+        if base_cls is None or patch_cls is None:
             continue
-        inits = [m for m in p.body if isinstance(m, _DEF)
-                 and m.name in ("__init__", "__post_init__")]
-        sets = _dataclass_fields(p)
-        for m in inits:
-            sets |= _self_attrs(m, _self_name(m), ast.Store)
+        inits = [method for method in patch_cls.body if isinstance(method, _DEF)
+                 and method.name in ("__init__", "__post_init__")]
+        sets = _dataclass_fields(patch_cls)
+        for method in inits:
+            sets |= _self_attrs(method, _self_name(method), ast.Store)
         if not sets:
             continue
-        old = _class_names(b) | _dataclass_fields(b)
-        for m in b.body:
-            if isinstance(m, _DEF):
-                old |= _self_attrs(m, _self_name(m), ast.Store)
+        old = _class_names(base_cls) | _dataclass_fields(base_cls)
+        for method in base_cls.body:
+            if isinstance(method, _DEF):
+                old |= _self_attrs(method, _self_name(method), ast.Store)
         readers = {}
-        for m in nodes:
-            if m.name in ("__init__", "__post_init__"):
+        for method in nodes:
+            if method.name in ("__init__", "__post_init__"):
                 continue
-            for x in _self_attrs(m, _self_name(m), ast.Load):
-                if x in sets and x not in old:
-                    readers.setdefault(x, []).append(f"{c}.{m.name}")
-        line = first_line(inits[0]) if inits else first_line(p)
-        for x in sorted(readers):
-            out.append({"cls": c, "field": x, "readers": sorted(set(readers[x])),
+            for field in _self_attrs(method, _self_name(method), ast.Load):
+                if field in sets and field not in old:
+                    readers.setdefault(field, []).append(f"{cls_name}.{method.name}")
+        line = first_line(inits[0]) if inits else first_line(patch_cls)
+        for field in sorted(readers):
+            out.append({"cls": cls_name, "field": field, "readers": sorted(set(readers[field])),
                         "init_line": line})
     return out
 

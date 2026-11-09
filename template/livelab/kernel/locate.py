@@ -111,9 +111,9 @@ class unfrozen:
                 if _scan["frozen"]:
                     _scan["gc_on"] = gc.isenabled()
                     gc.disable()
-                    for o in gc.get_objects():
-                        if type(o) in _GENS:
-                            _FROZEN_GENS.add(o)
+                    for obj in gc.get_objects():
+                        if type(obj) in _GENS:
+                            _FROZEN_GENS.add(obj)
                     gc.unfreeze()
             _scan["depth"] += 1
         except BaseException:
