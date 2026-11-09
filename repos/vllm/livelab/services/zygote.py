@@ -309,12 +309,14 @@ def serve(sock_path, modules_file):
                     findings.append(_stale_finding(fix))
                 refresh = fix["modules"] if fix else []
                 check_s = round(time.time() - t, 3)
-                open_findings = [f for f in findings if f["check"] not in req.get("accept", [])]
+                accept = req.get("accept", [])
+                open_findings = [f for f in findings if f["check"] not in accept]
+                accepted = [f for f in findings if f["check"] in accept]
                 if req.get("cmd") == "check":
                     # The same checks as a fork, nothing forked: a caller about to stop the
                     # running engine asks first, so a refusal does not leave it with none.
                     reply = {"ok": not open_findings, "findings": open_findings,
-                             "check_seconds": check_s, "accepted_findings": findings}
+                             "check_seconds": check_s, "accepted_findings": accepted}
                 elif open_findings:
                     reply = {"ok": False, "findings": open_findings, "check_seconds": check_s}
                 else:
@@ -323,7 +325,7 @@ def serve(sock_path, modules_file):
                     if pid == 0:
                         _child(req, [conn, srv], refresh)
                     reply = {"ok": True, "pid": pid, "check_seconds": check_s,
-                             "accepted_findings": findings}
+                             "accepted_findings": accepted}
                 if fix and fix["changed"]:
                     reply["refreshed"] = {"changed": fix["changed"], "modules": len(refresh),
                                           "scope": fix["scope"]}
