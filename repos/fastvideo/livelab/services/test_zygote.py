@@ -80,6 +80,81 @@ class ZygoteRefreshTest(unittest.TestCase):
         self.assertEqual((out["stale"], out["dropped"], out["value"]), ([], [], 1))
 
 
+FORKSERVER_DRIVER = """
+import importlib, json, multiprocessing as mp, os, sys, time
+from services import zygote as Z
+
+Z.enable(preload=["fastvideo.user"])
+ctx = mp.get_context("forkserver")
+
+
+def spawn_once():
+    import fastvideo.consts as consts_module
+    import fastvideo.user as user_module
+    reader, writer = ctx.Pipe(duplex=False)
+    process = ctx.Process(target=user_module.work, args=(consts_module.Arg(7), writer))
+    process.start()
+    writer.close()
+    result = reader.recv()
+    reader.close()
+    process.join(10)
+    return result
+
+
+first = spawn_once()
+time.sleep(0.02)
+with open(sys.argv[1], "w") as handle:
+    handle.write("VALUE = 2\\n\\nclass Arg:\\n    def __init__(self, x):\\n        self.x = x\\n")
+importlib.invalidate_caches()
+second = spawn_once()
+print(json.dumps({"first": first, "second": second}))
+"""
+
+
+class ForkserverPrepareHookTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="zygote-fs-")
+        package_dir = os.path.join(self.dir, "fastvideo")
+        os.makedirs(package_dir)
+        self.consts = os.path.join(package_dir, "consts.py")
+        files = {
+            "__init__.py": "",
+            "consts.py": "VALUE = 1\n\nclass Arg:\n    def __init__(self, x):\n        self.x = x\n",
+            "user.py": (
+                "from fastvideo.consts import Arg, VALUE\n\n"
+                "def work(arg, writer):\n"
+                "    writer.send({'value': VALUE, 'is_arg': isinstance(arg, Arg), 'x': arg.x})\n"
+                "    writer.close()\n"
+            ),
+        }
+        for name, text in files.items():
+            with open(os.path.join(package_dir, name), "w") as handle:
+                handle.write(text)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_forkserver_prepare_hook_refreshes_child_before_unpickling_target(self):
+        """Input: `zygote.enable` preloads `fastvideo.user` (VALUE = 1, class Arg) in a real
+        multiprocessing forkserver; worker 1 runs; `consts.py` is edited on disk to VALUE = 2;
+        worker 2 is forked from the same server with an `Arg(7)` argument and never calls
+        `refresh_stale` itself. Expect: worker 1 sees VALUE = 1; worker 2's `spawn.prepare`
+        hook refreshes `fastvideo.consts` and `fastvideo.user` before unpickling the process
+        object, so worker 2 sees VALUE = 2 and `isinstance(arg, Arg)` is True. Proves: the
+        forkserver `spawn.prepare` hook wired by `_serve` refreshes forked workers end to end."""
+        import subprocess
+        livelab_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([self.dir, livelab_dir])}
+        completed = subprocess.run([sys.executable, "-c", FORKSERVER_DRIVER, self.consts],
+                                   capture_output=True, text=True, check=True, env=env, timeout=30)
+        output = json.loads(completed.stdout.strip().splitlines()[-1])
+        self.assertEqual(output["first"], {"value": 1, "is_arg": True, "x": 7})
+        self.assertEqual(output["second"], {"value": 2, "is_arg": True, "x": 7}, completed.stderr)
+        self.assertIn("[fastrsi-zygote] pid ", completed.stderr)
+        self.assertIn("refreshed stale=['fastvideo.consts']", completed.stderr)
+
+
 def _child_poisoned(env):
     import subprocess
     code = ("import sys; sys.path.insert(0, '.'); import torch; torch.cuda.is_available(); "
