@@ -5,7 +5,7 @@
     python3 -m conformance --lab module:Class --receipts receipts.jsonl --json
 
 `--lab` takes `module:Class` (a LabUnderTest; its constructor takes `receipts`). Each engine's
-lab lives in `repos/<engine>/livelab/`; LABS maps short names to them once they exist.
+lab lives in `repos/<engine>/livelab/`.
 `--receipts` keeps the txn / proof / undo receipts the suite's transactions write.
 
 The run's own verdict is printed, not written as a receipt: the receipt proposal
@@ -19,19 +19,16 @@ import sys
 
 from . import cases
 
-LABS = {}   # short name -> "module:Class"
-
-
 def load(spec):
-    mod, _, cls = LABS.get(spec, spec).partition(":")
+    mod, _, cls = spec.partition(":")
     return getattr(importlib.import_module(mod), cls)
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m conformance")
-    ap.add_argument("--lab", required=True)
-    ap.add_argument("--only", default="")
-    ap.add_argument("--receipts", default=None)
+    ap.add_argument("--lab", required=True, help="the lab to test, as module:Class")
+    ap.add_argument("--only", default="", help="comma-separated case names to run")
+    ap.add_argument("--receipts", default=None, help="file that keeps the receipts the cases write")
     ap.add_argument("--json", action="store_true", help="print the results as JSON too")
     a = ap.parse_args(argv)
     Lab = load(a.lab)

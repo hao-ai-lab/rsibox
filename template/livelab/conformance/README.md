@@ -1,7 +1,6 @@
 # Conformance
 
-A lab's receipts count only after it passes every case. Ported in spirit from `legacy/v0`
-(`src/fastrsi/conformance.py`, `docs/conformance.md`) onto the transaction kernel.
+A lab's receipts count only after it passes every case.
 
 Each case drives a lab only through `LabUnderTest` (`lab.py`): the five interface verbs
 (`install`, `check`, `reset`, `uninstall`, `status`) plus a harness the lab provides for
@@ -19,7 +18,7 @@ on CPU now and against an engine adapter later.
 | `c5_failed_install` | A fault mid-install (one participant after 2 of 3 swaps; another's commit) leaves base, proven, across 3 functions in 2 modules |
 | `c6_refusal` | Unsupported edits are refused with the right code, and nothing changes: syntax `patch_invalid`, closure `closure_changed`, module constant `outside_changes`, no code change `empty_change` |
 | `c7_chain` | 3 stacked edits (two on the same function) each run; undoing them one by one returns each earlier output exactly, ending at base |
-| `c8_crash_and_hang` | Crash, hang, lost process and tampered code each poison the session; a poisoned lab refuses install; respawn returns to base |
+| `c8_crash_and_hang` | Crash, hang, lost participant and tampered code each poison the session; a poisoned lab refuses install; respawn returns to base |
 | `c9_soak` | Output returns to base after 20 cycles of install and undo |
 | `c10_not_proven` | An edit that never runs as Python (startup-only code) installs but its check reads `proven: False` with `zero_witness`, while a fresh process shows the edit matters |
 
@@ -32,7 +31,7 @@ From `template/livelab`:
 ```sh
 python3 -m conformance --lab module:Class        # the pass table
 python3 -m conformance --lab module:Class --only c7_chain --receipts receipts.jsonl --json
-python3 -m unittest conformance.test_conformance -v
+python3 -m unittest discover -s conformance -t . -v
 ```
 
 `--lab` takes `module:Class` (a `LabUnderTest`). `--receipts` keeps the `txn` / `proof` / `undo`
@@ -74,9 +73,8 @@ c10_not_proven        pass      0.057  proven False, findings ['zero_witness', '
 ## The toy lab
 
 The toy lab is not in `template/`: it drives the vLLM reference kernel, so it lives with it in
-`repos/vllm/livelab/kernel/` (it lands with the last kernel PR). Until then this folder tests
-its own cases against small fake labs (`test_cases.py`). The output above is from the toy lab at
-the kernel's prototype commit.
+`repos/vllm/livelab/kernel/toy_lab.py`. This folder tests its own cases against small fake
+labs (`test_cases.py`). The output above is from the toy lab.
 
 The toy lab: two worker ranks, each its own copy of the kernel's toy engine, step together in
 a `Cluster` loop thread; a `StepGapCoordinator` runs phase 2 of every transaction in one gap
@@ -90,14 +88,13 @@ What the toy cannot show: GPU state, CUDA graphs (c10 uses startup-only code ins
 RPC latency, a process that really dies (c8's crash, hang and lost participant are injected
 at the RPC and step boundary; respawn rebuilds the module copies in the same process).
 
-## Kernel pieces the cases needed
+## Kernel pieces the cases rely on
 
-Added to the kernel for these cases (see `repos/vllm/livelab/kernel/README.md`):
+See `repos/vllm/livelab/kernel/README.md`:
 
-- `empty_change` (c6): an edit that changes no code was committed as a success.
-- Chained edits (c7, c3): a second edit of the same function was `base_mismatch`, because
-  stage compared against the file and the running code carried the first edit's witness.
-  Participants now stage against the text they installed.
+- `empty_change` (c6): an edit that changes no code is refused, not committed as a success.
+- Chained edits (c7, c3): participants stage against the text they installed, so a second
+  edit of the same function is not a `base_mismatch`.
 - `fingerprint` and `session.py` (c4, c5, c8): code identity per participant, and the
   base / edited / poisoned state machine `status()` reports.
 
