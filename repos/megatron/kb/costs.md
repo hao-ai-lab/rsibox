@@ -41,6 +41,80 @@ start to the first step done (Megatron import 85 s, first step 21.4 s); steady s
 131,072 tokens; 94 GB per GPU. In the lab: start state 61 GiB per rank, restore 0.28 s, setup 31 s,
 install of the kept set on all 8 ranks 1.39 s (code) + 0.10 s (cell).
 
+## Restarts: why one costs 60-110 s, and what each kind of restart keeps
+
+Our 2026-11-07 runs on 4 GB200 (one node), 3 train steps, request (or process start) to the first train step done, from
+`phases.rank0.json`. "NFS" = Python environment and Megatron on the network file system; "local" = both copied to the
+node's RAM disk (`tools/stage_local.sh`); "zygote" = ranks forked from a process that has them imported
+(`livelab/fastrsi_megatron/zygote.py`).
+
+| Phase | 14B NFS | 14B local | 14B zygote | 32B NFS | 32B local | 32B zygote | Avoidable? How |
+|---|---|---|---|---|---|---|---|
+| Launcher to our driver (torchrun, interpreter) | 3.3 | 1.5 | 0.1 | 3.5 | 1.5 | 0.1 | yes: flag restart from the zygote |
+| `import torch` | 1.5 | 1.0 | 0 | 2.1 | 1.7 | 0 | yes: kept imported in the zygote |
+| `import megatron.training.training` (8,300 modules) | 31.8 | 10.4 | 0 | 52.4 | 10.0 | 0 | mostly: node-local copy (environment restart), kept imported (zygote) |
+| Args, `initialize_megatron` | 2.0 | 2.0 | 2.2-2.8 | 3.4 | 3.7 | 3.8-4.5 | no (process groups, seeds); eager NCCL makes it worse |
+| Init to kernel warm-up (lazy torch.compile imports, compile pool) | 4.5 | 1.3 | 1.6-1.7 | 24.7 | 1.3 | 1.6 | yes: node-local copy |
+| `warmup_training_kernels` (torch.compile, cache hit) | 4.0 | 2.8 | 2.2-2.8 | 7.3 | 3.2 | 2.5-3.1 | partly: per process; +6-9 s on a flag's first compile |
+| Model and optimizer build, data | 0.7 | 0.7 | 0.6-0.7 | 1.2 | 0.9 | 0.9-1.0 | no (random init on GPU, 0.3-0.4 s) |
+| First train step (steady step) | 10.2 (4.5) | 9.8 (4.4) | 9.4-11.4 (4.6) | 15.6 (6.8) | 15.3 (6.9) | 14.9-16.6 (6.9) | per process: see below |
+| **Total** | **58.0** | **29.3** | **17.1-19.6** | **110.1** | **37.6** | **24.5-27.5** | |
+
+Sources: runs t1-14b-b, t1-14b-c, t1-14b-d (14B) and t1-32b, t1-32b-b (32B); zygote ranges over 6 (14B) and 4 (32B)
+restarts with the same flags or another NCCL setting. With torch._dynamo and torch._inductor preloaded in the zygote (now
+its default) and TORCHINDUCTOR_COMPILE_THREADS=1, the warm-up takes 0.6-1.4 s (14B) / 0.65-0.84 s (32B, 2.9 s on a new
+flag's cached compile) and the total is 15.0-16.5 s (14B, 3 runs, t1-14b-e) / 22.8-25.1 s (32B, 4 runs, t1-32b-c). A flag that needs a new torch.compile
+(`--cross-entropy-loss-fusion`, first time) adds 6-9 s of warm-up: 23.7 s (14B), 30.8 s (32B). One 14B zygote restart took
+40.1 s (first step 17 s, its first microbatch 11.5 s), not reproduced in 8 more. The zygote itself is ready 12-25 s after
+its start, once per job; staging the 23 GB environment on a node takes 161-247 s (two runs, 32 copies in
+parallel) and Megatron-LM 4.4-7.4 s, once per node. A plain `torchrun` from the staged environment (`stage_local.sh`'s
+`env.sh`): 29.7 s to the first step at 14B (our run t2-tool).
+
+`torchrun` from a staged environment needs care: the venv's `torchrun` script names the original python in its shebang,
+and its ranks import from the network file system again (54.0 s at 14B). `stage_local.sh` repoints the shebangs.
+
+Import from a network file system, cold vs warm: `python -X importtime` of the same import, 37.7 s self time cold (the
+transformers package alone 16.6 s), 19.3 s warm; wall 20.5-23.0 s warm; 11.6-12.4 s from local RAM disk. Most of the
+8,300 modules are not used by training (transformers, openai, fla, flashinfer, wandb, fastapi ...).
+
+### The first train step
+
+`FASTRSI_STEP_DETAIL=2` (synchronized split, `run.py`): the first step's extra time over a steady one is in the first
+microbatch (14B 3.8-5.7 s vs 0.28-0.33 s; 32B 5.1-7.0 s vs 0.42-0.48 s), the optimizer step (+0.5 s / +1.3-1.4 s: Adam state
+allocation, first grad-norm reduction) and the step's tail (+0.5 s / +1.0-1.3 s). A Python profile of rank 0's first step
+(14B, zygote; profiled step 11.3 s vs 5.4 s) attributes the excess to: NCCL communicator creation on first use (`all_reduce`
+1.1 s, `broadcast` 0.5 s, coalesced 0.2 s), cuDNN fused-attention plans (`fused_attn_fwd` + `bwd` 1.96 s vs 0.12 s),
+the first RMSNorm calls (1.72 s vs 0.23 s, caching-allocator growth lands here), and torch.compile'd functions the warm-up
+does not cover (1.6 s more in dynamo frames, 0.8 s of it waiting on compile workers). All of it is per process: a fork
+cannot inherit it (no CUDA in the zygote). Creating communicators at init (`FASTRSI_EAGER_NCCL=1`, `device_id`) moves
+rather than removes it: init +3.0 s (14B) / +9-10 s (32B), first step -0.6 s / -2 to -4 s, net slower.
+
+What of the first step a cache on disk can keep (our 2026-11-07 runs, Qwen3-14B architecture TP 2 unless noted; single-layer
+numbers from a one-GPU probe of one attention, RMSNorm and linear layer at the same shapes, first call vs later calls):
+
+| Part | Persists across processes? | Cold | Warm | Cut by environment/cache, or only by a live process | Source |
+|---|---|---|---|---|---|
+| torch.compile (inductor FX graphs, Triton kernels) | yes, cache directories | warm-up 1.38 s (6 FX misses) | warm-up 0.55-0.76 s (8 hits); 0 compiles in step 1 either way | cache; network vs local directory makes no difference when warm (16.6-17.5 vs 16.6-17.0 s) | runs fs-cache, fs-paired cold1/cold2 |
+| cuDNN fused attention (TE) | plans: no (in-process dict, no serialization in TE 2.18); their JIT-compiled kernels: yes, CUDA JIT cache | first call 1.26-1.42 s | 0.10-0.25 s (later calls 0.006 s) | cache: CUDA_CACHE_PATH; the 0.1-0.25 s left only by a live process | single-layer probe |
+| TE RMSNorm | kernels: yes, CUDA JIT cache | 0.85-1.14 s | 0.14-0.19 s | cache | single-layer probe |
+| cuBLASLt heuristics | no | 0.045 s per shape | same | live process only; negligible (+0.08 s per 14B step); CUDA_MODULE_LOADING=EAGER makes it 0.78 s | single-layer probe, profile |
+| NCCL communicators | no (process state) | about 1.7 s of the first step (profile: all_reduce 1.1, broadcast 0.5, coalesced 0.2) | | live process only. NCCL_RUNTIME_CONNECT=0: 18.1 s vs 15.7-16.3 s to the first step (worse); device_id eager init: net +2.4 s (14B), +5-7 s (32B); NCCL topology/graph files: dump works, reusing the graph file crashed the job | runs fs-nccl, t1-14b-d, t1-32b-b |
+| CUDA caching allocator | no | 414 cudaMalloc in step 1, 84 in step 2 | | live process only. expandable_segments: 601/361 cudaMalloc, 18.3 s to the first step, optimizer step 1.11 vs 0.63 s (worse) | run fs-nccl |
+| Adam state | no | optimizer step +0.5 s (14B) / +1.3-1.4 s (32B) | | live process only | step split |
+
+Paired receipt for the caches that persist, flag restart from the zygote, 14B TP 2, four alternating pairs from two
+zygotes alive at once (run fs-paired): caches as before (inductor and Triton on the network file system, the CUDA JIT cache
+in its default place under the home directory, also on the network file system) 15.69, 17.27, 17.99, 17.18 s (mean 17.03)
+to the first step done; all three caches on node-local disk 16.63, 15.47, 15.76, 15.07 s (mean 15.73). The difference is
+in the first microbatch: 3.96-5.71 s before, 3.35-3.64 s after. Empty local caches: 18.24 s, then 15.51 s.
+Qwen3-32B architecture TP 4, three alternating pairs (run fs-paired-32b): 23.27, 25.33, 25.00 s (mean 24.53) before,
+22.58, 23.34, 22.57 s (mean 22.83) after; first microbatch 5.94-6.56 s before, 4.26-4.58 s after.
+So of the 5-6.5 s a first step costs over a steady one (14B), a disk cache keeps about 1.3 s on average (1.7 s at 32B; the JIT
+cache's place) and up to 2.3 s on a bad run; the remaining 4-5 s (communicators, allocator, Adam state, cuDNN plans, the step's tail)
+only a live process keeps. `tools/stage_local.sh` now puts all three caches on local disk.
+
+What only a live process keeps (the live lab's in-place edit): communicators, cuDNN plans, compiled graphs, allocator pools, Adam state.
+
 ## Live lab calls
 
 From the lab smoke (tiny, TP 2, 2026-11-07) and the conformance run.
