@@ -3,8 +3,8 @@
 The engine side of the transaction kernel (`template/livelab/kernel`): one transaction swaps
 code on every worker rank and in the engine core together, between the same two engine steps,
 with receipts. This folder holds the
-in-place swap path (R0, a function-body swap) and R1, the selective recapture of CUDA graphs in the
-commit's gap (`recapture.py`). Recompiles and R6 (weight reload) are not here: an edit that
+live code swap path (in-place function-body swap) and selective recapture of CUDA graphs in the
+commit's gap (`recapture.py`). Recompiles and warm weight reload are not here: an edit that
 needs one is a finding, not a silent swap.
 
 ## Contract
@@ -48,12 +48,12 @@ needs one is a finding, not a silent swap.
   checked at prepare. Reached only through an op that splits the graph: an advisory
   `captured_partly` (Python on prefill, graphs on decode). Captured only, or undecided: a
   blocking `captured_target`, so every rank votes no and the edit is reported, not applied.
-  Both route R1. With `"rebuild": ["R1"]` in the plan they turn advisory (the host
+  Both route to CUDA graph recapture. With `"rebuild": ["recapture"]` in the plan they turn advisory (the host
   recaptures); without it the finding names the plan field, or restarting with the edit (or
   running eager). Accepted, the edit commits, and a `zero_witness` at proof is routed the same way. The split decorator
   itself (`eager_break_during_capture` and code nested in it, in any module) is a blocking
   `captured_target` too: it runs only when vLLM decorates its ops at import or captures its
-  graphs (vLLM #59941 committed T0 with witness 0 on every rank). Calls made while the
+  graphs (vLLM #59941 committed via live code swap with witness 0 on every rank). Calls made while the
   stream captures a graph count apart from live calls.
 - **Selective CUDA graph recapture** (`recapture.py`, `host.RecaptureCoordinator`). A plan with
   `"rebuild": ["recapture"]` (or `"rebuild": ["R1"]`, optional `"recapture"` or `"r1"`:

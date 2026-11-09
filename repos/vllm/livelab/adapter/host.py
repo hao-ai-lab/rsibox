@@ -1,5 +1,5 @@
-"""Engine-core host: kernel transactions inside vLLM's EngineCore busy loop (R0 swap, and
-R1: recapture of the CUDA graphs in the commit's gap).
+"""Engine-core host: kernel transactions inside vLLM's EngineCore busy loop (live code swap, and
+selective recapture of CUDA graphs in the commit's gap).
 
 Enable with FASTRSI_KERNEL_DIR=<dir> in the engine's environment, import this module early in
 every engine process (a sitecustomize does it), and add `--worker-extension-cls

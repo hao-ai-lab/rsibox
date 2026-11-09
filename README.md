@@ -1,51 +1,83 @@
 # FastRSI
 
-Hot-reload your inference engine. Make it faster while it keeps running.
+Hot-reload your inference and training engines. Make them faster while they keep running.
 
-FastRSI gives a coding agent a **live lab**: a running engine it can change without a restart.
-The agent swaps a code change into the live processes, proves the new code ran, measures it, and
-undoes it on request. When a change cannot be swapped safely, the lab says "restart needed".
+FastRSI provides autonomous coding agents and human engineers with a **live lab**: a running engine that accepts and tests code changes without requiring slow cold restarts. The system swaps code edits into live worker processes during step gaps, verifies with live execution witnesses that the new code ran, benchmarks performance, and can roll back or undo changes in microseconds to milliseconds. When an edit cannot be safely hot-swapped, the live lab clearly flags the exact constraint and routes to the cheapest restart boundary.
 
-> **Status:** restarting development around a skill-first design. Nothing here runs yet.
-> The previous version (Python package, vLLM and SGLang plugins, conformance receipts) is on the
-> [`legacy/v0`](https://github.com/GindaChen/fastrsi/tree/legacy/v0) branch.
+## Repository layout
 
-## Layout
+The repository is organized into four distinct layers:
 
 ```
-core/                    what agents read
-  livelab_overview.md    skill: the live lab, its calls, function groups
-  developer.md           developer agent: edit, install, check, keep or revert
-  toolsmith_offline.md   toolsmith, once per repo: mine PRs and tests, build and verify the lab
-  toolsmith_online.md    toolsmith, on call: polish slow checks, extend to new modules
-  orchestrator.md        orchestrator agent: run the loop with programs and agents, schedule by GPU
-template/livelab/        blueprint for a new engine: the fixed interface (install, check, reset,
-                         uninstall), conformance cases, and the code every lab shares: the
-                         transaction kernel/ with its toy lab, forksafe.py (pre-fork CUDA guards)
-docs/                    how this repo and its process work (see docs/README.md)
-repos/<engine>/          everything about one engine:
-  docs/                  architecture: process tree, restart boundaries and their costs
-  kb/                    measured facts: costs, workload, lessons
-  livelab/               the engine's own code, one folder per boundary (adapter/, services/, ...)
-  tools/ patches/        proven probes; our edits to the engine, with an upstreaming ledger
-  examples/<name>/       one walkthrough per replayed change, with its receipt
+template/livelab/        Shared live-lab framework and blueprint for any engine:
+  kernel/                Pure-Python transaction kernel (locate, swap, findings, witness,
+                         journal, coordinator, session) with zero engine dependencies;
+                         includes ToyLab for self-contained testing.
+  forksafe.py            Pre-fork CUDA and driver safety guards for zygote server preloads.
+  conformance/           11 golden conformance test cases (c0-c10) that verify any live lab:
+                         repeatability, no-op guarantees, visibility, fresh process equivalence,
+                         uninstall/undo, failure rollback, refusal, chains, crash/hang recovery,
+                         soak stability, and unproven execution detection.
+  INTERFACE.md           The live lab protocol contract (verbs, state, findings, receipts).
+
+repos/<engine>/          Engine-specific live labs, knowledge bases, and PR replays:
+  docs/                  Engine architecture: process tree, restart boundaries, and costs.
+  kb/                    Measured facts and ground truth: costs, workloads, priors, lessons.
+  livelab/               Engine-specific lab implementations (adapters, services, hooks).
+  tools/                 Engine-specific probes and local tools.
+  patches/               Engine patches with upstreaming ledgers.
+  examples/<name>/       Reproducible walkthroughs replaying real PRs with receipts.
+
+core/                    Agent prompts, protocols, and engineering discipline:
+  livelab_overview.md    Live lab overview: interface verbs, boundaries, and function groups.
+  developer.md           Developer agent prompt: edit, stage, verify, commit, and undo.
+  toolsmith_offline.md   Offline toolsmith: mine PRs and tests to build engine knowledge.
+  toolsmith_online.md    Online toolsmith: diagnose slow checks, account for state pollution,
+                         and avoid over-conservative micro-edits.
+  orchestrator.md        Orchestrator prompt: live streamer and human interface of the loop.
+
+docs/                    Process documentation, rules, and framework lessons (docs/lessons.md).
 ```
 
-## How it fits together
+## Engine live labs
 
-1. **Offline, once per repo:** `toolsmith_offline` mines the repo's PRs and tests, bootstraps
-   `repos/<engine>/livelab/` from the template, verifies it against fresh processes, and fills
-   `repos/<engine>/kb/`.
-2. **Online:** the developer agent loads the skill, then edits, `install`s, `check`s, and keeps
-   (`reset`) or reverts (`uninstall`) inside the warm engine. Promising edits run the full
-   benchmark asynchronously.
-3. **On call:** a cost hook flags slow checks and fallback restarts; `toolsmith_online` then
-   polishes or extends the lab and saves the tool for the next agent.
+FastRSI currently supports three primary engine live labs under `repos/`:
 
-## First example
+- **vLLM** (`repos/vllm/`): Live lab adapter (`adapter/`), step-gap coordinator, selective CUDA graph recapture (`recapture.py`), and pre-fork zygote server preload (`services/zygote.py`). Replays DeepSeek-V4.1 Flash prefill optimizations (`examples/dsv41-prefill/`).
+- **FastVideo** (`repos/fastvideo/`): Live lab adapter (`adapter/`), worker supervisor, zygote respawn, and weights IPC holder for diffusion pipelines. Replays MiniMax-H3 live edits and PRs (`examples/pr-replay/`, `examples/h3-live-edit/`).
+- **Megatron-LM** (`repos/megatron/`): Training live lab (`livelab/fastrsi_megatron/`), train-step quiesce hook, gloo synchronization rounds, and weights/optimizer state snapshots (`state.py`). Replays architecture hill-climbs on Qwen3-14B (`examples/codex-hillclimb/`).
 
-`repos/vllm/examples/dsv41-prefill/`: the three vLLM PRs behind "+35.6–43.9% new-token prefill
-throughput" in vLLM's DeepSeek-V4.1-Flash post, hot-reloaded one at a time.
+## How it works
+
+1. **Transaction kernel inside the step gap:** Code edits are staged, analyzed, and prepared outside the gap while requests run. During a quiescent step gap (between generation steps in inference, or between train steps in training), the coordinator validates the edit across all worker ranks. If accepted, it swaps code objects atomically and captures execution witnesses.
+2. **Execution witness and proof:** The live lab tracks whether running steps hit the new bytecode. If an edit sits inside captured CUDA graphs or JIT-compiled kernels, the lab requires CUDA graph recapture or kernel rebuild before marking the change proven.
+3. **Instant journaled undo:** Every transaction logs inverse operations in an append-only journal. Rolling back or undoing an edit restores exact bytecode, class attributes, and CUDA graph entries in microseconds to milliseconds with zero recompilation.
+4. **Clean boundary routing:** Edits that change class hierarchies, constructor signatures, or distributed layout cannot be swapped in place. The kernel's findings reject unsafe swaps and route directly to the lowest appropriate restart boundary (component restart or warm engine restart via zygote fork).
+
+## Verification and testing
+
+Run CPU-only unittests and conformance checks locally:
+
+```sh
+# Shared kernel unittests
+python3 -m unittest discover -s template/livelab/kernel -t template/livelab -v
+
+# Run the 11 conformance cases on the ToyLab
+cd template/livelab && python3 -m conformance --lab kernel.toy_lab:ToyLab
+
+# Pre-fork CUDA guards test suite
+python3 -m unittest discover -s template/livelab -p 'test_forksafe.py' -v
+
+# vLLM live lab adapter tests
+python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
+
+# FastVideo adapter and service tests
+python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab -v
+python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
+
+# Megatron live lab tests
+python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab -v
+```
 
 ## License
 

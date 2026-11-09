@@ -17,10 +17,10 @@ in `template/livelab/kernel/README.md`.
 | Install pauses the engine for the whole install | **Prepare outside the gap** (locate, compile, stage, vote) while steps run; only validate and commit stall the loop | In the gap, prepare was 97% of the gap on the toy. Split, the first live run (vLLM, 8B dense model, one GPU) stalled 0.6 ms for a 0.84 s prepare (design notes §4b, items 7 and 12). |
 | Locate by heap scan | Locate from the module namespace; scan the heap only for closures and suspended frames | A full scan holds the GIL: one live step took 221 ms against a 20 ms median. Without it, the largest gap between stream chunks during prepare fell from 249 to 37 ms; on the toy, step-stall p99 fell from 17.5 to 2.8 ms (§4b item 11, `kernel/README.md`). |
 | `status()`: base, edited, poisoned (undefined) | Defined by **code fingerprints** and faults; plus `status(id)` for in-doubt callers | A caller that times out does not know the outcome; it must ask, never assume failure (§4b item 8). |
-| Function groups pick one mechanism | **Recipes R0-R10** name what is rebuilt, with measured costs; groups stay a planner's tags | Planned mechanisms were too pessimistic: in the first 4 replayed PRs, every actual recipe was cheaper than predicted, mostly swap plus repair, R0+R10 (§4b item 13). |
+| Function groups pick one mechanism | **Rebuild mechanisms** name what is rebuilt in words with measured costs; groups stay a planner's tags | Planned mechanisms were too pessimistic: in the first 4 replayed PRs, every actual mechanism was cheaper than predicted, mostly code swap plus repair cell (§4b item 13). |
 | "Refuses unsupported edits" | **Findings** with an accept list; only physical limits cannot be accepted | AGENTS.md "Checks advise; agents decide". |
 | One receipt, schema TODO | **Linked receipts** `txn`, `proof`, `undo` sharing a transaction id | Proof needs the workload, which runs after the commit; undo happens whenever it happens (§4b item 2). |
-| Undo "proves base invariants" | Undo is exact for code; data needs the plan's **undo resets** (R2, R3, R8) | Undo cannot un-write requests or cache entries the new code produced (§4b item 3). |
+| Undo "proves base invariants" | Undo is exact for code; data needs the plan's **undo resets** (drain, cache clear, snapshot revert) | Undo cannot un-write requests or cache entries the new code produced (§4b item 3). |
 | (not covered) | Deleting a definition is an edit (`removed_definition`); an edit that changes no code is refused (`empty_change`) | A deletion-only PR changed nothing live, so a forgotten caller passed live and failed after restart (§4b item 10). |
 | Cost per call | Two headline metrics: **edit-to-run** and **edit-to-finish**, against a warm restart | First live run: edit-to-run 0.88 s, edit-to-finish 6.4 s, warm restart 88 s (§4b item 12). |
 
@@ -118,29 +118,28 @@ or rollback, an unresolved in-doubt transaction, a participant that missed the p
 deadline. A poisoned lab refuses `install` with `session_poisoned` until `reset("respawn")`;
 `uninstall` stays allowed (it backs out before the respawn) and leaves the lab poisoned.
 
-## Recipes (mechanism vocabulary)
+## Mechanisms and recipes
 
 Costs from our vLLM runs (design notes §2; per-engine numbers belong in `repos/<engine>/kb/costs.md`).
 
-| Recipe | Rebuilds | Keeps | Cost |
-|---|---|---|---|
-| R0 swap | code objects | everything else | 0.03-0.04 s per worker; µs in the engine core |
-| R1 swap + recapture | code, CUDA graphs, compiled kernels | model, weights, KV | 4.5-7.8 s |
-| R2 preempt all | request state (re-prefill) | prefix cache, objects | 0.1 ms + re-prefill |
-| R3 cache reset | prefix-cache contents | objects, KV memory | 1-2 ms + full re-prefill |
-| R4 core rebuild | engine-core objects | KV manager, requests, workers | 8-35 ms |
-| R5 soft restart | model object, graphs | processes, comm groups, weights, KV memory | 1.4-2.2 s eager |
-| R6 weight reload | processed weights | process | 5 s by IPC mapping; ~100 s from disk |
-| R7 native reload | op library registration | process | build 8-24 s per file |
-| R8 snapshot revert | prefix-cache contents, from tiers | everything | 6 ms + reload |
-| R9 warm restart | everything below config | caches, weight daemon | 31-84 s |
-| R10 repair cell | what the cell declares it sets | everything else | ms per call |
+| Mechanism | Protocol key | Rebuilds | Keeps | Cost |
+|---|---|---|---|---|
+| Live code swap | `R0 swap` | code objects | everything else | 0.03-0.04 s per worker; µs in the engine core |
+| CUDA graph recapture | `R1` / `recapture` | code, CUDA graphs, compiled kernels | model, weights, KV | 4.5-7.8 s |
+| Drain & preempt | `R2` / `drain` | request state (re-prefill) | prefix cache, objects | 0.1 ms + re-prefill |
+| Cache reset | `R3` / `cache` | prefix-cache contents | objects, KV memory | 1-2 ms + full re-prefill |
+| Engine-core rebuild | `R4` | engine-core objects | KV manager, requests, workers | 8-35 ms |
+| Model soft restart | `R5` | model object, graphs | processes, comm groups, weights, KV memory | 1.4-2.2 s eager |
+| Warm weight reload | `R6` | processed weights | process | 5 s by IPC mapping; ~100 s from disk |
+| Native op reload | `R7` | op library registration | process | build 8-24 s per file |
+| Snapshot revert | `R8` / `snapshot` | prefix-cache contents, from tiers | everything | 6 ms + reload |
+| Warm engine restart | `R9` / `respawn` | everything below config | caches, weight daemon | 31-84 s |
+| Hand repair cell | `R10 repair` | what the cell declares it sets | everything else | ms per call |
 
-Recipes compose (R0+R10 for a new field, R0+R1 for a forward edit in graph mode). New
+Mechanisms compose (live code swap plus repair cell for a new field, live code swap plus CUDA graph recapture for a forward edit in graph mode). New
 defaults and added methods are evaluated as in the live class body (its names are visible,
-read-only), so R0 covers `def f(self, x=CONST)` with `CONST` in the class. The kernel
-implements R0 and R10, and R2, R3, R8 as reset hooks; the others are named here and not yet
-behind the kernel. A change that no recipe below R9 covers (startup logic, launch flags,
+read-only), so live code swap covers `def f(self, x=CONST)` with `CONST` in the class. The kernel
+implements live code swap (`R0 swap`) and repair cells (`R10 repair`), with drain (`R2`) and cache reset (`R3`) as reset hooks. A change that no mechanism below warm restart covers (startup logic, launch flags,
 environment variables) is refused with its reason: it needs a restart.
 
 ## Findings and accept
