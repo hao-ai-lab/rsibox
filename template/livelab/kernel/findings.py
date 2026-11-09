@@ -257,24 +257,30 @@ CATALOG = {
     "undo_incomplete": (
         "an inverse failed while undoing; the participant is not back at its base",
         [RESTART], "the base is not restored; later results are not comparable", [], False),
-    # Not raised on main: the JIT rebuild is not implemented (kernel README); a JIT target
-    # is a `jit_target` finding instead.
+    # Advisory: swap.stage raises it when jit.plan rebuilds a JIT target in place; when the
+    # rebuild is refused the target is a blocking `jit_target` instead.
     "jit_rebuild": (
         "the target is the Python function inside a JIT object (a Triton @jit kernel): the "
         "engine runs what the JIT compiled from the source text, never the function's "
-        "bytecode, so a code swap alone leaves the GPU on the old kernel. A JIT rebuild (not "
-        "implemented on main) rebuilds the JIT object in place from the new text (journaled: "
-        "undo restores the old compiled kernels), resets the module's JIT objects that call it, and counts launches as the "
-        "witness",
+        "bytecode. The rebuild sets the kernel's text in place from the edited source and "
+        "resets the compiled kernels, hashes and global values of the kernel and of every JIT "
+        "kernel that calls it, at any depth, in every loaded module, plus the autotuner "
+        "caches over them (journaled: undo puts the old compiled kernels back, no "
+        "recompile); its launches count as the witness",
         [{"action": "go on: the next launch compiles the new kernel", "cost": "one JIT "
-          "compile per specialization (seconds), on the first launch after the commit"}],
-        "none if the rebuild runs; kernels in other modules that inline this one keep the old "
-        "compiled code", ["Proving an edit applied"], True),
+          "compile per specialization (seconds), and a new tuning run for an autotuned "
+          "kernel, on the first launch after the commit"}],
+        "a CUDA graph captured before the edit replays the old kernel until it is "
+        "recaptured (zero_witness says so); a caller held only in a class or a closure, not "
+        "at a module's top level, is not found and keeps the old compiled code",
+        ["Proving an edit applied"], True),
     "jit_target": (
         "the target is a JIT kernel (@triton.jit, @triton.autotune, @triton.heuristics, or a "
-        "live JITFunction holds it): the engine runs what the JIT compiled from the source "
-        "text, never the function's bytecode, and v1 has no JIT rebuild, so a code swap "
-        "commits and the GPU keeps the old kernel (witness 0)",
+        "live JITFunction holds it) that cannot be rebuilt in place: the edit changes its "
+        "parameters or decorators (Triton fixed them when it built the objects), or the JIT "
+        "object is not one the rebuild knows (Triton's interpreter mode, another JIT). The "
+        "engine runs what the JIT compiled, never the function's bytecode, so a code swap "
+        "would commit and the GPU would keep the old kernel (witness 0)",
         [RESTART,
          {"action": "accept only to swap the Python function itself (e.g. for the "
                     "interpreter mode); the compiled kernel stays", "cost": "none"}],
