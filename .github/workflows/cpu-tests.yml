@@ -32,6 +32,22 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/repos/vllm/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
+  fastvideo-kernel:
+    name: FastVideo kernel copy golden tests and conformance c0-c10 on its toy lab (CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run the kernel copy's unittest cases on the toy engine (standard library only; torch cases skip)
+        run: python3 -m unittest discover -s repos/fastvideo/livelab/kernel -t repos/fastvideo/livelab -v
+      - name: Run the template conformance cases c0-c10 against the copy's toy lab
+        working-directory: template/livelab
+        env:
+          PYTHONPATH: ${{ github.workspace }}/repos/fastvideo/livelab
+        run: python3 -m conformance --lab kernel.toy_lab:ToyLab
   vllm-adapter:
     name: vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
     runs-on: ubuntu-latest
