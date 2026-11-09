@@ -89,3 +89,25 @@ jobs:
               sys.exit("Loop record fields with no text (write none if it does not apply): " + ", ".join(empty))
           print("OK: every loop record field has text. Not checked: whether it is true.")
           '
+  cross-engine-imports:
+    name: No repos/<engine>/ code imports from another repos/<other>/ (shared code goes to template/livelab)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bad=0
+          for dir in repos/*/; do
+            engine=$(basename "$dir")
+            for other in repos/*/; do
+              o=$(basename "$other")
+              [ "$o" = "$engine" ] && continue
+              hits=$(grep -rnE --include='*.py' --include='*.sh' \
+                "repos/$o/|\.\./$o/|[\"']$o[\"'], *[\"']livelab[\"']" "$dir" || true)
+              if [ -n "$hits" ]; then
+                echo "repos/$engine/ references repos/$o/:"; printf '%s\n' "$hits"; bad=1
+              fi
+            done
+          done
+          [ $bad = 0 ] && echo "OK: no Python or shell file under repos/<engine>/ references another engine's folder"
+          exit $bad
