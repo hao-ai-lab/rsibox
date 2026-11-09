@@ -10,6 +10,16 @@ the conformance harness of `template/livelab/conformance/`.
 - `adapter/`: the kernel inside FastVideo: `agent.py` runs in every worker process,
   `lab.py` is the lab host (the verbs), `patches.py` the conformance edits on real H3 code,
   `fresh.py` the fresh process `fresh_check` starts.
+- `services/`: the actions cheaper than a plain restart (`kb/costs.md`, "Restart ladder"):
+  - `rebuild.py`: re-import edited modules in a warm worker and rebuild what was built from them
+    (in-place rebuild, the `rebuild` verb; 0.2-1.3 s, measured);
+  - `jitcache.py`: path-stable JIT cache roots and a `torch_key` preset (warm restart with
+    path-stable caches; first-video JIT 6.3 -> 2.2 s, measured);
+  - `zygote.py`: fork workers from a preloaded forkserver, refreshing modules edited since it
+    imported them (zygote respawn; 14.1 s to ready, measured);
+  - `holder.py`: keep the loaded DiT, text encoder and VAE in a holder process that respawned
+    workers map by CUDA IPC, and refuse to serve when loader, quantization or model code changed
+    (zygote respawn with weights holder; 4.8 s to ready, measured).
 
 ## Process layout
 
@@ -47,9 +57,10 @@ request; it is not a hook today, and edit-to-run does not need it (a video takes
 
 | Verb | What it does on FastVideo |
 |---|---|
-| `install(patch)` | `patch = {"files": {module: full new text}, "accept": [...], "edit_time": t}`. R0 swap of every changed function on every rank, in one request gap. Refusals as the kernel's findings |
+| `install(patch)` | `patch = {"files": {module: full new text}, "accept": [...], "edit_time": t}`. Live swap of every changed function on every rank, in one request gap. Refusals as the kernel's findings |
 | `check(workload)` | One generation of the workload in the warm engine. `output` = hashes of the uint8 frames and the audio; `seconds`; `psnr_vs_golden`; per-rank witness of every live edit; `proven` |
-| `reset("state")` | Empties each rank's CUDA cache (R3). Request state (`ForwardBatch`, latents, RNG) is built per request by FastVideo |
+| `reset("state")` | Empties each rank's CUDA cache. Request state (`ForwardBatch`, latents, RNG) is built per request by FastVideo |
+| `rebuild(patch)` | In-place rebuild, no new process: every worker re-imports the edited modules and their importers, live objects get the new classes, constructor edits are merged into the loaded DiT against meta builds (weights stay), stages are built again. For the edits the live swap refuses (constructors, new fields, module constants). Needs no live edits installed; the rebuilt text is the new base. `{"revert": True}` goes back to the files |
 | `reset("respawn")` | Shuts the worker group down and builds a new one from the same config; clears poison |
 | `uninstall(id)` | Undo `id` and every later edit, newest first; checks the code fingerprint |
 | `status()` | base / edited / poisoned, the installed transactions, the code fingerprint |
@@ -62,8 +73,8 @@ not caught by the tamper check.
 ## Not covered
 
 - Code inside `torch.compile` regions (the VAE is compiled in the workload; the DiT is eager),
-  Triton kernel sources (`@triton.jit`: R0 swaps the Python wrapper, not the compiled kernel),
+  Triton kernel sources (`@triton.jit`: the live swap replaces the Python wrapper, not the compiled kernel),
   CUDA graphs of the NVFP4 VAE decoder, and native `fastvideo-kernel` code. See
-  `kb/priors.md` for their restart classes.
-- Constructors and fields (`constructor_edit`, `new_fields` block and route to a restart, as in
-  the kernel).
+  `docs/architecture.md` for their restart classes.
+- Constructors and fields (`constructor_edit`, `new_fields` block in `install`, as in the
+  kernel): `rebuild` runs them in the warm workers unless they need new weights.

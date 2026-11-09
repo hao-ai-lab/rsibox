@@ -49,6 +49,14 @@ MODULES = (DEC, LAT, INP, f"{H3}.stages.minimax_h3_denoising",
 RPC_ERROR = "__fastvideo_rpc_error__"
 
 
+def finding(check, observed, expected):
+    """A kernel finding when the kernel catalogues the check; a plain one otherwise."""
+    try:
+        return F.finding(check, observed, expected)
+    except KeyError:
+        return {"check": check, "observed": str(observed), "expected": str(expected)}
+
+
 def module_file(name):
     spec = importlib.util.find_spec(name)
     return spec.origin if spec else None
@@ -118,11 +126,15 @@ def force_multiproc():
 
 class FastVideoLab:
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
-    `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy."""
+    `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
+    `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
+    `reset("respawn")` skips the workers' imports (zygote respawn). `holder`: also keep the loaded DiT, text
+    encoder and VAE in a holder process (services/holder.py) that respawned workers map by CUDA
+    IPC instead of loading; implies `zygote`."""
     name = "fastvideo"
 
     def __init__(self, config, receipts=None, golden=None, modules=MODULES, rpc_timeout=60.0,
-                 check_timeout=600.0):
+                 check_timeout=600.0, zygote=False, holder=False):
         self.config = json.loads(json.dumps(config))
         self.writer = R.ReceiptWriter(receipts) if receipts else None
         self.rpc_timeout, self.check_timeout = rpc_timeout, check_timeout
@@ -133,6 +145,16 @@ class FastVideoLab:
             self.golden = np.load(golden)
         self.lock = threading.RLock()
         self.costs = {}
+        self.holder = None
+        if holder:          # loaded DiT, text encoder and VAE outlive the workers (services/holder.py)
+            from services import holder as H
+            sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}.sock")
+            self.holder = H.start(sock)
+            os.environ["FASTRSI_HOLDER_SOCK"] = sock
+            zygote = True   # the loader hook is installed by the zygote's worker entry
+        if zygote:          # every worker group, respawns included, forks from preloaded imports
+            from services import zygote as Z
+            self.costs["zygote_preload"] = Z.enable()
         self._spawn()
 
     # -- process layout ------------------------------------------------------------------
@@ -213,6 +235,15 @@ class FastVideoLab:
                 self.gen.shutdown()
             except Exception:
                 pass
+            if self.holder is not None:
+                from services import holder as H
+                try:
+                    H.call(os.environ["FASTRSI_HOLDER_SOCK"], {"op": "stop"}, timeout=10)
+                except Exception:
+                    pass
+                self.holder.join(10)
+                if self.holder.is_alive():
+                    self.holder.kill()
 
     # -- verbs ---------------------------------------------------------------------------
     def _base(self, m):
@@ -310,8 +341,64 @@ class FastVideoLab:
                 self._spawn()
                 return {"ok": not self.session.poisoned(), "reset": ["worker group", "session"],
                         "cost_s": round(time.perf_counter() - t0, 6)}
-            res = [C._call(p, "reset", "R3") for p in self.co.participants]
+            res = [C._call(p, "reset", "R3") for p in self.co.participants]  # "R3": CUDA cache
             return {"ok": all(r["ok"] for r in res), "reset": ["cuda cache"],
+                    "cost_s": round(time.perf_counter() - t0, 6)}
+
+    def rebuild(self, patch):
+        """In-place rebuild: every warm worker re-imports the edited modules from `patch["files"]`
+        and rebuilds what was built from them (adapter/agent.py `rebuild`): for the edits the
+        live swap refuses (constructors, new fields, module constants, new classes). The edited
+        text becomes the new base: the session starts over (no live edits may be installed).
+        `{"revert": True}` rebuilds every module rebuilt so far back to its file on disk."""
+        t0 = time.perf_counter()
+        with self.lock:
+            refuse = None
+            if self.session.poisoned():
+                refuse = finding("session_poisoned", "the lab is poisoned", "a known state: respawn")
+            elif self.session.stack:
+                refuse = finding("live_edits_installed", f"{len(self.session.stack)} transaction(s)",
+                                   "uninstall the live edits before a rebuild")
+            revert = bool(patch.get("revert"))
+            files = ({m: read_module(m) for m in getattr(self, "rebuilt", {})} if revert
+                     else dict(patch.get("files") or {}))
+            if not files and refuse is None:
+                refuse = finding("patch_invalid", "no files", "at least one edited module")
+            if refuse is not None:
+                return {"ok": False, "outcome": "refused", "findings": [refuse], "ranks": {},
+                        "cost_s": round(time.perf_counter() - t0, 6)}
+            ranks = {}
+
+            def one(i):                     # every rank at once: each has its own pipe
+                try:
+                    ranks[f"rank{i}"] = self.rank_call(i, "rebuild", {"files": files})
+                except Exception as e:
+                    ranks[f"rank{i}"] = {"ok": False, "findings": [finding(
+                        "participant_failed", f"{type(e).__name__}: {e}", "the rank answers")]}
+            lanes = [threading.Thread(target=one, args=(i,), daemon=True) for i in range(self.ranks)]
+            for th in lanes:
+                th.start()
+            for th in lanes:
+                th.join()
+            ranks = {k: ranks[k] for k in sorted(ranks, key=lambda k: int(k[4:]))}
+            oks = [r.get("ok") for r in ranks.values()]
+            findings = [f for r in ranks.values() for f in r.get("findings", [])]
+            if any(oks) and not all(oks):              # ranks now run different code
+                self.session.fault("participant_failed", "rebuild applied on some ranks only",
+                                   "every rank rebuilt, or none")
+                outcome = "partial"
+            elif all(oks):
+                outcome = "rebuilt"
+                self.rebuilt = {} if revert else {**getattr(self, "rebuilt", {}), **files}
+                for m, text in files.items():
+                    self.base_text[m] = text
+                self.live_text = [{}]
+                self.session.recovered(self.co)        # the edited text is the new base
+            else:
+                outcome = "refused"
+            et = patch.get("edit_time")
+            return {"ok": outcome == "rebuilt", "outcome": outcome, "findings": findings,
+                    "ranks": ranks, "edit_to_rebuilt_s": round(time.time() - et, 4) if et else None,
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
     def uninstall(self, id=None):

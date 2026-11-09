@@ -42,9 +42,12 @@ def verify_input(batch):
 
 class Pipeline:
     def __init__(self):
-        from adapter.toyfv import stages
         self.steps = load_schedule()
         self.modules = {"transformer": Transformer()}
+        self.create_pipeline_stages()
+
+    def create_pipeline_stages(self):
+        from adapter.toyfv import stages
         self.video = stages.VideoDecodingStage()
         self.audio = stages.AudioDecodingStage()
 

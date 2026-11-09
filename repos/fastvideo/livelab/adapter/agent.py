@@ -19,6 +19,12 @@ import traceback
 
 _STATE = {"participant": None, "faults": {}, "hooks": []}
 
+if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
+    # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
+    # compile; preset Inductor's torch_key from disk (services/jitcache.py)
+    from services import jitcache as _jitcache
+    _jitcache.preset_torch_key()
+
 
 def rank_of(worker):
     for attr in ("rank", "local_rank"):
@@ -144,6 +150,106 @@ def _plan_modules(plan):
     return list((plan or {}).get("modules", {})) if isinstance(plan, dict) else []
 
 
+def _ctor_args(module):
+    """Constructor arguments of a loaded component, when the module keeps them: FastVideo's
+    DiTs (`BaseDiT`) keep `config` and `hf_config`, their only arguments."""
+    if hasattr(module, "config") and hasattr(module, "hf_config"):
+        return (module.config, module.hf_config)
+    return None
+
+
+def _reset_stages(pipe):
+    """Drop the pipeline's stages (FastVideo `ComposedPipelineBase` keeps three views)."""
+    for st in list(getattr(pipe, "_stages", None) or []):
+        name = getattr(st, "_pipeline_stage_name", None)
+        if name and name in pipe.__dict__:
+            delattr(pipe, name)
+    if hasattr(pipe, "_stages"):
+        pipe._stages = []
+        pipe._stage_name_mapping = {}
+
+
+def rebuild(worker, payload):
+    """In-place rebuild in this warm worker: re-import the edited modules (and their importers) from
+    the new text, give the live objects the new classes, merge constructor edits into the
+    loaded torch components (their tensors stay), and build the pipeline's stages again. The
+    CUDA context, weights, JIT modules and compile caches stay. On a finding nothing changes.
+    payload: {"files": {module: text}, "prefixes": [packages the import graph covers]}."""
+    from services import rebuild as RB
+    t0 = time.perf_counter()
+    files = (payload or {}).get("files") or {}
+    pipe = getattr(worker, "pipeline", None)
+    prefixes = tuple((payload or {}).get("prefixes") or sorted({m.split(".")[0] for m in files}))
+    r = RB.refresh(files, prefixes)
+    out = {"rank": rank_of(worker), "pid": os.getpid(), "refreshed": r["refreshed"],
+           "refresh_s": r["seconds"], "findings": list(r["findings"])}
+    if not r["ok"]:
+        return {"ok": False, **out, "cost_s": round(time.perf_counter() - t0, 4)}
+    cmap = RB.class_map(r["old"])
+    out["classes"] = sorted(f"{c.__module__}.{c.__qualname__}" for c in cmap)
+    merged, plans = {}, []
+    try:
+        try:
+            import torch
+            Module = torch.nn.Module
+        except ImportError:                     # the CPU toy engine
+            torch, Module = None, ()
+        mods = dict(getattr(pipe, "modules", {}) or {})
+        for name, m in mods.items():
+            if not isinstance(m, Module):
+                if type(m) in cmap:
+                    plans.append((name, m, None))
+                continue
+            if not any(type(s) in cmap for s in m.modules()):
+                continue
+            args = _ctor_args(m)
+            if args is None:
+                plans.append((name, m, None))
+                continue
+            tm = time.perf_counter()
+            with torch.device("meta"):
+                base = type(m)(*args)
+                new = cmap.get(type(m), type(m))(*args)
+            mr = RB.merge_fields(m, base, new, dry_run=True)
+            mr["meta_build_s"] = round(time.perf_counter() - tm, 4)
+            merged[name] = mr
+            if not mr["ok"]:
+                out["findings"] += mr["findings"]
+            plans.append((name, m, (base, new)))
+    except Exception:
+        out["findings"].append(RB.finding("rebuild_failed", traceback.format_exc()[-2000:],
+                                          "the components rebuild"))
+    if out["findings"]:
+        RB.restore(r["old"])
+        return {"ok": False, **out, "merged": merged, "cost_s": round(time.perf_counter() - t0, 4)}
+    # every check passed: apply (class swaps and field merges), then the stages
+    for name, m, bn in plans:
+        if bn is None:
+            objs = list(m.modules()) if callable(getattr(m, "modules", None)) else [m]
+            merged[name] = RB.swap_classes(objs, cmap)
+        else:
+            merged[name] = {**RB.merge_fields(m, *bn), "meta_build_s": merged[name]["meta_build_s"]}
+    sw = RB.swap_classes([worker, pipe], cmap)
+    # caches the old code kept on its functions or globals (CUDA graphs, static buffers) would
+    # stay alive next to the new code's own: release them before the first new call
+    held = RB.release_held(r["old"])
+    out["held_released"] = [{k: h[k] for k in ("where", "cuda_bytes", "graphs")} for h in held["released"]]
+    out["held_findings"] = held["findings"]
+    out["cuda_bytes_released"] = held["cuda_bytes_released"]
+    ts = time.perf_counter()
+    stages = []
+    if pipe is not None and hasattr(pipe, "create_pipeline_stages"):
+        _reset_stages(pipe)
+        args = getattr(pipe, "fastvideo_args", None)
+        pipe.create_pipeline_stages(*([args] if args is not None else []))
+        stages = [type(s).__name__ for s in (getattr(pipe, "_stages", None) or [])] or \
+            sorted(k for k, v in vars(pipe).items() if hasattr(v, "forward"))
+    out.update(merged=merged, swapped=sw["swapped"], stages=stages,
+               stages_s=round(time.perf_counter() - ts, 4))
+    _STATE["participant"] = None            # a new base: the kernel journal starts over
+    return {"ok": True, **out, "cost_s": round(time.perf_counter() - t0, 4)}
+
+
 def rpc(worker, method, payload=None):
     """The collective_rpc target. `worker` is the FastVideo worker of this process."""
     if _STATE["faults"].get("lost"):
@@ -154,6 +260,13 @@ def rpc(worker, method, payload=None):
         return inject(worker, **(payload or {}))
     if method == "repl":
         return repl(worker, payload)
+    if method == "rebuild":
+        try:
+            return rebuild(worker, payload)
+        except Exception:
+            return {"ok": False, "findings": [{"check": "rebuild_failed",
+                                               "observed": traceback.format_exc()[-3000:],
+                                               "expected": "the rebuild runs"}]}
     p = participant(worker)
     if method == "prepare":
         # stage compiles the new module text: decorators that read source at definition time
