@@ -39,7 +39,7 @@ Contract:
   for refreshed modules do not count. Cost (our 2026-11-07 run, Qwen3-14B architecture, TP 2): the
   re-import took 1.4 s, and the lab was ready 40.9 s after the request, against 78.8 s for torchrun.
 """
-import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
+import argparse, ast, ctypes, gc, importlib, json, os, signal, socket, sys, time, traceback
 
 # the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
@@ -209,18 +209,46 @@ def _stat(f):
         return None
 
 
-def rank_env(req, local_rank):
-    n = int(req["nproc"])
-    node = int(req.get("node_rank", 0))
-    env = dict(req.get("env", {}))
-    env.update(RANK=str(node * n + local_rank), LOCAL_RANK=str(local_rank),
-               WORLD_SIZE=str(n * int(req.get("nnodes", 1))), LOCAL_WORLD_SIZE=str(n),
-               GROUP_RANK=str(node), MASTER_ADDR=req.get("master_addr", "127.0.0.1"),
-               MASTER_PORT=str(req["port"]), TORCHELASTIC_RUN_ID=str(req.get("run_id", "zygote")),
-               FASTRSI_T0=repr(req.get("t0", time.time())))
-    if n > 1 and "OMP_NUM_THREADS" not in env and "OMP_NUM_THREADS" not in os.environ:
-        env["OMP_NUM_THREADS"] = "1"            # torchrun's default for more than one rank
-    return env
+def clamp_pre_fork_threads(environ=os.environ):
+    """Clamp OpenMP, BLAS, and TorchInductor thread pools to 1 thread before preloading
+    modules in the zygote. Libraries such as libgomp, OpenBLAS, PyTorch, and
+    torch._inductor.config read their thread counts at import time; without pre-fork
+    clamping, torch._inductor.config.compile_threads defaults to min(32, cpu_count) = 32
+    and spawns +31 worker threads inside forked ranks."""
+    for env_key in (
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "TORCHINDUCTOR_COMPILE_THREADS",
+    ):
+        environ.setdefault(env_key, "1")
+        START_ENV.setdefault(env_key, environ[env_key])
+
+
+def rank_env(request_data, local_rank):
+    num_procs = int(request_data["nproc"])
+    node_rank = int(request_data.get("node_rank", 0))
+    env_vars = dict(request_data.get("env", {}))
+    env_vars.update(
+        RANK=str(node_rank * num_procs + local_rank),
+        LOCAL_RANK=str(local_rank),
+        WORLD_SIZE=str(num_procs * int(request_data.get("nnodes", 1))),
+        LOCAL_WORLD_SIZE=str(num_procs),
+        GROUP_RANK=str(node_rank),
+        MASTER_ADDR=request_data.get("master_addr", "127.0.0.1"),
+        MASTER_PORT=str(request_data["port"]),
+        TORCHELASTIC_RUN_ID=str(request_data.get("run_id", "zygote")),
+        FASTRSI_T0=repr(request_data.get("t0", time.time())),
+    )
+    if num_procs > 1:
+        if "OMP_NUM_THREADS" not in env_vars and "OMP_NUM_THREADS" not in os.environ:
+            env_vars["OMP_NUM_THREADS"] = "1"  # torchrun's default for more than one rank
+        if (
+            "TORCHINDUCTOR_COMPILE_THREADS" not in env_vars
+            and "TORCHINDUCTOR_COMPILE_THREADS" not in os.environ
+        ):
+            env_vars["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
+    return env_vars
 
 
 def cpu_list(spec):
@@ -252,16 +280,26 @@ def bind(req, local_rank):
     return None
 
 
-def set_threads(env=os.environ):
-    """Apply OMP_NUM_THREADS to torch's intra-op pool in a forked rank. OpenMP and torch read
-    it when they load, in the zygote, so setting the variable after the fork alone does
-    nothing: without this a rank uses every core, as the zygote does."""
-    t = sys.modules.get("torch")
-    n = env.get("OMP_NUM_THREADS", "")
-    if t is not None and n.isdigit() and int(n) > 0:
-        t.set_num_threads(int(n))
-        return int(n)
-    return None
+def set_threads(environ=os.environ):
+    """Apply OMP_NUM_THREADS to torch's intra-op pool and TORCHINDUCTOR_COMPILE_THREADS to
+    torch._inductor.config in a forked rank. OpenMP, torch, and TorchInductor read these
+    variables when they load in the zygote, so setting the environment variables after the
+    fork alone does not shrink already-initialized thread pools or config attributes."""
+    applied_omp_threads = None
+    torch_mod = sys.modules.get("torch")
+    omp_threads_str = environ.get("OMP_NUM_THREADS", "")
+    if torch_mod is not None and omp_threads_str.isdigit() and int(omp_threads_str) > 0:
+        applied_omp_threads = int(omp_threads_str)
+        torch_mod.set_num_threads(applied_omp_threads)
+    inductor_config = sys.modules.get("torch._inductor.config")
+    compile_threads_str = environ.get("TORCHINDUCTOR_COMPILE_THREADS", "")
+    if (
+        inductor_config is not None
+        and compile_threads_str.isdigit()
+        and int(compile_threads_str) > 0
+    ):
+        inductor_config.compile_threads = int(compile_threads_str)
+    return applied_omp_threads
 
 
 def _child(req, local_rank, lsock, conn):
@@ -387,40 +425,50 @@ def handle(req, lsock, conn, src):
 
 
 def serve(sock, mods, script=None, forksafe=True):
-    t = time.time()
-    fs = install_forksafe() if forksafe else {"installed": False, "why": "off"}
+    start_time = time.time()
+    clamp_pre_fork_threads()
+    forksafe_status = install_forksafe() if forksafe else {"installed": False, "why": "off"}
     took = preload(mods, script)
+    set_threads()
     src = sources()
+    gc_frozen = 0
+    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") != "0":
+        # Freeze preloaded modules (~900K objects) in the permanent GC generation so cyclic GC
+        # traversals in forked ranks do not dirty shared Copy-on-Write pages.
+        gc.collect()
+        gc.freeze()
+        gc_frozen = gc.get_freeze_count()
     if os.path.exists(sock):
         os.unlink(sock)
-    ls = socket.socket(socket.AF_UNIX)
-    ls.bind(sock)
-    ls.listen(4)
+    listen_sock = socket.socket(socket.AF_UNIX)
+    listen_sock.bind(sock)
+    listen_sock.listen(4)
     import threading
     threads = {"native": len(os.listdir("/proc/self/task")) if os.path.isdir("/proc/self/task")
-               else None, "python": [x.name for x in threading.enumerate()]}
-    print(json.dumps({"event": "ready", "pid": os.getpid(), "import_s": round(time.time() - t, 3),
-                      "threads": threads,
-                      "modules": len(sys.modules), "forksafe": fs, "took": took}),
+               else None, "python": [thread_obj.name for thread_obj in threading.enumerate()]}
+    print(json.dumps({"event": "ready", "pid": os.getpid(),
+                      "import_s": round(time.time() - start_time, 3),
+                      "threads": threads, "gc_frozen": gc_frozen,
+                      "modules": len(sys.modules), "forksafe": forksafe_status, "took": took}),
           flush=True)
     while True:
-        conn, _ = ls.accept()
+        conn, _ = listen_sock.accept()
         with conn:
             line = conn.makefile().readline()
             if not line:
                 continue
-            req = json.loads(line)
-            if req.get("op") == "stop":
+            request_data = json.loads(line)
+            if request_data.get("op") == "stop":
                 _send(conn, {"event": "stopped"})
                 break
-            if req.get("op") == "ping":
+            if request_data.get("op") == "ping":
                 _send(conn, {"event": "pong", "pid": os.getpid()})
                 continue
             try:
-                handle(req, ls, conn, src)
-            except Exception as e:              # a bad request must not kill the zygote
-                _send(conn, {"event": "error", "error": repr(e)})
-    ls.close()
+                handle(request_data, listen_sock, conn, src)
+            except Exception as exc:            # a bad request must not kill the zygote
+                _send(conn, {"event": "error", "error": repr(exc)})
+    listen_sock.close()
     os.unlink(sock)
 
 
