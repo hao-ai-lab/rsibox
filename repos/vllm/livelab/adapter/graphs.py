@@ -93,18 +93,18 @@ def _defs(tree):
 
 
 def _calls(node):
-    """Names this def calls as `self.<name>(...)` or `<name>(...)`."""
-    out = set()
-    for c in ast.walk(node):
-        if not isinstance(c, ast.Call):
+    """(bare_names, self_attrs) called inside `node` as `<name>(...)` or `self.<name>(...)`."""
+    bare_names, self_attrs = set(), set()
+    for call_node in ast.walk(node):
+        if not isinstance(call_node, ast.Call):
             continue
-        f = c.func
-        if isinstance(f, ast.Name):
-            out.add(f.id)
-        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) \
-                and f.value.id == "self":
-            out.add(f.attr)
-    return out
+        func = call_node.func
+        if isinstance(func, ast.Name):
+            bare_names.add(func.id)
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) \
+                and func.value.id == "self":
+            self_attrs.add(func.attr)
+    return bare_names, self_attrs
 
 
 _TREES = {}
@@ -115,10 +115,25 @@ def _index(source):
     hit = _TREES.get(key)
     if hit is None:
         defs = _defs(ast.parse(source))
-        calls = {q: _calls(n) for q, n in defs.items()}
+        raw_calls = {qual: _calls(node) for qual, node in defs.items()}
         by_name = {}
-        for q in defs:
-            by_name.setdefault(q.rsplit(".", 1)[-1], []).append(q)
+        for qual in defs:
+            by_name.setdefault(qual.rsplit(".", 1)[-1], []).append(qual)
+        calls = {}
+        for caller_qual, (bare_names, self_attrs) in raw_calls.items():
+            targets = set()
+            for bare_name in bare_names:
+                if bare_name in defs:
+                    targets.add(bare_name)
+                else:
+                    targets.update(by_name.get(bare_name, ()))
+            class_prefix = caller_qual.split(".", 1)[0] + "." if "." in caller_qual else None
+            for attr_name in self_attrs:
+                if class_prefix and class_prefix + attr_name in defs:
+                    targets.add(class_prefix + attr_name)
+                else:
+                    targets.update(by_name.get(attr_name, ()))
+            calls[caller_qual] = targets
         hit = _TREES[key] = (defs, calls, by_name)
         while len(_TREES) > 32:
             _TREES.pop(next(iter(_TREES)))
@@ -129,28 +144,33 @@ def reach(source, roots, qual):
     """("split", detail) when the split ops `roots` (module-level function names) reach `qual`
     and nothing else in the module calls it; ("captured", detail) when no root reaches it;
     ("unknown", reason) when this cannot be decided statically."""
-    defs, calls, by_name = _index(source)
+    defs, calls, _by_name = _index(source)
     if qual not in defs:
         return "unknown", (f"{qual} is not a module-level function or a method of a "
                            "top-level class")
 
-    def closure(starts):
-        seen, todo = set(), [r for r in starts if r in defs]
+    def closure(starts, stop=()):
+        seen, todo = set(), [root for root in starts if root in defs and root not in stop]
         while todo:
-            q = todo.pop()
-            if q in seen:
+            current = todo.pop()
+            if current in seen or current in stop:
                 continue
-            seen.add(q)
-            for name in calls[q]:
-                todo += by_name.get(name, [])
+            seen.add(current)
+            for target_qual in calls[current]:
+                if target_qual not in stop:
+                    todo.append(target_qual)
         return seen
-    via = [r for r in roots if qual in closure([r])]
+    via = [root for root in roots if qual in closure([root])]
     if not via:
         return "captured", (f"no op that splits the graph in this module ({roots or 'none'}) "
                             f"calls {qual}")
     reached = closure(roots)
-    name = qual.rsplit(".", 1)[-1]
-    outside = sorted(q for q in defs if q != qual and name in calls[q] and q not in reached)
+    split_stop = set(roots) - {qual}
+    outside = sorted(
+        caller_qual for caller_qual in defs
+        if caller_qual != qual and caller_qual not in reached
+        and qual in closure([caller_qual], stop=split_stop)
+    )
     if outside:
         return "unknown", (f"{qual} is reached through {via}, but also called from {outside}, "
                            "which no split op reaches (they may run inside the graphs)")
@@ -171,9 +191,12 @@ def decoration_time(qual):
 def where(g, kind):
     """Where the engine runs a target of reach kind `kind` ("split", "captured", "unknown")
     in graph mode g: {"prefill": bool, "decode": bool} (True: in Python)."""
-    cg, compiled = g["cudagraph_mode"], g["compile_mode"] != "NONE"
+    if kind == "unknown":
+        return {"prefill": False, "decode": False}
+    cudagraph_mode = g["cudagraph_mode"]
+    compiled = g["compile_mode"] != "NONE"
     split = kind == "split"
-    prefill = (split and (cg in PIECEWISE or cg == "NONE")) or (
-        cg == "FULL_DECODE_ONLY" and (split or not compiled))
-    decode = split and cg in ("PIECEWISE", "NONE")
+    prefill = (split and (cudagraph_mode in PIECEWISE or cudagraph_mode == "NONE")) or (
+        cudagraph_mode == "FULL_DECODE_ONLY" and (split or not compiled))
+    decode = split and cudagraph_mode in ("PIECEWISE", "NONE")
     return {"prefill": prefill, "decode": decode}

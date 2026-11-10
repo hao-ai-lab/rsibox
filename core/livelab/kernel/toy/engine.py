@@ -49,40 +49,61 @@ class Gap:
     def __init__(self):
         self.active = False
         self._queue = []
+        self._lock = threading.Lock()
+
+    def start(self):
+        with self._lock:
+            self.active = True
+
+    def stop(self):
+        with self._lock:
+            self.active = False
+        self.drain()
 
     def drain(self):
-        while self._queue:
-            self._queue.pop(0)()
+        while True:
+            with self._lock:
+                if not self._queue:
+                    return
+                queued_job = self._queue.pop(0)
+            queued_job()
 
     def call(self, fn, timeout=5.0):
-        if not self.active:
-            return fn()
-        box, done = {}, threading.Event()
+        result_box, job_done = {}, threading.Event()
 
         def job():
             try:
-                box["value"] = fn()
-            except BaseException as e:
-                box["error"] = e
-            done.set()
-        self._queue.append(job)
-        if not done.wait(timeout):
+                result_box["value"] = fn()
+            except BaseException as error:
+                result_box["error"] = error
+            job_done.set()
+
+        with self._lock:
+            if not self.active:
+                run_immediately = True
+            else:
+                run_immediately = False
+                self._queue.append(job)
+        if run_immediately:
+            return fn()
+        if not self.active:
+            self.drain()
+        if not job_done.wait(timeout):
             raise TimeoutError(f"no step gap within {timeout} s")
-        if "error" in box:
-            raise box["error"]
-        return box["value"]
+        if "error" in result_box:
+            raise result_box["error"]
+        return result_box["value"]
 
 
 def run_loop(engine, stop, x=1):
-    engine.boundary.active = True
+    engine.boundary.start()
     try:
         while not stop.is_set():
             engine.run_boundary()
             engine.step(x)
             time.sleep(engine.delay)
     finally:
-        engine.boundary.active = False
-        engine.run_boundary()
+        engine.boundary.stop()
 
 
 class Cluster:
@@ -98,31 +119,29 @@ class Cluster:
         self.gap = Gap()
 
     def step(self, x=1):
-        for e in self.engines.values():
-            e.run_boundary()
-            e.step(x)
-        self.log.append(tuple(e.ran[-1] for e in self.engines.values()))
+        for engine in self.engines.values():
+            engine.run_boundary()
+            engine.step(x)
+        self.log.append(tuple(engine.ran[-1] for engine in self.engines.values()))
         self.ends.append(time.perf_counter())
 
     def longest_stall(self):
         """Longest time between the ends of two consecutive steps (seconds)."""
-        return max((b - a for a, b in zip(self.ends, self.ends[1:])), default=0.0)
+        return max((end_b - end_a for end_a, end_b in zip(self.ends, self.ends[1:])), default=0.0)
 
     def at_gap(self, fn, timeout=5.0):
         return self.gap.call(fn, timeout)
 
     def run(self, stop, x=1):
-        self.gap.active = True
-        for e in self.engines.values():
-            e.boundary.active = True
+        self.gap.start()
+        for engine in self.engines.values():
+            engine.boundary.start()
         try:
             while not stop.is_set():
                 self.gap.drain()
                 self.step(x)
                 time.sleep(self.delay)
         finally:
-            self.gap.active = False
-            for e in self.engines.values():
-                e.boundary.active = False
-                e.run_boundary()
-            self.gap.drain()
+            for engine in self.engines.values():
+                engine.boundary.stop()
+            self.gap.stop()

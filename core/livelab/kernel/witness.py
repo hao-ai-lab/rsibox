@@ -1,7 +1,7 @@
 """Witness: count calls of swapped code, keyed `module:qualname:firstline`.
 
 The swap injects `__fastrsi_hit__("<key>")` as the first statement of each new body (after
-the docstring), as `fastrsi_lab_cov.install_batch` does. `__fastrsi_hit__` is a global of the
+the docstring). `__fastrsi_hit__` is a global of the
 module, bound to the participant's `Witness.hook` (a plain function that calls `hit`); the
 swap binds it through the journal. Undo never deletes the global: code that Dynamo transformed
 or a graph captured while the edit was installed may still name it, and a deleted global killed

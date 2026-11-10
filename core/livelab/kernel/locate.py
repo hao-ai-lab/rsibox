@@ -12,11 +12,10 @@ It leaves out the file, the qualname and line numbers, which form the identity, 
 function does not change its hash. First 16 hex digits.
 `text_hash(s)` is sha256 of UTF-8 text, 16 hex digits, for sources and plans.
 
-The live functions of a module are found by scanning the gc heap (as
-`fastrsi_lab_cov.install_batch` does): every function object whose globals are the module's
-dict. Swapping `__code__` on those objects reaches every holder at once: module dicts (also
-`from x import f` copies), class dicts, closure cells of decorator wrappers, bound methods
-saved as callbacks. `holders(fn)` lists them for the record.
+The live functions of a module are found by scanning the gc heap: every function object whose
+globals are the module's dict. Swapping `__code__` on those objects reaches every holder at
+once: module dicts (also `from x import f` copies), class dicts, closure cells of decorator
+wrappers, bound methods saved as callbacks. `holders(fn)` lists them for the record.
 """
 import functools
 import gc
@@ -107,13 +106,13 @@ class unfrozen:
         _scan_lock.acquire()
         try:
             if _scan["depth"] == 0:
+                _scan["gc_on"] = gc.isenabled()
+                gc.disable()
                 _scan["frozen"] = gc.get_freeze_count()
                 if _scan["frozen"]:
-                    _scan["gc_on"] = gc.isenabled()
-                    gc.disable()
-                    for obj in gc.get_objects():
-                        if type(obj) in _GENS:
-                            _FROZEN_GENS.add(obj)
+                    for tracked_obj in gc.get_objects():
+                        if type(tracked_obj) in _GENS:
+                            _FROZEN_GENS.add(tracked_obj)
                     gc.unfreeze()
             _scan["depth"] += 1
         except BaseException:
@@ -121,11 +120,12 @@ class unfrozen:
             raise
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc_info):
         try:
             _scan["depth"] -= 1
-            if _scan["depth"] == 0 and _scan["frozen"]:
-                gc.freeze()
+            if _scan["depth"] == 0:
+                if _scan["frozen"]:
+                    gc.freeze()
                 if _scan["gc_on"]:
                     gc.enable()
         finally:

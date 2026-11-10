@@ -8,7 +8,7 @@ One schema for every check in the kernel:
      "why": str,               # why the difference matters
      "actions": [{"action": str, "cost": str}],
      "risk_if_ignored": str,
-     "lessons": [str],         # related rows of repos/<engine>/kb/lessons.md
+     "lessons": [str],         # related rows of docs/lessons.md
      "overridable": bool}      # False: physical, accepting it cannot make the change happen
 
 plus two optional annotations: "subject" (what was checked, e.g. a witness key) and
@@ -30,9 +30,9 @@ check name, or an accept record that says who accepted it and why, for the trans
 A check accepted on every run is a calibration bug in the check, not a standing accept.
 """
 
-RESTART = {"action": "warm restart of the engine", "cost": "recipe R9 (see kb/costs.md)"}
+RESTART = {"action": "warm restart of the engine", "cost": "component restart (see kb/costs.md)"}
 REBUILD = {"action": "soft restart: rebuild the objects from the edited source",
-           "cost": "recipe R5 (see kb/costs.md)"}
+           "cost": "in-place rebuild (see kb/costs.md)"}
 ACCEPT = {"action": "accept this finding and go on", "cost": "none"}
 
 # check -> (why, actions, risk if ignored, lessons, overridable)
@@ -127,7 +127,7 @@ CATALOG = {
     "zero_witness": (
         "the swapped code has not run since the swap",
         [{"action": "send work that takes this path", "cost": "seconds"},
-         {"action": "if it runs only at startup: soft restart", "cost": "recipe R5"},
+         {"action": "if it runs only at startup: soft restart", "cost": "in-place rebuild"},
          {"action": "if it runs inside captured graphs: recapture", "cost": "recipe R1"}],
         "results are judged on code that never ran", ["Proving an edit applied"], True),
     "ranks_disagree": (
@@ -211,7 +211,7 @@ CATALOG = {
         [{"action": "check that the edit reached the planner (file saved, right module)",
           "cost": "seconds"},
          {"action": "if the edit is outside function bodies: soft or warm restart",
-          "cost": "recipe R5 or R9"}],
+          "cost": "in-place rebuild or component restart"}],
         "a silent no-op install reads as a success", ["Proving an edit applied"], False),
     "docstring_only": (
         "the edit changes only docstrings (module, class or function): the engine runs the "

@@ -193,27 +193,46 @@ class LocateEdgeCaseTest(unittest.TestCase):
                                          "where": "_lru_cache_wrapper().__wrapped__"}])
 
     def test_one_scan_at_a_time_and_no_collection_while_unfrozen(self):
-        """Input: a frozen heap; thread A inside `unfrozen()`, thread B entering it, then A
-        leaving. Expected: B's scan never sees the heap frozen again under it (freeze count
-        0 inside B after A left), gc collection is off inside the window and back on after,
-        and the heap is frozen again at the end. Pain point: A re-froze the heap under B's
-        scan, which then saw almost nothing; a full collection of the unfrozen heap would
-        stall the engine. Not: other threads calling gc.freeze() themselves."""
+        """Input: (a) an unfrozen heap with nested `unfrozen()` calls on the same thread;
+        (b) a frozen heap with thread A inside `unfrozen()`, thread B entering it, then A
+        leaving. Expected: gc is disabled on outermost entry even when the heap was not
+        frozen and restored on outermost exit; thread B blocks until thread A exits; B's
+        scan never sees the heap frozen again under it (freeze count 0 inside B after A
+        left), gc collection is off inside the window and back on after, and the heap is
+        frozen again at the end."""
+        gc.unfreeze()
+        self.assertEqual((gc.get_freeze_count(), gc.isenabled()), (0, True))
+        with L.unfrozen():
+            self.assertFalse(gc.isenabled())
+            with L.unfrozen():
+                self.assertFalse(gc.isenabled())
+            self.assertFalse(gc.isenabled())
+        self.assertTrue(gc.isenabled())
+
         gc.freeze()
         self.addCleanup(gc.unfreeze)
-        inside, a_left, seen = threading.Event(), threading.Event(), []
+        b_started, b_entered, release_b, seen = (
+            threading.Event(), threading.Event(), threading.Event(), []
+        )
 
-        def b():
+        def worker_b():
+            b_started.set()
             with L.unfrozen():
-                inside.set()
-                a_left.wait(2)
+                b_entered.set()
+                release_b.wait(2)
                 seen.append((gc.get_freeze_count(), gc.isenabled()))
+
         with L.unfrozen():
-            th = threading.Thread(target=b)
-            th.start()
-            inside.wait(0.2)              # with the lock B waits here until A leaves
-        a_left.set()
-        th.join(5)
+            with L.unfrozen():
+                self.assertEqual((gc.get_freeze_count(), gc.isenabled()), (0, False))
+            self.assertEqual((gc.get_freeze_count(), gc.isenabled()), (0, False))
+            worker_thread = threading.Thread(target=worker_b)
+            worker_thread.start()
+            self.assertTrue(b_started.wait(2))
+            self.assertFalse(b_entered.wait(0.1))  # B blocks on the lock while A holds unfrozen
+        self.assertTrue(b_entered.wait(2))
+        release_b.set()
+        worker_thread.join(5)
         self.assertEqual(seen, [(0, False)])
         self.assertTrue(gc.isenabled())
         self.assertGreater(gc.get_freeze_count(), 0)

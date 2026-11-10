@@ -148,7 +148,7 @@ class WorkerGroup(C.Participant):
         out = C.merge_ranks(method, rs)
         if any(r.get("pending") for r in out["ranks"]):
             out["pending"] = True
-        return out
+        return C.expect_ranks(self, method, out)
 
     def _break(self, method, deadline_at, err, why, expected):
         """A call the group cannot account for: refuse every later call and poison the host.
@@ -280,10 +280,50 @@ class RecaptureCoordinator(C.StepGapCoordinator):
                 p, "undo", txn, None, set())
         if not all(u["ok"] for u in rb["participants"].values()):
             rb["status"] = "partial"
+            with self._lock:
+                self.txns[txn]["pending_rollback"] = [
+                    participant for participant in reversed(self.participants)
+                    if not rb["participants"][participant.name]["ok"]
+                ]
         out["outcome"] = "rolled_back"
         tl.pop("committed", None)
         tl["gap_end"] = self.clock()
         return out
+
+    def _queue_rollback_gate(self):
+        gap_owner = getattr(self.gap, "__self__", None)
+        gap_obj = getattr(gap_owner, "gap", None)
+        queue_list = getattr(gap_obj, "_queue", None)
+        lock_obj = getattr(gap_obj, "_lock", None)
+        if queue_list is None or lock_obj is None:
+            return
+
+        def hold_until_rollback_done():
+            self._in_rollback_gate = True
+            try:
+                while getattr(gap_obj, "active", True) and self.poll_rollback():
+                    while True:
+                        with lock_obj:
+                            if not queue_list:
+                                break
+                            queued_job = queue_list.pop(0)
+                        queued_job()
+                    time.sleep(0.005)
+            finally:
+                self._in_rollback_gate = False
+
+        with lock_obj:
+            if getattr(gap_obj, "active", True):
+                queue_list.append(hold_until_rollback_done)
+
+    def _in_gap(self, fn):
+        def wrapped():
+            try:
+                return fn()
+            finally:
+                if not self._in_rollback_gate and self.has_pending_rollback():
+                    self._queue_rollback_gate()
+        return super()._in_gap(wrapped)
 
 
 R1Coordinator = RecaptureCoordinator
@@ -303,11 +343,22 @@ class Host:
         self.workers = WorkerGroup(self, self.dp["expected"])
         self.co = RecaptureCoordinator(
             [self.workers, C.CallParticipant("core", self.core_side.dispatch, bounded=True)],
-            gap=lambda fn: self.in_loop(fn, gap=True, timeout=self.gap_timeout),
+            gap=self._in_gap,
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None},
             rebuild=lambda txn, spec: self.workers.recapture({"txn": txn, **spec}))
+
+    def _in_gap(self, fn):
+        try:
+            return self.in_loop(fn, gap=True, timeout=self.gap_timeout)
+        except LateJob as error:
+            self.workers._break(
+                "phase2", None, error,
+                f"phase-2 gap job: {error}; it may still apply: respawn",
+                "phase-2 gap job finishes in the loop while its caller waits",
+            )
+            raise
 
     def in_loop(self, fn, gap=False, timeout=60.0):
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
@@ -345,6 +396,8 @@ class Host:
             return self.co.prove(cmd["txn"], golden=cmd.get("golden"))
         if op == "undo":
             return self.co.undo(cmd["txn"])
+        if op == "recovered":
+            return self.co.recovered()
         if op == "status":                   # no txn: the host's overall status
             return self.co.status(cmd.get("txn"))
         if op == "pstatus":                  # each participant's own state (per rank)
@@ -431,22 +484,42 @@ def _patch_core(mod):
             request.run()
 
     def _process_engine_step(self):
-        h = _HOST[0] if _HOST else None
-        hold = bool(h and h.pending and self.batch_queue)
+        host = _HOST[0] if _HOST else None
+        coordinator = getattr(host, "co", None)
+        core_side = getattr(host, "core_side", None)
+        if host is not None:
+            host.loop_thread = threading.current_thread()
+            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
+            while host.pending and not self.batch_queue:
+                host.pending.pop(0).run()
+            if not self.batch_queue and coordinator is not None and coordinator.poll_rollback():
+                host.held_steps += 1
+                time.sleep(0.005)
+                return False
+        hold = bool(
+            host and (
+                host.pending or (coordinator is not None and coordinator.has_pending_rollback())
+            ) and self.batch_queue
+        )
         if hold:                                 # pause keep: schedule nothing new
             self.scheduler.has_requests = lambda: False
-            h.held_steps += 1
-        t = time.perf_counter()
+            host.held_steps += 1
+        if core_side is not None:
+            core_side.tick(True)
+        step_start = time.perf_counter()
         try:
-            r = orig_step(self)
+            result = orig_step(self)
         finally:
             if hold:
                 del self.scheduler.has_requests
-        if h is not None:
-            h.steps.append((t, time.perf_counter() - t))
-            while h.pending and not self.batch_queue:
-                h.pending.pop(0).run()
-        return r
+        if host is not None:
+            if core_side is not None:
+                core_side.tick(False)
+            host.steps.append((step_start, time.perf_counter() - step_start))
+            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
+            while host.pending and not self.batch_queue:
+                host.pending.pop(0).run()
+        return result
 
     def run_busy_loop(self):
         pc = getattr(getattr(self, "vllm_config", None), "parallel_config", None)

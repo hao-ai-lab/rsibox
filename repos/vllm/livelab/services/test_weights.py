@@ -226,3 +226,33 @@ def test_a_daemon_that_does_not_get_ready_is_stopped(d):
             assert not os.path.exists(f"/proc/{rep['pid']}"), rep
         finally:
             _stop(rep["pid"])
+
+
+def test_stop_terminates_surviving_child_after_session_leader_exits(d):
+    """Input: a session leader started with `start_new_session=True` that spawns a child in the
+    same process group and then exits immediately while the child stays alive. Expect:
+    `weights.stop(proc)` still signals the process group by `proc.pid`, terminates the child,
+    and returns True."""
+    import weights
+
+    child_pid_file = os.path.join(d, "child.pid")
+    leader_code = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({child_pid_file!r}, 'w').write(str(child.pid))\n"
+    )
+    leader_proc = subprocess.Popen(
+        [sys.executable, "-c", leader_code], start_new_session=True
+    )
+    leader_proc.wait(timeout=10)
+    assert leader_proc.poll() is not None
+    deadline = time.time() + 5.0
+    while not os.path.exists(child_pid_file) and time.time() < deadline:
+        time.sleep(0.02)
+    child_pid = int(Path(child_pid_file).read_text().strip())
+    try:
+        assert weights.stop(leader_proc, grace=2) is True
+        assert weights._exited(child_pid)
+    finally:
+        _stop(leader_proc.pid)
+        _stop(child_pid)

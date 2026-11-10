@@ -42,6 +42,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 
 from kernel import coordinator as C
 from kernel import findings as F
@@ -187,22 +188,27 @@ class Side(Endpoint):
         return e[1]
 
     def _watch_targets(self, targets, txn):
-        for m, ts in (targets or {}).items():
-            act = self.lp._actual(m)
-            mod = sys.modules.get(act) or importlib.import_module(act)
-            for qual, _line in ts if isinstance(ts, list) else ():
-                obj = mod
+        for module_name, target_list in (targets or {}).items():
+            actual_name = self.lp._actual(module_name)
+            module_obj = sys.modules.get(actual_name) or importlib.import_module(actual_name)
+            for qual, _line in target_list if isinstance(target_list, list) else ():
+                obj = module_obj
                 try:
                     for part in qual.split("."):
                         obj = getattr(obj, part)
                 except AttributeError:
                     continue
-                k = f"{m}:{qual}"
-                if hasattr(obj, "__code__") and k not in self.watch:
+                watch_key = f"{module_name}:{qual}"
+                if hasattr(obj, "__code__"):
                     with self._watch_lock:
-                        if k not in self._watch_new:
-                            self._watch_new[k] = obj
-                            self._watch_txn.setdefault(txn, set()).add(k)
+                        was_dropping = watch_key in self._watch_drop
+                        self._watch_drop.discard(watch_key)
+                        if was_dropping or (
+                            watch_key not in self.watch and watch_key not in self._watch_new
+                        ):
+                            if watch_key not in self.watch:
+                                self._watch_new[watch_key] = obj
+                            self._watch_txn.setdefault(txn, set()).add(watch_key)
 
     def _drop_watch(self, txn):
         """The keys a vetoed transaction added stop being watched (at the next step start)."""
@@ -225,6 +231,7 @@ class Side(Endpoint):
         if first:
             self.steps += 1
         if not self.watch:
+            self._cur = None
             return
         cur = {k: self._tag(f.__code__) for k, f in list(self.watch.items())}
         if first and cur != self._cur:
@@ -310,14 +317,15 @@ class Side(Endpoint):
             def run():
                 with job["lock"]:
                     cancelled = job["cancelled"]
-                r = F.not_ok("prepare cancelled before it started") if cancelled else \
+                result = F.not_ok("prepare cancelled before it started") if cancelled else \
                     self._prepare_once(payload)
-                r["prepare_s"] = round(time.perf_counter() - job["t0"], 6)
+                result["prepare_s"] = round(time.perf_counter() - job["t0"], 6)
                 with job["lock"]:
-                    job["result"] = r
+                    job["result"] = result
                     cancelled = job["cancelled"]
-                if cancelled:        # aborted while staging: drop what this prepare staged
-                    Endpoint._dispatch(self, "abort", txn)
+                if cancelled:        # aborted/undone while staging: drop what this prepare staged
+                    cancel_method = cancelled if isinstance(cancelled, str) else "abort"
+                    Endpoint._dispatch(self, cancel_method, txn)
                     self._drop_watch(txn)
             threading.Thread(target=run, daemon=True,
                              name=f"fastrsi-prepare-{payload['id']}").start()
@@ -332,8 +340,9 @@ class Side(Endpoint):
             job = self._jobs.pop(txn, None)    # the vote is over
             if job is not None and method != "commit":
                 with job["lock"]:              # still staging: it cleans up when done
-                    job["cancelled"] = job["result"] is None
-            if method == "abort":
+                    if job["result"] is None:
+                        job["cancelled"] = method
+            if method == "abort" or (method == "undo" and txn not in self.lp._marks):
                 self._drop_watch(txn)          # vetoed here or on another rank
             else:
                 self._watch_txn.pop(txn, None)  # committed: its keys stay watched
@@ -347,8 +356,9 @@ class Side(Endpoint):
             try:
                 return self._fault(method, payload) or super(Side, self)._dispatch(method,
                                                                                    payload)
-            except Exception as e:                 # named here, not by the lane
-                return F.not_ok(f"{method} on {self.who()}: {type(e).__name__}: {e}")
+            except BaseException as error:         # named here, not by the lane
+                return F.not_ok(f"{method} on {self.who()}: {type(error).__name__}: {error}",
+                                traceback=traceback.format_exc()[-1500:])
         done, r = self._lane.call(call, deadline_at)
         if done:
             return r

@@ -245,7 +245,9 @@ class ToyLab:
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         if r.returncode:
-            return {"ok": False, "error": r.stderr.strip().splitlines()[-1:], "output": None}
+            stderr_lines = r.stderr.strip().splitlines()
+            error_msg = stderr_lines[-1] if stderr_lines else "fresh_check failed"
+            return {"ok": False, "error": error_msg, "output": None}
         return {"ok": True, "output": json.loads(r.stdout)}
 
     def inject(self, fault, **kw):

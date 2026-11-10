@@ -162,20 +162,43 @@ def _exited(pid):
         return True
 
 
+def _pg_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _wait_pg(proc, pgid, timeout):
+    deadline = time.time() + timeout
+    if proc.poll() is None:
+        remaining = max(0.0, deadline - time.time())
+        proc.wait(remaining)
+    while _pg_alive(pgid):
+        if time.time() >= deadline:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        time.sleep(0.02)
+
+
 def stop(p, grace=10):
     """Stop the daemon's session (SIGTERM, SIGKILL after `grace` s); True if it was running.
     Only a session this module started: its pid leads it (start_new_session)."""
-    if p.poll() is not None:
-        return False
+    leader_running = p.poll() is None
     try:
-        if os.getpgid(p.pid) != p.pid:
+        if leader_running and os.getpgid(p.pid) != p.pid:
             return False
         os.killpg(p.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return leader_running
+    try:
         try:
-            p.wait(grace)
+            _wait_pg(p, p.pid, grace)
         except subprocess.TimeoutExpired:
             os.killpg(p.pid, signal.SIGKILL)
-            p.wait(grace)
+            _wait_pg(p, p.pid, grace)
     except ProcessLookupError:
         pass
     return True
