@@ -73,6 +73,7 @@ class JitCacheTest(unittest.TestCase):
         self.assertEqual(J.check_root(a), [])
         self.assertEqual(os.stat(os.path.join(a, "x.o")).st_mtime_ns, 1_700_000_000_123_456_789)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: compares realpath with abspath; macOS tmp dirs are symlinks (/var -> /private/var)")
     def test_env_pins_every_cache_under_the_root(self):
         """Input: env_for(root). Expect: the four cache roots under root, autotune caching on.
         Proves: the environment mapping points every JIT cache variable under one root. Not:

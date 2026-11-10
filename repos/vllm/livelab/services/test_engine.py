@@ -6,6 +6,7 @@ torch and vLLM stubbed out. The cases that need vLLM's real parser are in test_v
 Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
 """
 import json, os, signal, socket, subprocess, sys, tempfile, time
+import pytest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -158,6 +159,7 @@ def test_busy_port_is_a_finding_and_nothing_starts():
         assert not os.path.exists(out)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_wait_healthy_returns_none_as_soon_as_the_server_exits():
     """Input: a direct start whose server exits at once with an argument error (no Traceback in
     the log) and is not reaped yet, so /proc/<pid> still exists as a zombie. Expect: None within
@@ -177,6 +179,7 @@ def test_wait_healthy_returns_none_as_soon_as_the_server_exits():
         p.wait()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_direct_start_passes_the_vllm_argv_through_and_reports_health_seconds():
     """Input: `engine.py start` with launcher flags and vLLM flags mixed, `-tp 2` and a port
     only vLLM's parser knows, and a fake vllm that answers /health after 1.5 s. Expect: the
@@ -229,6 +232,7 @@ def test_an_argv_vllm_would_not_serve_as_meant_is_a_finding_and_nothing_starts()
         assert not os.path.exists(out)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_zygote_runs_with_the_engine_env():
     """Input: `engine.py zygote` starts a real zygote.py; then the zygote's own env check is
     asked about (1) the env a start with the same options builds and (2) one with another
@@ -270,6 +274,7 @@ def test_zygote_runs_with_the_engine_env():
         _stop(rep["pid"])
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
     """Input: a real zygote.py (torch stubbed, vLLM absent) that pre-imported a module outside
     the refresh packages; the module is then edited; `engine.py start --zygote S m`. Expect:
@@ -308,6 +313,7 @@ def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
         _stop(rep["pid"])
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_zygote_parse_reads_an_edit_to_vllms_argument_code():
     """Input: a real zygote.py (torch stubbed) that pre-imported STUB_PARSER as vLLM's parser
     (a `vllm` package, so its edits refresh); then three parses of `m --new-flag 1`: before any
@@ -451,6 +457,7 @@ def _reconfigure(cache_dir, log, pid, env, *flags):
     return proc, _one_json_line(proc.stdout)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_without_a_live_consumer_restarts_and_says_so():
     """Input: an engine whose process has no live agent (the plain fake `vllm`), started with
     `--weights --kvplan` (`m --port P --max-model-len 4096 --enforce-eager`), then:
@@ -506,6 +513,7 @@ def test_reconfigure_without_a_live_consumer_restarts_and_says_so():
         daemon.close()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_live_path_is_acknowledged_by_the_engine_core_agent():
     """Input: a fake `vllm serve` whose engine-core child runs live_reconfig's patched busy loop
     (FAKE_VLLM_LIVE), started with `--max-num-seqs 16 --max-num-batched-tokens 4096`, then:
@@ -559,6 +567,7 @@ def test_reconfigure_live_path_is_acknowledged_by_the_engine_core_agent():
                 _stop(pid)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
     """(1) A process recorded with another start time is another process (pid reuse):
     _signal_if_same must not signal it. (2) stop_engine of an engine whose port another process
@@ -607,6 +616,7 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
         _stop(eng.pid)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
     """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:
     (1) `--bogus-flag` (rejected by vLLM's parser);

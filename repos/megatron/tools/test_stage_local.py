@@ -1,6 +1,7 @@
 """Golden case for stage_local.sh on a toy venv and tree (real script, real copies, no GPU).
 What the copy buys on a real environment is in kb/costs.md (restart tiers)."""
 import os
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class StageLocal(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: stage_local.sh uses GNU sed -i")
     def test_staged_env_points_at_the_copy(self):
         """Input: a venv whose console script names the venv's python in its shebang, a tree
         with .git, a cache root with inductor/. Expect: the copied script names DEST's python

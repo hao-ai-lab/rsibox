@@ -163,6 +163,7 @@ http.server.HTTPServer(("127.0.0.1", int(argv[argv.index("--port") + 1])), H).se
 '''
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_kvplan_flag_installs_the_worker_class_and_reports_reuse():
     """Input: `engine.py start --kvplan`. Expect: the server gets --worker-cls
     kvplan.KVPlanWorker, this folder first on PYTHONPATH (so every worker can import it) and

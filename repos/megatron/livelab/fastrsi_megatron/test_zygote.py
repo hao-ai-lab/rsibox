@@ -54,6 +54,7 @@ class Zygote(unittest.TestCase):
                "env": dict({"OUT": self.d}, **(env or {})), "t0": time.time(), **kw}
         return list(zygote.request(self.sock, req))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_ranks_get_torchrun_env_and_reuse_the_zygote_imports(self):
         """Input: zygote preloaded `heavy` (records the importing pid); start 2 ranks with
         MY_FLAG=on. Expect: ranks 0 and 1, WORLD_SIZE 2, MASTER_PORT 29999, MY_FLAG on, the
@@ -76,6 +77,7 @@ class Zygote(unittest.TestCase):
             )
         self.assertGreater(self.ready["gc_frozen"], 0)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_one_failing_rank_stops_the_others_and_the_zygote_serves_again(self):
         """Input: rank 1 exits 7 while rank 0 sleeps 60 s. Expect: rank 0 terminated (rc -15)
         within seconds, rc [-15, 7]; then a second start on the same zygote succeeds.
@@ -86,6 +88,7 @@ class Zygote(unittest.TestCase):
         self.assertLess(time.time() - t, 20)
         self.assertEqual(self.start()[-1]["rc"], [0, 0])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_edited_source_is_a_finding_unless_accepted(self):
         """Input: heavy.py edited after the zygote imported it. Expect: the request is refused
         with a "stale" finding naming heavy.py (the ranks would run the old code); with
@@ -109,6 +112,7 @@ class Zygote(unittest.TestCase):
         self.assertEqual(evs[0]["event"], "refused")
         self.assertEqual(evs[0]["findings"][0]["keys"], ["NVTE_FUSED_ATTN"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_overlay_of_a_preloaded_module_is_refused(self):
         """A fresh check of a code edit sets FASTRSI_OVERLAY; overlay.py can only replace a
         module before its first import, and the zygote imported `heavy` already. Input: an
@@ -126,6 +130,7 @@ class Zygote(unittest.TestCase):
         os.rename(os.path.join(ov, "heavy.py"), os.path.join(ov, "light.py"))
         self.assertEqual(self.start(env={"FASTRSI_OVERLAY": ov})[-1]["rc"], [0, 0])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_code_restart_reimports_the_refreshed_package_from_the_overlay(self):
         """Input: the zygote preloaded `heavy` (PID = the zygote's pid); an overlay replaces `heavy`
         with PID = -1. Without refresh the request is refused ("overlay"). With refresh=["heavy"],
@@ -146,6 +151,7 @@ class Zygote(unittest.TestCase):
             out = json.load(open(os.path.join(self.d, "r%d.json" % r)))
             self.assertEqual(out["heavy_pid"], -1)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_each_rank_is_pinned_to_its_cpu_list(self):
         """A fork keeps the zygote's CPU affinity; ranks on GPUs of different sockets need
         their own. Input: cpus ["0", "0"] for 2 ranks (CPU 0 always exists). Expect: each

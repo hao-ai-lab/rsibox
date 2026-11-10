@@ -2,6 +2,7 @@
 10-minute wait: the zygote died at bind() after its imports, stayed a zombie child of the
 launcher, and wait_ready() saw /proc/<pid> and kept polling."""
 import os, subprocess, sys, time
+import pytest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import zygote
 
@@ -16,6 +17,7 @@ def test_long_socket_path_is_reported_before_launch():
     assert zygote.sock_path_error("/dev/shm/run/zyg.sock") is None
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_wait_ready_sees_an_unreaped_dead_child():
     """Input: a child that exited but is not reaped (/proc/<pid> still exists). Expected:
     wait_ready returns {"ready": False, "error": "zygote exited"} in under 5 s. Pain point: a

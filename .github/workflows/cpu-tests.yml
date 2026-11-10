@@ -1,5 +1,10 @@
 name: CPU tests
+# Fork PRs never run on the self-hosted runner: `runs-on` below picks FASTRSI_CI_RUNNER only for
+# pushes, manual runs and PRs whose head branch is in this repository. GPU and torch cases run in
+# the B200 CI (.github/b200-ci/), which posts the `b200-gpu` commit status.
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -12,7 +17,7 @@ env:
 jobs:
   conformance-cases:
     name: Conformance cases fail labs that lack their property (fake labs, CPU)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +32,7 @@ jobs:
         run: python3 -m unittest discover -s conformance -t . -v
   livelab-framework:
     name: Framework kernel, forksafe, and conformance c0-c10 on the toy lab (CPU)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +52,7 @@ jobs:
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
   fastvideo-adapter:
     name: FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +74,7 @@ jobs:
         run: python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
   vllm-adapter:
     name: vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -84,7 +89,7 @@ jobs:
         run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
   vllm-services:
     name: vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -103,7 +108,7 @@ jobs:
         run: '"$RUNNER_TEMP/pytest-venv/bin/python" -m pytest -v -rs repos/vllm/livelab/services'
   megatron-livelab:
     name: Megatron live-lab and tool golden tests (CPU; torch cases skip)
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
