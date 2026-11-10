@@ -1,7 +1,7 @@
 """Regression tests for the kernel rows of the 2026-11-10 repo audit (#8, #9, #10, #18, #19,
 #20, #21, #23). Each test failed on main (f35870f) and passes with the fix; the docstring says
 what it saw before. CPU, standard library only (the JIT cases use test_jit's stand-in runtime;
-the GPU proof of the same fixes is evidence/fix-kernel/).
+the GPU runs of the same fixes are summarized in the PR description).
 
 Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 """
