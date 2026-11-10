@@ -78,7 +78,9 @@ aborted, undone, in-doubt); the record is written once the outcome is known.
 | `decisions` | `{accepted: [check], blocking: [check]}` | how the accept list was applied |
 | `outcome` | `committed` \| `aborted` \| `rolled_back` | all switched, none switched, or switched and undone in the same transaction |
 | `timeline` | `{edit, prepare_start, prepared, gap_start, vote, committed, gap_end, txn_end}` | measured unix seconds |
-| `edit_to_run_s` | float \| null | `committed - edit`; null if nothing committed |
+| `edit_to_run_s` | null | null here: nothing has run at commit; the `proof` record has the first execution |
+| `edit_to_commit_s` | float \| null | `committed - edit` (monotonic clock); null if nothing committed |
+| `timeline_mono` | `{stamp: seconds since edit}` | the same stamps on the monotonic clock; every `_s` span uses it |
 | `prepare_s` | float | `prepared - prepare_start`: phase 1, while the engine steps |
 | `gap_s` | float \| null | `gap_end - gap_start`: phase 2, how long the engine's loop stalled |
 | `baseline_restart_s` | `{seconds, source}` \| null | the warm restart this transaction replaces |
@@ -92,7 +94,10 @@ aborted, undone, in-doubt); the record is written once the outcome is known.
 | `findings` | [finding + `participant`] | `zero_witness`, `running_frame`, ... |
 | `golden` | any | the caller's golden-check results, recorded as given |
 | `timeline` | `{edit, proved}` | measured unix seconds |
-| `edit_to_finish_s` | float \| null | `proved - edit` |
+| `edit_to_finish_s` | float \| null | `proved - edit` (monotonic) |
+| `edit_to_run_s` | float \| null | first live witness hit, the latest over participants and ranks, minus edit (monotonic, same host); null if some participant shows none |
+| `first_run_s` | `{participant[/rank]: float \| null}` | each one's first hit minus edit |
+| `launches` | `{participant: {key: {kernel: n}}}` | Triton: launches per kernel that runs the edited code |
 
 `undo`: a later undo of a committed transaction.
 

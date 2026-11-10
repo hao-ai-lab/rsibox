@@ -72,6 +72,15 @@ CATALOG = {
         [{"action": "edit and target the enclosing function so new closures are made",
           "cost": "none"}, REBUILD, RESTART],
         "nothing is installed for this target", ["Keeping state across edits"], False),
+    "nested_signature": (
+        "a nested function's defaults belong to each closure, evaluated when the enclosing "
+        "call ran its def: a code swap gives the live closures the new code with their old "
+        "defaults, so a call that relies on a new or changed default fails (TypeError) or "
+        "reads the old value",
+        [{"action": "keep the nested signature and move the default into the body (None "
+          "sentinel)", "cost": "none"}, REBUILD, RESTART],
+        "live closures raise TypeError or use stale defaults at their next call",
+        ["Keeping state across edits"], False),
     "defaults_not_evaluated": (
         "the new default values could not be evaluated outside the class body; the old "
         "defaults are kept",

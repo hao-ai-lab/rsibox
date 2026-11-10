@@ -264,8 +264,9 @@ class HostTest(unittest.TestCase):
     def test_validate_deadline_miss_refreshes_for_healthy_participants_and_timed_out_undo_cancels(self):
         """Input: (a) rank0's validate exceeds commit_at (0.05 s) while rank1 and rank2 are
         healthy; (b) a committed transaction whose undo gap call times out before starting.
-        Expected: (a) only rank0 is in missed_deadline and poison (rank1 and rank2 get fresh
-        per-call validate deadlines instead of an already-expired commit_at); (b) the timed-out
+        Expected: (a) only rank0 is in missed_deadline and poison (rank1 and rank2, whose turn
+        came after the deadline, are not asked to validate and are aborted without a wait: not
+        blamed, and the gap stays bounded by the deadline, audit #19); (b) the timed-out
         undo does not run when the gap drains later."""
         cluster, participants, local_participants = self._cluster(
             "valmiss", gap_mode=True, slow={"rank0": {"validate": 0.15}}

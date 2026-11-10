@@ -44,7 +44,9 @@ template's conformance cases c0-c10.
   text, builds new imports, functions, methods and defaults in a scratch namespace (a
   method's body reads the live class's names; the live class is not touched), and pairs each
   running code object of a target and of its enclosing functions with its new version, so
-  closures made later run the new code. Nothing is visible yet. Findings: `no_live_function`,
+  closures made later run the new code. Nothing is visible yet, and nothing of the edit has
+  run: definitions the edit adds are built at apply, so their decorators and class bodies run
+  only for a transaction that commits. Findings: `no_live_function`,
   `not_in_patch`, `base_mismatch`, `outside_changes`, `removed_definition`, `closure_changed`
   (free variables differ; not overridable), `defaults_not_evaluated`, `running_frame`
   (advisory at stage: a step in flight), `patch_invalid`, `new_fields`, `constructor_edit`, `line_aliased`,
@@ -66,8 +68,12 @@ template's conformance cases c0-c10.
   cleared. All of it is snapshotted and journaled first: undo puts back the old compiled
   kernels and tuning choices, with no recompile. The bytecode swap of the kernel's `.fn`
   still runs, so fingerprints, chained edits and `base_mismatch` work as for any function.
+  Callers are found by object identity (what the caller's text names resolves to the edited
+  JIT object), never by bare name, so a same-named kernel in another module is not a caller.
   The witness counter goes into `pre_run_hooks` of the kernel and of every caller (a helper
-  inlined into a caller runs only the caller's hooks), so a kernel that never launches, or
+  inlined into a caller runs only the caller's hooks), each kernel with its own launch counter
+  (`witness_check` replies `launches`: {key: {module.qualname: launches}}); a hook that fired
+  on a kernel with no binary compiled after the edit proves nothing. So a kernel that never launches, or
   replays only inside a graph captured before the edit, reads 0. A `@triton.jit` definition
   the edit adds is built while linecache holds the patch text, so `inspect.getsourcelines`
   reads its lines; it is counted through the hooks of the rebuilt kernels that name it.
@@ -158,7 +164,7 @@ template's conformance cases c0-c10.
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
 | `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `jit`, `journal`, `locate`, `witness`. |
-| `jit.py` | The Triton rebuild: `text_of` (text half), `plan` (find the JIT object, its callers in every loaded module, its autotuners), `apply` (rebuild, reset, launch hooks, all journaled), `arm_added`, `seeded_lines`. Standard library only; imports nothing of the kernel. |
+| `jit.py` | The Triton rebuild: `text_of` (text half), `plan` (find the JIT object, its callers in every loaded module by identity, its autotuners), `apply` (rebuild, reset, launch hooks, all journaled), `arm_added`, `seeded_lines`. Standard library only; imports nothing of the kernel. |
 | `coordinator.py` | Participants (`Participant`, `CallParticipant`, `LocalParticipant`) and the host (`Coordinator`, `StepGapCoordinator`, `GroupParticipant`, `merge_ranks`, `expect_ranks`, `Lane`). Imports `findings`, `journal`, `locate`, `receipt`, `swap`, `witness`. |
 | `session.py` | `Session`: the transaction stack, expected fingerprints, poison. Imports `coordinator`, `findings`, `locate`. |
 | `toy_lab.py` | `ToyLab`: the conformance lab on the toy engine (2 ranks, step-gap host, session). |
@@ -277,3 +283,16 @@ The prototype swap (fastrsi#12) had more than a plain live code swap needs; thes
   `rebuild` and `recapture_s` stay None.
 
 These come in later PRs, each importing and testing on top of this series.
+
+## Audit fixes (2026-11-10)
+
+| Row | Rule now | Test (`test_audit_fixes.py`) |
+|---|---|---|
+| 8 | A commit is decided under a lock before it leaves the quiesce point: it stands only while the caller still waits and the deadline holds; else the job rolls itself back. An undo waits for an in-flight commit (or says `in_flight`, which poisons the host). | `CommitUndoRaceTest` |
+| 9 | Triton callers by identity; a launch counter per kernel; a hook with no new binary proves nothing. | `TritonWitnessIdentityTest` |
+| 10 | A nested function whose defaults change is a blocking `nested_signature` (live closures keep their defaults). | `NestedSignatureTest` |
+| 18 | Undo cascades by commit order; the host refuses unknown and repeated undo and marks cascaded transactions undone; an undo whose quiesce gave up before it started is cancelled, one that started records its own state. | `UndoBookkeepingTest` |
+| 19 | A phase-2 deadline is never re-armed: participants whose turn comes after it are not asked to validate and are aborted without a wait. | `DeadlineTest` |
+| 20 | Spans on `time.monotonic` (`Timeline`); `edit_to_run_s` is in the proof: the first live witness hit on every participant minus the edit. | `TimingTest` |
+| 21 | Restart witness is the per-rank minimum; a capture probe that raises counts the call as not live. | `WitnessAcrossRanksTest` |
+| 23 | Prepare runs no decorator of an added definition (built at apply). | `StageSideEffectTest` |

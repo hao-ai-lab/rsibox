@@ -181,78 +181,68 @@ def callers_of(jit_fn, jits):
     return out
 
 
-def _call_site_names(jit_fn):
-    """Extract called identifier names from AST Call sites of a JIT callable."""
-    called_names = set()
-    try:
-        parsed_tree = jit_fn.parse()
-    except Exception:
-        return called_names
-    for node in ast.walk(parsed_tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name):
-                called_names.add(node.func.id)
-            elif isinstance(node.func, ast.Attribute):
-                called_names.add(node.func.attr)
-    return called_names
+def label(jit_fn):
+    """A JIT callable's qualified name: `module.qualname` (never the bare name: two modules
+    may each define a kernel called `helper`)."""
+    return f"{jit_fn.fn.__module__}.{jit_fn.fn.__qualname__}"
+
+
+def _by_name(name, modules):
+    """The JIT callable a string names: `module.qualname` of a loaded module, or a top-level
+    name in one of the given `modules` (only there: a bare name never matches across
+    modules). None when it names none, or more than one."""
+    found = []
+    for mod in modules:
+        d = _dict_of(mod)
+        if d is not None and name in d:
+            found.append(d[name])
+    parts = name.split(".")
+    for i in range(len(parts) - 1, 0, -1) if not found else ():
+        obj = sys.modules.get(".".join(parts[:i]))
+        if obj is None:
+            continue
+        for part in parts[i:]:
+            d = _dict_of(obj) if not isinstance(obj, type) else dict(vars(obj))
+            obj = d.get(part) if d is not None else None
+            if obj is None:
+                break
+        if obj is not None:
+            found.append(obj)
+        break
+    jits = {id(j): j for j in (unwrap(o)[0] for o in found) if j is not None}
+    return next(iter(jits.values())) if len(jits) == 1 else None
 
 
 def discover_triton_callers(edited_jit_names, modules=None):
-    """Discover transitive `@triton.jit` callers of `edited_jit_names` across `modules`."""
+    """The JIT callables that call the edited kernels, at any depth, by object identity
+    (`calls`: what the caller's text names resolves, through its globals and closure, to the
+    edited object). Items: JIT objects (or wrappers), or names resolved by `_by_name`; a name
+    that resolves to nothing is ignored. Never matched by bare name across modules (audit #9:
+    a same-named kernel elsewhere read as a caller and its launches as the edit's witness)."""
     if isinstance(edited_jit_names, str) or not hasattr(edited_jit_names, "__iter__"):
-        target_items = [edited_jit_names]
+        items = [edited_jit_names]
     else:
-        target_items = list(edited_jit_names)
+        items = list(edited_jit_names)
+    if modules is None:
+        module_list = []
+    elif isinstance(modules, dict):
+        module_list = list(modules.values())
+    else:
+        module_list = list(modules)
     jits, _tuners = scan(modules=modules)
-    target_names = set()
-    seed_jits = []
-    seen_seed_ids = set()
-    for item in target_items:
-        if isinstance(item, str):
-            target_names.add(item)
-            target_names.add(item.rsplit(".", 1)[-1])
-        else:
-            unwrapped_jit, _chain = unwrap(item)
-            if unwrapped_jit is not None and not missing(unwrapped_jit):
-                jits[id(unwrapped_jit)] = unwrapped_jit
-                if id(unwrapped_jit) not in seen_seed_ids:
-                    seen_seed_ids.add(id(unwrapped_jit))
-                    seed_jits.append(unwrapped_jit)
-                target_names.add(unwrapped_jit.fn.__name__)
-                target_names.add(unwrapped_jit.fn.__qualname__)
-
-    for candidate in list(jits.values()):
-        qualname = candidate.fn.__qualname__
-        full_name = f"{candidate.__module__}.{qualname}"
-        if (
-            candidate.fn.__name__ in target_names
-            or qualname in target_names
-            or full_name in target_names
-        ) and id(candidate) not in seen_seed_ids:
-            seen_seed_ids.add(id(candidate))
-            seed_jits.append(candidate)
-
-    discovered, seen_ids, queue = [], set(seen_seed_ids), list(seed_jits)
-    if target_names:
-        for candidate in jits.values():
-            if id(candidate) not in seen_ids and (
-                _call_site_names(candidate) & target_names
-            ):
-                seen_ids.add(id(candidate))
-                discovered.append(candidate)
-                queue.append(candidate)
-
-    while queue:
-        current = queue.pop(0)
-        current_names = {current.fn.__name__, current.fn.__qualname__}
-        for candidate in jits.values():
-            if id(candidate) in seen_ids:
-                continue
-            if calls(candidate, current) or (_call_site_names(candidate) & current_names):
-                seen_ids.add(id(candidate))
-                discovered.append(candidate)
-                queue.append(candidate)
-    return discovered
+    seeds = []
+    for item in items:
+        jf = _by_name(item, module_list) if isinstance(item, str) else unwrap(item)[0]
+        if jf is not None and not missing(jf) and all(jf is not s for s in seeds):
+            seeds.append(jf)
+    out, seen = [], {id(s) for s in seeds}
+    for jf in seeds:
+        jits[id(jf)] = jf
+        for c in callers_of(jf, jits):
+            if id(c) not in seen:
+                seen.add(id(c))
+                out.append(c)
+    return out
 
 
 def plan(mod, qualname, text):
@@ -273,12 +263,7 @@ def plan(mod, qualname, text):
         return {"ok": False, "why": text["guard"] if text else "no text of the kernel"}
     jits, tuners = scan()
     jits[id(jit_fn)] = jit_fn
-    callers = callers_of(jit_fn, jits)
-    seen_caller_ids = {id(jit_fn), *(id(caller) for caller in callers)}
-    for extra_caller in discover_triton_callers([jit_fn, qualname]):
-        if id(extra_caller) not in seen_caller_ids:
-            seen_caller_ids.add(id(extra_caller))
-            callers.append(extra_caller)
+    callers = callers_of(jit_fn, jits)       # by identity only (audit #9)
     affected = [jit_fn] + callers
     ids = {id(fn_item) for fn_item in affected}
     tuners = [wrapper for wrapper, fn_item in tuners if id(fn_item) in ids]
@@ -290,7 +275,7 @@ def plan(mod, qualname, text):
     ]
     return {"ok": True, "plan": {
         "jf": jit_fn, "q": qualname, "text": text, "affected": affected, "tuners": tuners,
-        "callers": [f"{caller.__module__}.{caller.fn.__qualname__}" for caller in callers],
+        "callers": [label(caller) for caller in callers],
         "scanned": len(jits), "plan_s": round(time.perf_counter() - start_time, 6)}}
 
 
@@ -301,13 +286,33 @@ def _caches(device_caches):
     }
 
 
-def _hook_into(fns, hook, journal, label):
+def _hook_into(fns, witness, journal, key):
+    """Arm `key` and, on each kernel, its own launch counter (`witness.arm_launch`): a launch
+    of any of them runs the edited code (the kernel, or a caller inlining it), and the proof
+    names the kernel that launched. A witness without arm_launch gets one shared hook."""
+    shared = witness.arm(key, journal)
     for fn_item in fns:
+        hook = (witness.arm_launch(key, label(fn_item), journal)
+                if hasattr(witness, "arm_launch") else shared)
         fn_item.pre_run_hooks.append(hook)
         journal.record_call(
-            lambda fn_item=fn_item: fn_item.pre_run_hooks.remove(hook),
-            f"unhook {label}",
+            lambda fn_item=fn_item, hook=hook: fn_item.pre_run_hooks.remove(hook),
+            f"unhook {key}",
         )
+
+
+def compiled(fns):
+    """{kernel label: compiled kernels in its device caches}. `apply` empties them, so every
+    entry after it was compiled from the edited text: a launch hook that fired on a kernel
+    with none never reached a launch of the new binary (the compile failed or the call was
+    not a launch)."""
+    out = {}
+    for fn_item in fns:
+        try:
+            out[label(fn_item)] = sum(len(v[0]) for v in fn_item.device_caches.values())
+        except Exception:
+            out[label(fn_item)] = 0
+    return out
 
 
 def apply(plan_data, journal, witness, key):
@@ -350,7 +355,7 @@ def apply(plan_data, journal, witness, key):
         invalidate(fn_item)
     for wrapper in plan_data["tuners"]:
         wrapper.cache.clear()
-    _hook_into(plan_data["affected"], witness.arm(key, journal), journal, key)
+    _hook_into(plan_data["affected"], witness, journal, key)
 
 
 def _set_text(jit_fn, src, raw, start, def_line):
@@ -468,7 +473,7 @@ def arm_added(obj, key, plans, journal, witness):
                 if id(f) not in seen:
                     seen.add(id(f))
                     fns.append(f)
-    _hook_into(fns, witness.arm(key, journal), journal, key)
+    _hook_into(fns, witness, journal, key)
     return len(fns)
 
 
