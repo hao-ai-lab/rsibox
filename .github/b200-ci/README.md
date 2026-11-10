@@ -8,7 +8,7 @@ vLLM cases that GitHub-hosted CPU jobs always skip, and builds a single `b200-gp
 |---|---|---|
 | `cpu` | fresh venv with pytest only, `CUDA_VISIBLE_DEVICES=""` | the `cpu-tests.yml` suites (GitHub parity) |
 | `gpu` | fresh venv with torch 2.9.1+cu128, Triton, numpy, pytest; `FASTRSI_TEST_GPU=1`; GPUs from the pool; `FASTRSI_VLLM_PYTHON` | the same suites, so torch, GPU and vLLM cases run |
-| `quickstart` | `python -m venv` per Python (3.10, 3.11, 3.12), one clean clone each | the README `## Quickstart` block, verbatim |
+| `quickstart` | `python -m venv` per Python (3.11, 3.12 by default), one clean clone each | the README `## Quickstart` block, verbatim |
 
 ## Trust
 

@@ -345,7 +345,7 @@ def main():
     ap.add_argument("--gpus", default="auto:2", help="CUDA_VISIBLE_DEVICES value, or auto:N idle GPUs")
     ap.add_argument("--gpu-pool", default="0,1,2,3", help="GPU indices this runner may use (B200 split)")
     ap.add_argument("--python", default="3.12")
-    ap.add_argument("--quickstart-pythons", default="3.10,3.11,3.12")
+    ap.add_argument("--quickstart-pythons", default="3.11,3.12", help="requires-python is >=3.11")
     ap.add_argument("--vllm-python", default="", help="python with vLLM for FASTRSI_VLLM_PYTHON (gpu stage)")
     ap.add_argument("--stages", default="cpu,gpu,quickstart")
     ap.add_argument("--uv", default=shutil.which("uv") or str(Path.home() / ".local/bin/uv"))
