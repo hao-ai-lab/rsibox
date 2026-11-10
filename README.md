@@ -6,7 +6,7 @@ FastRSI provides autonomous coding agents and human engineers with a **live lab*
 
 ## Quickstart (30 seconds)
 
-The shared live-lab transaction kernel (`core/livelab/`) uses the Python standard library only (`>= 3.10`, zero third-party dependencies):
+The shared live-lab transaction kernel (`core/livelab/`) uses the Python standard library only (Python `>= 3.11`: code identity uses `co_qualname`; zero third-party dependencies):
 
 ```sh
 # 1. Run all 11 golden conformance cases (c0-c10) on ToyLab in one command (~3s on CPU):
