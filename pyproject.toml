@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastrsi-livelab"
+version = "0.1.0"
+description = "Shared engine-agnostic live-lab transaction kernel, conformance suite, and pre-fork CUDA guards for FastRSI."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "" = "core/livelab" }
+packages = ["kernel", "kernel.toy", "conformance"]
+py-modules = ["forksafe", "livestream"]
