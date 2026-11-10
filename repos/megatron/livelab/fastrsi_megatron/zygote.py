@@ -44,7 +44,7 @@ import argparse, ast, ctypes, gc, importlib, json, os, signal, socket, sys, time
 # the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
 import forksafe
-from forksafe import PROPS_CODE, Properties  # noqa: F401
+from forksafe import PROPS_CODE, Properties, freeze_gc_before_fork  # noqa: F401
 
 START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
@@ -319,14 +319,18 @@ def unpatch(cuda=None):
 
 
 def bind(req, local_rank):
-    """Pin the rank to its CPU list (`cpus`: one 'a-b,c' string per local rank) before CUDA and
-    its threads start. A fork keeps the zygote's affinity; without a list nothing changes,
-    as under torchrun. Returns the CPUs set, or None."""
+    """Pin the rank to its CPU list (`cpus`: one 'a-b,c' string per local rank, or auto-detected
+    GPU NUMA affinity when FASTRSI_ZYGOTE_AUTO_NUMA=1) before CUDA and its threads start. A fork
+    keeps the zygote's affinity; without a list nothing changes, as under torchrun. Returns the
+    CPUs set, or None."""
     lists = req.get("cpus") or []
     if local_rank < len(lists) and lists[local_rank]:
-        cpus = cpu_list(lists[local_rank])
-        os.sched_setaffinity(0, cpus)
-        return sorted(cpus)
+        cpus = sorted(cpu_list(lists[local_rank]))
+        forksafe.bind_rank_numa_and_cpus(local_rank, explicit_cpus=cpus)
+        return cpus
+    if os.environ.get("FASTRSI_ZYGOTE_AUTO_NUMA") == "1":
+        res = forksafe.bind_rank_numa_and_cpus(local_rank)
+        return res.get("cpus") if res.get("bound") else None
     return None
 
 
@@ -484,9 +488,8 @@ def serve(sock, mods, script=None, forksafe=True):
     if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") != "0":
         # Freeze preloaded modules (~900K objects) in the permanent GC generation so cyclic GC
         # traversals in forked ranks do not dirty shared Copy-on-Write pages.
-        gc.collect()
-        gc.freeze()
-        gc_frozen = gc.get_freeze_count()
+        gc_info = freeze_gc_before_fork()
+        gc_frozen = gc_info.get("frozen_objects", gc.get_freeze_count())
     if os.path.exists(sock):
         os.unlink(sock)
     listen_sock = socket.socket(socket.AF_UNIX)

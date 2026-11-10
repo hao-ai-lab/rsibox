@@ -141,9 +141,29 @@ def _child(req, conns, refresh=()):
         null = os.open(os.devnull, os.O_RDONLY)
         os.dup2(null, 0); os.close(null)
         os.chdir(req.get("cwd") or "/")
-        for k in [k for k in os.environ if _volatile(k) and k not in req["env"]]:
-            del os.environ[k]
-        os.environ.update({k: v for k, v in req["env"].items() if _volatile(k)})
+        for env_key in [env_key for env_key in os.environ if _volatile(env_key) and env_key not in req["env"]]:
+            del os.environ[env_key]
+        os.environ.update({env_key: env_val for env_key, env_val in req["env"].items() if _volatile(env_key)})
+        if not req.get("env", {}).get("OMP_NUM_THREADS") and not os.environ.get("OMP_NUM_THREADS"):
+            forksafe.clamp_thread_pools(num_threads=1)
+        local_rank_str = (
+            req.get("env", {}).get("LOCAL_RANK")
+            or os.environ.get("LOCAL_RANK")
+            or ""
+        ).strip()
+        visible_gpu_ids = [
+            token.strip()
+            for token in (
+                req.get("env", {}).get("CUDA_VISIBLE_DEVICES")
+                or os.environ.get("CUDA_VISIBLE_DEVICES")
+                or ""
+            ).split(",")
+            if token.strip().isdigit()
+        ]
+        if local_rank_str.isdigit():
+            forksafe.bind_rank_numa_and_cpus(int(local_rank_str))
+        elif len(visible_gpu_ids) == 1:
+            forksafe.bind_rank_numa_and_cpus(0)
         sys.argv = list(req["argv"])
         if refresh:
             r = zygote_refresh.refresh(refresh)
@@ -263,9 +283,7 @@ def serve(sock_path, modules_file):
     # would otherwise scan (and so write to, copying every page) the whole inherited heap on
     # each full collection. Prefork servers do the same (Python docs, gc.freeze).
     if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
-        import gc
-        gc.collect()
-        gc.freeze()
+        forksafe.freeze_gc_before_fork()
     print(json.dumps({"event": "zygote_ready", "pid": os.getpid(), "import_seconds":
                       round(time.time() - t0, 2), "modules": len(sys.modules),
                       "source_files": len(sources), "graph_modules": len(graph),
