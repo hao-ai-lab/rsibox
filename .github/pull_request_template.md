@@ -6,8 +6,8 @@
 
 ## Evidence
 
-<!-- Receipts, test output or a walkthrough with real output; "none" for docs-only changes.
-     Then one line on what this PR does not show. -->
+<!-- Receipts, test output or a walkthrough with real output, written here; "none" for docs-only
+     changes. Do not commit run logs or evidence/ folders. Then one line on what this PR does not show. -->
 
 ## Loop record
 
@@ -21,7 +21,7 @@
 - Function groups: <!-- OP, GRAPH, STATE, RESOURCE, NATIVE, RANKS, restart; per changed function -->
 - Rule added: <!-- the smallest general rule this needed, and where it now lives -->
 - Overheads measured: <!-- phase, seconds, source (receipt or kb/measurements file) -->
-- Receipts: <!-- paths, or none -->
+- Receipts: <!-- summarized in this description (GPU, model, command, numbers), or none; not committed -->
 - Not verified: <!-- what a reader should not assume -->
 - Ideal full GPU test: <!-- complete end-to-end GPU test for this change: GPU count, model/workload, expected metric/behavior -->
 - Actual tests run: <!-- exact GPU or CPU commands executed in the trajectory, test counts, and measured timings -->

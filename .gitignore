@@ -11,3 +11,6 @@ dist/
 
 # Private notes and experiment scripts (see AGENTS.md, "What stays out of the repo")
 .lab/
+
+# Run logs and GPU receipts go in the PR description, not the repo (AGENTS.md)
+evidence/

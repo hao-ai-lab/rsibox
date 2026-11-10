@@ -58,7 +58,9 @@ then the iteration on top of it. That way each framework rule points to the PR t
 - **One boundary per PR.** A code PR changes one folder of `livelab/` (one boundary), with at
   most about 600 lines of non-test code. Its description states the contract (interface,
   invariants, what the folder owns), and it carries its own tests: at least one case that fails
-  without the PR. A PR that touches a running engine also carries a GPU receipt. Split a bigger
+  without the PR. A PR that touches a running engine also carries a GPU receipt in its
+  description: GPU type and count, model, command and the measured numbers. Do not commit run
+  logs, receipts or `evidence/` folders; they expose hosts and paths. Split a bigger
   change along its dependency order, so that each PR imports and tests on its own on top of the
   one before it.
 - **Merge** with squash, keeping the PR description as the commit body, so the loop record is
@@ -152,6 +154,8 @@ The repo will be public. Experiments and the machines they ran on are not part o
 
 - **Never commit:**
   - experiment or setup scripts tied to one machine, cluster or run;
+  - run logs, raw receipts, screenshots and `evidence/` folders (summarize them in the PR
+    description instead; git ignores `evidence/`);
   - internal IPs and hostnames; cluster, pod and namespace names; usernames;
   - home and scratch paths (`/raid/...`, `/home/<user>/...`, `/workspace/...`);
   - how to reach a machine: kubeconfig, SSH, tunnel or proxy recipes;
