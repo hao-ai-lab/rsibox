@@ -44,6 +44,7 @@ every worker; VLLM_SERVER_DEV_MODE=1 exposes it through POST /collective_rpc).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import http.server
 import json
@@ -291,6 +292,9 @@ def copy_rank(a):
         raise RuntimeError("source and destination holders hold different tensors: "
                            f"{set(map(tuple, theirs[0])) ^ set(manifest)}")
     nbytes = sum(named[n].numel() * named[n].element_size() for n in names)
+    before = [None, None]
+    dist.all_gather_object(before, model_digest([(n, named[n]) for n in names])[0])
+    agree_before = digests_agree(before[0], before[1])
     dist.barrier()
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -314,7 +318,8 @@ def copy_rank(a):
     print(json.dumps({"rank": a.rank, "tensors": len(names), "bytes": nbytes,
                       "map_s": t_mapped - t_start, "nccl_s": t1 - t0,
                       "gbps": nbytes / max(t1 - t0, 1e-9) / 1e9, "digest_s": dig_s,
-                      "digests_agree": agree["ok"], "n_differ": agree["n_differ"]}))
+                      "digests_agree": agree["ok"], "n_differ": agree["n_differ"],
+                      "n_differ_before": agree_before["n_differ"]}))
     return 0 if agree["ok"] else 1
 
 
@@ -572,6 +577,10 @@ def first_token_s(port, model):
 class Router:
     def __init__(self, pool, port):
         self.pool, self.port = pool, port
+        self.open = threading.Event()
+        self.open.set()
+        self.cv = threading.Condition()
+        self.inflight = 0
         router = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -582,6 +591,17 @@ class Router:
 
             def _forward(self, method):
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                router.open.wait()                 # held while the pool drains (quiesce)
+                with router.cv:
+                    router.inflight += 1
+                try:
+                    self._forward_body(method, body)
+                finally:
+                    with router.cv:
+                        router.inflight -= 1
+                        router.cv.notify_all()
+
+            def _forward_body(self, method, body):
                 for attempt in range(3):
                     eng = router.pool.active
                     try:
@@ -589,7 +609,7 @@ class Router:
                         c.request(method, self.path, body=body or None,
                                   headers={"Content-Type": "application/json"})
                         r = c.getresponse()
-                    except OSError:
+                    except (OSError, http.client.HTTPException):
                         router.pool.on_backend_error(eng, "connect")
                         continue
                     if r.status >= 500 and attempt < 2:
@@ -609,7 +629,9 @@ class Router:
                                 break
                             self.wfile.write(chunk)
                             self.wfile.flush()
-                    except OSError:
+                    except (OSError, http.client.HTTPException):
+                        # the engine died mid-stream: this client sees a cut stream (its
+                        # tokens so far were served); later requests go to the standby
                         router.pool.on_backend_error(eng, "stream broke")
                     c.close()
                     return
@@ -626,7 +648,21 @@ class Router:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
+    @contextlib.contextmanager
+    def drained(self, timeout=60):
+        """Hold new requests and wait until none is in flight: a check run inside sees the
+        engine alone (batched neighbours change logprobs by up to ~0.1 on Qwen3-8B)."""
+        self.open.clear()
+        t0 = time.monotonic()
+        with self.cv:
+            self.cv.wait_for(lambda: self.inflight == 0, timeout)
+        try:
+            yield time.monotonic() - t0
+        finally:
+            self.open.set()
+
     def close(self):
+        self.open.set()
         self.server.shutdown()
 
 
@@ -742,12 +778,14 @@ class Pool:
         if self.pending is not None:
             out["rolled_back_pending"] = self.rollback("superseded by " + patch.id)
         eng = self.active
-        r = eng.rpc("lease_apply", patch.to_json())
-        if not r.get("ok"):
-            raise RuntimeError(f"apply {patch.id}: {r}")
-        eng.reset_prefix_cache()
-        got = reference(eng.port, self.model)
-        gate = gate_compare(self.ref, got, self.tol)
+        with self.router.drained() as drain_s:
+            r = eng.rpc("lease_apply", patch.to_json())
+            if not r.get("ok"):
+                raise RuntimeError(f"apply {patch.id}: {r}")
+            eng.reset_prefix_cache()
+            got = reference(eng.port, self.model)
+            gate = gate_compare(self.ref, got, self.tol)
+        out["drain_s"] = drain_s
         out.update({"touched": r["touched"], "apply_s": r["seconds"], "gate": gate})
         if gate["pass"]:
             self.pending = patch
@@ -779,7 +817,8 @@ class Pool:
         self.standby.reset_prefix_cache()
         self.ledger.append(patch)
         self.pending = None
-        self.ref = reference(self.active.port, self.model)
+        with self.router.drained():
+            self.ref = reference(self.active.port, self.model)
         self.ref_digest = self.digest(self.active)
         sb = digests_agree(self.ref_digest, self.digest(self.standby))
         return {"accepted": patch.id, "ledger": self.ledger.ids, "standby_digest_ok": sb["ok"]}
@@ -851,12 +890,20 @@ def measure_fault(pool, load, kind):
             pool.failover(f"digest mismatch ({integ['n_differ']} tensors)", victim)
     s = load.first_after(t_fault, target.name)
     fo = next((e for e in pool.events[::-1] if e["ev"] == "failover" and e["t"] >= t_fault), None)
-    got = reference(pool.router.port, pool.model)
     return {"fault": kind, "from": victim.name, "to": target.name,
             "fault_to_switch_s": (fo["t"] - t_fault) if fo else None,
             "fault_to_first_token_s": (s["t_first_token"] - t_fault) if s else None,
             "detected_by": fo["reason"] if fo else None,
-            "correct_after": gate_compare(pool.ref, got, 0.0)}
+            **correctness(pool)}
+
+
+def correctness(pool):
+    """The reference prompts through the router: under live load (tokens must match; logprobs
+    move with batching) and drained (must match the ledger reference exactly)."""
+    loaded = gate_compare(pool.ref, reference(pool.router.port, pool.model), 0.0)
+    with pool.router.drained():
+        alone = gate_compare(pool.ref, reference(pool.active.port, pool.model), 0.0)
+    return {"correct_under_load": loaded, "correct_drained": alone}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -938,7 +985,7 @@ def demo(a):
         ev = pool.evaluate(Patch("bad-zero-mlp", r"layers\.(1[0-9])\.mlp\.down_proj", "scale", 0.0))
         s = load.first_after(t_f, pool.active.name)
         ev["fault_to_first_token_s"] = (s["t_first_token"] - t_f) if s else None
-        ev["correct_after"] = gate_compare(pool.ref, reference(pool.router.port, model), 0.0)
+        ev.update(correctness(pool))
         ev["from"] = victim.name
         sc.append({"fault": "patch_rejected", **ev}); save()
         # 5d. bug (a): a passing patch left unaccepted, then another evaluate
