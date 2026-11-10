@@ -10,6 +10,8 @@ Usage:
   python3 engine.py zygote --python <venv python> --zygote SOCK --cache-root C --log z.log \
       [--fork] [--zygote-modules FILE]
   python3 engine.py start ... --zygote SOCK --zygote-check   # would the zygote fork it now?
+  python3 engine.py pool {copy,demo} ...   # weight lease / NCCL seed / standby pool
+      (weight_scaling_colocate.py; its own flags, see that file)
 
 `start` and `reconfigure` print one JSON line: {"pid", "cmd", "t_launch", "healthy_after_s",
 "vllm_args", ...} (plus "reconfig" on `reconfigure`). pid leads a new session (setsid): stop
@@ -910,6 +912,10 @@ def parse(argv=None):
 
 def main(argv=None):
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    if raw_argv[:1] == ["pool"]:
+        # The standby pool has its own parser (holders, engines and a router of its own).
+        import weight_scaling_colocate
+        return weight_scaling_colocate.main(raw_argv[1:])
     parsed_args, vargv = parse(raw_argv)
     if parsed_args.cmd == "zygote":
         result_payload = start_zygote(parsed_args)
