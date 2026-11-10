@@ -39,7 +39,7 @@ Contract:
   for refreshed modules do not count. Cost (our 2026-11-07 run, Qwen3-14B architecture, TP 2): the
   re-import took 1.4 s, and the lab was ready 40.9 s after the request, against 78.8 s for torchrun.
 """
-import argparse, ast, ctypes, importlib, json, os, signal, socket, sys, time, traceback
+import argparse, ast, ctypes, gc, importlib, json, os, signal, socket, sys, time, traceback
 
 # the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
@@ -50,14 +50,16 @@ START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
 EARLY_ENV_PREFIXES = ("NVTE_", "PYTORCH_", "TORCH_", "TORCHINDUCTOR_", "TRITON_", "LD_",
                       "PYTHON", "MEGATRON_")
-# ... except these, read at process-group or communicator creation, after the fork.
-LATE_ENV_PREFIXES = ("TORCH_NCCL_", "TORCH_DISTRIBUTED_")
+# ... except these, read at process-group or communicator creation, or applied in set_threads() after the fork.
+LATE_ENV_PREFIXES = ("TORCH_NCCL_", "TORCH_DISTRIBUTED_", "TORCHINDUCTOR_COMPILE_THREADS")
 # torch._dynamo and torch._inductor are imported lazily at the first torch.compile, in Megatron's
-# kernel warm-up: preloading them takes 1.5-2 s off each restart (with
-# TORCHINDUCTOR_COMPILE_THREADS=1 in the zygote's environment, our 14B runs: warm-up 0.6-1.4 s
-# instead of 2.2-2.8 s).
+# kernel warm-up: preloading them takes 1.5-2 s off each restart. During preload and warmup,
+# TorchInductor uses a multi-threaded compile pool (default_compile_threads) for fast compilation,
+# then quiesce_compile_pools_after_warmup() shuts down the compile pools and clamps ATen to 1
+# thread before steady-state GPU training steps.
 DEFAULT_PRELOAD = ["torch", "megatron.training.training", "torch._dynamo",
                    "torch._inductor.compile_fx", "torch._inductor.codecache"]
+PRELOAD_COMPILE_THREADS = 8
 
 
 def install_forksafe():
@@ -138,22 +140,26 @@ def sources():
 
 def preload(mods, script=None, check=cuda_initialized):
     """Import `mods` and the script's imports; returns {module: seconds} or raises SystemExit
-    naming the first module whose import initialized CUDA."""
+    naming the first module whose import initialized CUDA. Resets ATen threads to 1 and
+    quiesces any Inductor compile pools after preloading so forked ranks start clean."""
     if script:
         sys.path.insert(0, os.path.dirname(os.path.abspath(script)))
         mods = list(mods) + script_imports(script)
     took = {}
-    for m in dict.fromkeys(mods):
-        t = time.time()
+    for mod_name in dict.fromkeys(mods):
+        start_ts = time.time()
         try:
-            importlib.import_module(m)
-        except ImportError as e:
-            took[m] = f"skipped: {e}"
+            importlib.import_module(mod_name)
+        except ImportError as exc:
+            took[mod_name] = f"skipped: {exc}"
             continue
-        took[m] = round(time.time() - t, 3)
+        took[mod_name] = round(time.time() - start_ts, 3)
         if check():
-            raise SystemExit(f"zygote: importing {m} initialized CUDA; a forked rank could not "
-                             "use the GPU")
+            raise SystemExit(
+                f"zygote: importing {mod_name} initialized CUDA; a forked rank could not "
+                "use the GPU"
+            )
+    quiesce_compile_pools_after_warmup()
     return took
 
 
@@ -209,18 +215,90 @@ def _stat(f):
         return None
 
 
-def rank_env(req, local_rank):
-    n = int(req["nproc"])
-    node = int(req.get("node_rank", 0))
-    env = dict(req.get("env", {}))
-    env.update(RANK=str(node * n + local_rank), LOCAL_RANK=str(local_rank),
-               WORLD_SIZE=str(n * int(req.get("nnodes", 1))), LOCAL_WORLD_SIZE=str(n),
-               GROUP_RANK=str(node), MASTER_ADDR=req.get("master_addr", "127.0.0.1"),
-               MASTER_PORT=str(req["port"]), TORCHELASTIC_RUN_ID=str(req.get("run_id", "zygote")),
-               FASTRSI_T0=repr(req.get("t0", time.time())))
-    if n > 1 and "OMP_NUM_THREADS" not in env and "OMP_NUM_THREADS" not in os.environ:
-        env["OMP_NUM_THREADS"] = "1"            # torchrun's default for more than one rank
-    return env
+def default_compile_threads(local_world_size, cpu_count=None):
+    """Return per-rank TorchInductor compile thread count during warmup: fair share of host
+    CPUs (clamped to [2, 8]) so cold/refresh torch.compile stays fast without oversubscribing
+    all ranks on the node."""
+    total_cpus = int(cpu_count or os.cpu_count() or 8)
+    world_procs = max(1, int(local_world_size))
+    return max(2, min(8, total_cpus // max(1, 2 * world_procs)))
+
+
+def clamp_pre_fork_threads(environ=os.environ):
+    """Configure OpenMP, BLAS, and TorchInductor thread pools before preloading modules in the
+    zygote. OpenMP and BLAS intra-op pools default to 1 thread so forked ranks do not inherit
+    32-thread CPU pools, while TORCHINDUCTOR_COMPILE_THREADS defaults to PRELOAD_COMPILE_THREADS
+    (8) during preload/warmup and is quiesced via quiesce_compile_pools_after_warmup() before
+    fork and before steady-state training."""
+    for env_key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        environ.setdefault(env_key, "1")
+        START_ENV.setdefault(env_key, environ[env_key])
+    environ.setdefault("TORCHINDUCTOR_COMPILE_THREADS", str(PRELOAD_COMPILE_THREADS))
+    START_ENV.setdefault(
+        "TORCHINDUCTOR_COMPILE_THREADS", environ["TORCHINDUCTOR_COMPILE_THREADS"]
+    )
+
+
+def quiesce_compile_pools_after_warmup():
+    """Reset torch's intra-op thread pool to 1 and shut down any active TorchInductor
+    AsyncCompile thread/process pools after preload or warmup compilation finishes.
+    This preserves fast multi-threaded torch.compile during warmup while ensuring zero
+    background compile threads or CPU thread contention during steady-state training steps."""
+    applied_torch_threads = None
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None and hasattr(torch_mod, "set_num_threads"):
+        torch_mod.set_num_threads(1)
+        applied_torch_threads = 1
+    inductor_config = sys.modules.get("torch._inductor.config")
+    if inductor_config is not None and hasattr(inductor_config, "compile_threads"):
+        inductor_config.compile_threads = 1
+    pools_shutdown = []
+    async_compile_mod = sys.modules.get("torch._inductor.async_compile")
+    if async_compile_mod is not None:
+        targets = [async_compile_mod]
+        async_compile_cls = getattr(async_compile_mod, "AsyncCompile", None)
+        if async_compile_cls is not None:
+            targets.append(async_compile_cls)
+        for holder in targets:
+            for attr_name in ("_pool", "_process_pool", "_compile_threads_pool"):
+                pool_obj = getattr(holder, attr_name, None)
+                if pool_obj is not None and hasattr(pool_obj, "shutdown"):
+                    try:
+                        pool_obj.shutdown(wait=False)
+                        pools_shutdown.append(f"{ getattr(holder, '__name__', 'async_compile') }.{attr_name}")
+                    except Exception:
+                        pass
+                    try:
+                        setattr(holder, attr_name, None)
+                    except Exception:
+                        pass
+    return {
+        "torch_threads": applied_torch_threads,
+        "compile_threads": getattr(inductor_config, "compile_threads", None),
+        "pools_shutdown": pools_shutdown,
+    }
+
+
+def rank_env(request_data, local_rank):
+    num_procs = int(request_data["nproc"])
+    node_rank = int(request_data.get("node_rank", 0))
+    env_vars = dict(request_data.get("env", {}))
+    env_vars.update(
+        RANK=str(node_rank * num_procs + local_rank),
+        LOCAL_RANK=str(local_rank),
+        WORLD_SIZE=str(num_procs * int(request_data.get("nnodes", 1))),
+        LOCAL_WORLD_SIZE=str(num_procs),
+        GROUP_RANK=str(node_rank),
+        MASTER_ADDR=request_data.get("master_addr", "127.0.0.1"),
+        MASTER_PORT=str(request_data["port"]),
+        TORCHELASTIC_RUN_ID=str(request_data.get("run_id", "zygote")),
+        FASTRSI_T0=repr(request_data.get("t0", time.time())),
+    )
+    if num_procs > 1 and "OMP_NUM_THREADS" not in env_vars and "OMP_NUM_THREADS" not in os.environ:
+        env_vars["OMP_NUM_THREADS"] = "1"  # torchrun's default for more than one rank
+    if "TORCHINDUCTOR_COMPILE_THREADS" not in env_vars:
+        env_vars["TORCHINDUCTOR_COMPILE_THREADS"] = str(default_compile_threads(num_procs))
+    return env_vars
 
 
 def cpu_list(spec):
@@ -252,16 +330,26 @@ def bind(req, local_rank):
     return None
 
 
-def set_threads(env=os.environ):
-    """Apply OMP_NUM_THREADS to torch's intra-op pool in a forked rank. OpenMP and torch read
-    it when they load, in the zygote, so setting the variable after the fork alone does
-    nothing: without this a rank uses every core, as the zygote does."""
-    t = sys.modules.get("torch")
-    n = env.get("OMP_NUM_THREADS", "")
-    if t is not None and n.isdigit() and int(n) > 0:
-        t.set_num_threads(int(n))
-        return int(n)
-    return None
+def set_threads(environ=os.environ):
+    """Apply OMP_NUM_THREADS to torch's intra-op pool and TORCHINDUCTOR_COMPILE_THREADS to
+    torch._inductor.config in a forked rank. OpenMP, torch, and TorchInductor read these
+    variables when they load in the zygote, so setting the environment variables after the
+    fork alone does not shrink already-initialized thread pools or config attributes."""
+    applied_omp_threads = None
+    torch_mod = sys.modules.get("torch")
+    omp_threads_str = environ.get("OMP_NUM_THREADS", "")
+    if torch_mod is not None and omp_threads_str.isdigit() and int(omp_threads_str) > 0:
+        applied_omp_threads = int(omp_threads_str)
+        torch_mod.set_num_threads(applied_omp_threads)
+    inductor_config = sys.modules.get("torch._inductor.config")
+    compile_threads_str = environ.get("TORCHINDUCTOR_COMPILE_THREADS", "")
+    if (
+        inductor_config is not None
+        and compile_threads_str.isdigit()
+        and int(compile_threads_str) > 0
+    ):
+        inductor_config.compile_threads = int(compile_threads_str)
+    return applied_omp_threads
 
 
 def _child(req, local_rank, lsock, conn):
@@ -387,40 +475,49 @@ def handle(req, lsock, conn, src):
 
 
 def serve(sock, mods, script=None, forksafe=True):
-    t = time.time()
-    fs = install_forksafe() if forksafe else {"installed": False, "why": "off"}
+    start_time = time.time()
+    clamp_pre_fork_threads()
+    forksafe_status = install_forksafe() if forksafe else {"installed": False, "why": "off"}
     took = preload(mods, script)
     src = sources()
+    gc_frozen = 0
+    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") != "0":
+        # Freeze preloaded modules (~900K objects) in the permanent GC generation so cyclic GC
+        # traversals in forked ranks do not dirty shared Copy-on-Write pages.
+        gc.collect()
+        gc.freeze()
+        gc_frozen = gc.get_freeze_count()
     if os.path.exists(sock):
         os.unlink(sock)
-    ls = socket.socket(socket.AF_UNIX)
-    ls.bind(sock)
-    ls.listen(4)
+    listen_sock = socket.socket(socket.AF_UNIX)
+    listen_sock.bind(sock)
+    listen_sock.listen(4)
     import threading
     threads = {"native": len(os.listdir("/proc/self/task")) if os.path.isdir("/proc/self/task")
-               else None, "python": [x.name for x in threading.enumerate()]}
-    print(json.dumps({"event": "ready", "pid": os.getpid(), "import_s": round(time.time() - t, 3),
-                      "threads": threads,
-                      "modules": len(sys.modules), "forksafe": fs, "took": took}),
+               else None, "python": [thread_obj.name for thread_obj in threading.enumerate()]}
+    print(json.dumps({"event": "ready", "pid": os.getpid(),
+                      "import_s": round(time.time() - start_time, 3),
+                      "threads": threads, "gc_frozen": gc_frozen,
+                      "modules": len(sys.modules), "forksafe": forksafe_status, "took": took}),
           flush=True)
     while True:
-        conn, _ = ls.accept()
+        conn, _ = listen_sock.accept()
         with conn:
             line = conn.makefile().readline()
             if not line:
                 continue
-            req = json.loads(line)
-            if req.get("op") == "stop":
+            request_data = json.loads(line)
+            if request_data.get("op") == "stop":
                 _send(conn, {"event": "stopped"})
                 break
-            if req.get("op") == "ping":
+            if request_data.get("op") == "ping":
                 _send(conn, {"event": "pong", "pid": os.getpid()})
                 continue
             try:
-                handle(req, ls, conn, src)
-            except Exception as e:              # a bad request must not kill the zygote
-                _send(conn, {"event": "error", "error": repr(e)})
-    ls.close()
+                handle(request_data, listen_sock, conn, src)
+            except Exception as exc:            # a bad request must not kill the zygote
+                _send(conn, {"event": "error", "error": repr(exc)})
+    listen_sock.close()
     os.unlink(sock)
 
 

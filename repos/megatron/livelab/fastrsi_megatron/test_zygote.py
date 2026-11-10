@@ -17,7 +17,7 @@ from fastrsi_megatron import zygote  # noqa: E402
 HEAVY = "import os, time\nPID = os.getpid()\nT = time.time()\n"
 SCRIPT = """import heavy, json, os, sys
 out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_PORT", "MY_FLAG",
-                                      "OMP_NUM_THREADS")}
+                                      "OMP_NUM_THREADS", "TORCHINDUCTOR_COMPILE_THREADS")}
 out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:],
            cpus=sorted(os.sched_getaffinity(0)))
 json.dump(out, open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w"))
@@ -70,6 +70,11 @@ class Zygote(unittest.TestCase):
             self.assertEqual(o["heavy_pid"], self.ready["pid"])
             self.assertEqual(o["sid"], o["pid"])
             self.assertEqual(o["OMP_NUM_THREADS"], "1")     # torchrun's default for 2 ranks
+            self.assertEqual(
+                o["TORCHINDUCTOR_COMPILE_THREADS"],
+                str(zygote.default_compile_threads(2)),
+            )
+        self.assertGreater(self.ready["gc_frozen"], 0)
 
     def test_one_failing_rank_stops_the_others_and_the_zygote_serves_again(self):
         """Input: rank 1 exits 7 while rank 0 sleeps 60 s. Expect: rank 0 terminated (rc -15)
@@ -178,25 +183,135 @@ class Pieces(unittest.TestCase):
         self.assertEqual(zygote.cpu_list("0-3,8,10-11"), {0, 1, 2, 3, 8, 10, 11})
 
     def test_set_threads_applies_omp_num_threads_to_torch_in_the_rank(self):
-        """torch reads OMP_NUM_THREADS when it loads (in the zygote), so a forked rank would
-        keep the zygote's pool (every core) and run its CPU work slower than under torchrun.
-        Input: a fake torch module and OMP_NUM_THREADS=1. Expect set_num_threads(1); with no
-        valid value, nothing is called."""
-        calls = []
+        """torch reads OMP_NUM_THREADS and torch._inductor.config reads
+        TORCHINDUCTOR_COMPILE_THREADS when they load in the zygote, so a forked rank would
+        keep an unclamped pool (every core or 32 Inductor workers) without explicit clamping.
+        Input: fake torch and torch._inductor.config modules with OMP_NUM_THREADS=1 and
+        TORCHINDUCTOR_COMPILE_THREADS=1. Expect set_num_threads(1) and compile_threads == 1;
+        with no valid value, nothing is called."""
+        recorded_calls = []
 
-        class T:
-            def set_num_threads(self, n):
-                calls.append(n)
-        sys.modules["torch"], old = T(), sys.modules.get("torch")
+        class FakeTorch:
+            def set_num_threads(self, num_threads):
+                recorded_calls.append(num_threads)
+
+        class FakeInductorConfig:
+            compile_threads = 32
+
+        fake_inductor_config = FakeInductorConfig()
+        old_torch = sys.modules.get("torch")
+        old_inductor = sys.modules.get("torch._inductor.config")
+        sys.modules["torch"] = FakeTorch()
+        sys.modules["torch._inductor.config"] = fake_inductor_config
         try:
-            self.assertEqual(zygote.set_threads({"OMP_NUM_THREADS": "1"}), 1)
-            self.assertIsNone(zygote.set_threads({"OMP_NUM_THREADS": "x"}))
+            self.assertEqual(
+                zygote.set_threads(
+                    {"OMP_NUM_THREADS": "1", "TORCHINDUCTOR_COMPILE_THREADS": "1"}
+                ),
+                1,
+            )
+            self.assertEqual(fake_inductor_config.compile_threads, 1)
+            self.assertIsNone(
+                zygote.set_threads(
+                    {"OMP_NUM_THREADS": "invalid", "TORCHINDUCTOR_COMPILE_THREADS": "invalid"}
+                )
+            )
         finally:
-            if old is not None:
-                sys.modules["torch"] = old
+            if old_torch is not None:
+                sys.modules["torch"] = old_torch
             else:
                 del sys.modules["torch"]
-        self.assertEqual(calls, [1])
+            if old_inductor is not None:
+                sys.modules["torch._inductor.config"] = old_inductor
+            else:
+                del sys.modules["torch._inductor.config"]
+        self.assertEqual(recorded_calls, [1])
+
+    def test_clamp_pre_fork_threads_sets_default_single_thread_env_vars(self):
+        """Pre-fork thread clamping must default OMP, OpenBLAS, and MKL thread variables to 1
+        while allowing multi-threaded TorchInductor compile (PRELOAD_COMPILE_THREADS = 8)
+        during preload/warmup without overwriting caller-provided values."""
+        target_env = {"OMP_NUM_THREADS": "4"}
+        zygote.clamp_pre_fork_threads(target_env)
+        self.assertEqual(target_env["OMP_NUM_THREADS"], "4")
+        self.assertEqual(target_env["OPENBLAS_NUM_THREADS"], "1")
+        self.assertEqual(target_env["MKL_NUM_THREADS"], "1")
+        self.assertEqual(
+            target_env["TORCHINDUCTOR_COMPILE_THREADS"],
+            str(zygote.PRELOAD_COMPILE_THREADS),
+        )
+        self.assertEqual(zygote.default_compile_threads(2, cpu_count=64), 8)
+        self.assertEqual(zygote.default_compile_threads(8, cpu_count=64), 4)
+        self.assertEqual(zygote.default_compile_threads(16, cpu_count=16), 2)
+
+    def test_quiesce_compile_pools_after_warmup_resets_threads_and_shuts_down_pools(self):
+        """After preload or warmup compilation completes, quiesce_compile_pools_after_warmup()
+        must reset torch's intra-op thread pool to 1, set inductor compile_threads to 1, and
+        shut down any active AsyncCompile thread/process pools so steady-state training steps
+        run with zero background compile threads."""
+        recorded_torch_threads = []
+        shutdown_calls = []
+
+        class FakeTorch:
+            def set_num_threads(self, num_threads):
+                recorded_torch_threads.append(num_threads)
+
+        class FakeInductorConfig:
+            compile_threads = 8
+
+        class FakePool:
+            def __init__(self, pool_name):
+                self.pool_name = pool_name
+
+            def shutdown(self, wait=False):
+                shutdown_calls.append((self.pool_name, wait))
+
+        class FakeAsyncCompile:
+            _pool = FakePool("class_thread_pool")
+            _process_pool = FakePool("class_process_pool")
+
+        class FakeAsyncCompileModule:
+            __name__ = "torch._inductor.async_compile"
+            AsyncCompile = FakeAsyncCompile
+            _pool = FakePool("module_thread_pool")
+
+        fake_async_module = FakeAsyncCompileModule()
+        old_torch = sys.modules.get("torch")
+        old_inductor = sys.modules.get("torch._inductor.config")
+        old_async = sys.modules.get("torch._inductor.async_compile")
+        sys.modules["torch"] = FakeTorch()
+        sys.modules["torch._inductor.config"] = FakeInductorConfig()
+        sys.modules["torch._inductor.async_compile"] = fake_async_module
+        try:
+            summary = zygote.quiesce_compile_pools_after_warmup()
+            self.assertEqual(summary["torch_threads"], 1)
+            self.assertEqual(summary["compile_threads"], 1)
+            self.assertEqual(len(summary["pools_shutdown"]), 3)
+            self.assertIsNone(FakeAsyncCompile._pool)
+            self.assertIsNone(FakeAsyncCompile._process_pool)
+            self.assertIsNone(fake_async_module._pool)
+        finally:
+            if old_torch is not None:
+                sys.modules["torch"] = old_torch
+            else:
+                del sys.modules["torch"]
+            if old_inductor is not None:
+                sys.modules["torch._inductor.config"] = old_inductor
+            else:
+                del sys.modules["torch._inductor.config"]
+            if old_async is not None:
+                sys.modules["torch._inductor.async_compile"] = old_async
+            else:
+                del sys.modules["torch._inductor.async_compile"]
+        self.assertEqual(recorded_torch_threads, [1])
+        self.assertEqual(
+            shutdown_calls,
+            [
+                ("module_thread_pool", False),
+                ("class_thread_pool", False),
+                ("class_process_pool", False),
+            ],
+        )
 
     def test_script_imports_reads_top_level_and_guarded_imports(self):
         """pretrain_gpt.py style: plain imports, from-imports, imports under `if`/`try`; a

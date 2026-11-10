@@ -96,7 +96,9 @@ def _detailed(a, k, raw):
 def main():
     if os.environ.get("FASTRSI_EAGER_NCCL") == "1":
         _eager_nccl()
+    from . import zygote
     detail = int(os.environ.get("FASTRSI_STEP_DETAIL", "0") or 0)
+    compile_warmup_steps = int(os.environ.get("FASTRSI_COMPILE_WARMUP_STEPS", "2") or 2)
     _wrap("initialize_megatron", "init_start", "init_done")
     _wrap("setup_model_and_optimizer", "model_opt_start", "model_opt_done")
     _wrap("build_train_valid_test_data_iterators", "data_start", "data_done")
@@ -122,6 +124,9 @@ def main():
                       "grad_norm": float(r[5]) if r[5] is not None else None})
         if d is not None:
             STEPS[-1]["detail"] = d
+        if len(STEPS) == compile_warmup_steps:
+            zygote.quiesce_compile_pools_after_warmup()
+            T.setdefault("compile_pools_quiesced", time.time())
         T.setdefault("first_step_done", t1)
         _dump()
         return r

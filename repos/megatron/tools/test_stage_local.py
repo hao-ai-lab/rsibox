@@ -37,6 +37,7 @@ class StageLocal(unittest.TestCase):
             self.assertIn(f"export PYTHONPATH={dest}/tree", env)
             self.assertIn(f"CUDA_CACHE_PATH={dest}/cache/cuda", env)
             self.assertIn(f"TORCHINDUCTOR_CACHE_DIR={dest}/cache/inductor", env)
+            self.assertIn("TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS:-8}", env)
 
 
 if __name__ == "__main__":
