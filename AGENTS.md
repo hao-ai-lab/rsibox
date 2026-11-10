@@ -46,9 +46,11 @@ then the iteration on top of it. That way each framework rule points to the PR t
   `python3 .github/review/review.py --pr <n> --apply`.
 - **Loop record:** a PR that changes `repos/<engine>/` is a loop iteration. Its description
   fills the "Loop record" section: engine, upstream PRs, function groups, the rule added,
-  overheads measured with their sources, receipts, and what is not verified. Write "none" when
-  a field does not apply; do not delete it. CI checks that every field has text, not that the
-  text is true.
+  overheads measured with their sources, receipts, what is not verified, and the three mandatory
+  GPU verification bullets (`Ideal full GPU test`, `Actual tests run`, and
+  `Why unrun GPU paths were skipped`). PRs that change `core/livelab/` must also include those
+  three GPU verification bullets. Write "none" when a field does not apply; do not delete it. CI
+  checks that every required field has text, not that the text is true.
 - **One iteration per PR.** Keep it small enough to review in one sitting. Stack PRs when one
   step depends on another.
 - **Stacks:** merge only when the PR's base is `main`; after merging check the files are on
@@ -86,6 +88,7 @@ verdict:
 - Stop after 3 review rounds, or sooner when a round brings only rejected or deferred findings.
   An agent never approves its own PR; it merges only what the owner asked it to merge.
 - Agent reviews post comments only (`.github/review/`), never approve or request changes.
+- For multi-agent delegation, the mandatory **Boss $\to$ Worker $\to$ `letitdo` Trajectory Auditor** verification triangle (auditing `transcript.jsonl` and raw step outputs before accepting any worker completion claim), model routing (`Claude Opus` vs. `Gemini 4`; never `Gemini 3.8`), variable-naming cross-checks, dependency-ordered PR bundling, P0/P1/P2 review comment triage, and two-tier empirical reporting, follow [`docs/process/developer_workflow.md`](docs/process/developer_workflow.md).
 
 ## Tests and CI
 

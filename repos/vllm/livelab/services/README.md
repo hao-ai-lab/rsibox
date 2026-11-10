@@ -1,0 +1,60 @@
+# Services: startup disaggregation and state holders for vLLM
+
+Each restart of `vllm serve` repeats three expensive phases that do not depend on the edited code: importing Python and vLLM (`~13–21 s`), loading and sharding weights onto the GPU (`~7–125 s`), and running a dummy forward pass to profile peak activation memory for the KV cache (`~2–79 s`).
+
+`repos/vllm/livelab/services/` disaggregates those phases into independent holders and a single launcher CLI (`engine.py`) so a worker or server restart reuses pre-imported modules (`zygote.py` + `zygote_refresh.py`), resident GPU weights (`weights.py`), and the measured KV-cache plan (`kvplan.py`), dropping Qwen3-8B TP1 eager startup from `51.85 s` to `7.37 s` (`repos/vllm/kb/costs.md`).
+
+## Contract
+
+- **One JSON line per command.** Every CLI entry point (`engine.py`, `weights.py`, `vllm_args.py`, `zygote.py`) writes a single JSON line to `stdout` on both success (`exit 0`) and refusal (`exit 2`, carrying structured `findings` or `finding`). Any log output printed by vLLM at import time is redirected to `stderr` or the server's `--log` file.
+- **Two parsers, zero flag overlap (`engine.py`, `vllm_args.py`).** `engine.py` parses only its own launcher flags (`--cache-root`, `--log`, `--weights`, `--kvplan`, `--fork`, `--zygote`, ...) with `allow_abbrev=False` and passes all remaining arguments verbatim to `vllm serve`. It reads back `model`, `port`, `host`, `tensor_parallel_size`, `load_format`, `enforce_eager`, `worker_cls`, and `model_loader_extra_config`—plus which of those were explicitly set in the argv or `--config` YAML—using vLLM's own `make_arg_parser(FlexibleArgumentParser())` (`vllm_args.py`), either inside the zygote (`~0.2 s`) or directly (`~5 s`).
+- **Pre-flight checks advise before starting (`engine.py`).** Missing model (`vllm_model`), rejected vLLM flags (`vllm_args`), non-local host (`vllm_host`), busy port (`port_in_use`), or conflicts between holder flags and explicit vLLM flags (`weights_load_format`, `weights_fallback`, `weights_socket_dir`, `kvplan_worker_cls`) return a finding and `exit 2` without starting a server.
+- **Zygote and module refresh (`zygote.py`, `zygote_refresh.py`).** `zygote.py` installs `core/livelab/forksafe.py` (answering `get_device_capability` and `current_device` via NVML so import-time GPU probes in FlashInfer/CuTe DSL do not call `cuInit`), imports vLLM and its heavy dependencies, builds the static import graph of `vllm.*`, freezes the GC heap (`gc.freeze()`), and listens on a Unix socket. On a `fork` or `parse` request, it checks for environment drift (`env`) and modified source files (`_changed`). Edited Python files under `FASTRSI_ZYGOTE_REFRESH` (default `vllm`) are refreshed in the forked child (`zygote_refresh.py`): the child drops the edited modules and their transitive importers from `sys.modules` (or all of `vllm` when `> 100` modules are reached), clears their `CustomOp` registry entries (`forget_registrations`), and guards `torch.library.Library.define` / `impl` (`op_redefine_guard`) so identical op schemas re-register cleanly while schema changes raise with the op's name. Modified `.so` extensions or files outside the refresh prefix stay a `stale` finding.
+- **Resident GPU weights (`weights.py`).** Wraps `vllm preload` (the per-GPU Unix-socket weight cache daemon) and probes every rank's expected socket path (`vllm_weight_cache_<md5(gpu_uuid)>.sock`) before an `ipc_cache` start. If any rank's daemon socket does not answer (or if `nvidia-smi` cannot resolve the engine's GPU UUIDs), `engine.py` exits immediately with a `weights_daemon` finding instead of hanging `300 s` (`state_timeout_s`). `loader_config()` sets `"fallback": False` so an `ipc_cache` engine never falls back to reading the checkpoint from disk silently. If `weights.py start` fails or times out before logging `READY`, it kills the daemon's process group so a failed daemon never leaks GPU memory.
+- **Cached KV-cache plan (`kvplan.py`).** Installed via `--worker-cls kvplan.KVPlanWorker` with `FASTRSI_KVPLAN_DIR` set. Wraps `Worker.determine_available_memory` (startup step 4c): on a cache miss, runs the profile forward pass once and atomically saves `available_kv_cache_memory_bytes`, `total_consumed`, `peak_activation_memory`, `cudagraph_memory_estimate`, `init_free`, and `WorkspaceManager` lane sizes under a key hashed from `(vllm_version, config_hash, load_format, rank, world_size, gpu_name, gpu_total, requested_memory, FASTRSI_KVPLAN_SALT)`. On a subsequent start with the same key and at least `init_free` free memory on every rank (`all_agree` via `all_reduce(MIN)`), restores those attributes and grows the workspace lanes in `~5–6 ms` without running the profile forward pass. Non-positive KV sizes (`<= 0`) are never recorded (`kvplan_not_recorded`) or reused (`kvplan_unusable`).
+
+## Files
+
+| File | What it owns |
+|---|---|
+| [`engine.py`](engine.py) | Launcher CLI (`start`, `zygote`): cache directory layout (`CACHE_LAYOUT`), `engine_env` (`CUTE_DSL_ARCH`, `VLLM_WORKER_MULTIPROC_METHOD=fork`), argv validation (`argv_findings`), holder preflight, `/health` polling (`wait_healthy`), and `fork_check`. |
+| [`vllm_args.py`](vllm_args.py) | Parses a `vllm serve` argv with vLLM's own `FlexibleArgumentParser` and detects which fields were explicitly provided in the argv or `--config` file. |
+| [`zygote.py`](zygote.py) | Pre-import server (`serve`, `ping`, `request`, `parse`, `check`): installs `forksafe.py`, verifies CUDA is uninitialized, snapshots module mtimes/sizes, checks `env` and `stale` findings, and forks `vllm serve` children. |
+| [`zygote_refresh.py`](zygote_refresh.py) | Static AST import graph (`import_graph`, `dependents`, `plan`), `sys.modules` + package attribute purge (`purge`), `CustomOp` registry cleanup (`forget_registrations`), and `torch.library` re-registration guard (`op_redefine_guard`). |
+| [`weights.py`](weights.py) | Weight-cache daemon manager (`start`, `probe`): NVML GPU UUID to socket-path mapping (`socket_paths`), socket connectivity probe, `weights_daemon` finding, `loader_config` (`fallback: False`), and session cleanup on startup failure. |
+| [`kvplan.py`](kvplan.py) | `KVPlanWorker` (`determine_available_memory` wrapper): config + load-format identity (`ident`), atomic plan persistence, multi-rank agreement (`all_agree`), workspace lane growth (`grow_workspace`), and `kvplan_*` findings. |
+
+## Usage
+
+```bash
+# 1. Start the resident weight cache daemon once (holds weights on GPU via CUDA IPC)
+python3 repos/vllm/livelab/services/weights.py start \
+  --model Qwen/Qwen3-8B --socket-dir /dev/shm/w --log /dev/shm/preload.log
+
+# 2. Start the pre-imported zygote server once (with the same cache root and fork settings)
+python3 repos/vllm/livelab/services/engine.py zygote \
+  --zygote /dev/shm/zyg.sock --cache-root /dev/shm/cache --log /dev/shm/zyg.log --fork --kvplan
+
+# 3. Fork `vllm serve` from the zygote, mapping IPC weights and recording/reusing the KV plan
+python3 repos/vllm/livelab/services/engine.py start \
+  --zygote /dev/shm/zyg.sock --fork --kvplan --weights --weights-socket-dir /dev/shm/w \
+  --cache-root /dev/shm/cache --log /dev/shm/serve.log \
+  Qwen/Qwen3-8B --port 8000 --enforce-eager
+```
+
+## Golden tests
+
+From the repo root (CPU only, runs in CI via `.github/workflows/cpu-tests.yml`; `test_vllm_args.py` and the real-vLLM case in `test_zygote_refresh.py` also run when `FASTRSI_VLLM_PYTHON` points to a vLLM venv):
+
+```bash
+python3 -m pytest repos/vllm/livelab/services/ -v
+```
+
+| Test file | Pain points covered |
+|---|---|
+| [`test_engine.py`](test_engine.py) | Busy port refused before start (`port_in_use`); zombie server exit detected immediately by `wait_healthy`; verbatim argv pass-through; missing model (`vllm_model`), bad flag (`vllm_args`), and non-local `--host` (`vllm_host`) refused as one JSON line; zygote `env` and `stale` checks; `zygote.parse` refreshing edited CLI arg definitions and catching syntax errors (`zygote_parse`); `fork_check` detecting vLLM's `spawn` fallback. |
+| [`test_vllm_args.py`](test_vllm_args.py) | Positional `model_tag` vs. `--model`; `-tp` / `--tensor-parallel-size` / `--tensor_parallel_size` aliases; explicit flag detection even when equal to vLLM's default (`--load-format auto`); `--config` YAML parsing; zero flag overlap between launcher and vLLM; zero CUDA initialization during parsing. |
+| [`test_zygote_refresh.py`](test_zygote_refresh.py) | Transitive importer purge in forked child while sparing unrelated modules; `.so` extension edit blocked; `torch.library` op re-definition allowed for identical schema and refused on schema change; `CustomOp.register` entries forgotten for refreshed modules only (`#61323`). |
+| [`test_zygote_sock.py`](test_zygote_sock.py) | Socket path exceeding `AF_UNIX` 107-byte limit rejected before minutes of imports; `wait_ready` detecting an unreaped zombie child immediately. |
+| [`test_weights.py`](test_weights.py) | Missing or wrong-GPU daemon socket refused in `< 1 s` (`weights_daemon`) instead of waiting `300 s`; `--weights` enforcing `--load-format ipc_cache` and `"fallback": false`; conflicting `--load-format` (`weights_load_format`), fallback enabled (`weights_fallback`), or mismatched socket dirs (`weights_socket_dir`) refused; failed daemon killed on timeout/traceback. |
+| [`test_kvplan.py`](test_kvplan.py) | Second start with matching config skips `determine_available_memory` and restores KV attributes; config drift (`kvplan_mismatch`) and lower free memory (`kvplan_free_memory`) reported and re-profiled; non-positive KV measurement (`<= 0`) neither recorded (`kvplan_not_recorded`) nor reused (`kvplan_unusable`); multi-rank disagreement falls back to profiling on all ranks (`kvplan_no_agreement`); `--kvplan` conflicts (`kvplan_worker_cls`) refused. |
