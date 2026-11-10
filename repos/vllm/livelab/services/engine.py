@@ -32,19 +32,20 @@ Contract:
 - `reconfigure --pid PID` reads the running engine's recorded `vllm serve` argv and launcher
   settings from `<cache-root>/engines/<PID>.json` (or `/proc/<PID>/cmdline`), applies the given
   flag overrides via `vllm_args.override()`, and classifies the delta into 4 tiers (see
-  `repos/vllm/kb/reconfiguration_matrix.md`):
-  - `in_process_instant` (< 100 ms): scheduler/admission/KV-policy updates (`--max-num-seqs`,
-    `--max-num-batched-tokens`, `--max-model-len`, `--enable-prefix-caching`, ...) applied in-place
-    without stopping PID.
-  - `in_process_graph` (0.5-2 s): eager/CUDAGraph dispatch toggle (`--enforce-eager`) or CUDA graph
-    recapture (`--cudagraph-capture-sizes`, `--compilation-config`, ...) applied in-place without
-    stopping PID.
-  - `warm_weights_ipc` (7-20 s): deep KV/worker init flags (`--gpu-memory-utilization`,
-    `--block-size`, `--swap-space`, or `--reconfigure-restart`) that restart the worker while
-    resident `weights.py` CUDA IPC weights stay valid (zero disk reload).
-  - `live_reshard_or_cold`: `WeightCacheKey` sharding (`subtier='tier2a_reshard'`) or weight-format
-    (`subtier='tier2b_weight_format'`) changes, refused before stopping PID unless
-    `--weights-accept-reconfig` is given.
+  `repos/vllm/kb/reconfiguration_matrix.md`), then applies it one of two ways and reports which
+  (`reconfig.path`):
+  - `in_process_live`: every changed flag has a live consumer (live_reconfig.LIVE_FIELDS:
+    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value). The launcher
+    sends it to the engine core's live agent (started by engine.py in every engine it starts),
+    which sets the scheduler's limits between two steps and reads them back. PID keeps
+    running; only an acknowledged change updates the recorded state.
+  - `restart`: everything else (`--max-model-len`, `--enable-prefix-caching`, `--enforce-eager`,
+    CUDA graph flags, `--gpu-memory-utilization`, ...), and any live change the agent does not
+    acknowledge: PID is stopped (verified) and the engine starts with the new argv; the
+    report's `restart_reason` says why it was not live. With `--weights`, resident CUDA IPC
+    weights make the restart warm (zero disk reload).
+  Tier-2 deltas (`WeightCacheKey` sharding, `subtier='tier2a_reshard'`, or weight format,
+  `'tier2b_weight_format'`) are refused before stopping PID unless `--weights-accept-reconfig`.
   Every preflight check runs BEFORE mutating or stopping PID; a refusal exits 2 and leaves PID
   running untouched.
 - engine_env() is the one environment of every engine process. The zygote is started with it
@@ -84,11 +85,13 @@ adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune 
 mode are not built. Pass their vLLM flags in the argv or set their variables in the
 environment.
 """
-import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request
+import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kvplan, vllm_args, weights, zygote  # noqa: E402
+import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
+
+LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
 KVPLAN_WORKER = "kvplan.KVPlanWorker"
 
@@ -114,6 +117,13 @@ def engine_env(a, base=None):
     """The environment every engine process runs with, and the zygote's (start_zygote)."""
     env = dict(os.environ if base is None else base)
     env.update(cache_env(a.cache_root))
+    # The live reconfiguration agent (live_reconfig.py) in the engine core: its sitecustomize
+    # goes on the path ahead of site-packages, and each launch gets its own control folder.
+    if not getattr(a, "live_dir", None):
+        a.live_dir = str(Path(a.cache_root).resolve() / "engines" / "live" / uuid.uuid4().hex)
+    env["FASTRSI_LIVE_RECONFIG_DIR"] = a.live_dir
+    paths = [p for p in (env.get("PYTHONPATH") or "").split(os.pathsep) if p and p != LIVE_SITE]
+    env["PYTHONPATH"] = os.pathsep.join([LIVE_SITE] + paths)
     if a.kvplan is not None:
         # KVPlanWorker is imported by name in every worker: this folder goes on the path.
         here = str(Path(__file__).resolve().parent)
@@ -380,6 +390,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
         "vargv": list(vllm_argv),
         "cmd": list(command),
         "vllm_args": parsed_vllm,
+        "live_dir": getattr(launcher_args, "live_dir", None),
         "launcher": {
             "vllm": launcher_args.vllm,
             "weights": bool(launcher_args.weights),
@@ -497,47 +508,70 @@ def _descendants(pid):
     return descendants
 
 
-def stop_engine(pid, port=None, grace=10.0):
-    """Stop engine `pid` and its recorded descendants (using killpg only when `pid` leads its
-    own process group), waiting up to `grace` s before SIGKILL and waiting for `port` to close."""
-    start_time = time.time()
+def _start_time(pid):
+    """The process start time (clock ticks since boot, /proc/<pid>/stat field 22), or None when
+    pid is gone. A pid with another start time is another process (pid reuse)."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _same_process(pid, start_time):
+    return start_time is not None and _start_time(pid) == start_time
+
+
+def _signal_if_same(pid, start_time, sig):
+    """Signal pid only if it is still the process recorded with start_time."""
+    if not _same_process(pid, start_time):
+        return False
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0):
+    """Stop engine `pid` and its descendants: SIGTERM, up to `grace` s, then SIGKILL, up to
+    `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
+    signalled only while it still has that start time, so a reused pid is never hit.
+    Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
+    recorded process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
+    t0 = time.time()
     if zygote._exited(pid):
-        return {"stopped": False, "seconds": 0.0}
-    descendant_pids = _descendants(pid)
+        return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
+                "note": f"pid {pid} was not running"}
+    procs = {p: _start_time(p) for p in [pid] + _descendants(pid)}
+    procs = {p: st for p, st in procs.items() if st is not None}
+
+    def alive():
+        return sorted(p for p, st in procs.items() if _same_process(p, st) and not zygote._exited(p))
+
+    def done():
+        return not alive() and (port is None or not port_in_use(port))
+
     try:
-        if os.getpgid(pid) == pid:
+        if os.getpgid(pid) == pid and _same_process(pid, procs.get(pid)):
             os.killpg(pid, signal.SIGTERM)
-        else:
-            os.kill(pid, signal.SIGTERM)
-            for child_pid in descendant_pids:
-                try:
-                    os.kill(child_pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
     except ProcessLookupError:
         pass
-    deadline = start_time + grace
-    while time.time() < deadline:
-        if zygote._exited(pid) and all(zygote._exited(child_pid) for child_pid in descendant_pids):
-            if port is None or not port_in_use(port):
-                return {"stopped": True, "seconds": round(time.time() - start_time, 3)}
+    for p, st in procs.items():
+        _signal_if_same(p, st, signal.SIGTERM)
+    deadline = t0 + grace
+    while time.time() < deadline and not done():
         time.sleep(0.05)
-    try:
-        if not zygote._exited(pid) and os.getpgid(pid) == pid:
-            os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    for target_pid in [pid] + descendant_pids:
-        if not zygote._exited(target_pid):
-            try:
-                os.kill(target_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-    while time.time() < deadline + 2.0:
-        if zygote._exited(pid) and (port is None or not port_in_use(port)):
-            break
-        time.sleep(0.05)
-    return {"stopped": True, "seconds": round(time.time() - start_time, 3)}
+    if not done():
+        for p in alive():
+            _signal_if_same(p, procs[p], signal.SIGKILL)
+        deadline = time.time() + kill_wait
+        while time.time() < deadline and not done():
+            time.sleep(0.05)
+    left = alive()
+    port_open = port_in_use(port) if port is not None else None
+    return {"stopped": not left and not port_open, "seconds": round(time.time() - t0, 3),
+            "alive": left, "port_open": port_open}
 
 
 def _launch_process(launcher_args, vllm_argv, parsed_vllm, env, preflight_report,
@@ -649,43 +683,61 @@ def _inherit_launcher(launcher_args, saved_launcher, raw_argv):
         launcher_args.zygote = saved_launcher["zygote"]
 
 
-def apply_in_process_reconfig(launcher_args, new_vargv, new_parsed, preflight_report, reconfig):
-    """Apply an `in_process_instant` or `in_process_graph` reconfiguration to a running engine
-    without stopping or restarting `launcher_args.pid`. Writes the live control actions to
-    `<cache-root>/engines/<pid>.reconfig.json`, updates the recorded engine state, and returns
-    the live reconfiguration report."""
-    t_apply = time.time()
+LIVE_ACK_TIMEOUT_S = 15.0
+
+
+def live_reconfig_plan(state, reconfig):
+    """Can this delta be applied inside the running engine? (values, None) when the engine's
+    live agent is up and every changed field is one it can set within the engine's boot limits;
+    else (None, reason). Pure checks: nothing is sent."""
+    if not reconfig or not reconfig.get("in_process") or not reconfig.get("changed"):
+        return None, "the delta has fields without a live consumer"
+    values = {f: new for f, (_, new) in reconfig["changed"].items()}
+    live_dir = state.get("live_dir")
+    ready = live_reconfig.read_ready(live_dir) if live_dir else None
+    if not ready:
+        return None, ("no live agent answered for this engine (started without engine.py's "
+                      "live agent, or it failed to start: see the engine log)")
+    if ready.get("api_pid") != state.get("pid"):
+        return None, (f"the live agent belongs to api pid {ready.get('api_pid')}, not "
+                      f"{state.get('pid')}")
+    if zygote._exited(int(ready.get("pid") or 0)):
+        return None, f"the live agent's engine core (pid {ready.get('pid')}) is gone"
+    problems = live_reconfig.check_values(values, ready.get("boot") or {})
+    if problems:
+        return None, "; ".join(problems)
+    return values, None
+
+
+def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, preflight_report,
+                              reconfig, values):
+    """Apply `values` inside the running engine through its live agent and wait for the
+    agent's acknowledgement. Only an acknowledged change updates the recorded engine state.
+    Returns (report, None) on success, (None, reason) when the engine did not confirm."""
+    t0 = time.perf_counter()
     pid = launcher_args.pid
+    ack = live_reconfig.request(state["live_dir"], "set", timeout=LIVE_ACK_TIMEOUT_S,
+                                values=values)
+    apply_s = round(time.perf_counter() - t0, 6)
+    if not ack.get("ok"):
+        return None, f"live agent refused or did not answer: {ack.get('error')}"
+    after = ack.get("after") or {}
+    confirmed = (("max_num_seqs" not in values
+                  or after.get("target_max_num_seqs") == values["max_num_seqs"])
+                 and ("max_num_batched_tokens" not in values
+                      or after.get("max_num_scheduled_tokens") == values["max_num_batched_tokens"]))
+    if not confirmed:
+        return None, f"live agent answered but the scheduler reads back {after}"
     command = serve_cmd(launcher_args, new_vargv, new_parsed)
     port = new_parsed["args"]["port"]
-    reconfig_path = _engine_state_path(launcher_args.cache_root, pid).with_suffix(".reconfig.json")
-    reconfig_path.parent.mkdir(parents=True, exist_ok=True)
-    control_payload = {
-        "pid": pid,
-        "timestamp": t_apply,
-        "tier": reconfig["tier"],
-        "subtier": reconfig["subtier"],
-        "changed": reconfig["changed"],
-        "control_actions": reconfig["control_actions"],
-    }
-    reconfig_path.write_text(json.dumps(control_payload))
+    launcher_args.live_dir = state["live_dir"]
     save_engine_state(launcher_args, pid, port, new_vargv, command, new_parsed)
-    reconfig_report = {
-        **reconfig,
-        "restarted": False,
-        "replaced_pid": None,
-        "apply_seconds": round(time.time() - t_apply, 4),
-        "control_file": str(reconfig_path),
-    }
     return {
-        "pid": pid,
-        "cmd": command,
-        "t_launch": t_apply,
-        "port": port,
-        "vllm_args": new_parsed,
-        **preflight_report,
-        "reconfig": reconfig_report,
-    }
+        "pid": pid, "cmd": command, "t_launch": time.time(), "port": port,
+        "vllm_args": new_parsed, **preflight_report,
+        "reconfig": {**reconfig, "path": "in_process_live", "restarted": False,
+                     "replaced_pid": None, "apply_seconds": apply_s, "live_ack": ack},
+    }, None
 
 
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
@@ -697,10 +749,10 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     3. Run all preflight checks (vLLM parser, WeightCacheKey compatibility, daemon socket probe,
        zygote check, port check) BEFORE mutating or stopping `launcher_args.pid`. Any refusal
        exits 2 with `launcher_args.pid` still running.
-    4. For `in_process_instant` and `in_process_graph` (when port is unchanged and
-       `--reconfigure-restart` is not set), apply the control actions in-process in < 1 s without
-       stopping `launcher_args.pid`. For `warm_weights_ipc` (or `--reconfigure-restart`), stop
-       `launcher_args.pid` cleanly and launch the reconfigured engine with resident IPC weights."""
+    4. Apply live (`path: in_process_live`) when the engine's live agent can set every changed
+       flag and acknowledges it; otherwise stop `launcher_args.pid` (verified: a stop that
+       leaves a process or the port behind is a finding, exit 2, nothing started) and launch
+       the reconfigured engine (`path: restart`, `restart_reason`)."""
     if not launcher_args.pid or zygote._exited(launcher_args.pid):
         print(json.dumps({"findings": [{
             "check": "reconfigure_pid",
@@ -748,12 +800,15 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         sys.exit(2)
     old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
     new_port = new_parsed["args"]["port"]
-    can_apply_in_process = (
-        reconfig is not None
-        and reconfig.get("in_process")
-        and new_port == old_port
-        and not getattr(launcher_args, "reconfigure_restart", False)
-    )
+    if reconfig is not None and reconfig.get("tier") == "noop":
+        print(json.dumps({"reconfig": {**reconfig, "path": "noop", "restarted": False},
+                          "pid": launcher_args.pid, "note": "nothing changed"}))
+        sys.exit(0)
+    live_values, live_reason = (None, "--reconfigure-restart given") if getattr(
+        launcher_args, "reconfigure_restart", False) else (
+        (None, "the port changes") if new_port != old_port else
+        live_reconfig_plan(state, reconfig))
+    can_apply_in_process = live_values is not None
     if launcher_args.zygote and not can_apply_in_process:
         zygote_reply = zygote.check(launcher_args.zygote, env, accept=_accept(launcher_args))
         if not zygote_reply.get("ok"):
@@ -779,12 +834,33 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             "reconfig": reconfig, "note": "not started; old engine left running"}))
         sys.exit(2)
     if can_apply_in_process:
-        return apply_in_process_reconfig(
-            launcher_args, new_vargv, new_parsed, preflight_report, reconfig
-        )
+        report, live_reason = apply_in_process_reconfig(
+            launcher_args, state, new_vargv, new_parsed, preflight_report, reconfig,
+            live_values)
+        if report is not None:
+            return report
+        if launcher_args.zygote:   # the restart below forks: check before stopping the engine
+            zygote_reply = zygote.check(launcher_args.zygote, env, accept=_accept(launcher_args))
+            if not zygote_reply.get("ok"):
+                print(json.dumps({"zygote_findings": zygote_reply.get("findings"),
+                                  "error": zygote_reply.get("error"), "reconfig": reconfig,
+                                  "live_fallback_reason": live_reason,
+                                  "note": "not started; old engine left running"}))
+                sys.exit(2)
+    t_stop = time.perf_counter()
     stop_info = stop_engine(launcher_args.pid, port=old_port)
-    reconfig_report = {**(reconfig or {}), "restarted": True, "replaced_pid": launcher_args.pid,
-                       "stop_seconds": stop_info["seconds"]}
+    if not stop_info["stopped"]:
+        print(json.dumps({"findings": [{
+            "check": "stop_engine", "observed": stop_info,
+            "expected": "every process of the old engine gone and its port closed",
+            "why": "a new engine next to a live old one would share its GPUs and port",
+            "actions": ["stop the listed pids yourself, then start the engine"]}],
+            "reconfig": reconfig, "note": "not started; old engine may still be running"}))
+        sys.exit(2)
+    reconfig_report = {**(reconfig or {}), "path": "restart", "restarted": True,
+                       "replaced_pid": launcher_args.pid,
+                       "restart_reason": live_reason,
+                       "stop_seconds": round(time.perf_counter() - t_stop, 6)}
     return _launch_process(
         launcher_args,
         new_vargv,
@@ -823,7 +899,7 @@ def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
     while time.time() - t0 < timeout:
         if zygote._exited(pid):
             return None
-        text = open(log, errors="replace").read() if os.path.exists(log) else ""
+        text = open(log, errors="replace").read() if log and os.path.exists(log) else ""
         if any(s in text for s in FAILED):
             return None
         try:
@@ -926,13 +1002,16 @@ def main(argv=None):
         if parsed_args.cmd == "reconfigure"
         else start(parsed_args, vargv)
     )
+    live = (result_payload.get("reconfig") or {}).get("path") == "in_process_live"
+    # An in-process change starts nothing: --log is not this engine's fresh log (an old
+    # traceback there would read as a failed start), so only /health is checked.
     result_payload["healthy_after_s"] = wait_healthy(
-        result_payload["port"], result_payload["pid"], parsed_args.log,
+        result_payload["port"], result_payload["pid"], None if live else parsed_args.log,
         timeout=parsed_args.timeout, t0=result_payload["t_launch"],
     )
-    if parsed_args.kvplan is not None:
+    if parsed_args.kvplan is not None and not live:
         result_payload["kvplan"] = kvplan_report(parsed_args.log)
-    if parsed_args.fork or parsed_args.zygote:
+    if (parsed_args.fork or parsed_args.zygote) and not live:
         result_payload["fork_check"] = fork_check(parsed_args.log)
         result_payload["fork_finding"] = fork_finding(result_payload["fork_check"])
     print(json.dumps(result_payload))

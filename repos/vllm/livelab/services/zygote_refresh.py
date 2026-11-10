@@ -153,9 +153,10 @@ def _norm_schema(schema):
 def op_redefine_guard(report=None):
     """While re-importing refreshed modules: `Library.define` of an op that already exists with
     the same schema is skipped (its implementation is still replaced by `Library.impl`, which
-    overrides); a changed schema raises with the op's name, since a running process cannot
-    change an op's signature. `report(event)` gets one dict per skipped define, replaced
-    implementation and re-registered opaque type. Use it through guard_for()."""
+    overrides, and its fake impl by `Library._register_fake` with allow_override); a changed
+    schema raises with the op's name, since a running process cannot change an op's
+    signature. `report(event)` gets one dict per skipped define, replaced implementation, replaced
+    fake impl and re-registered opaque type. Use it through guard_for()."""
     try:
         from torch.library import Library
         import torch
@@ -204,6 +205,25 @@ def op_redefine_guard(report=None):
             _emit({"event": "zygote_op_impl_replaced", "op": f"{self.ns}::{op_name}",
                    "dispatch_key": kw.get("dispatch_key", args[1] if len(args) > 1 else "")})
         return orig_impl(self, op_name, *args, **kw)
+
+    # vLLM's direct_register_custom_op also registers a fake (meta) impl through
+    # Library._register_fake, which refuses a second one ("already has an fake impl
+    # registered"). Same rule as impl: a re-registration of a skipped define replaces it.
+    orig_fake = getattr(Library, "_register_fake", None)
+    can_override_fake = (orig_fake is not None and "allow_override"
+                         in inspect.signature(orig_fake).parameters)
+
+    def register_fake(self, op_name, fn, _stacklevel=1, **kw):
+        op = op_name.split(".", 1)[0] if isinstance(op_name, str) else None
+        if (self.ns, op) in skipped:
+            if can_override_fake:
+                kw["allow_override"] = True
+            else:   # older torch: drop the old fake impl first
+                entry = torch._library.simple_registry.singleton.find(f"{self.ns}::{op_name}")
+                if entry.fake_impl.kernel is not None:
+                    entry.fake_impl.kernel = None
+            _emit({"event": "zygote_op_fake_replaced", "op": f"{self.ns}::{op_name}"})
+        return orig_fake(self, op_name, fn, _stacklevel + 1, **kw)
     orig_opaque = getattr(torch._C, "_register_opaque_type", None)
 
     def register_opaque(name, *args, **kw):
@@ -214,12 +234,16 @@ def op_redefine_guard(report=None):
                 raise
             _emit({"event": "zygote_opaque_reregistered", "type": name})
     Library.define, Library.impl = define, impl
+    if orig_fake is not None:
+        Library._register_fake = register_fake
     if orig_opaque is not None:
         torch._C._register_opaque_type = register_opaque
     try:
         yield
     finally:
         Library.define, Library.impl = orig, orig_impl
+        if orig_fake is not None:
+            Library._register_fake = orig_fake
         if orig_opaque is not None:
             torch._C._register_opaque_type = orig_opaque
 

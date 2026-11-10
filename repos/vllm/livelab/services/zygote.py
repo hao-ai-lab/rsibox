@@ -56,7 +56,8 @@ START_ENV = dict(os.environ)
 # Keys that may differ between the zygote's and the request's environment: shell bookkeeping,
 # the cluster harness's per-task ids, and the profiler's per-run output settings (re-read
 # after fork).
-VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "FASTRSI_PROF_DIR", "FASTRSI_PROF_T0"}
+VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "FASTRSI_PROF_DIR", "FASTRSI_PROF_T0",
+            "FASTRSI_LIVE_RECONFIG_DIR"}   # engine.py: one live-agent folder per launch
 VOLATILE_PREFIXES = ("RAY_",)
 
 # What `vllm serve` imports before it parses its arguments (vllm/entrypoints/cli/main.py), and

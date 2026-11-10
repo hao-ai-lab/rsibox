@@ -220,7 +220,16 @@ def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
     }
     instant_delta = vllm_args.classify_reconfig(base_parsed, instant_parsed)
     assert instant_delta["tier"] == "in_process_instant"
-    assert instant_delta["in_process"] is True and instant_delta["weights_compatible"] is True
+    # max_model_len has no live consumer in the engine: the delta restarts (honestly).
+    assert instant_delta["in_process"] is False and instant_delta["weights_compatible"] is True
+    assert instant_delta["live_fields"] == ["max_num_batched_tokens"]
+    live_only = {**base_parsed, "args": {**base_parsed["args"], "max_num_seqs": 4,
+                                         "max_num_batched_tokens": 2048}}
+    live_delta = vllm_args.classify_reconfig(base_parsed, live_only)
+    assert live_delta["in_process"] is True
+    assert live_delta["control_actions"] == [{
+        "action": "set_scheduler_limits", "target": "EngineCore.scheduler (live_reconfig)",
+        "fields": {"max_num_seqs": 4, "max_num_batched_tokens": 2048}}]
     assert set(instant_delta["in_process_instant_fields"]) == {
         "max_model_len", "max_num_batched_tokens",
     }
@@ -231,7 +240,7 @@ def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
     }
     graph_delta = vllm_args.classify_reconfig(base_parsed, graph_parsed)
     assert graph_delta["tier"] == "in_process_graph"
-    assert graph_delta["in_process"] is True and graph_delta["weights_compatible"] is True
+    assert graph_delta["in_process"] is False and graph_delta["weights_compatible"] is True
     assert graph_delta["in_process_graph_fields"] == ["enforce_eager"]
 
     warm_ipc_parsed = {

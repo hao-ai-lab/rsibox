@@ -6,10 +6,14 @@ flags: the launcher passes the argv through verbatim and only reads back what it
               or {"ok": False, "error": "<vLLM's argparse message>"}
   override(base_argv, patch_argv) -> merged `vllm serve` argv with patch flags overriding base
   classify_reconfig(old_v, new_v) -> 4-tier classification (see kb/reconfiguration_matrix.md):
-      - in_process_instant (< 100 ms scheduler/runtime config mutation, no process restart)
-      - in_process_graph   (0.5-2 s live dispatch toggle or CUDA graph recapture, no process restart)
+      - in_process_instant (scheduler/admission/KV-policy flags)
+      - in_process_graph   (eager/CUDA graph flags)
       - warm_weights_ipc   (7-20 s worker restart with WeightHolder CUDA IPC, zero disk read)
       - live_reshard_or_cold (WeightCacheKey sharding or weight-format change)
+    The tier says what the delta touches. `in_process` says whether it can be applied inside the
+    running engine today: True only when every changed field has a live consumer
+    (live_reconfig.LIVE_FIELDS: max_num_seqs, max_num_batched_tokens). Every other delta,
+    including all of in_process_graph, is applied by a restart (engine.py says which path ran).
 
 Contract:
 - The parser is `make_arg_parser(FlexibleArgumentParser())`, the one `vllm serve` builds, so
@@ -25,7 +29,10 @@ Contract:
   (test_vllm_args.py checks this in a fresh process). Cost on our host: import 4.7-4.9 s, build
   0.16 s, parse 1 ms. The zygote has these imported already (zygote.py, request "parse").
 """
-import argparse, contextlib, dataclasses, enum, io, sys, time
+import argparse, contextlib, dataclasses, enum, io, os, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from live_reconfig import LIVE_FIELDS  # noqa: E402  (no vLLM import: cheap)
 
 # Tier 2a: flags that change how weights are sharded across GPUs in WeightCacheKey.
 RESHARD_FIELDS = (
@@ -51,8 +58,8 @@ WEIGHT_FORMAT_FIELDS = (
     "linear_backend_per_quant",
 )
 
-# Tier 1A (in_process_instant, < 100 ms): scheduler and admission flags mutated in-process at the
-# step gap without restarting workers or recapturing CUDA graphs.
+# Tier 1A (in_process_instant): scheduler and admission flags. Only LIVE_FIELDS have a consumer
+# inside the engine (live_reconfig.py); the others restart.
 IN_PROCESS_INSTANT_FIELDS = (
     "max_num_seqs",
     "max_num_batched_tokens",
@@ -63,8 +70,7 @@ IN_PROCESS_INSTANT_FIELDS = (
     "async_scheduling",
 )
 
-# Tier 1B (in_process_graph, 0.5-2 s): execution/compilation flags applied in-process by toggling
-# eager vs CUDAGraphWrapper dispatch or recapturing CUDA graphs via RecaptureCoordinator.
+# Tier 1B (in_process_graph): execution/compilation flags. No live consumer: they restart.
 IN_PROCESS_GRAPH_FIELDS = (
     "enforce_eager",
     "cudagraph_capture_sizes",
@@ -303,62 +309,22 @@ def override(base_argv, patch_argv):
     return merged_argv
 
 
-def _build_control_actions(changed, new_args, instant_fields, graph_fields):
-    """Build the ordered list of in-process control actions for `in_process_instant` and
-    `in_process_graph` reconfigurations (see `repos/vllm/kb/reconfiguration_matrix.md`)."""
-    actions = []
-    sched_fields = [
-        field_name for field_name in instant_fields
-        if field_name in ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy",
-                          "enable_chunked_prefill", "async_scheduling")
-    ]
-    if sched_fields:
-        actions.append({
-            "action": "mutate_scheduler_config",
-            "target": "EngineCore.scheduler.scheduler_config",
-            "fields": {field_name: new_args.get(field_name) for field_name in sched_fields},
-            "target_latency_s": 0.05,
-        })
-    if "max_model_len" in instant_fields:
-        actions.append({
-            "action": "mutate_max_model_len",
-            "target": "EngineCore.model_config.max_model_len + Scheduler.max_model_len",
-            "fields": {"max_model_len": new_args.get("max_model_len")},
-            "target_latency_s": 0.05,
-        })
-    if "enable_prefix_caching" in instant_fields:
-        actions.append({
-            "action": "toggle_prefix_caching",
-            "target": "KVCacheManager.enable_caching",
-            "fields": {"enable_prefix_caching": new_args.get("enable_prefix_caching")},
-            "target_latency_s": 0.05,
-        })
-    if "enforce_eager" in graph_fields:
-        actions.append({
-            "action": "toggle_cudagraph_dispatch",
-            "target": "GPUModelRunner.compilation_config.cudagraph_mode",
-            "fields": {"enforce_eager": new_args.get("enforce_eager")},
-            "target_latency_s": 0.5,
-        })
-    recapture_fields = [
-        field_name for field_name in graph_fields if field_name != "enforce_eager"
-    ]
-    if recapture_fields:
-        actions.append({
-            "action": "recapture_cudagraphs",
-            "target": "RecaptureCoordinator.recapture",
-            "fields": {field_name: new_args.get(field_name) for field_name in recapture_fields},
-            "target_latency_s": 1.5,
-        })
-    return actions
+def _build_control_actions(changed, new_args):
+    """The live control actions for a delta whose every field has a consumer (LIVE_FIELDS):
+    one `set_scheduler_limits` that live_reconfig.py applies on the engine loop thread."""
+    fields = {f: new_args.get(f) for f in LIVE_FIELDS if f in changed}
+    if not fields or any(f not in LIVE_FIELDS for f in changed):
+        return []
+    return [{"action": "set_scheduler_limits", "target": "EngineCore.scheduler (live_reconfig)",
+             "fields": fields}]
 
 
 def classify_reconfig(old_parsed, new_parsed):
     """Classify the config delta between two parsed `vllm serve` argvs (`old_parsed`, `new_parsed`
     from `parse()`) into 4 operational tiers (documented in `repos/vllm/kb/reconfiguration_matrix.md`):
-    - `in_process_instant` (< 100 ms): scheduler/admission/KV-policy mutation in-process (`in_process=True`).
-    - `in_process_graph` (0.5-2 s): eager/CUDAGraph dispatch toggle or graph recapture in-process
-      (`in_process=True`).
+    - `in_process_instant`: scheduler/admission/KV-policy flags (`in_process=True` only when every
+      changed field is in LIVE_FIELDS).
+    - `in_process_graph`: eager/CUDA graph flags (`in_process=False`: no live consumer).
     - `warm_weights_ipc` (7-20 s): worker restart with resident `WeightHolder` CUDA IPC weights,
       zero disk reload (`in_process=False`, `weights_compatible=True`).
     - `live_reshard_or_cold`: `WeightCacheKey` sharding (`subtier='tier2a_reshard'`) or
@@ -415,16 +381,16 @@ def classify_reconfig(old_parsed, new_parsed):
         tier = "in_process_instant"
         subtier = "tier1_in_process_instant"
         in_process = True
-    control_actions = (
-        _build_control_actions(
-            changed, new_args, in_process_instant_fields, in_process_graph_fields
-        )
-        if in_process and changed else []
-    )
+    live_fields = [f for f in changed if f in LIVE_FIELDS]
+    if changed and in_process:
+        # Only a delta made of LIVE_FIELDS has a consumer in the engine; the rest restarts.
+        in_process = len(live_fields) == len(changed)
+    control_actions = _build_control_actions(changed, new_args) if in_process else []
     return {
         "tier": tier,
         "subtier": subtier,
         "in_process": in_process,
+        "live_fields": live_fields,
         "weights_compatible": not weight_key_changed,
         "changed": changed,
         "in_process_instant_fields": in_process_instant_fields,

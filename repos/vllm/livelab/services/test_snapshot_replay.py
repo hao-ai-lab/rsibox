@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 import random
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import snapshot_replay  # noqa: E402
 from snapshot_replay import (  # noqa: E402
     KVStateSnapshotter,
     PLACEHOLDER_TOKEN_ID,
@@ -255,6 +257,15 @@ class FakeModelRunner:
         self.execute_model_state: Any = None
         self.kv_caches = [FakeKVCacheTensor(num_phys_blocks, block_sizes[0]) for _ in range(num_layers)]
         self.rejection_sampler: Any = None
+        # vLLM's layer -> KV-cache group map (runner.kv_cache_config) and the layers the
+        # tensors are bound to (static forward context): layer i is in group i % num_groups.
+        num_groups = len(block_sizes)
+        names = [f"model.layers.{i}.attn" for i in range(num_layers)]
+        self.kv_cache_config = SimpleNamespace(kv_cache_groups=[
+            SimpleNamespace(layer_names=[n for i, n in enumerate(names) if i % num_groups == g])
+            for g in range(num_groups)])
+        self.compilation_config = SimpleNamespace(static_forward_context={
+            n: SimpleNamespace(kv_cache=[t]) for n, t in zip(names, self.kv_caches)})
 
 
 class FakeJournal:
@@ -590,3 +601,125 @@ def test_combined_snapshot_and_speculative_acceptance_replay() -> None:
     traj_second = run_ten_steps()
     assert traj_first == traj_second
     assert mocker.stats()["accepted_per_step"][:5] == [[4, 4], [2, 2], [3, 3], [1, 1], [0, 0]]
+
+
+# ---- Audit row 5: group mapping, RNG, synchronized timing, mocker guard ----
+
+def _two_group_runner_out_of_order():
+    """A hybrid runner (two KV-cache groups) whose layer order is not its group order, as in
+    vLLM (runner.kv_caches is ordered by layer index): layer 0 is in group 1, layer 1 in
+    group 0, layer 2 in group 1. Each group's requests hold different physical blocks."""
+    runner = FakeModelRunner(max_num_reqs=4, max_model_len=4_096, max_num_batched_tokens=1_024,
+                             num_phys_blocks=256, block_sizes=(16, 16), num_layers=3)
+    names = [f"model.layers.{i}.attn" for i in range(3)]
+    runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[
+        SimpleNamespace(layer_names=[names[1]]), SimpleNamespace(layer_names=[names[0], names[2]])])
+    spec = ThrashingRegimeSpec(num_decode_reqs=2, decode_context_len=1_024, num_prefill_reqs=0,
+                               prefill_chunk_len=0, horizon_steps=5, block_sizes=(16, 16))
+    snapshotter = KVStateSnapshotter(kv_mode="tail", horizon_steps=5, max_step_tokens=1)
+    snapshotter.synthesize_thrashing_state(runner, spec)
+    # Give group 1 its own physical blocks (offset by 100) so the groups' block sets differ.
+    table1 = runner.input_batch.block_table.block_tables[1]
+    for req_idx in range(2):
+        n = table1.num_blocks_per_row.to_list()[req_idx]
+        row = table1.block_table.cpu.read_row(req_idx, n)
+        table1.block_table.cpu.write_row(req_idx, 0, [b + 100 for b in row])
+    return runner, snapshotter, names
+
+
+def test_kv_blocks_are_saved_per_kv_cache_group_not_per_layer_index() -> None:
+    """Input: _two_group_runner_out_of_order(); every block of every layer holds a distinct
+    value; capture (tail); then every block the horizon touches in each layer's OWN group is
+    overwritten. Expect: restore() brings every one of them back, and every backup entry holds
+    exactly its layer's group's dirty blocks. Before: layer i was given dirty_per_group[i]
+    (layer 0 got group 0's blocks), so layer 0's real blocks stayed corrupted."""
+    runner, snapshotter, names = _two_group_runner_out_of_order()
+    for li, kv in enumerate(runner.kv_caches):
+        kv.blocks = [float(li * 1000 + b) for b in range(len(kv.blocks))]
+    before = [list(kv.blocks) for kv in runner.kv_caches]
+    snap = snapshotter.capture(runner)
+    dirty = snap.dirty_block_ids_per_group
+    assert set(dirty[0]).isdisjoint(dirty[1]), dirty
+    group_of_layer = [1, 0, 1]
+    for li, kv in enumerate(runner.kv_caches):
+        for b in dirty[group_of_layer[li]]:
+            kv.blocks[b] = -1.0
+    snapshotter.restore(runner, snap)
+    assert [list(kv.blocks) for kv in runner.kv_caches] == before
+    by_key = {entry["key"]: entry for entry in snap.kv_backups}
+    for li, name in enumerate(names):
+        assert by_key[name]["block_ids"] == dirty[group_of_layer[li]]
+        assert by_key[name]["group"] == group_of_layer[li]
+
+
+def test_multi_group_runner_without_a_group_map_is_an_error_not_a_guess() -> None:
+    runner, snapshotter, _ = _two_group_runner_out_of_order()
+    del runner.kv_cache_config
+    with pytest.raises(snapshot_replay.SnapshotError, match="refusing to guess"):
+        snapshotter.capture(runner)
+
+
+def test_rng_state_covers_numpy_and_per_request_generators() -> None:
+    """Input: capture, draw from Python, numpy and torch (CPU and a per-request generator),
+    restore, draw again. Expect: the same draws. Before: numpy, CUDA and the per-request
+    generators were not saved (only Python and torch CPU). CUDA is covered by the GPU check."""
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    runner, snapshotter, _ = _two_group_runner_out_of_order()
+    runner.input_batch.generators = {0: torch.Generator().manual_seed(7)}
+    snap = snapshotter.capture(runner, kv_mode="metadata_only")
+    assert {"py_random", "numpy", "torch_cpu", "generators"} <= set(snap.rng_state)
+
+    def draws():
+        return (random.random(), float(np.random.rand()), float(torch.rand(1)),
+                float(torch.rand(1, generator=runner.input_batch.generators[0])))
+    first = draws()
+    snapshotter.restore(runner, snap)
+    assert draws() == first
+
+
+def test_capture_and_restore_times_are_taken_after_a_device_synchronize(monkeypatch) -> None:
+    """Every clock reading of capture/restore goes through _now_ms(), which synchronizes CUDA
+    first; the per-phase times are in snapshot.timing. Before: perf_counter with no
+    synchronize (GPU copies under-timed) and one total only."""
+    calls = []
+    monkeypatch.setattr(snapshot_replay, "_sync", lambda: calls.append(1))
+    runner, snapshotter, _ = _two_group_runner_out_of_order()
+    snap = snapshotter.capture(runner)
+    n_capture = len(calls)
+    snapshotter.restore(runner, snap)
+    assert n_capture >= 4 and len(calls) - n_capture >= 4
+    assert {"capture_metadata_ms", "capture_kv_d2h_ms", "capture_rng_ms", "capture_total_ms",
+            "restore_metadata_ms", "restore_kv_h2d_ms", "restore_rng_ms",
+            "restore_total_ms"} <= set(snap.timing)
+
+
+def test_restore_refuses_when_a_snapshot_request_left_the_runner() -> None:
+    """Before: restore() skipped a request that had left the batch and reported success."""
+    runner, snapshotter, _ = _two_group_runner_out_of_order()
+    snap = snapshotter.capture(runner)
+    del runner.requests[next(iter(runner.requests))]
+    with pytest.raises(snapshot_replay.SnapshotError, match="left the runner"):
+        snapshotter.restore(runner, snap)
+
+
+def test_speculative_acceptance_mocker_cannot_touch_a_scored_run(monkeypatch) -> None:
+    """The mocker fakes acceptance, so (1) it cannot be installed inside scored_run() or with
+    FASTRSI_SCORED=1, and (2) a scored run cannot start while one is installed."""
+    target = SimpleNamespace(rejection_sampler=SimpleNamespace(forward=lambda *a, **k: None))
+    with snapshot_replay.scored_run():
+        with pytest.raises(snapshot_replay.MockedInScoredRunError):
+            SpeculativeAcceptanceMocker(1).install(target)
+    monkeypatch.setenv("FASTRSI_SCORED", "1")
+    with pytest.raises(snapshot_replay.MockedInScoredRunError):
+        SpeculativeAcceptanceMocker(1).install(target)
+    monkeypatch.delenv("FASTRSI_SCORED")
+    mocker = SpeculativeAcceptanceMocker(1).install(target)
+    try:
+        with pytest.raises(snapshot_replay.MockedInScoredRunError):
+            with snapshot_replay.scored_run():
+                pass
+    finally:
+        mocker.uninstall()
+    with snapshot_replay.scored_run():
+        snapshot_replay.assert_unmocked()
