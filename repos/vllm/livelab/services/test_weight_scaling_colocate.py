@@ -63,8 +63,8 @@ def pool():
     python = os.environ.get("FASTRSI_VLLM_PYTHON", sys.executable)
     g0, g1 = (int(x) for x in os.environ.get("FASTRSI_GPUS", "0,1").split(","))
     work = tempfile.mkdtemp(prefix="wsc-test-", dir=os.environ.get("FASTRSI_TEST_TMP"))
-    sock = os.path.join(work, "sock")
-    os.makedirs(sock, mode=0o700)
+    # AF_UNIX paths are limited to 107 bytes: the socket dir stays short, outside `work`
+    sock = tempfile.mkdtemp(prefix="wsc-")
     h0 = W.Holder(g0, sock, os.path.join(work, "h0.log"))
     h1 = W.Holder(g1, sock, os.path.join(work, "h1.log"))
     engines = []
