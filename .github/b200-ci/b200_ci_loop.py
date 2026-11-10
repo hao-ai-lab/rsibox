@@ -42,7 +42,7 @@ def run_one(a, sha, pr):
     work = Path(a.work).expanduser()
     result = work / "results" / f"{sha}.json"
     argv = [sys.executable, str(HERE / "run_b200_ci.py"), "--sha", sha, "--work", str(work),
-            "--gpus", a.gpus]
+            "--gpus", a.gpus, "--gpu-pool", a.gpu_pool]
     if pr:
         argv += ["--pr", str(pr)]
     if a.vllm_python:
@@ -67,6 +67,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default="~/fastrsi-ci")
     ap.add_argument("--gpus", default="auto:2")
+    ap.add_argument("--gpu-pool", default="0,1,2,3")
     ap.add_argument("--vllm-python", default="")
     ap.add_argument("--logs-url-base", default="")
     ap.add_argument("--agent", default="claude")

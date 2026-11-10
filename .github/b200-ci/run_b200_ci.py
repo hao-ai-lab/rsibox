@@ -93,8 +93,13 @@ def check_pr(pr: int, sha: str) -> dict:
 
 # ---------------------------------------------------------------- GPUs
 
-def pick_gpus(spec: str) -> str:
+def pick_gpus(spec: str, pool: str) -> str:
+    """`spec` is an explicit CUDA_VISIBLE_DEVICES value or auto:N. auto picks N idle GPUs,
+    only from `pool` (the indices this runner is allowed on the shared machine)."""
+    allowed = set(pool.split(",")) if pool else None
     if not spec.startswith("auto"):
+        if allowed and not set(spec.split(",")) <= allowed:
+            raise Refused(f"--gpus {spec} is outside the allowed pool {pool}")
         return spec
     want = int(spec.split(":", 1)[1]) if ":" in spec else 1
     out = sh(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
@@ -102,11 +107,11 @@ def pick_gpus(spec: str) -> str:
     idle = []
     for line in out.strip().splitlines():
         idx, mem, util = [x.strip() for x in line.split(",")]
-        if int(mem) < 500 and int(util) == 0:
+        if (allowed is None or idx in allowed) and int(mem) < 500 and int(util) == 0:
             idle.append(idx)
     if len(idle) < want:
-        raise Refused(f"need {want} idle GPUs, found {idle}")
-    return ",".join(idle[-want:])  # take from the top end, away from GPU 0
+        raise Refused(f"need {want} idle GPUs in pool {pool or 'all'}, found {idle}")
+    return ",".join(idle[:want])
 
 
 # ---------------------------------------------------------------- envs
@@ -244,20 +249,23 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path) -> dict:
         log_path.write_text("no ```sh block under ## Quickstart in README.md\n")
         return {"python": python, "ok": False, "rc": "no-block", "log": str(log_path.relative_to(run_dir))}
     venv = run_dir / "envs" / f"quickstart-{python}"
+    # Each Python gets its own clean clone: the block makes .venv/ in the tree it runs in.
+    qsrc = run_dir / "envs" / f"quickstart-src-{python}"
+    sh(["git", "clone", "--quiet", str(src), str(qsrc)])
     script = run_dir / f"quickstart-py{python}.sh"
     script.write_text("set -euxo pipefail\nsource %s/bin/activate\ncd %s\n%s" %
-                      (shlex.quote(str(venv)), shlex.quote(str(src)), m.group(1)))
+                      (shlex.quote(str(venv)), shlex.quote(str(qsrc)), m.group(1)))
     t0 = time.monotonic()
     with open(log_path, "w") as log:
         # A plain `python -m venv` with pip, as a user would make it (no uv, no extras).
-        r = subprocess.run([uv, "python", "find", python], capture_output=True, text=True)
+        r = subprocess.run([uv, "python", "find", "--no-project", python], capture_output=True, text=True)
         base = r.stdout.strip() or f"python{python}"
         rc = subprocess.run([base, "-m", "venv", str(venv)], stdout=log, stderr=subprocess.STDOUT).returncode
         if rc == 0:
             env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "FASTRSI_"))}
             env["CUDA_VISIBLE_DEVICES"] = ""
             rc = subprocess.run(["bash", str(script)], stdout=log, stderr=subprocess.STDOUT,
-                                env=env, cwd=src).returncode
+                                env=env, cwd=qsrc).returncode
     return {"python": python, "ok": rc == 0, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
             "log": str(log_path.relative_to(run_dir))}
 
@@ -335,6 +343,7 @@ def main():
     ap.add_argument("--work", default=str(Path.home() / "fastrsi-ci"))
     ap.add_argument("--pr", type=int, help="also require this PR to be same-repo with head == sha (uses gh)")
     ap.add_argument("--gpus", default="auto:2", help="CUDA_VISIBLE_DEVICES value, or auto:N idle GPUs")
+    ap.add_argument("--gpu-pool", default="0,1,2,3", help="GPU indices this runner may use (B200 split)")
     ap.add_argument("--python", default="3.12")
     ap.add_argument("--quickstart-pythons", default="3.10,3.11,3.12")
     ap.add_argument("--vllm-python", default="", help="python with vLLM for FASTRSI_VLLM_PYTHON (gpu stage)")
@@ -375,7 +384,7 @@ def main():
             if "cpu" in stages:
                 summary["cpu_env_s"] = round(make_env(a.uv, envs / "cpu", a.python, [CPU_EXTRA], log), 1)
             if "gpu" in stages:
-                summary["gpus"] = pick_gpus(a.gpus)
+                summary["gpus"] = pick_gpus(a.gpus, a.gpu_pool)
                 summary["gpu_env_s"] = round(make_env(a.uv, envs / "gpu", a.python,
                                                       [TORCH_SPEC, GPU_EXTRA], log), 1)
         base_env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}

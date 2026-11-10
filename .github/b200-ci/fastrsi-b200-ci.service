@@ -11,7 +11,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/fastrsi-ci/runner/b200_ci_loop.py --work %h/fastrsi-ci --gpus auto:2 --vllm-python /usr/bin/python3 --interval 300
+ExecStart=/usr/bin/python3 %h/fastrsi-ci/runner/b200_ci_loop.py --work %h/fastrsi-ci --gpus auto:2 --gpu-pool 0,1,2,3 --vllm-python /usr/bin/python3 --interval 300
 Restart=on-failure
 RestartSec=60
 
