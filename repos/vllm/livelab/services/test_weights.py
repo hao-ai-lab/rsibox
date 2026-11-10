@@ -77,6 +77,7 @@ def test_ipc_cache_without_a_daemon_is_a_finding_and_nothing_starts(d):
     assert secs < 10 and not os.path.exists(out)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_weights_with_a_daemon_maps_them_without_disk_fallback(d):
     """Input: a listener on GPU 1's daemon socket; `engine.py start --weights`. Expect: the
     server starts with --load-format ipc_cache and a loader config naming that socket folder
@@ -124,6 +125,7 @@ def _refused(r):
     assert r.returncode == 2, r.stdout + r.stderr
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_weights_with_an_explicit_config_that_keeps_the_disk_fallback_is_a_finding(d):
     """Input: a listener on GPU 1's daemon socket; `engine.py start --weights m
     --model-loader-extra-config C` with C = {"socket_dir": S} (fallback unset; vLLM's
