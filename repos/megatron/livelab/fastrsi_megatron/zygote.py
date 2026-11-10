@@ -22,8 +22,16 @@ Contract:
   in <log-dir>/rank<r>.log; with `cpus` (one CPU list per local rank) it is pinned to its list
   right after the fork (a fork otherwise keeps the zygote's affinity). OMP_NUM_THREADS is applied to torch's thread pool in the rank
   (torch.set_num_threads), since torch read the variable when the zygote imported it.
-- When a rank exits non-zero, the zygote terminates the other ranks' process trees by PID (as
-  torchrun does), never by a process group it shares.
+- When a rank exits non-zero, the zygote terminates the other ranks' process trees by PID and
+  their process groups (each rank leads its own), as torchrun does, never a group it shares.
+- Supervision (no rank or child of a rank outlives its job): the zygote is the child subreaper of
+  everything it forks and reaps all of it before it serves the next request. Each rank has
+  PR_SET_PDEATHSIG=SIGKILL, so it dies with the zygote, and a guard process (forked from the rank
+  before CUDA, named fastrsi-guard) that kills the rank's process group when the rank dies,
+  however it dies. A client that disconnects while its job runs stops the job (SIGTERM, then
+  SIGKILL after 10 s), as torchrun's workers stop with torchrun; `on_client_gone: "keep"` lets it
+  run to its end instead. A malformed request (not JSON, not an object, missing fields) gets an
+  `error` event; a send to a gone client is logged on stderr, never fatal.
 - Findings (not gates; a request lists the ones it accepts in `accept`, otherwise no fork):
   "stale": a source file of a module the zygote imported changed since (the ranks would run
   the old code; restart the zygote, or edit through the live lab); "env": a request variable
@@ -39,7 +47,7 @@ Contract:
   for refreshed modules do not count. Cost (our 2026-11-07 run, Qwen3-14B architecture, TP 2): the
   re-import took 1.4 s, and the lab was ready 40.9 s after the request, against 78.8 s for torchrun.
 """
-import argparse, ast, ctypes, gc, importlib, json, os, signal, socket, sys, time, traceback
+import argparse, ast, ctypes, errno, gc, importlib, json, os, select, signal, socket, sys, time, traceback
 
 # the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
@@ -62,6 +70,30 @@ DEFAULT_PRELOAD = ["torch", "megatron.training.training", "torch._dynamo",
 PRELOAD_COMPILE_THREADS = 8
 
 
+PR_SET_PDEATHSIG, PR_SET_NAME, PR_SET_CHILD_SUBREAPER = 1, 15, 36
+CLIENT_GONE_GRACE_S = 10.0
+
+
+def _prctl(option, arg):
+    """prctl(2) on Linux; False elsewhere (or when libc is not found)."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if isinstance(arg, bytes):
+            return libc.prctl(option, ctypes.c_char_p(arg), 0, 0, 0) == 0
+        return libc.prctl(option, ctypes.c_ulong(arg), 0, 0, 0) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def log(event, **kw):
+    """One JSON line on stderr: supervision events that no client may be left to receive."""
+    try:
+        print(json.dumps({"event": event, "t": round(time.time(), 3), **kw}, default=str),
+              file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def install_forksafe():
     """Keep the imports from initializing CUDA. Some imports only ask about the GPU (quack, via
     Transformer Engine, calls torch.cuda.get_device_capability at import, which initializes
@@ -75,7 +107,45 @@ def install_forksafe():
         return {"installed": False, "why": repr(e)}
     out = forksafe.install(torch.cuda)
     out["properties"] = install_properties(torch.cuda)
+    out["cuda_python"] = guard_cuda_python(torch.cuda)
     return out
+
+
+_CUINIT = {}
+
+
+def guard_cuda_python(cuda=None):
+    """The CuTe DSL (nvidia-cutlass-dsl, imported by flashinfer through Megatron in NeMo 26.04)
+    calls cuda-python's cuInit at import to pick its target arch, and falls back to sm_100 when
+    that fails. In the zygote, cuInit answers CUDA_ERROR_NOT_INITIALIZED (CUDA stays off) and
+    CUTE_DSL_ARCH, if unset, is set from the NVML-answered capability, so the DSL targets the
+    right arch; the forked rank gets the real cuInit back (unguard_cuda_python). Returns what was
+    done."""
+    try:
+        import cuda.bindings.driver as drv
+    except ImportError:
+        return {"installed": False, "why": "no cuda-python"}
+    if "fn" not in _CUINIT:
+        _CUINIT["fn"], _CUINIT["mod"] = drv.cuInit, drv
+        drv.cuInit = lambda flags=0: (drv.CUresult.CUDA_ERROR_NOT_INITIALIZED,)
+    arch = None
+    if cuda is not None and "CUTE_DSL_ARCH" not in os.environ:
+        try:
+            major, minor = cuda.get_device_capability(0)
+            arch = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+            os.environ["CUTE_DSL_ARCH"] = arch
+            START_ENV["CUTE_DSL_ARCH"] = arch
+        except Exception as e:                  # no GPU visible: leave the DSL's default
+            arch = f"unset: {e!r}"
+    return {"installed": True, "cute_dsl_arch": arch or os.environ.get("CUTE_DSL_ARCH")}
+
+
+def unguard_cuda_python():
+    if "fn" in _CUINIT:
+        _CUINIT["mod"].cuInit = _CUINIT.pop("fn")
+        _CUINIT.pop("mod")
+        return True
+    return False
 
 
 def install_properties(cuda, probe=None):
@@ -356,7 +426,43 @@ def set_threads(environ=os.environ):
     return applied_omp_threads
 
 
-def _child(req, local_rank, lsock, conn):
+def _guard(rank_pid):
+    """In a process forked from the rank: wait until the rank is gone (PR_SET_PDEATHSIG delivers
+    SIGUSR2), then kill the rank's process group (its data-loader, compile and other children
+    that did not leave the group). A SIGTERM (the zygote's own stop of the tree, which signals
+    the group too) just ends the guard. Never returns."""
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        why = []
+        signal.signal(signal.SIGTERM, lambda *_: why.append("term"))
+        signal.signal(signal.SIGUSR2, lambda *_: why.append("rank_gone"))
+        _prctl(PR_SET_NAME, b"fastrsi-guard")
+        _prctl(PR_SET_PDEATHSIG, signal.SIGUSR2)
+        fd = os.open(os.devnull, os.O_RDWR)
+        for i in (0, 1, 2):
+            os.dup2(fd, i)
+        os.closerange(3, 65536)
+        if os.getppid() != rank_pid:            # the rank died before prctl took effect
+            why.append("rank_gone")
+        while not why:
+            signal.pause()
+        if "term" not in why:
+            os.killpg(rank_pid, signal.SIGKILL)    # the guard is in the group: last act
+    finally:
+        os._exit(0)
+
+
+def _supervised(zygote_pid):
+    """In the forked rank, right after setsid: die with the zygote, and start the guard."""
+    _prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    if os.getppid() != zygote_pid:               # the zygote died before prctl took effect
+        os._exit(1)
+    rank = os.getpid()
+    if os.fork() == 0:
+        _guard(rank)
+
+
+def _child(req, local_rank, lsock, conn, zygote_pid=None):
     """In the forked rank: never returns."""
     code = 1
     try:
@@ -365,7 +471,10 @@ def _child(req, local_rank, lsock, conn):
         os.setsid()
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGCHLD):
             signal.signal(s, signal.SIG_DFL)
+        if zygote_pid is not None:
+            _supervised(zygote_pid)
         os.environ.update(rank_env(req, local_rank))
+        unguard_cuda_python()                   # the rank initializes CUDA itself
         if os.environ.get("FASTRSI_ZYGOTE_UNPATCH", "1") != "0":
             unpatch()
         bind(req, local_rank)
@@ -432,54 +541,151 @@ def _tree(pid):
 
 
 def kill_tree(pid, sig=signal.SIGTERM):
+    """Signal pid's process tree (children first) and its process group: a rank leads its own
+    group, which also holds children that were orphaned out of the tree."""
     for p in reversed(_tree(pid)):
         try:
             os.kill(p, sig)
         except ProcessLookupError:
             pass
+    try:
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _send(conn, obj):
-    conn.sendall((json.dumps(obj) + "\n").encode())
+    """Best effort: False (and a log line) when the client is gone."""
+    try:
+        conn.sendall((json.dumps(obj, default=str) + "\n").encode())
+        return True
+    except OSError as e:
+        log("client_gone", on=obj.get("event"), error=repr(e))
+        return False
+
+
+def _client_gone(conn):
+    """Has the client closed its end? (It sends nothing after its request line.)"""
+    try:
+        r, _, _ = select.select([conn], [], [], 0)
+        if not r:
+            return False
+        return conn.recv(4096) == b""
+    except (OSError, ValueError):
+        return True
+
+
+def _children():
+    me = os.getpid()
+    out = []
+    for p in os.listdir("/proc") if os.path.isdir("/proc") else []:
+        if p.isdigit():
+            try:
+                with open(f"/proc/{p}/stat") as f:
+                    if int(f.read().rsplit(")", 1)[1].split()[2]) == me:
+                        out.append(int(p))
+            except (OSError, IndexError, ValueError):
+                pass
+    return out
+
+
+def reap_all(timeout=10.0):
+    """Kill whatever is still our child (ranks, or orphans the subreaper took in) and reap
+    until none is left. Returns the pids reaped."""
+    reaped, deadline, killed = [], time.time() + timeout, set()
+    while time.time() < deadline:
+        for p in _children():
+            if p not in killed:
+                kill_tree(p, signal.SIGKILL)
+                killed.add(p)
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return reaped
+        if pid:
+            reaped.append(pid)
+        else:
+            time.sleep(0.02)
+    log("reap_timeout", left=_children())
+    return reaped
+
+
+def validate(req):
+    """The fields handle() needs, before any fork; raises ValueError naming the first bad one."""
+    if not isinstance(req, dict):
+        raise ValueError(f"request must be a JSON object, got {type(req).__name__}")
+    try:
+        n = int(req["nproc"])
+        int(req["port"])
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"nproc and port must be integers: {e!r}") from None
+    if n < 1:
+        raise ValueError("nproc must be at least 1")
+    if not isinstance(req.get("argv"), list) or not req["argv"]:
+        raise ValueError("argv must be a non-empty list")
+    if not isinstance(req.get("env", {}), dict):
+        raise ValueError("env must be an object")
+    if req.get("on_client_gone", "kill") not in ("kill", "keep"):
+        raise ValueError("on_client_gone must be kill or keep")
 
 
 def handle(req, lsock, conn, src):
+    validate(req)
     block, seen = findings(req, src)
     if block:
         _send(conn, {"event": "refused", "findings": block})
         return
-    pids = []
-    for r in range(int(req["nproc"])):
-        pid = os.fork()
-        if pid == 0:
-            _child(req, r, lsock, conn)
-        pids.append(pid)
-    _send(conn, {"event": "forked", "pids": pids, "findings": seen,
-                 "fork_s": round(time.time() - req.get("t0", time.time()), 3)})
-    rc, left = {}, set(pids)
-    deadline = time.time() + float(req.get("timeout", 0) or 1e12)
-    while left:
-        pid, st = os.waitpid(-1, os.WNOHANG)
-        if pid == 0:
-            if time.time() > deadline:
+    me, pids = os.getpid(), []
+    t0 = req.get("t0", time.time())
+    try:
+        for r in range(int(req["nproc"])):
+            pid = os.fork()
+            if pid == 0:
+                _child(req, r, lsock, conn, me)
+            pids.append(pid)
+        connected = _send(conn, {"event": "forked", "pids": pids, "findings": seen,
+                                 "fork_s": round(time.time() - t0, 3), "mono": time.monotonic()})
+        policy = req.get("on_client_gone", "kill")
+        rc, left, stopping = {}, set(pids), False
+        deadline = time.time() + float(req.get("timeout", 0) or 1e12)
+        while left:
+            if connected and _client_gone(conn):
+                connected = False
+                log("client_gone", on="running", pids=sorted(left), policy=policy)
+            if not connected and policy == "kill" and not stopping:
+                stopping = True                 # SIGTERM now, SIGKILL after the grace
                 for p in left:
-                    kill_tree(p, signal.SIGKILL)
-                deadline = 1e18
-            time.sleep(0.05)
-            continue
-        if pid not in left:
-            continue
-        left.discard(pid)
-        rc[pids.index(pid)] = os.waitstatus_to_exitcode(st)
-        if rc[pids.index(pid)] != 0:            # torchrun's policy: one rank fails, stop all
-            for p in left:
-                kill_tree(p)
-    _send(conn, {"event": "exited", "rc": [rc[i] for i in range(len(pids))],
-                 "s": round(time.time() - req.get("t0", time.time()), 3)})
+                    kill_tree(p)
+                deadline = min(deadline, time.time() + CLIENT_GONE_GRACE_S)
+            try:
+                pid, st = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if pid == 0:
+                if time.time() > deadline:
+                    for p in left:
+                        kill_tree(p, signal.SIGKILL)
+                    deadline = 1e18
+                time.sleep(0.05)
+                continue
+            if pid not in left:                 # an orphan the subreaper took in
+                continue
+            left.discard(pid)
+            rc[pids.index(pid)] = os.waitstatus_to_exitcode(st)
+            if rc[pids.index(pid)] != 0:        # torchrun's policy: one rank fails, stop all
+                for p in left:
+                    kill_tree(p)
+        _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
+                     "s": round(time.time() - t0, 3)})
+    finally:
+        reaped = reap_all()                     # ranks left by an exception, guards, orphans
+        if pids:
+            log("job_reaped", ranks=pids, reaped=len(reaped))
 
 
 def serve(sock, mods, script=None, forksafe=True):
     start_time = time.time()
+    subreaper = _prctl(PR_SET_CHILD_SUBREAPER, 1)    # orphans of a job come back here to be reaped
     clamp_pre_fork_threads()
     forksafe_status = install_forksafe() if forksafe else {"installed": False, "why": "off"}
     took = preload(mods, script)
@@ -500,25 +706,30 @@ def serve(sock, mods, script=None, forksafe=True):
                else None, "python": [thread_obj.name for thread_obj in threading.enumerate()]}
     print(json.dumps({"event": "ready", "pid": os.getpid(),
                       "import_s": round(time.time() - start_time, 3),
-                      "threads": threads, "gc_frozen": gc_frozen,
+                      "threads": threads, "gc_frozen": gc_frozen, "subreaper": subreaper,
                       "modules": len(sys.modules), "forksafe": forksafe_status, "took": took}),
           flush=True)
     while True:
         conn, _ = listen_sock.accept()
         with conn:
-            line = conn.makefile().readline()
-            if not line:
-                continue
-            request_data = json.loads(line)
-            if request_data.get("op") == "stop":
-                _send(conn, {"event": "stopped"})
-                break
-            if request_data.get("op") == "ping":
-                _send(conn, {"event": "pong", "pid": os.getpid()})
-                continue
-            try:
+            try:                                # a bad request or a gone client must not kill the zygote
+                conn.settimeout(30)             # for the request line only
+                line = conn.makefile().readline()
+                conn.settimeout(None)
+                if not line:
+                    continue
+                request_data = json.loads(line)
+                if not isinstance(request_data, dict):
+                    raise ValueError(f"request must be a JSON object, got {type(request_data).__name__}")
+                if request_data.get("op") == "stop":
+                    _send(conn, {"event": "stopped"})
+                    break
+                if request_data.get("op") == "ping":
+                    _send(conn, {"event": "pong", "pid": os.getpid()})
+                    continue
                 handle(request_data, listen_sock, conn, src)
-            except Exception as exc:            # a bad request must not kill the zygote
+            except Exception as exc:
+                log("bad_request", error=repr(exc))
                 _send(conn, {"event": "error", "error": repr(exc)})
     listen_sock.close()
     os.unlink(sock)

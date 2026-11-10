@@ -8,7 +8,8 @@ for its commands:
                 replies are gathered on rank 0, in rank order.
 
 Gloo, not NCCL: the rounds carry Python objects, run on the CPU, and never touch the training
-streams. The group's timeout is long because ranks wait in it while the lab is idle; a hang is
+streams. A client that times out or disconnects before its reply costs only that reply: reply()
+returns False and the host serves the next request (the ranks never see it). The group's timeout is long because ranks wait in it while the lab is idle; a hang is
 caught by the client's own timeout (see client.py), which poisons the lab.
 
 Clients reach rank 0 through a Unix socket (one JSON line in, one JSON line out; the path must
@@ -20,6 +21,7 @@ import json
 import os
 import queue
 import socket
+import sys
 import threading
 import time
 from datetime import timedelta
@@ -67,26 +69,46 @@ class Server:
 
     def _accept(self):
         while True:
-            conn, _ = self.sock.accept()
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:                     # closed by close()
+                return
             threading.Thread(target=self._one, args=(conn,), daemon=True).start()
 
     def _one(self, conn):
-        f = conn.makefile("rwb")
-        line = f.readline()
-        if not line:
-            conn.close()
-            return
         done = threading.Event()
 
         def reply(obj):
+            """Send obj; False when the client is gone (timed out, disconnected): the lab logs it
+            and serves on. Never raises."""
             try:
                 f.write((json.dumps(obj, default=str) + "\n").encode())
                 f.flush()
+                return True
+            except (OSError, ValueError) as e:
+                print(f"[fastrsi] client gone before the reply ({type(e).__name__}: {e}); "
+                      "serving on", file=sys.stderr, flush=True)
+                return False
             finally:
-                conn.close()
+                for c in (f, conn):
+                    try:
+                        c.close()
+                    except OSError:
+                        pass
                 done.set()
         try:
+            f = conn.makefile("rwb")
+            line = f.readline()
+        except OSError:
+            conn.close()
+            return
+        if not line:
+            conn.close()
+            return
+        try:
             req = json.loads(line)
+            if not isinstance(req, dict):
+                raise ValueError(f"a request is a JSON object, not {type(req).__name__}")
         except ValueError as e:
             reply({"ok": False, "error": f"bad request: {e}"})
             return
@@ -134,7 +156,13 @@ class Mailbox:
     def _replier(self, rid):
         def reply(obj):
             tmp = os.path.join(self.root, f".resp-{rid}.tmp")
-            with open(tmp, "w") as f:
-                json.dump(obj, f, default=str)
-            os.rename(tmp, os.path.join(self.root, f"resp-{rid}.json"))
+            try:
+                with open(tmp, "w") as f:
+                    json.dump(obj, f, default=str)
+                os.rename(tmp, os.path.join(self.root, f"resp-{rid}.json"))
+                return True
+            except OSError as e:
+                print(f"[fastrsi] mailbox reply {rid} not written ({e}); serving on",
+                      file=sys.stderr, flush=True)
+                return False
         return reply

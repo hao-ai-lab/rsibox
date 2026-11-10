@@ -193,7 +193,8 @@ import vllm.model_executor.layers.layernorm as ln
 from vllm.model_executor.custom_op import op_registry
 from vllm.utils.torch_utils import direct_register_custom_op
 from torch.library import Library
-out = {}
+out = {"n_layernorm_ops": sum(1 for c in op_registry.values()
+                             if getattr(c, "__module__", "") == ln.__name__)}
 p = zr.plan([ln.__file__], zr.import_graph(("vllm",)))
 zr.refresh(p["modules"])
 seen = []
@@ -243,5 +244,10 @@ def test_vllm_layernorm_refresh_reimports_in_real_vllm(tmp_path):
     assert out["new_class"] is True
     assert out["same_schema_value"] == [3.0]
     assert "zrvllm::probe changed its schema" in out["changed_schema"]
-    assert out["events"][:4] == ["zygote_registry_forgot"] * 4
+    # one "forgot" per CustomOp layernorm.py registers (3 in vLLM 0.15.1, 4 in later ones)
+    n = out["n_layernorm_ops"]
+    assert n >= 1 and out["events"][:n] == ["zygote_registry_forgot"] * n, out
     assert "zygote_op_redefined" in out["events"]
+    # direct_register_custom_op's fake impl is replaced too (before: "already has an fake impl
+    # registered" from Library._register_fake)
+    assert "zygote_op_fake_replaced" in out["events"]

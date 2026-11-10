@@ -7,10 +7,17 @@ restores it before every check:
 
 - weights: every model parameter (bf16, in the DDP param buffers) and the optimizer's fp32
   master copies (`shard_fp32_from_float16_groups` and friends);
+- buffers: every registered buffer of the model chunks (normalization statistics and the like);
 - optimizer state: every tensor in the inner optimizer's `state` (Adam moments, step);
 - scalars in the optimizer's `param_groups` and the scheduler's `num_steps`;
-- RNG: torch CPU, CUDA, and Megatron's tensor-parallel CUDA RNG tracker;
+- grad scaler: each inner optimizer's `grad_scaler.state_dict()` (fp16; bf16 runs have none);
+- RNG: torch CPU, CUDA, Megatron's tensor-parallel CUDA RNG tracker, Python `random`, numpy;
 - data: the K x microbatches batches the check feeds, frozen once from the real iterator.
+
+Restore fails closed: if the live state has a tensor the snapshot does not (extra), lacks one it
+has (missing), or one changed shape or dtype, or the optimizer's groups changed, it writes
+nothing and returns ok False with the names. `digest()` hashes every piece above (sha256 of the
+exact bytes), so a reset round trip can be shown bit for bit.
 
 S must not depend on the code under test, or a fresh process started with an edit would start
 from a different S than the live lab (conformance c3). Adam creates its moments at the first
@@ -21,9 +28,18 @@ counters are zero in a fresh Adam. A state key it does not know is reported, nev
 Copies live in pinned host memory: about 14 bytes per parameter per rank with bf16 weights,
 fp32 master weights and two fp32 moments.
 """
+import copy
+import hashlib
+import json
+import random
 import time
 
 import torch
+
+try:
+    import numpy as np
+except ImportError:                             # numpy is optional for the lab itself
+    np = None
 
 ZERO_KEYS = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq", "step")
 FP32_GROUPS = ("shard_fp32_from_float16_groups", "shard_fp32_groups", "fp32_from_float16_groups",
@@ -50,6 +66,8 @@ def tensors(model, optimizer):
     for ci, chunk in enumerate(model):
         for n, p in chunk.named_parameters():
             add(f"model{ci}.{n}", p.data)
+        for n, b in chunk.named_buffers():
+            add(f"model{ci}.buffer.{n}", b)
     for oi, opt in enumerate(inner_optimizers(optimizer)):
         for g in FP32_GROUPS:
             for gi, group in enumerate(getattr(opt, g, None) or []):
@@ -84,11 +102,35 @@ def _tracker():
     return tensor_parallel.get_cuda_rng_tracker()
 
 
+def _tracker_states(t):
+    """Copies of the tracker's states. Megatron's get_states() returns the live state objects and
+    set_states() keeps the dict it is given, which fork() then updates in place: without copies a
+    restore would bring back whatever the last check left in the snapshot's own dict."""
+    out = {}
+    for name, st in t.get_states().items():
+        out[name] = st.get_state() if isinstance(st, torch.Generator) else st.clone()
+    return out
+
+
+def _set_tracker_states(t, saved):
+    live = t.get_states()
+    states = {}
+    for name, st in saved.items():
+        if isinstance(live.get(name), torch.Generator):    # graph-safe generators: set in place
+            live[name].set_state(st.clone())
+            states[name] = live[name]
+        else:
+            states[name] = st.clone()
+    t.set_states(states)
+
+
 def rng_state():
     t = _tracker()
     return {"cpu": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-            "tracker": t.get_states() if t is not None else None}
+            "tracker": _tracker_states(t) if t is not None and t.get_states() else None,
+            "python": random.getstate(),
+            "numpy": np.random.get_state() if np is not None else None}
 
 
 def set_rng_state(s):
@@ -96,7 +138,30 @@ def set_rng_state(s):
     if s["cuda"] is not None:
         torch.cuda.set_rng_state(s["cuda"])
     if s["tracker"] is not None:
-        _tracker().set_states(s["tracker"])
+        _set_tracker_states(_tracker(), s["tracker"])
+    random.setstate(s["python"])
+    if s.get("numpy") is not None:
+        np.random.set_state(s["numpy"])
+
+
+def _cpu(x):
+    """A deep copy with tensors moved to host memory."""
+    if torch.is_tensor(x):
+        return x.detach().to("cpu", copy=True)
+    if isinstance(x, dict):
+        return {k: _cpu(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return type(x)(_cpu(v) for v in x)
+    return copy.deepcopy(x)
+
+
+def scaler_states(optimizer):
+    """[grad_scaler.state_dict() copied to host, or None] per inner optimizer."""
+    out = []
+    for opt in inner_optimizers(optimizer):
+        gs = getattr(opt, "grad_scaler", None)
+        out.append(_cpu(gs.state_dict()) if gs is not None and hasattr(gs, "state_dict") else None)
+    return out
 
 
 class Snapshot:
@@ -116,35 +181,139 @@ class Snapshot:
         _sync()
         self.groups = group_scalars(optimizer)
         self.num_steps = getattr(scheduler, "num_steps", None)
+        self.scalers = scaler_states(optimizer)
         self.rng = rng_state()
         self.bytes = sum(h.numel() * h.element_size() for h in self.host.values())
         self.take_s = round(time.perf_counter() - t0, 4)
+        cats = {_category(n) for n in self.host}
+        self.restored = [c for c in ("weights", "master_weights", "buffers", "optimizer")
+                         if c in cats] + ["optimizer_scalars"] + \
+            (["scheduler"] if self.num_steps is not None else []) + \
+            (["grad_scaler"] if any(x is not None for x in self.scalers) else []) + \
+            ["rng"]
 
-    def restore(self):
-        """Write the copies back. Returns what was restored and what could not be."""
-        t0 = time.perf_counter()
+    def compare(self, allow_extra=False):
+        """What restore() would refuse: {missing, extra, mismatch, groups} (lists of names)."""
         live = tensors(self.model, self.optimizer)
         missing = sorted(set(self.host) - set(live))
         extra = sorted(set(live) - set(self.host))
+        mismatch = sorted(n for n, h in self.host.items() if n in live and
+                          (tuple(live[n].shape) != tuple(h.shape) or live[n].dtype != h.dtype))
+        groups = []
+        opts = inner_optimizers(self.optimizer)
+        if len(opts) != len(self.groups):
+            groups.append(f"{len(opts)} inner optimizers, snapshot has {len(self.groups)}")
+        for i, (opt, gs) in enumerate(zip(opts, self.groups)):
+            n = len(getattr(getattr(opt, "optimizer", None), "param_groups", []))
+            if n != len(gs):
+                groups.append(f"optimizer {i}: {n} param groups, snapshot has {len(gs)}")
+        if len(scaler_states(self.optimizer)) != len(self.scalers):
+            groups.append("grad scaler count changed")
+        return live, {"missing": missing, "extra": [] if allow_extra else extra,
+                      "mismatch": mismatch, "groups": groups, "n_extra_allowed":
+                      len(extra) if allow_extra else 0}
+
+    def restore(self, allow_extra=False):
+        """Write the copies back, or nothing at all. allow_extra: state the snapshot does not
+        have is left as it is (only for the start, where the warm-up creates Adam's state and
+        zero_new_state handles it). Returns ok, what was restored, and what could not be."""
+        t0 = time.perf_counter()
+        live, bad = self.compare(allow_extra)
+        out = {"tensors": 0, "missing": bad["missing"][:5], "extra": bad["extra"][:5],
+               "mismatch": bad["mismatch"][:5], "groups": bad["groups"],
+               "n_missing": len(bad["missing"]), "n_extra": len(bad["extra"])}
+        if bad["missing"] or bad["extra"] or bad["mismatch"] or bad["groups"]:
+            return {"ok": False, "restored": [], **out,
+                    "error": "live state does not match the snapshot; nothing written",
+                    "seconds": round(time.perf_counter() - t0, 4)}
         with torch.no_grad():
             for n, h in self.host.items():
-                if n in live:
-                    live[n].copy_(h, non_blocking=h.is_pinned())
+                live[n].copy_(h, non_blocking=h.is_pinned())
         for opt, groups in zip(inner_optimizers(self.optimizer), self.groups):
             inner = getattr(opt, "optimizer", None)
             for g, s in zip(getattr(inner, "param_groups", []), groups):
                 for k in [k for k in g if k != "params" and not torch.is_tensor(g[k])
                           and k not in s]:
                     del g[k]
-                g.update(s)
+                g.update(copy.deepcopy(s))
         if self.num_steps is not None:
             self.scheduler.num_steps = self.num_steps
             self.scheduler.step(increment=0)
+        for opt, sd in zip(inner_optimizers(self.optimizer), self.scalers):
+            if sd is not None:
+                opt.grad_scaler.load_state_dict(_cpu(sd))
         set_rng_state(self.rng)
         _sync()
-        return {"tensors": len(self.host) - len(missing), "missing": missing[:5],
-                "extra": extra[:5], "n_missing": len(missing), "n_extra": len(extra),
+        out["tensors"] = len(self.host)
+        return {"ok": True, "restored": list(self.restored), **out,
+                "n_extra_allowed": bad["n_extra_allowed"],
                 "seconds": round(time.perf_counter() - t0, 4)}
+
+
+def _category(name):
+    if name.startswith("model"):
+        return "buffers" if ".buffer." in name else "weights"
+    return "optimizer" if ".state." in name else "master_weights"
+
+
+CHUNK = 256 << 20
+
+
+def _hash_tensor(h, t, buf):
+    """Feed t's dtype, shape and exact bytes to h; GPU tensors through the pinned buffer."""
+    h.update(f"{t.dtype}{tuple(t.shape)}".encode())
+    u8 = t.detach().contiguous().reshape(-1).view(torch.uint8)
+    if u8.device.type == "cpu":
+        h.update(memoryview(u8.numpy()))
+        return buf
+    if buf is None:
+        buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
+    for i in range(0, u8.numel(), CHUNK):
+        m = min(CHUNK, u8.numel() - i)
+        buf[:m].copy_(u8[i:i + m])
+        h.update(memoryview(buf[:m].numpy()))
+    return buf
+
+
+def _hash_obj(h, x):
+    if torch.is_tensor(x):
+        _hash_tensor(h, x.cpu(), None)
+    elif np is not None and isinstance(x, np.ndarray):
+        h.update(f"{x.dtype}{x.shape}".encode())
+        h.update(np.ascontiguousarray(x).tobytes())
+    elif isinstance(x, dict):
+        for k in sorted(x, key=str):
+            h.update(repr(k).encode())
+            _hash_obj(h, x[k])
+    elif isinstance(x, (list, tuple)):
+        h.update(f"{type(x).__name__}{len(x)}".encode())
+        for v in x:
+            _hash_obj(h, v)
+    else:
+        h.update(repr(x).encode())
+
+
+def digest(model, optimizer, scheduler):
+    """sha256 per piece of the state a restore covers, of the exact bytes (live state, not the
+    snapshot): weights, master_weights, buffers, optimizer (tensors), optimizer_scalars,
+    scheduler, grad_scaler, rng; and `all` over them."""
+    _sync()
+    hs = {c: hashlib.sha256() for c in ("weights", "master_weights", "buffers", "optimizer")}
+    buf = None
+    for n, t in sorted(tensors(model, optimizer).items()):
+        h = hs[_category(n)]
+        h.update(n.encode())
+        buf = _hash_tensor(h, t, buf)
+    out = {c: h.hexdigest() for c, h in hs.items()}
+    for name, obj in (("optimizer_scalars", group_scalars(optimizer)),
+                      ("scheduler", getattr(scheduler, "num_steps", None)),
+                      ("grad_scaler", scaler_states(optimizer)),
+                      ("rng", rng_state())):
+        h = hashlib.sha256()
+        _hash_obj(h, obj)
+        out[name] = h.hexdigest()
+    out["all"] = hashlib.sha256(json.dumps(out, sort_keys=True).encode()).hexdigest()
+    return out
 
 
 def zero_new_state(optimizer, before):

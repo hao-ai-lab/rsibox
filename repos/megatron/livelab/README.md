@@ -41,6 +41,16 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   how to reset are a finding at start (`optimizer_state_unknown`), never zeroed silently.
 - **Poison:** the lab cannot answer for a hung or dead rank; the client's timeout or a closed
   connection poisons it, and `reset("respawn")` restarts the job (the harness does it).
+- **Clients cannot break the lab.** A request that is not a JSON object with a string `verb`
+  gets an error reply. A client that times out or disconnects before its reply costs only that
+  reply: rank 0 logs `client gone before the reply` and serves the next request; the other ranks
+  never see it.
+- **Reset fails closed.** S covers weights, fp32 masters, buffers, Adam state, param-group
+  scalars, scheduler, grad scaler, and torch CPU/CUDA, TP-tracker, Python and numpy RNG. If the
+  live state has a tensor S lacks, lacks one S has, or one changed shape or dtype, `reset` (and
+  `check`) answer ok false and write nothing. `digest` returns each rank's sha256 of every piece,
+  so a round trip is shown bit for bit. `resume` puts S back (`state: "keep"` skips that) and feeds
+  the job's next steps the frozen batches first: the job continues as if the lab had not run.
 - **Respawn kills by PID tree.** torchrun starts workers in sessions of their own: a kill of the
   launcher's process group leaves them holding GPU memory.
 
@@ -116,7 +126,11 @@ FASTRSI_T0=$(date +%s.%N) python -m fastrsi_megatron.zygote start --sock S --npr
 Contract: each rank gets torchrun's variables (OMP_NUM_THREADS=1 too, applied to torch's pool)
 and the request's, a session of its own, `D/rank<r>.log`, optionally a CPU list (`--cpus`), and
 torch.cuda's own functions back; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
-time. One rank exiting non-zero stops the others by PID tree. Findings refuse a request unless
+time. One rank exiting non-zero stops the others by PID tree. No rank or child of a rank outlives
+its job: the zygote is child subreaper and reaps everything after each job, each rank dies with
+the zygote (PR_SET_PDEATHSIG), a `fastrsi-guard` process per rank kills the rank's process group
+when the rank dies, and a client that disconnects stops its job (`on_client_gone: "keep"` lets it
+run). A malformed request gets an `error` event; the zygote serves on. Findings refuse a request unless
 it accepts them: `stale` (an imported source file changed), `env` (a variable a library may
 read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_OVERLAY replaces a
 module the zygote has imported).
