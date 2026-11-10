@@ -70,8 +70,11 @@ CHUNK_WORDS = 1 << 26          # 512 MiB of 64-bit words per digest step
 
 @dataclass(frozen=True)
 class Patch:
-    """A weight patch: `op` ("scale" or "noise") with `value` on every parameter whose name
-    matches `target` (re.search). noise adds value * std(param) * N(0, 1) with `seed`."""
+    """A weight patch: `op` with `value` on every parameter whose name matches `target`
+    (re.search). "scale" multiplies; "noise" adds value * std(param) * N(0, 1) with `seed`;
+    "mlp_rescale" multiplies the up half of each matched gate_up_proj by value and divides each
+    matched down_proj by it: with value a power of two the MLP's output is bit-identical (power-of-
+    two scaling commutes with rounding), so the bytes change and the outputs must not."""
     id: str
     target: str
     op: str = "scale"
@@ -170,6 +173,11 @@ def apply_patch(named: dict, patch: Patch) -> list[str]:
             t = named[n]
             if patch.op == "scale":
                 t.mul_(patch.value)
+            elif patch.op == "mlp_rescale":
+                if "gate_up_proj" in n:
+                    t[t.shape[0] // 2:].mul_(patch.value)      # [gate; up] along dim 0
+                elif "down_proj" in n:
+                    t.mul_(1.0 / patch.value)
             elif patch.op == "noise":
                 std = t.float().std().item()
                 noise = torch.randn(t.shape, generator=g, device=t.device, dtype=torch.float32)
@@ -1026,10 +1034,11 @@ def demo(a):
     return 0
 
 
-# Benign weight patches: they change bytes (bf16 rounding keeps most elements, flips some) but
-# not the greedy tokens; the gate tolerance decides.
-GOOD = (Patch("good-1", r"layers\.3\.mlp\.down_proj", "noise", 1e-5, 1),
-        Patch("good-2", r"layers\.5\.mlp\.down_proj", "noise", 1e-5, 2))
+# Benign weight patches: exact reparameterizations (bytes change, outputs must not). Measured:
+# even 1e-5 * std noise on one down_proj flips a greedy token of Qwen3-8B (gate_noise_probe.py),
+# so noise is no benign patch for a 16-token greedy gate.
+GOOD = (Patch("good-1", r"layers\.3\.mlp\.(gate_up|down)_proj", "mlp_rescale", 2.0),
+        Patch("good-2", r"layers\.5\.mlp\.(gate_up|down)_proj", "mlp_rescale", 4.0))
 
 
 class _Done(Exception):
