@@ -989,13 +989,17 @@ def demo(a):
         ev["from"] = victim.name
         sc.append({"fault": "patch_rejected", **ev}); save()
         # 5d. bug (a): a passing patch left unaccepted, then another evaluate
-        e1 = pool.evaluate(Patch("good-1", r"layers\.3\.mlp\.down_proj", "noise", 1e-4, 1))
-        e2 = pool.evaluate(Patch("good-2", r"layers\.5\.mlp\.down_proj", "noise", 1e-4, 2))
-        acc = pool.accept()
-        res["accept_gate"] = {"first": e1, "second": e2, "accept": acc,
+        e1 = pool.evaluate(GOOD[0])
+        res["accept_gate"] = {"first": e1}
+        save()
+        e2 = pool.evaluate(GOOD[1])
+        res["accept_gate"]["second"] = e2
+        save()
+        acc = pool.accept() if pool.pending else {"accepted": None, "why": "second not pending"}
+        res["accept_gate"].update({"accept": acc,
                               "digest_after": {"active": pool.check_integrity()["ok"],
                                                "standby": pool.check_integrity(pool.standby)["ok"]},
-                              "ledger": pool.ledger.ids}
+                              "ledger": pool.ledger.ids})
         save()
         # 5e. sticky CUDA error in the active engine
         r = measure_fault(pool, load, "cuda")
@@ -1020,6 +1024,12 @@ def demo(a):
         save()
     print(json.dumps({"ok": True, "result": os.path.join(work, "result.json")}))
     return 0
+
+
+# Benign weight patches: they change bytes (bf16 rounding keeps most elements, flips some) but
+# not the greedy tokens; the gate tolerance decides.
+GOOD = (Patch("good-1", r"layers\.3\.mlp\.down_proj", "noise", 1e-5, 1),
+        Patch("good-2", r"layers\.5\.mlp\.down_proj", "noise", 1e-5, 2))
 
 
 class _Done(Exception):

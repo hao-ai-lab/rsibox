@@ -96,8 +96,7 @@ def _clean(pool, eng):
 
 @gpu
 def test_bug_a_unaccepted_patch_never_leaks(pool):
-    p1 = W.Patch("good-1", r"layers\.3\.mlp\.down_proj", "noise", 1e-4, 1)
-    p2 = W.Patch("good-2", r"layers\.5\.mlp\.down_proj", "noise", 1e-4, 2)
+    p1, p2 = W.GOOD
     r1 = pool.evaluate(p1)
     assert r1["state"] == "pending", r1
     assert pool.ledger.ids == []
