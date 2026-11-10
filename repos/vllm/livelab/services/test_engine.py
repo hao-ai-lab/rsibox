@@ -380,21 +380,57 @@ def test_fork_check_reads_vllms_spawn_fallback():
         assert fg == {"spawn_forced": False} and engine.fork_finding(fg) is None
 
 
-def test_reconfigure_in_process_and_warm_ipc_tiers():
-    """Input: an engine started with `--weights --kvplan` (`m --port P --max-model-len 4096
-     --enforce-eager`), followed by three `engine.py reconfigure --pid PID` calls:
-    1. `in_process_instant`: `--max-model-len 32768 --max-num-batched-tokens 8192` -> applies
-       in-process in < 1 s without stopping `pid1` (`restarted: False`, `pid == pid1`,
-       `tier == 'in_process_instant'`);
-    2. `in_process_graph`: `--no-enforce-eager` -> applies in-process in < 1 s without stopping
-       `pid1` (`restarted: False`, `pid == pid1`, `tier == 'in_process_graph'`);
-    3. `warm_weights_ipc`: `--gpu-memory-utilization 0.85` -> restarts the worker process using
-       resident `weights.py` CUDA IPC (`restarted: True`, `replaced_pid == pid1`, `pid2 != pid1`,
-       `tier == 'warm_weights_ipc'`) with merged flags (`--max-model-len 32768`,
-       `--max-num-batched-tokens 8192`, `--gpu-memory-utilization 0.85`, `--load-format ipc_cache`,
-       `--worker-cls kvplan.KVPlanWorker`)."""
+# A stand-in `vllm serve` WITH the engine core's live agent: it builds a minimal
+# vllm.v1.engine.core module (EngineCoreProc with the three methods live_reconfig patches),
+# lets live_reconfig patch it exactly as in a real engine, and runs the busy loop in a child
+# process (as vLLM's engine core is the API server's child). The scheduler is a plain object
+# with vLLM's attribute names; the loop blocks on the input queue like vLLM's when idle.
+FAKE_VLLM_LIVE = r'''#!{py}
+import http.server, json, multiprocessing as mp, os, queue, sys, threading, time, types
+argv = sys.argv[1:]
+open(os.environ["FAKE_OUT"], "w").write(json.dumps({{"argv": argv}}))
+def flag(name, default):
+    return int(argv[argv.index(name) + 1]) if name in argv else default
+def core_main():
+    import live_reconfig
+    mod = types.ModuleType("vllm.v1.engine.core")
+    class EngineCoreProc:
+        def __init__(self):
+            self.input_queue = queue.Queue()
+            self.scheduler = types.SimpleNamespace(
+                max_num_running_reqs=flag("--max-num-seqs", 256),
+                max_num_scheduled_tokens=flag("--max-num-batched-tokens", 8192),
+                running=[], waiting=[])
+            self.vllm_config = types.SimpleNamespace(
+                scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),
+                model_config=types.SimpleNamespace(max_model_len=flag("--max-model-len", 4096)),
+                parallel_config=types.SimpleNamespace(data_parallel_size=1))
+        def _handle_client_request(self, t, r):
+            pass
+        def _process_engine_step(self):
+            return False
+        def run_busy_loop(self):
+            while True:
+                self._handle_client_request(*self.input_queue.get())
+                self._process_engine_step()
+    mod.EngineCoreProc = EngineCoreProc
+    live_reconfig._patch_core(mod)
+    EngineCoreProc().run_busy_loop()
+if __name__ == "__main__":
+    sys.path.insert(0, os.environ["LIVELAB_SERVICES"])
+    mp.set_start_method("fork")
+    mp.Process(target=core_main, daemon=True).start()
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/health" else 404); self.end_headers()
+        def log_message(self, *a): pass
+    http.server.HTTPServer(("127.0.0.1", flag("--port", 8000)), H).serve_forever()
+'''
+
+
+def _weights_daemon(work_dir):
+    """nvidia-smi stub and a weights daemon socket for GPU-fake-0 (the --weights probe)."""
     from weights import socket_name
-    work_dir = _short_dir()
     smi_dir = os.path.join(work_dir, "bin")
     os.makedirs(smi_dir, exist_ok=True)
     _script(smi_dir, "nvidia-smi",
@@ -405,6 +441,27 @@ def test_reconfigure_in_process_and_warm_ipc_tiers():
     daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     daemon.bind(os.path.join(sock_dir, socket_name("GPU-fake-0")))
     daemon.listen(4)
+    return smi_dir, sock_dir, daemon
+
+
+def _reconfigure(cache_dir, log, pid, env, *flags):
+    proc = subprocess.run(
+        [sys.executable, ENGINE, "reconfigure", "--pid", str(pid), "--cache-root", cache_dir,
+         "--log", log, *flags], capture_output=True, text=True, timeout=90, env=env)
+    return proc, _one_json_line(proc.stdout)
+
+
+def test_reconfigure_without_a_live_consumer_restarts_and_says_so():
+    """Input: an engine whose process has no live agent (the plain fake `vllm`), started with
+    `--weights --kvplan` (`m --port P --max-model-len 4096 --enforce-eager`), then:
+    1. `--max-num-seqs 4` (in_process_instant, a live field) -> nobody in the engine can apply
+       it, so the launcher restarts: path "restart", restarted True, a new pid, and
+       restart_reason names the missing live agent. Before: it wrote <pid>.reconfig.json that
+       nothing read, recorded the new argv as the engine's, and reported restarted False.
+    2. `--no-enforce-eager` (in_process_graph: no live consumer at all) -> restart too.
+    3. `--gpu-memory-utilization 0.85` (warm_weights_ipc) -> restart with merged flags."""
+    work_dir = _short_dir()
+    smi_dir, sock_dir, daemon = _weights_daemon(work_dir)
     fake_vllm = _script(work_dir, "vllm", FAKE_VLLM)
     out_file = os.path.join(work_dir, "ran.json")
     cache_dir = os.path.join(work_dir, "c")
@@ -416,79 +473,135 @@ def test_reconfigure_in_process_and_warm_ipc_tiers():
          os.path.join(work_dir, "s1.log"), "--vllm", fake_vllm, "--weights",
          "--weights-socket-dir", sock_dir, "m", "--kvplan", "--port", str(port),
          "--max-model-len", "4096", "--enforce-eager"],
-        capture_output=True, text=True, timeout=60, env=env,
-    )
-    start_report = _one_json_line(start_proc.stdout)
-    pid1 = start_report["pid"]
-    pid2 = None
+        capture_output=True, text=True, timeout=60, env=env)
+    pids = [_one_json_line(start_proc.stdout)["pid"]]
     try:
         assert start_proc.returncode == 0, start_proc.stdout + start_proc.stderr
-        # 1. in_process_instant (< 100 ms): pid1 stays alive!
-        instant_proc = subprocess.run(
-            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
-             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
-             "--max-model-len", "32768", "--max-num-batched-tokens", "8192"],
-            capture_output=True, text=True, timeout=60, env=env,
-        )
-        assert instant_proc.returncode == 0, instant_proc.stdout + instant_proc.stderr
-        instant_report = _one_json_line(instant_proc.stdout)
-        assert instant_report["pid"] == pid1 and not zygote._exited(pid1)
-        assert instant_report["reconfig"]["tier"] == "in_process_instant"
-        assert instant_report["reconfig"]["in_process"] is True
-        assert instant_report["reconfig"]["restarted"] is False
-        assert instant_report["reconfig"]["replaced_pid"] is None
-        assert len(instant_report["reconfig"]["control_actions"]) == 2
-
-        # 2. in_process_graph (0.5-2 s): pid1 still stays alive!
-        graph_proc = subprocess.run(
-            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
-             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
-             "--no-enforce-eager"],
-            capture_output=True, text=True, timeout=60, env=env,
-        )
-        assert graph_proc.returncode == 0, graph_proc.stdout + graph_proc.stderr
-        graph_report = _one_json_line(graph_proc.stdout)
-        assert graph_report["pid"] == pid1 and not zygote._exited(pid1)
-        assert graph_report["reconfig"]["tier"] == "in_process_graph"
-        assert graph_report["reconfig"]["in_process"] is True
-        assert graph_report["reconfig"]["restarted"] is False
-        assert graph_report["reconfig"]["control_actions"][0]["action"] == (
-            "toggle_cudagraph_dispatch"
-        )
-
-        # 3. warm_weights_ipc (7-20 s): worker restarts with resident WeightHolder IPC!
-        reconfig_proc = subprocess.run(
-            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
-             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
-             "--gpu-memory-utilization", "0.85"],
-            capture_output=True, text=True, timeout=60, env=env,
-        )
-        reconfig_report = _one_json_line(reconfig_proc.stdout)
-        pid2 = reconfig_report.get("pid")
-        assert reconfig_proc.returncode == 0, reconfig_proc.stdout + reconfig_proc.stderr
-        assert zygote._exited(pid1), "old engine pid must be stopped on warm_weights_ipc"
-        assert pid2 and pid2 != pid1 and reconfig_report["healthy_after_s"] is not None
-        reconfig_delta = reconfig_report["reconfig"]
-        assert reconfig_delta["tier"] == "warm_weights_ipc"
-        assert reconfig_delta["in_process"] is False
-        assert reconfig_delta["restarted"] is True
-        assert reconfig_delta["weights_compatible"] is True
-        assert reconfig_delta["replaced_pid"] == pid1
-        assert reconfig_delta["changed"] == {"gpu_memory_utilization": [0.9, 0.85]}
+        for i, flags in enumerate((["--max-num-seqs", "4"], ["--no-enforce-eager"],
+                                   ["--gpu-memory-utilization", "0.85"])):
+            proc, rep = _reconfigure(cache_dir, os.path.join(work_dir, f"r{i}.log"), pids[-1],
+                                     env, *flags)
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            rc = rep["reconfig"]
+            assert rc["path"] == "restart" and rc["restarted"] is True, rc
+            assert rc["replaced_pid"] == pids[-1] and rep["pid"] != pids[-1]
+            assert zygote._exited(pids[-1]), "the replaced engine must be gone"
+            assert rc["restart_reason"], rc
+            assert rep["healthy_after_s"] is not None
+            pids.append(rep["pid"])
         ran_argv = json.loads(Path(out_file).read_text())["argv"]
         assert ran_argv == [
-            "serve", "m", "--port", str(port), "--max-model-len", "32768",
-            "--max-num-batched-tokens", "8192", "--gpu-memory-utilization", "0.85",
+            "serve", "m", "--port", str(port), "--max-model-len", "4096", "--max-num-seqs", "4",
+            "--gpu-memory-utilization", "0.85",
             "--host", "127.0.0.1", "--load-format", "ipc_cache",
             "--model-loader-extra-config",
             json.dumps({"socket_dir": sock_dir, "mode": "zero_copy", "fallback": False}),
             "--worker-cls", "kvplan.KVPlanWorker",
         ]
+        assert not list(Path(cache_dir, "engines").glob("*.reconfig.json")), \
+            "no control file without a consumer"
     finally:
-        _stop(pid1)
-        if pid2:
-            _stop(pid2)
+        for pid in pids:
+            _stop(pid)
         daemon.close()
+
+
+def test_reconfigure_live_path_is_acknowledged_by_the_engine_core_agent():
+    """Input: a fake `vllm serve` whose engine-core child runs live_reconfig's patched busy loop
+    (FAKE_VLLM_LIVE), started with `--max-num-seqs 16 --max-num-batched-tokens 4096`, then:
+    1. `--max-num-seqs 4` -> path "in_process_live", same pid, the agent's ack reads the
+       scheduler back (target 4, max_num_running_reqs 4), and the recorded state has the new
+       argv only after that ack;
+    2. `--max-num-seqs 32` (above the boot value 16: the runner is sized for 16) -> not live:
+       path "restart", restart_reason names the boot value."""
+    work_dir = _short_dir()
+    fake_vllm = _script(work_dir, "vllm", FAKE_VLLM_LIVE)
+    out_file = os.path.join(work_dir, "ran.json")
+    cache_dir = os.path.join(work_dir, "c")
+    port = _free_port()
+    env = stub_env(work_dir, FAKE_OUT=out_file, LIVELAB_SERVICES=str(HERE))
+    start_proc = subprocess.run(
+        [sys.executable, ENGINE, "start", "--cache-root", cache_dir, "--log",
+         os.path.join(work_dir, "s1.log"), "--vllm", fake_vllm, "m", "--port", str(port),
+         "--max-num-seqs", "16", "--max-num-batched-tokens", "4096"],
+        capture_output=True, text=True, timeout=60, env=env)
+    pids = [_one_json_line(start_proc.stdout)["pid"]]
+    try:
+        assert start_proc.returncode == 0, start_proc.stdout + start_proc.stderr
+        state_file = Path(cache_dir, "engines", f"{pids[0]}.json")
+        live_dir = json.loads(state_file.read_text())["live_dir"]
+        for _ in range(100):
+            if Path(live_dir, "ready.json").exists():
+                break
+            time.sleep(0.05)
+        proc, rep = _reconfigure(cache_dir, os.path.join(work_dir, "r1.log"), pids[0], env,
+                                 "--max-num-seqs", "4")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        rc = rep["reconfig"]
+        assert rc["path"] == "in_process_live" and rc["restarted"] is False, rc
+        assert rep["pid"] == pids[0] and not zygote._exited(pids[0])
+        ack = rc["live_ack"]
+        assert ack["ok"] and ack["before"]["max_num_running_reqs"] == 16
+        assert ack["after"]["max_num_running_reqs"] == 4 and ack["after"]["target_max_num_seqs"] == 4
+        assert json.loads(state_file.read_text())["vargv"][-2:] == ["--max-num-seqs", "4"]
+
+        proc, rep = _reconfigure(cache_dir, os.path.join(work_dir, "r2.log"), pids[0], env,
+                                 "--max-num-seqs", "32")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        rc = rep["reconfig"]
+        assert rc["path"] == "restart" and "boot value 16" in rc["restart_reason"], rc
+        pids.append(rep["pid"])
+    finally:
+        for pid in pids:
+            _stop(pid)
+
+
+def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
+    """(1) A process recorded with another start time is another process (pid reuse):
+    _signal_if_same must not signal it. (2) stop_engine of an engine whose port another process
+    keeps open returns stopped False with port_open True. Before: it returned stopped True
+    after the SIGKILL path without checking anything."""
+    victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        st = engine._start_time(victim.pid)
+        assert st is not None
+        assert engine._signal_if_same(victim.pid, st + 1, signal.SIGKILL) is False
+        time.sleep(0.2)
+        assert not zygote._exited(victim.pid), "a pid with another start time was signalled"
+    finally:
+        victim.kill()
+        victim.wait()
+    port = _free_port()
+    other = socket.socket()
+    other.bind(("127.0.0.1", port))
+    other.listen(64)
+    import threading
+
+    def accept_all():
+        try:
+            while True:
+                other.accept()[0].close()
+        except OSError:
+            pass
+    threading.Thread(target=accept_all, daemon=True).start()
+    eng = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                           start_new_session=True)
+    try:
+        r = engine.stop_engine(eng.pid, port=port, grace=0.5, kill_wait=0.5)
+        eng.wait(timeout=5)
+        assert r["stopped"] is False and r["port_open"] is True and r["alive"] == [], r
+    finally:
+        other.close()
+        _stop(eng.pid)
+    eng = subprocess.Popen([sys.executable, "-c",
+                            "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+                            " time.sleep(60)"], start_new_session=True)
+    try:
+        time.sleep(0.3)
+        r = engine.stop_engine(eng.pid, grace=0.5, kill_wait=3)
+        assert r["stopped"] is True and r["alive"] == [], r
+    finally:
+        _stop(eng.pid)
 
 
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
