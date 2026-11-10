@@ -102,11 +102,33 @@ def _tracker():
     return tensor_parallel.get_cuda_rng_tracker()
 
 
+def _tracker_states(t):
+    """Copies of the tracker's states. Megatron's get_states() returns the live state objects and
+    set_states() keeps the dict it is given, which fork() then updates in place: without copies a
+    restore would bring back whatever the last check left in the snapshot's own dict."""
+    out = {}
+    for name, st in t.get_states().items():
+        out[name] = st.get_state() if isinstance(st, torch.Generator) else st.clone()
+    return out
+
+
+def _set_tracker_states(t, saved):
+    live = t.get_states()
+    states = {}
+    for name, st in saved.items():
+        if isinstance(live.get(name), torch.Generator):    # graph-safe generators: set in place
+            live[name].set_state(st.clone())
+            states[name] = live[name]
+        else:
+            states[name] = st.clone()
+    t.set_states(states)
+
+
 def rng_state():
     t = _tracker()
     return {"cpu": torch.get_rng_state(),
             "cuda": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
-            "tracker": t.get_states() if t is not None else None,
+            "tracker": _tracker_states(t) if t is not None and t.get_states() else None,
             "python": random.getstate(),
             "numpy": np.random.get_state() if np is not None else None}
 
@@ -116,7 +138,7 @@ def set_rng_state(s):
     if s["cuda"] is not None:
         torch.cuda.set_rng_state(s["cuda"])
     if s["tracker"] is not None:
-        _tracker().set_states(s["tracker"])
+        _set_tracker_states(_tracker(), s["tracker"])
     random.setstate(s["python"])
     if s.get("numpy") is not None:
         np.random.set_state(s["numpy"])

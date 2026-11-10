@@ -350,6 +350,35 @@ class ResetFailsClosed(unittest.TestCase):
             self.assertEqual(np.random.rand(), np0)
         self.assertEqual(fx.opt.grad_scaler._scale.item(), 65536.0)
 
+    def test_tracker_states_survive_a_step_after_restore(self):
+        """Megatron's CudaRNGStatesTracker: get_states() returns its states, set_states() keeps the
+        dict it is given and fork() writes new states into it. Input: S, restore, a step that
+        forks the tracker, restore again. Expect: the tracker state equals S's both times. Before
+        the fix the second restore brought back the step's state (the snapshot's own dict had been
+        written by fork); the GPU run's digest showed it as an `rng` difference."""
+        from fastrsi_megatron import state as ST
+
+        class Tracker:                          # the semantics of megatron.core.tensor_parallel.random
+            def __init__(self):
+                self.states_ = {"model-parallel-rng": torch.ByteTensor([1, 2, 3])}
+
+            def get_states(self):
+                return {k: v for k, v in self.states_.items()}
+
+            def set_states(self, states):
+                self.states_ = states
+
+            def step(self):
+                self.states_["model-parallel-rng"] = self.states_["model-parallel-rng"] + 1
+        t = Tracker()
+        fx = LabFixture(self)
+        with mock.patch.object(ST, "_tracker", return_value=t):
+            s = ST.Snapshot([fx.model], fx.opt, fx.sched)
+            for _ in range(2):
+                self.assertTrue(s.restore()["ok"])
+                self.assertEqual(t.states_["model-parallel-rng"].tolist(), [1, 2, 3])
+                t.step()
+
     def test_restore_with_extra_or_missing_state_fails_and_writes_nothing(self):
         """Input: S, a step, then an optimizer state tensor S does not have (extra); then one S has
         that the live optimizer lost (missing). Expect: ok False with the names, and the live

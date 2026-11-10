@@ -107,7 +107,45 @@ def install_forksafe():
         return {"installed": False, "why": repr(e)}
     out = forksafe.install(torch.cuda)
     out["properties"] = install_properties(torch.cuda)
+    out["cuda_python"] = guard_cuda_python(torch.cuda)
     return out
+
+
+_CUINIT = {}
+
+
+def guard_cuda_python(cuda=None):
+    """The CuTe DSL (nvidia-cutlass-dsl, imported by flashinfer through Megatron in NeMo 26.04)
+    calls cuda-python's cuInit at import to pick its target arch, and falls back to sm_100 when
+    that fails. In the zygote, cuInit answers CUDA_ERROR_NOT_INITIALIZED (CUDA stays off) and
+    CUTE_DSL_ARCH, if unset, is set from the NVML-answered capability, so the DSL targets the
+    right arch; the forked rank gets the real cuInit back (unguard_cuda_python). Returns what was
+    done."""
+    try:
+        import cuda.bindings.driver as drv
+    except ImportError:
+        return {"installed": False, "why": "no cuda-python"}
+    if "fn" not in _CUINIT:
+        _CUINIT["fn"], _CUINIT["mod"] = drv.cuInit, drv
+        drv.cuInit = lambda flags=0: (drv.CUresult.CUDA_ERROR_NOT_INITIALIZED,)
+    arch = None
+    if cuda is not None and "CUTE_DSL_ARCH" not in os.environ:
+        try:
+            major, minor = cuda.get_device_capability(0)
+            arch = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+            os.environ["CUTE_DSL_ARCH"] = arch
+            START_ENV["CUTE_DSL_ARCH"] = arch
+        except Exception as e:                  # no GPU visible: leave the DSL's default
+            arch = f"unset: {e!r}"
+    return {"installed": True, "cute_dsl_arch": arch or os.environ.get("CUTE_DSL_ARCH")}
+
+
+def unguard_cuda_python():
+    if "fn" in _CUINIT:
+        _CUINIT["mod"].cuInit = _CUINIT.pop("fn")
+        _CUINIT.pop("mod")
+        return True
+    return False
 
 
 def install_properties(cuda, probe=None):
@@ -436,6 +474,7 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
         if zygote_pid is not None:
             _supervised(zygote_pid)
         os.environ.update(rank_env(req, local_rank))
+        unguard_cuda_python()                   # the rank initializes CUDA itself
         if os.environ.get("FASTRSI_ZYGOTE_UNPATCH", "1") != "0":
             unpatch()
         bind(req, local_rank)
@@ -605,7 +644,7 @@ def handle(req, lsock, conn, src):
                 _child(req, r, lsock, conn, me)
             pids.append(pid)
         connected = _send(conn, {"event": "forked", "pids": pids, "findings": seen,
-                                 "fork_s": round(time.time() - t0, 3)})
+                                 "fork_s": round(time.time() - t0, 3), "mono": time.monotonic()})
         policy = req.get("on_client_gone", "kill")
         rc, left, stopping = {}, set(pids), False
         deadline = time.time() + float(req.get("timeout", 0) or 1e12)

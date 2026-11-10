@@ -343,7 +343,8 @@ class Lab:
         if os.environ.get("FASTRSI_MAILBOX"):
             G.Mailbox(os.environ["FASTRSI_MAILBOX"], server.q)
         with open(os.environ.get("FASTRSI_READY", os.devnull), "w") as f:
-            json.dump({"sock": path, "pid": os.getpid(), "timings": self.timings}, f)
+            json.dump({"sock": path, "pid": os.getpid(), "timings": self.timings,
+                       "mono": time.monotonic(), "time": time.time()}, f)
         print(f"[fastrsi] lab ready on {path}: {json.dumps(self.timings)}", flush=True)
         while True:
             req, reply = server.next()
@@ -473,8 +474,7 @@ class Lab:
         if self.batches.items is None or getattr(self, "resumed", "start") != "start":
             return it
         if self.replayed is None or self.replayed[0] is not it:
-            import itertools
-            base = itertools.chain(list(self.batches.items), it)
+            base = _Replay(self.batches.items, it)
             w = self.batches.wrapper
             self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
                              else base)
@@ -482,6 +482,22 @@ class Lab:
 
 
 ZERO = ST.ZERO_KEYS
+
+
+class _Replay:
+    """The frozen batches, then `it` (an iterator that may lack __iter__, as Megatron's
+    RerunDataIterator does)."""
+
+    def __init__(self, items, it):
+        self.items, self.it = list(items), it
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.items:
+            return self.items.pop(0)
+        return next(self.it)
 
 
 def _version():
