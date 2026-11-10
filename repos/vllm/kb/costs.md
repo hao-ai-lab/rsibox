@@ -37,6 +37,25 @@ Source: our startup measurement, 2026-10-08, `vllm/vllm-openai:v0.31.0`,
 Reading: autotune is 62% of a warm start and its cache did not help. Engram tables are 2 × 23.6 GiB
 pinned host memory per rank. No torch.compile for this model in this image.
 
+## Restart per check vs live edit (Qwen3-8B, 1× GB200, 2026-11-10)
+
+Source: our 2026-11-10 run of [`../examples/live-edit-qwen3`](../examples/live-edit-qwen3/README.md):
+vLLM 0.31.0, TP 1, CUDA graphs on (defaults), `--no-enable-prefix-caching`, warm on-disk caches,
+weights on a memory disk. Check: 8 requests, greedy, 32 tokens each (1.03 s). Each number is one
+measurement. The lab has not run conformance on vLLM, so these are measurements, not receipts.
+
+| Edit | Restart, edit to result | Live, edit to result | Install (edit to commit) | Engine loop stalled | Undo | Witness calls |
+|---|---:|---:|---:|---:|---:|---:|
+| `Scheduler.schedule`, engine core | 62.98 s | 1.175 s | 0.141 s | 1.2 ms | 0.7 ms | 816 |
+| `Sampler._sample_random`, worker | 63.37 s | 1.072 s | 0.030 s | 0.5 ms | 0.3 ms | 768 |
+| `Sampler.greedy_sample` in `v1/sample/sampler.py`, worker | 63.08 s | 1.067 s | 0.030 s | 0.5 ms | 0.3 ms | 0 (`zero_witness`) |
+
+- Launch to `/health`: 61.94–64.55 s over 6 starts (5 plain, 1 with the adapter: 63.03 s).
+- Check time, median of 3: 1.035 s plain, 1.032 s with the adapter loaded (no cost detected).
+- Live output equals the fresh process's output for all three edits.
+- This 63 s restart is not the 228 s baseline of the ladder above (a different measurement,
+  not reproduced here).
+
 ## Restart after one edit (Qwen3-8B, warm caches otherwise)
 
 Source: our per-edit restart measurement (pre-v0 internal tree), dev workload.
