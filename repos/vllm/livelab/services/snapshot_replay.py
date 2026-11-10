@@ -1,5 +1,24 @@
 """Stateful KV cache snapshot, thrashing steady-state replay, and deterministic
 speculative acceptance mocking for the vLLM live lab.
+
+Status (read before using it):
+- Runner level only. `KVStateSnapshotter` saves and restores the state of one V1
+  `GPUModelRunner` (its requests, input batch, block tables, step buffers, the KV blocks the next
+  `horizon_steps` touch, and every RNG the sampler reads). It does NOT cover the scheduler's
+  side (EngineCore block pool, request queues, num_computed_tokens of scheduler Requests): a
+  restore inside a serving engine whose scheduler then keeps going desynchronizes the two. The
+  one sound use is the one gpu_check_snapshot_replay.py makes: restore, then re-execute the
+  recorded SchedulerOutputs of the horizon on the runner, so the scheduler is never involved.
+  It is not wired into any measured path for that reason.
+- KV blocks are saved per KV-cache group: each layer's tensor is matched to its group through
+  `runner.kv_cache_config.kv_cache_groups[g].layer_names` and the attention layer's bound
+  `kv_cache` (static forward context). A multi-group runner without that mapping is an error,
+  never a guess.
+- Times (`snapshot.timing`, `restore()`'s return) are wall time on the monotonic clock with
+  `torch.cuda.synchronize()` before every reading when CUDA is in use.
+- `SpeculativeAcceptanceMocker` fakes the acceptance decision. It is refused inside
+  `scored_run()` and when FASTRSI_SCORED=1, and a scored run refuses to start or end while one
+  is installed: mocked acceptance can never produce a scored number.
 """
 
 from __future__ import annotations
@@ -8,6 +27,7 @@ from contextlib import contextmanager
 import copy
 from dataclasses import dataclass, field
 import math
+import os
 import random
 import time
 from typing import Any, Callable, Sequence
@@ -17,7 +37,31 @@ try:
 except ImportError:  # pragma: no cover
     _torch = None  # type: ignore[assignment]
 
+try:
+    import numpy as _np
+except ImportError:  # pragma: no cover
+    _np = None  # type: ignore[assignment]
+
 PLACEHOLDER_TOKEN_ID = -1
+
+
+class SnapshotError(ValueError):
+    """The snapshot cannot be taken or restored faithfully (nothing is guessed)."""
+
+
+def _cuda_in_use() -> bool:
+    return bool(_torch is not None and _torch.cuda.is_available() and _torch.cuda.is_initialized())
+
+
+def _sync() -> None:
+    if _cuda_in_use():
+        _torch.cuda.synchronize()
+
+
+def _now_ms() -> float:
+    """Monotonic clock in ms, after the GPU finished the work queued so far."""
+    _sync()
+    return time.perf_counter() * 1000.0
 
 
 @dataclass(frozen=True)
@@ -87,6 +131,8 @@ class KVStateSnapshot:
     rng_state: dict[str, Any] = field(default_factory=dict)
     findings: list[SnapshotFinding] = field(default_factory=list)
     capture_ms: float = 0.0
+    timing: dict[str, float] = field(default_factory=dict)
+    layer_groups: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_backed_up_bytes(self) -> int:
@@ -98,6 +144,7 @@ class KVStateSnapshot:
             "horizon_steps": self.horizon_steps, "max_step_tokens": self.max_step_tokens,
             "dirty_blocks_per_group": [len(grp) for grp in self.dirty_block_ids_per_group],
             "backed_up_kv_bytes": self.total_backed_up_bytes, "capture_ms": round(self.capture_ms, 3),
+            "timing_ms": {k: round(v, 4) for k, v in self.timing.items()},
             "findings": [item.to_dict() for item in self.findings],
         }
 
@@ -191,6 +238,43 @@ def _iter_kv_tensors(kv_caches: Any) -> list[tuple[Any, Any]]:
     for key, val in (kv_caches.items() if isinstance(kv_caches, dict) else enumerate(kv_caches)):
         items.extend(((key, sub_idx), sub_val) for sub_idx, sub_val in enumerate(val)) if (isinstance(val, (list, tuple)) and not hasattr(val, "shape")) else items.append((key, val))
     return items
+
+
+def kv_layer_groups(runner: Any) -> list[tuple[Any, Any, int]]:
+    """[(key, kv tensor, KV-cache group index)] for every KV tensor of the runner.
+
+    vLLM's runner.kv_caches is ordered by layer index, NOT by group, so a list index is never a
+    group index. The group of a layer comes from runner.kv_cache_config.kv_cache_groups[g]
+    .layer_names, and its tensor from the attention layer the runner bound it to
+    (compilation_config.static_forward_context[name].kv_cache[0]). A runner with one block
+    table group needs no mapping: every tensor is group 0. A multi-group runner without the
+    mapping raises SnapshotError."""
+    num_groups = len(_iter_block_tables(getattr(getattr(runner, "input_batch", None), "block_table", None)))
+    cfg = getattr(runner, "kv_cache_config", None)
+    groups = getattr(cfg, "kv_cache_groups", None)
+    if groups:
+        comp = getattr(runner, "compilation_config", None)
+        if comp is None:
+            comp = getattr(getattr(runner, "vllm_config", None), "compilation_config", None)
+        ctx = getattr(comp, "static_forward_context", None) or {}
+        out: list[tuple[Any, Any, int]] = []
+        for g_idx, group in enumerate(groups):
+            for name in getattr(group, "layer_names", []):
+                layer = ctx.get(name)
+                kv = getattr(layer, "kv_cache", None)
+                if kv is None:
+                    raise SnapshotError(f"layer {name} (KV group {g_idx}) has no bound kv_cache")
+                kv = kv[0] if isinstance(kv, (list, tuple)) and kv and not _is_torch(kv) else kv
+                if isinstance(kv, (list, tuple)) and not hasattr(kv, "shape"):   # mamba state
+                    out.extend(((name, i), sub, g_idx) for i, sub in enumerate(kv))
+                else:
+                    out.append((name, kv, g_idx))
+        return out
+    items = _iter_kv_tensors(getattr(runner, "kv_caches", None))
+    if num_groups <= 1:
+        return [(key, val, 0) for key, val in items]
+    raise SnapshotError(f"runner has {num_groups} KV-cache groups but no kv_cache_config to map "
+                        "its layers to them; refusing to guess (a layer index is not a group)")
 
 
 def _shape_of(tensor: Any) -> tuple[int, ...]:
@@ -325,7 +409,7 @@ class KVStateSnapshotter:
         return dirty_per_group
 
     def capture(self, runner: Any, *, kv_mode: str | None = None, horizon_steps: int | None = None, max_step_tokens: int | None = None, journal: Any | None = None) -> KVStateSnapshot:
-        start_time, eff_mode = time.perf_counter(), kv_mode or self.kv_mode
+        t0, eff_mode = _now_ms(), kv_mode or self.kv_mode
         if eff_mode not in self.VALID_KV_MODES or getattr(runner, "input_batch", None) is None:
             raise ValueError(f"Unsupported kv_mode={eff_mode!r} or missing runner.input_batch")
         eff_steps = horizon_steps if horizon_steps is not None else self.horizon_steps
@@ -372,11 +456,14 @@ class KVStateSnapshotter:
             "num_accepted_tokens": _snapshot_pair(getattr(runner, "num_accepted_tokens", None), max(1, num_reqs), pin=self.pin_memory),
         }
         dirty_per_group = self.compute_dirty_block_ids(runner, eff_steps, eff_step_toks, eff_mode)
-        findings, kv_backups = [], []
+        t_meta = _now_ms()
+        findings, kv_backups, layer_groups = [], [], {}
         if eff_mode != "metadata_only":
-            union_dirty = sorted({bid for grp in dirty_per_group for bid in grp})
-            for idx, (key, kv_t) in enumerate(_iter_kv_tensors(getattr(runner, "kv_caches", None))):
-                grp_dirty = dirty_per_group[idx] if idx < len(dirty_per_group) else union_dirty
+            for key, kv_t, g_idx in kv_layer_groups(runner):
+                layer_groups[str(key)] = g_idx
+                if g_idx >= len(dirty_per_group):
+                    raise SnapshotError(f"layer {key} is in KV group {g_idx}, but the input batch has {len(dirty_per_group)} block tables")
+                grp_dirty = dirty_per_group[g_idx]
                 if not grp_dirty:
                     continue
                 axis = _infer_block_axis(kv_t)
@@ -386,17 +473,19 @@ class KVStateSnapshotter:
                     findings.append(SnapshotFinding("snapshot_block_id_out_of_range", "warning", f"Layer {key}: block IDs exceed pool ({num_phys}).", {"layer": str(key)}))
                 if valid_ids:
                     entry = _backup_kv_blocks(kv_t, axis, valid_ids, pin=self.pin_memory)
-                    entry["key"] = key
+                    entry["key"], entry["group"] = key, g_idx
                     kv_backups.append(entry)
-        rng_state: dict[str, Any] = {"py_random": random.getstate()}
-        if _torch is not None:
-            rng_state["torch_cpu"] = _torch.get_rng_state().clone()
+        t_kv = _now_ms()
+        rng_state = capture_rng_state(getattr(runner, "input_batch", None))
+        t_end = _now_ms()
         snapshot = KVStateSnapshot(
             created_at_ns=time.time_ns(), kv_mode=eff_mode, horizon_steps=eff_steps, max_step_tokens=eff_step_toks,
             num_reqs=num_reqs, total_scheduled_tokens=total_sched, req_ids=req_ids, req_id_to_index=req_id_to_index,
             requests=requests_snap, input_slices=input_slices, block_tables=bt_snapshots, runner_buffers=runner_buffers,
             kv_backups=kv_backups, dirty_block_ids_per_group=dirty_per_group, rng_state=rng_state, findings=findings,
-            capture_ms=(time.perf_counter() - start_time) * 1000.0,
+            capture_ms=t_end - t0,
+            timing={"capture_metadata_ms": t_meta - t0, "capture_kv_d2h_ms": t_kv - t_meta, "capture_rng_ms": t_end - t_kv, "capture_total_ms": t_end - t0},
+            layer_groups=layer_groups,
         )
         self._last_snapshot = snapshot
         if journal is not None and hasattr(journal, "record_call"):
@@ -404,11 +493,17 @@ class KVStateSnapshotter:
         return snapshot
 
     def restore(self, runner: Any, snapshot: KVStateSnapshot | None = None) -> float:
-        start_time, snap = time.perf_counter(), snapshot or self._last_snapshot
+        """Restore `snapshot`; returns its wall time in ms (CUDA-synchronized). The per-phase
+        times land in `snapshot.timing` (restore_*_ms). A request of the snapshot that left the
+        runner since cannot be restored: SnapshotError, before anything is changed."""
+        t0, snap = _now_ms(), snapshot or self._last_snapshot
         if snap is None or getattr(runner, "input_batch", None) is None:
             raise ValueError("Valid snapshot and runner.input_batch required for restore()")
         input_batch, num_reqs, runner_requests = runner.input_batch, snap.num_reqs, getattr(runner, "requests", None)
         if isinstance(runner_requests, dict):
+            missing = sorted(req_id for req_id in snap.requests if req_id not in runner_requests)
+            if missing:
+                raise SnapshotError(f"requests {missing} left the runner since the snapshot; their state is gone")
             for key in [key for key in runner_requests if key not in snap.requests]:
                 del runner_requests[key]
             for req_id, rsnap in snap.requests.items():
@@ -435,7 +530,14 @@ class KVStateSnapshotter:
                 input_batch.spec_token_ids[row_idx] = list(spec_row)
         for row_idx, out_row in enumerate(slices["req_output_token_ids"]):
             if row_idx < len(input_batch.req_output_token_ids):
-                input_batch.req_output_token_ids[row_idx] = list(out_row) if out_row is not None else None
+                # vLLM aliases this row with requests[req_id].output_token_ids (one list): keep
+                # the alias, or later appends reach only one of the two.
+                req_id = snap.req_ids[row_idx] if row_idx < len(snap.req_ids) else None
+                req_obj = runner_requests.get(req_id) if isinstance(runner_requests, dict) and req_id else None
+                if req_obj is not None and out_row is not None:
+                    input_batch.req_output_token_ids[row_idx] = req_obj.output_token_ids
+                else:
+                    input_batch.req_output_token_ids[row_idx] = list(out_row) if out_row is not None else None
         input_batch.prev_req_id_to_index = copy.deepcopy(slices["prev_req_id_to_index"])
         raw_tables = _iter_block_tables(getattr(input_batch, "block_table", None))
         for btsnap in snap.block_tables:
@@ -451,16 +553,18 @@ class KVStateSnapshotter:
         _restore_slice(getattr(runner, "optimistic_seq_lens_cpu", None), rbufs["optimistic_seq_lens_cpu"], max(1, num_reqs))
         if hasattr(runner, "execute_model_state"):
             runner.execute_model_state = None
+        t_meta = _now_ms()
         if snap.kv_backups:
-            kv_map = dict(_iter_kv_tensors(getattr(runner, "kv_caches", None)))
+            kv_map = {key: kv_t for key, kv_t, _ in kv_layer_groups(runner)}
             for backup in snap.kv_backups:
-                if backup["key"] in kv_map:
-                    _restore_kv_blocks(kv_map[backup["key"]], backup)
-        if "py_random" in snap.rng_state:
-            random.setstate(snap.rng_state["py_random"])
-        if _torch is not None and "torch_cpu" in snap.rng_state:
-            _torch.set_rng_state(snap.rng_state["torch_cpu"])
-        return (time.perf_counter() - start_time) * 1000.0
+                if backup["key"] not in kv_map:
+                    raise SnapshotError(f"KV tensor {backup['key']} of the snapshot is not in the runner")
+                _restore_kv_blocks(kv_map[backup["key"]], backup)
+        t_kv = _now_ms()
+        restore_rng_state(snap.rng_state, input_batch)
+        t_end = _now_ms()
+        snap.timing.update({"restore_metadata_ms": t_meta - t0, "restore_kv_h2d_ms": t_kv - t_meta, "restore_rng_ms": t_end - t_kv, "restore_total_ms": t_end - t0})
+        return t_end - t0
 
     @contextmanager
     def frozen(self, runner: Any, **capture_kwargs: Any):
@@ -538,8 +642,8 @@ class KVStateSnapshotter:
         self._rebuild_step_metadata(runner, req_specs, group_blocks)
         if fill_tail_kv:
             dirty_groups = self.compute_dirty_block_ids(runner, cfg.horizon_steps, decode_step_tokens, "tail")
-            for idx, (_, kv_t) in enumerate(kv_tensors):
-                grp, axis = (dirty_groups[idx] if idx < len(dirty_groups) else []), _infer_block_axis(kv_t)
+            for _, kv_t, g_idx in kv_layer_groups(runner):
+                grp, axis = (dirty_groups[g_idx] if g_idx < len(dirty_groups) else []), _infer_block_axis(kv_t)
                 _fill_kv_blocks(kv_t, axis, [bid for bid in grp if 0 <= bid < _shape_of(kv_t)[axis]], 0.01)
         return findings
 
@@ -614,11 +718,13 @@ class KVStateSnapshotter:
         self._rebuild_step_metadata(runner, req_specs, None)
         raw_tables, kv_tensors, total_sched = _iter_block_tables(getattr(input_batch, "block_table", None)), _iter_kv_tensors(getattr(runner, "kv_caches", None)), sum(item["num_scheduled"] for item in req_specs)
         if mutate_tail_kv and raw_tables and kv_tensors and total_sched > 0:
-            block_size = max(1, int(getattr(raw_tables[0], "block_size", 16)))
-            sm_cpu, _ = _extract_pair(getattr(raw_tables[0], "slot_mapping", None))
-            touched, fill_val = sorted({slot // block_size for slot in _read_1d_ints(sm_cpu, total_sched)}), float((req_specs[0]["num_computed"] % 97) + 1)
-            for _, kv_t in kv_tensors:
-                axis = _infer_block_axis(kv_t)
+            fill_val, touched_per_group = float((req_specs[0]["num_computed"] % 97) + 1), []
+            for table in raw_tables:
+                block_size = max(1, int(getattr(table, "block_size", 16)))
+                sm_cpu, _ = _extract_pair(getattr(table, "slot_mapping", None))
+                touched_per_group.append(sorted({slot // block_size for slot in _read_1d_ints(sm_cpu, total_sched)}) if sm_cpu is not None else [])
+            for _, kv_t, g_idx in kv_layer_groups(runner):
+                touched, axis = (touched_per_group[g_idx] if g_idx < len(touched_per_group) else []), _infer_block_axis(kv_t)
                 _fill_kv_blocks(kv_t, axis, [bid for bid in touched if 0 <= bid < _shape_of(kv_t)[axis]], fill_val)
         return {"num_reqs": num_reqs, "total_scheduled_tokens": total_sched, "seq_lens": [item["num_computed"] + item["num_scheduled"] for item in req_specs]}
 
@@ -627,11 +733,77 @@ class KVStateSnapshotter:
             raise ValueError(f"num_steps must be >= 1, got {num_steps}")
         snap = snapshot or self._last_snapshot or self.capture(runner)
         restore_before_ms = self.restore(runner, snap) if restore_before else 0.0
-        start_replay = time.perf_counter()
+        start_replay = _now_ms()
         records = [step_fn(runner, step_idx) if step_fn is not None else self.advance_steady_state_step(runner) for step_idx in range(num_steps)]
-        replay_ms = (time.perf_counter() - start_replay) * 1000.0
+        replay_ms = _now_ms() - start_replay
         restore_after_ms = self.restore(runner, snap) if restore_after else 0.0
         return {"num_steps": num_steps, "restore_before_ms": restore_before_ms, "replay_ms": replay_ms, "per_step_ms": replay_ms / num_steps, "restore_after_ms": restore_after_ms, "total_ms": restore_before_ms + replay_ms + restore_after_ms, "steps": records}
+
+
+def capture_rng_state(input_batch: Any = None) -> dict[str, Any]:
+    """Every RNG vLLM's sampling can read: Python, numpy, torch CPU, torch CUDA (every device),
+    and the per-request torch.Generators of seeded requests (input_batch.generators)."""
+    state: dict[str, Any] = {"py_random": random.getstate()}
+    if _np is not None:
+        state["numpy"] = _np.random.get_state()
+    if _torch is not None:
+        state["torch_cpu"] = _torch.get_rng_state().clone()
+        if _cuda_in_use():
+            state["torch_cuda"] = [s.clone() for s in _torch.cuda.get_rng_state_all()]
+        gens = getattr(input_batch, "generators", None)
+        if isinstance(gens, dict):
+            state["generators"] = {idx: gen.get_state().clone() for idx, gen in gens.items()}
+    return state
+
+
+def restore_rng_state(state: dict[str, Any], input_batch: Any = None) -> None:
+    if "py_random" in state:
+        random.setstate(state["py_random"])
+    if _np is not None and "numpy" in state:
+        _np.random.set_state(state["numpy"])
+    if _torch is None:
+        return
+    if "torch_cpu" in state:
+        _torch.set_rng_state(state["torch_cpu"])
+    if "torch_cuda" in state:
+        _torch.cuda.set_rng_state_all(state["torch_cuda"])
+    gens = getattr(input_batch, "generators", None)
+    if "generators" in state and isinstance(gens, dict):
+        if set(gens) != set(state["generators"]):
+            raise SnapshotError(f"seeded requests changed rows: {sorted(state['generators'])} -> {sorted(gens)}")
+        for idx, gen_state in state["generators"].items():
+            gens[idx].set_state(gen_state)
+
+
+class MockedInScoredRunError(RuntimeError):
+    """A SpeculativeAcceptanceMocker and a scored run met: the score would be fake."""
+
+
+_ACTIVE_MOCKERS: set[int] = set()
+_SCORED_DEPTH = [0]
+
+
+def _scored() -> bool:
+    return _SCORED_DEPTH[0] > 0 or os.environ.get("FASTRSI_SCORED") == "1"
+
+
+def assert_unmocked() -> None:
+    """Call before reporting any scored number: raises if acceptance is mocked anywhere here."""
+    if _ACTIVE_MOCKERS:
+        raise MockedInScoredRunError(f"{len(_ACTIVE_MOCKERS)} SpeculativeAcceptanceMocker installed: acceptance is fake")
+
+
+@contextmanager
+def scored_run():
+    """Mark a scored check. Refuses to start or finish with a mocker installed, and no mocker
+    can be installed inside it."""
+    assert_unmocked()
+    _SCORED_DEPTH[0] += 1
+    try:
+        yield
+    finally:
+        _SCORED_DEPTH[0] -= 1
+    assert_unmocked()
 
 
 SpecAcceptanceSpec = int | float | Sequence[int] | Sequence[Sequence[int]]
@@ -777,6 +949,8 @@ class SpeculativeAcceptanceMocker:
         return enforced
 
     def install(self, target: Any, *, journal: Any | None = None) -> SpeculativeAcceptanceMocker:
+        if _scored():
+            raise MockedInScoredRunError("SpeculativeAcceptanceMocker cannot be installed in a scored run (scored_run() or FASTRSI_SCORED=1)")
         if self._installed_target is not None:
             self.uninstall()
         sampler = getattr(target, "rejection_sampler", target)
@@ -794,12 +968,14 @@ class SpeculativeAcceptanceMocker:
             sampler.forward = mock_fn
             if hasattr(target, "rejection_sampler") and target is not sampler:
                 target.rejection_sampler = _CallableSamplerProxy(sampler, mock_fn)
+        _ACTIVE_MOCKERS.add(id(self))
         if journal is not None and hasattr(journal, "record_call"):
             journal.record_call(self.uninstall)
         return self
 
     def uninstall(self) -> None:
         sampler = self._installed_target
+        _ACTIVE_MOCKERS.discard(id(self))
         if sampler is None:
             return
         if self._installed_owner is not None and hasattr(self._installed_owner, "rejection_sampler"):
