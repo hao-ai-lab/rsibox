@@ -16,7 +16,15 @@ answer is a blocking `participant_missing`. Phase 1 and phase 2 both run in this
 step runs while the lab serves, so no step can see two code versions.
 
 Verbs (rank 0, one JSON request each; see client.py): install, check, reset, uninstall, status,
-repl, inject, resume, exit. Fresh mode (FASTRSI_FRESH=<output path>): steps 1-2, one check,
+digest, repl, inject, resume, exit.
+
+Robustness: a request that is not a JSON object with a string `verb` gets an error reply; a client
+that times out or disconnects before its reply costs only that reply (logged, the lab serves on;
+the other ranks never see it). `reset` and `check` fail closed when a rank's restore refuses
+(state.Snapshot.restore). `digest` returns each rank's sha256 of every piece of state, so a reset
+round trip is shown bit for bit. `resume` puts S back on every rank (unless `state: "keep"`) and
+the job's next train steps get the frozen batches first, then the real iterator: the job continues
+as if the lab had not run. Fresh mode (FASTRSI_FRESH=<output path>): steps 1-2, one check,
 the output written as JSON, then exit; the conformance harness compares it to a live check.
 """
 import contextlib
@@ -49,6 +57,11 @@ MODULES = ("megatron.core.transformer.mlp", "megatron.core.transformer.attention
 
 def _now():
     return time.perf_counter()
+
+
+def _sync():
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 class RanksParticipant(C.Participant):
@@ -132,6 +145,7 @@ class Lab:
             resets={"R2": self._r2, "R3": self._r3})
         self._setup()
         self.host = None
+        self.replayed = None
 
     # -- state ---------------------------------------------------------------------------
     def _mb(self):
@@ -149,7 +163,9 @@ class Lab:
         from . import zygote
         zygote.quiesce_compile_pools_after_warmup()
         t3 = _now()
-        r = s0.restore()
+        r = s0.restore(allow_extra=True)        # the warm-up created Adam's state: zeroed next
+        if not r["ok"]:
+            raise RuntimeError(f"lab setup: the start state could not be put back: {r}")
         zeroed, unknown = ST.zero_new_state(self.optimizer, set(s0.host))
         del s0
         self.snap = ST.Snapshot(self.model, self.optimizer, self.scheduler)
@@ -184,10 +200,10 @@ class Lab:
                 os._exit(17)                              # a worker dies in a step
             if self.faults.pop("hang", None):
                 time.sleep(float(os.environ.get("FASTRSI_HANG_S", "3600")))
-            torch.cuda.synchronize()
+            _sync()
             t0 = _now()
             r = self.ts(*a, **{**self.k, "iteration": it0 + i})
-            torch.cuda.synchronize()
+            _sync()
             sec.append(round(_now() - t0, 5))
             ld = r[0] if isinstance(r[0], dict) else {}
             v = ld.get("lm loss")
@@ -214,15 +230,27 @@ class Lab:
             if op == "check":
                 t0 = _now()
                 rst = self._restore()
+                if not rst["ok"]:
+                    return {"ok": False, "rank": self.rank, "restore": rst,
+                            "error": f"restore refused: {rst['error']}"}
                 out = self._steps(msg["steps"])
                 return {"ok": True, "rank": self.rank, **out, "restore": rst,
                         "seconds": round(_now() - t0, 4)}
-            if op == "reset":
-                return {"ok": True, "rank": self.rank, "restore": self._restore()}
+            if op in ("reset", "prepare_resume"):
+                rst = self._restore()
+                return {"ok": rst["ok"], "rank": self.rank, "restore": rst,
+                        **({} if rst["ok"] else {"error": f"restore refused: {rst['error']}"})}
+            if op == "digest":
+                t0 = _now()
+                d = ST.digest(self.model, self.optimizer, self.scheduler)
+                return {"ok": True, "rank": self.rank, "digest": d,
+                        "seconds": round(_now() - t0, 4)}
             if op == "repl":
                 return {**self._repl(msg["code"]), "rank": self.rank}
             if op == "inject":
                 return {**self._inject(msg), "rank": self.rank}
+            if op == "resume":
+                self.resumed = msg.get("state", "start")
             if op in ("resume", "exit", "noop"):
                 return {"ok": True, "rank": self.rank}
             return {"ok": False, "rank": self.rank, "error": f"unknown op {op}"}
@@ -320,15 +348,26 @@ class Lab:
         while True:
             req, reply = server.next()
             t0 = _now()
-            verb = req.get("verb")
+            verb = req.get("verb") if isinstance(req, dict) else None
             try:
-                out = self.verb(verb, req)
+                if not isinstance(verb, str):
+                    out = {"ok": False, "error": "bad request: a JSON object with a string "
+                           f"'verb' is required, got {str(req)[:200]}"}
+                else:
+                    out = self.verb(verb, req)
             except Exception as e:
                 out = {"ok": False, "error": f"{type(e).__name__}: {e}",
                        "trace": traceback.format_exc()[-3000:]}
             out["cost_s"] = round(_now() - t0, 6)
-            reply(out)
-            if verb in ("resume", "exit"):
+            try:
+                sent = reply(out)
+            except OSError as e:                # a reply function that raises: same as gone
+                sent = False
+                print(f"[fastrsi] reply failed: {e}", file=sys.stderr, flush=True)
+            if sent is False:
+                print(f"[fastrsi] client gone before the reply to {verb!r} "
+                      f"({out['cost_s']} s); the lab serves on", flush=True)
+            if verb == "exit" or (verb == "resume" and out.get("ok")):
                 server.close()
                 return verb
 
@@ -379,8 +418,28 @@ class Lab:
                 return {"ok": False, "error": "respawn restarts the worker group: the "
                         "harness does it (client.respawn)", "reset": []}
             rs = self.round({"op": "reset"})
-            return {"ok": all(r["ok"] for r in rs), "reset": ["weights", "optimizer",
-                    "scheduler", "rng", "data"], "restore": rs[0].get("restore")}
+            ok = all(r.get("ok") for r in rs)
+            done = set.intersection(*[set(r["restore"].get("restored", [])) for r in rs]) \
+                if ok else set()
+            restored = [c for c in rs[0]["restore"].get("restored", []) if c in done]
+            out = {"ok": ok, "reset": restored + (["data"] if ok else []),
+                   "restore": rs[0].get("restore")}
+            if not ok:
+                out["error"] = "; ".join(f"rank {r.get('rank')}: {r.get('error')}" for r in rs
+                                         if not r.get("ok"))
+                out["ranks"] = [r.get("restore") for r in rs]
+            return out
+        if verb == "digest":
+            t0 = _now()
+            rs = self.round({"op": "digest"})
+            ok = all(r.get("ok") for r in rs)
+            ds = [r.get("digest") for r in rs]
+            import hashlib
+            return {"ok": ok, "ranks": ds,
+                    "digest": hashlib.sha256(json.dumps(ds, sort_keys=True).encode()).hexdigest(),
+                    "rank_s": [r.get("seconds") for r in rs], "seconds": round(_now() - t0, 4),
+                    **({} if ok else {"error": "; ".join(str(r.get("error")) for r in rs
+                                                         if not r.get("ok"))})}
         if verb == "uninstall":
             r = s.uninstall(req.get("id"))
             n = len(r.get("undone", []))
@@ -396,10 +455,30 @@ class Lab:
         if verb == "inject":
             rs = self.round({"op": "inject", **{k: v for k, v in req.items() if k != "verb"}})
             return {"ok": all(r["ok"] for r in rs), "ranks": rs}
+        if verb == "resume" and req.get("state", "start") == "start":
+            rs = self.round({"op": "prepare_resume"})
+            if not all(r.get("ok") for r in rs):
+                return {"ok": False, "error": "resume refused, the lab serves on: " + "; ".join(
+                    f"rank {r.get('rank')}: {r.get('error')}" for r in rs if not r.get("ok"))}
         if verb in ("resume", "exit"):
-            self.round({"op": verb})
-            return {"ok": True}
+            self.round({"op": verb, "state": req.get("state", "start")})
+            return {"ok": True, **({"state": req.get("state", "start")} if verb == "resume"
+                                   else {})}
         return {"ok": False, "error": f"unknown verb {verb}"}
+
+    def replay(self, it):
+        """The iterator the job's train steps get after resume: the frozen batches, then `it`
+        (the batches the lab took from it come first again), so the job continues as if the lab
+        had not run. With resume state "keep", `it` itself."""
+        if self.batches.items is None or getattr(self, "resumed", "start") != "start":
+            return it
+        if self.replayed is None or self.replayed[0] is not it:
+            import itertools
+            base = itertools.chain(list(self.batches.items), it)
+            w = self.batches.wrapper
+            self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
+                             else base)
+        return self.replayed[1]
 
 
 ZERO = ST.ZERO_KEYS
@@ -436,6 +515,8 @@ def install_hook(tr):
             if lab.serve() == "exit":
                 dist.barrier(group=lab.ranks.group)
                 os._exit(0)
+        lab = box["lab"]
+        a = (a[0], lab.replay(a[1])) + tuple(a[2:]) if len(a) > 1 else a
         return ts(*a, **k)
     train_step.__wrapped__ = raw
     tr.train_step = train_step
