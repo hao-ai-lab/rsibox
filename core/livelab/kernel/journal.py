@@ -104,6 +104,37 @@ def _label(obj):
     return type(obj).__name__
 
 
+def _clear_cached_fn_state(value, depth=0):
+    """Clear runtime attributes cached on a removed function or JIT wrapper."""
+    if depth > 4 or value is None:
+        return
+    if isinstance(value, types.FunctionType):
+        value.__dict__.clear()
+        return
+    if isinstance(value, type):
+        for member in list(vars(value).values()):
+            _clear_cached_fn_state(member, depth + 1)
+        return
+    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
+        inner = getattr(value, attr_name, None)
+        if inner is not None and inner is not value:
+            _clear_cached_fn_state(inner, depth + 1)
+
+
+def _holds_nested_code(value, code_pairs, depth=0):
+    """Does `value` (a function or JIT/descriptor wrapper) hold a code object in `code_pairs`?"""
+    if depth > 4 or value is None:
+        return False
+    if isinstance(value, types.FunctionType):
+        pair = code_pairs.get(id(value.__code__))
+        return pair is not None and pair[0] is value.__code__
+    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
+        inner = getattr(value, attr_name, None)
+        if inner is not None and inner is not value and _holds_nested_code(inner, code_pairs, depth + 1):
+            return True
+    return False
+
+
 class Entry:
     __slots__ = ("kind", "target", "name", "old")
 
@@ -120,12 +151,18 @@ class Entry:
             return _restore_closures(old)
         elif self.kind == "getattr_added":   # absent before, set through setattr
             try:
-                getattr(t, n)
+                removed_val = getattr(t, n)
             except AttributeError:
                 return None
+            _clear_cached_fn_state(removed_val)
             delattr(t, n)
         elif self.kind == "code":
-            t.__code__, t.__defaults__, t.__kwdefaults__ = old
+            if len(old) == 4:
+                t.__code__, t.__defaults__, t.__kwdefaults__, old_dict = old
+                t.__dict__.clear()
+                t.__dict__.update(old_dict)
+            else:
+                t.__code__, t.__defaults__, t.__kwdefaults__ = old
         elif self.kind == "attr":
             setattr(t, n, old)
         elif self.kind == "object":
@@ -138,9 +175,14 @@ class Entry:
         elif self.kind == "added":
             if isinstance(t, (dict, list)):
                 if n in t:
+                    if isinstance(t, dict):
+                        _clear_cached_fn_state(t.get(n))
                     del t[n]
-            elif _own(t, n) is not MISSING:
-                delattr(t, n)
+            else:
+                removed_val = _own(t, n)
+                if removed_val is not MISSING:
+                    _clear_cached_fn_state(removed_val)
+                    delattr(t, n)
 
     def describe(self):
         if self.kind == "call":
@@ -157,13 +199,29 @@ def _refs(pairs):
 
 
 def _restore_closures(entry):
-    """entry: (pairs, refs at record). pairs: {id(new nested code): (new code, old code or
-    None)}. Only the new codes that gained a reference since the entry was recorded can have
-    a function object; when none did, no pass runs. Else one heap pass (`gc.get_referrers`
-    of those codes, frozen objects included): every function whose `__code__` is one of them
-    gets its old code back when the free variables match; the rest are counted in a
-    `closure_not_restored` finding."""
-    pairs, base = entry
+    """entry: (pairs, refs at record[, mod, class_snapshots]). pairs: {id(new nested code):
+    (new code, old code or None)}. Only the new codes that gained a reference since the entry
+    was recorded can have a function object; when none did, no pass runs. Else one heap pass
+    (`gc.get_referrers` of those codes, frozen objects included): every function whose
+    `__code__` is one of them gets its old code back when the free variables match; the rest
+    are counted in a `closure_not_restored` finding."""
+    pairs, base = entry[0], entry[1]
+    mod_obj = entry[2] if len(entry) > 2 else None
+    cls_snapshots = entry[3] if len(entry) > 3 else ()
+    for cls_obj, base_keys in cls_snapshots:
+        for attr_name in list(set(vars(cls_obj)) - base_keys):
+            attr_val = vars(cls_obj).get(attr_name, MISSING)
+            _clear_cached_fn_state(attr_val)
+            try:
+                delattr(cls_obj, attr_name)
+            except AttributeError:
+                pass
+    if mod_obj is not None:
+        mod_dict = vars(mod_obj)
+        for attr_name, attr_val in list(mod_dict.items()):
+            if _holds_nested_code(attr_val, pairs):
+                _clear_cached_fn_state(attr_val)
+                mod_dict.pop(attr_name, None)
     now = _refs(pairs)
     pairs = {k: p for k, p in pairs.items() if now[k] != base[k]}
     if not pairs:
@@ -171,6 +229,11 @@ def _restore_closures(entry):
     t0 = time.perf_counter()
     restored, kept = 0, {}
     with L.unfrozen():
+        gc.collect()
+        now = _refs(pairs)
+        pairs = {code_id: pair for code_id, pair in pairs.items() if now[code_id] != base[code_id]}
+        if not pairs:
+            return {"closures_restored": 0, "closure_codes_scanned": 0}
         refs = gc.get_referrers(*[new for new, _ in pairs.values()])
     try:
         for o in refs:
@@ -204,12 +267,18 @@ class Journal:
         self.entries = []
         self.marks = []          # [(label, position)]
         self.routes = []         # rebuild routes asked for by cells (`need_rebuild`)
+        self._undo_callbacks = []
 
     # -- marks ---------------------------------------------------------------------------
     def mark(self, label=""):
         pos = len(self.entries)
         self.marks.append((label, pos))
         return pos
+
+    def on_undo(self, callback):
+        """Register an auxiliary cleanup callback for the current mark position without adding
+        a visible journal entry (used to sync linecache across transactions)."""
+        self._undo_callbacks.append((len(self.entries), callback))
 
     def undo_to(self, mark):
         """Replay inverses back to `mark`, newest first. Never raises: an inverse that fails is
@@ -227,6 +296,12 @@ class Journal:
                 fs += r.pop("findings", [])
                 for k, v in r.items():
                     info[k] = round(info.get(k, 0) + v, 6)
+        while self._undo_callbacks and self._undo_callbacks[-1][0] >= mark:
+            _, callback = self._undo_callbacks.pop()
+            try:
+                callback()
+            except Exception as exc:
+                errors.append(f"on_undo: {type(exc).__name__}: {exc}")
         self.marks = [(lab, p) for lab, p in self.marks if p <= mark]
         if errors:
             fs.insert(0, F.finding("undo_incomplete", "; ".join(errors),
@@ -240,7 +315,7 @@ class Journal:
 
     # -- typed changes -------------------------------------------------------------------
     def set_code(self, fn, code, defaults=KEEP, kwdefaults=KEEP):
-        old = (fn.__code__, fn.__defaults__, fn.__kwdefaults__)
+        old = (fn.__code__, fn.__defaults__, fn.__kwdefaults__, dict(fn.__dict__))
         self.entries.append(Entry("code", fn, fn.__qualname__, old))
         fn.__code__ = code
         if defaults is not KEEP:
@@ -285,14 +360,23 @@ class Journal:
         README). Not an inverse: nothing runs at undo_to."""
         self.routes.append(route)
 
-    def record_closures(self, pairs):
+    def record_closures(self, pairs, mod=None):
         """Journal {id(new nested code): (new code, old code or None)} for the codes a swap
         installs, with each new code's reference count now; undo gives every function made
         from a new code its old one (one heap pass, only at undo, only for the codes that
         gained a reference). Nothing is recorded when `pairs` is empty."""
         if pairs:
             pairs = dict(pairs)
-            self.entries.append(Entry("closures", None, "closures", (pairs, _refs(pairs))))
+            cls_snapshots = ()
+            if mod is not None:
+                cls_snapshots = tuple(
+                    (cls_obj, set(vars(cls_obj)))
+                    for cls_obj in vars(mod).values()
+                    if isinstance(cls_obj, type)
+                )
+            self.entries.append(
+                Entry("closures", None, "closures", (pairs, _refs(pairs), mod, cls_snapshots))
+            )
 
     def set_attr(self, obj, name, value):
         self.record_attr(obj, name)
