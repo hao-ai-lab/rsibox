@@ -55,10 +55,23 @@ def make_arg_parser(p):
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--host")
     p.add_argument("-tp", "--tensor-parallel-size", type=int, default=1)
+    p.add_argument("-pp", "--pipeline-parallel-size", type=int, default=1)
+    p.add_argument("-dp", "--data-parallel-size", type=int, default=1)
+    p.add_argument("--enable-expert-parallel", action="store_true")
     p.add_argument("--load-format", default="auto")
     p.add_argument("--enforce-eager", action="store_true")
     p.add_argument("--worker-cls", default="auto")
-    p.add_argument("--max-model-len")
+    p.add_argument("--max-model-len", type=int)
+    p.add_argument("--max-num-batched-tokens", type=int)
+    p.add_argument("--max-num-seqs", type=int)
+    p.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    p.add_argument("--enable-prefix-caching", action="store_true")
+    p.add_argument("--kv-cache-dtype", default="auto")
+    p.add_argument("--dtype", default="auto")
+    p.add_argument("-q", "--quantization")
+    p.add_argument("--moe-backend", default="auto")
+    p.add_argument("--linear-backend", default="auto")
+    p.add_argument("-cc", "--compilation-config", type=__import__("json").loads, default={})
     p.add_argument("--model-loader-extra-config", type=__import__("json").loads, default={})
     return p
 ''',
@@ -365,3 +378,194 @@ def test_fork_check_reads_vllms_spawn_fallback():
         fb, fg = engine.fork_check(bad), engine.fork_check(good)
         assert fb["spawn_forced"] is True and engine.fork_finding(fb)["check"] == "fork"
         assert fg == {"spawn_forced": False} and engine.fork_finding(fg) is None
+
+
+def test_reconfigure_in_process_and_warm_ipc_tiers():
+    """Input: an engine started with `--weights --kvplan` (`m --port P --max-model-len 4096
+     --enforce-eager`), followed by three `engine.py reconfigure --pid PID` calls:
+    1. `in_process_instant`: `--max-model-len 32768 --max-num-batched-tokens 8192` -> applies
+       in-process in < 1 s without stopping `pid1` (`restarted: False`, `pid == pid1`,
+       `tier == 'in_process_instant'`);
+    2. `in_process_graph`: `--no-enforce-eager` -> applies in-process in < 1 s without stopping
+       `pid1` (`restarted: False`, `pid == pid1`, `tier == 'in_process_graph'`);
+    3. `warm_weights_ipc`: `--gpu-memory-utilization 0.85` -> restarts the worker process using
+       resident `weights.py` CUDA IPC (`restarted: True`, `replaced_pid == pid1`, `pid2 != pid1`,
+       `tier == 'warm_weights_ipc'`) with merged flags (`--max-model-len 32768`,
+       `--max-num-batched-tokens 8192`, `--gpu-memory-utilization 0.85`, `--load-format ipc_cache`,
+       `--worker-cls kvplan.KVPlanWorker`)."""
+    from weights import socket_name
+    work_dir = _short_dir()
+    smi_dir = os.path.join(work_dir, "bin")
+    os.makedirs(smi_dir, exist_ok=True)
+    _script(smi_dir, "nvidia-smi",
+            "#!{py}\nimport sys\nids = sys.argv[sys.argv.index('-i') + 1].split(',') "
+            "if '-i' in sys.argv else ['0']\nprint('\\n'.join(f'GPU-fake-{{i}}' for i in ids))\n")
+    sock_dir = os.path.join(work_dir, "s")
+    os.makedirs(sock_dir)
+    daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    daemon.bind(os.path.join(sock_dir, socket_name("GPU-fake-0")))
+    daemon.listen(4)
+    fake_vllm = _script(work_dir, "vllm", FAKE_VLLM)
+    out_file = os.path.join(work_dir, "ran.json")
+    cache_dir = os.path.join(work_dir, "c")
+    port = _free_port()
+    env = stub_env(work_dir, FAKE_OUT=out_file, CUDA_VISIBLE_DEVICES="0",
+                   PATH=smi_dir + os.pathsep + os.environ["PATH"])
+    start_proc = subprocess.run(
+        [sys.executable, ENGINE, "start", "--cache-root", cache_dir, "--log",
+         os.path.join(work_dir, "s1.log"), "--vllm", fake_vllm, "--weights",
+         "--weights-socket-dir", sock_dir, "m", "--kvplan", "--port", str(port),
+         "--max-model-len", "4096", "--enforce-eager"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    start_report = _one_json_line(start_proc.stdout)
+    pid1 = start_report["pid"]
+    pid2 = None
+    try:
+        assert start_proc.returncode == 0, start_proc.stdout + start_proc.stderr
+        # 1. in_process_instant (< 100 ms): pid1 stays alive!
+        instant_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
+             "--max-model-len", "32768", "--max-num-batched-tokens", "8192"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert instant_proc.returncode == 0, instant_proc.stdout + instant_proc.stderr
+        instant_report = _one_json_line(instant_proc.stdout)
+        assert instant_report["pid"] == pid1 and not zygote._exited(pid1)
+        assert instant_report["reconfig"]["tier"] == "in_process_instant"
+        assert instant_report["reconfig"]["in_process"] is True
+        assert instant_report["reconfig"]["restarted"] is False
+        assert instant_report["reconfig"]["replaced_pid"] is None
+        assert len(instant_report["reconfig"]["control_actions"]) == 2
+
+        # 2. in_process_graph (0.5-2 s): pid1 still stays alive!
+        graph_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s1.log"),
+             "--no-enforce-eager"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert graph_proc.returncode == 0, graph_proc.stdout + graph_proc.stderr
+        graph_report = _one_json_line(graph_proc.stdout)
+        assert graph_report["pid"] == pid1 and not zygote._exited(pid1)
+        assert graph_report["reconfig"]["tier"] == "in_process_graph"
+        assert graph_report["reconfig"]["in_process"] is True
+        assert graph_report["reconfig"]["restarted"] is False
+        assert graph_report["reconfig"]["control_actions"][0]["action"] == (
+            "toggle_cudagraph_dispatch"
+        )
+
+        # 3. warm_weights_ipc (7-20 s): worker restarts with resident WeightHolder IPC!
+        reconfig_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
+             "--gpu-memory-utilization", "0.85"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        reconfig_report = _one_json_line(reconfig_proc.stdout)
+        pid2 = reconfig_report.get("pid")
+        assert reconfig_proc.returncode == 0, reconfig_proc.stdout + reconfig_proc.stderr
+        assert zygote._exited(pid1), "old engine pid must be stopped on warm_weights_ipc"
+        assert pid2 and pid2 != pid1 and reconfig_report["healthy_after_s"] is not None
+        reconfig_delta = reconfig_report["reconfig"]
+        assert reconfig_delta["tier"] == "warm_weights_ipc"
+        assert reconfig_delta["in_process"] is False
+        assert reconfig_delta["restarted"] is True
+        assert reconfig_delta["weights_compatible"] is True
+        assert reconfig_delta["replaced_pid"] == pid1
+        assert reconfig_delta["changed"] == {"gpu_memory_utilization": [0.9, 0.85]}
+        ran_argv = json.loads(Path(out_file).read_text())["argv"]
+        assert ran_argv == [
+            "serve", "m", "--port", str(port), "--max-model-len", "32768",
+            "--max-num-batched-tokens", "8192", "--gpu-memory-utilization", "0.85",
+            "--host", "127.0.0.1", "--load-format", "ipc_cache",
+            "--model-loader-extra-config",
+            json.dumps({"socket_dir": sock_dir, "mode": "zero_copy", "fallback": False}),
+            "--worker-cls", "kvplan.KVPlanWorker",
+        ]
+    finally:
+        _stop(pid1)
+        if pid2:
+            _stop(pid2)
+        daemon.close()
+
+
+def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
+    """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:
+    (1) `--bogus-flag` (rejected by vLLM's parser);
+    (2) `-tp 2` (`live_reshard_or_cold`, `subtier: tier2a_reshard`: changes TP sharding in
+        WeightCacheKey);
+    (3) `--kv-cache-dtype fp8` (`live_reshard_or_cold`, `subtier: tier2b_weight_format`: changes
+        KV cache dtype in WeightCacheKey).
+    Expect: all three exit 2 with findings (`vllm_args`, `weights_reconfig_tier2` for tier2a
+    and tier2b), and the original engine PID stays alive and serving /health on port P!
+    Then (4) with `--weights-accept-reconfig --kv-cache-dtype fp8`, preflight accepts the Tier-2
+    change and replaces the engine."""
+    from weights import socket_name
+    work_dir = _short_dir()
+    smi_dir = os.path.join(work_dir, "bin")
+    os.makedirs(smi_dir, exist_ok=True)
+    _script(smi_dir, "nvidia-smi",
+            "#!{py}\nimport sys\nids = sys.argv[sys.argv.index('-i') + 1].split(',') "
+            "if '-i' in sys.argv else ['0']\nprint('\\n'.join(f'GPU-fake-{{i}}' for i in ids))\n")
+    sock_dir = os.path.join(work_dir, "s")
+    os.makedirs(sock_dir)
+    daemon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    daemon.bind(os.path.join(sock_dir, socket_name("GPU-fake-0")))
+    daemon.listen(4)
+    fake_vllm = _script(work_dir, "vllm", FAKE_VLLM)
+    out_file = os.path.join(work_dir, "ran.json")
+    cache_dir = os.path.join(work_dir, "c")
+    port = _free_port()
+    env = stub_env(work_dir, FAKE_OUT=out_file, CUDA_VISIBLE_DEVICES="0",
+                   PATH=smi_dir + os.pathsep + os.environ["PATH"])
+    start_proc = subprocess.run(
+        [sys.executable, ENGINE, "start", "--cache-root", cache_dir, "--log",
+         os.path.join(work_dir, "s1.log"), "--vllm", fake_vllm, "--weights",
+         "--weights-socket-dir", sock_dir, "m", "--port", str(port),
+         "--max-model-len", "4096"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    start_report = _one_json_line(start_proc.stdout)
+    pid1 = start_report["pid"]
+    pid2 = None
+    try:
+        assert start_proc.returncode == 0
+        for patch_flags, want_check, want_subtier in (
+            (["--bogus-flag"], "vllm_args", None),
+            (["-tp", "2"], "weights_reconfig_tier2", "tier2a_reshard"),
+            (["--kv-cache-dtype", "fp8"], "weights_reconfig_tier2", "tier2b_weight_format"),
+        ):
+            refused_proc = subprocess.run(
+                [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+                 "--cache-root", cache_dir, "--log", os.path.join(work_dir, "bad.log"),
+                 *patch_flags],
+                capture_output=True, text=True, timeout=60, env=env,
+            )
+            assert refused_proc.returncode == 2, refused_proc.stdout + refused_proc.stderr
+            refused_report = _one_json_line(refused_proc.stdout)
+            assert refused_report["findings"][0]["check"] == want_check, refused_report
+            if want_subtier:
+                assert refused_report["reconfig"]["tier"] == "live_reshard_or_cold", refused_report
+                assert refused_report["reconfig"]["subtier"] == want_subtier, refused_report
+            assert not zygote._exited(pid1), "running engine must stay up on preflight refusal"
+            assert engine.port_in_use(port) is True
+        accepted_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
+             "--weights-accept-reconfig", "--kv-cache-dtype", "fp8"],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+        assert accepted_proc.returncode == 0, accepted_proc.stdout + accepted_proc.stderr
+        accepted_report = _one_json_line(accepted_proc.stdout)
+        pid2 = accepted_report["pid"]
+        assert zygote._exited(pid1)
+        assert accepted_report["reconfig"]["tier"] == "live_reshard_or_cold"
+        assert accepted_report["reconfig"]["subtier"] == "tier2b_weight_format"
+        assert accepted_report["vllm_args"]["args"]["kv_cache_dtype"] == "fp8"
+    finally:
+        _stop(pid1)
+        if pid2:
+            _stop(pid2)
+        daemon.close()
