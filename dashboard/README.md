@@ -25,7 +25,7 @@ Other outputs of `build.py`:
 
 ```sh
 python3 dashboard/build.py --standalone out/dashboard.html   # one file: HTML, CSS, JS and data inlined
-python3 dashboard/build.py --table evidence/dashboard/verification.md
+python3 dashboard/build.py --table out/verification.md          # table: every charted number vs the PDF
 ```
 
 The standalone file needs no server; it loads its two web fonts from Google Fonts and falls back to
