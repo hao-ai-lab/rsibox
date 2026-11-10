@@ -552,8 +552,11 @@ def test_reconfigure_live_path_is_acknowledged_by_the_engine_core_agent():
         assert rc["path"] == "restart" and "boot value 16" in rc["restart_reason"], rc
         pids.append(rep["pid"])
     finally:
-        for pid in pids:
-            _stop(pid)
+        for pid in pids:   # each engine leads its session; its engine-core child is in it too
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                _stop(pid)
 
 
 def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
