@@ -1,0 +1,162 @@
+{
+ "id": "m-check-phases-3sys",
+ "title": "Where one check's time goes in the races: vLLM, FastVideo, Megatron",
+ "kind": "stacked",
+ "panels": [
+  {
+   "title": "vLLM (DeepSeek V4.1 Flash prefill, 4 GPUs)",
+   "rows": [
+    {
+     "label": "Restart",
+     "segments": [
+      [
+       "Weight load",
+       98.1,
+       false
+      ],
+      [
+       "Import, config, other init",
+       17.86,
+       false
+      ],
+      [
+       "JIT build and compile",
+       18.03,
+       false
+      ],
+      [
+       "Import, config, other init",
+       50.41,
+       true
+      ],
+      [
+       "The check itself",
+       39.73,
+       false
+      ]
+     ]
+    },
+    {
+     "label": "Live",
+     "segments": [
+      [
+       "Live code install",
+       0.12,
+       false
+      ],
+      [
+       "The check itself",
+       39.73,
+       false
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "title": "FastVideo (H3, 1 GB10 GPU)",
+   "rows": [
+    {
+     "label": "Restart",
+     "segments": [
+      [
+       "Import, config, other init",
+       3.8,
+       false
+      ],
+      [
+       "Weight load",
+       313.35,
+       false
+      ],
+      [
+       "JIT build and compile",
+       46.7,
+       false
+      ],
+      [
+       "Import, config, other init",
+       19.7,
+       true
+      ],
+      [
+       "The check itself",
+       116.55,
+       false
+      ]
+     ]
+    },
+    {
+     "label": "Live",
+     "segments": [
+      [
+       "Live code install",
+       51.6,
+       true
+      ],
+      [
+       "The check itself",
+       113.3,
+       false
+      ]
+     ]
+    }
+   ]
+  },
+  {
+   "title": "Megatron (Qwen3-30B-A3B, 24 layers, 4 GPUs)",
+   "rows": [
+    {
+     "label": "Restart",
+     "segments": [
+      [
+       "Import, config, other init",
+       59.04,
+       true
+      ],
+      [
+       "Warm-up steps",
+       167.98,
+       false
+      ],
+      [
+       "The check itself",
+       40.73,
+       false
+      ]
+     ]
+    },
+    {
+     "label": "Live",
+     "segments": [
+      [
+       "Live code install",
+       3.65,
+       false
+      ],
+      [
+       "Import, config, other init",
+       17.38,
+       true
+      ],
+      [
+       "CUDA graph capture",
+       9.0,
+       false
+      ],
+      [
+       "Warm-up steps",
+       24.89,
+       false
+      ],
+      [
+       "The check itself",
+       41.17,
+       false
+      ]
+     ]
+    }
+   ]
+  }
+ ]
+}

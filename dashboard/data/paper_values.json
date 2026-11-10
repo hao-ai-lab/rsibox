@@ -1,0 +1,53 @@
+{
+ "note": "Values printed in the paper, transcribed by reading the PDF. pdf11 = fastrsi (11).pdf (13 pages, current); pdf3 = fastrsi (3).pdf (17 pages, Oct 29, last draft with kernel and nanoGPT races). Race finals are the boxed end values (2 decimals, 3 for SOL scores); sooner is the printed label.",
+ "races": {
+  "r-prefill-p8k":     {"pdf": "pdf11", "fig": "Fig. 5 Prefill 8K",     "codex": "1.28", "livelab": "1.28", "sooner": "tie"},
+  "r-prefill-p16k":    {"pdf": "pdf11", "fig": "Fig. 5 Prefill 16K",    "codex": "1.31", "livelab": "1.35", "sooner": "5.8× sooner"},
+  "r-prefill-p32k":    {"pdf": "pdf11", "fig": "Fig. 5 Prefill 32K",    "codex": "1.36", "livelab": "1.37", "sooner": "1.8× sooner"},
+  "r-prefill-p64k":    {"pdf": "pdf11", "fig": "Fig. 5 Prefill 64K",    "codex": "1.41", "livelab": "1.41", "sooner": "5.8× sooner"},
+  "r-decode-d1x32k":   {"pdf": "pdf11", "fig": "Fig. 5 Decode 1×32K",   "codex": "1.17", "livelab": "1.17", "sooner": "tie"},
+  "r-decode-d8x32k":   {"pdf": "pdf11", "fig": "Fig. 5 Decode 8×32K",   "codex": "1.10", "livelab": "1.11", "sooner": "2.3× sooner"},
+  "r-decode-d32x32k":  {"pdf": "pdf11", "fig": "Fig. 5 Decode 32×32K",  "codex": "1.05", "livelab": "1.09", "sooner": "1.1× sooner"},
+  "r-decode-d16x128k": {"pdf": "pdf11", "fig": "Fig. 5 Decode 16×128K", "codex": "1.08", "livelab": "1.10", "sooner": "2.3× sooner"},
+  "r-megatron":        {"pdf": "pdf11", "fig": "Fig. 6 Megatron",       "codex": "1.09", "livelab": "1.10", "sooner": "1.6× sooner"},
+  "r-t2av-seeds":      {"pdf": "pdf11", "fig": "Fig. 6 FastVideo-T2VA", "codex": "1.91", "livelab": "1.95", "sooner": "1.4× sooner"},
+  "r-omni":            {"pdf": "pdf11", "fig": "Fig. 6 FastVideo-Ref2VA", "codex": "1.26", "livelab": "1.38", "sooner": "1.4× sooner"},
+  "r-nanogpt":         {"pdf": "pdf3",  "fig": "Fig. 12 NanoGPT",        "codex": "1.72", "livelab": "1.87", "sooner": null},
+  "r-moe-bwd-kernel":  {"pdf": "pdf3",  "fig": "Fig. 12 Kernel (MoE bwd)", "codex": "0.515", "livelab": "0.541", "sooner": null},
+  "r-gqa-kernel":      {"pdf": "pdf3",  "fig": "Fig. 13 GQA (race 1)",   "codex": "0.973", "livelab": "0.976", "sooner": null},
+  "r-mla-kernel":      {"pdf": "pdf3",  "fig": "Fig. 13 MLA (race 1)",   "codex": "0.949", "livelab": "0.952", "sooner": null},
+  "r-moe-fwd-kernel":  {"pdf": "pdf3",  "fig": "Fig. 13 MoE fwd (race 1)", "codex": "0.795", "livelab": "0.806", "sooner": null}
+ },
+ "race_text": [
+  {"pdf": "pdf11", "where": "§5.2 FastVideo-T2VA", "text": "cutting clip latency from 60.1 s to 32.3 s", "atom": "r-t2av-seeds", "check": "livelab_seconds", "value": 32.3, "start_s": 60.149},
+  {"pdf": "pdf11", "where": "§5.2 FastVideo-Ref2VA", "text": "reaches Codex's final speedup (1.26×, 152 s) in 3.8 h", "atom": "r-omni", "check": "reach_h", "value": 3.8},
+  {"pdf": "pdf11", "where": "§5.2 Megatron-LM", "text": "hits Codex's 6-hour mark (1.09×) in 3.6 h", "atom": "r-megatron", "check": "reach_h", "value": 3.6},
+  {"pdf": "pdf3", "where": "App. D", "text": "nanoGPT ties on shared GPUs (1.79× vs. 1.80×)", "atom": "r-nanogpt", "check": "race2", "codex": "1.80", "livelab": "1.79"},
+  {"pdf": "pdf3", "where": "App. D", "text": "best scores 0.952 vs. 0.948 (MLA)", "atom": "r-mla-kernel", "check": "best_any", "codex": "0.948", "livelab": "0.952"},
+  {"pdf": "pdf3", "where": "App. D", "text": "best scores 0.809 vs. 0.795 (MoE forward)", "atom": "r-moe-fwd-kernel", "check": "best_any", "codex": "0.795", "livelab": "0.809"},
+  {"pdf": "pdf3", "where": "App. D", "text": "best scores 0.976 vs. 0.973 (GQA)", "atom": "r-gqa-kernel", "check": "best_any", "codex": "0.973", "livelab": "0.976"},
+  {"pdf": "pdf3", "where": "App. D", "text": "best scores 0.541 vs. 0.515 (MoE backward)", "atom": "r-moe-bwd-kernel", "check": "best_any", "codex": "0.515", "livelab": "0.541"}
+ ],
+ "fig13_pairs": [
+  {"atom": "r-gqa-kernel", "race": 3, "codex": "0.969", "livelab": "0.976"},
+  {"atom": "r-gqa-kernel", "race": 5, "codex": "0.972", "livelab": "0.973"},
+  {"atom": "r-moe-fwd-kernel", "race": 3, "codex": "0.792", "livelab": "0.805"},
+  {"atom": "r-moe-fwd-kernel", "race": 5, "codex": "0.752", "livelab": "0.786"},
+  {"atom": "r-moe-bwd-kernel", "race": 1, "codex": "0.515", "livelab": "0.516"},
+  {"atom": "r-moe-bwd-kernel", "race": 3, "codex": "0.464", "livelab": "0.443"},
+  {"atom": "r-moe-bwd-kernel", "race": 5, "codex": "0.438", "livelab": "0.541"}
+ ],
+ "fig1": {"pdf": "pdf11", "a": ["228 s", "157 s", "100 s", "58 s", "23.6 s"], "b": ["23.6 s", "14.1 s", "2.4 s"]},
+ "fig3": {"pdf": "pdf11", "panels": {"vLLM": ["228 s", "23.6 s"], "FastVideo": ["500 s", "165 s"], "Megatron": ["268 s", "96 s"]}},
+ "fig7": {"pdf": "pdf11", "rows": {"vLLM": [221, 38, "5.8×"], "Megatron": [264, 96, "2.7×"], "FastVideo-T2VA": [500, 164, "3.1×"], "FastVideo-Ref2VA": [934, 521, "1.8×"]}},
+ "fig8": {"pdf": "pdf11", "rows": {"Megatron": [90, 123, 5.9, 5.3], "vLLM": [77, 156, 5.6, 4.3], "FastVideo-T2VA": [120, 249, 3.3, 2.7], "FastVideo-Ref2VA": [140, 221, 5.4, 3.7]}},
+ "fig9": {"pdf": "pdf11", "rows": {"vLLM (prefill)": "17/20", "Megatron-LM": "34/44", "FastVideo-T2VA": "29/29", "FastVideo-Ref2VA": "12/12"}, "text": "within a median offset of −0.2% to −1.9%"},
+ "fig10": {"pdf": "pdf11", "rows": {"vLLM": ["5.7 h", "3.6 h"], "Megatron": ["5.9 h", "5.4 h"], "FastVideo-T2VA": ["3.4 h", "2.9 h"], "FastVideo-Ref2VA": ["5.4 h", "3.6 h"]}},
+ "table2": {"pdf": "pdf11", "rows": [
+  ["FastRSI, all mechanisms (paper: full Live Lab artifact)", 134, 21.0, "full"],
+  ["− Disable standby worker", 137, 20.7, "prestart"],
+  ["− Disable in-place revert (uninstall)", 145, 19.7, "revert"],
+  ["− Disable async full-benchmark gate", 158, 18.4, "side"],
+  ["Restart per check (disable install)", 252, 13.7, "hotpatch"]
+ ], "text": "nearly doubles mean check time from 134 s to 288 s and drops throughput from 21.0 to 13.7 evaluations/hr"}
+}

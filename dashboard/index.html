@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FastRSI results</title>
+<meta name="description" content="FastRSI results from the paper's figure data: cold start, evaluation time and end-to-end search speed, restart per check vs live checks.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="wrap">
+    <p class="kicker">FastRSI, drawn from the figure data of the paper <i>LiveLab-MLSys</i></p>
+    <h1>Check the edit without restarting the system</h1>
+    <p class="lead">A coding agent tunes vLLM, Megatron-LM and FastVideo for hours. <span class="arm-name codex">Codex</span> restarts the system for every check. <span class="arm-name live">FastRSI</span> installs each edit into the running process and probes only what changed. Three effects follow, in the order the paper argues them.</p>
+    <nav class="band-index" aria-label="Bands">
+      <a href="#band-a"><span class="ix">A</span><span class="ix-text"><b>Cold start</b><span id="ix-a"></span></span></a>
+      <a href="#band-b"><span class="ix">B</span><span class="ix-text"><b>Evaluation time</b><span id="ix-b"></span></span></a>
+      <a href="#band-c"><span class="ix">C</span><span class="ix-text"><b>End-to-end search</b><span id="ix-c"></span></span></a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="band" id="band-a">
+    <div class="wrap">
+      <button class="band-head" aria-expanded="true" aria-controls="body-a">
+        <span class="band-letter" aria-hidden="true">A</span>
+        <span class="band-title"><span class="h2">Reduce cold start</span><span class="band-sum" id="sum-a"></span></span>
+        <span class="band-toggle" aria-hidden="true"></span>
+      </button>
+      <div class="band-body" id="body-a">
+        <figure class="fig">
+          <figcaption><b>Each piece of kept state removes a named slice of a restart.</b> One-line change to vLLM's scheduler, Nemotron 3.5 Super on one GB200 (paper Fig. 1a). The dashed outline is the row above; rows marked "derived" remove a phase from the row above instead of being measured.</figcaption>
+          <div class="chart" id="ch-ladder-a"></div>
+        </figure>
+        <figure class="fig">
+          <figcaption><b>Under a restart, 77-90% of a check is setup.</b> Seconds per check for one localized edit, restart vs live, each engine on its own scale (paper Fig. 3). Hover a segment for its phase.</figcaption>
+          <div class="chart" id="ch-phases"></div>
+          <div class="legend" id="lg-phases"></div>
+          <p class="note" id="note-phases"></p>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="band-b">
+    <div class="wrap">
+      <button class="band-head" aria-expanded="true" aria-controls="body-b">
+        <span class="band-letter" aria-hidden="true">B</span>
+        <span class="band-title"><span class="h2">Reduce evaluation time, faithfully</span><span class="band-sum" id="sum-b"></span></span>
+        <span class="band-toggle" aria-hidden="true"></span>
+      </button>
+      <div class="band-body" id="body-b">
+        <figure class="fig">
+          <figcaption><b>A targeted probe cuts the live check from 23.6 s to 2.4 s.</b> The same scheduler edit, checked live (paper Fig. 1b).</figcaption>
+          <div class="chart" id="ch-ladder-b"></div>
+        </figure>
+        <figure class="fig">
+          <figcaption><b>Edit to result inside the races.</b> Every check as a dot on a log scale; the ring is the median (paper Fig. 7).</figcaption>
+          <div class="chart" id="ch-e2r"></div>
+          <p class="note" id="note-e2r"></p>
+        </figure>
+        <div class="fig-pair">
+          <figure class="fig">
+            <figcaption><b>Saved time goes into more experiments.</b> Median per run: checks (scored checks plus screens) and hours spent in scored checks (paper Fig. 8).</figcaption>
+            <div class="chart" id="ch-checks"></div>
+          </figure>
+          <figure class="fig">
+            <figcaption><b>Live checks agree with trusted cold runs.</b> Relative difference for the same commit; the shaded band is ±5%, the ring is the median (paper Fig. 9).</figcaption>
+            <div class="chart" id="ch-fid"></div>
+            <p class="note" id="note-fid"></p>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band" id="band-c">
+    <div class="wrap">
+      <button class="band-head" aria-expanded="true" aria-controls="body-c">
+        <span class="band-letter" aria-hidden="true">C</span>
+        <span class="band-title"><span class="h2">Reach the same result sooner</span><span class="band-sum" id="sum-c"></span></span>
+        <span class="band-toggle" aria-hidden="true"></span>
+      </button>
+      <div class="band-body" id="body-c">
+        <div class="race">
+          <div class="picker" id="picker" role="group" aria-label="Workload"></div>
+          <div class="race-main">
+            <div class="race-head">
+              <h3 id="race-title"></h3>
+              <p id="race-about" class="about"></p>
+            </div>
+            <div class="controls" id="controls"></div>
+            <div class="chart race-chart" id="ch-race"></div>
+            <p class="hint">Hover a step for its commit. Drag across the chart to zoom into a time window; double-click or <button type="button" class="linkish" id="zoom-reset">reset zoom</button>.</p>
+            <p class="note" id="race-note"></p>
+          </div>
+        </div>
+        <div class="fig-pair">
+          <figure class="fig">
+            <figcaption><b>Faster models make checks the limit.</b> Hours to replay each logged run with the model's generation k times faster (paper Fig. 10).</figcaption>
+            <div class="chart" id="ch-replay"></div>
+            <p class="note" id="note-replay"></p>
+          </figure>
+          <figure class="fig">
+            <figcaption><b>In-place install is the foundation.</b> FastRSI on vLLM with one mechanism disabled at a time, replayed over six 6-hour runs: mean check time and checks per hour (paper Table 2).</figcaption>
+            <div class="chart" id="ch-ablation"></div>
+            <p class="note" id="note-ablation"></p>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="check" id="paper-check">
+    <div class="wrap">
+      <details>
+        <summary><span class="h2">Paper check</span> <span id="check-sum"></span></summary>
+        <p class="about">Each charted number, computed from its data file and compared with the value printed in the paper. Mismatches are reported, not corrected.</p>
+        <div class="table-wrap"><table id="check-table"></table></div>
+      </details>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <div class="wrap">
+    <p>Built <span id="built"></span> from <code>dashboard/data/</code>, the paper's figure data copied as-is (see <code>data/SOURCES.md</code>). Paper: <i>LiveLab-MLSys</i>, draft PDF of Oct 30; kernels and nanoGPT from the Oct 29 draft. No new GPU runs.</p>
+  </div>
+</footer>
+
+<div class="tip" id="tip" role="status" aria-live="polite" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

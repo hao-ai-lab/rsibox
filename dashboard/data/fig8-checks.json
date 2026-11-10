@@ -1,0 +1,46 @@
+{
+ "columns": [
+  "Engine",
+  "Checks Codex",
+  "Checks LiveLab",
+  "of which screens (Codex / LiveLab)",
+  "Check-hours Codex",
+  "Check-hours LiveLab"
+ ],
+ "rows": [
+  [
+   "Megatron",
+   90.0,
+   123.0,
+   "0 / 0",
+   5.87,
+   5.34
+  ],
+  [
+   "vLLM",
+   77.0,
+   156.0,
+   "0 / 0",
+   5.56,
+   4.31
+  ],
+  [
+   "FastVideo-T2VA",
+   120.0,
+   249.0,
+   "96 / 219",
+   3.33,
+   2.71
+  ],
+  [
+   "FastVideo-Ref2VA",
+   140.0,
+   221.0,
+   "117 / 200",
+   5.4,
+   3.65
+  ]
+ ],
+ "caption": "How much each side checked, per run (median over the runs kept: Megatron 2 vs 3 seeds, vLLM 3 vs 3, FastVideo one race each). Left: checks, i.e. scored checks plus screens, timed runs of the agent's code that are not scored (LiveLab: its in-process lab tool on FastVideo and live A/B runs on vLLM; Codex had no screening tool, so its screens are the benchmark and profiling scripts it ran itself). Right: hours spent in scored checks. Megatron and vLLM: 6 hours; FastVideo: 8 hours. Codex: the Codex agent checking each edit with a restart. LiveLab: the same agent, prompt and time budget, checking through LiveLab.",
+ "source": "paper2/publish/index.json (p7-checks)"
+}

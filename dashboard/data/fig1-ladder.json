@@ -1,0 +1,83 @@
+{
+ "model": "Nemotron 3.5 Super NVFP4, vllm serve, 1x GB200",
+ "source": "paper/data/nemotron-fig1-serve.9c1a829.json via paper/figures/fig1_stacked.py",
+ "a": [
+  {
+   "label": "Start w/ cache (baseline)",
+   "seg": {
+    "Kernel autotune": 72.561,
+    "Weight load": 56.653,
+    "CUDA graph capture": 39.862,
+    "Engine init": 30.415,
+    "Run workload": 17.098,
+    "Logprob check": 10.941
+   },
+   "measured": true
+  },
+  {
+   "label": "+ Reuse autotune config",
+   "seg": {
+    "Kernel autotune": 1.234,
+    "Weight load": 57.277,
+    "CUDA graph capture": 41.34,
+    "Engine init": 31.203,
+    "Run workload": 15.853,
+    "Logprob check": 9.931
+   },
+   "measured": true
+  },
+  {
+   "label": "+ Retain model weight",
+   "seg": {
+    "Kernel autotune": 1.234,
+    "CUDA graph capture": 41.34,
+    "Engine init": 31.203,
+    "Run workload": 15.853,
+    "Logprob check": 9.931
+   },
+   "measured": false
+  },
+  {
+   "label": "+ Retain CUDA graph",
+   "seg": {
+    "Kernel autotune": 1.234,
+    "Engine init": 31.203,
+    "Run workload": 15.853,
+    "Logprob check": 9.931
+   },
+   "measured": false
+  },
+  {
+   "label": "+ Retain live process",
+   "seg": {
+    "Run workload": 14.101,
+    "Logprob check": 9.516
+   },
+   "measured": true
+  }
+ ],
+ "b": [
+  {
+   "label": "Live swap, dev workload",
+   "seg": {
+    "Run workload": 14.101,
+    "Logprob check": 9.516
+   },
+   "measured": true
+  },
+  {
+   "label": "+ Skip the logprob check",
+   "seg": {
+    "Run workload": 14.101
+   },
+   "measured": true
+  },
+  {
+   "label": "+ Test with a small batch",
+   "seg": {
+    "Run workload": 2.403
+   },
+   "measured": true
+  }
+ ]
+}

@@ -1,0 +1,516 @@
+{
+ "figures": [
+  {
+   "id": "main-vllm",
+   "title": "Figure 5 (main): vLLM",
+   "panels": [
+    {
+     "race": "r-prefill-p8k",
+     "codex": 1.278,
+     "livelab": 1.276,
+     "best": [
+      "Codex #1",
+      "LiveLab #2"
+     ],
+     "mean": [
+      1.235,
+      1.247
+     ],
+     "sooner": "tie",
+     "runs": "2 vs 2",
+     "title": "Prefill 8K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-prefill-p16k",
+     "codex": 1.312,
+     "livelab": 1.355,
+     "best": [
+      "Codex #5",
+      "LiveLab #5"
+     ],
+     "mean": [
+      1.275,
+      1.324
+     ],
+     "sooner": "5.8× sooner",
+     "runs": "2 vs 2",
+     "title": "Prefill 16K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-prefill-p32k",
+     "codex": 1.357,
+     "livelab": 1.372,
+     "best": [
+      "Codex #1",
+      "LiveLab #7"
+     ],
+     "mean": [
+      1.306,
+      1.338
+     ],
+     "sooner": "1.8× sooner",
+     "runs": "2 vs 2",
+     "title": "Prefill 32K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-prefill-p64k",
+     "codex": 1.405,
+     "livelab": 1.415,
+     "best": [
+      "Codex #5",
+      "LiveLab #5"
+     ],
+     "mean": [
+      1.351,
+      1.384
+     ],
+     "sooner": "5.8× sooner",
+     "runs": "2 vs 2",
+     "title": "Prefill 64K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-decode-d1x32k",
+     "codex": 1.172,
+     "livelab": 1.169,
+     "best": [
+      "Codex race 2",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      1.112,
+      1.134
+     ],
+     "sooner": "tie",
+     "runs": "2 vs 2",
+     "title": "Decode 1×32K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-decode-d8x32k",
+     "codex": 1.098,
+     "livelab": 1.112,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      1.066,
+      1.086
+     ],
+     "sooner": "2.3× sooner",
+     "runs": "2 vs 2",
+     "title": "Decode 8×32K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-decode-d32x32k",
+     "codex": 1.046,
+     "livelab": 1.091,
+     "best": [
+      "Codex race 2",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      1.023,
+      1.038
+     ],
+     "sooner": "1.1× sooner",
+     "runs": "2 vs 2",
+     "title": "Decode 32×32K",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-decode-d16x128k",
+     "codex": 1.085,
+     "livelab": 1.095,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      1.056,
+      1.074
+     ],
+     "sooner": "2.3× sooner",
+     "runs": "2 vs 2",
+     "title": "Decode 16×128K",
+     "fmt": "{:.2f}×"
+    }
+   ],
+   "caption": "Best picked run per side (its end value is boxed). Speedup over the starting code of the best commit so far that passes the correctness check, for the best run of each side (the run with the highest mean speedup over the race; its end value is boxed), over 6-hour races on one GB200 machine (4 GPUs) with vLLM serving DeepSeek V4.1. Timings are the agents' own, on each run's machine. Codex: the Codex agent checking each edit with a restart. LiveLab: the same agent, prompt and time budget, checking through LiveLab. Prefill: K new tokens after a 128K cached prefix. Decode: requests per GPU × context."
+  },
+  {
+   "id": "main-systems",
+   "title": "Figure 6 (main): Megatron-LM and FastVideo",
+   "panels": [
+    {
+     "race": "r-megatron",
+     "codex": 1.087,
+     "livelab": 1.098,
+     "best": [
+      "Codex #3",
+      "LiveLab #2"
+     ],
+     "mean": [
+      1.043,
+      1.062
+     ],
+     "sooner": "1.6× sooner",
+     "runs": "2 vs 2",
+     "title": "Megatron",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-t2av-seeds",
+     "codex": 1.906,
+     "livelab": 1.95,
+     "best": [
+      "Codex #1",
+      "LiveLab #1"
+     ],
+     "mean": [
+      1.616,
+      1.696
+     ],
+     "sooner": "1.4× sooner",
+     "runs": "2 vs 2",
+     "title": "FastVideo-T2VA",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-omni",
+     "codex": 1.26,
+     "livelab": 1.378,
+     "best": [
+      "Codex",
+      "LiveLab"
+     ],
+     "mean": [
+      1.189,
+      1.237
+     ],
+     "sooner": "1.4× sooner",
+     "runs": "1 vs 1",
+     "title": "FastVideo-Ref2VA",
+     "fmt": "{:.2f}×"
+    }
+   ],
+   "caption": "Best picked run per side (its end value is boxed). Speedup over the starting code of the best commit so far that passes the correctness check. Megatron: training throughput of Qwen3-30B-A3B cut to 24 layers on one 4-GPU GB200 machine, 6 hours. FastVideo: end-to-end generation time per clip for MiniMax H3 text-to-audio-video (T2VA) and reference-to-audio-video (Ref2VA) on one DGX Spark, 8 hours. Codex: the Codex agent checking each edit with a restart. LiveLab: the same agent, prompt and time budget, checking through LiveLab."
+  },
+  {
+   "id": "p4-low-overhead",
+   "title": "Low-overhead tasks: nanoGPT speedrun and the MoE backward kernel",
+   "panels": [
+    {
+     "race": "r-nanogpt",
+     "codex": 1.718,
+     "livelab": 1.873,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      1.569,
+      1.667
+     ],
+     "sooner": null,
+     "runs": "1 vs 1",
+     "title": "NanoGPT",
+     "fmt": "{:.2f}×"
+    },
+    {
+     "race": "r-moe-bwd-kernel",
+     "codex": 0.515,
+     "livelab": 0.541,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 5"
+     ],
+     "mean": [
+      0.415,
+      0.464
+     ],
+     "sooner": null,
+     "runs": "5 vs 5",
+     "title": "Kernel (MoE bwd)",
+     "fmt": "{:.3f}"
+    }
+   ],
+   "caption": "Best result so far that passes the correctness check, for the best run of each side; its end value is boxed. NanoGPT: speedup of the training-time speedrun over its start, 4 hours, the race on dedicated GPUs. MoE backward kernel (SOL-ExecBench L2/025): best run over all races (5 per side), 2 hours. Codex: the Codex agent checking each edit with a restart. LiveLab: the same agent, prompt and time budget, checking through LiveLab. Kernels: speed-of-light (SOL) score, 0–1 (1 = the hardware limit the benchmark estimates), one B200 GPU per side, both sides inside NVIDIA's Kernel Design Agents workflow (KDA) unless noted."
+  },
+  {
+   "id": "p5-kernels-appendix",
+   "title": "Appendix: every kernel race",
+   "panels": [
+    {
+     "race": "r-gqa-kernel",
+     "codex": 0.973,
+     "livelab": 0.976,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      0.962,
+      0.97
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "GQA",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-gqa-kernel",
+     "codex": 0.969,
+     "livelab": 0.976,
+     "best": [
+      "Codex race 3",
+      "LiveLab race 3"
+     ],
+     "mean": [
+      0.958,
+      0.965
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "GQA",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-gqa-kernel",
+     "codex": 0.972,
+     "livelab": 0.973,
+     "best": [
+      "Codex race 5",
+      "LiveLab race 5"
+     ],
+     "mean": [
+      0.96,
+      0.954
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "GQA",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-mla-kernel",
+     "codex": 0.949,
+     "livelab": 0.952,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      0.931,
+      0.942
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MLA",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-fwd-kernel",
+     "codex": 0.795,
+     "livelab": 0.806,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      0.773,
+      0.749
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MoE fwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-fwd-kernel",
+     "codex": 0.792,
+     "livelab": 0.805,
+     "best": [
+      "Codex race 3",
+      "LiveLab race 3"
+     ],
+     "mean": [
+      0.764,
+      0.758
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MoE fwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-fwd-kernel",
+     "codex": 0.752,
+     "livelab": 0.786,
+     "best": [
+      "Codex race 5",
+      "LiveLab race 5"
+     ],
+     "mean": [
+      0.735,
+      0.743
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MoE fwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-gqa-kernel-plain",
+     "codex": 0.976,
+     "livelab": 0.977,
+     "best": [
+      "Codex",
+      "LiveLab"
+     ],
+     "mean": [
+      0.96,
+      0.97
+     ],
+     "sooner": null,
+     "runs": "1 vs 1",
+     "title": "GQA, plain agent",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-bwd-kernel",
+     "codex": 0.515,
+     "livelab": 0.516,
+     "best": [
+      "Codex race 1",
+      "LiveLab race 1"
+     ],
+     "mean": [
+      0.415,
+      0.408
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MoE bwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-bwd-kernel",
+     "codex": 0.464,
+     "livelab": 0.443,
+     "best": [
+      "Codex race 3",
+      "LiveLab race 3"
+     ],
+     "mean": [
+      0.339,
+      0.335
+     ],
+     "sooner": null,
+     "runs": "2 vs 2",
+     "title": "MoE bwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-bwd-kernel",
+     "codex": 0.438,
+     "livelab": 0.541,
+     "best": [
+      "Codex race 5",
+      "LiveLab race 5"
+     ],
+     "mean": [
+      0.319,
+      0.464
+     ],
+     "sooner": null,
+     "runs": "1 vs 1",
+     "title": "MoE bwd",
+     "fmt": "{:.3f}"
+    },
+    {
+     "race": "r-moe-kernel-plain",
+     "codex": 0.502,
+     "livelab": 0.538,
+     "best": [
+      "Codex",
+      "LiveLab"
+     ],
+     "mean": [
+      0.406,
+      0.446
+     ],
+     "sooner": null,
+     "runs": "1 vs 1",
+     "title": "MoE bwd, plain agent",
+     "fmt": "{:.3f}"
+    }
+   ],
+   "caption": "Every kernel race: best result so far that passes the correctness check, for each side. Each KDA panel holds two races of the same task, one solid (end value boxed) and one dotted (2 hours each; GQA attention prefill from FlashInfer-Bench: 6 races; MoE forward and backward from SOL-ExecBench L2/013 and L2/025: 6 and 5; MLA attention decode: 2). Plain agent: one earlier race each, before both sides used KDA (GQA: 47 minutes; MoE backward: 2 hours). Each panel has its own y scale. Codex: the Codex agent checking each edit with a restart. LiveLab: the same agent, prompt and time budget, checking through LiveLab. Kernels: speed-of-light (SOL) score, 0–1 (1 = the hardware limit the benchmark estimates), one B200 GPU per side, both sides inside NVIDIA's Kernel Design Agents workflow (KDA) unless noted."
+  }
+ ],
+ "hidden": {
+  "runs:r-megatron": [
+   "Codex #1",
+   "LiveLab #1"
+  ],
+  "runs:r-prefill-p8k": [
+   "Codex #2",
+   "Codex #6",
+   "LiveLab #5",
+   "LiveLab #3",
+   "LiveLab #6",
+   "LiveLab #7",
+   "LiveLab #8",
+   "LiveLab #9",
+   "Codex #5",
+   "Codex #3",
+   "LiveLab #4"
+  ],
+  "runs:r-prefill-p64k": [
+   "Codex #6",
+   "Codex #2",
+   "Codex #3",
+   "Codex #4",
+   "LiveLab #1",
+   "LiveLab #2",
+   "LiveLab #4",
+   "LiveLab #6",
+   "LiveLab #8",
+   "LiveLab #9",
+   "LiveLab #3"
+  ],
+  "runs:r-prefill-p16k": [
+   "Codex #6",
+   "Codex #4",
+   "Codex #2",
+   "LiveLab #4",
+   "LiveLab #2",
+   "LiveLab #1",
+   "LiveLab #6",
+   "LiveLab #8",
+   "LiveLab #9",
+   "Codex #3",
+   "LiveLab #7"
+  ],
+  "runs:r-prefill-p32k": [
+   "Codex #6",
+   "Codex #2",
+   "Codex #5",
+   "LiveLab #5",
+   "LiveLab #3",
+   "LiveLab #8",
+   "LiveLab #4",
+   "LiveLab #2",
+   "LiveLab #1",
+   "LiveLab #9",
+   "Codex #3"
+  ]
+ },
+ "rule": "Picked runs = the race atom's series minus hidden['runs:<race>']. Best run per side = the run named in panels[].best (highest mean speedup over the race, build_publish.py kept())."
+}

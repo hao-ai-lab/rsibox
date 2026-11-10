@@ -1,0 +1,138 @@
+{
+ "id": "m4-model-speed-replay",
+ "title": "Faster models: the same runs, replayed",
+ "kind": "lines",
+ "x_label": "Model speed-up",
+ "y_label": "Hours to replay the run",
+ "x": [
+  "1\u00d7",
+  "1.5\u00d7",
+  "2\u00d7",
+  "3\u00d7",
+  "5\u00d7",
+  "10\u00d7",
+  "\u221e"
+ ],
+ "names": [
+  "Codex",
+  "LiveLab"
+ ],
+ "colors": [
+  "#c8312b",
+  "#1f5fa8"
+ ],
+ "rows": [
+  {
+   "system": "vLLM",
+   "arm": "Codex",
+   "run": "d2",
+   "hours": [
+    5.92,
+    5.86,
+    5.83,
+    5.8,
+    5.78,
+    5.76,
+    5.75
+   ]
+  },
+  {
+   "system": "vLLM",
+   "arm": "LiveLab",
+   "run": "d1",
+   "hours": [
+    5.99,
+    4.87,
+    4.47,
+    4.12,
+    3.87,
+    3.71,
+    3.58
+   ]
+  },
+  {
+   "system": "Megatron",
+   "arm": "Codex",
+   "run": "5c",
+   "hours": [
+    5.98,
+    5.96,
+    5.96,
+    5.95,
+    5.94,
+    5.94,
+    5.93
+   ]
+  },
+  {
+   "system": "Megatron",
+   "arm": "LiveLab",
+   "run": "5a",
+   "hours": [
+    6.0,
+    5.7,
+    5.6,
+    5.53,
+    5.48,
+    5.44,
+    5.41
+   ]
+  },
+  {
+   "system": "FastVideo-T2VA",
+   "arm": "Codex",
+   "run": "H3",
+   "hours": [
+    7.83,
+    6.23,
+    5.53,
+    4.82,
+    4.26,
+    3.84,
+    3.42
+   ]
+  },
+  {
+   "system": "FastVideo-T2VA",
+   "arm": "LiveLab",
+   "run": "H3",
+   "hours": [
+    7.93,
+    6.01,
+    5.22,
+    4.46,
+    3.84,
+    3.38,
+    2.91
+   ]
+  },
+  {
+   "system": "FastVideo-Ref2VA",
+   "arm": "Codex",
+   "run": "Omni r2",
+   "hours": [
+    7.84,
+    6.92,
+    6.55,
+    6.18,
+    5.89,
+    5.66,
+    5.44
+   ]
+  },
+  {
+   "system": "FastVideo-Ref2VA",
+   "arm": "LiveLab",
+   "run": "Omni r2",
+   "hours": [
+    7.61,
+    6.2,
+    5.55,
+    4.9,
+    4.38,
+    3.99,
+    3.6
+   ]
+  }
+ ]
+}

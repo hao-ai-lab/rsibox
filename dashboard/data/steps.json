@@ -1,0 +1,7006 @@
+{
+ "note": "Best-so-far steps matched to a ledger row by exact time; a step not listed was not matched. subject: the commit's first line, from raw/commit-subjects.txt or data/deepseek_ideas.json (git log of the run's worktree).",
+ "steps": {
+  "r-prefill-p8k|Codex #1": {
+   "1": {
+    "commit": "a588da1c21",
+    "run": "n3-normal"
+   },
+   "2": {
+    "commit": "3c72eb6883",
+    "run": "n3-normal",
+    "subject": "Apply BF16 DeepSelect dispatch to prefill logits"
+   },
+   "3": {
+    "commit": "ccbffe476f",
+    "run": "n3-normal",
+    "subject": "Record the full cold baseline measurements"
+   },
+   "4": {
+    "commit": "c8bcf53352",
+    "run": "n3-normal",
+    "subject": "Combine staging tiling with substantial causal-context trimming"
+   },
+   "5": {
+    "commit": "036d490aaa",
+    "run": "n3-normal",
+    "subject": "Combine gated staging and chunking with measured Engram overlap"
+   },
+   "6": {
+    "commit": "16a637742e",
+    "run": "n3-normal",
+    "subject": "Combine wave-aligned prefill chunks with tiled indices and Engram overlap"
+   },
+   "7": {
+    "commit": "833bc34a45",
+    "run": "n3-normal",
+    "subject": "Record normalization gate pass and shortlist helper signature failure"
+   },
+   "8": {
+    "commit": "9b72b0dd6e",
+    "run": "n3-normal",
+    "subject": "Record the final half-grid timing and require matched cold controls"
+   }
+  },
+  "r-prefill-p8k|Codex #2": {
+   "1": {
+    "commit": "ee103f9a26",
+    "run": "n4-normal",
+    "subject": "perf: use BF16 DeepSelect for compatible indexer prefill rows"
+   },
+   "2": {
+    "commit": "26813808c9",
+    "run": "n4-normal",
+    "subject": "Combine larger staging tiles, direct dense quantization and large causal chunks"
+   },
+   "3": {
+    "commit": "c4720b1485",
+    "run": "n4-normal",
+    "subject": "Overlap Engram host-table prefetch with large prefill computation"
+   },
+   "4": {
+    "commit": "9c41831224",
+    "run": "n4-normal",
+    "subject": "Combine multi-row normalization and attention index tiles"
+   },
+   "5": {
+    "commit": "1d6be6598f",
+    "run": "n4-normal",
+    "subject": "Restore BF16 chunking for shared dense and sparse indexer metadata"
+   },
+   "6": {
+    "commit": "694aace422",
+    "run": "n4-normal",
+    "subject": "Combine warp-local normalization with balanced MQA scheduling"
+   }
+  },
+  "r-prefill-p8k|Codex #3": {
+   "1": {
+    "commit": "e03a5852ec",
+    "run": "n5-normal",
+    "subject": "perf: apply BF16 DeepSelect path to dense prefill indexer"
+   },
+   "2": {
+    "commit": "8d5ce4616e",
+    "run": "n5-normal",
+    "subject": "perf: use DeepGEMM for large MXFP8 projections without requantization"
+   },
+   "3": {
+    "commit": "849389e8bf",
+    "run": "n5-normal",
+    "subject": "refactor: simplify the validated SM100 native FP4 gather"
+   },
+   "4": {
+    "commit": "a58fbf5e53",
+    "run": "n5-normal",
+    "subject": "perf: consolidate faster prefill staging and QKV normalization"
+   },
+   "5": {
+    "commit": "090786aa27",
+    "run": "n5-normal",
+    "subject": "perf: consolidate direct MXFP8 quantization and parallel index preparation"
+   },
+   "6": {
+    "commit": "a524d7b136",
+    "run": "n5-normal",
+    "subject": "perf: test bounded background chunks for host embedding prefetch"
+   },
+   "7": {
+    "commit": "f809933c3d",
+    "run": "n5-normal",
+    "subject": "perf: test wider bounded host-lookup prefetch chunks"
+   },
+   "8": {
+    "commit": "543ef60e46",
+    "run": "n5-normal",
+    "subject": "perf: test a throughput-oriented bounded prefetch grid"
+   },
+   "9": {
+    "commit": "425ec03d9c",
+    "run": "n5-normal",
+    "subject": "perf: consolidate validated prefill data-movement optimizations"
+   },
+   "10": {
+    "commit": "1bc3b7a9bd",
+    "run": "n5-normal",
+    "subject": "perf: combine validated prefetch with bounded causal score tiling"
+   }
+  },
+  "r-prefill-p8k|Codex #4": {
+   "1": {
+    "commit": "81eca91778",
+    "run": "n6-normal",
+    "subject": "perf: use DeepSelect on native BF16 dense prefill logits"
+   },
+   "2": {
+    "commit": "5470b09a71",
+    "run": "n6-normal",
+    "subject": "perf: decode gathered FP4 pairs with native Blackwell conversion"
+   },
+   "3": {
+    "commit": "99c19df6c8",
+    "run": "n6-normal",
+    "subject": "perf: keep faster index assembly and restore candidate-score tiles"
+   },
+   "4": {
+    "commit": "889e18684b",
+    "run": "n6-normal",
+    "subject": "perf: amortize BF16 indexer launches on high-memory SM100 GPUs"
+   },
+   "5": {
+    "commit": "039a3335f1",
+    "run": "n6-normal",
+    "subject": "perf: retain cuBLASLt bulk MXFP8 projections for validation"
+   },
+   "6": {
+    "commit": "9cb835f5c4",
+    "run": "n6-normal",
+    "subject": "perf: validate four-row shared normalization scheduling"
+   },
+   "7": {
+    "commit": "4af6b173d4",
+    "run": "n6-normal",
+    "subject": "perf: validate independent Q and KV normalization widths"
+   }
+  },
+  "r-prefill-p8k|Codex #5": {
+   "1": {
+    "commit": "d49c365425",
+    "run": "n7-normal",
+    "subject": "Use configured DeepSelect on dense prefill logits without FP32 upcast"
+   },
+   "2": {
+    "commit": "c4c13cf3ea",
+    "run": "n7-normal",
+    "subject": "Reduce BF16 candidate logits directly into FP32 block scores"
+   },
+   "3": {
+    "commit": "e2f0382ce3",
+    "run": "n7-normal",
+    "subject": "Finalize measured prefill improvements and remove inactive chunk tuning"
+   },
+   "4": {
+    "commit": "b66fc99821",
+    "run": "n7-normal",
+    "subject": "Combine BF16 indexer chunks with faster large MXFP8 projections"
+   },
+   "5": {
+    "commit": "0fe29f5b10",
+    "run": "n7-normal",
+    "subject": "Combine gated prefill gains with full-width residual broadcast"
+   },
+   "6": {
+    "commit": "c137efb4ec",
+    "run": "n7-normal",
+    "subject": "Combine overlapped Engram prefetch and compact Q KV normalization"
+   },
+   "7": {
+    "commit": "df55a25603",
+    "run": "n7-normal",
+    "subject": "Combine causal indexer chunk planning with prefill kernel improvements"
+   },
+   "8": {
+    "commit": "385958ed95",
+    "run": "n7-normal",
+    "subject": "Combine forward-local shared KV gathers with explicit replay invalidation"
+   },
+   "9": {
+    "commit": "1f0a5dfce9",
+    "run": "n7-normal",
+    "subject": "Combine tiled index construction with forward-local KV gather reuse"
+   },
+   "10": {
+    "commit": "bcbfdb9e7c",
+    "run": "n7-normal",
+    "subject": "Combine balanced indexer scheduling with validated prefill memory improvements"
+   },
+   "11": {
+    "commit": "7eed290903",
+    "run": "n7-normal",
+    "subject": "Combine direct packed-scale activation production with prefill optimizations"
+   },
+   "12": {
+    "commit": "0e19d4fa8d",
+    "run": "n7-normal",
+    "subject": "Combine four-warp Engram post WKV with measured prefill improvements"
+   },
+   "13": {
+    "commit": "26044f54e4",
+    "run": "n7-normal",
+    "subject": "Combine staggered Engram prefetch with short-tail MQA scheduling"
+   },
+   "14": {
+    "commit": "074b0e62b6",
+    "run": "n7-normal",
+    "subject": "Consolidate measured K-first prefill staging and quantization"
+   }
+  },
+  "r-prefill-p8k|Codex #6": {
+   "1": {
+    "commit": "465bf71b2f",
+    "run": "n8-normal",
+    "subject": "perf: eliminate FP32 logits copy before prefill DeepSelect"
+   },
+   "2": {
+    "commit": "9acd877eb9",
+    "run": "n8-normal",
+    "subject": "perf: retain unordered top-k after locality experiment regressed"
+   },
+   "3": {
+    "commit": "55253b15f7",
+    "run": "n8-normal",
+    "subject": "perf: finalize short-query paged prefill dispatch"
+   },
+   "4": {
+    "commit": "5c43a70141",
+    "run": "n8-normal",
+    "subject": "fix: gather shared index inputs before compact source attention"
+   },
+   "5": {
+    "commit": "117a4766d0",
+    "run": "n8-normal",
+    "subject": "perf: combine compact source projections with validated prefill fusions"
+   },
+   "6": {
+    "commit": "f3316872b2",
+    "run": "n8-normal",
+    "subject": "perf: finalize replay outputs before scatter in the combined prefill path"
+   },
+   "7": {
+    "commit": "177006d7c3",
+    "run": "n8-normal",
+    "subject": "Record register cap regression and causal budget trial"
+   },
+   "8": {
+    "commit": "5101bf236d",
+    "run": "n8-normal",
+    "subject": "Record neutral residual reuse and validate retained scheduling gains"
+   },
+   "9": {
+    "commit": "5101bf236d",
+    "run": "n8-normal",
+    "subject": "Record neutral residual reuse and validate retained scheduling gains"
+   },
+   "10": {
+    "commit": "67b98457f8",
+    "run": "n8-normal",
+    "subject": "Size source-attention output storage to live replay queries"
+   }
+  },
+  "r-prefill-p8k|LiveLab #1": {
+   "1": {
+    "commit": "8e28a569aa",
+    "run": "s3-fastrsi",
+    "subject": "Record passing DeepSelect gate and CUTLASS timing gains"
+   },
+   "2": {
+    "commit": "0b64cc2f1e",
+    "run": "s3-fastrsi",
+    "subject": "Guard DeepGEMM MXFP8 dispatch and document initial timings"
+   },
+   "3": {
+    "commit": "83afe73627",
+    "run": "s3-fastrsi",
+    "subject": "Combine shared KV gathers with batch-size selected MXFP8 GEMMs"
+   },
+   "4": {
+    "commit": "b3a3a6df53",
+    "run": "s3-fastrsi",
+    "subject": "Balance prefill MQA work over KV spans"
+   },
+   "5": {
+    "commit": "49053eee6a",
+    "run": "s3-fastrsi",
+    "subject": "Own shared prefill gathers in bounded persistent workspace"
+   },
+   "6": {
+    "commit": "29364b4bea",
+    "run": "s3-fastrsi",
+    "subject": "Add gated four-warp prefill query normalization to the combination"
+   },
+   "7": {
+    "commit": "d9576fdd1d",
+    "run": "s3-fastrsi",
+    "subject": "Select measured faster GEMM backend for medium prefill batches"
+   },
+   "8": {
+    "commit": "38541d6926",
+    "run": "s3-fastrsi",
+    "subject": "Apply the BF16 budget to shared indexer metadata explicitly"
+   },
+   "9": {
+    "commit": "8c25c774e2",
+    "run": "s3-fastrsi",
+    "subject": "Allow host embedding prefetch overlap for medium token batches"
+   }
+  },
+  "r-prefill-p8k|LiveLab #2": {
+   "1": {
+    "commit": "eb88ad508f",
+    "run": "s4-fastrsi",
+    "subject": "Document baseline and prefill optimization method"
+   },
+   "2": {
+    "commit": "28f1c7af68",
+    "run": "s4-fastrsi",
+    "subject": "Record CUTLASS GEMM speedup with unchanged outputs"
+   },
+   "3": {
+    "commit": "81e392df6d",
+    "run": "s4-fastrsi",
+    "subject": "Reject sparse-index sorting after measured regression"
+   },
+   "4": {
+    "commit": "c07064e1f1",
+    "run": "s4-fastrsi",
+    "subject": "Keep eight-row gathers and harden dense MXFP8 dispatch"
+   },
+   "5": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "6": {
+    "commit": "0b43826aaf",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate prefill improvements with bounded workspace use"
+   },
+   "7": {
+    "commit": "790983232d",
+    "run": "s4-fastrsi",
+    "subject": "Combine BF16 indexer budgeting and attention index reuse"
+   },
+   "8": {
+    "commit": "1f84445e4e",
+    "run": "s4-fastrsi",
+    "subject": "Combine vectorized broadcast and bounded mHC buffer reuse"
+   },
+   "9": {
+    "commit": "46a00876bd",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate balanced MQA scheduling with gated prefill improvements"
+   },
+   "10": {
+    "commit": "a97bba9c7e",
+    "run": "s4-fastrsi",
+    "subject": "Combine bounded candidate selection with balanced medium MQA"
+   },
+   "11": {
+    "commit": "f765c6c37f",
+    "run": "s4-fastrsi",
+    "subject": "Validate tiled SWA gather without resident Engram scales"
+   },
+   "12": {
+    "commit": "c973b6697a",
+    "run": "s4-fastrsi",
+    "subject": "Combine native output scales and reduced prefill launch overhead"
+   },
+   "13": {
+    "commit": "35100ea020",
+    "run": "s4-fastrsi",
+    "subject": "Combine measured prefill scheduling and metadata savings"
+   }
+  },
+  "r-prefill-p8k|LiveLab #3": {
+   "1": {
+    "commit": "aa8cdcba41",
+    "run": "s5-fastrsi",
+    "subject": "Consume native BF16 prefill logits with DeepSelect"
+   },
+   "2": {
+    "commit": "e2dff65dde",
+    "run": "s5-fastrsi",
+    "subject": "Combine prefill selector, GEMM, and cache scheduling improvements"
+   },
+   "3": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "4": {
+    "commit": "231f584b35",
+    "run": "s5-fastrsi",
+    "subject": "Review combined prefill optimizations and initialize scale padding"
+   },
+   "5": {
+    "commit": "f5bd1b3cf2",
+    "run": "s5-fastrsi",
+    "subject": "Account for prefill reuse buffers in activation memory profiling"
+   }
+  },
+  "r-prefill-p8k|LiveLab #4": {
+   "1": {
+    "commit": "8084d96ba7",
+    "run": "s6-fastrsi",
+    "subject": "Retain measured prefill wins and drop inconclusive staging change"
+   },
+   "2": {
+    "commit": "b96715c9d0",
+    "run": "s6-fastrsi",
+    "subject": "Combine gated BF16 chunk planning and prefill kernel wins"
+   },
+   "3": {
+    "commit": "53d2b0e655",
+    "run": "s6-fastrsi",
+    "subject": "Stack gated Engram row caching with prefill kernel and planner wins"
+   },
+   "4": {
+    "commit": "e566c785e1",
+    "run": "s6-fastrsi",
+    "subject": "Combine validated Engram caching with gated throughput improvements"
+   },
+   "5": {
+    "commit": "ae3da125a2",
+    "run": "s6-fastrsi",
+    "subject": "Finalize exact zero-scale MXFP8 behavior and review cumulative helpers"
+   }
+  },
+  "r-prefill-p8k|LiveLab #5": {
+   "1": {
+    "commit": "b888e3d770",
+    "run": "s7-fastrsi",
+    "subject": "Drop unproven tiled gather and retain prefill top-k experiment"
+   },
+   "2": {
+    "commit": "c964a07527",
+    "run": "s7-fastrsi",
+    "subject": "Test CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "862cc1ac10",
+    "run": "s7-fastrsi",
+    "subject": "Finalize guarded prefill kernel selection and combine measured wins"
+   },
+   "4": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   },
+   "5": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   }
+  },
+  "r-prefill-p8k|LiveLab #6": {
+   "1": {
+    "commit": "b904f7af7f",
+    "run": "s8-fastrsi",
+    "subject": "Tile NVFP4 prefill cache gathers across independent token rows"
+   },
+   "2": {
+    "commit": "11aef3216c",
+    "run": "s8-fastrsi",
+    "subject": "Stack verified exact FP4 decoding with optimized prefill indexer and GEMMs"
+   },
+   "3": {
+    "commit": "1297be65a4",
+    "run": "s8-fastrsi",
+    "subject": "Finalize prefill stack with 64-row MegaMoE staging"
+   },
+   "4": {
+    "commit": "66315a0b39",
+    "run": "s8-fastrsi",
+    "subject": "Stack shared prefill KV and fused query and output memory paths"
+   },
+   "5": {
+    "commit": "04357dcf73",
+    "run": "s8-fastrsi",
+    "subject": "Remove comparison-only Engram bookkeeping and document stream joins"
+   }
+  },
+  "r-prefill-p8k|LiveLab #7": {
+   "1": {
+    "commit": "f2ec394075",
+    "run": "s9-fastrsi",
+    "subject": "docs: record DeepSelect speedup and follow-up experiments"
+   },
+   "2": {
+    "commit": "da03a11993",
+    "run": "s9-fastrsi",
+    "subject": "Retain shared KV staging and account for peak memory"
+   },
+   "3": {
+    "commit": "9068bb861c",
+    "run": "s9-fastrsi",
+    "subject": "Combine verified prefill memory and staging improvements"
+   },
+   "4": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "5": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "6": {
+    "commit": "8cb2cbed95",
+    "run": "s9-fastrsi",
+    "subject": "Keep host huge pages by reallocating failed NUMA stripes on healthy nodes"
+   },
+   "7": {
+    "commit": "a9d56dbc9b",
+    "run": "s9-fastrsi",
+    "subject": "Combine native MQA scheduling and scale layouts with striped huge-page tables"
+   },
+   "8": {
+    "commit": "fe6719f119",
+    "run": "s9-fastrsi",
+    "subject": "Test balanced cold host placement with early Engram projection"
+   }
+  },
+  "r-prefill-p8k|LiveLab #8": {
+   "1": {
+    "commit": "d672d8e525",
+    "run": "s10-fastrsi",
+    "subject": "Use configured DeepSelect on native prefill logits"
+   },
+   "2": {
+    "commit": "2b85a9091e",
+    "run": "s10-fastrsi",
+    "subject": "Compare CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "cd510acc22",
+    "run": "s10-fastrsi",
+    "subject": "Keep measured prefill improvements with compatible fallback paths"
+   },
+   "4": {
+    "commit": "08b1724c75",
+    "run": "s10-fastrsi",
+    "subject": "Prepare derived MXFP8 scales at load and expose compile-safe GEMM op"
+   },
+   "5": {
+    "commit": "1f82d42470",
+    "run": "s10-fastrsi",
+    "subject": "Stack native BF16 indexer chunks with combined-index reuse"
+   },
+   "6": {
+    "commit": "04e2733ded",
+    "run": "s10-fastrsi",
+    "subject": "Bound prefill workspace ownership to a live forward context"
+   },
+   "7": {
+    "commit": "3fe41723fd",
+    "run": "s10-fastrsi",
+    "subject": "Stack residual broadcast and indexer casts with tuned Engram lookups"
+   },
+   "8": {
+    "commit": "a68e5b07c8",
+    "run": "s10-fastrsi",
+    "subject": "Stack exact-output prefill improvements with long-context MQA tail scheduling"
+   },
+   "9": {
+    "commit": "fffa113749",
+    "run": "s10-fastrsi",
+    "subject": "Combine asynchronous host Engram staging with tuned quantization tiles"
+   },
+   "10": {
+    "commit": "173ae72f1f",
+    "run": "s10-fastrsi",
+    "subject": "Screen eight-warps large background Engram lookups"
+   }
+  },
+  "r-prefill-p8k|LiveLab #9": {
+   "1": {
+    "commit": "ebd2fc881d",
+    "run": "s11-fastrsi",
+    "subject": "perf: dispatch dense prefill top-k to DeepSelect"
+   },
+   "2": {
+    "commit": "85cfc4462c",
+    "run": "s11-fastrsi",
+    "subject": "perf: test CUTLASS MXFP8 projections for large token batches"
+   },
+   "3": {
+    "commit": "0b79ce2a48",
+    "run": "s11-fastrsi",
+    "subject": "perf: test DeepGEMM MXFP8 projections with exact scale relayout"
+   },
+   "4": {
+    "commit": "184a11a898",
+    "run": "s11-fastrsi",
+    "subject": "perf: test native BF16 accounting for indexer chunk sizing"
+   },
+   "5": {
+    "commit": "b293c2149d",
+    "run": "s11-fastrsi",
+    "subject": "fix: describe shared mHC scales with logical token extent"
+   },
+   "6": {
+    "commit": "6126e35dbf",
+    "run": "s11-fastrsi",
+    "subject": "perf: combine exact gather, staging, and scale-layout savings"
+   },
+   "7": {
+    "commit": "da34ef0626",
+    "run": "s11-fastrsi",
+    "subject": "perf: eliminate sorting from bounded source token selection"
+   },
+   "8": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "9": {
+    "commit": "e15be9395c",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack causal prefill chunking and direct-layout quantization"
+   },
+   "10": {
+    "commit": "18114e8fb0",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack exact scale layouts and bandwidth improvements"
+   },
+   "11": {
+    "commit": "8c633f1e16",
+    "run": "s11-fastrsi",
+    "subject": "docs: record active Engram overlap improvement"
+   },
+   "12": {
+    "commit": "da829cb3a3",
+    "run": "s11-fastrsi",
+    "subject": "perf: finalize low-contention SM100 embedding prefetch"
+   }
+  },
+  "r-prefill-p16k|Codex #1": {
+   "1": {
+    "commit": "a588da1c21",
+    "run": "n3-normal"
+   },
+   "2": {
+    "commit": "3c72eb6883",
+    "run": "n3-normal",
+    "subject": "Apply BF16 DeepSelect dispatch to prefill logits"
+   },
+   "3": {
+    "commit": "18a32384c7",
+    "run": "n3-normal",
+    "subject": "Evaluate native FP4 conversion and wider KV gather tiles"
+   },
+   "4": {
+    "commit": "ccbffe476f",
+    "run": "n3-normal",
+    "subject": "Record the full cold baseline measurements"
+   },
+   "5": {
+    "commit": "c8bcf53352",
+    "run": "n3-normal",
+    "subject": "Combine staging tiling with substantial causal-context trimming"
+   },
+   "6": {
+    "commit": "036d490aaa",
+    "run": "n3-normal",
+    "subject": "Combine gated staging and chunking with measured Engram overlap"
+   },
+   "7": {
+    "commit": "b7b891927f",
+    "run": "n3-normal",
+    "subject": "Screen block-maximum shortlisting for exact prefill token top-k"
+   },
+   "8": {
+    "commit": "833bc34a45",
+    "run": "n3-normal",
+    "subject": "Record normalization gate pass and shortlist helper signature failure"
+   },
+   "9": {
+    "commit": "7a382b9ef8",
+    "run": "n3-normal",
+    "subject": "Validate final scope and compare half versus quarter Engram scheduling"
+   }
+  },
+  "r-prefill-p16k|Codex #2": {
+   "1": {
+    "commit": "ee103f9a26",
+    "run": "n4-normal",
+    "subject": "perf: use BF16 DeepSelect for compatible indexer prefill rows"
+   },
+   "2": {
+    "commit": "1d2093e4a8",
+    "run": "n4-normal",
+    "subject": "perf: test CUTLASS throughput path for large MXFP8 projections"
+   },
+   "3": {
+    "commit": "ad18f0069e",
+    "run": "n4-normal",
+    "subject": "perf: test DeepGEMM for large dense MXFP8 projections"
+   },
+   "4": {
+    "commit": "26813808c9",
+    "run": "n4-normal",
+    "subject": "Combine larger staging tiles, direct dense quantization and large causal chunks"
+   },
+   "5": {
+    "commit": "c4720b1485",
+    "run": "n4-normal",
+    "subject": "Overlap Engram host-table prefetch with large prefill computation"
+   },
+   "6": {
+    "commit": "9c41831224",
+    "run": "n4-normal",
+    "subject": "Combine multi-row normalization and attention index tiles"
+   },
+   "7": {
+    "commit": "915e0296dc",
+    "run": "n4-normal",
+    "subject": "Record passing compact selection gate and test in-place compaction"
+   },
+   "8": {
+    "commit": "1d6be6598f",
+    "run": "n4-normal",
+    "subject": "Restore BF16 chunking for shared dense and sparse indexer metadata"
+   },
+   "9": {
+    "commit": "3544a95143",
+    "run": "n4-normal",
+    "subject": "Fix CPU query length reference in shared indexer memory guard"
+   },
+   "10": {
+    "commit": "0b74ed49ce",
+    "run": "n4-normal",
+    "subject": "Use existing balanced scheduling metadata for large MQA logits"
+   },
+   "11": {
+    "commit": "50c2e43846",
+    "run": "n4-normal",
+    "subject": "Avoid empty candidate-scoring CTAs for large batches"
+   }
+  },
+  "r-prefill-p16k|Codex #3": {
+   "1": {
+    "commit": "e03a5852ec",
+    "run": "n5-normal",
+    "subject": "perf: apply BF16 DeepSelect path to dense prefill indexer"
+   },
+   "2": {
+    "commit": "8d5ce4616e",
+    "run": "n5-normal",
+    "subject": "perf: use DeepGEMM for large MXFP8 projections without requantization"
+   },
+   "3": {
+    "commit": "849389e8bf",
+    "run": "n5-normal",
+    "subject": "refactor: simplify the validated SM100 native FP4 gather"
+   },
+   "4": {
+    "commit": "a58fbf5e53",
+    "run": "n5-normal",
+    "subject": "perf: consolidate faster prefill staging and QKV normalization"
+   },
+   "5": {
+    "commit": "090786aa27",
+    "run": "n5-normal",
+    "subject": "perf: consolidate direct MXFP8 quantization and parallel index preparation"
+   },
+   "6": {
+    "commit": "6c6f9a8216",
+    "run": "n5-normal",
+    "subject": "perf: size indexer score chunks using their causal key bounds"
+   },
+   "7": {
+    "commit": "a524d7b136",
+    "run": "n5-normal",
+    "subject": "perf: test bounded background chunks for host embedding prefetch"
+   },
+   "8": {
+    "commit": "f809933c3d",
+    "run": "n5-normal",
+    "subject": "perf: test wider bounded host-lookup prefetch chunks"
+   }
+  },
+  "r-prefill-p16k|Codex #4": {
+   "1": {
+    "commit": "81eca91778",
+    "run": "n6-normal",
+    "subject": "perf: use DeepSelect on native BF16 dense prefill logits"
+   },
+   "2": {
+    "commit": "3d67d620b4",
+    "run": "n6-normal",
+    "subject": "fix: retain bounded sparse chunks to preserve graph memory headroom"
+   },
+   "3": {
+    "commit": "5470b09a71",
+    "run": "n6-normal",
+    "subject": "perf: decode gathered FP4 pairs with native Blackwell conversion"
+   },
+   "4": {
+    "commit": "64d79fe6e5",
+    "run": "n6-normal",
+    "subject": "perf: budget BF16 indexer logits at their actual element size"
+   },
+   "5": {
+    "commit": "4c54d20817",
+    "run": "n6-normal",
+    "subject": "perf: test background Engram lookup for bulk inputs"
+   },
+   "6": {
+    "commit": "32c38b5ec6",
+    "run": "n6-normal",
+    "subject": "perf: test larger row tiles for bulk MegaMoE input staging"
+   },
+   "7": {
+    "commit": "351fb61f7f",
+    "run": "n6-normal",
+    "subject": "perf: balance dense MQA logits work across SMs"
+   },
+   "8": {
+    "commit": "039a3335f1",
+    "run": "n6-normal",
+    "subject": "perf: retain cuBLASLt bulk MXFP8 projections for validation"
+   },
+   "9": {
+    "commit": "ea72da5bf1",
+    "run": "n6-normal",
+    "subject": "perf: validate exact kernel gains with bounded score workspace"
+   },
+   "10": {
+    "commit": "9cb835f5c4",
+    "run": "n6-normal",
+    "subject": "perf: validate four-row shared normalization scheduling"
+   },
+   "11": {
+    "commit": "4af6b173d4",
+    "run": "n6-normal",
+    "subject": "perf: validate independent Q and KV normalization widths"
+   },
+   "12": {
+    "commit": "4af6b173d4",
+    "run": "n6-normal",
+    "subject": "perf: validate independent Q and KV normalization widths"
+   }
+  },
+  "r-prefill-p16k|Codex #5": {
+   "1": {
+    "commit": "d49c365425",
+    "run": "n7-normal",
+    "subject": "Use configured DeepSelect on dense prefill logits without FP32 upcast"
+   },
+   "2": {
+    "commit": "c4c13cf3ea",
+    "run": "n7-normal",
+    "subject": "Reduce BF16 candidate logits directly into FP32 block scores"
+   },
+   "3": {
+    "commit": "e2f0382ce3",
+    "run": "n7-normal",
+    "subject": "Finalize measured prefill improvements and remove inactive chunk tuning"
+   },
+   "4": {
+    "commit": "8ed12ea9d9",
+    "run": "n7-normal",
+    "subject": "Budget shared indexer prefill chunks using BF16 logits"
+   },
+   "5": {
+    "commit": "b66fc99821",
+    "run": "n7-normal",
+    "subject": "Combine BF16 indexer chunks with faster large MXFP8 projections"
+   },
+   "6": {
+    "commit": "0fe29f5b10",
+    "run": "n7-normal",
+    "subject": "Combine gated prefill gains with full-width residual broadcast"
+   },
+   "7": {
+    "commit": "c137efb4ec",
+    "run": "n7-normal",
+    "subject": "Combine overlapped Engram prefetch and compact Q KV normalization"
+   },
+   "8": {
+    "commit": "1f0a5dfce9",
+    "run": "n7-normal",
+    "subject": "Combine tiled index construction with forward-local KV gather reuse"
+   },
+   "9": {
+    "commit": "bcbfdb9e7c",
+    "run": "n7-normal",
+    "subject": "Combine balanced indexer scheduling with validated prefill memory improvements"
+   },
+   "10": {
+    "commit": "7eed290903",
+    "run": "n7-normal",
+    "subject": "Combine direct packed-scale activation production with prefill optimizations"
+   },
+   "11": {
+    "commit": "26044f54e4",
+    "run": "n7-normal",
+    "subject": "Combine staggered Engram prefetch with short-tail MQA scheduling"
+   },
+   "12": {
+    "commit": "642eda1768",
+    "run": "n7-normal",
+    "subject": "Key shared prefill indices by exact gather inputs"
+   }
+  },
+  "r-prefill-p16k|Codex #6": {
+   "1": {
+    "commit": "465bf71b2f",
+    "run": "n8-normal",
+    "subject": "perf: eliminate FP32 logits copy before prefill DeepSelect"
+   },
+   "2": {
+    "commit": "a84a80a092",
+    "run": "n8-normal",
+    "subject": "fix: make tiled gather record size a Triton compile-time constant"
+   },
+   "3": {
+    "commit": "9acd877eb9",
+    "run": "n8-normal",
+    "subject": "perf: retain unordered top-k after locality experiment regressed"
+   },
+   "4": {
+    "commit": "55253b15f7",
+    "run": "n8-normal",
+    "subject": "perf: finalize short-query paged prefill dispatch"
+   },
+   "5": {
+    "commit": "1ecb56ef26",
+    "run": "n8-normal",
+    "subject": "perf: run the last KV-source FFN on bounded replay rows"
+   },
+   "6": {
+    "commit": "5c43a70141",
+    "run": "n8-normal",
+    "subject": "fix: gather shared index inputs before compact source attention"
+   },
+   "7": {
+    "commit": "8792a86822",
+    "run": "n8-normal",
+    "subject": "perf: tile the initial residual-stream broadcast"
+   },
+   "8": {
+    "commit": "83827864c2",
+    "run": "n8-normal",
+    "subject": "perf: finalize retained hidden rows before replay scatter"
+   },
+   "9": {
+    "commit": "ada73235fe",
+    "run": "n8-normal",
+    "subject": "Tile long MXFP8 SWA cache gathers across token rows"
+   },
+   "10": {
+    "commit": "bfd845ac51",
+    "run": "n8-normal",
+    "subject": "Test four warps for large Engram gate residual fusion"
+   },
+   "11": {
+    "commit": "b2f6c295fb",
+    "run": "n8-normal",
+    "subject": "Balance short dense query batches over long KV contexts"
+   },
+   "12": {
+    "commit": "be25aa44c7",
+    "run": "n8-normal",
+    "subject": "Test reusing consumed large mHC residual storage"
+   },
+   "13": {
+    "commit": "3e2912e48e",
+    "run": "n8-normal",
+    "subject": "Test unpadded 1280-wide query normalization decomposition"
+   }
+  },
+  "r-prefill-p16k|LiveLab #1": {
+   "1": {
+    "commit": "8be8b56c78",
+    "run": "s3-fastrsi",
+    "subject": "Avoid upcasting prefill logits accepted by DeepSelect"
+   },
+   "2": {
+    "commit": "8e28a569aa",
+    "run": "s3-fastrsi",
+    "subject": "Record passing DeepSelect gate and CUTLASS timing gains"
+   },
+   "3": {
+    "commit": "0b64cc2f1e",
+    "run": "s3-fastrsi",
+    "subject": "Guard DeepGEMM MXFP8 dispatch and document initial timings"
+   },
+   "4": {
+    "commit": "68eb4c9e4a",
+    "run": "s3-fastrsi",
+    "subject": "Combine DeepSelect, CUTLASS and shared prefill KV gathers"
+   },
+   "5": {
+    "commit": "83afe73627",
+    "run": "s3-fastrsi",
+    "subject": "Combine shared KV gathers with batch-size selected MXFP8 GEMMs"
+   },
+   "6": {
+    "commit": "b3a3a6df53",
+    "run": "s3-fastrsi",
+    "subject": "Balance prefill MQA work over KV spans"
+   },
+   "7": {
+    "commit": "49053eee6a",
+    "run": "s3-fastrsi",
+    "subject": "Own shared prefill gathers in bounded persistent workspace"
+   },
+   "8": {
+    "commit": "29364b4bea",
+    "run": "s3-fastrsi",
+    "subject": "Add gated four-warp prefill query normalization to the combination"
+   },
+   "9": {
+    "commit": "d9576fdd1d",
+    "run": "s3-fastrsi",
+    "subject": "Select measured faster GEMM backend for medium prefill batches"
+   },
+   "10": {
+    "commit": "d9576fdd1d",
+    "run": "s3-fastrsi",
+    "subject": "Select measured faster GEMM backend for medium prefill batches"
+   },
+   "11": {
+    "commit": "38541d6926",
+    "run": "s3-fastrsi",
+    "subject": "Apply the BF16 budget to shared indexer metadata explicitly"
+   },
+   "12": {
+    "commit": "6c44ca2c6d",
+    "run": "s3-fastrsi",
+    "subject": "Retain exact scale-layout fallback for preprocessed weight loaders"
+   },
+   "13": {
+    "commit": "cbe902b847",
+    "run": "s3-fastrsi",
+    "subject": "Overlap host embeddings with decoder compute when tables use large GPU pages"
+   },
+   "14": {
+    "commit": "cbe902b847",
+    "run": "s3-fastrsi",
+    "subject": "Overlap host embeddings with decoder compute when tables use large GPU pages"
+   }
+  },
+  "r-prefill-p16k|LiveLab #2": {
+   "1": {
+    "commit": "28f1c7af68",
+    "run": "s4-fastrsi",
+    "subject": "Record CUTLASS GEMM speedup with unchanged outputs"
+   },
+   "2": {
+    "commit": "81e392df6d",
+    "run": "s4-fastrsi",
+    "subject": "Reject sparse-index sorting after measured regression"
+   },
+   "3": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "4": {
+    "commit": "0b43826aaf",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate prefill improvements with bounded workspace use"
+   },
+   "5": {
+    "commit": "790983232d",
+    "run": "s4-fastrsi",
+    "subject": "Combine BF16 indexer budgeting and attention index reuse"
+   },
+   "6": {
+    "commit": "1f84445e4e",
+    "run": "s4-fastrsi",
+    "subject": "Combine vectorized broadcast and bounded mHC buffer reuse"
+   },
+   "7": {
+    "commit": "46a00876bd",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate balanced MQA scheduling with gated prefill improvements"
+   },
+   "8": {
+    "commit": "a97bba9c7e",
+    "run": "s4-fastrsi",
+    "subject": "Combine bounded candidate selection with balanced medium MQA"
+   },
+   "9": {
+    "commit": "f765c6c37f",
+    "run": "s4-fastrsi",
+    "subject": "Validate tiled SWA gather without resident Engram scales"
+   },
+   "10": {
+    "commit": "332c8aad2e",
+    "run": "s4-fastrsi",
+    "subject": "Combine native-scale normalization and exact tighter token pruning"
+   },
+   "11": {
+    "commit": "c973b6697a",
+    "run": "s4-fastrsi",
+    "subject": "Combine native output scales and reduced prefill launch overhead"
+   },
+   "12": {
+    "commit": "35100ea020",
+    "run": "s4-fastrsi",
+    "subject": "Combine measured prefill scheduling and metadata savings"
+   }
+  },
+  "r-prefill-p16k|LiveLab #3": {
+   "1": {
+    "commit": "aa8cdcba41",
+    "run": "s5-fastrsi",
+    "subject": "Consume native BF16 prefill logits with DeepSelect"
+   },
+   "2": {
+    "commit": "e2dff65dde",
+    "run": "s5-fastrsi",
+    "subject": "Combine prefill selector, GEMM, and cache scheduling improvements"
+   },
+   "3": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "4": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "5": {
+    "commit": "231f584b35",
+    "run": "s5-fastrsi",
+    "subject": "Review combined prefill optimizations and initialize scale padding"
+   }
+  },
+  "r-prefill-p16k|LiveLab #4": {
+   "1": {
+    "commit": "e2d89fb402",
+    "run": "s6-fastrsi",
+    "subject": "Use native packed FP4 conversion in tiled cache gather"
+   },
+   "2": {
+    "commit": "4d48d2cbcb",
+    "run": "s6-fastrsi",
+    "subject": "Reuse gathered compressed KV across sharing attention layers"
+   },
+   "3": {
+    "commit": "8084d96ba7",
+    "run": "s6-fastrsi",
+    "subject": "Retain measured prefill wins and drop inconclusive staging change"
+   },
+   "4": {
+    "commit": "d5a9ba861f",
+    "run": "s6-fastrsi",
+    "subject": "Test interleaved Engram host values and scale rows"
+   },
+   "5": {
+    "commit": "b96715c9d0",
+    "run": "s6-fastrsi",
+    "subject": "Combine gated BF16 chunk planning and prefill kernel wins"
+   },
+   "6": {
+    "commit": "53d2b0e655",
+    "run": "s6-fastrsi",
+    "subject": "Stack gated Engram row caching with prefill kernel and planner wins"
+   },
+   "7": {
+    "commit": "e566c785e1",
+    "run": "s6-fastrsi",
+    "subject": "Combine validated Engram caching with gated throughput improvements"
+   },
+   "8": {
+    "commit": "ae3da125a2",
+    "run": "s6-fastrsi",
+    "subject": "Finalize exact zero-scale MXFP8 behavior and review cumulative helpers"
+   }
+  },
+  "r-prefill-p16k|LiveLab #5": {
+   "1": {
+    "commit": "b888e3d770",
+    "run": "s7-fastrsi",
+    "subject": "Drop unproven tiled gather and retain prefill top-k experiment"
+   },
+   "2": {
+    "commit": "862cc1ac10",
+    "run": "s7-fastrsi",
+    "subject": "Finalize guarded prefill kernel selection and combine measured wins"
+   },
+   "3": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   },
+   "4": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   }
+  },
+  "r-prefill-p16k|LiveLab #6": {
+   "1": {
+    "commit": "b904f7af7f",
+    "run": "s8-fastrsi",
+    "subject": "Tile NVFP4 prefill cache gathers across independent token rows"
+   },
+   "2": {
+    "commit": "11aef3216c",
+    "run": "s8-fastrsi",
+    "subject": "Stack verified exact FP4 decoding with optimized prefill indexer and GEMMs"
+   },
+   "3": {
+    "commit": "1297be65a4",
+    "run": "s8-fastrsi",
+    "subject": "Finalize prefill stack with 64-row MegaMoE staging"
+   },
+   "4": {
+    "commit": "66315a0b39",
+    "run": "s8-fastrsi",
+    "subject": "Stack shared prefill KV and fused query and output memory paths"
+   },
+   "5": {
+    "commit": "04357dcf73",
+    "run": "s8-fastrsi",
+    "subject": "Remove comparison-only Engram bookkeeping and document stream joins"
+   },
+   "6": {
+    "commit": "79e1755930",
+    "run": "s8-fastrsi",
+    "subject": "Remove comparison-only Engram bookkeeping and document stream joins"
+   }
+  },
+  "r-prefill-p16k|LiveLab #7": {
+   "1": {
+    "commit": "f2ec394075",
+    "run": "s9-fastrsi",
+    "subject": "docs: record DeepSelect speedup and follow-up experiments"
+   },
+   "2": {
+    "commit": "da03a11993",
+    "run": "s9-fastrsi",
+    "subject": "Retain shared KV staging and account for peak memory"
+   },
+   "3": {
+    "commit": "9068bb861c",
+    "run": "s9-fastrsi",
+    "subject": "Combine verified prefill memory and staging improvements"
+   },
+   "4": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "5": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "6": {
+    "commit": "8cb2cbed95",
+    "run": "s9-fastrsi",
+    "subject": "Keep host huge pages by reallocating failed NUMA stripes on healthy nodes"
+   },
+   "7": {
+    "commit": "fe6719f119",
+    "run": "s9-fastrsi",
+    "subject": "Test balanced cold host placement with early Engram projection"
+   }
+  },
+  "r-prefill-p16k|LiveLab #8": {
+   "1": {
+    "commit": "d672d8e525",
+    "run": "s10-fastrsi",
+    "subject": "Use configured DeepSelect on native prefill logits"
+   },
+   "2": {
+    "commit": "2b85a9091e",
+    "run": "s10-fastrsi",
+    "subject": "Compare CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "2b85a9091e",
+    "run": "s10-fastrsi",
+    "subject": "Compare CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "4": {
+    "commit": "84ec70fb61",
+    "run": "s10-fastrsi",
+    "subject": "Use DeepGEMM wrapper scale handling without duplicate argument"
+   },
+   "5": {
+    "commit": "1cd323148a",
+    "run": "s10-fastrsi",
+    "subject": "Reuse compressed KV gathers across attention consumers"
+   },
+   "6": {
+    "commit": "a512cc2705",
+    "run": "s10-fastrsi",
+    "subject": "Reuse combined sparse and sliding-window attention indices"
+   },
+   "7": {
+    "commit": "1f82d42470",
+    "run": "s10-fastrsi",
+    "subject": "Stack native BF16 indexer chunks with combined-index reuse"
+   },
+   "8": {
+    "commit": "a68e5b07c8",
+    "run": "s10-fastrsi",
+    "subject": "Stack exact-output prefill improvements with long-context MQA tail scheduling"
+   },
+   "9": {
+    "commit": "fffa113749",
+    "run": "s10-fastrsi",
+    "subject": "Combine asynchronous host Engram staging with tuned quantization tiles"
+   },
+   "10": {
+    "commit": "173ae72f1f",
+    "run": "s10-fastrsi",
+    "subject": "Screen eight-warps large background Engram lookups"
+   }
+  },
+  "r-prefill-p16k|LiveLab #9": {
+   "1": {
+    "commit": "ebd2fc881d",
+    "run": "s11-fastrsi",
+    "subject": "perf: dispatch dense prefill top-k to DeepSelect"
+   },
+   "2": {
+    "commit": "85cfc4462c",
+    "run": "s11-fastrsi",
+    "subject": "perf: test CUTLASS MXFP8 projections for large token batches"
+   },
+   "3": {
+    "commit": "184a11a898",
+    "run": "s11-fastrsi",
+    "subject": "perf: test native BF16 accounting for indexer chunk sizing"
+   },
+   "4": {
+    "commit": "6126e35dbf",
+    "run": "s11-fastrsi",
+    "subject": "perf: combine exact gather, staging, and scale-layout savings"
+   },
+   "5": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "6": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "7": {
+    "commit": "bf8feb8c3e",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack index combination normalization and residual copy wins"
+   },
+   "8": {
+    "commit": "18114e8fb0",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack exact scale layouts and bandwidth improvements"
+   },
+   "9": {
+    "commit": "8c633f1e16",
+    "run": "s11-fastrsi",
+    "subject": "docs: record active Engram overlap improvement"
+   }
+  },
+  "r-prefill-p32k|Codex #1": {
+   "1": {
+    "commit": "3c72eb6883",
+    "run": "n3-normal",
+    "subject": "Apply BF16 DeepSelect dispatch to prefill logits"
+   },
+   "2": {
+    "commit": "ccbffe476f",
+    "run": "n3-normal",
+    "subject": "Record the full cold baseline measurements"
+   },
+   "3": {
+    "commit": "c8bcf53352",
+    "run": "n3-normal",
+    "subject": "Combine staging tiling with substantial causal-context trimming"
+   },
+   "4": {
+    "commit": "036d490aaa",
+    "run": "n3-normal",
+    "subject": "Combine gated staging and chunking with measured Engram overlap"
+   },
+   "5": {
+    "commit": "16a637742e",
+    "run": "n3-normal",
+    "subject": "Combine wave-aligned prefill chunks with tiled indices and Engram overlap"
+   },
+   "6": {
+    "commit": "833bc34a45",
+    "run": "n3-normal",
+    "subject": "Record normalization gate pass and shortlist helper signature failure"
+   }
+  },
+  "r-prefill-p32k|Codex #2": {
+   "1": {
+    "commit": "ee103f9a26",
+    "run": "n4-normal",
+    "subject": "perf: use BF16 DeepSelect for compatible indexer prefill rows"
+   },
+   "2": {
+    "commit": "26813808c9",
+    "run": "n4-normal",
+    "subject": "Combine larger staging tiles, direct dense quantization and large causal chunks"
+   },
+   "3": {
+    "commit": "c4720b1485",
+    "run": "n4-normal",
+    "subject": "Overlap Engram host-table prefetch with large prefill computation"
+   },
+   "4": {
+    "commit": "9c41831224",
+    "run": "n4-normal",
+    "subject": "Combine multi-row normalization and attention index tiles"
+   },
+   "5": {
+    "commit": "1d6be6598f",
+    "run": "n4-normal",
+    "subject": "Restore BF16 chunking for shared dense and sparse indexer metadata"
+   },
+   "6": {
+    "commit": "81e0cac8a9",
+    "run": "n4-normal",
+    "subject": "Validate faster warp-local normalization across all five points"
+   },
+   "7": {
+    "commit": "694aace422",
+    "run": "n4-normal",
+    "subject": "Combine warp-local normalization with balanced MQA scheduling"
+   },
+   "8": {
+    "commit": "50c2e43846",
+    "run": "n4-normal",
+    "subject": "Avoid empty candidate-scoring CTAs for large batches"
+   }
+  },
+  "r-prefill-p32k|Codex #3": {
+   "1": {
+    "commit": "e03a5852ec",
+    "run": "n5-normal",
+    "subject": "perf: apply BF16 DeepSelect path to dense prefill indexer"
+   },
+   "2": {
+    "commit": "8d5ce4616e",
+    "run": "n5-normal",
+    "subject": "perf: use DeepGEMM for large MXFP8 projections without requantization"
+   },
+   "3": {
+    "commit": "849389e8bf",
+    "run": "n5-normal",
+    "subject": "refactor: simplify the validated SM100 native FP4 gather"
+   },
+   "4": {
+    "commit": "a58fbf5e53",
+    "run": "n5-normal",
+    "subject": "perf: consolidate faster prefill staging and QKV normalization"
+   },
+   "5": {
+    "commit": "090786aa27",
+    "run": "n5-normal",
+    "subject": "perf: consolidate direct MXFP8 quantization and parallel index preparation"
+   },
+   "6": {
+    "commit": "6c6f9a8216",
+    "run": "n5-normal",
+    "subject": "perf: size indexer score chunks using their causal key bounds"
+   },
+   "7": {
+    "commit": "a524d7b136",
+    "run": "n5-normal",
+    "subject": "perf: test bounded background chunks for host embedding prefetch"
+   },
+   "8": {
+    "commit": "f809933c3d",
+    "run": "n5-normal",
+    "subject": "perf: test wider bounded host-lookup prefetch chunks"
+   }
+  },
+  "r-prefill-p32k|Codex #4": {
+   "1": {
+    "commit": "81eca91778",
+    "run": "n6-normal",
+    "subject": "perf: use DeepSelect on native BF16 dense prefill logits"
+   },
+   "2": {
+    "commit": "5470b09a71",
+    "run": "n6-normal",
+    "subject": "perf: decode gathered FP4 pairs with native Blackwell conversion"
+   },
+   "3": {
+    "commit": "99c19df6c8",
+    "run": "n6-normal",
+    "subject": "perf: keep faster index assembly and restore candidate-score tiles"
+   },
+   "4": {
+    "commit": "889e18684b",
+    "run": "n6-normal",
+    "subject": "perf: amortize BF16 indexer launches on high-memory SM100 GPUs"
+   },
+   "5": {
+    "commit": "039a3335f1",
+    "run": "n6-normal",
+    "subject": "perf: retain cuBLASLt bulk MXFP8 projections for validation"
+   },
+   "6": {
+    "commit": "ea72da5bf1",
+    "run": "n6-normal",
+    "subject": "perf: validate exact kernel gains with bounded score workspace"
+   },
+   "7": {
+    "commit": "039a3335f1",
+    "run": "n6-normal",
+    "subject": "perf: retain cuBLASLt bulk MXFP8 projections for validation"
+   },
+   "8": {
+    "commit": "9cb835f5c4",
+    "run": "n6-normal",
+    "subject": "perf: validate four-row shared normalization scheduling"
+   },
+   "9": {
+    "commit": "9cb835f5c4",
+    "run": "n6-normal",
+    "subject": "perf: validate four-row shared normalization scheduling"
+   }
+  },
+  "r-prefill-p32k|Codex #5": {
+   "1": {
+    "commit": "d49c365425",
+    "run": "n7-normal",
+    "subject": "Use configured DeepSelect on dense prefill logits without FP32 upcast"
+   },
+   "2": {
+    "commit": "c4c13cf3ea",
+    "run": "n7-normal",
+    "subject": "Reduce BF16 candidate logits directly into FP32 block scores"
+   },
+   "3": {
+    "commit": "b66fc99821",
+    "run": "n7-normal",
+    "subject": "Combine BF16 indexer chunks with faster large MXFP8 projections"
+   },
+   "4": {
+    "commit": "caf7e19750",
+    "run": "n7-normal",
+    "subject": "Combine faster projections, BF16 candidate scores and tiled MoE staging"
+   },
+   "5": {
+    "commit": "0fe29f5b10",
+    "run": "n7-normal",
+    "subject": "Combine gated prefill gains with full-width residual broadcast"
+   },
+   "6": {
+    "commit": "c137efb4ec",
+    "run": "n7-normal",
+    "subject": "Combine overlapped Engram prefetch and compact Q KV normalization"
+   },
+   "7": {
+    "commit": "df55a25603",
+    "run": "n7-normal",
+    "subject": "Combine causal indexer chunk planning with prefill kernel improvements"
+   },
+   "8": {
+    "commit": "385958ed95",
+    "run": "n7-normal",
+    "subject": "Combine forward-local shared KV gathers with explicit replay invalidation"
+   },
+   "9": {
+    "commit": "bcbfdb9e7c",
+    "run": "n7-normal",
+    "subject": "Combine balanced indexer scheduling with validated prefill memory improvements"
+   },
+   "10": {
+    "commit": "0e19d4fa8d",
+    "run": "n7-normal",
+    "subject": "Combine four-warp Engram post WKV with measured prefill improvements"
+   },
+   "11": {
+    "commit": "26044f54e4",
+    "run": "n7-normal",
+    "subject": "Combine staggered Engram prefetch with short-tail MQA scheduling"
+   },
+   "12": {
+    "commit": "b03a9516b3",
+    "run": "n7-normal",
+    "subject": "Guard candidate grid dimensions and confirm combined prefill changes"
+   },
+   "13": {
+    "commit": "642eda1768",
+    "run": "n7-normal",
+    "subject": "Key shared prefill indices by exact gather inputs"
+   }
+  },
+  "r-prefill-p32k|Codex #6": {
+   "1": {
+    "commit": "465bf71b2f",
+    "run": "n8-normal",
+    "subject": "perf: eliminate FP32 logits copy before prefill DeepSelect"
+   },
+   "2": {
+    "commit": "9acd877eb9",
+    "run": "n8-normal",
+    "subject": "perf: retain unordered top-k after locality experiment regressed"
+   },
+   "3": {
+    "commit": "55253b15f7",
+    "run": "n8-normal",
+    "subject": "perf: finalize short-query paged prefill dispatch"
+   },
+   "4": {
+    "commit": "5c43a70141",
+    "run": "n8-normal",
+    "subject": "fix: gather shared index inputs before compact source attention"
+   },
+   "5": {
+    "commit": "117a4766d0",
+    "run": "n8-normal",
+    "subject": "perf: combine compact source projections with validated prefill fusions"
+   },
+   "6": {
+    "commit": "f3316872b2",
+    "run": "n8-normal",
+    "subject": "perf: finalize replay outputs before scatter in the combined prefill path"
+   },
+   "7": {
+    "commit": "177006d7c3",
+    "run": "n8-normal",
+    "subject": "Record register cap regression and causal budget trial"
+   },
+   "8": {
+    "commit": "5101bf236d",
+    "run": "n8-normal",
+    "subject": "Record neutral residual reuse and validate retained scheduling gains"
+   },
+   "9": {
+    "commit": "67b98457f8",
+    "run": "n8-normal",
+    "subject": "Size source-attention output storage to live replay queries"
+   },
+   "10": {
+    "commit": "902137e150",
+    "run": "n8-normal",
+    "subject": "Cap split-width normalization registers to improve large-batch occupancy"
+   },
+   "11": {
+    "commit": "8e8e8ae737",
+    "run": "n8-normal",
+    "subject": "Quantize prefill activations directly into packed MN-major scales"
+   },
+   "12": {
+    "commit": "8e8e8ae737",
+    "run": "n8-normal",
+    "subject": "Quantize prefill activations directly into packed MN-major scales"
+   }
+  },
+  "r-prefill-p32k|LiveLab #1": {
+   "1": {
+    "commit": "8e28a569aa",
+    "run": "s3-fastrsi",
+    "subject": "Record passing DeepSelect gate and CUTLASS timing gains"
+   },
+   "2": {
+    "commit": "0b64cc2f1e",
+    "run": "s3-fastrsi",
+    "subject": "Guard DeepGEMM MXFP8 dispatch and document initial timings"
+   },
+   "3": {
+    "commit": "83afe73627",
+    "run": "s3-fastrsi",
+    "subject": "Combine shared KV gathers with batch-size selected MXFP8 GEMMs"
+   },
+   "4": {
+    "commit": "b3a3a6df53",
+    "run": "s3-fastrsi",
+    "subject": "Balance prefill MQA work over KV spans"
+   },
+   "5": {
+    "commit": "49053eee6a",
+    "run": "s3-fastrsi",
+    "subject": "Own shared prefill gathers in bounded persistent workspace"
+   },
+   "6": {
+    "commit": "29364b4bea",
+    "run": "s3-fastrsi",
+    "subject": "Add gated four-warp prefill query normalization to the combination"
+   },
+   "7": {
+    "commit": "38541d6926",
+    "run": "s3-fastrsi",
+    "subject": "Apply the BF16 budget to shared indexer metadata explicitly"
+   },
+   "8": {
+    "commit": "6c44ca2c6d",
+    "run": "s3-fastrsi",
+    "subject": "Retain exact scale-layout fallback for preprocessed weight loaders"
+   },
+   "9": {
+    "commit": "cbe902b847",
+    "run": "s3-fastrsi",
+    "subject": "Overlap host embeddings with decoder compute when tables use large GPU pages"
+   }
+  },
+  "r-prefill-p32k|LiveLab #2": {
+   "1": {
+    "commit": "43c7d20e42",
+    "run": "s4-fastrsi",
+    "subject": "Tile NVFP4 KV gathers across rows and decode E2M1 with exact bit operations"
+   },
+   "2": {
+    "commit": "28f1c7af68",
+    "run": "s4-fastrsi",
+    "subject": "Record CUTLASS GEMM speedup with unchanged outputs"
+   },
+   "3": {
+    "commit": "81e392df6d",
+    "run": "s4-fastrsi",
+    "subject": "Reject sparse-index sorting after measured regression"
+   },
+   "4": {
+    "commit": "c07064e1f1",
+    "run": "s4-fastrsi",
+    "subject": "Keep eight-row gathers and harden dense MXFP8 dispatch"
+   },
+   "5": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "6": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "7": {
+    "commit": "0b43826aaf",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate prefill improvements with bounded workspace use"
+   },
+   "8": {
+    "commit": "790983232d",
+    "run": "s4-fastrsi",
+    "subject": "Combine BF16 indexer budgeting and attention index reuse"
+   },
+   "9": {
+    "commit": "1f84445e4e",
+    "run": "s4-fastrsi",
+    "subject": "Combine vectorized broadcast and bounded mHC buffer reuse"
+   },
+   "10": {
+    "commit": "46a00876bd",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate balanced MQA scheduling with gated prefill improvements"
+   },
+   "11": {
+    "commit": "a97bba9c7e",
+    "run": "s4-fastrsi",
+    "subject": "Combine bounded candidate selection with balanced medium MQA"
+   },
+   "12": {
+    "commit": "f765c6c37f",
+    "run": "s4-fastrsi",
+    "subject": "Validate tiled SWA gather without resident Engram scales"
+   },
+   "13": {
+    "commit": "1150a892b4",
+    "run": "s4-fastrsi",
+    "subject": "Combine batched native query scales and bounded projection tiles"
+   },
+   "14": {
+    "commit": "332c8aad2e",
+    "run": "s4-fastrsi",
+    "subject": "Combine native-scale normalization and exact tighter token pruning"
+   },
+   "15": {
+    "commit": "b4d21d7764",
+    "run": "s4-fastrsi",
+    "subject": "Validate selected candidate values at all five prefill sizes"
+   },
+   "16": {
+    "commit": "c973b6697a",
+    "run": "s4-fastrsi",
+    "subject": "Combine native output scales and reduced prefill launch overhead"
+   }
+  },
+  "r-prefill-p32k|LiveLab #3": {
+   "1": {
+    "commit": "aa8cdcba41",
+    "run": "s5-fastrsi",
+    "subject": "Consume native BF16 prefill logits with DeepSelect"
+   },
+   "2": {
+    "commit": "e2dff65dde",
+    "run": "s5-fastrsi",
+    "subject": "Combine prefill selector, GEMM, and cache scheduling improvements"
+   },
+   "3": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "4": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "5": {
+    "commit": "231f584b35",
+    "run": "s5-fastrsi",
+    "subject": "Review combined prefill optimizations and initialize scale padding"
+   }
+  },
+  "r-prefill-p32k|LiveLab #4": {
+   "1": {
+    "commit": "8084d96ba7",
+    "run": "s6-fastrsi",
+    "subject": "Retain measured prefill wins and drop inconclusive staging change"
+   },
+   "2": {
+    "commit": "b96715c9d0",
+    "run": "s6-fastrsi",
+    "subject": "Combine gated BF16 chunk planning and prefill kernel wins"
+   },
+   "3": {
+    "commit": "53d2b0e655",
+    "run": "s6-fastrsi",
+    "subject": "Stack gated Engram row caching with prefill kernel and planner wins"
+   },
+   "4": {
+    "commit": "ae3da125a2",
+    "run": "s6-fastrsi",
+    "subject": "Finalize exact zero-scale MXFP8 behavior and review cumulative helpers"
+   }
+  },
+  "r-prefill-p32k|LiveLab #5": {
+   "1": {
+    "commit": "b888e3d770",
+    "run": "s7-fastrsi",
+    "subject": "Drop unproven tiled gather and retain prefill top-k experiment"
+   },
+   "2": {
+    "commit": "862cc1ac10",
+    "run": "s7-fastrsi",
+    "subject": "Finalize guarded prefill kernel selection and combine measured wins"
+   },
+   "3": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   }
+  },
+  "r-prefill-p32k|LiveLab #6": {
+   "1": {
+    "commit": "b904f7af7f",
+    "run": "s8-fastrsi",
+    "subject": "Tile NVFP4 prefill cache gathers across independent token rows"
+   },
+   "2": {
+    "commit": "13cc67c7d2",
+    "run": "s8-fastrsi",
+    "subject": "Test DeepGEMM prefill GEMMs with lossless MXFP8 scale repacking"
+   },
+   "3": {
+    "commit": "11aef3216c",
+    "run": "s8-fastrsi",
+    "subject": "Stack verified exact FP4 decoding with optimized prefill indexer and GEMMs"
+   },
+   "4": {
+    "commit": "1297be65a4",
+    "run": "s8-fastrsi",
+    "subject": "Finalize prefill stack with 64-row MegaMoE staging"
+   },
+   "5": {
+    "commit": "2ae3059a3b",
+    "run": "s8-fastrsi",
+    "subject": "Reuse gathered compressed KV across consecutive prefill consumers"
+   },
+   "6": {
+    "commit": "cdb27a84f0",
+    "run": "s8-fastrsi",
+    "subject": "Test tiled Q KV normalization and MXFP8 quantization"
+   },
+   "7": {
+    "commit": "66315a0b39",
+    "run": "s8-fastrsi",
+    "subject": "Stack shared prefill KV and fused query and output memory paths"
+   },
+   "8": {
+    "commit": "837d4bf047",
+    "run": "s8-fastrsi",
+    "subject": "Test exact score pruning for candidate-source token top-k"
+   },
+   "9": {
+    "commit": "c414e03ed3",
+    "run": "s8-fastrsi",
+    "subject": "Test balanced KV-split scheduling for dense prefill MQA logits"
+   },
+   "10": {
+    "commit": "c566563a8c",
+    "run": "s8-fastrsi",
+    "subject": "Use resolved Engram configuration before model field initialization"
+   },
+   "11": {
+    "commit": "c566563a8c",
+    "run": "s8-fastrsi",
+    "subject": "Use resolved Engram configuration before model field initialization"
+   },
+   "12": {
+    "commit": "5912bc166f",
+    "run": "s8-fastrsi",
+    "subject": "Stagger large shared Engram lookups before their consumers"
+   },
+   "13": {
+    "commit": "1cf8903e13",
+    "run": "s8-fastrsi",
+    "subject": "Use bit-preserving packed route sort in the staging trial"
+   }
+  },
+  "r-prefill-p32k|LiveLab #7": {
+   "1": {
+    "commit": "f2ec394075",
+    "run": "s9-fastrsi",
+    "subject": "docs: record DeepSelect speedup and follow-up experiments"
+   },
+   "2": {
+    "commit": "9068bb861c",
+    "run": "s9-fastrsi",
+    "subject": "Combine verified prefill memory and staging improvements"
+   },
+   "3": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "4": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "5": {
+    "commit": "6a415ef046",
+    "run": "s9-fastrsi",
+    "subject": "Restore the indexer capture boundary around the pipeline prototype"
+   },
+   "6": {
+    "commit": "8cb2cbed95",
+    "run": "s9-fastrsi",
+    "subject": "Keep host huge pages by reallocating failed NUMA stripes on healthy nodes"
+   },
+   "7": {
+    "commit": "a42e77c52b",
+    "run": "s9-fastrsi",
+    "subject": "Test four warps for large Engram injection rows"
+   },
+   "8": {
+    "commit": "fe6719f119",
+    "run": "s9-fastrsi",
+    "subject": "Test balanced cold host placement with early Engram projection"
+   }
+  },
+  "r-prefill-p32k|LiveLab #8": {
+   "1": {
+    "commit": "d672d8e525",
+    "run": "s10-fastrsi",
+    "subject": "Use configured DeepSelect on native prefill logits"
+   },
+   "2": {
+    "commit": "2b85a9091e",
+    "run": "s10-fastrsi",
+    "subject": "Compare CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "cd510acc22",
+    "run": "s10-fastrsi",
+    "subject": "Keep measured prefill improvements with compatible fallback paths"
+   },
+   "4": {
+    "commit": "08b1724c75",
+    "run": "s10-fastrsi",
+    "subject": "Prepare derived MXFP8 scales at load and expose compile-safe GEMM op"
+   },
+   "5": {
+    "commit": "1f82d42470",
+    "run": "s10-fastrsi",
+    "subject": "Stack native BF16 indexer chunks with combined-index reuse"
+   },
+   "6": {
+    "commit": "04e2733ded",
+    "run": "s10-fastrsi",
+    "subject": "Bound prefill workspace ownership to a live forward context"
+   },
+   "7": {
+    "commit": "3fe41723fd",
+    "run": "s10-fastrsi",
+    "subject": "Stack residual broadcast and indexer casts with tuned Engram lookups"
+   },
+   "8": {
+    "commit": "a68e5b07c8",
+    "run": "s10-fastrsi",
+    "subject": "Stack exact-output prefill improvements with long-context MQA tail scheduling"
+   },
+   "9": {
+    "commit": "fffa113749",
+    "run": "s10-fastrsi",
+    "subject": "Combine asynchronous host Engram staging with tuned quantization tiles"
+   },
+   "10": {
+    "commit": "173ae72f1f",
+    "run": "s10-fastrsi",
+    "subject": "Screen eight-warps large background Engram lookups"
+   }
+  },
+  "r-prefill-p32k|LiveLab #9": {
+   "1": {
+    "commit": "ebd2fc881d",
+    "run": "s11-fastrsi",
+    "subject": "perf: dispatch dense prefill top-k to DeepSelect"
+   },
+   "2": {
+    "commit": "85cfc4462c",
+    "run": "s11-fastrsi",
+    "subject": "perf: test CUTLASS MXFP8 projections for large token batches"
+   },
+   "3": {
+    "commit": "0b79ce2a48",
+    "run": "s11-fastrsi",
+    "subject": "perf: test DeepGEMM MXFP8 projections with exact scale relayout"
+   },
+   "4": {
+    "commit": "184a11a898",
+    "run": "s11-fastrsi",
+    "subject": "perf: test native BF16 accounting for indexer chunk sizing"
+   },
+   "5": {
+    "commit": "6126e35dbf",
+    "run": "s11-fastrsi",
+    "subject": "perf: combine exact gather, staging, and scale-layout savings"
+   },
+   "6": {
+    "commit": "da34ef0626",
+    "run": "s11-fastrsi",
+    "subject": "perf: eliminate sorting from bounded source token selection"
+   },
+   "7": {
+    "commit": "ec6b64737e",
+    "run": "s11-fastrsi",
+    "subject": "perf: bound prefill logits allocations by causal chunk width"
+   },
+   "8": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "9": {
+    "commit": "73fcfc80d2",
+    "run": "s11-fastrsi",
+    "subject": "perf: apply causal chunk bounds with a sparse score-width floor"
+   },
+   "10": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "11": {
+    "commit": "e15be9395c",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack causal prefill chunking and direct-layout quantization"
+   },
+   "12": {
+    "commit": "bf8feb8c3e",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack index combination normalization and residual copy wins"
+   },
+   "13": {
+    "commit": "18114e8fb0",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack exact scale layouts and bandwidth improvements"
+   },
+   "14": {
+    "commit": "8c633f1e16",
+    "run": "s11-fastrsi",
+    "subject": "docs: record active Engram overlap improvement"
+   },
+   "15": {
+    "commit": "da829cb3a3",
+    "run": "s11-fastrsi",
+    "subject": "perf: finalize low-contention SM100 embedding prefetch"
+   }
+  },
+  "r-prefill-p64k|Codex #1": {
+   "1": {
+    "commit": "3c72eb6883",
+    "run": "n3-normal",
+    "subject": "Apply BF16 DeepSelect dispatch to prefill logits"
+   },
+   "2": {
+    "commit": "18a32384c7",
+    "run": "n3-normal",
+    "subject": "Evaluate native FP4 conversion and wider KV gather tiles"
+   },
+   "3": {
+    "commit": "ccbffe476f",
+    "run": "n3-normal",
+    "subject": "Record the full cold baseline measurements"
+   },
+   "4": {
+    "commit": "c8bcf53352",
+    "run": "n3-normal",
+    "subject": "Combine staging tiling with substantial causal-context trimming"
+   },
+   "5": {
+    "commit": "036d490aaa",
+    "run": "n3-normal",
+    "subject": "Combine gated staging and chunking with measured Engram overlap"
+   },
+   "6": {
+    "commit": "b7b891927f",
+    "run": "n3-normal",
+    "subject": "Screen block-maximum shortlisting for exact prefill token top-k"
+   },
+   "7": {
+    "commit": "16a637742e",
+    "run": "n3-normal",
+    "subject": "Combine wave-aligned prefill chunks with tiled indices and Engram overlap"
+   },
+   "8": {
+    "commit": "833bc34a45",
+    "run": "n3-normal",
+    "subject": "Record normalization gate pass and shortlist helper signature failure"
+   }
+  },
+  "r-prefill-p64k|Codex #2": {
+   "1": {
+    "commit": "ee103f9a26",
+    "run": "n4-normal",
+    "subject": "perf: use BF16 DeepSelect for compatible indexer prefill rows"
+   },
+   "2": {
+    "commit": "1d2093e4a8",
+    "run": "n4-normal",
+    "subject": "perf: test CUTLASS throughput path for large MXFP8 projections"
+   },
+   "3": {
+    "commit": "ad18f0069e",
+    "run": "n4-normal",
+    "subject": "perf: test DeepGEMM for large dense MXFP8 projections"
+   },
+   "4": {
+    "commit": "26813808c9",
+    "run": "n4-normal",
+    "subject": "Combine larger staging tiles, direct dense quantization and large causal chunks"
+   },
+   "5": {
+    "commit": "c4720b1485",
+    "run": "n4-normal",
+    "subject": "Overlap Engram host-table prefetch with large prefill computation"
+   },
+   "6": {
+    "commit": "9c41831224",
+    "run": "n4-normal",
+    "subject": "Combine multi-row normalization and attention index tiles"
+   },
+   "7": {
+    "commit": "915e0296dc",
+    "run": "n4-normal",
+    "subject": "Record passing compact selection gate and test in-place compaction"
+   },
+   "8": {
+    "commit": "1d6be6598f",
+    "run": "n4-normal",
+    "subject": "Restore BF16 chunking for shared dense and sparse indexer metadata"
+   },
+   "9": {
+    "commit": "0b74ed49ce",
+    "run": "n4-normal",
+    "subject": "Use existing balanced scheduling metadata for large MQA logits"
+   },
+   "10": {
+    "commit": "694aace422",
+    "run": "n4-normal",
+    "subject": "Combine warp-local normalization with balanced MQA scheduling"
+   },
+   "11": {
+    "commit": "50c2e43846",
+    "run": "n4-normal",
+    "subject": "Avoid empty candidate-scoring CTAs for large batches"
+   }
+  },
+  "r-prefill-p64k|Codex #3": {
+   "1": {
+    "commit": "e03a5852ec",
+    "run": "n5-normal",
+    "subject": "perf: apply BF16 DeepSelect path to dense prefill indexer"
+   },
+   "2": {
+    "commit": "8d5ce4616e",
+    "run": "n5-normal",
+    "subject": "perf: use DeepGEMM for large MXFP8 projections without requantization"
+   },
+   "3": {
+    "commit": "849389e8bf",
+    "run": "n5-normal",
+    "subject": "refactor: simplify the validated SM100 native FP4 gather"
+   },
+   "4": {
+    "commit": "fa146372bf",
+    "run": "n5-normal",
+    "subject": "perf: increase token tile for large MegaMoE input staging"
+   },
+   "5": {
+    "commit": "2a85b81e70",
+    "run": "n5-normal",
+    "subject": "perf: tile prefill Q and KV normalization together"
+   },
+   "6": {
+    "commit": "1cd256f947",
+    "run": "n5-normal",
+    "subject": "perf: test lossless FP4 weight expansion for large expert batches"
+   }
+  },
+  "r-prefill-p64k|Codex #4": {
+   "1": {
+    "commit": "81eca91778",
+    "run": "n6-normal",
+    "subject": "perf: use DeepSelect on native BF16 dense prefill logits"
+   },
+   "2": {
+    "commit": "3d67d620b4",
+    "run": "n6-normal",
+    "subject": "fix: retain bounded sparse chunks to preserve graph memory headroom"
+   },
+   "3": {
+    "commit": "5470b09a71",
+    "run": "n6-normal",
+    "subject": "perf: decode gathered FP4 pairs with native Blackwell conversion"
+   },
+   "4": {
+    "commit": "64d79fe6e5",
+    "run": "n6-normal",
+    "subject": "perf: budget BF16 indexer logits at their actual element size"
+   },
+   "5": {
+    "commit": "4c54d20817",
+    "run": "n6-normal",
+    "subject": "perf: test background Engram lookup for bulk inputs"
+   },
+   "6": {
+    "commit": "32c38b5ec6",
+    "run": "n6-normal",
+    "subject": "perf: test larger row tiles for bulk MegaMoE input staging"
+   },
+   "7": {
+    "commit": "351fb61f7f",
+    "run": "n6-normal",
+    "subject": "perf: balance dense MQA logits work across SMs"
+   },
+   "8": {
+    "commit": "d74608d7ad",
+    "run": "n6-normal",
+    "subject": "perf: isolate bit-exact residual broadcast improvement"
+   },
+   "9": {
+    "commit": "039a3335f1",
+    "run": "n6-normal",
+    "subject": "perf: retain cuBLASLt bulk MXFP8 projections for validation"
+   },
+   "10": {
+    "commit": "4af6b173d4",
+    "run": "n6-normal",
+    "subject": "perf: validate independent Q and KV normalization widths"
+   }
+  },
+  "r-prefill-p64k|Codex #5": {
+   "1": {
+    "commit": "d49c365425",
+    "run": "n7-normal",
+    "subject": "Use configured DeepSelect on dense prefill logits without FP32 upcast"
+   },
+   "2": {
+    "commit": "c4c13cf3ea",
+    "run": "n7-normal",
+    "subject": "Reduce BF16 candidate logits directly into FP32 block scores"
+   },
+   "3": {
+    "commit": "e2f0382ce3",
+    "run": "n7-normal",
+    "subject": "Finalize measured prefill improvements and remove inactive chunk tuning"
+   },
+   "4": {
+    "commit": "8ed12ea9d9",
+    "run": "n7-normal",
+    "subject": "Budget shared indexer prefill chunks using BF16 logits"
+   },
+   "5": {
+    "commit": "b66fc99821",
+    "run": "n7-normal",
+    "subject": "Combine BF16 indexer chunks with faster large MXFP8 projections"
+   },
+   "6": {
+    "commit": "caf7e19750",
+    "run": "n7-normal",
+    "subject": "Combine faster projections, BF16 candidate scores and tiled MoE staging"
+   },
+   "7": {
+    "commit": "0fe29f5b10",
+    "run": "n7-normal",
+    "subject": "Combine gated prefill gains with full-width residual broadcast"
+   },
+   "8": {
+    "commit": "c137efb4ec",
+    "run": "n7-normal",
+    "subject": "Combine overlapped Engram prefetch and compact Q KV normalization"
+   },
+   "9": {
+    "commit": "df55a25603",
+    "run": "n7-normal",
+    "subject": "Combine causal indexer chunk planning with prefill kernel improvements"
+   },
+   "10": {
+    "commit": "385958ed95",
+    "run": "n7-normal",
+    "subject": "Combine forward-local shared KV gathers with explicit replay invalidation"
+   },
+   "11": {
+    "commit": "1f0a5dfce9",
+    "run": "n7-normal",
+    "subject": "Combine tiled index construction with forward-local KV gather reuse"
+   },
+   "12": {
+    "commit": "bcbfdb9e7c",
+    "run": "n7-normal",
+    "subject": "Combine balanced indexer scheduling with validated prefill memory improvements"
+   },
+   "13": {
+    "commit": "7eed290903",
+    "run": "n7-normal",
+    "subject": "Combine direct packed-scale activation production with prefill optimizations"
+   },
+   "14": {
+    "commit": "0e19d4fa8d",
+    "run": "n7-normal",
+    "subject": "Combine four-warp Engram post WKV with measured prefill improvements"
+   },
+   "15": {
+    "commit": "26044f54e4",
+    "run": "n7-normal",
+    "subject": "Combine staggered Engram prefetch with short-tail MQA scheduling"
+   },
+   "16": {
+    "commit": "8dfd103f20",
+    "run": "n7-normal",
+    "subject": "Combine guarded index reuse with prefill candidate traversal"
+   },
+   "17": {
+    "commit": "b03a9516b3",
+    "run": "n7-normal",
+    "subject": "Guard candidate grid dimensions and confirm combined prefill changes"
+   },
+   "18": {
+    "commit": "642eda1768",
+    "run": "n7-normal",
+    "subject": "Key shared prefill indices by exact gather inputs"
+   }
+  },
+  "r-prefill-p64k|Codex #6": {
+   "1": {
+    "commit": "465bf71b2f",
+    "run": "n8-normal",
+    "subject": "perf: eliminate FP32 logits copy before prefill DeepSelect"
+   },
+   "2": {
+    "commit": "a84a80a092",
+    "run": "n8-normal",
+    "subject": "fix: make tiled gather record size a Triton compile-time constant"
+   },
+   "3": {
+    "commit": "9acd877eb9",
+    "run": "n8-normal",
+    "subject": "perf: retain unordered top-k after locality experiment regressed"
+   },
+   "4": {
+    "commit": "1ecb56ef26",
+    "run": "n8-normal",
+    "subject": "perf: run the last KV-source FFN on bounded replay rows"
+   },
+   "5": {
+    "commit": "5c43a70141",
+    "run": "n8-normal",
+    "subject": "fix: gather shared index inputs before compact source attention"
+   },
+   "6": {
+    "commit": "5aaff893ac",
+    "run": "n8-normal",
+    "subject": "fix: retain physical SM count required by native MegaMoE"
+   },
+   "7": {
+    "commit": "f096e85edb",
+    "run": "n8-normal",
+    "subject": "perf: gather live source queries before their wide projections"
+   },
+   "8": {
+    "commit": "8792a86822",
+    "run": "n8-normal",
+    "subject": "perf: tile the initial residual-stream broadcast"
+   },
+   "9": {
+    "commit": "83827864c2",
+    "run": "n8-normal",
+    "subject": "perf: finalize retained hidden rows before replay scatter"
+   },
+   "10": {
+    "commit": "ada73235fe",
+    "run": "n8-normal",
+    "subject": "Tile long MXFP8 SWA cache gathers across token rows"
+   },
+   "11": {
+    "commit": "fc2eda705d",
+    "run": "n8-normal",
+    "subject": "Budget dense indexer chunks using their causal context bound"
+   },
+   "12": {
+    "commit": "bfd845ac51",
+    "run": "n8-normal",
+    "subject": "Test four warps for large Engram gate residual fusion"
+   },
+   "13": {
+    "commit": "9138943d2c",
+    "run": "n8-normal",
+    "subject": "Use existing balanced scheduler for large dense MQA logits"
+   },
+   "14": {
+    "commit": "3e2912e48e",
+    "run": "n8-normal",
+    "subject": "Test unpadded 1280-wide query normalization decomposition"
+   }
+  },
+  "r-prefill-p64k|LiveLab #1": {
+   "1": {
+    "commit": "8be8b56c78",
+    "run": "s3-fastrsi",
+    "subject": "Avoid upcasting prefill logits accepted by DeepSelect"
+   },
+   "2": {
+    "commit": "8e28a569aa",
+    "run": "s3-fastrsi",
+    "subject": "Record passing DeepSelect gate and CUTLASS timing gains"
+   },
+   "3": {
+    "commit": "0b64cc2f1e",
+    "run": "s3-fastrsi",
+    "subject": "Guard DeepGEMM MXFP8 dispatch and document initial timings"
+   },
+   "4": {
+    "commit": "6390668eb4",
+    "run": "s3-fastrsi",
+    "subject": "Invalidate shared gathers when replay layer sequences restart"
+   },
+   "5": {
+    "commit": "83afe73627",
+    "run": "s3-fastrsi",
+    "subject": "Combine shared KV gathers with batch-size selected MXFP8 GEMMs"
+   },
+   "6": {
+    "commit": "b3a3a6df53",
+    "run": "s3-fastrsi",
+    "subject": "Balance prefill MQA work over KV spans"
+   },
+   "7": {
+    "commit": "29364b4bea",
+    "run": "s3-fastrsi",
+    "subject": "Add gated four-warp prefill query normalization to the combination"
+   },
+   "8": {
+    "commit": "d9576fdd1d",
+    "run": "s3-fastrsi",
+    "subject": "Select measured faster GEMM backend for medium prefill batches"
+   },
+   "9": {
+    "commit": "9fa4630a86",
+    "run": "s3-fastrsi",
+    "subject": "Prepack exact DeepGEMM weight-scale layout during loading"
+   },
+   "10": {
+    "commit": "38541d6926",
+    "run": "s3-fastrsi",
+    "subject": "Apply the BF16 budget to shared indexer metadata explicitly"
+   },
+   "11": {
+    "commit": "6c44ca2c6d",
+    "run": "s3-fastrsi",
+    "subject": "Retain exact scale-layout fallback for preprocessed weight loaders"
+   },
+   "12": {
+    "commit": "cbe902b847",
+    "run": "s3-fastrsi",
+    "subject": "Overlap host embeddings with decoder compute when tables use large GPU pages"
+   },
+   "13": {
+    "commit": "cbe902b847",
+    "run": "s3-fastrsi",
+    "subject": "Overlap host embeddings with decoder compute when tables use large GPU pages"
+   }
+  },
+  "r-prefill-p64k|LiveLab #2": {
+   "1": {
+    "commit": "28f1c7af68",
+    "run": "s4-fastrsi",
+    "subject": "Record CUTLASS GEMM speedup with unchanged outputs"
+   },
+   "2": {
+    "commit": "81e392df6d",
+    "run": "s4-fastrsi",
+    "subject": "Reject sparse-index sorting after measured regression"
+   },
+   "3": {
+    "commit": "c07064e1f1",
+    "run": "s4-fastrsi",
+    "subject": "Keep eight-row gathers and harden dense MXFP8 dispatch"
+   },
+   "4": {
+    "commit": "da95d7a424",
+    "run": "s4-fastrsi",
+    "subject": "Guard optional DeepGEMM dispatch and record correctness validation"
+   },
+   "5": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "6": {
+    "commit": "c13f89426d",
+    "run": "s4-fastrsi",
+    "subject": "Keep Engram collectives on the consuming stream"
+   },
+   "7": {
+    "commit": "0b43826aaf",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate prefill improvements with bounded workspace use"
+   },
+   "8": {
+    "commit": "790983232d",
+    "run": "s4-fastrsi",
+    "subject": "Combine BF16 indexer budgeting and attention index reuse"
+   },
+   "9": {
+    "commit": "1f84445e4e",
+    "run": "s4-fastrsi",
+    "subject": "Combine vectorized broadcast and bounded mHC buffer reuse"
+   },
+   "10": {
+    "commit": "46a00876bd",
+    "run": "s4-fastrsi",
+    "subject": "Consolidate balanced MQA scheduling with gated prefill improvements"
+   },
+   "11": {
+    "commit": "23344668a1",
+    "run": "s4-fastrsi",
+    "subject": "Combine batched prefill normalization with balanced MQA"
+   },
+   "12": {
+    "commit": "a97bba9c7e",
+    "run": "s4-fastrsi",
+    "subject": "Combine bounded candidate selection with balanced medium MQA"
+   },
+   "13": {
+    "commit": "332c8aad2e",
+    "run": "s4-fastrsi",
+    "subject": "Combine native-scale normalization and exact tighter token pruning"
+   },
+   "14": {
+    "commit": "c973b6697a",
+    "run": "s4-fastrsi",
+    "subject": "Combine native output scales and reduced prefill launch overhead"
+   },
+   "15": {
+    "commit": "35100ea020",
+    "run": "s4-fastrsi",
+    "subject": "Combine measured prefill scheduling and metadata savings"
+   },
+   "16": {
+    "commit": "d05a4677dd",
+    "run": "s4-fastrsi",
+    "subject": "Remove rejected MQA prototype from the gated implementation"
+   },
+   "17": {
+    "commit": "890561b5aa",
+    "run": "s4-fastrsi",
+    "subject": "Release consumed query tiles before the next projection"
+   }
+  },
+  "r-prefill-p64k|LiveLab #3": {
+   "1": {
+    "commit": "aa8cdcba41",
+    "run": "s5-fastrsi",
+    "subject": "Consume native BF16 prefill logits with DeepSelect"
+   },
+   "2": {
+    "commit": "e2dff65dde",
+    "run": "s5-fastrsi",
+    "subject": "Combine prefill selector, GEMM, and cache scheduling improvements"
+   },
+   "3": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "4": {
+    "commit": "94cb034690",
+    "run": "s5-fastrsi",
+    "subject": "Finalize combined prefill optimizations and document measurements"
+   },
+   "5": {
+    "commit": "231f584b35",
+    "run": "s5-fastrsi",
+    "subject": "Review combined prefill optimizations and initialize scale padding"
+   },
+   "6": {
+    "commit": "f5bd1b3cf2",
+    "run": "s5-fastrsi",
+    "subject": "Account for prefill reuse buffers in activation memory profiling"
+   }
+  },
+  "r-prefill-p64k|LiveLab #4": {
+   "1": {
+    "commit": "4d48d2cbcb",
+    "run": "s6-fastrsi",
+    "subject": "Reuse gathered compressed KV across sharing attention layers"
+   },
+   "2": {
+    "commit": "8084d96ba7",
+    "run": "s6-fastrsi",
+    "subject": "Retain measured prefill wins and drop inconclusive staging change"
+   },
+   "3": {
+    "commit": "b96715c9d0",
+    "run": "s6-fastrsi",
+    "subject": "Combine gated BF16 chunk planning and prefill kernel wins"
+   },
+   "4": {
+    "commit": "53d2b0e655",
+    "run": "s6-fastrsi",
+    "subject": "Stack gated Engram row caching with prefill kernel and planner wins"
+   },
+   "5": {
+    "commit": "e566c785e1",
+    "run": "s6-fastrsi",
+    "subject": "Combine validated Engram caching with gated throughput improvements"
+   },
+   "6": {
+    "commit": "ae3da125a2",
+    "run": "s6-fastrsi",
+    "subject": "Finalize exact zero-scale MXFP8 behavior and review cumulative helpers"
+   }
+  },
+  "r-prefill-p64k|LiveLab #5": {
+   "1": {
+    "commit": "b888e3d770",
+    "run": "s7-fastrsi",
+    "subject": "Drop unproven tiled gather and retain prefill top-k experiment"
+   },
+   "2": {
+    "commit": "c964a07527",
+    "run": "s7-fastrsi",
+    "subject": "Test CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "862cc1ac10",
+    "run": "s7-fastrsi",
+    "subject": "Finalize guarded prefill kernel selection and combine measured wins"
+   },
+   "4": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   },
+   "5": {
+    "commit": "826d44ee5e",
+    "run": "s7-fastrsi",
+    "subject": "Document final prefill kernel paths and exact layout validation"
+   }
+  },
+  "r-prefill-p64k|LiveLab #6": {
+   "1": {
+    "commit": "b904f7af7f",
+    "run": "s8-fastrsi",
+    "subject": "Tile NVFP4 prefill cache gathers across independent token rows"
+   },
+   "2": {
+    "commit": "11aef3216c",
+    "run": "s8-fastrsi",
+    "subject": "Stack verified exact FP4 decoding with optimized prefill indexer and GEMMs"
+   },
+   "3": {
+    "commit": "1297be65a4",
+    "run": "s8-fastrsi",
+    "subject": "Finalize prefill stack with 64-row MegaMoE staging"
+   },
+   "4": {
+    "commit": "66315a0b39",
+    "run": "s8-fastrsi",
+    "subject": "Stack shared prefill KV and fused query and output memory paths"
+   },
+   "5": {
+    "commit": "5912bc166f",
+    "run": "s8-fastrsi",
+    "subject": "Stagger large shared Engram lookups before their consumers"
+   }
+  },
+  "r-prefill-p64k|LiveLab #7": {
+   "1": {
+    "commit": "f2ec394075",
+    "run": "s9-fastrsi",
+    "subject": "docs: record DeepSelect speedup and follow-up experiments"
+   },
+   "2": {
+    "commit": "da03a11993",
+    "run": "s9-fastrsi",
+    "subject": "Retain shared KV staging and account for peak memory"
+   },
+   "3": {
+    "commit": "9068bb861c",
+    "run": "s9-fastrsi",
+    "subject": "Combine verified prefill memory and staging improvements"
+   },
+   "4": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "5": {
+    "commit": "3481530b72",
+    "run": "s9-fastrsi",
+    "subject": "Combine shared attention indices with verified prefill improvements"
+   },
+   "6": {
+    "commit": "31f76ee429",
+    "run": "s9-fastrsi",
+    "subject": "Account for sparse consumer width in causal chunk planning"
+   },
+   "7": {
+    "commit": "6a415ef046",
+    "run": "s9-fastrsi",
+    "subject": "Restore the indexer capture boundary around the pipeline prototype"
+   },
+   "8": {
+    "commit": "8cb2cbed95",
+    "run": "s9-fastrsi",
+    "subject": "Keep host huge pages by reallocating failed NUMA stripes on healthy nodes"
+   },
+   "9": {
+    "commit": "a9d56dbc9b",
+    "run": "s9-fastrsi",
+    "subject": "Combine native MQA scheduling and scale layouts with striped huge-page tables"
+   },
+   "10": {
+    "commit": "5fa16a1f54",
+    "run": "s9-fastrsi",
+    "subject": "Write dense SM100 indexer weights directly in consumer BF16 dtype"
+   },
+   "11": {
+    "commit": "e1a498b2bd",
+    "run": "s9-fastrsi",
+    "subject": "Record confirmed 32K huge-page lookup overlap win"
+   },
+   "12": {
+    "commit": "40cd1c202b",
+    "run": "s9-fastrsi",
+    "subject": "Write overlapped Engram projections directly into persistent output"
+   },
+   "13": {
+    "commit": "93cd417b10",
+    "run": "s9-fastrsi",
+    "subject": "Release stale checkpoint cache before shared Engram host allocation"
+   },
+   "14": {
+    "commit": "fe6719f119",
+    "run": "s9-fastrsi",
+    "subject": "Test balanced cold host placement with early Engram projection"
+   }
+  },
+  "r-prefill-p64k|LiveLab #8": {
+   "1": {
+    "commit": "d672d8e525",
+    "run": "s10-fastrsi",
+    "subject": "Use configured DeepSelect on native prefill logits"
+   },
+   "2": {
+    "commit": "2b85a9091e",
+    "run": "s10-fastrsi",
+    "subject": "Compare CUTLASS MXFP8 GEMM for large token batches"
+   },
+   "3": {
+    "commit": "cd510acc22",
+    "run": "s10-fastrsi",
+    "subject": "Keep measured prefill improvements with compatible fallback paths"
+   },
+   "4": {
+    "commit": "08b1724c75",
+    "run": "s10-fastrsi",
+    "subject": "Prepare derived MXFP8 scales at load and expose compile-safe GEMM op"
+   },
+   "5": {
+    "commit": "1295989aa5",
+    "run": "s10-fastrsi",
+    "subject": "Use the long grid dimension for NVFP4 row tiles"
+   },
+   "6": {
+    "commit": "1cd323148a",
+    "run": "s10-fastrsi",
+    "subject": "Reuse compressed KV gathers across attention consumers"
+   },
+   "7": {
+    "commit": "a512cc2705",
+    "run": "s10-fastrsi",
+    "subject": "Reuse combined sparse and sliding-window attention indices"
+   },
+   "8": {
+    "commit": "1f82d42470",
+    "run": "s10-fastrsi",
+    "subject": "Stack native BF16 indexer chunks with combined-index reuse"
+   },
+   "9": {
+    "commit": "3fe41723fd",
+    "run": "s10-fastrsi",
+    "subject": "Stack residual broadcast and indexer casts with tuned Engram lookups"
+   },
+   "10": {
+    "commit": "a68e5b07c8",
+    "run": "s10-fastrsi",
+    "subject": "Stack exact-output prefill improvements with long-context MQA tail scheduling"
+   },
+   "11": {
+    "commit": "fffa113749",
+    "run": "s10-fastrsi",
+    "subject": "Combine asynchronous host Engram staging with tuned quantization tiles"
+   },
+   "12": {
+    "commit": "173ae72f1f",
+    "run": "s10-fastrsi",
+    "subject": "Screen eight-warps large background Engram lookups"
+   }
+  },
+  "r-prefill-p64k|LiveLab #9": {
+   "1": {
+    "commit": "ebd2fc881d",
+    "run": "s11-fastrsi",
+    "subject": "perf: dispatch dense prefill top-k to DeepSelect"
+   },
+   "2": {
+    "commit": "85cfc4462c",
+    "run": "s11-fastrsi",
+    "subject": "perf: test CUTLASS MXFP8 projections for large token batches"
+   },
+   "3": {
+    "commit": "184a11a898",
+    "run": "s11-fastrsi",
+    "subject": "perf: test native BF16 accounting for indexer chunk sizing"
+   },
+   "4": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "5": {
+    "commit": "73fcfc80d2",
+    "run": "s11-fastrsi",
+    "subject": "perf: apply causal chunk bounds with a sparse score-width floor"
+   },
+   "6": {
+    "commit": "0ef2df598d",
+    "run": "s11-fastrsi",
+    "subject": "perf: budget shared source and sparse indexer logits as BF16"
+   },
+   "7": {
+    "commit": "2c7a1c8de2",
+    "run": "s11-fastrsi",
+    "subject": "perf: screen explicit residual reuse at large prefill mHC boundaries"
+   },
+   "8": {
+    "commit": "e15be9395c",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack causal prefill chunking and direct-layout quantization"
+   },
+   "9": {
+    "commit": "bf8feb8c3e",
+    "run": "s11-fastrsi",
+    "subject": "perf: stack index combination normalization and residual copy wins"
+   },
+   "10": {
+    "commit": "8c633f1e16",
+    "run": "s11-fastrsi",
+    "subject": "docs: record active Engram overlap improvement"
+   }
+  },
+  "r-decode-d1x32k|Codex race 1": {
+   "1": {
+    "commit": "d90eb7f269",
+    "run": "d1-normal"
+   },
+   "2": {
+    "commit": "f98f6392c5",
+    "run": "d1-normal"
+   },
+   "3": {
+    "commit": "b9a6c0bf77",
+    "run": "d1-normal"
+   },
+   "4": {
+    "commit": "2699bac8d9",
+    "run": "d1-normal"
+   },
+   "5": {
+    "commit": "ba72d7beac",
+    "run": "d1-normal"
+   },
+   "6": {
+    "commit": "2621e500ea",
+    "run": "d1-normal"
+   },
+   "7": {
+    "commit": "3446970648",
+    "run": "d1-normal"
+   },
+   "8": {
+    "commit": "f810ca0877",
+    "run": "d1-normal"
+   },
+   "9": {
+    "commit": "b16f00b939",
+    "run": "d1-normal"
+   },
+   "10": {
+    "commit": "c4550a6235",
+    "run": "d1-normal"
+   },
+   "11": {
+    "commit": "297f83d78d",
+    "run": "d1-normal"
+   }
+  },
+  "r-decode-d1x32k|Codex race 2": {
+   "1": {
+    "commit": "763139a8c4",
+    "run": "d2-normal",
+    "subject": "perf: combine exact mHC memory optimizations and decode position reuse"
+   },
+   "2": {
+    "commit": "b6bdf9e361",
+    "run": "d2-normal",
+    "subject": "perf: finalize captured decode metadata reuse with exact mHC optimizations"
+   },
+   "3": {
+    "commit": "b9ad74aa53",
+    "run": "d2-normal",
+    "subject": "perf: combine exact shifted mHC fusion and Mega-mHC FP8 output reuse"
+   },
+   "4": {
+    "commit": "e3c8ca1759",
+    "run": "d2-normal",
+    "subject": "perf: combine tiled mHC normalization with fused input quantization"
+   },
+   "5": {
+    "commit": "d340342fbb",
+    "run": "d2-normal",
+    "subject": "perf: combine smaller post tiles and decode launch grids"
+   },
+   "6": {
+    "commit": "cf18ddaec0",
+    "run": "d2-normal",
+    "subject": "fix: retain decoder parallel settings for direct MoE staging"
+   },
+   "7": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   },
+   "8": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   },
+   "9": {
+    "commit": "2754e687e3",
+    "run": "d2-normal",
+    "subject": "perf: validate narrower post-collapse tiles in a cold repeat"
+   }
+  },
+  "r-decode-d1x32k|LiveLab race 1": {
+   "1": {
+    "commit": "ed4025e008",
+    "run": "d1-fastrsi"
+   },
+   "2": {
+    "commit": "ff6d93e9e7",
+    "run": "d1-fastrsi"
+   },
+   "3": {
+    "commit": "3b39153705",
+    "run": "d1-fastrsi"
+   },
+   "4": {
+    "commit": "dedda06594",
+    "run": "d1-fastrsi"
+   },
+   "5": {
+    "commit": "0e421fdbaa",
+    "run": "d1-fastrsi"
+   },
+   "6": {
+    "commit": "c9c0d4fc7d",
+    "run": "d1-fastrsi"
+   },
+   "7": {
+    "commit": "cd1e0b92fe",
+    "run": "d1-fastrsi"
+   },
+   "8": {
+    "commit": "78703dbc5c",
+    "run": "d1-fastrsi"
+   }
+  },
+  "r-decode-d1x32k|LiveLab race 2": {
+   "1": {
+    "commit": "758f79bf65",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate small-batch wins and remove discarded mHC experiments"
+   },
+   "2": {
+    "commit": "9cc6bb0c84",
+    "run": "d2-fastrsi",
+    "subject": "Group split-mHC warmup compilation by stage name"
+   },
+   "3": {
+    "commit": "3c99fcb446",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate four-stage mHC and fused router weight selection"
+   },
+   "4": {
+    "commit": "753fb5153b",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate exact batched top-k remaps and remove rejected probes"
+   },
+   "5": {
+    "commit": "820a120de9",
+    "run": "d2-fastrsi",
+    "subject": "Integrate verified decode gains with startup warmup and remove probes"
+   },
+   "6": {
+    "commit": "90431b79e5",
+    "run": "d2-fastrsi",
+    "subject": "Keep verified native KV overlap and remove experimental kernels"
+   },
+   "7": {
+    "commit": "374d96e105",
+    "run": "d2-fastrsi",
+    "subject": "Integrate exact parallel KV normalization and cache publication"
+   },
+   "8": {
+    "commit": "e94a30a8fc",
+    "run": "d2-fastrsi",
+    "subject": "Restore exact eight-warps query normalization"
+   }
+  },
+  "r-decode-d8x32k|Codex race 1": {
+   "1": {
+    "commit": "d90eb7f269",
+    "run": "d1-normal"
+   },
+   "2": {
+    "commit": "f98f6392c5",
+    "run": "d1-normal"
+   },
+   "3": {
+    "commit": "b9a6c0bf77",
+    "run": "d1-normal"
+   },
+   "4": {
+    "commit": "2699bac8d9",
+    "run": "d1-normal"
+   },
+   "5": {
+    "commit": "ba72d7beac",
+    "run": "d1-normal"
+   },
+   "6": {
+    "commit": "2621e500ea",
+    "run": "d1-normal"
+   },
+   "7": {
+    "commit": "3446970648",
+    "run": "d1-normal"
+   },
+   "8": {
+    "commit": "59a7b4787b",
+    "run": "d1-normal"
+   },
+   "9": {
+    "commit": "f810ca0877",
+    "run": "d1-normal"
+   },
+   "10": {
+    "commit": "b16f00b939",
+    "run": "d1-normal"
+   },
+   "11": {
+    "commit": "c4550a6235",
+    "run": "d1-normal"
+   },
+   "12": {
+    "commit": "052eaa2c0f",
+    "run": "d1-normal"
+   },
+   "13": {
+    "commit": "785ad440f5",
+    "run": "d1-normal"
+   }
+  },
+  "r-decode-d8x32k|Codex race 2": {
+   "1": {
+    "commit": "763139a8c4",
+    "run": "d2-normal",
+    "subject": "perf: combine exact mHC memory optimizations and decode position reuse"
+   },
+   "2": {
+    "commit": "b6bdf9e361",
+    "run": "d2-normal",
+    "subject": "perf: finalize captured decode metadata reuse with exact mHC optimizations"
+   },
+   "3": {
+    "commit": "b9ad74aa53",
+    "run": "d2-normal",
+    "subject": "perf: combine exact shifted mHC fusion and Mega-mHC FP8 output reuse"
+   },
+   "4": {
+    "commit": "e3c8ca1759",
+    "run": "d2-normal",
+    "subject": "perf: combine tiled mHC normalization with fused input quantization"
+   },
+   "5": {
+    "commit": "b8971a0b7f",
+    "run": "d2-normal",
+    "subject": "refactor: document fused mHC numerical and layout contracts"
+   },
+   "6": {
+    "commit": "d340342fbb",
+    "run": "d2-normal",
+    "subject": "perf: combine smaller post tiles and decode launch grids"
+   },
+   "7": {
+    "commit": "26cdccf1d9",
+    "run": "d2-normal",
+    "subject": "perf: combine unrolled mHC normalization and guarded Engram prefetch"
+   },
+   "8": {
+    "commit": "cf18ddaec0",
+    "run": "d2-normal",
+    "subject": "fix: retain decoder parallel settings for direct MoE staging"
+   },
+   "9": {
+    "commit": "6b5cff7efe",
+    "run": "d2-normal",
+    "subject": "perf: retain prefetched mHC statistics with capture-safe grid guard"
+   },
+   "10": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   }
+  },
+  "r-decode-d8x32k|LiveLab race 1": {
+   "1": {
+    "commit": "ed4025e008",
+    "run": "d1-fastrsi"
+   },
+   "2": {
+    "commit": "ff6d93e9e7",
+    "run": "d1-fastrsi"
+   },
+   "3": {
+    "commit": "3b39153705",
+    "run": "d1-fastrsi"
+   },
+   "4": {
+    "commit": "dedda06594",
+    "run": "d1-fastrsi"
+   },
+   "5": {
+    "commit": "0e421fdbaa",
+    "run": "d1-fastrsi"
+   },
+   "6": {
+    "commit": "c9c0d4fc7d",
+    "run": "d1-fastrsi"
+   },
+   "7": {
+    "commit": "00b70dc069",
+    "run": "d1-fastrsi"
+   },
+   "8": {
+    "commit": "0bec2606f4",
+    "run": "d1-fastrsi"
+   },
+   "9": {
+    "commit": "cd1e0b92fe",
+    "run": "d1-fastrsi"
+   },
+   "10": {
+    "commit": "0e722aa319",
+    "run": "d1-fastrsi"
+   },
+   "11": {
+    "commit": "78703dbc5c",
+    "run": "d1-fastrsi"
+   }
+  },
+  "r-decode-d8x32k|LiveLab race 2": {
+   "1": {
+    "commit": "758f79bf65",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate small-batch wins and remove discarded mHC experiments"
+   },
+   "2": {
+    "commit": "9cc6bb0c84",
+    "run": "d2-fastrsi",
+    "subject": "Group split-mHC warmup compilation by stage name"
+   },
+   "3": {
+    "commit": "3c99fcb446",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate four-stage mHC and fused router weight selection"
+   },
+   "4": {
+    "commit": "753fb5153b",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate exact batched top-k remaps and remove rejected probes"
+   },
+   "5": {
+    "commit": "3acb88a034",
+    "run": "d2-fastrsi",
+    "subject": "Integrate verified decode scheduling and routing improvements"
+   },
+   "6": {
+    "commit": "90431b79e5",
+    "run": "d2-fastrsi",
+    "subject": "Keep verified native KV overlap and remove experimental kernels"
+   },
+   "7": {
+    "commit": "374d96e105",
+    "run": "d2-fastrsi",
+    "subject": "Integrate exact parallel KV normalization and cache publication"
+   },
+   "8": {
+    "commit": "db185f8bc6",
+    "run": "d2-fastrsi",
+    "subject": "Select measured KV preparation policy and faster single-row routing"
+   }
+  },
+  "r-decode-d32x32k|Codex race 1": {
+   "1": {
+    "commit": "d90eb7f269",
+    "run": "d1-normal"
+   },
+   "2": {
+    "commit": "f98f6392c5",
+    "run": "d1-normal"
+   },
+   "3": {
+    "commit": "b9a6c0bf77",
+    "run": "d1-normal"
+   },
+   "4": {
+    "commit": "2699bac8d9",
+    "run": "d1-normal"
+   },
+   "5": {
+    "commit": "ba72d7beac",
+    "run": "d1-normal"
+   },
+   "6": {
+    "commit": "2621e500ea",
+    "run": "d1-normal"
+   },
+   "7": {
+    "commit": "3446970648",
+    "run": "d1-normal"
+   },
+   "8": {
+    "commit": "59a7b4787b",
+    "run": "d1-normal"
+   },
+   "9": {
+    "commit": "c4550a6235",
+    "run": "d1-normal"
+   }
+  },
+  "r-decode-d32x32k|Codex race 2": {
+   "1": {
+    "commit": "763139a8c4",
+    "run": "d2-normal",
+    "subject": "perf: combine exact mHC memory optimizations and decode position reuse"
+   },
+   "2": {
+    "commit": "b6bdf9e361",
+    "run": "d2-normal",
+    "subject": "perf: finalize captured decode metadata reuse with exact mHC optimizations"
+   },
+   "3": {
+    "commit": "b9ad74aa53",
+    "run": "d2-normal",
+    "subject": "perf: combine exact shifted mHC fusion and Mega-mHC FP8 output reuse"
+   },
+   "4": {
+    "commit": "e3c8ca1759",
+    "run": "d2-normal",
+    "subject": "perf: combine tiled mHC normalization with fused input quantization"
+   },
+   "5": {
+    "commit": "b8971a0b7f",
+    "run": "d2-normal",
+    "subject": "refactor: document fused mHC numerical and layout contracts"
+   },
+   "6": {
+    "commit": "97d2e4aaf5",
+    "run": "d2-normal",
+    "subject": "perf: combine bounded mHC grids with decode input improvements"
+   },
+   "7": {
+    "commit": "cf18ddaec0",
+    "run": "d2-normal",
+    "subject": "fix: retain decoder parallel settings for direct MoE staging"
+   },
+   "8": {
+    "commit": "6b5cff7efe",
+    "run": "d2-normal",
+    "subject": "perf: retain prefetched mHC statistics with capture-safe grid guard"
+   },
+   "9": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   }
+  },
+  "r-decode-d32x32k|LiveLab race 1": {
+   "1": {
+    "commit": "ed4025e008",
+    "run": "d1-fastrsi"
+   },
+   "2": {
+    "commit": "3b39153705",
+    "run": "d1-fastrsi"
+   },
+   "3": {
+    "commit": "0e421fdbaa",
+    "run": "d1-fastrsi"
+   },
+   "4": {
+    "commit": "afbe2882d3",
+    "run": "d1-fastrsi"
+   },
+   "5": {
+    "commit": "c9c0d4fc7d",
+    "run": "d1-fastrsi"
+   },
+   "6": {
+    "commit": "00b70dc069",
+    "run": "d1-fastrsi"
+   },
+   "7": {
+    "commit": "cd1e0b92fe",
+    "run": "d1-fastrsi"
+   },
+   "8": {
+    "commit": "0e722aa319",
+    "run": "d1-fastrsi"
+   }
+  },
+  "r-decode-d32x32k|LiveLab race 2": {
+   "1": {
+    "commit": "758f79bf65",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate small-batch wins and remove discarded mHC experiments"
+   },
+   "2": {
+    "commit": "9cc6bb0c84",
+    "run": "d2-fastrsi",
+    "subject": "Group split-mHC warmup compilation by stage name"
+   },
+   "3": {
+    "commit": "753fb5153b",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate exact batched top-k remaps and remove rejected probes"
+   },
+   "4": {
+    "commit": "820a120de9",
+    "run": "d2-fastrsi",
+    "subject": "Integrate verified decode gains with startup warmup and remove probes"
+   },
+   "5": {
+    "commit": "90431b79e5",
+    "run": "d2-fastrsi",
+    "subject": "Keep verified native KV overlap and remove experimental kernels"
+   }
+  },
+  "r-decode-d16x128k|Codex race 1": {
+   "1": {
+    "commit": "d90eb7f269",
+    "run": "d1-normal"
+   },
+   "2": {
+    "commit": "f98f6392c5",
+    "run": "d1-normal"
+   },
+   "3": {
+    "commit": "b9a6c0bf77",
+    "run": "d1-normal"
+   },
+   "4": {
+    "commit": "2699bac8d9",
+    "run": "d1-normal"
+   },
+   "5": {
+    "commit": "ba72d7beac",
+    "run": "d1-normal"
+   },
+   "6": {
+    "commit": "2621e500ea",
+    "run": "d1-normal"
+   },
+   "7": {
+    "commit": "3446970648",
+    "run": "d1-normal"
+   },
+   "8": {
+    "commit": "59a7b4787b",
+    "run": "d1-normal"
+   },
+   "9": {
+    "commit": "f810ca0877",
+    "run": "d1-normal"
+   },
+   "10": {
+    "commit": "b16f00b939",
+    "run": "d1-normal"
+   },
+   "11": {
+    "commit": "c4550a6235",
+    "run": "d1-normal"
+   },
+   "12": {
+    "commit": "052eaa2c0f",
+    "run": "d1-normal"
+   },
+   "13": {
+    "commit": "785ad440f5",
+    "run": "d1-normal"
+   }
+  },
+  "r-decode-d16x128k|Codex race 2": {
+   "1": {
+    "commit": "763139a8c4",
+    "run": "d2-normal",
+    "subject": "perf: combine exact mHC memory optimizations and decode position reuse"
+   },
+   "2": {
+    "commit": "b6bdf9e361",
+    "run": "d2-normal",
+    "subject": "perf: finalize captured decode metadata reuse with exact mHC optimizations"
+   },
+   "3": {
+    "commit": "b9ad74aa53",
+    "run": "d2-normal",
+    "subject": "perf: combine exact shifted mHC fusion and Mega-mHC FP8 output reuse"
+   },
+   "4": {
+    "commit": "e3c8ca1759",
+    "run": "d2-normal",
+    "subject": "perf: combine tiled mHC normalization with fused input quantization"
+   },
+   "5": {
+    "commit": "b8971a0b7f",
+    "run": "d2-normal",
+    "subject": "refactor: document fused mHC numerical and layout contracts"
+   },
+   "6": {
+    "commit": "d340342fbb",
+    "run": "d2-normal",
+    "subject": "perf: combine smaller post tiles and decode launch grids"
+   },
+   "7": {
+    "commit": "26cdccf1d9",
+    "run": "d2-normal",
+    "subject": "perf: combine unrolled mHC normalization and guarded Engram prefetch"
+   },
+   "8": {
+    "commit": "cf18ddaec0",
+    "run": "d2-normal",
+    "subject": "fix: retain decoder parallel settings for direct MoE staging"
+   },
+   "9": {
+    "commit": "6b5cff7efe",
+    "run": "d2-normal",
+    "subject": "perf: retain prefetched mHC statistics with capture-safe grid guard"
+   },
+   "10": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   },
+   "11": {
+    "commit": "67bdd4c48d",
+    "run": "d2-normal",
+    "subject": "perf: finalize validated decode fusion and statistics scheduling"
+   }
+  },
+  "r-decode-d16x128k|LiveLab race 1": {
+   "1": {
+    "commit": "ed4025e008",
+    "run": "d1-fastrsi"
+   },
+   "2": {
+    "commit": "ff6d93e9e7",
+    "run": "d1-fastrsi"
+   },
+   "3": {
+    "commit": "3b39153705",
+    "run": "d1-fastrsi"
+   },
+   "4": {
+    "commit": "dedda06594",
+    "run": "d1-fastrsi"
+   },
+   "5": {
+    "commit": "0e421fdbaa",
+    "run": "d1-fastrsi"
+   },
+   "6": {
+    "commit": "c9c0d4fc7d",
+    "run": "d1-fastrsi"
+   },
+   "7": {
+    "commit": "00b70dc069",
+    "run": "d1-fastrsi"
+   },
+   "8": {
+    "commit": "cd1e0b92fe",
+    "run": "d1-fastrsi"
+   },
+   "9": {
+    "commit": "0e722aa319",
+    "run": "d1-fastrsi"
+   }
+  },
+  "r-decode-d16x128k|LiveLab race 2": {
+   "1": {
+    "commit": "758f79bf65",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate small-batch wins and remove discarded mHC experiments"
+   },
+   "2": {
+    "commit": "9cc6bb0c84",
+    "run": "d2-fastrsi",
+    "subject": "Group split-mHC warmup compilation by stage name"
+   },
+   "3": {
+    "commit": "753fb5153b",
+    "run": "d2-fastrsi",
+    "subject": "Consolidate exact batched top-k remaps and remove rejected probes"
+   },
+   "4": {
+    "commit": "3acb88a034",
+    "run": "d2-fastrsi",
+    "subject": "Integrate verified decode scheduling and routing improvements"
+   },
+   "5": {
+    "commit": "90431b79e5",
+    "run": "d2-fastrsi",
+    "subject": "Keep verified native KV overlap and remove experimental kernels"
+   },
+   "6": {
+    "commit": "374d96e105",
+    "run": "d2-fastrsi",
+    "subject": "Integrate exact parallel KV normalization and cache publication"
+   }
+  },
+  "r-megatron|Codex #1": {
+   "1": {
+    "commit": "005ba6a69b",
+    "run": "5a-normal"
+   },
+   "2": {
+    "commit": "354bf3cb20",
+    "run": "5a-normal"
+   },
+   "3": {
+    "commit": "a90d222ac9",
+    "run": "5a-normal"
+   },
+   "4": {
+    "commit": "8fcd448cfa",
+    "run": "5a-normal"
+   },
+   "5": {
+    "commit": "a489f4baac",
+    "run": "5a-normal"
+   },
+   "6": {
+    "commit": "0dfafb0a12",
+    "run": "5a-normal"
+   },
+   "7": {
+    "commit": "18ff31a16e",
+    "run": "5a-normal"
+   },
+   "8": {
+    "commit": "5b6ba44069",
+    "run": "5a-normal"
+   },
+   "9": {
+    "commit": "d224ef4f18",
+    "run": "5a-normal"
+   }
+  },
+  "r-megatron|Codex #2": {
+   "1": {
+    "commit": "0b1eef079a",
+    "run": "5b-normal"
+   },
+   "2": {
+    "commit": "3fc0a3dac0",
+    "run": "5b-normal"
+   },
+   "3": {
+    "commit": "3de4a31b4d",
+    "run": "5b-normal"
+   },
+   "4": {
+    "commit": "d0bf4ff35b",
+    "run": "5b-normal"
+   },
+   "5": {
+    "commit": "eb0a49a8eb",
+    "run": "5b-normal"
+   },
+   "6": {
+    "commit": "65702d431b",
+    "run": "5b-normal"
+   },
+   "7": {
+    "commit": "0e0f83457f",
+    "run": "5b-normal"
+   }
+  },
+  "r-megatron|Codex #3": {
+   "1": {
+    "commit": "a54c0ac076",
+    "run": "5c-normal"
+   },
+   "2": {
+    "commit": "e7ad661302",
+    "run": "5c-normal"
+   },
+   "3": {
+    "commit": "6ef3047111",
+    "run": "5c-normal"
+   },
+   "4": {
+    "commit": "4cf4f25f61",
+    "run": "5c-normal"
+   },
+   "5": {
+    "commit": "260c817a2b",
+    "run": "5c-normal"
+   },
+   "6": {
+    "commit": "c12534bba4",
+    "run": "5c-normal"
+   },
+   "7": {
+    "commit": "5e38cf8b5e",
+    "run": "5c-normal"
+   },
+   "8": {
+    "commit": "972664334d",
+    "run": "5c-normal"
+   },
+   "9": {
+    "commit": "563ef22285",
+    "run": "5c-normal"
+   },
+   "10": {
+    "commit": "ac2d9f49f3",
+    "run": "5c-normal"
+   }
+  },
+  "r-megatron|LiveLab #1": {
+   "1": {
+    "commit": "9cba017030",
+    "run": "5a-fastrsi"
+   },
+   "2": {
+    "commit": "261c8664af",
+    "run": "5a-fastrsi"
+   },
+   "3": {
+    "commit": "20f37dadb0",
+    "run": "5a-fastrsi"
+   },
+   "4": {
+    "commit": "2a26425d2a",
+    "run": "5a-fastrsi"
+   },
+   "5": {
+    "commit": "15ca110d96",
+    "run": "5a-fastrsi"
+   },
+   "6": {
+    "commit": "63592351b9",
+    "run": "5a-fastrsi"
+   },
+   "7": {
+    "commit": "bdbca28bce",
+    "run": "5a-fastrsi"
+   },
+   "8": {
+    "commit": "8bab9c98cd",
+    "run": "5a-fastrsi"
+   },
+   "9": {
+    "commit": "97140f9561",
+    "run": "5a-fastrsi"
+   },
+   "10": {
+    "commit": "ba9f52be8d",
+    "run": "5a-fastrsi"
+   }
+  },
+  "r-megatron|LiveLab #2": {
+   "1": {
+    "commit": "cefc9bc883",
+    "run": "5b-fastrsi"
+   },
+   "2": {
+    "commit": "5469cec305",
+    "run": "5b-fastrsi"
+   },
+   "3": {
+    "commit": "3e9b62f615",
+    "run": "5b-fastrsi"
+   },
+   "4": {
+    "commit": "444d4e8fea",
+    "run": "5b-fastrsi"
+   }
+  },
+  "r-megatron|LiveLab #3": {
+   "1": {
+    "commit": "31888a130f",
+    "run": "5c-fastrsi"
+   },
+   "2": {
+    "commit": "a3adb338e3",
+    "run": "5c-fastrsi"
+   },
+   "3": {
+    "commit": "9cbd4a843e",
+    "run": "5c-fastrsi"
+   }
+  },
+  "r-gqa-kernel|Codex race 1": {
+   "1": {
+    "commit": "1d51fa0954",
+    "run": "kda10",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "199922b6ec",
+    "run": "kda10",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "b870a3b68b",
+    "run": "kda10",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "1067f23d39",
+    "run": "kda10",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "26fce4d83b",
+    "run": "kda10",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "a9d70686c7",
+    "run": "kda10",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "79ef403d6a",
+    "run": "kda10",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "fcf95421ac",
+    "run": "kda10",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "1a48a2331e",
+    "run": "kda10",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "c161f4c2fa",
+    "run": "kda10",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "0da8be10b9",
+    "run": "kda10",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "b623229156",
+    "run": "kda10",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "f6e8d1c355",
+    "run": "kda10",
+    "check": "n17"
+   },
+   "14": {
+    "commit": "9a4ae382c6",
+    "run": "kda10",
+    "check": "n18"
+   },
+   "15": {
+    "commit": "576bd448a8",
+    "run": "kda10",
+    "check": "n19"
+   },
+   "16": {
+    "commit": "9334f500a1",
+    "run": "kda10",
+    "check": "n20"
+   }
+  },
+  "r-gqa-kernel|Codex race 2": {
+   "1": {
+    "commit": "a8457c4f99",
+    "run": "kda12",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "e93f8e58bc",
+    "run": "kda12",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "6e1240fa1b",
+    "run": "kda12",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "f8f138dc7f",
+    "run": "kda12",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "38ad34056c",
+    "run": "kda12",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "9adb5a3bd4",
+    "run": "kda12",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "3eaff4a3b6",
+    "run": "kda12",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "bb5b744268",
+    "run": "kda12",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "22d27c963b",
+    "run": "kda12",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "055b3e4e1a",
+    "run": "kda12",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "feaaa3e09d",
+    "run": "kda12",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "6d0b5a6a0e",
+    "run": "kda12",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "c4bcc02c90",
+    "run": "kda12",
+    "check": "n15"
+   }
+  },
+  "r-gqa-kernel|Codex race 3": {
+   "1": {
+    "commit": "7da200808e",
+    "run": "kda13",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "5d2ccc9969",
+    "run": "kda13",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "40ac1d630f",
+    "run": "kda13",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "e5fa00c989",
+    "run": "kda13",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "b7327b7550",
+    "run": "kda13",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "9f3779830c",
+    "run": "kda13",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "2e1fe06bc2",
+    "run": "kda13",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "6325ad9802",
+    "run": "kda13",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "662da6a8da",
+    "run": "kda13",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "381c39f86c",
+    "run": "kda13",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "4de22a9424",
+    "run": "kda13",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "17a997556c",
+    "run": "kda13",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "ab10f51d8a",
+    "run": "kda13",
+    "check": "n14"
+   }
+  },
+  "r-gqa-kernel|Codex race 4": {
+   "1": {
+    "commit": "04682c6e0c",
+    "run": "kda16",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "374846ae67",
+    "run": "kda16",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "c71f22196f",
+    "run": "kda16",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "189025fb79",
+    "run": "kda16",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "40dec3c3ff",
+    "run": "kda16",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "b16351dbe6",
+    "run": "kda16",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "7a543a6d65",
+    "run": "kda16",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "3f33d13109",
+    "run": "kda16",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "7f392a89ed",
+    "run": "kda16",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "32d0330474",
+    "run": "kda16",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "bb95141fc9",
+    "run": "kda16",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "17e5a1e4e6",
+    "run": "kda16",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "7838df7636",
+    "run": "kda16",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "f07230cf9e",
+    "run": "kda16",
+    "check": "n15"
+   }
+  },
+  "r-gqa-kernel|Codex race 5": {
+   "1": {
+    "commit": "0d4978c794",
+    "run": "kda19",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "1d12448efc",
+    "run": "kda19",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "9831b8a979",
+    "run": "kda19",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "d86f1e6174",
+    "run": "kda19",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "327f4dd74f",
+    "run": "kda19",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "c7d783c2c0",
+    "run": "kda19",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "eb8d505178",
+    "run": "kda19",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "6535f27ed9",
+    "run": "kda19",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "2ae220ab1e",
+    "run": "kda19",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "1ccd254050",
+    "run": "kda19",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "9807b04d32",
+    "run": "kda19",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "097ac1b63e",
+    "run": "kda19",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "e429be3f1a",
+    "run": "kda19",
+    "check": "n14"
+   }
+  },
+  "r-gqa-kernel|Codex race 6": {
+   "1": {
+    "commit": "14237f1987",
+    "run": "kda27",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "332d2056a6",
+    "run": "kda27",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "2e28b83465",
+    "run": "kda27",
+    "check": "n5"
+   },
+   "4": {
+    "commit": "b3a6edb415",
+    "run": "kda27",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "2a2c7f3a35",
+    "run": "kda27",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "5326f849d3",
+    "run": "kda27",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "830d679fb9",
+    "run": "kda27",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "25e908584a",
+    "run": "kda27",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "ff3a2f721c",
+    "run": "kda27",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "bb319f8304",
+    "run": "kda27",
+    "check": "n13"
+   },
+   "11": {
+    "commit": "7a076ad4b6",
+    "run": "kda27",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "e4c2afe0a6",
+    "run": "kda27",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "503beec5ea",
+    "run": "kda27",
+    "check": "n16"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 1": {
+   "1": {
+    "commit": "0198b9208f",
+    "run": "kda10",
+    "check": "n3"
+   },
+   "2": {
+    "commit": "baaa587841",
+    "run": "kda10",
+    "check": "n4"
+   },
+   "3": {
+    "commit": "bb351ee334",
+    "run": "kda10",
+    "check": "n5"
+   },
+   "4": {
+    "commit": "fe9869b2c1",
+    "run": "kda10",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "13855ca611",
+    "run": "kda10",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "feecc18a56",
+    "run": "kda10",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "00a06a2f32",
+    "run": "kda10",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "61ea954234",
+    "run": "kda10",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "8600494643",
+    "run": "kda10",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "dd69c087ad",
+    "run": "kda10",
+    "check": "n13"
+   },
+   "11": {
+    "commit": "f7ff89e8c2",
+    "run": "kda10",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "2dc98a1b12",
+    "run": "kda10",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "5bb46f40e2",
+    "run": "kda10",
+    "check": "n16"
+   },
+   "14": {
+    "commit": "98d42ab506",
+    "run": "kda10",
+    "check": "n17"
+   },
+   "15": {
+    "commit": "793cd23e65",
+    "run": "kda10",
+    "check": "n18"
+   },
+   "16": {
+    "commit": "a572dd1a22",
+    "run": "kda10",
+    "check": "n19"
+   },
+   "17": {
+    "commit": "4b03bb9c63",
+    "run": "kda10",
+    "check": "n21"
+   },
+   "18": {
+    "commit": "843bfb4ea9",
+    "run": "kda10",
+    "check": "n22"
+   },
+   "19": {
+    "commit": "7a1db600aa",
+    "run": "kda10",
+    "check": "n23"
+   },
+   "20": {
+    "commit": "21a1c4cd02",
+    "run": "kda10",
+    "check": "n25"
+   },
+   "21": {
+    "commit": "e3c8086fdb",
+    "run": "kda10",
+    "check": "n26"
+   },
+   "22": {
+    "commit": "ca1dd5b21f",
+    "run": "kda10",
+    "check": "n27"
+   },
+   "23": {
+    "commit": "110fb63032",
+    "run": "kda10",
+    "check": "n28"
+   },
+   "24": {
+    "commit": "fd23b40013",
+    "run": "kda10",
+    "check": "n29"
+   },
+   "25": {
+    "commit": "75474a4f55",
+    "run": "kda10",
+    "check": "n31"
+   },
+   "26": {
+    "commit": "af9a533d51",
+    "run": "kda10",
+    "check": "n32"
+   },
+   "27": {
+    "commit": "4111bb255f",
+    "run": "kda10",
+    "check": "n33"
+   },
+   "28": {
+    "commit": "0b1e6da5c9",
+    "run": "kda10",
+    "check": "n34"
+   },
+   "29": {
+    "commit": "c7c9f07f95",
+    "run": "kda10",
+    "check": "n35"
+   },
+   "30": {
+    "commit": "498eaa0724",
+    "run": "kda10",
+    "check": "n36"
+   },
+   "31": {
+    "commit": "c734677031",
+    "run": "kda10",
+    "check": "n37"
+   },
+   "32": {
+    "commit": "f6866cd262",
+    "run": "kda10",
+    "check": "n38"
+   },
+   "33": {
+    "commit": "da1a8c4f7c",
+    "run": "kda10",
+    "check": "n40"
+   },
+   "34": {
+    "commit": "b0f26506d1",
+    "run": "kda10",
+    "check": "n41"
+   },
+   "35": {
+    "commit": "47188a1dd1",
+    "run": "kda10",
+    "check": "n42"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 2": {
+   "1": {
+    "commit": "cb4b2c96e4",
+    "run": "kda12",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "8073b37f65",
+    "run": "kda12",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "b68becc776",
+    "run": "kda12",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "fa0e048a85",
+    "run": "kda12",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "34655654e3",
+    "run": "kda12",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "d04d66b6b6",
+    "run": "kda12",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "481487b2e0",
+    "run": "kda12",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "3c63334081",
+    "run": "kda12",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "f99dedd471",
+    "run": "kda12",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "70fd7b7ecf",
+    "run": "kda12",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "b5da16c23c",
+    "run": "kda12",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "8cb24e72f5",
+    "run": "kda12",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "7e206dc09b",
+    "run": "kda12",
+    "check": "n16"
+   },
+   "14": {
+    "commit": "38c47a916c",
+    "run": "kda12",
+    "check": "n17"
+   },
+   "15": {
+    "commit": "e2a4c40ebe",
+    "run": "kda12",
+    "check": "n18"
+   },
+   "16": {
+    "commit": "9f3ee30871",
+    "run": "kda12",
+    "check": "n20"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 3": {
+   "1": {
+    "commit": "a0e6b2512a",
+    "run": "kda13",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "1fcd2163f4",
+    "run": "kda13",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "8fc7d996c0",
+    "run": "kda13",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "d7a9c1386c",
+    "run": "kda13",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "9cd14e2327",
+    "run": "kda13",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "369b987d4e",
+    "run": "kda13",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "7e59166b8a",
+    "run": "kda13",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "8032a3513a",
+    "run": "kda13",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "ebe420817e",
+    "run": "kda13",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "5dcd6ec324",
+    "run": "kda13",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "f2d55ce8fc",
+    "run": "kda13",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "a8c31c2fd0",
+    "run": "kda13",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "3ab384413a",
+    "run": "kda13",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "94928bbb4e",
+    "run": "kda13",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "92fcf6a671",
+    "run": "kda13",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "c3e80041b6",
+    "run": "kda13",
+    "check": "n17"
+   },
+   "17": {
+    "commit": "59517ec15c",
+    "run": "kda13",
+    "check": "n18"
+   },
+   "18": {
+    "commit": "d629360fac",
+    "run": "kda13",
+    "check": "n19"
+   },
+   "19": {
+    "commit": "8ec2b9f616",
+    "run": "kda13",
+    "check": "n20"
+   },
+   "20": {
+    "commit": "0ca4c52f35",
+    "run": "kda13",
+    "check": "n21"
+   },
+   "21": {
+    "commit": "3df1fa4704",
+    "run": "kda13",
+    "check": "n23"
+   },
+   "22": {
+    "commit": "86af15f47e",
+    "run": "kda13",
+    "check": "n24"
+   },
+   "23": {
+    "commit": "31d6cce67e",
+    "run": "kda13",
+    "check": "n25"
+   },
+   "24": {
+    "commit": "4bd791d792",
+    "run": "kda13",
+    "check": "n26"
+   },
+   "25": {
+    "commit": "23e4e4bde8",
+    "run": "kda13",
+    "check": "n27"
+   },
+   "26": {
+    "commit": "bbfba0a94e",
+    "run": "kda13",
+    "check": "n28"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 4": {
+   "1": {
+    "commit": "52f2c3067a",
+    "run": "kda16",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "ecca1e6c87",
+    "run": "kda16",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "73c8a0818e",
+    "run": "kda16",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "032341f497",
+    "run": "kda16",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "1b30a751c2",
+    "run": "kda16",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "9e30f942c4",
+    "run": "kda16",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "55fe7c46fe",
+    "run": "kda16",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "3d4f7f22ed",
+    "run": "kda16",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "037a3d60b2",
+    "run": "kda16",
+    "check": "n12"
+   },
+   "10": {
+    "commit": "d06aeb3b17",
+    "run": "kda16",
+    "check": "n13"
+   },
+   "11": {
+    "commit": "ac04ea3cbd",
+    "run": "kda16",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "e0f394d0b8",
+    "run": "kda16",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "6be6480c93",
+    "run": "kda16",
+    "check": "n16"
+   },
+   "14": {
+    "commit": "c9b6c42675",
+    "run": "kda16",
+    "check": "n18"
+   },
+   "15": {
+    "commit": "6c9d4d9ecc",
+    "run": "kda16",
+    "check": "n19"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 5": {
+   "1": {
+    "commit": "aeb2926242",
+    "run": "kda19",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "e17b8a7a74",
+    "run": "kda19",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "92d8d55116",
+    "run": "kda19",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "efa9bf36e2",
+    "run": "kda19",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "9d2d8475c5",
+    "run": "kda19",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "2e64938272",
+    "run": "kda19",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "5a4a0397a9",
+    "run": "kda19",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "5ababa8804",
+    "run": "kda19",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "2134cd1a62",
+    "run": "kda19",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "938cccab72",
+    "run": "kda19",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "8633cf53ef",
+    "run": "kda19",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "6fcf3821bd",
+    "run": "kda19",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "096d9bbbf4",
+    "run": "kda19",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "1c1413b7ef",
+    "run": "kda19",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "607f855fea",
+    "run": "kda19",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "07acc81c35",
+    "run": "kda19",
+    "check": "n17"
+   },
+   "17": {
+    "commit": "954406ba89",
+    "run": "kda19",
+    "check": "n18"
+   },
+   "18": {
+    "commit": "09bafaa593",
+    "run": "kda19",
+    "check": "n19"
+   },
+   "19": {
+    "commit": "fcba164a75",
+    "run": "kda19",
+    "check": "n20"
+   },
+   "20": {
+    "commit": "8dd8f9737d",
+    "run": "kda19",
+    "check": "n21"
+   }
+  },
+  "r-gqa-kernel|LiveLab race 6": {
+   "1": {
+    "commit": "852dc1f5b0",
+    "run": "kda27",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "ab734dbd4e",
+    "run": "kda27",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "c8a4bf4929",
+    "run": "kda27",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "a60e94d4ac",
+    "run": "kda27",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "d3d75ba2b1",
+    "run": "kda27",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "d10462a2a3",
+    "run": "kda27",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "e12aff2301",
+    "run": "kda27",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "c4e548c27a",
+    "run": "kda27",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "2e2adfb3ae",
+    "run": "kda27",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "169cce8bcd",
+    "run": "kda27",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "e99371da26",
+    "run": "kda27",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "af514f85ce",
+    "run": "kda27",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "386390eadb",
+    "run": "kda27",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "a5c92541b8",
+    "run": "kda27",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "f100ae4f33",
+    "run": "kda27",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "794c2be9d4",
+    "run": "kda27",
+    "check": "n17"
+   },
+   "17": {
+    "commit": "5b98cafb64",
+    "run": "kda27",
+    "check": "n18"
+   },
+   "18": {
+    "commit": "e8b6aa73d6",
+    "run": "kda27",
+    "check": "n19"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 1": {
+   "1": {
+    "commit": "27a133df95",
+    "run": "kda8",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "7f1f29a9b1",
+    "run": "kda8",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "82721a399b",
+    "run": "kda8",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "19063ab14b",
+    "run": "kda8",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "71693d1d2d",
+    "run": "kda8",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "b1d202fe7c",
+    "run": "kda8",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "753bc7ceb3",
+    "run": "kda8",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "89bbe74d01",
+    "run": "kda8",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "a371d76a6e",
+    "run": "kda8",
+    "check": "n11"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 2": {
+   "1": {
+    "commit": "9a9acacb57",
+    "run": "kda11",
+    "check": "n3"
+   },
+   "2": {
+    "commit": "419c64e990",
+    "run": "kda11",
+    "check": "n4"
+   },
+   "3": {
+    "commit": "6168c94e07",
+    "run": "kda11",
+    "check": "n5"
+   },
+   "4": {
+    "commit": "826b9aacee",
+    "run": "kda11",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "98a54c66b3",
+    "run": "kda11",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "7dda51f21d",
+    "run": "kda11",
+    "check": "n10"
+   },
+   "7": {
+    "commit": "f9f4e5cb41",
+    "run": "kda11",
+    "check": "n12"
+   },
+   "8": {
+    "commit": "fe20cd14e7",
+    "run": "kda11",
+    "check": "n13"
+   },
+   "9": {
+    "commit": "44a3a0f0b3",
+    "run": "kda11",
+    "check": "n14"
+   },
+   "10": {
+    "commit": "2197bed6d5",
+    "run": "kda11",
+    "check": "n15"
+   },
+   "11": {
+    "commit": "7058b07c47",
+    "run": "kda11",
+    "check": "n16"
+   },
+   "12": {
+    "commit": "550e36b6b4",
+    "run": "kda11",
+    "check": "n18"
+   },
+   "13": {
+    "commit": "e904adc99f",
+    "run": "kda11",
+    "check": "n19"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 3": {
+   "1": {
+    "commit": "bcdbfc46be",
+    "run": "kda15",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "5f72e83ef0",
+    "run": "kda15",
+    "check": "n4"
+   },
+   "3": {
+    "commit": "c6b5b40beb",
+    "run": "kda15",
+    "check": "n5"
+   },
+   "4": {
+    "commit": "ffb96ce828",
+    "run": "kda15",
+    "check": "n7"
+   },
+   "5": {
+    "commit": "04a7c0822d",
+    "run": "kda15",
+    "check": "n10"
+   },
+   "6": {
+    "commit": "af99587f75",
+    "run": "kda15",
+    "check": "n11"
+   },
+   "7": {
+    "commit": "d9efff3c37",
+    "run": "kda15",
+    "check": "n14"
+   },
+   "8": {
+    "commit": "3f2932fbb8",
+    "run": "kda15",
+    "check": "n15"
+   },
+   "9": {
+    "commit": "44f81754b5",
+    "run": "kda15",
+    "check": "n16"
+   },
+   "10": {
+    "commit": "74c801ba5c",
+    "run": "kda15",
+    "check": "n17"
+   },
+   "11": {
+    "commit": "16a7ce61a8",
+    "run": "kda15",
+    "check": "n19"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 4": {
+   "1": {
+    "commit": "77e7cfb7f8",
+    "run": "kda18",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "77e7cfb7f8",
+    "run": "kda18",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "908ffea17e",
+    "run": "kda18",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "16c2e817e7",
+    "run": "kda18",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "e903222a60",
+    "run": "kda18",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "9832e6b751",
+    "run": "kda18",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "5e3861bf1c",
+    "run": "kda18",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "bbc08891de",
+    "run": "kda18",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "7f3ea4ccf1",
+    "run": "kda18",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "02614d13ce",
+    "run": "kda18",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "23ed08409c",
+    "run": "kda18",
+    "check": "n12"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 5": {
+   "1": {
+    "commit": "c394d4b04c",
+    "run": "kda21",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "9488ac26a3",
+    "run": "kda21",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "4bbaa10d16",
+    "run": "kda21",
+    "check": "n14"
+   },
+   "4": {
+    "commit": "a9911d9234",
+    "run": "kda21",
+    "check": "n16"
+   },
+   "5": {
+    "commit": "5ba1c44458",
+    "run": "kda21",
+    "check": "n17"
+   },
+   "6": {
+    "commit": "b4e7171550",
+    "run": "kda21",
+    "check": "n18"
+   }
+  },
+  "r-moe-fwd-kernel|Codex race 6": {
+   "1": {
+    "commit": "2c5441a331",
+    "run": "kda23",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "c19746ce29",
+    "run": "kda23",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "21557bd9b0",
+    "run": "kda23",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "91dd01bf1f",
+    "run": "kda23",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "b8b4233b21",
+    "run": "kda23",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "0a3dc3ecfa",
+    "run": "kda23",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "8503f64b13",
+    "run": "kda23",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "74ca373051",
+    "run": "kda23",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "789a49fcca",
+    "run": "kda23",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "41a521df64",
+    "run": "kda23",
+    "check": "n13"
+   },
+   "11": {
+    "commit": "dfedb79c9a",
+    "run": "kda23",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "fc06eefe8d",
+    "run": "kda23",
+    "check": "n16"
+   },
+   "13": {
+    "commit": "6bce2d5001",
+    "run": "kda23",
+    "check": "n17"
+   },
+   "14": {
+    "commit": "0070c6df9c",
+    "run": "kda23",
+    "check": "n18"
+   },
+   "15": {
+    "commit": "d197f8aec5",
+    "run": "kda23",
+    "check": "n21"
+   },
+   "16": {
+    "commit": "04e5e7c2c0",
+    "run": "kda23",
+    "check": "n22"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 1": {
+   "1": {
+    "commit": "5499429d29",
+    "run": "kda8",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "5f95306543",
+    "run": "kda8",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "94a3c32129",
+    "run": "kda8",
+    "check": "n5"
+   },
+   "4": {
+    "commit": "06b0a48ece",
+    "run": "kda8",
+    "check": "n7"
+   },
+   "5": {
+    "commit": "322b971401",
+    "run": "kda8",
+    "check": "n8"
+   },
+   "6": {
+    "commit": "3c513945af",
+    "run": "kda8",
+    "check": "n9"
+   },
+   "7": {
+    "commit": "da2a8aebd4",
+    "run": "kda8",
+    "check": "n10"
+   },
+   "8": {
+    "commit": "7b5a227c33",
+    "run": "kda8",
+    "check": "n11"
+   },
+   "9": {
+    "commit": "fef8b9da37",
+    "run": "kda8",
+    "check": "n12"
+   },
+   "10": {
+    "commit": "8fe8c975b4",
+    "run": "kda8",
+    "check": "n13"
+   },
+   "11": {
+    "commit": "a8103e65e8",
+    "run": "kda8",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "5cc381c680",
+    "run": "kda8",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "c44492cbc3",
+    "run": "kda8",
+    "check": "n17"
+   },
+   "14": {
+    "commit": "2274e1b0b5",
+    "run": "kda8",
+    "check": "n19"
+   },
+   "15": {
+    "commit": "f3165d05d4",
+    "run": "kda8",
+    "check": "n20"
+   },
+   "16": {
+    "commit": "38ce5dee8f",
+    "run": "kda8",
+    "check": "n21"
+   },
+   "17": {
+    "commit": "da7ce19614",
+    "run": "kda8",
+    "check": "n22"
+   },
+   "18": {
+    "commit": "8801a96184",
+    "run": "kda8",
+    "check": "n23"
+   },
+   "19": {
+    "commit": "c173083267",
+    "run": "kda8",
+    "check": "n24"
+   },
+   "20": {
+    "commit": "ba93c8de5e",
+    "run": "kda8",
+    "check": "n25"
+   },
+   "21": {
+    "commit": "fb604a290b",
+    "run": "kda8",
+    "check": "n26"
+   },
+   "22": {
+    "commit": "ec3d23e3f3",
+    "run": "kda8",
+    "check": "n27"
+   },
+   "23": {
+    "commit": "5999d164d4",
+    "run": "kda8",
+    "check": "n28"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 2": {
+   "1": {
+    "commit": "5e417ee7e0",
+    "run": "kda11",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "efa4fdbcef",
+    "run": "kda11",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "9a42fd0f26",
+    "run": "kda11",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "415513d0cc",
+    "run": "kda11",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "5c04c3a0c8",
+    "run": "kda11",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "c1e8c927fa",
+    "run": "kda11",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "070ed41a75",
+    "run": "kda11",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "8947b3a7d3",
+    "run": "kda11",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "b4afaef97f",
+    "run": "kda11",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "160e460e97",
+    "run": "kda11",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "6ac48f4915",
+    "run": "kda11",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "d7a8a4de73",
+    "run": "kda11",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "ba4d0d20ad",
+    "run": "kda11",
+    "check": "n15"
+   },
+   "14": {
+    "commit": "3b3d1506c6",
+    "run": "kda11",
+    "check": "n16"
+   },
+   "15": {
+    "commit": "b6afdea8bd",
+    "run": "kda11",
+    "check": "n17"
+   },
+   "16": {
+    "commit": "9f9a2fe4a6",
+    "run": "kda11",
+    "check": "n18"
+   },
+   "17": {
+    "commit": "0469a46f54",
+    "run": "kda11",
+    "check": "n19"
+   },
+   "18": {
+    "commit": "2edff2efbe",
+    "run": "kda11",
+    "check": "n20"
+   },
+   "19": {
+    "commit": "4ef834fefb",
+    "run": "kda11",
+    "check": "n21"
+   },
+   "20": {
+    "commit": "bbe31e7067",
+    "run": "kda11",
+    "check": "n22"
+   },
+   "21": {
+    "commit": "ff2a010d9c",
+    "run": "kda11",
+    "check": "n23"
+   },
+   "22": {
+    "commit": "d776ce162a",
+    "run": "kda11",
+    "check": "n24"
+   },
+   "23": {
+    "commit": "30601cbb67",
+    "run": "kda11",
+    "check": "n25"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 3": {
+   "1": {
+    "commit": "7ddcc51533",
+    "run": "kda15",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "5ac4ddd367",
+    "run": "kda15",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "320c7baafa",
+    "run": "kda15",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "c2f20ace05",
+    "run": "kda15",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "597d43b671",
+    "run": "kda15",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "0d58266729",
+    "run": "kda15",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "8eb54d174d",
+    "run": "kda15",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "0b4871f4e5",
+    "run": "kda15",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "96bfcf0ebc",
+    "run": "kda15",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "94651bb6c7",
+    "run": "kda15",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "9072cc13ab",
+    "run": "kda15",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "68e1b480c3",
+    "run": "kda15",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "a708add618",
+    "run": "kda15",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "aa425fb594",
+    "run": "kda15",
+    "check": "n16"
+   },
+   "15": {
+    "commit": "b405bd3430",
+    "run": "kda15",
+    "check": "n17"
+   },
+   "16": {
+    "commit": "c0872b5e49",
+    "run": "kda15",
+    "check": "n18"
+   },
+   "17": {
+    "commit": "e686f05ade",
+    "run": "kda15",
+    "check": "n19"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 4": {
+   "1": {
+    "commit": "d78a3a855a",
+    "run": "kda18",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "c4f8267bed",
+    "run": "kda18",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "6db4b9dd88",
+    "run": "kda18",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "8d99bab3bb",
+    "run": "kda18",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "581c1e1473",
+    "run": "kda18",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "3a9cdfa1e0",
+    "run": "kda18",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "844731c14d",
+    "run": "kda18",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "30fcd3a40a",
+    "run": "kda18",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "73e7dcf43a",
+    "run": "kda18",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "e2127d2bdb",
+    "run": "kda18",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "78eb055c18",
+    "run": "kda18",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "365f36481a",
+    "run": "kda18",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "a87f7c75a8",
+    "run": "kda18",
+    "check": "n16"
+   },
+   "14": {
+    "commit": "f8f0aab9ad",
+    "run": "kda18",
+    "check": "n17"
+   },
+   "15": {
+    "commit": "4fbf2d4bcf",
+    "run": "kda18",
+    "check": "n18"
+   },
+   "16": {
+    "commit": "eb3ea8da8f",
+    "run": "kda18",
+    "check": "n20"
+   },
+   "17": {
+    "commit": "e8793badf6",
+    "run": "kda18",
+    "check": "n22"
+   },
+   "18": {
+    "commit": "43aefdd00d",
+    "run": "kda18",
+    "check": "n23"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 5": {
+   "1": {
+    "commit": "31380f17f5",
+    "run": "kda21",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "18024d5f11",
+    "run": "kda21",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "2363e4fb8a",
+    "run": "kda21",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "46898e3dfc",
+    "run": "kda21",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "7269920a00",
+    "run": "kda21",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "506898f141",
+    "run": "kda21",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "9922b4fc69",
+    "run": "kda21",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "6b0472602b",
+    "run": "kda21",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "d4365ecd52",
+    "run": "kda21",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "e1d836b41b",
+    "run": "kda21",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "dc776e44d6",
+    "run": "kda21",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "235cfd7543",
+    "run": "kda21",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "6cfa9ed522",
+    "run": "kda21",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "42c604a1f4",
+    "run": "kda21",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "e85e109fae",
+    "run": "kda21",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "4a52859e08",
+    "run": "kda21",
+    "check": "n17"
+   },
+   "17": {
+    "commit": "b6be241ede",
+    "run": "kda21",
+    "check": "n18"
+   }
+  },
+  "r-moe-fwd-kernel|LiveLab race 6": {
+   "1": {
+    "commit": "0258dc43f7",
+    "run": "kda23",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "7483ec847c",
+    "run": "kda23",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "8ecd502219",
+    "run": "kda23",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "098a30bd1b",
+    "run": "kda23",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "cd5d670aa2",
+    "run": "kda23",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "4cb30cb2d6",
+    "run": "kda23",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "f49c2ee3f7",
+    "run": "kda23",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "755c5da68e",
+    "run": "kda23",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "29c948d8e1",
+    "run": "kda23",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "4e8c6b356d",
+    "run": "kda23",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "9cada85cfd",
+    "run": "kda23",
+    "check": "n14"
+   },
+   "12": {
+    "commit": "29860f32b7",
+    "run": "kda23",
+    "check": "n15"
+   },
+   "13": {
+    "commit": "099a1948db",
+    "run": "kda23",
+    "check": "n16"
+   },
+   "14": {
+    "commit": "63b5d28142",
+    "run": "kda23",
+    "check": "n17"
+   },
+   "15": {
+    "commit": "38589772ad",
+    "run": "kda23",
+    "check": "n18"
+   },
+   "16": {
+    "commit": "f365c7bfb8",
+    "run": "kda23",
+    "check": "n21"
+   }
+  },
+  "r-moe-bwd-kernel|Codex race 1": {
+   "1": {
+    "commit": "cc05b457c6",
+    "run": "kda9",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "d1110423b5",
+    "run": "kda9",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "7a5d0ea3b2",
+    "run": "kda9",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "2f9be60e66",
+    "run": "kda9",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "b8fb18648a",
+    "run": "kda9",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "b965d04b96",
+    "run": "kda9",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "70c9220b78",
+    "run": "kda9",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "c8b3791655",
+    "run": "kda9",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "280a3933fd",
+    "run": "kda9",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "2be697d3e2",
+    "run": "kda9",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "f26d99f4b5",
+    "run": "kda9",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "ca1ac51534",
+    "run": "kda9",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "9a94d4a60e",
+    "run": "kda9",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "f66e999685",
+    "run": "kda9",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "cef94f19c3",
+    "run": "kda9",
+    "check": "n16"
+   }
+  },
+  "r-moe-bwd-kernel|Codex race 2": {
+   "1": {
+    "commit": "842bba7109",
+    "run": "kda14",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "e87693543b",
+    "run": "kda14",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "0f6cbc33c5",
+    "run": "kda14",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "d4025dcb74",
+    "run": "kda14",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "ffd4ddbd0a",
+    "run": "kda14",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "da16b36605",
+    "run": "kda14",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "2bd2ecf5a4",
+    "run": "kda14",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "2eac79571d",
+    "run": "kda14",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "e270c64285",
+    "run": "kda14",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "5b079d0fb8",
+    "run": "kda14",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "30fc2c01e9",
+    "run": "kda14",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "be7dd5fcac",
+    "run": "kda14",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "bf8ba567db",
+    "run": "kda14",
+    "check": "n14"
+   }
+  },
+  "r-moe-bwd-kernel|Codex race 3": {
+   "1": {
+    "commit": "d67f2522d6",
+    "run": "kda17",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "e308bd40b6",
+    "run": "kda17",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "fa19d593a5",
+    "run": "kda17",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "7b396b0c1a",
+    "run": "kda17",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "88f120e41b",
+    "run": "kda17",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "e1498c9bf9",
+    "run": "kda17",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "e74c3e31bc",
+    "run": "kda17",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "ac06af3775",
+    "run": "kda17",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "4581e80419",
+    "run": "kda17",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "fefc8956d2",
+    "run": "kda17",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "7846018b24",
+    "run": "kda17",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "3b16fe5dda",
+    "run": "kda17",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "1862b46e3f",
+    "run": "kda17",
+    "check": "n15"
+   }
+  },
+  "r-moe-bwd-kernel|Codex race 4": {
+   "1": {
+    "commit": "7565d62283",
+    "run": "kda20",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "6e0a00243f",
+    "run": "kda20",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "bb03d15a7c",
+    "run": "kda20",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "26b87e21f6",
+    "run": "kda20",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "95ffc45d9d",
+    "run": "kda20",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "d14d243132",
+    "run": "kda20",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "9494a9cc66",
+    "run": "kda20",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "ed72b50e87",
+    "run": "kda20",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "6f73a6d30c",
+    "run": "kda20",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "5c23ca8be5",
+    "run": "kda20",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "c8658cee5b",
+    "run": "kda20",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "7f1b3f774a",
+    "run": "kda20",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "d859fb2bfe",
+    "run": "kda20",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "835b8e3ff8",
+    "run": "kda20",
+    "check": "n16"
+   }
+  },
+  "r-moe-bwd-kernel|Codex race 5": {
+   "1": {
+    "commit": "6f99ae451e",
+    "run": "kda22",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "bef302fb15",
+    "run": "kda22",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "ec06be1350",
+    "run": "kda22",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "cb8efb13ed",
+    "run": "kda22",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "920fa1fa2c",
+    "run": "kda22",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "7015c8fbf1",
+    "run": "kda22",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "8352bd3714",
+    "run": "kda22",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "9471d511f5",
+    "run": "kda22",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "48bbd48710",
+    "run": "kda22",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "66a00b024a",
+    "run": "kda22",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "128e0d9ee2",
+    "run": "kda22",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "7380ab1415",
+    "run": "kda22",
+    "check": "n14"
+   }
+  },
+  "r-moe-bwd-kernel|LiveLab race 1": {
+   "1": {
+    "commit": "f41331cbec",
+    "run": "kda9",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "aab76efd41",
+    "run": "kda9",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "17f76f528c",
+    "run": "kda9",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "1665533ca0",
+    "run": "kda9",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "85b4f07109",
+    "run": "kda9",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "0abf90d6d7",
+    "run": "kda9",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "2d0d0c1c4d",
+    "run": "kda9",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "b1c9493f8f",
+    "run": "kda9",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "6dadbc75ac",
+    "run": "kda9",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "e1e8fc0af4",
+    "run": "kda9",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "8d6940777a",
+    "run": "kda9",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "c644650e84",
+    "run": "kda9",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "485539ec6d",
+    "run": "kda9",
+    "check": "n15"
+   },
+   "14": {
+    "commit": "974962945c",
+    "run": "kda9",
+    "check": "n16"
+   }
+  },
+  "r-moe-bwd-kernel|LiveLab race 2": {
+   "1": {
+    "commit": "13953191cb",
+    "run": "kda14",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "1bed585bd1",
+    "run": "kda14",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "46a96e3fe9",
+    "run": "kda14",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "0a57a7a873",
+    "run": "kda14",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "3341bb7a71",
+    "run": "kda14",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "cffee10737",
+    "run": "kda14",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "b6c7afa6a4",
+    "run": "kda14",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "024e3eeb93",
+    "run": "kda14",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "231b640a0c",
+    "run": "kda14",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "0da47e8763",
+    "run": "kda14",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "585acbedde",
+    "run": "kda14",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "c128ae6233",
+    "run": "kda14",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "b79052d6d5",
+    "run": "kda14",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "a094013ab7",
+    "run": "kda14",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "25f17af6e1",
+    "run": "kda14",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "dffdc82c19",
+    "run": "kda14",
+    "check": "n17"
+   }
+  },
+  "r-moe-bwd-kernel|LiveLab race 3": {
+   "1": {
+    "commit": "c3679bd58b",
+    "run": "kda17",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "827cb84a6a",
+    "run": "kda17",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "df36012347",
+    "run": "kda17",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "675b316caf",
+    "run": "kda17",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "32c72e6b4e",
+    "run": "kda17",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "0ae46bf076",
+    "run": "kda17",
+    "check": "n8"
+   },
+   "7": {
+    "commit": "cab277eafb",
+    "run": "kda17",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "645b95a9c6",
+    "run": "kda17",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "bf181dd343",
+    "run": "kda17",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "d07b79f01d",
+    "run": "kda17",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "469e5f083c",
+    "run": "kda17",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "9dfc11036c",
+    "run": "kda17",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "a33d38f587",
+    "run": "kda17",
+    "check": "n15"
+   },
+   "14": {
+    "commit": "2dc81fa7be",
+    "run": "kda17",
+    "check": "n16"
+   },
+   "15": {
+    "commit": "0565cd7250",
+    "run": "kda17",
+    "check": "n17"
+   }
+  },
+  "r-moe-bwd-kernel|LiveLab race 4": {
+   "1": {
+    "commit": "9c497c1fbd",
+    "run": "kda20",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "e602832e4a",
+    "run": "kda20",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "461c930fd3",
+    "run": "kda20",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "e2a62cf3cd",
+    "run": "kda20",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "f814f8b3c9",
+    "run": "kda20",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "36b8ea0294",
+    "run": "kda20",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "dc17de874f",
+    "run": "kda20",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "913ed0deb0",
+    "run": "kda20",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "9e86943586",
+    "run": "kda20",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "350701e211",
+    "run": "kda20",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "1eabc6b9f5",
+    "run": "kda20",
+    "check": "n12"
+   }
+  },
+  "r-moe-bwd-kernel|LiveLab race 5": {
+   "1": {
+    "commit": "12865b8435",
+    "run": "kda22",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "ecbfe9550d",
+    "run": "kda22",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "c14fced15d",
+    "run": "kda22",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "f0c0e81b34",
+    "run": "kda22",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "f6dd992faf",
+    "run": "kda22",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "97bf3929d0",
+    "run": "kda22",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "8c6dca1d5d",
+    "run": "kda22",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "2cf076fdbf",
+    "run": "kda22",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "865c647e55",
+    "run": "kda22",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "6c502cb3bc",
+    "run": "kda22",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "7a80d33b8e",
+    "run": "kda22",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "861c0301d0",
+    "run": "kda22",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "72f565a214",
+    "run": "kda22",
+    "check": "n15"
+   }
+  },
+  "r-mla-kernel|Codex race 1": {
+   "1": {
+    "commit": "b487dc1f8b",
+    "run": "kda24",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "b3d40c29e9",
+    "run": "kda24",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "387a1b78a7",
+    "run": "kda24",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "56e48a8618",
+    "run": "kda24",
+    "check": "n6"
+   },
+   "5": {
+    "commit": "2f02558af3",
+    "run": "kda24",
+    "check": "n7"
+   },
+   "6": {
+    "commit": "c80dd61613",
+    "run": "kda24",
+    "check": "n10"
+   },
+   "7": {
+    "commit": "f8f6190d45",
+    "run": "kda24",
+    "check": "n11"
+   },
+   "8": {
+    "commit": "bea54a4d7e",
+    "run": "kda24",
+    "check": "n13"
+   },
+   "9": {
+    "commit": "d0706327f6",
+    "run": "kda24",
+    "check": "n14"
+   },
+   "10": {
+    "commit": "ec4d716857",
+    "run": "kda24",
+    "check": "n15"
+   },
+   "11": {
+    "commit": "0d6e0e2a5b",
+    "run": "kda24",
+    "check": "n17"
+   },
+   "12": {
+    "commit": "855dd241bf",
+    "run": "kda24",
+    "check": "n18"
+   },
+   "13": {
+    "commit": "1d953933da",
+    "run": "kda24",
+    "check": "n19"
+   },
+   "14": {
+    "commit": "8609ea1ab1",
+    "run": "kda24",
+    "check": "n20"
+   },
+   "15": {
+    "commit": "4b87154465",
+    "run": "kda24",
+    "check": "n21"
+   },
+   "16": {
+    "commit": "04176bb1aa",
+    "run": "kda24",
+    "check": "n22"
+   },
+   "17": {
+    "commit": "730c3e72b7",
+    "run": "kda24",
+    "check": "n23"
+   },
+   "18": {
+    "commit": "7431232597",
+    "run": "kda24",
+    "check": "n24"
+   },
+   "19": {
+    "commit": "3e29c56a0c",
+    "run": "kda24",
+    "check": "n27"
+   },
+   "20": {
+    "commit": "905c0f9777",
+    "run": "kda24",
+    "check": "n28"
+   },
+   "21": {
+    "commit": "71bc2cd36a",
+    "run": "kda24",
+    "check": "n30"
+   },
+   "22": {
+    "commit": "7bb088f8e4",
+    "run": "kda24",
+    "check": "n31"
+   },
+   "23": {
+    "commit": "60c96826b0",
+    "run": "kda24",
+    "check": "n33"
+   },
+   "24": {
+    "commit": "7b23b7b3c5",
+    "run": "kda24",
+    "check": "n34"
+   }
+  },
+  "r-mla-kernel|Codex race 2": {
+   "1": {
+    "commit": "08e81aed2d",
+    "run": "kda25",
+    "check": "n3"
+   },
+   "2": {
+    "commit": "6697e19bf9",
+    "run": "kda25",
+    "check": "n4"
+   },
+   "3": {
+    "commit": "3888d47307",
+    "run": "kda25",
+    "check": "n10"
+   },
+   "4": {
+    "commit": "df4aea1b52",
+    "run": "kda25",
+    "check": "n11"
+   },
+   "5": {
+    "commit": "6e14af24ab",
+    "run": "kda25",
+    "check": "n13"
+   },
+   "6": {
+    "commit": "7aa81fe3d4",
+    "run": "kda25",
+    "check": "n14"
+   },
+   "7": {
+    "commit": "2538d1045c",
+    "run": "kda25",
+    "check": "n15"
+   },
+   "8": {
+    "commit": "168e2d17c9",
+    "run": "kda25",
+    "check": "n16"
+   },
+   "9": {
+    "commit": "63b4cee3a2",
+    "run": "kda25",
+    "check": "n17"
+   },
+   "10": {
+    "commit": "1e01facc6f",
+    "run": "kda25",
+    "check": "n19"
+   },
+   "11": {
+    "commit": "d847384907",
+    "run": "kda25",
+    "check": "n20"
+   },
+   "12": {
+    "commit": "cf72870631",
+    "run": "kda25",
+    "check": "n24"
+   },
+   "13": {
+    "commit": "d95674ed8c",
+    "run": "kda25",
+    "check": "n25"
+   },
+   "14": {
+    "commit": "4396e298d1",
+    "run": "kda25",
+    "check": "n27"
+   },
+   "15": {
+    "commit": "ca737ca0f2",
+    "run": "kda25",
+    "check": "n30"
+   },
+   "16": {
+    "commit": "514c8e497d",
+    "run": "kda25",
+    "check": "n33"
+   }
+  },
+  "r-mla-kernel|LiveLab race 1": {
+   "1": {
+    "commit": "2cae6bc5a2",
+    "run": "kda24",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "4ea032be5c",
+    "run": "kda24",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "cc98724fb0",
+    "run": "kda24",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "776b45b74c",
+    "run": "kda24",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "29e588f857",
+    "run": "kda24",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "ca75e640eb",
+    "run": "kda24",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "21865fed55",
+    "run": "kda24",
+    "check": "n8"
+   },
+   "8": {
+    "commit": "d64c0159bc",
+    "run": "kda24",
+    "check": "n9"
+   },
+   "9": {
+    "commit": "bcee8ce964",
+    "run": "kda24",
+    "check": "n10"
+   },
+   "10": {
+    "commit": "4255d7a82e",
+    "run": "kda24",
+    "check": "n11"
+   },
+   "11": {
+    "commit": "78ac0f310f",
+    "run": "kda24",
+    "check": "n12"
+   },
+   "12": {
+    "commit": "048a2d839f",
+    "run": "kda24",
+    "check": "n13"
+   },
+   "13": {
+    "commit": "dc91727054",
+    "run": "kda24",
+    "check": "n14"
+   },
+   "14": {
+    "commit": "3df7cbe892",
+    "run": "kda24",
+    "check": "n15"
+   },
+   "15": {
+    "commit": "c0ba6102d8",
+    "run": "kda24",
+    "check": "n16"
+   },
+   "16": {
+    "commit": "dc2308f18f",
+    "run": "kda24",
+    "check": "n17"
+   },
+   "17": {
+    "commit": "6b3d0af246",
+    "run": "kda24",
+    "check": "n18"
+   },
+   "18": {
+    "commit": "9232c690e5",
+    "run": "kda24",
+    "check": "n19"
+   }
+  },
+  "r-mla-kernel|LiveLab race 2": {
+   "1": {
+    "commit": "b2dd71e2f2",
+    "run": "kda25",
+    "check": "n2"
+   },
+   "2": {
+    "commit": "1fb40d197b",
+    "run": "kda25",
+    "check": "n3"
+   },
+   "3": {
+    "commit": "099cd1c06e",
+    "run": "kda25",
+    "check": "n4"
+   },
+   "4": {
+    "commit": "d9f8650cd6",
+    "run": "kda25",
+    "check": "n5"
+   },
+   "5": {
+    "commit": "06dba6e3df",
+    "run": "kda25",
+    "check": "n6"
+   },
+   "6": {
+    "commit": "0bc5911d7e",
+    "run": "kda25",
+    "check": "n7"
+   },
+   "7": {
+    "commit": "63ebedefa4",
+    "run": "kda25",
+    "check": "n9"
+   },
+   "8": {
+    "commit": "a2b04d6602",
+    "run": "kda25",
+    "check": "n10"
+   },
+   "9": {
+    "commit": "0df7910b64",
+    "run": "kda25",
+    "check": "n11"
+   },
+   "10": {
+    "commit": "eaa80a38ca",
+    "run": "kda25",
+    "check": "n12"
+   },
+   "11": {
+    "commit": "991f7c44b9",
+    "run": "kda25",
+    "check": "n13"
+   },
+   "12": {
+    "commit": "3bce32ef4e",
+    "run": "kda25",
+    "check": "n14"
+   },
+   "13": {
+    "commit": "f48703337b",
+    "run": "kda25",
+    "check": "n15"
+   },
+   "14": {
+    "commit": "027d8e6089",
+    "run": "kda25",
+    "check": "n16"
+   }
+  },
+  "r-nanogpt|Codex race 1": {
+   "1": {
+    "commit": "5bba02f",
+    "run": "speedrun1"
+   },
+   "2": {
+    "commit": "db973df",
+    "run": "speedrun1"
+   },
+   "3": {
+    "commit": "c0b5815",
+    "run": "speedrun1"
+   },
+   "4": {
+    "commit": "2a8c230",
+    "run": "speedrun1"
+   },
+   "5": {
+    "commit": "a59ba6b",
+    "run": "speedrun1"
+   },
+   "6": {
+    "commit": "c51c3f8",
+    "run": "speedrun1"
+   },
+   "7": {
+    "commit": "5b2140c",
+    "run": "speedrun1"
+   },
+   "8": {
+    "commit": "d555c89",
+    "run": "speedrun1"
+   },
+   "9": {
+    "commit": "a09bc3d",
+    "run": "speedrun1"
+   }
+  },
+  "r-nanogpt|Codex race 2 (shared GPUs)": {
+   "1": {
+    "commit": "8babcc5",
+    "run": "speedrun2"
+   },
+   "2": {
+    "commit": "bcce4ac",
+    "run": "speedrun2"
+   },
+   "3": {
+    "commit": "35c9551",
+    "run": "speedrun2"
+   },
+   "4": {
+    "commit": "8a7ba63",
+    "run": "speedrun2"
+   },
+   "5": {
+    "commit": "ff79496",
+    "run": "speedrun2"
+   },
+   "6": {
+    "commit": "fb9cc7f",
+    "run": "speedrun2"
+   },
+   "7": {
+    "commit": "93454df",
+    "run": "speedrun2"
+   }
+  },
+  "r-nanogpt|LiveLab race 1": {
+   "1": {
+    "commit": "4b16b5b",
+    "run": "speedrun1"
+   },
+   "2": {
+    "commit": "998d697",
+    "run": "speedrun1"
+   },
+   "3": {
+    "commit": "46abcc8",
+    "run": "speedrun1"
+   },
+   "4": {
+    "commit": "4a1764e",
+    "run": "speedrun1"
+   },
+   "5": {
+    "commit": "2153640",
+    "run": "speedrun1"
+   },
+   "6": {
+    "commit": "89acf05",
+    "run": "speedrun1"
+   },
+   "7": {
+    "commit": "1a31ec5",
+    "run": "speedrun1"
+   },
+   "8": {
+    "commit": "f76cd7a",
+    "run": "speedrun1"
+   },
+   "9": {
+    "commit": "0e360b1",
+    "run": "speedrun1"
+   }
+  },
+  "r-nanogpt|LiveLab race 2 (shared GPUs)": {
+   "1": {
+    "commit": "c04352c",
+    "run": "speedrun2"
+   },
+   "2": {
+    "commit": "f484572",
+    "run": "speedrun2"
+   },
+   "3": {
+    "commit": "0026494",
+    "run": "speedrun2"
+   },
+   "4": {
+    "commit": "e82d4b4",
+    "run": "speedrun2"
+   },
+   "5": {
+    "commit": "1b83b36",
+    "run": "speedrun2"
+   }
+  }
+ }
+}
