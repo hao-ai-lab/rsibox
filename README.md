@@ -12,8 +12,9 @@ The shared live-lab transaction kernel (`core/livelab/`) uses the Python standar
 # 1. Run all 11 golden conformance cases (c0-c10) on ToyLab in one command (~3s on CPU):
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab
 
-# (Optional) Install core/livelab in editable mode so kernel, conformance, and forksafe are on sys.path:
-pip install --no-build-isolation -e .
+# (Optional) Install core/livelab in editable mode in a fresh venv, so kernel, conformance and forksafe import from anywhere:
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e .
 python3 -m conformance --lab kernel.toy_lab:ToyLab
 
 # 2. Run the FastVideo ToyFastVideoLab conformance suite (~3s on CPU):
