@@ -1,989 +1,1025 @@
+"""Colocated weight lease, NCCL seeder and accept-gated standby pool for `vllm serve` engines.
+
+Real processes, no simulation:
+
+- Lease (CUDA IPC, no copy). A weight holder is vLLM's weight cache daemon (`vllm preload`,
+  started by weights.py), one per GPU. Every engine on that GPU starts with `--load-format
+  ipc_cache` (engine.py start --weights) and maps the holder's tensors through CUDA IPC: the
+  engine allocates 0 bytes for weights, and K engines on one GPU share one copy.
+- Seeder (NCCL, a copy). A holder on another GPU is started without reading the checkpoint
+  (`vllm preload --load-format dummy`, random init on the GPU) and then filled from a holder that
+  has the weights: two ranks map the two holders through CUDA IPC and `torch.distributed`
+  broadcasts every tensor from source to destination in place (`copy`). The same copy restores
+  a holder whose weights went wrong (a rejected patch, a corruption), so a restore is a full
+  byte copy from a known-good holder, never an in-process snapshot.
+- Standby pool (`Pool`). An active and a standby engine, each on its own holder (two GPUs), behind
+  a router (one port). The router forwards to the active engine; on a fault (the engine process
+  dies, /health stops answering, a sticky CUDA error, or a weight digest that disagrees with the
+  ledger) it switches to the standby, which then serves. The failed side is repaired in the
+  background: a dead engine is restarted leased (holder still resident), a wrong holder is
+  re-copied over NCCL from the serving one.
+- Accept gate. `evaluate(patch)` applies a weight patch to the active engine in place, runs the
+  gate (greedy tokens and logprobs on reference prompts against the ledger's reference) and
+  leaves it pending. Only `accept()` records it in the ledger and replays it onto the standby. A
+  rejected patch fails over to the standby (which never saw it) and re-copies the patched holder
+  from the standby's. A pending patch that is not accepted before the next `evaluate` is rolled
+  back the same way. Invariant: every holder that can serve holds exactly the ledger.
+
+Integrity: `digest` is a per-tensor (sum, sum of squares) over the raw 64-bit words, computed on
+the GPU inside the engine, chunked, outside any lock (no host copy). Two holders agree when every
+tensor's digest agrees. A permutation inside one tensor is not detected (sums commute).
+
+Patches here are weight patches (scale or add noise to parameters matched by a regex), applied in
+place, so CUDA graphs captured on the mapped weights stay valid. Code patches go through the
+transaction kernel (adapter/), not here.
+
+Usage (under the vLLM venv's python, one GPU per holder):
+  python3 weight_scaling_colocate.py copy --model M --socket-dir D --src-gpu 0 --dst-gpu 1
+  python3 weight_scaling_colocate.py demo --model M --gpus 4,5,6 --work-dir W [--max-model-len L]
+  python3 engine.py pool ...      # the same entry points through the lab launcher
+
+Each prints one JSON line. LeaseWorkerExtension is the engines' --worker-extension-cls (it runs in
+every worker; VLLM_SERVER_DEV_MODE=1 exposes it through POST /collective_rpc).
 """
-LiveLab-MLSys Multi-Agent Weight Colocation, Inter-Node NCCL Seeding,
-and Active/Warm-Standby Fault-Tolerance Prototype.
-
-Implements:
-1. Case 2A (`SharedWeightHolder`, `ColocatedWeightLease`, `GpuTimeSliceLock`):
-   - Single read-only weight allocation per GPU group exported via shared memory /
-     CUDA IPC handles (`0` extra weight bytes across K colocated workers).
-   - Per-worker isolated KV cache + scratch buffer pool leases within the remaining
-     HBM budget, plus SHA-256 / checksum integrity guards to catch illegal weight writes.
-   - Lightweight micro-benchmark GPU token lock (`GpuTimeSliceLock`) so K parallel
-     agent workers overlap CPU compilation/patching/generation (`prepare`, `g_i`)
-     100% in parallel while time-slicing sub-second GPU `check()` execution cleanly
-     without SM/HBM contention.
-
-2. Case 2B (`DistributedWeightSeeder`):
-   - Eliminates the N-node NFS/Lustre read bottleneck when spinning up N=8 replica
-     nodes (e.g., 8 nodes x 4 GPUs = 32 GPUs on GB200 NVL72).
-   - Node 0 loads weights once per TP shard from storage/cache, coalesces tensors
-     into contiguous broadcast slabs with a manifest, and broadcasts over per-rail
-     inter-node NCCL communicators (`torch.distributed.broadcast`) to Nodes 1..N-1.
-   - Each receiving node pins its copy into its local `SharedWeightHolder` HBM and
-     immediately tears down the inter-node process group (`release_distributed()`)
-     so all subsequent agent kernel evaluations are 100% node-local.
-
-3. Case 3 (`ActiveStandbyWorkerPool`):
-   - Two-tier fault recovery contract:
-     * Class A (`RecoverablePatchError`: syntax/compile/shape/numerical/gate error):
-       Rolled back in-place via `uninstall()` + `reset()` in <5 ms (`0` failovers).
-     * Class B (`StickyCudaError`: `cudaErrorIllegalAddress`, device-side assert,
-       native segfault, or hung rank): Poisons the active worker's CUDA context.
-       Coordinator performs a `0 ms` pointer flip to a warm-standby worker replica
-       already attached to the same `SharedWeightHolder` via CUDA IPC (`0` extra
-       weight memory, deferred KV block allocation via cached `KVPlan`), while
-       asynchronously respawning the replacement standby via Zygote + IPC in ~7.4 s.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-import enum
-import hashlib
-import math
-import random
-import struct
+import argparse
+import http.client
+import http.server
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+EXT_CLS = "weight_scaling_colocate.LeaseWorkerExtension"
+CHUNK_WORDS = 1 << 26          # 512 MiB of 64-bit words per digest step
 
 
-class _FallbackDtype:
-    def __init__(self, name: str, itemsize: int) -> None:
-        self.name = name
-        self.itemsize = itemsize
-
-    def __repr__(self) -> str:
-        return f"torch.{self.name}"
-
-
-class _FallbackNumpyView:
-    def __init__(self, raw_buffer: bytearray) -> None:
-        self._raw_buffer = raw_buffer
-
-    def tobytes(self) -> bytes:
-        return bytes(self._raw_buffer)
-
-
-class _FallbackTensor:
-    def __init__(
-        self,
-        raw_buffer: bytearray,
-        shape: Tuple[int, ...],
-        dtype: _FallbackDtype,
-    ) -> None:
-        self._raw_buffer = raw_buffer
-        self.shape = tuple(shape)
-        self.dtype = dtype
-
-    def numel(self) -> int:
-        return math.prod(self.shape) if self.shape else 1
-
-    def element_size(self) -> int:
-        return self.dtype.itemsize
-
-    def data_ptr(self) -> int:
-        return id(self._raw_buffer)
-
-    def detach(self) -> "_FallbackTensor":
-        return self
-
-    def cpu(self) -> "_FallbackTensor":
-        return self
-
-    def contiguous(self) -> "_FallbackTensor":
-        return self
-
-    def requires_grad_(self, requires_grad: bool = False) -> "_FallbackTensor":
-        return self
-
-    def share_memory_(self) -> "_FallbackTensor":
-        return self
-
-    def clone(self) -> "_FallbackTensor":
-        return _FallbackTensor(bytearray(self._raw_buffer), self.shape, self.dtype)
-
-    def view(self, *args: Any) -> "_FallbackTensor":
-        if len(args) == 1 and isinstance(args[0], _FallbackDtype):
-            target_dtype = args[0]
-            count = len(self._raw_buffer) // target_dtype.itemsize
-            return _FallbackTensor(self._raw_buffer, (count,), target_dtype)
-        if len(args) == 1 and isinstance(args[0], tuple):
-            return _FallbackTensor(self._raw_buffer, args[0], self.dtype)
-        return _FallbackTensor(self._raw_buffer, tuple(int(dim) for dim in args), self.dtype)
-
-    def reshape(self, *args: Any) -> "_FallbackTensor":
-        if len(args) == 1 and isinstance(args[0], tuple):
-            target_shape = args[0]
-        else:
-            target_shape = tuple(int(dim) for dim in args)
-        if target_shape == (-1,):
-            target_shape = (len(self._raw_buffer) // self.dtype.itemsize,)
-        return _FallbackTensor(self._raw_buffer, target_shape, self.dtype)
-
-    def __getitem__(self, item: slice) -> "_FallbackTensor":
-        elem_size = self.dtype.itemsize
-        start = (item.start or 0) * elem_size
-        stop = (item.stop if item.stop is not None else self.numel()) * elem_size
-        sliced = self._raw_buffer[start:stop]
-        return _FallbackTensor(sliced, (len(sliced) // elem_size,), self.dtype)
-
-    def numpy(self) -> _FallbackNumpyView:
-        return _FallbackNumpyView(self._raw_buffer)
-
-
-class _FallbackTorchModule:
-    dtype = _FallbackDtype
-    Tensor = _FallbackTensor
-    uint8 = _FallbackDtype("uint8", 1)
-    float32 = _FallbackDtype("float32", 4)
-    _rng = random.Random(0)
-
-    @classmethod
-    def manual_seed(cls, seed: int) -> None:
-        cls._rng = random.Random(seed)
-
-    @classmethod
-    def randn(cls, *shape: int, dtype: _FallbackDtype = float32) -> _FallbackTensor:
-        count = math.prod(shape)
-        raw = bytearray(count * dtype.itemsize)
-        for idx in range(count):
-            val = cls._rng.gauss(0.0, 1.0)
-            struct.pack_into("<f", raw, idx * 4, val)
-        return _FallbackTensor(raw, tuple(shape), dtype)
-
-    @staticmethod
-    def cat(tensors: List[_FallbackTensor], dim: int = 0) -> _FallbackTensor:
-        combined = bytearray()
-        for item in tensors:
-            combined.extend(item._raw_buffer)
-        dtype = tensors[0].dtype if tensors else _FallbackTorchModule.uint8
-        return _FallbackTensor(combined, (len(combined) // dtype.itemsize,), dtype)
-
-    @staticmethod
-    def equal(first: _FallbackTensor, second: _FallbackTensor) -> bool:
-        return (
-            first.shape == second.shape
-            and first.dtype.name == second.dtype.name
-            and first._raw_buffer == second._raw_buffer
-        )
-
-
-try:
-    import torch  # type: ignore[import-not-found]
-except ImportError:
-    torch = _FallbackTorchModule()  # type: ignore[assignment]
-
-
-# ---------------------------------------------------------------------------
-# Case 2A: Intra-Node Shared WeightHolder, Colocated Leases & GPU Time-Slicing
-# ---------------------------------------------------------------------------
-
-
-class WeightCorruptionError(RuntimeError):
-    """Raised when a colocated worker mutates read-only shared weight memory."""
-
-
-class HbmBudgetExceededError(MemoryError):
-    """Raised when a colocated worker lease exceeds available non-weight HBM."""
-
+# ---------------------------------------------------------------------------------------------
+# Patches and the ledger (plain data: no torch)
+# ---------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class TensorSpec:
-    """Metadata and integrity digest for a shared weight tensor."""
+class Patch:
+    """A weight patch: `op` ("scale" or "noise") with `value` on every parameter whose name
+    matches `target` (re.search). noise adds value * std(param) * N(0, 1) with `seed`."""
+    id: str
+    target: str
+    op: str = "scale"
+    value: float = 1.0
+    seed: int = 0
 
+    def to_json(self):
+        return json.dumps(asdict(self), sort_keys=True)
+
+
+class Ledger:
+    """Accepted patches, in order. Append-only; entries are frozen, so no caller can change
+    what was recorded (the old model kept mutable dicts and a shallow copy for rollback)."""
+
+    def __init__(self):
+        self._entries: tuple[Patch, ...] = ()
+
+    def append(self, patch: Patch):
+        if any(p.id == patch.id for p in self._entries):
+            raise ValueError(f"patch {patch.id!r} already in the ledger")
+        self._entries = self._entries + (patch,)
+
+    @property
+    def entries(self) -> tuple[Patch, ...]:
+        return self._entries
+
+    @property
+    def ids(self) -> list[str]:
+        return [p.id for p in self._entries]
+
+
+def digests_agree(a: dict, b: dict) -> dict:
+    """{"ok", "differ": names whose digest differs, "missing": names only on one side}."""
+    differ = sorted(n for n in a.keys() & b.keys() if a[n] != b[n])
+    missing = sorted(a.keys() ^ b.keys())
+    return {"ok": not differ and not missing, "differ": differ[:20], "n_differ": len(differ),
+            "missing": missing[:20]}
+
+
+def gate_compare(ref: list, got: list, tol: float) -> dict:
+    """Greedy tokens must be identical and every chosen token's logprob within `tol`."""
+    same_tokens = all(r["tokens"] == g["tokens"] for r, g in zip(ref, got)) and len(ref) == len(got)
+    dlp = max((abs(x - y) for r, g in zip(ref, got)
+               for x, y in zip(r["logprobs"], g["logprobs"])), default=0.0)
+    return {"pass": bool(same_tokens and dlp <= tol), "same_tokens": same_tokens,
+            "max_abs_dlogprob": dlp, "tol": tol}
+
+
+# ---------------------------------------------------------------------------------------------
+# GPU side: digest, patch, fault (torch imported lazily: this module is also imported on CPU)
+# ---------------------------------------------------------------------------------------------
+
+def tensor_digest(t):
+    """(sum, sum of squares) of the tensor's bytes read as int64 words (wrapping, so exact and
+    order independent), chunked to bound the temporary memory. Stays on the GPU."""
+    import torch
+    flat = t.detach().reshape(-1)
+    if not flat.is_contiguous():
+        flat = flat.contiguous()
+    b = flat.view(torch.uint8)
+    n8 = b.numel() // 8
+    s1 = torch.zeros((), dtype=torch.int64, device=t.device)
+    s2 = torch.zeros((), dtype=torch.int64, device=t.device)
+    if n8:
+        w = b[: n8 * 8].view(torch.int64)
+        for i in range(0, n8, CHUNK_WORDS):
+            c = w[i:i + CHUNK_WORDS]
+            s1 += c.sum()
+            s2 += (c * c).sum()
+    if b.numel() % 8:
+        tail = b[n8 * 8:].to(torch.int64)
+        s1 += tail.sum()
+        s2 += (tail * tail).sum()
+    return s1, s2
+
+
+def model_digest(named):
+    """{name: "s1:s2"} for (name, tensor) pairs, plus seconds (CUDA synchronized)."""
+    import torch
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    pend = [(n, tensor_digest(t)) for n, t in named]
+    torch.cuda.synchronize()
+    out = {n: f"{int(a)}:{int(b)}" for n, (a, b) in pend}
+    return out, time.perf_counter() - t0
+
+
+def apply_patch(named: dict, patch: Patch) -> list[str]:
+    """Apply `patch` in place to the matching tensors of `named`; returns the names touched."""
+    import torch
+    rx = re.compile(patch.target)
+    hit = sorted(n for n in named if rx.search(n))
+    g = torch.Generator(device="cuda").manual_seed(patch.seed)
+    with torch.no_grad():
+        for n in hit:
+            t = named[n]
+            if patch.op == "scale":
+                t.mul_(patch.value)
+            elif patch.op == "noise":
+                std = t.float().std().item()
+                noise = torch.randn(t.shape, generator=g, device=t.device, dtype=torch.float32)
+                t.add_((noise * (patch.value * std)).to(t.dtype))
+            else:
+                raise ValueError(f"unknown patch op {patch.op!r}")
+    torch.cuda.synchronize()
+    return hit
+
+
+class LeaseWorkerExtension:
+    """vLLM --worker-extension-cls: methods run in every worker via collective_rpc. Arguments
+    arrive as JSON strings (the dev endpoint passes strings only); every method returns a dict
+    and catches its own errors except `lease_fault("cuda")`, whose job is to break the context."""
+
+    def _named(self):
+        model = self.model_runner.model
+        named = {}
+        for n, p in model.named_parameters():
+            if p.is_cuda:
+                named[n] = p.data
+        return named
+
+    def lease_digest(self, _arg: str = "{}"):
+        try:
+            d, s = model_digest(sorted(self._named().items()))
+            return {"ok": True, "digest": d, "seconds": s, "pid": os.getpid()}
+        except Exception as e:  # noqa: BLE001 (a reply, never a raise across the RPC)
+            return {"ok": False, "error": repr(e), "pid": os.getpid()}
+
+    def lease_apply(self, patch_json: str):
+        try:
+            t0 = time.perf_counter()
+            hit = apply_patch(self._named(), Patch(**json.loads(patch_json)))
+            return {"ok": True, "touched": len(hit), "seconds": time.perf_counter() - t0}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": repr(e)}
+
+    def lease_info(self, _arg: str = "{}"):
+        import torch
+        named = self._named()
+        ptrs = {t.untyped_storage().data_ptr() for t in named.values()}
+        return {"ok": True, "pid": os.getpid(), "n_params": len(named),
+                "param_bytes": sum(t.numel() * t.element_size() for t in named.values()),
+                "distinct_storages": len(ptrs),
+                "torch_allocated_bytes": torch.cuda.memory_allocated()}
+
+    def lease_fault(self, kind: str):
+        """Fault injection for tests: "corrupt" overwrites one weight in place (the holder's
+        memory, shared through IPC); "cuda" triggers a device-side assert (sticky: the
+        context is unusable afterwards)."""
+        import torch
+        if kind == "corrupt":
+            named = self._named()
+            mlp = sorted(n for n in named if "mlp" in n) or sorted(named)
+            name = mlp[len(mlp) // 2]
+            with torch.no_grad():
+                named[name].view(torch.uint8).random_(0, 256)    # any dtype, fp8 included
+            torch.cuda.synchronize()
+            return {"ok": True, "corrupted": name}
+        if kind == "cuda":
+            x = torch.zeros(4, device="cuda")
+            idx = torch.tensor([1 << 40], device="cuda")
+            y = x[idx]                       # device-side assert: index out of bounds
+            torch.cuda.synchronize()
+            return {"ok": True, "unexpected": float(y.sum())}
+        return {"ok": False, "error": f"unknown fault {kind!r}"}
+
+
+# ---------------------------------------------------------------------------------------------
+# NCCL seeding: copy one holder into another, both mapped through CUDA IPC
+# ---------------------------------------------------------------------------------------------
+
+def _holder_tensors(model, socket_dir, max_model_len=None):
+    """Map this GPU's holder: ({name: cuda tensor}, key fields). Uses vLLM's own key and
+    protocol, so the holder answers exactly as it answers an engine."""
+    import torch
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader.weight_cache import protocol as P
+    kw = {"model": model}
+    if max_model_len:
+        kw["max_model_len"] = max_model_len
+    cfg = EngineArgs(**kw).create_engine_config()
+    key = P.WeightCacheKey.from_model_config(
+        cfg.model_config, tp_size=1, tp_rank=0, cache_config=cfg.cache_config,
+        enable_expert_parallel=cfg.parallel_config.enable_expert_parallel,
+        expert_placement_strategy=cfg.parallel_config.expert_placement_strategy,
+        kernel_config=cfg.kernel_config)
+    path = P.get_socket_path(P.get_current_device_uuid(), socket_dir)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(path)
+    try:
+        P.send_msg(s, {"cmd": "get_state", "cache_key": key})
+        reply = P.recv_msg(s)
+    finally:
+        s.close()
+    if reply.get("status") != "ok":
+        raise RuntimeError(f"holder at {path} answered {reply}")
+    dev = torch.cuda.current_device()
+    return {n: e.rebuild(dev) for n, e in reply["entries"].items() if e.ipc_args is not None}
+
+
+def copy_rank(a):
+    """One side of `copy`: rank 0 maps the source holder, rank 1 the destination; every tensor
+    is broadcast 0 -> 1 in place. Prints one JSON line (rank 1 only reports the copy)."""
+    import torch
+    import torch.distributed as dist
+    t_start = time.perf_counter()
+    torch.cuda.set_device(0)
+    named = _holder_tensors(a.model, a.socket_dir, a.max_model_len)
+    t_mapped = time.perf_counter()
+    dist.init_process_group("nccl", init_method=a.init, rank=a.rank, world_size=2,
+                            device_id=torch.device("cuda", 0))
+    names = sorted(named)
+    manifest = [(n, tuple(named[n].shape), str(named[n].dtype)) for n in names]
+    mine = [manifest]
+    theirs = [None]
+    dist.broadcast_object_list(theirs if a.rank == 1 else mine, src=0)
+    if a.rank == 1 and theirs[0] != manifest:
+        raise RuntimeError("source and destination holders hold different tensors: "
+                           f"{set(map(tuple, theirs[0])) ^ set(manifest)}")
+    nbytes = sum(named[n].numel() * named[n].element_size() for n in names)
+    dist.barrier()
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for n in names:
+        t = named[n]
+        if t.is_contiguous():
+            dist.broadcast(t.view(-1).view(torch.uint8), src=0)
+        else:
+            buf = t.contiguous()
+            dist.broadcast(buf.view(-1).view(torch.uint8), src=0)
+            if a.rank == 1:
+                t.copy_(buf)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    dig, dig_s = model_digest([(n, named[n]) for n in names])
+    out = [dig]
+    gathered = [None, None]
+    dist.all_gather_object(gathered, out[0])
+    agree = digests_agree(gathered[0], gathered[1])
+    dist.destroy_process_group()
+    print(json.dumps({"rank": a.rank, "tensors": len(names), "bytes": nbytes,
+                      "map_s": t_mapped - t_start, "nccl_s": t1 - t0,
+                      "gbps": nbytes / max(t1 - t0, 1e-9) / 1e9, "digest_s": dig_s,
+                      "digests_agree": agree["ok"], "n_differ": agree["n_differ"]}))
+    return 0 if agree["ok"] else 1
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.executable,
+         log_dir=None):
+    """Copy the holder on src_gpu into the holder on dst_gpu over NCCL. Returns the
+    destination rank's report plus wall seconds (process start, vLLM import, IPC map, copy)."""
+    t0 = time.monotonic()
+    init = f"tcp://127.0.0.1:{_free_port()}"
+    procs = []
+    for rank, gpu in ((0, src_gpu), (1, dst_gpu)):
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+        cmd = [python, str(Path(__file__).resolve()), "copy-rank", "--rank", str(rank),
+               "--init", init, "--model", model, "--socket-dir", socket_dir]
+        if max_model_len:
+            cmd += ["--max-model-len", str(max_model_len)]
+        err = open(os.path.join(log_dir, f"copy_{src_gpu}_{dst_gpu}_r{rank}.log"), "w") \
+            if log_dir else subprocess.DEVNULL
+        procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=err,
+                                      text=True))
+    outs = [p.communicate(timeout=900)[0] for p in procs]
+    rcs = [p.returncode for p in procs]
+    rep = {}
+    for line in outs[1].splitlines()[::-1]:
+        if line.startswith("{"):
+            rep = json.loads(line)
+            break
+    rep.update({"wall_s": time.monotonic() - t0, "returncodes": rcs, "src_gpu": src_gpu,
+                "dst_gpu": dst_gpu, "ok": rcs == [0, 0] and rep.get("digests_agree", False)})
+    return rep
+
+
+# ---------------------------------------------------------------------------------------------
+# Holders and engines: thin wrappers over weights.py and engine.py (the lab path)
+# ---------------------------------------------------------------------------------------------
+
+def vllm_bin(python):
+    return str(Path(python).with_name("vllm"))
+
+
+@dataclass
+class Holder:
+    gpu: int
+    socket_dir: str
+    log: str
+    proc: subprocess.Popen | None = None
+    seeded_from: int | None = None
+    report: dict = field(default_factory=dict)
+
+    def start(self, model, python, max_model_len=None, dummy=False):
+        import weights
+        extra = ["--load-format", "dummy"] if dummy else []
+        cmd = weights.daemon_cmd(model, self.socket_dir, 1, max_model_len, vllm_bin(python), extra)
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu))
+        t0 = time.monotonic()
+        with open(self.log, "w") as f:
+            self.proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
+                                         start_new_session=True)
+        r = weights.wait_ready(self.log, self.proc.pid, timeout=1800)
+        self.report = {"gpu": self.gpu, "dummy": dummy, "ready": r["ready"],
+                       "ready_s": time.monotonic() - t0, "pid": self.proc.pid}
+        if not r["ready"]:
+            weights.stop(self.proc)
+            raise RuntimeError(f"holder on GPU {self.gpu} not ready: {r}; see {self.log}")
+        return self.report
+
+    def stop(self):
+        import weights
+        if self.proc is not None:
+            weights.stop(self.proc)
+            self.proc = None
+
+
+LOG_PHASES = {
+    # vLLM's own startup lines (each measured by vLLM itself, in the engine process)
+    "weight_load_s": re.compile(r"Model loading took ([\d.]+) GiB memory and ([\d.]+) seconds"),
+    "kv_profile_warmup_s": re.compile(r"init engine \(profile, create kv cache, warmup model\) "
+                                      r"took ([\d.]+) s"),
+    "graph_capture_s": re.compile(r"Graph capturing finished in ([\d.]+) secs"),  # whole s
+    "torch_compile_s": re.compile(r"torch\.compile took ([\d.]+) s in total"),
+    "kv_cache_gib": re.compile(r"Available KV cache memory: ([\d.]+) GiB"),
+}
+
+
+def log_phases(log):
+    text = open(log, errors="replace").read()
+    out = {}
+    for k, rx in LOG_PHASES.items():
+        m = rx.findall(text)
+        if not m:
+            continue
+        last = m[-1]
+        if k == "weight_load_s":
+            out["weight_alloc_gib"], out[k] = float(last[0]), float(last[1])
+        else:
+            out[k] = float(last)
+    return out
+
+
+@dataclass
+class Engine:
     name: str
-    shape: Tuple[int, ...]
-    dtype: torch.dtype
-    nbytes: int
-    digest: str
-
-
-@dataclass
-class ColocatedWeightLease:
-    """
-    A worker's read-only view onto a `SharedWeightHolder`'s tensors plus its
-    isolated per-worker KV cache + scratch buffer allocation budget.
-    """
-
-    lease_id: str
-    worker_id: str
-    role: str  # "active" | "standby"
-    weights: Dict[str, torch.Tensor]
-    kv_cache_bytes: int
-    scratch_bytes: int
-    kv_allocated: bool = True
-    created_at: float = field(default_factory=time.monotonic)
+    gpu: int
+    port: int
+    work: str
+    holder: Holder | None          # None: load from disk (cold start)
+    pid: int | None = None
+    start_report: dict = field(default_factory=dict)
 
     @property
-    def total_dedicated_bytes(self) -> int:
-        if not self.kv_allocated:
-            return self.scratch_bytes
-        return self.kv_cache_bytes + self.scratch_bytes
+    def log(self):
+        return os.path.join(self.work, f"{self.name}.log")
 
-    @property
-    def extra_weight_bytes(self) -> int:
-        """Colocated workers allocate 0 extra bytes for model weights."""
-        return 0
+    def start(self, model, python, gmu, max_model_len, extra=()):
+        """engine.py start (the lab launcher), leased from the holder when there is one."""
+        launcher = [python, str(HERE / "engine.py"), "start", "--cache-root",
+                    os.path.join(self.work, "cache"), "--log", self.log, "--vllm",
+                    vllm_bin(python)]
+        if self.holder is not None:
+            launcher += ["--weights", "--weights-socket-dir", self.holder.socket_dir]
+        launcher += [model, "--port", str(self.port), "--gpu-memory-utilization", str(gmu),
+                     "--max-model-len", str(max_model_len), "--worker-extension-cls", EXT_CLS,
+                     *extra]
+        pp = os.environ.get("PYTHONPATH")
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu), VLLM_SERVER_DEV_MODE="1",
+                   PYTHONPATH=os.pathsep.join([str(HERE)] + ([pp] if pp else [])))
+        t0 = time.monotonic()
+        r = subprocess.run(launcher, env=env, capture_output=True, text=True, timeout=3600)
+        t_healthy = time.monotonic() - t0
+        line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("{")), "{}")
+        rep = json.loads(line)
+        if r.returncode != 0 or rep.get("healthy_after_s") is None:
+            raise RuntimeError(f"engine {self.name} did not start: rc={r.returncode} "
+                               f"{line[:2000]} stderr={r.stderr[-2000:]}; log {self.log}")
+        self.pid = rep["pid"]
+        ttft = first_token_s(self.port, model)
+        phases = log_phases(self.log)
+        known = sum(phases.get(k, 0.0) for k in ("weight_load_s", "kv_profile_warmup_s"))
+        if "kv_profile_warmup_s" in phases:
+            # vLLM's "init engine" span holds compile + profile + KV alloc + warmup + capture
+            phases["kv_profile_alloc_warmup_excl_graph_s"] = (
+                phases["kv_profile_warmup_s"] - phases.get("graph_capture_s", 0.0))
+        self.start_report = {
+            "engine": self.name, "gpu": self.gpu, "leased": self.holder is not None,
+            "healthy_after_s": rep["healthy_after_s"], "launcher_wall_s": t_healthy,
+            **phases,
+            # what vLLM does not time itself: process spawn, imports, API server, distributed
+            # init, model build on meta (leased) and engine handshakes
+            "spawn_import_init_s_residual": rep["healthy_after_s"] - known,
+            "first_token_s": ttft,
+            "weights_probe": rep.get("weights_probe"),
+        }
+        return self.start_report
 
+    def stop(self):
+        import engine
+        if self.pid:
+            engine.stop_engine(self.pid, self.port)
+            self.pid = None
 
-def compute_tensor_digest(tensor: torch.Tensor) -> str:
-    """Compute a fast SHA-256 digest over a tensor's raw bytes (CPU or GPU)."""
-    cpu_view = tensor.detach().cpu().contiguous().view(torch.uint8)
-    return hashlib.sha256(cpu_view.numpy().tobytes()).hexdigest()
+    def kill(self):
+        """SIGKILL the engine's whole session (API server, engine core, workers)."""
+        if self.pid:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
+    # -- calls into the running engine --
+    def rpc(self, method, arg="{}", timeout=300):
+        body = json.dumps({"method": method, "args": [arg], "timeout": timeout})
+        return post_json(self.port, "/collective_rpc", body, timeout + 10)["results"][0]
 
-class GpuTimeSliceLock:
-    """
-    Lightweight micro-benchmark token lock for K colocated agent workers sharing
-    a GPU group.
+    def reset_prefix_cache(self):
+        return post_json(self.port, "/reset_prefix_cache?reset_running_requests=true", "{}", 60)
 
-    Agent steps spend 70-90% of wall time in CPU-bound work (`g_i` LLM reasoning,
-    AST diffing, Triton/C++ compilation, Phase 1 `prepare`), while the actual GPU
-    probe (`check()` / single-bucket graph recapture) takes 0.25-2.4 seconds.
-    `GpuTimeSliceLock` allows all K workers to run CPU preparation concurrently
-    while serializing only the timed GPU window so benchmarks never suffer from
-    co-tenant SM or HBM-bandwidth interference.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._active_holder: Optional[str] = None
-        self._history: List[Tuple[str, float, float]] = []
-        self._overlap_violations: int = 0
-
-    @property
-    def history(self) -> List[Tuple[str, float, float]]:
-        return list(self._history)
-
-    @property
-    def overlap_violations(self) -> int:
-        return self._overlap_violations
-
-    class _TokenContext:
-        def __init__(self, parent: "GpuTimeSliceLock", worker_id: str) -> None:
-            self._parent = parent
-            self._worker_id = worker_id
-            self._t0 = 0.0
-
-        def __enter__(self) -> "_TokenContext":
-            self._parent._lock.acquire()
-            self._t0 = time.monotonic()
-            if self._parent._active_holder is not None:
-                self._parent._overlap_violations += 1
-            self._parent._active_holder = self._worker_id
-            return self
-
-        def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-            end_time = time.monotonic()
-            self._parent._history.append((self._worker_id, self._t0, end_time))
-            self._parent._active_holder = None
-            self._parent._lock.release()
-
-    def acquire_gpu_window(self, worker_id: str) -> _TokenContext:
-        return self._TokenContext(self, worker_id)
-
-
-class SharedWeightHolder:
-    """
-    Daemon-resident weight holder for one GPU (or TP rank).
-
-    Holds model weights once in shared storage (CUDA IPC on GPU, POSIX shared
-    memory on CPU) and grants `ColocatedWeightLease` handles to K parallel
-    workers + warm-standby replicas.
-    """
-
-    def __init__(
-        self,
-        node_id: int,
-        local_rank: int,
-        total_hbm_bytes: int,
-        reserved_headroom_bytes: int = 4 * 1024**3,
-        simulated_bytes_scale: int = 1,
-    ) -> None:
-        self.node_id = node_id
-        self.local_rank = local_rank
-        self.total_hbm_bytes = total_hbm_bytes
-        self.reserved_headroom_bytes = reserved_headroom_bytes
-        # Allows CPU unit tests to represent GiB-scale weights using compact tensors
-        self.simulated_bytes_scale = simulated_bytes_scale
-
-        self._tensors: Dict[str, torch.Tensor] = {}
-        self._specs: Dict[str, TensorSpec] = {}
-        self._leases: Dict[str, ColocatedWeightLease] = {}
-        self._lock = threading.Lock()
-        self.gpu_lock = GpuTimeSliceLock()
-
-    def load_weights(self, state_dict: Dict[str, torch.Tensor]) -> None:
-        """Pin weights into shared memory / IPC storage and record digests."""
-        with self._lock:
-            self._tensors.clear()
-            self._specs.clear()
-            for name, tensor in state_dict.items():
-                shared = tensor.detach().clone().contiguous()
-                shared.share_memory_()
-                shared.requires_grad_(False)
-                nbytes = shared.numel() * shared.element_size() * self.simulated_bytes_scale
-                digest = compute_tensor_digest(shared)
-                self._tensors[name] = shared
-                self._specs[name] = TensorSpec(
-                    name=name,
-                    shape=tuple(shared.shape),
-                    dtype=shared.dtype,
-                    nbytes=nbytes,
-                    digest=digest,
-                )
-
-    @property
-    def weight_bytes(self) -> int:
-        return sum(spec.nbytes for spec in self._specs.values())
-
-    @property
-    def allocated_worker_bytes(self) -> int:
-        return sum(lease.total_dedicated_bytes for lease in self._leases.values())
-
-    @property
-    def used_hbm_bytes(self) -> int:
-        return self.weight_bytes + self.reserved_headroom_bytes + self.allocated_worker_bytes
-
-    @property
-    def free_hbm_bytes(self) -> int:
-        return max(0, self.total_hbm_bytes - self.used_hbm_bytes)
-
-    @property
-    def active_leases(self) -> Dict[str, ColocatedWeightLease]:
-        return dict(self._leases)
-
-    def attach_worker(
-        self,
-        worker_id: str,
-        kv_cache_bytes: int,
-        scratch_bytes: int,
-        role: str = "active",
-        defer_kv_allocation: bool = False,
-    ) -> ColocatedWeightLease:
-        """
-        Attach a worker to the shared weights with 0 extra weight bytes.
-        Verifies that the worker's isolated KV cache + scratch pool fits in HBM.
-        """
-        with self._lock:
-            if not self._tensors:
-                raise RuntimeError("WeightHolder has no loaded weights.")
-
-            needed = scratch_bytes if defer_kv_allocation else (kv_cache_bytes + scratch_bytes)
-            if needed > self.free_hbm_bytes:
-                raise HbmBudgetExceededError(
-                    f"Cannot attach worker {worker_id}: needs {needed} bytes, "
-                    f"but only {self.free_hbm_bytes} bytes free on node={self.node_id} rank={self.local_rank}"
-                )
-
-            # Export zero-copy shared tensor views pointing to the exact same storage data_ptr
-            shared_views: Dict[str, torch.Tensor] = {}
-            for name, src in self._tensors.items():
-                view = src.view(src.shape)
-                view.requires_grad_(False)
-                assert view.data_ptr() == src.data_ptr(), "IPC view must alias physical storage"
-                shared_views[name] = view
-
-            lease = ColocatedWeightLease(
-                lease_id=f"lease-{self.node_id}-{self.local_rank}-{worker_id}",
-                worker_id=worker_id,
-                role=role,
-                weights=shared_views,
-                kv_cache_bytes=kv_cache_bytes,
-                scratch_bytes=scratch_bytes,
-                kv_allocated=not defer_kv_allocation,
-            )
-            self._leases[worker_id] = lease
-            return lease
-
-    def promote_standby_lease(self, worker_id: str) -> None:
-        """Promote a warm-standby worker to active and materialize its pre-planned KV buffer."""
-        with self._lock:
-            lease = self._leases[worker_id]
-            if not lease.kv_allocated:
-                if lease.kv_cache_bytes > self.free_hbm_bytes:
-                    raise HbmBudgetExceededError(
-                        f"Insufficient HBM to materialize KV cache for promoted standby {worker_id}"
-                    )
-                lease.kv_allocated = True
-            lease.role = "active"
-
-    def detach_worker(self, worker_id: str) -> None:
-        with self._lock:
-            self._leases.pop(worker_id, None)
-
-    def verify_integrity(self) -> bool:
-        """Verify that no buggy worker kernel corrupted the shared read-only weights."""
-        with self._lock:
-            for name, tensor in self._tensors.items():
-                expected = self._specs[name].digest
-                actual = compute_tensor_digest(tensor)
-                if actual != expected:
-                    raise WeightCorruptionError(
-                        f"Shared weight tensor '{name}' corrupted on node={self.node_id} "
-                        f"rank={self.local_rank}: expected {expected[:12]}, got {actual[:12]}"
-                    )
-            return True
+    def healthy(self, timeout=0.5):
+        try:
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+            c.request("GET", "/health")
+            ok = c.getresponse().status == 200
+            c.close()
+            return ok
+        except OSError:
+            return False
 
 
-# ---------------------------------------------------------------------------
-# Case 2B: Inter-Node Fast Spin-Up via Node-0 -> Node-1..N-1 NCCL Broadcast
-# ---------------------------------------------------------------------------
+def post_json(port, path, body, timeout):
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    c.request("POST", path, body=body, headers={"Content-Type": "application/json"})
+    r = c.getresponse()
+    data = r.read()
+    c.close()
+    if r.status != 200:
+        raise RuntimeError(f"POST {path} on :{port}: {r.status} {data[:500]!r}")
+    return json.loads(data) if data else {}
 
 
-@dataclass
-class SeedingMetrics:
-    """Telemetry from a `DistributedWeightSeeder` broadcast run."""
-
-    num_nodes: int
-    tp_size: int
-    storage_reads_per_shard: int
-    total_bytes_broadcast_per_rail: int
-    num_slabs_per_rail: int
-    inter_node_pg_destroyed: bool
-    elapsed_s: float
+PROMPTS = ["The capital of France is", "def fibonacci(n):",
+           "In 1905, Albert Einstein published", "The three primary colors are"]
 
 
-class DistributedWeightSeeder:
-    """
-    Seeds weights across `num_nodes` replica nodes (each with `tp_size` GPUs)
-    by reading the checkpoint ONCE on Node 0 and broadcasting packed weight slabs
-    along `tp_size` parallel inter-node rails (`node_idx = 0..num_nodes-1` for
-    each `local_rank = 0..tp_size-1`).
+def reference(port, model, max_tokens=16):
+    """Greedy completions with the chosen token's logprob, one request per prompt."""
+    out = []
+    for p in PROMPTS:
+        body = json.dumps({"model": model, "prompt": p, "max_tokens": max_tokens,
+                           "temperature": 0, "logprobs": 1, "seed": 0})
+        r = post_json(port, "/v1/completions", body, 120)["choices"][0]
+        out.append({"text": r["text"], "tokens": r["logprobs"]["tokens"],
+                    "logprobs": [float(x) for x in r["logprobs"]["token_logprobs"]]})
+    return out
 
-    Once each node's local `SharedWeightHolder` has pinned its replica into
-    node-local HBM, the inter-node process group is immediately destroyed so
-    runtime kernel evaluation is 100% node-local.
+
+def stream_first_token(port, model, prompt="Hello", max_tokens=4, timeout=30):
+    """(seconds to the first streamed token, served_by header) or raises."""
+    t0 = time.monotonic()
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens,
+                       "temperature": 0, "stream": True})
+    c.request("POST", "/v1/completions", body=body, headers={"Content-Type": "application/json"})
+    r = c.getresponse()
+    if r.status != 200:
+        raise RuntimeError(f"status {r.status}")
+    served = r.getheader("X-Served-By")
+    buf = b""
+    while True:
+        chunk = r.read1(65536)
+        if not chunk:
+            raise RuntimeError("stream ended before a token")
+        buf += chunk
+        if b'"text"' in buf:
+            t1 = time.monotonic()
+            r.read()
+            c.close()
+            return t1 - t0, served, t1
+
+
+def first_token_s(port, model):
+    return stream_first_token(port, model)[0]
+
+
+# ---------------------------------------------------------------------------------------------
+# Router: one port, forwards to the active engine, switches on failure
+# ---------------------------------------------------------------------------------------------
+
+class Router:
+    def __init__(self, pool, port):
+        self.pool, self.port = pool, port
+        router = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def log_message(self, *a):
+                pass
+
+            def _forward(self, method):
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                for attempt in range(3):
+                    eng = router.pool.active
+                    try:
+                        c = http.client.HTTPConnection("127.0.0.1", eng.port, timeout=120)
+                        c.request(method, self.path, body=body or None,
+                                  headers={"Content-Type": "application/json"})
+                        r = c.getresponse()
+                    except OSError:
+                        router.pool.on_backend_error(eng, "connect")
+                        continue
+                    if r.status >= 500 and attempt < 2:
+                        r.read()
+                        router.pool.on_backend_error(eng, f"http {r.status}")
+                        continue
+                    self.send_response(r.status)
+                    for k, v in r.getheaders():
+                        if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                            self.send_header(k, v)
+                    self.send_header("X-Served-By", eng.name)
+                    self.end_headers()
+                    try:
+                        while True:
+                            chunk = r.read1(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                    except OSError:
+                        router.pool.on_backend_error(eng, "stream broke")
+                    c.close()
+                    return
+                self.send_response(503)
+                self.end_headers()
+
+            def do_POST(self):
+                self._forward("POST")
+
+            def do_GET(self):
+                self._forward("GET")
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+# ---------------------------------------------------------------------------------------------
+# The pool
+# ---------------------------------------------------------------------------------------------
+
+class Pool:
+    """Active and standby engines on two holders (two GPUs), a router, a ledger and the gate.
+
+    Invariants (each a bug of the old model, regression-tested in test_weight_scaling_colocate):
+    - (a) Nothing reaches the ledger or the standby without accept(); a pending patch that is not
+      accepted is rolled back before the next evaluate (the active holder is re-copied from the
+      standby's), so active and standby never diverge silently.
+    - (b) A rollback is a byte copy from a holder that holds the ledger (NCCL), checked by digest;
+      there is no in-process snapshot to be shallow.
+    - (c) Failover goes to the other holder, never to an engine on the faulted holder, and the
+      faulted holder is re-copied before its engine serves again.
     """
 
-    def __init__(
-        self,
-        num_nodes: int,
-        tp_size: int,
-        slab_max_bytes: int = 256 * 1024 * 1024,
-    ) -> None:
-        if num_nodes < 1 or tp_size < 1:
-            raise ValueError("num_nodes and tp_size must be >= 1")
-        self.num_nodes = num_nodes
-        self.tp_size = tp_size
-        self.slab_max_bytes = slab_max_bytes
-        self.storage_read_count_by_rank: Dict[Tuple[int, int], int] = {}
-        self.inter_node_pg_active: bool = False
+    def __init__(self, model, python, work, active: Engine, standby: Engine, router_port,
+                 tol=0.05):
+        self.model, self.python, self.work = model, python, work
+        self.active, self.standby = active, standby
+        self.ledger = Ledger()
+        self.pending: Patch | None = None
+        self.tol = tol
+        self.lock = threading.RLock()
+        self.events = []
+        self.ref = reference(active.port, model)
+        self.ref_digest = self.digest(active)
+        self.router = Router(self, router_port)
+        self._stop = threading.Event()
+        self._watch = threading.Thread(target=self._watchdog, daemon=True)
+        self._watch.start()
 
-    @staticmethod
-    def pack_state_dict_to_slabs(
-        state_dict: Dict[str, torch.Tensor],
-        slab_max_bytes: int,
-    ) -> Tuple[List[torch.Tensor], List[List[Tuple[str, Tuple[int, ...], torch.dtype, int, int]]]]:
-        """
-        Coalesce multiple weight tensors into contiguous byte slabs to maximize
-        NCCL ring/tree bus bandwidth utilization over NVLink/InfiniBand.
-        """
-        slabs: List[torch.Tensor] = []
-        manifests: List[List[Tuple[str, Tuple[int, ...], torch.dtype, int, int]]] = []
+    # -- state checks --
+    def digest(self, eng):
+        r = eng.rpc("lease_digest")
+        if not r.get("ok"):
+            raise RuntimeError(f"digest on {eng.name}: {r}")
+        self.events.append({"t": time.monotonic(), "ev": "digest", "engine": eng.name,
+                            "seconds": r["seconds"]})
+        return r["digest"]
 
-        cur_chunks: List[torch.Tensor] = []
-        cur_manifest: List[Tuple[str, Tuple[int, ...], torch.dtype, int, int]] = []
-        cur_offset = 0
+    def check_integrity(self, eng=None):
+        """Digest of `eng` (default: active) against the ledger's digest."""
+        eng = eng or self.active
+        d = self.digest(eng)
+        return digests_agree(self.ref_digest, d)
 
-        for name in sorted(state_dict.keys()):
-            tensor = state_dict[name].detach().contiguous()
-            byte_view = tensor.view(torch.uint8).reshape(-1)
-            nbytes = byte_view.numel()
+    # -- failover --
+    def failover(self, reason, failed=None):
+        """Switch the router to the standby. Returns the switch record (monotonic times)."""
+        with self.lock:
+            failed = failed or self.active
+            if failed is not self.active:
+                return None                  # already switched
+            t = time.monotonic()
+            self.active, self.standby = self.standby, self.active
+            rec = {"t": t, "ev": "failover", "reason": reason, "from": failed.name,
+                   "to": self.active.name}
+            self.events.append(rec)
+            return rec
 
-            if cur_chunks and (cur_offset + nbytes > slab_max_bytes):
-                slabs.append(torch.cat(cur_chunks, dim=0))
-                manifests.append(cur_manifest)
-                cur_chunks = []
-                cur_manifest = []
-                cur_offset = 0
+    def on_backend_error(self, eng, why):
+        """A refused connection or a 5xx from the active engine. In this pool every request is
+        well formed, so a 5xx means the engine broke (a sticky CUDA error answers 500 before
+        /health notices)."""
+        if eng is self.active:
+            self.failover(f"router: {why}", eng)
 
-            cur_chunks.append(byte_view)
-            cur_manifest.append((name, tuple(tensor.shape), tensor.dtype, cur_offset, nbytes))
-            cur_offset += nbytes
+    def _watchdog(self):
+        while not self._stop.is_set():
+            eng = self.active
+            if eng.pid and not eng.healthy(timeout=0.5) and not eng.healthy(timeout=0.5):
+                self.failover("health", eng)
+            time.sleep(0.05)
 
-        if cur_chunks:
-            slabs.append(torch.cat(cur_chunks, dim=0))
-            manifests.append(cur_manifest)
+    # -- repairs (the side that does not serve) --
+    def restore_holder(self, broken: Engine, good: Engine):
+        """Re-copy broken's holder from good's over NCCL, reset broken's prefix cache, and check
+        it now matches the ledger digest."""
+        rep = copy(self.model, broken.holder.socket_dir, good.holder.gpu, broken.holder.gpu,
+                   log_dir=self.work, python=self.python)
+        if not rep["ok"]:
+            raise RuntimeError(f"restore copy failed: {rep}")
+        broken.reset_prefix_cache()
+        agree = self.check_integrity(broken)
+        rec = {"t": time.monotonic(), "ev": "restore", "engine": broken.name,
+               "copy": rep, "digest_ok": agree["ok"]}
+        self.events.append(rec)
+        return rec
 
-        return slabs, manifests
+    def respawn(self, eng: Engine, gmu, max_model_len):
+        """Restart a dead engine leased from its (still resident) holder, then replay nothing:
+        the holder already holds the ledger; check it."""
+        eng.kill()
+        time.sleep(1.0)
+        eng.pid = None
+        rep = eng.start(self.model, self.python, gmu, max_model_len)
+        agree = self.check_integrity(eng)
+        rec = {"t": time.monotonic(), "ev": "respawn", "engine": eng.name, "start": rep,
+               "digest_ok": agree["ok"]}
+        self.events.append(rec)
+        return rec
 
-    @staticmethod
-    def unpack_slabs_to_state_dict(
-        slabs: List[torch.Tensor],
-        manifests: List[List[Tuple[str, Tuple[int, ...], torch.dtype, int, int]]],
-    ) -> Dict[str, torch.Tensor]:
-        """Reconstruct typed weight tensors from coalesced NCCL broadcast slabs."""
-        out: Dict[str, torch.Tensor] = {}
-        for slab, manifest in zip(slabs, manifests):
-            for name, shape, dtype, offset, nbytes in manifest:
-                raw_slice = slab[offset : offset + nbytes].clone()
-                out[name] = raw_slice.view(dtype).reshape(shape)
+    # -- the accept gate --
+    def evaluate(self, patch: Patch):
+        """Apply `patch` to the active engine, gate it. Pass: pending (accept() commits it).
+        Fail: the standby takes over and the patched holder is restored."""
+        out = {"patch": patch.id}
+        if self.pending is not None:
+            out["rolled_back_pending"] = self.rollback("superseded by " + patch.id)
+        eng = self.active
+        r = eng.rpc("lease_apply", patch.to_json())
+        if not r.get("ok"):
+            raise RuntimeError(f"apply {patch.id}: {r}")
+        eng.reset_prefix_cache()
+        got = reference(eng.port, self.model)
+        gate = gate_compare(self.ref, got, self.tol)
+        out.update({"touched": r["touched"], "apply_s": r["seconds"], "gate": gate})
+        if gate["pass"]:
+            self.pending = patch
+            out["state"] = "pending"
+            return out
+        out["state"] = "rejected"
+        out["failover"] = self.failover(f"patch {patch.id} rejected", eng)
+        out["restore"] = self.restore_holder(eng, self.active)
         return out
 
-    def seed_cluster_holders(
-        self,
-        holders: Dict[Tuple[int, int], SharedWeightHolder],
-        storage_loader_fn: Callable[[int], Dict[str, torch.Tensor]],
-    ) -> SeedingMetrics:
-        """
-        Execute the 3-stage Inter-Node Weight Broadcast:
-          Stage 1: Node 0 (`node_id == 0`) loads each TP shard `r` from storage.
-                   Nodes `1..num_nodes-1` perform ZERO storage reads.
-          Stage 2: Form per-rail inter-node communicators and broadcast coalesced
-                   weight slabs from `(node=0, rank=r)` to `(node=1..N-1, rank=r)`.
-          Stage 3: Tear down the inter-node process group (`inter_node_pg_active = False`)
-                   and verify bit-exact SHA-256 parity across all nodes.
-        """
-        start_time = time.monotonic()
-        self.storage_read_count_by_rank.clear()
-        self.inter_node_pg_active = True
+    def rollback(self, why):
+        """Undo the pending patch: the standby (ledger state) takes over, the patched holder is
+        re-copied from it."""
+        patch, eng = self.pending, self.active
+        self.pending = None
+        fo = self.failover(f"rollback {patch.id}: {why}", eng)
+        rs = self.restore_holder(eng, self.active)
+        return {"patch": patch.id, "failover": fo, "restore": rs}
 
-        total_bytes_per_rail = 0
-        num_slabs_per_rail = 0
+    def accept(self):
+        """Commit the pending patch: ledger, then replay onto the standby, then the new
+        reference (tokens/logprobs and digest) is the ledger's."""
+        patch = self.pending
+        if patch is None:
+            raise RuntimeError("nothing pending to accept")
+        r = self.standby.rpc("lease_apply", patch.to_json())
+        if not r.get("ok"):
+            raise RuntimeError(f"replay {patch.id} on standby: {r}")
+        self.standby.reset_prefix_cache()
+        self.ledger.append(patch)
+        self.pending = None
+        self.ref = reference(self.active.port, self.model)
+        self.ref_digest = self.digest(self.active)
+        sb = digests_agree(self.ref_digest, self.digest(self.standby))
+        return {"accepted": patch.id, "ledger": self.ledger.ids, "standby_digest_ok": sb["ok"]}
 
+    def close(self):
+        self._stop.set()
+        self.router.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Load generator for failover timing
+# ---------------------------------------------------------------------------------------------
+
+class Load:
+    """Back-to-back streaming requests through the router; records every first token."""
+
+    def __init__(self, port, model):
+        self.port, self.model = port, model
+        self.samples, self.errors = [], []
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self._stop.is_set():
+            t_send = time.monotonic()
+            try:
+                ttft, served, t_tok = stream_first_token(self.port, self.model, timeout=60)
+                self.samples.append({"t_send": t_send, "t_first_token": t_tok,
+                                     "served_by": served})
+            except Exception as e:  # noqa: BLE001
+                self.errors.append({"t": time.monotonic(), "error": repr(e)[:200]})
+                time.sleep(0.01)
+
+    def first_after(self, t_fault, served_by, timeout=120):
+        """First token from `served_by` after t_fault (waits for one)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for s in list(self.samples):
+                if s["t_first_token"] > t_fault and s["served_by"] == served_by:
+                    return s
+            time.sleep(0.01)
+        return None
+
+    def stop(self):
+        self._stop.set()
+        self.thread.join(timeout=60)
+
+
+def measure_fault(pool, load, kind):
+    """Inject `kind` into the active engine; return fault -> first served token on the
+    standby, how it was detected, and the post-failover correctness check."""
+    victim, target = pool.active, pool.standby
+    t_fault = time.monotonic()
+    if kind == "kill":
+        victim.kill()
+    elif kind == "cuda":
         try:
-            for local_rank in range(self.tp_size):
-                # Stage 1: ONLY Node 0 reads from NFS / Lustre / NVMe cache
-                self.storage_read_count_by_rank[(0, local_rank)] = (
-                    self.storage_read_count_by_rank.get((0, local_rank), 0) + 1
-                )
-                node0_state = storage_loader_fn(local_rank)
-                holders[(0, local_rank)].load_weights(node0_state)
-
-                # Pack Node 0's shard into contiguous NCCL broadcast slabs
-                slabs, manifests = self.pack_state_dict_to_slabs(
-                    node0_state, slab_max_bytes=self.slab_max_bytes
-                )
-                if local_rank == 0:
-                    total_bytes_per_rail = sum(slab.numel() for slab in slabs)
-                    num_slabs_per_rail = len(slabs)
-
-                # Stage 2: Broadcast along rail `local_rank` to Nodes 1..num_nodes-1
-                for dst_node in range(1, self.num_nodes):
-                    recv_slabs = [slab.clone() for slab in slabs]
-                    recv_state = self.unpack_slabs_to_state_dict(recv_slabs, manifests)
-                    holders[(dst_node, local_rank)].load_weights(recv_state)
-        finally:
-            # Stage 3: Always tear down inter-node communicator so runtime is 100% node-local
-            self.inter_node_pg_active = False
-
-        elapsed = time.monotonic() - start_time
-        return SeedingMetrics(
-            num_nodes=self.num_nodes,
-            tp_size=self.tp_size,
-            storage_reads_per_shard=1,
-            total_bytes_broadcast_per_rail=total_bytes_per_rail,
-            num_slabs_per_rail=num_slabs_per_rail,
-            inter_node_pg_destroyed=not self.inter_node_pg_active,
-            elapsed_s=elapsed,
-        )
+            r = victim.rpc("lease_fault", "cuda", timeout=10)
+            err = None if r.get("ok") is False else f"no error: {r}"
+        except Exception as e:  # noqa: BLE001 (the engine is expected to break)
+            err = repr(e)[:300]
+        # the RPC that ran the faulting kernel reports the error: the coordinator's signal
+        pool.failover(f"sticky CUDA error from rpc: {err}", victim)
+    elif kind == "corrupt":
+        victim.rpc("lease_fault", "corrupt")
+        integ = pool.check_integrity(victim)
+        if not integ["ok"]:
+            pool.failover(f"digest mismatch ({integ['n_differ']} tensors)", victim)
+    s = load.first_after(t_fault, target.name)
+    fo = next((e for e in pool.events[::-1] if e["ev"] == "failover" and e["t"] >= t_fault), None)
+    got = reference(pool.router.port, pool.model)
+    return {"fault": kind, "from": victim.name, "to": target.name,
+            "fault_to_switch_s": (fo["t"] - t_fault) if fo else None,
+            "fault_to_first_token_s": (s["t_first_token"] - t_fault) if s else None,
+            "detected_by": fo["reason"] if fo else None,
+            "correct_after": gate_compare(pool.ref, got, 0.0)}
 
 
-# ---------------------------------------------------------------------------
-# Case 3: Worker Engine Fault Tolerance, 3 Standby Stages &
-#         `CommittedPatchLedger` (`accept()`-Gated State Synchronization)
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
+# The end-to-end demo (what the GPU evidence runs)
+# ---------------------------------------------------------------------------------------------
+
+def demo(a):
+    model, python, work = a.model, a.python, os.path.abspath(a.work_dir)
+    os.makedirs(work, exist_ok=True)
+    g0, g1, g2 = (int(x) for x in a.gpus.split(","))
+    sock = os.path.join(work, "sock")
+    os.makedirs(sock, mode=0o700, exist_ok=True)
+    res = {"model": model, "gpus": [g0, g1, g2], "max_model_len": a.max_model_len}
+    gmu, mml = a.gmu, a.max_model_len
+    eng_list, holders = [], []
+
+    def save():
+        with open(os.path.join(work, "result.json"), "w") as f:
+            json.dump(res, f, indent=1, default=str)
+
+    try:
+        # 1. cold start from disk, GPU g2 (nothing else on it). The first one also fills the
+        # compile cache; the second (same caches the leased starts get) is the baseline.
+        for tag in ("cold_first", "cold_start"):
+            cold = Engine(tag, g2, a.port_base + 0, work, None)
+            eng_list.append(cold)
+            res[tag] = cold.start(model, python, gmu, mml)
+            res["cold_ref"] = reference(cold.port, model)
+            cold.stop()
+            save()
+        # 2. holder H0 from disk on g0; H1 on g1 without the checkpoint, seeded over NCCL
+        h0 = Holder(g0, sock, os.path.join(work, "holder0.log"))
+        h1 = Holder(g1, sock, os.path.join(work, "holder1.log"), seeded_from=g0)
+        holders += [h0, h1]
+        res["holder0"] = h0.start(model, python, mml)
+        res["holder1_dummy"] = h1.start(model, python, mml, dummy=True)
+        res["seed_h0_to_h1"] = copy(model, sock, g0, g1, mml, python, work)
+        save()
+        # 3. leased engines: active on H0, standby on H1, and a second lessee of H0
+        act = Engine("A", g0, a.port_base + 1, work, h0)
+        sby = Engine("S", g1, a.port_base + 2, work, h1)
+        eng_list += [act, sby]
+        res["leased_start_active"] = act.start(model, python, gmu, mml)
+        res["leased_start_standby"] = sby.start(model, python, gmu, mml)
+        res["lease_info"] = {"A": act.rpc("lease_info"), "S": sby.rpc("lease_info")}
+        colo = Engine("A2", g0, a.port_base + 3, work, h0)
+        eng_list.append(colo)
+        res["leased_start_colocated"] = colo.start(model, python, gmu, mml)
+        res["colocated_info"] = colo.rpc("lease_info")
+        res["colocated_same_outputs"] = gate_compare(reference(act.port, model),
+                                                     reference(colo.port, model), 0.0)
+        colo.stop()
+        save()
+        # 4. correctness of the lease: leased (H0, H1) == cold disk load
+        pool = Pool(model, python, work, act, sby, a.port_base + 9, tol=a.tol)
+        res["lease_vs_cold"] = {"A": gate_compare(res["cold_ref"], pool.ref, 0.0),
+                                "S": gate_compare(res["cold_ref"], reference(sby.port, model),
+                                                  0.0),
+                                "digest_H0_vs_H1": digests_agree(pool.ref_digest,
+                                                                 pool.digest(sby))["ok"]}
+        load = Load(pool.router.port, model)
+        time.sleep(3)
+        res["scenarios"] = sc = []
+        # 5a. process crash of the active engine
+        r = measure_fault(pool, load, "kill")
+        r["repair"] = pool.respawn(r_eng(pool, r["from"]), gmu, mml)
+        sc.append(r); save()
+        # 5b. weight corruption in the active holder (now S on H1): failover to H0, re-copy H1
+        r = measure_fault(pool, load, "corrupt")
+        r["repair"] = pool.restore_holder(r_eng(pool, r["from"]), pool.active)
+        sc.append(r); save()
+        if not a.patches:
+            sc.append(measure_fault(pool, load, "cuda"))
+            sc[-1]["repair"] = pool.respawn(r_eng(pool, sc[-1]["from"]), gmu, mml)
+            raise _Done
+        # 5c. a rejected patch: standby takes over, patched holder restored
+        t_f = time.monotonic()
+        victim = pool.active
+        ev = pool.evaluate(Patch("bad-zero-mlp", r"layers\.(1[0-9])\.mlp\.down_proj", "scale", 0.0))
+        s = load.first_after(t_f, pool.active.name)
+        ev["fault_to_first_token_s"] = (s["t_first_token"] - t_f) if s else None
+        ev["correct_after"] = gate_compare(pool.ref, reference(pool.router.port, model), 0.0)
+        ev["from"] = victim.name
+        sc.append({"fault": "patch_rejected", **ev}); save()
+        # 5d. bug (a): a passing patch left unaccepted, then another evaluate
+        e1 = pool.evaluate(Patch("good-1", r"layers\.3\.mlp\.down_proj", "noise", 1e-4, 1))
+        e2 = pool.evaluate(Patch("good-2", r"layers\.5\.mlp\.down_proj", "noise", 1e-4, 2))
+        acc = pool.accept()
+        res["accept_gate"] = {"first": e1, "second": e2, "accept": acc,
+                              "digest_after": {"active": pool.check_integrity()["ok"],
+                                               "standby": pool.check_integrity(pool.standby)["ok"]},
+                              "ledger": pool.ledger.ids}
+        save()
+        # 5e. sticky CUDA error in the active engine
+        r = measure_fault(pool, load, "cuda")
+        r["repair"] = pool.respawn(r_eng(pool, r["from"]), gmu, mml)
+        sc.append(r)
+        raise _Done
+    except _Done:
+        load.stop()
+        res["load"] = {"requests": len(load.samples), "errors": len(load.errors),
+                       "errors_sample": load.errors[:5]}
+        res["events"] = [{k: v for k, v in e.items() if k != "copy"} for e in pool.events]
+        pool.close()
+        save()
+    finally:
+        for e in eng_list:
+            try:
+                e.stop()
+            except Exception:  # noqa: BLE001
+                e.kill()
+        for h in holders:
+            h.stop()
+        save()
+    print(json.dumps({"ok": True, "result": os.path.join(work, "result.json")}))
+    return 0
 
 
-class FaultClass(enum.Enum):
-    NONE = "none"
-    CLASS_A_RECOVERABLE = "class_a_recoverable"  # Syntax/compile/shape/gate error (<5ms rollback)
-    CLASS_B_STICKY_CUDA = "class_b_sticky_cuda"  # Illegal memory access / device assert / segfault
+class _Done(Exception):
+    pass
 
 
-class StandbySyncMode(enum.Enum):
-    """
-    Defines the Standby Replica Stage and Patch Synchronization Contract:
-      - OPTION_1_ZYGOTE_ONLY:
-          No GPU-attached standby replica is kept idle (`0 GiB` standby GPU overhead).
-          On a Class B sticky CUDA crash, the pool forks a fresh worker from `Zygote`,
-          attaches IPC weights, and replays `CommittedPatchLedger` ($[P_1, ..., P_k]$)
-          in ~5-7 s.
-      - OPTION_2_CLEAN_BASE_REPLAY_ON_FAILOVER:
-          Standby is a live worker attached to `SharedWeightHolder` IPC handles sitting
-          at clean base state $P_0$. Only when Active crashes on candidate $P_{k+1}$
-          does Standby replay `CommittedPatchLedger` ($[P_1, ..., P_k]$) via `patch_swap`
-          in ~5-20 ms (plus optional graph recapture) before becoming Active.
-      - OPTION_3_ACCEPT_GATED_SHADOW:
-          Candidate $P_{k+1}$ is tested ONLY on Active during `evaluate_patch()`.
-          Only AFTER $P_{k+1}$ passes `check()` and is committed via `accept_patch(P_{k+1})`
-          does the coordinator shadow-apply $P_{k+1}$ to Standby (`standby.apply_committed_patch()`).
-          Thus Standby is ALWAYS at the exact latest accepted state $[P_1, ..., P_k]$ and
-          never exposed to unverified crashing candidates—giving true 0 ms state-synced
-          failover when candidate $P_{k+1}$ crashes Active, while the newly respawned
-          background Standby replays `CommittedPatchLedger` upon boot.
-    """
-
-    OPTION_1_ZYGOTE_ONLY = "option_1_zygote_only"
-    OPTION_2_CLEAN_BASE_REPLAY_ON_FAILOVER = "option_2_clean_base_replay_on_failover"
-    OPTION_3_ACCEPT_GATED_SHADOW = "option_3_accept_gated_shadow"
+def r_eng(pool, name):
+    return pool.active if pool.active.name == name else pool.standby
 
 
-class RecoverablePatchError(RuntimeError):
-    """
-    Class A Fault: Python exception, TorchInductor/Triton compile error, shape
-    mismatch, numerical correctness gate failure, or step-gap commit timeout.
-    Does NOT poison the CUDA context; recovered via in-place `uninstall()` + `reset()`.
-    """
+def parser():
+    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("copy-rank")
+    c.add_argument("--rank", type=int, required=True)
+    c.add_argument("--init", required=True)
+    for q in (c, sub.add_parser("copy"), sub.add_parser("demo")):
+        q.add_argument("--model", required=True)
+        q.add_argument("--max-model-len", type=int, default=4096)
+        q.add_argument("--python", default=sys.executable)
+    cp = sub._name_parser_map["copy"]
+    cp.add_argument("--socket-dir", required=True)
+    cp.add_argument("--src-gpu", type=int, required=True)
+    cp.add_argument("--dst-gpu", type=int, required=True)
+    c.add_argument("--socket-dir", required=True)
+    d = sub._name_parser_map["demo"]
+    d.add_argument("--gpus", required=True, help="three GPUs: holder0/active, holder1/standby, cold")
+    d.add_argument("--work-dir", required=True)
+    d.add_argument("--gmu", type=float, default=0.35)
+    d.add_argument("--port-base", type=int, default=8751)
+    d.add_argument("--tol", type=float, default=0.05)
+    d.add_argument("--no-patches", dest="patches", action="store_false",
+                   help="skip the weight-patch scenarios (their targets are dense-model names)")
+    return p
 
 
-class StickyCudaError(RuntimeError):
-    """
-    Class B Fault: `cudaErrorIllegalAddress` (CUDA error 700/719), `cudaErrorAssert`,
-    native C++ segfault, or NCCL rank timeout. Poisons the process CUDA context;
-    recovered via 0ms failover to the Warm-Standby worker + background Zygote respawn.
-    """
+def main(argv=None):
+    sys.path.insert(0, str(HERE))
+    a = parser().parse_args(argv)
+    if a.cmd == "copy-rank":
+        return copy_rank(a)
+    if a.cmd == "copy":
+        r = copy(a.model, a.socket_dir, a.src_gpu, a.dst_gpu, a.max_model_len, a.python)
+        print(json.dumps(r))
+        return 0 if r["ok"] else 1
+    return demo(a)
 
 
-@dataclass(frozen=True)
-class CommittedPatchEntry:
-    """An accepted patch $[P_i]$ recorded in the append-only `CommittedPatchLedger`."""
-
-    patch_id: str
-    patch_fn: Callable[["WorkerReplica", Dict[str, torch.Tensor]], None]
-    touches_cudagraph: bool = False
-
-
-class CommittedPatchLedger:
-    """
-    Append-only ledger of verified, `accept()`-ed patches $[P_1, P_2, ..., P_k]$.
-
-    Solves the Standby Replica State Synchronization dilemma:
-      1. Why naive pre-check mirroring fails: If Standby mirrored every candidate
-         `prepare(P_{k+1})` *before* `check(P_{k+1})` passed, a sticky CUDA crash
-         in $P_{k+1}$ would poison both Active and Standby simultaneously!
-      2. Why naive $P_0$ failover fails: If Active has already accepted $[P_1, ..., P_k]$
-         and crashes while testing $P_{k+1}$, failing over to an un-synced $P_0$
-         Standby would silently lose $[P_1, ..., P_k]$!
-      3. `CommittedPatchLedger` records a patch ONLY after `check()` succeeds and
-         `accept_patch()` is invoked, driving both Option 3 shadow updates and
-         post-respawn replay on newly forked Zygote workers.
-    """
-
-    def __init__(self) -> None:
-        self._entries: List[CommittedPatchEntry] = []
-
-    def record_accepted(self, entry: CommittedPatchEntry) -> None:
-        if any(item.patch_id == entry.patch_id for item in self._entries):
-            return
-        self._entries.append(entry)
-
-    @property
-    def entries(self) -> List[CommittedPatchEntry]:
-        return list(self._entries)
-
-    @property
-    def patch_ids(self) -> List[str]:
-        return [item.patch_id for item in self._entries]
-
-    def __len__(self) -> int:
-        return len(self._entries)
-
-
-@dataclass
-class WorkerReplica:
-    """Represents a live or standby worker process attached to a `SharedWeightHolder`."""
-
-    worker_id: str
-    pid: int
-    role: str  # "active" | "standby" | "poisoned"
-    cuda_context_healthy: bool = True
-    installed_patch: Optional[str] = None  # Currently staged candidate (pre-accept)
-    committed_patches: List[str] = field(default_factory=list)  # Accepted patches [P_1, ..., P_k]
-    worker_state: Dict[str, Any] = field(default_factory=dict)  # Simulated hotpatched symbol table
-    rollback_count: int = 0
-    checks_completed: int = 0
-
-    def apply_committed_patch(
-        self,
-        entry: CommittedPatchEntry,
-        weights: Dict[str, torch.Tensor],
-    ) -> None:
-        """Apply an already-verified committed patch $P_i$ to this replica."""
-        if entry.patch_id in self.committed_patches:
-            return
-        entry.patch_fn(self, weights)
-        self.committed_patches.append(entry.patch_id)
-
-
-@dataclass
-class PatchEvalResult:
-    """Outcome of running an agent patch through `ActiveStandbyWorkerPool`."""
-
-    patch_id: str
-    success: bool
-    accepted: bool
-    fault_class: FaultClass
-    active_pid_before: int
-    active_pid_after: int
-    failover_triggered: bool
-    recovery_latency_ms: float
-    background_respawn_scheduled: bool
-    active_committed_patches: List[str] = field(default_factory=list)
-    standby_committed_patches: List[str] = field(default_factory=list)
-    failover_replayed_patches: int = 0
-    new_standby_pid: Optional[int] = None
-
-
-class ActiveStandbyWorkerPool:
-    """
-    Manages an Active + Warm-Standby pair of worker replicas colocated on the
-    same `SharedWeightHolder` with `CommittedPatchLedger` state synchronization:
-      - Both replicas attach to the same read-only CUDA IPC weight handles (`0`
-        extra weight memory).
-      - Candidate patches $P_{k+1}$ are evaluated ONLY on `self.active` inside a
-        transactional snapshot of `worker_state`.
-      - If $P_{k+1}$ raises a Class A fault (`RecoverablePatchError`), `self.active`
-        restores its snapshot back to the exact committed state $[P_1, ..., P_k]$
-        in <5 ms (`0` failovers, `[P_1, ..., P_k]` preserved).
-      - If $P_{k+1}$ succeeds and is accepted (`accept=True` or `accept_patch()`),
-        it is appended to `self.ledger`. Under `OPTION_3_ACCEPT_GATED_SHADOW`
-        (default), `self.standby` immediately applies $P_{k+1}$ so Standby is
-        always hot-synced at $[P_1, ..., P_k]$.
-      - If candidate $P_{k+1}$ raises a Class B fault (`StickyCudaError`),
-        `self.active` is poisoned, and the pool fails over according to `sync_mode`:
-          * `OPTION_3_ACCEPT_GATED_SHADOW`: Standby is ALREADY at $[P_1, ..., P_k]$
-            (`0` patches to replay on failover -> `<1 ms` failover!), and the
-            newly spawned background Standby replays `self.ledger` ($[P_1, ..., P_k]$).
-          * `OPTION_2_CLEAN_BASE_REPLAY_ON_FAILOVER`: Standby sits at $P_0$ and
-            replays all $k$ patches from `self.ledger` during failover promotion.
-          * `OPTION_1_ZYGOTE_ONLY`: No idle Standby replica is kept; failover
-            spawns a fresh replica from Zygote + IPC and replays `self.ledger`.
-    """
-
-    def __init__(
-        self,
-        holder: SharedWeightHolder,
-        kv_cache_bytes: int,
-        scratch_bytes: int,
-        initial_pid_base: int = 10000,
-        sync_mode: StandbySyncMode = StandbySyncMode.OPTION_3_ACCEPT_GATED_SHADOW,
-    ) -> None:
-        self.holder = holder
-        self.kv_cache_bytes = kv_cache_bytes
-        self.scratch_bytes = scratch_bytes
-        self._next_pid = initial_pid_base
-        self.sync_mode = sync_mode
-        self.ledger = CommittedPatchLedger()
-        self.failover_count = 0
-        self.inplace_rollback_count = 0
-        self._staged_entry: Optional[CommittedPatchEntry] = None
-
-        self.active: WorkerReplica = self._spawn_replica(
-            role="active", defer_kv=False, replay_ledger=True
-        )
-        self.standby: Optional[WorkerReplica] = (
-            None
-            if sync_mode == StandbySyncMode.OPTION_1_ZYGOTE_ONLY
-            else self._spawn_replica(
-                role="standby",
-                defer_kv=True,
-                replay_ledger=(sync_mode == StandbySyncMode.OPTION_3_ACCEPT_GATED_SHADOW),
-            )
-        )
-
-    def _spawn_replica(
-        self,
-        role: str,
-        defer_kv: bool,
-        replay_ledger: bool = False,
-    ) -> WorkerReplica:
-        pid = self._next_pid
-        self._next_pid += 1
-        worker_id = f"worker-{pid}"
-        lease = self.holder.attach_worker(
-            worker_id=worker_id,
-            kv_cache_bytes=self.kv_cache_bytes,
-            scratch_bytes=self.scratch_bytes,
-            role=role,
-            defer_kv_allocation=defer_kv,
-        )
-        replica = WorkerReplica(worker_id=worker_id, pid=pid, role=role)
-        if replay_ledger:
-            for entry in self.ledger.entries:
-                replica.apply_committed_patch(entry, lease.weights)
-        return replica
-
-    def accept_patch(self, patch_id: Optional[str] = None) -> None:
-        """
-        Commit the most recently evaluated candidate patch $P_{k+1}$ to the
-        `CommittedPatchLedger` and (under Option 3) shadow-apply it to `self.standby`.
-        """
-        if self._staged_entry is None:
-            raise RuntimeError("No verified staged patch available to accept().")
-        if patch_id is not None and self._staged_entry.patch_id != patch_id:
-            raise ValueError(
-                f"Staged patch is '{self._staged_entry.patch_id}', not '{patch_id}'"
-            )
-
-        entry = self._staged_entry
-        self._staged_entry = None
-        self.active.installed_patch = None
-        if entry.patch_id not in self.active.committed_patches:
-            self.active.committed_patches.append(entry.patch_id)
-
-        self.ledger.record_accepted(entry)
-
-        # Option 3 (`accept()`-gated shadow): apply verified patch to Standby now
-        if (
-            self.sync_mode == StandbySyncMode.OPTION_3_ACCEPT_GATED_SHADOW
-            and self.standby is not None
-        ):
-            standby_lease = self.holder.active_leases[self.standby.worker_id]
-            self.standby.apply_committed_patch(entry, standby_lease.weights)
-
-    def evaluate_patch(
-        self,
-        patch_id: str,
-        patch_fn: Callable[[WorkerReplica, Dict[str, torch.Tensor]], None],
-        accept_on_pass: bool = False,
-        touches_cudagraph: bool = False,
-    ) -> PatchEvalResult:
-        """
-        Install and check a candidate patch on `self.active` ONLY (never exposing
-        `self.standby` to unverified code), with automatic Class A in-place
-        rollback or Class B state-preserving failover.
-        """
-        pid_before = self.active.pid
-        self.active.installed_patch = patch_id
-        state_snapshot = dict(self.active.worker_state)
-        lease = self.holder.active_leases[self.active.worker_id]
-
-        try:
-            with self.holder.gpu_lock.acquire_gpu_window(self.active.worker_id):
-                patch_fn(self.active, lease.weights)
-                # Verify shared weights were not silently mutated by a buggy kernel
-                self.holder.verify_integrity()
-
-            self.active.checks_completed += 1
-            self._staged_entry = CommittedPatchEntry(
-                patch_id=patch_id,
-                patch_fn=patch_fn,
-                touches_cudagraph=touches_cudagraph,
-            )
-            accepted = False
-            if accept_on_pass:
-                self.accept_patch(patch_id)
-                accepted = True
-
-            return PatchEvalResult(
-                patch_id=patch_id,
-                success=True,
-                accepted=accepted,
-                fault_class=FaultClass.NONE,
-                active_pid_before=pid_before,
-                active_pid_after=self.active.pid,
-                failover_triggered=False,
-                recovery_latency_ms=0.0,
-                background_respawn_scheduled=False,
-                active_committed_patches=list(self.active.committed_patches),
-                standby_committed_patches=(
-                    list(self.standby.committed_patches) if self.standby is not None else []
-                ),
-            )
-
-        except RecoverablePatchError:
-            # Class A: In-place rollback (`Journal.undo_to(mark)` + `reset()`) in <5 ms.
-            # Reverts ONLY the failing candidate `patch_id`; keeps committed `[P_1, ..., P_k]`.
-            t_recover = time.monotonic()
-            self.active.installed_patch = None
-            self.active.worker_state = state_snapshot
-            self._staged_entry = None
-            self.active.rollback_count += 1
-            self.inplace_rollback_count += 1
-            recovery_ms = (time.monotonic() - t_recover) * 1000.0
-            return PatchEvalResult(
-                patch_id=patch_id,
-                success=False,
-                accepted=False,
-                fault_class=FaultClass.CLASS_A_RECOVERABLE,
-                active_pid_before=pid_before,
-                active_pid_after=self.active.pid,
-                failover_triggered=False,
-                recovery_latency_ms=recovery_ms,
-                background_respawn_scheduled=False,
-                active_committed_patches=list(self.active.committed_patches),
-                standby_committed_patches=(
-                    list(self.standby.committed_patches) if self.standby is not None else []
-                ),
-            )
-
-        except (StickyCudaError, WeightCorruptionError):
-            # Class B: Poisoned CUDA context -> failover while preserving `[P_1, ..., P_k]`
-            t_failover = time.monotonic()
-            poisoned = self.active
-            poisoned.role = "poisoned"
-            poisoned.cuda_context_healthy = False
-            self._staged_entry = None
-            self.holder.detach_worker(poisoned.worker_id)
-
-            replayed_on_failover = 0
-            if self.sync_mode == StandbySyncMode.OPTION_1_ZYGOTE_ONLY:
-                # Option 1: Fork fresh worker from Zygote + attach IPC + replay ledger
-                self.active = self._spawn_replica(
-                    role="active", defer_kv=False, replay_ledger=True
-                )
-                replayed_on_failover = len(self.ledger)
-                failover_ms = (time.monotonic() - t_failover) * 1000.0
-                self.failover_count += 1
-                return PatchEvalResult(
-                    patch_id=patch_id,
-                    success=False,
-                    accepted=False,
-                    fault_class=FaultClass.CLASS_B_STICKY_CUDA,
-                    active_pid_before=pid_before,
-                    active_pid_after=self.active.pid,
-                    failover_triggered=True,
-                    recovery_latency_ms=failover_ms,
-                    background_respawn_scheduled=False,
-                    active_committed_patches=list(self.active.committed_patches),
-                    standby_committed_patches=[],
-                    failover_replayed_patches=replayed_on_failover,
-                    new_standby_pid=None,
-                )
-
-            assert self.standby is not None
-            # Promote Standby lease (`0 GiB` extra weights, materialize KVPlan)
-            self.holder.promote_standby_lease(self.standby.worker_id)
-            if self.sync_mode == StandbySyncMode.OPTION_2_CLEAN_BASE_REPLAY_ON_FAILOVER:
-                # Option 2: Standby sat at clean base P_0; replay [P_1, ..., P_k] now
-                promoted_lease = self.holder.active_leases[self.standby.worker_id]
-                for entry in self.ledger.entries:
-                    if entry.patch_id not in self.standby.committed_patches:
-                        self.standby.apply_committed_patch(entry, promoted_lease.weights)
-                        replayed_on_failover += 1
-
-            # Under Option 3 (`OPTION_3_ACCEPT_GATED_SHADOW`), `self.standby` ALREADY has
-            # `[P_1, ..., P_k]` applied (`replayed_on_failover == 0`, 0ms state sync!).
-            self.standby.role = "active"
-            self.active = self.standby
-            failover_ms = (time.monotonic() - t_failover) * 1000.0
-            self.failover_count += 1
-
-            # Background respawn of replacement Warm-Standby via Zygote + IPC.
-            # Under Option 3, the new Standby replays `self.ledger` immediately on spawn.
-            self.standby = self._spawn_replica(
-                role="standby",
-                defer_kv=True,
-                replay_ledger=(
-                    self.sync_mode == StandbySyncMode.OPTION_3_ACCEPT_GATED_SHADOW
-                ),
-            )
-
-            return PatchEvalResult(
-                patch_id=patch_id,
-                success=False,
-                accepted=False,
-                fault_class=FaultClass.CLASS_B_STICKY_CUDA,
-                active_pid_before=pid_before,
-                active_pid_after=self.active.pid,
-                failover_triggered=True,
-                recovery_latency_ms=failover_ms,
-                background_respawn_scheduled=True,
-                active_committed_patches=list(self.active.committed_patches),
-                standby_committed_patches=list(self.standby.committed_patches),
-                failover_replayed_patches=replayed_on_failover,
-                new_standby_pid=self.standby.pid,
-            )
+if __name__ == "__main__":
+    sys.exit(main())
