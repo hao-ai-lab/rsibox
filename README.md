@@ -1,121 +1,174 @@
 # FastRSI
 
-Hot-reload your inference and training engines. Make them faster while they keep running.
+Test an edit to a running ML engine without restarting it.
 
-FastRSI provides autonomous coding agents and human engineers with a **live lab**: a running engine that accepts and tests code changes without requiring slow cold restarts. The system swaps code edits into live worker processes during step gaps, verifies with live execution witnesses that the new code ran, benchmarks performance, and can roll back or undo changes in microseconds to milliseconds. When an edit cannot be safely hot-swapped, the live lab clearly flags the exact constraint and routes to the cheapest restart boundary.
+<!-- links: paper, blog, results page -->
 
-## Quickstart (30 seconds)
+A coding agent (or a person) optimizing vLLM, Megatron-LM or FastVideo pays a full engine restart
+for every idea it tries. FastRSI installs the edit into the warm engine process, proves that the new
+code actually ran, measures it, and undoes it. When an edit cannot be swapped in safely, it refuses
+and says which restart boundary the edit needs.
 
-The shared live-lab transaction kernel (`core/livelab/`) uses the Python standard library only (Python `>= 3.11`: code identity uses `co_qualname`; zero third-party dependencies):
+## Why
+
+A one-line vLLM scheduler edit on one GB200, warm on-disk caches. Each row keeps one more piece of
+state instead of rebuilding it. Source: [`repos/vllm/kb/costs.md`](repos/vllm/kb/costs.md).
+
+| Step removed | Check time | vs restart |
+|---|---:|---:|
+| Restart with caches (baseline) | 228 s | 1.0× |
+| + reuse autotune config | 157 s | 1.5× |
+| + keep model weights | 100 s (derived) | 2.3× |
+| + keep CUDA graphs | 58 s (derived) | 3.9× |
+| + keep the live process (hot swap) | 23.6 s | 9.6× |
+| then skip the logprob check | 14.1 s | |
+| then test with a small batch | 2.4 s | 95× end to end |
+
+The two derived rows are computed by removing one phase from a measured run, not measured on their
+own. 204 s of the 228 s restart is setup that the edit did not invalidate. The other engines:
+
+- FastVideo (MiniMax H3, 1 GB200): a live swap reaches its first checked video in 6.7 s (0.72 s
+  edit-to-run plus a 6.0 s video), against about 72 s for a warm restart and about 507 s cold.
+  Source: [`repos/fastvideo/kb/costs.md`](repos/fastvideo/kb/costs.md).
+- Megatron-LM (2-layer model, TP 2 on 2 GB200): install 0.05 s and a 3-step check 0.45 s, against
+  57.5 s to restart to the same point. Source: [`repos/megatron/kb/costs.md`](repos/megatron/kb/costs.md).
+
+## Quickstart
+
+Python 3.11 or newer, no GPU, no third-party packages. From the repository root:
 
 ```sh
-# 1. Run all 11 golden conformance cases (c0-c10) on ToyLab in one command (~3s on CPU):
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab
+```
 
-# (Optional) Install core/livelab in editable mode in a fresh venv, so kernel, conformance and forksafe import from anywhere:
-python3 -m venv .venv && . .venv/bin/activate
-pip install -e .
+About 1.5 s on a laptop. Excerpt of the output:
+
+```
+case                  result  seconds  evidence
+c2_visible            pass      0.004  output [11, 13, 15, 17, 21, 27] x2 ranks -> [12, 14, 16, 18, 22, 28] x2 ranks
+c4_uninstall          pass      0.006  uninstall ['txn-42e962fd'] in 0.000939 s; identity 665aa2ee3a8d968d restored
+c8_crash_and_hang     pass      1.035  crash: poisoned by ['participant_failed'], respawn 0.003573 s
+c10_not_proven        pass      0.044  proven False, findings ['zero_witness', 'zero_witness']
+
+11/11 as expected
+```
+
+```sh
+# Installed in a venv, so it runs from any directory
+python3 -m venv .venv && . .venv/bin/activate && pip install -e .
 python3 -m conformance --lab kernel.toy_lab:ToyLab
-
-# 2. Run the FastVideo ToyFastVideoLab conformance suite (~3s on CPU):
+# The same 11 cases on a FastVideo-shaped toy engine with real worker processes (about 5 s)
 PYTHONPATH=core/livelab:repos/fastvideo/livelab python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
-
-# 3. Inspect the 3 recorded multi-GPU engine walkthroughs and receipts:
-ls repos/vllm/examples/dsv41-prefill/          # vLLM: DeepSeek-V4.1-Flash prefill PRs (#59894, #62359, #62240)
-ls repos/fastvideo/examples/replay-1882/       # FastVideo: MiniMax-H3 PR #1882 live swap, zero-witness catch, and undo
-ls repos/megatron/examples/codex-hillclimb/    # Megatron-LM: 206-iteration live hill-climb (+5.1% to +8.5% tok/s/GPU)
 ```
 
-### 4-Tier Live Mutation vs. Static Snapshot / Cold Restart
+The toy lab is two worker ranks stepping together. Each case drives it only through the lab
+interface, so the same cases run against real engines. The toy cannot show GPU state, CUDA graphs or
+real RPC latency. What passing shows ([`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)):
 
-Static GPU checkpoint/restore tools capture a frozen process image and must invalidate or re-snapshot whenever Python bytecode, `@triton.jit` kernels, captured `CUDAGraph` descriptors, or parallelism flags change. FastRSI routes every edit to the lowest boundary that preserves sound execution witnesses:
+- c0-c2: the workload repeats exactly; an edit that keeps behavior leaves output bit-exact; a visible
+  edit changes output, and its witness fires on every rank.
+- c3: the output after a live edit (and after a chain of 3) equals a fresh process started with it.
+- c4, c7, c9: undo returns output and code identity to base, also one edit at a time through a chain,
+  and after 20 install/undo cycles.
+- c5: a fault halfway through an install rolls every rank back to base.
+- c6: unsupported edits are refused with a reason and change nothing; an install that would silently
+  change nothing is refused too, not reported as a success.
+- c8: a crashed, hung or lost worker, or code changed behind the lab's back, marks the lab poisoned;
+  it refuses installs until the worker group is respawned at base.
+- c10: an edit whose new code never ran (startup-only code) is reported not proven (`zero_witness`),
+  while a fresh process shows the edit does change the output.
 
-| Boundary Tier | Mechanism | Edit-to-Run Latency | Undo / Restore Latency | What It Handles |
-|---|---|---|---|---|
-| **Tier 0 — In-Place Swap & Node Patch** | Python `__code__` swap (`swap.py`) + surgical `cuGraphExecKernelNodeSetParams` update | **0.13–1.0 ms** | **0.13–1.2 ms** (journaled inverse) | Function/method bodies, scheduler heuristics, sampler logic, and launch grid/scalar changes inside captured graphs |
-| **Tier 1 — In-Process Kernel Re-JIT** | Transitive `@triton.jit` caller cascade (`jit.py`) + selective Dynamo frame reset | **50–500 ms** (`0.26–1.8 s` full autotune) | **0.56 ms** (cached binary pointer swap) | Triton kernel bodies, `@triton.heuristics`, and inline `@triton.jit` device helpers |
-| **Tier 2 — Selective Graph & KV Replay** | Step-gap `CUDAGraph` bucket recapture (`recapture.py`) + tail KV block snapshot replay (`snapshot_replay.py`) | **0.37–1.4 s** (`< 5 ms` KV state restore) | **1.2–5.0 ms** (graph pool & tail block restore) | Structural edits inside graph-captured forward regions (`OP` / `GRAPH`) and deterministic 128K steady-state decode replay |
-| **Tier 3 — Warm Zygote + IPC Weight Lease** | Pre-fork Zygote (`forksafe.py`) + zero-copy CUDA IPC `WeightHolder` + 2D `TP<->DP` / `TP<->EP` NVLink resharding (`reshard.py`) | **7.4–22.6 s** (`0.35–1.6 s` NVLink reshard) | **7.4–22.6 s** (`< 1 ms` standby failover) | Constructor/`__init__` state, module-level constants, KV cache layout flags, and live `TP <-> DP` / `MoE TP <-> EP` resharding |
-| **Baseline — Cold Restart / Static Snapshot** | Full process respawn, safetensors disk load, JIT warmup, and full graph sweep | **200–650 s+** | **200–650 s+** | Required only when changing hardware topology or uncached base checkpoints |
+## What you can do with it
 
-## Repository layout
+Every engine's lab implements the same calls ([`core/livelab/INTERFACE.md`](core/livelab/INTERFACE.md), version 0, draft):
 
-The repository is organized into four distinct layers:
+- `install(patch)`: stage and bind an edit on every rank at once, or refuse it with a reason before touching state.
+- `check(workload)`: run a probe in the warm engine. Returns latency or throughput, output vs base,
+  whether the edited code ran, and the check's own cost.
+- `reset()`: drain in-flight work and restore caches, buffers, RNG and iterators, so the next check
+  starts from the same state.
+- `uninstall()`: revert to base in place, with proof that base holds again.
+- `status()`: `base`, `edited` or `poisoned`.
 
-```
-core/livelab/            Shared engine-agnostic live-lab runtime:
-  kernel/                Pure-Python transaction kernel (locate, swap, findings, witness,
-                         journal, coordinator, session) with zero engine dependencies;
-                         includes ToyLab for self-contained testing.
-  forksafe.py            Pre-fork CUDA and driver safety guards for zygote server preloads.
-  conformance/           11 golden conformance test cases (c0-c10) that verify any live lab:
-                         repeatability, no-op guarantees, visibility, fresh process equivalence,
-                         uninstall/undo, failure rollback, refusal, chains, crash/hang recovery,
-                         soak stability, and unproven execution detection.
-  INTERFACE.md           The live lab protocol contract (verbs, state, findings, receipts).
+## What is in the repo today
 
-core/agents/             Agent prompts, protocols, and engineering discipline:
-  livelab_overview.md    Live lab overview: interface verbs, boundaries, and function groups.
-  developer.md           Developer agent prompt: edit, stage, verify, commit, and undo.
-  toolsmith_offline.md   Offline toolsmith: mine PRs and tests to build engine knowledge.
-  toolsmith_online.md    Online toolsmith: diagnose slow checks, account for state pollution,
-                         and avoid over-conservative micro-edits.
-  toolsmith_distill.md   Distillation toolsmith: promote proven mechanisms across 2+ engines.
-  orchestrator.md        Orchestrator prompt: live streamer and human interface of the loop.
+| Engine | CPU, in CI | Run on GPUs, with a written result | Not there yet |
+|---|---|---|---|
+| Toy lab | kernel unit tests; conformance 11/11 | not applicable | |
+| FastVideo | adapter tests with real worker processes; conformance 11/11 on a FastVideo-shaped toy | conformance on MiniMax H3, 11/11 on 2 GPUs (10/11 on 1: c2 needs two ranks) ([h3-conformance](repos/fastvideo/examples/h3-conformance/README.md)); one live edit ([h3-live-edit](repos/fastvideo/examples/h3-live-edit/README.md)); upstream PR replays ([pr-replay](repos/fastvideo/examples/pr-replay/README.md), [replay-1882](repos/fastvideo/examples/replay-1882/README.md)) | edits inside compiled or graph-captured code; Triton kernels edited in place; 4 ranks |
+| Megatron-LM | lab tests (overlay, mailbox, phase stamps, zygote; torch cases skip) | conformance 11/11 on a 2-layer model, TP 2 on 2 GB200 ([livelab](repos/megatron/livelab/README.md)); a Codex hill-climb ([codex-hillclimb](repos/megatron/examples/codex-hillclimb/README.md)); 8 upstream PRs ([upstream-replay](repos/megatron/examples/upstream-replay/README.md)) | pipeline parallelism; conformance beyond 2 ranks; CUDA graph edits |
+| vLLM | adapter tests on in-process toy ranks; services tests against fake `vllm serve` processes | measurements only, no walkthrough: the ladder above, zygote fork and weight holder ([kb/costs.md](repos/vllm/kb/costs.md)), Triton rebuild and graph recapture ([docs/architecture.md](repos/vllm/docs/architecture.md)) | conformance on a real vLLM engine; the DeepSeek-V4.1-Flash prefill replay is a plan with the three upstream patches, no receipts yet ([dsv41-prefill](repos/vllm/examples/dsv41-prefill/README.md)); component restart; KV holder |
 
-repos/<engine>/          Engine-specific live labs, knowledge bases, and PR replays:
-  docs/                  Engine architecture: process tree, restart boundaries, and costs.
-  kb/                    Measured facts and ground truth: costs, workloads, priors, lessons.
-  livelab/               Engine-specific lab implementations (adapters, services, hooks).
-  tools/                 Engine-specific probes and local tools.
-  patches/               Engine patches with upstreaming ledgers.
-  examples/<name>/       Reproducible walkthroughs replaying real PRs with receipts.
-
-template/                Minimal onboarding scaffold for bootstrapping a new engine under repos/.
-
-docs/                    Process documentation, rules, and framework lessons (docs/lessons.md).
-```
-
-## Engine live labs
-
-FastRSI currently supports three primary engine live labs under `repos/`:
-
-- **vLLM** (`repos/vllm/`): Live lab adapter (`adapter/`), step-gap coordinator, selective CUDA graph recapture (`recapture.py`), and pre-fork zygote server preload (`services/zygote.py`). Replays DeepSeek-V4.1 Flash prefill optimizations (`examples/dsv41-prefill/`).
-- **FastVideo** (`repos/fastvideo/`): Live lab adapter (`adapter/`), worker supervisor, zygote respawn, and weights IPC holder for diffusion pipelines. Replays MiniMax-H3 live edits and PRs (`examples/pr-replay/`, `examples/h3-live-edit/`).
-- **Megatron-LM** (`repos/megatron/`): Training live lab (`livelab/fastrsi_megatron/`), train-step quiesce hook, gloo synchronization rounds, and weights/optimizer state snapshots (`state.py`). Replays architecture hill-climbs on Qwen3-14B (`examples/codex-hillclimb/`).
+- **FastVideo replay-1882:** upstream PR #1882, reversed, was swapped into a warm H3 engine (install
+  0.086 s), checked 3 times and undone (0.030 s). The witness showed 0 calls: this workload never
+  reaches the edited code, so the replay reads "not proven" instead of passing.
+- **Megatron codex-hillclimb:** 82 iterations on the Qwen3-14B architecture (TP 2, 2 GB200), no
+  restart between edits. The 3 kept edits: +5.1% tokens/s/GPU (median of 4 paired rounds); +7.1% on
+  the Qwen3-32B architecture at TP 4. One of them (iteration 12) ran in a private harness, not the lab.
 
 ## How it works
 
-1. **Transaction kernel inside the step gap:** Code edits are staged, analyzed, and prepared outside the gap while requests run. During a quiescent step gap (between generation steps in inference, or between train steps in training), the coordinator validates the edit across all worker ranks. If accepted, it swaps code objects atomically and captures execution witnesses.
-2. **Execution witness and proof:** The live lab tracks whether running steps hit the new bytecode. If an edit sits inside captured CUDA graphs or JIT-compiled kernels, the lab requires CUDA graph recapture or kernel rebuild before marking the change proven.
-3. **Instant journaled undo:** Every transaction logs inverse operations in an append-only journal. Rolling back or undoing an edit restores exact bytecode, class attributes, and CUDA graph entries in microseconds to milliseconds with zero recompilation.
-4. **Clean boundary routing:** Edits that change class hierarchies, constructor signatures, or distributed layout cannot be swapped in place. The kernel's findings reject unsafe swaps and route directly to the lowest appropriate restart boundary (component restart or warm engine restart via zygote fork).
+1. **Edits commit in the step gap.** An edit is staged and analyzed while the engine keeps running.
+   In the gap between two generation or train steps, a coordinator commits it on all ranks or none.
+2. **A witness proves the new code ran.** Each edited function counts its calls on every rank. Code
+   inside captured CUDA graphs or compiled Triton kernels counts only after the graph is recaptured
+   or the kernel rebuilt.
+3. **Undo is journaled.** Every change logs its inverse. `uninstall` restores the exact code objects
+   and checks code identity against base.
+4. **Refusals name a restart boundary.** Edits that change constructors, add fields, touch module
+   state or change the distributed layout are refused, with a finding that names the cheapest
+   restart that can run them.
 
-## Verification and testing
+## Mechanisms by restart boundary
 
-Run CPU-only unittests and conformance checks locally:
+| Boundary | Mechanism | Edits it handles | File | Measured cost |
+|---|---|---|---|---|
+| In place, Python | swap function code on every rank, journaled undo | function and method bodies | `core/livelab/kernel/swap.py` | FastVideo install 0.06 s, uninstall 0.014 s ([costs](repos/fastvideo/kb/costs.md)); Megatron install 0.05 s, uninstall 0.017 s ([costs](repos/megatron/kb/costs.md)) |
+| In place, Triton | rebuild `@triton.jit` kernels and their callers; undo restores the compiled binaries | Triton kernel bodies | `core/livelab/kernel/jit.py` | 0.07 s ([vLLM architecture](repos/vllm/docs/architecture.md)) |
+| In place, CUDA graphs | recapture the affected graphs in the live worker | edits inside graph-captured code | `repos/vllm/livelab/adapter/recapture.py` | 3.0-5.6 s per region, 14.4 s all graphs, Qwen3-8B ([vLLM architecture](repos/vllm/docs/architecture.md)) |
+| In process, module rebuild | re-import the edited module and rebuild the live objects | constructors, new fields, module constants | `repos/fastvideo/livelab/services/rebuild.py` | 0.19-1.27 s, 1 GPU ([costs](repos/fastvideo/kb/costs.md)) |
+| New process, warm | fork from a server with imports done; weights served over CUDA IPC by a holder | launch flags, startup code, anything the in-place paths refuse | `core/livelab/forksafe.py`, `repos/*/livelab/services/zygote.py`, `weights.py`, `holder.py`, `repos/megatron/livelab/fastrsi_megatron/zygote.py` | vLLM 7.37 s to `/health`, Qwen3-8B ([costs](repos/vllm/kb/costs.md)); FastVideo respawn 4.78 s and 5.62 s, weights held ([costs](repos/fastvideo/kb/costs.md)); Megatron 15.0-16.5 s to first step, 14B ([costs](repos/megatron/kb/costs.md)) |
+| New layout, same weights | reshard held weights between TP, DP and EP in memory | parallelism changes | `repos/vllm/livelab/services/reshard.py` | not yet measured here |
+| Full restart | new process, warm disk caches | anything else | | 228 s in the vLLM ladder above |
+
+## Repository layout
+
+```
+core/livelab/        shared runtime, standard library only
+  kernel/            transaction kernel (locate, swap, witness, journal, coordinator) and the toy lab
+  conformance/       the 11 cases every lab must pass
+  INTERFACE.md       the lab interface
+core/agents/         prompts for the developer, toolsmith and orchestrator agents
+repos/<engine>/      vllm, fastvideo, megatron
+  docs/, kb/         architecture and restart boundaries; measured costs, each with its source
+  livelab/           the engine's lab, built on core/livelab
+  examples/<name>/   walkthroughs of replayed changes
+template/            scaffold for a new engine
+```
+
+## Tests
+
+What CPU CI runs (`.github/workflows/cpu-tests.yml`); torch, vLLM and Linux-only cases skip on a laptop:
 
 ```sh
-# Shared kernel unittests
-python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
-
-# Run the 11 conformance cases on the ToyLab
-cd core/livelab && python3 -m conformance --lab kernel.toy_lab:ToyLab
-
-# Pre-fork CUDA guards test suite
-python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
-
-# vLLM live lab adapter tests
-python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
-
-# FastVideo adapter and service tests
-python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab -v
-python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab -v
-
-# Megatron live lab tests
-python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab -v
+python3 -m unittest discover -s core/livelab/kernel -t core/livelab
+python3 -m unittest discover -s core/livelab -p 'test_forksafe.py'
+(cd core/livelab && python3 -m unittest discover -s conformance -t .)
+python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab
+python3 -m pytest -rs repos/vllm/livelab/services            # needs pytest
+python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab
+python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab
+python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab
 ```
+
+Rules for contributors, people and agents: [`AGENTS.md`](AGENTS.md).
+
+## Limits
+
+A live check shows that the edited path ran and that its output matched on the chosen workload; it
+does not show the edit is equivalent on all inputs. An engine needs a Python control layer the lab
+can reach between steps. One agent works on one warm process at a time.
 
 ## License
 
-Apache-2.0
+Apache-2.0 ([`LICENSE`](LICENSE)).
