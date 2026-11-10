@@ -2,7 +2,7 @@
 
 Real processes, real Unix sockets, real fork and signals; the Lab cases use the CPU train step of
 test_pieces (no Megatron, no GPU). What the GPU run adds (a real Qwen3-14B job through the zygote
-and the lab, with the same faults injected) is in evidence/fix-megatron/.
+and the lab, with the same faults injected) is summarized in the PR description.
 
 Linux only (the zygote reads /proc and uses prctl).
 """
