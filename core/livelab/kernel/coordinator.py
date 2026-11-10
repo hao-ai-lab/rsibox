@@ -674,12 +674,18 @@ def _attr_names(scope):
 
 def _codes_of(obj, depth=0):
     """Code objects an added object runs: a function, a static/class method's function, a
-    decorator's __wrapped__, or a JIT wrapper's `fn` (Triton). Empty for anything else."""
+    property/cached_property, an added class's members, a decorator's __wrapped__, or a JIT
+    wrapper's `fn` (Triton). Empty for anything else."""
     if depth > 4 or obj is None:
         return []
+    if isinstance(obj, type):
+        out = []
+        for member in vars(obj).values():
+            out += _codes_of(member, depth + 1)
+        return out
     code = getattr(obj, "__code__", None)
     out = [code] if isinstance(code, types.CodeType) else []
-    for attr in ("__func__", "__wrapped__", "fn"):
+    for attr in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
         inner = getattr(obj, attr, None)
         if inner is not None and inner is not obj:
             out += _codes_of(inner, depth + 1)

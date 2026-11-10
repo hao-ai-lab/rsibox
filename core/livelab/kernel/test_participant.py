@@ -202,6 +202,104 @@ class EditAddedDefinitionTest(unittest.TestCase):
         self.assertEqual(mod_obj.scale(1), 2)
         self.assertFalse(hasattr(mod_obj, "helper"))
 
+    def test_a_method_of_a_class_an_earlier_transaction_added_can_be_edited_again(self):
+        """Input: transaction txn-a adds `class Helper` with method `compute`, transaction
+        txn-b edits `Helper.compute`. Expected: txn-b commits and runs the new method body;
+        undoing txn-b then txn-a restores base and `at_base()["ok"]` is True."""
+        idx = next(_n)
+        mod_name = f"kt_added_cls{idx}"
+        base_src = "def scale(val):\n    return val * 2\n"
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        first_patch = (
+            "class Helper:\n"
+            "    def compute(self, val):\n"
+            "        return val + 1\n\n\n"
+            "def scale(val):\n"
+            "    return Helper().compute(val) * 2\n"
+        )
+        self.assertTrue(part.prepare({"id": "txn-a", "modules": {mod_name: {"source": first_patch}}})["ok"])
+        self.assertTrue(part.commit("txn-a")["ok"])
+        self.assertEqual(mod_obj.scale(1), 4)
+        second_patch = first_patch.replace("return val + 1", "return val + 5")
+        prep_res = part.prepare({"id": "txn-b", "modules": {mod_name: {"source": second_patch}}})
+        self.assertTrue(prep_res["ok"], [item["check"] for item in prep_res.get("findings", [])])
+        self.assertTrue(part.commit("txn-b")["ok"])
+        self.assertEqual(mod_obj.scale(1), 12)
+        self.assertTrue(part.undo("txn-b")["ok"])
+        self.assertEqual(mod_obj.scale(1), 4)
+        self.assertTrue(part.undo("txn-a")["ok"])
+        self.assertEqual((mod_obj.scale(1), part.at_base()["ok"]), (2, True))
+
+    def test_cached_builder_and_local_class_patterns_undo_cleanly_to_base(self):
+        """Input: an edit that (1) adds a lazy builder function caching a cyclic JIT-like
+        wrapper on its own `__dict__`, (2) swaps a method that caches a kernel wrapper on its
+        own `__dict__` and on its class, and (3) defines a local class and recursive helper
+        inside a swapped function (reproducing the FastVideo H3 and Megatron climb iter 33, 55,
+        and 157 undo-poisoning patterns). Expected: after running the edited functions, `undo`
+        succeeds with no `closure_not_restored` finding and `at_base()["ok"]` is True."""
+        idx = next(_n)
+        mod_name = f"kt_cached_jit{idx}"
+        base_src = (
+            "class CrossEntropyOp:\n"
+            "    @staticmethod\n"
+            "    def apply_op(val):\n"
+            "        return val * 2\n\n\n"
+            "def embed_op(val):\n"
+            "    return val + 1\n"
+        )
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        patched_src = (
+            "class _FakeJIT:\n"
+            "    def __init__(self, func):\n"
+            "        self.fn = func\n"
+            "        self.binder = self._bind\n"
+            "    def _bind(self):\n"
+            "        return self.fn\n\n\n"
+            "def _get_builder_kernel():\n"
+            "    kern = getattr(_get_builder_kernel, 'kernel', None)\n"
+            "    if kern is None:\n"
+            "        @_FakeJIT\n"
+            "        def _inner_kernel(val):\n"
+            "            return val + 10\n"
+            "        _get_builder_kernel.kernel = _inner_kernel\n"
+            "        kern = _inner_kernel\n"
+            "    return kern\n\n\n"
+            "class CrossEntropyOp:\n"
+            "    @staticmethod\n"
+            "    def apply_op(val):\n"
+            "        owner = CrossEntropyOp\n"
+            "        kern = getattr(owner, '_shift_exp_sum_kernel', None)\n"
+            "        if kern is None:\n"
+            "            @_FakeJIT\n"
+            "            def _cls_kernel(inp):\n"
+            "                return inp * 3\n"
+            "            owner._shift_exp_sum_kernel = _cls_kernel\n"
+            "            CrossEntropyOp.apply_op._self_kernel = _cls_kernel\n"
+            "            kern = _cls_kernel\n"
+            "        return kern.fn(_get_builder_kernel().fn(val))\n\n\n"
+            "def embed_op(val):\n"
+            "    class LocalGradFn:\n"
+            "        @staticmethod\n"
+            "        def forward(inp):\n"
+            "            return inp + 4\n"
+            "    def walk(steps):\n"
+            "        return 0 if steps <= 0 else 1 + walk(steps - 1)\n"
+            "    return LocalGradFn.forward(val) + walk(2)\n"
+        )
+        self.assertTrue(part.prepare({"id": "txn-jit", "modules": {mod_name: {"source": patched_src}}})["ok"])
+        self.assertTrue(part.commit("txn-jit")["ok"])
+        self.assertEqual((mod_obj.CrossEntropyOp.apply_op(2), mod_obj.embed_op(3)), (36, 9))
+        undo_res = part.undo("txn-jit")
+        self.assertEqual((undo_res["ok"], undo_res.get("findings", [])), (True, []))
+        self.assertFalse(hasattr(mod_obj.CrossEntropyOp, "_shift_exp_sum_kernel"))
+        self.assertFalse(hasattr(mod_obj.CrossEntropyOp.apply_op, "_self_kernel"))
+        self.assertEqual(
+            (mod_obj.CrossEntropyOp.apply_op(2), mod_obj.embed_op(3), part.at_base()["ok"]),
+            (4, 4, True),
+        )
+
 
 LAZY = '''import importlib
 

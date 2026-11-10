@@ -38,6 +38,7 @@ import collections
 import copy
 import functools
 import importlib
+import linecache
 import time
 import types
 
@@ -186,8 +187,9 @@ def _type_checking(test):
 class Staged:
     """What `apply` will do. Built by `stage`; nothing in it is visible to the engine yet."""
 
-    def __init__(self, mod):
+    def __init__(self, mod, source=None):
         self.mod = mod
+        self.source = source
         self.imports = {}        # name -> object to add to the module dict
         self.swaps = []          # (function object, new code, defaults|KEEP, kwdefaults|KEEP)
         self.adds = []           # (owner: module dict or class, name, new object)
@@ -741,6 +743,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     if "trees" in at:
         timings["trees"] = at["trees"]
     st = Staged(mod)
+    st.source = source
     st.line_map = a["line_map"]
     if base_hash is not None and L.text_hash(base_src) != base_hash:
         fs.append(F.finding("base_mismatch", f"base text hash {L.text_hash(base_src)}",
@@ -1280,8 +1283,13 @@ def closure_pairs(st):
     for fn, code, _, _ in st.swaps:
         pair(fn.__code__, code)
     for _, _, obj in st.adds:
-        for f in _member_functions(obj):
-            pair(None, f.__code__)
+        if isinstance(obj, type):
+            for member in vars(obj).values():
+                for fn_obj in _member_functions(member):
+                    pair(None, fn_obj.__code__)
+        else:
+            for fn_obj in _member_functions(obj):
+                pair(None, fn_obj.__code__)
     return pairs
 
 
@@ -1293,7 +1301,24 @@ def apply(st, journal, witness):
     start = len(journal.entries)
     g = st.mod.__dict__
     try:
-        journal.record_closures(closure_pairs(st))
+        mod_file = getattr(st.mod, "__file__", None)
+        if mod_file and getattr(st, "source", None) is not None and hasattr(journal, "on_undo"):
+            prev_linecache = linecache.cache.get(mod_file)
+            linecache.cache[mod_file] = (
+                len(st.source),
+                None,
+                st.source.splitlines(True),
+                mod_file,
+            )
+
+            def _restore_linecache(target_file=mod_file, previous=prev_linecache):
+                if previous is None:
+                    linecache.cache.pop(target_file, None)
+                else:
+                    linecache.cache[target_file] = previous
+
+            journal.on_undo(_restore_linecache)
+        journal.record_closures(closure_pairs(st), mod=st.mod)
         for name, value in st.imports.items():
             journal.set_item(g, name, value)
         hook = getattr(witness, "hook", None) or witness.hit

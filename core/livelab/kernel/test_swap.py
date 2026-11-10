@@ -243,6 +243,40 @@ class SwapEdgeCaseTest(unittest.TestCase):
         undo_result = journal.undo_to(mark)
         self.assertEqual((undo_result["ok"], module_obj.f(1.5)), (True, 1))
 
+    def test_apply_syncs_linecache_for_runtime_inspect_getsourcelines_and_restores_on_undo(self):
+        """Input: a swapped function that lazily defines an inner kernel and calls
+        `inspect.getsourcelines` on it at runtime (as `@triton.jit` does when compiling a lazy
+        kernel inside a function in Megatron climb iter 33 and 55). Expected: while installed,
+        `inspect.getsourcelines` reads the patched source lines; after `undo_to`, `linecache`
+        is restored to the base file lines without adding extra entries to `journal.describe()`."""
+        import inspect
+        module_name = f"kt_sw{next(_n)}"
+        base_source = (
+            "def compute(val):\n"
+            "    return val + 1\n"
+        )
+        edited_source = (
+            "import inspect\n\n"
+            "def compute(val):\n"
+            "    def _lazy_triton_kernel(inp):\n"
+            "        return inp * 10\n"
+            "    lines, _ = inspect.getsourcelines(_lazy_triton_kernel)\n"
+            "    return ''.join(lines).strip(), _lazy_triton_kernel(val)\n"
+        )
+        (module_obj,) = temp_modules(self, {module_name: base_source})
+        journal, witness = J.Journal(), W.Witness()
+        mark = journal.mark("txn-linecache")
+        result = S.stage_and_apply(module_name, edited_source, journal, witness)
+        self.assertTrue(result["ok"], result["findings"])
+        src_text, val_out = module_obj.compute(3)
+        self.assertIn("def _lazy_triton_kernel(inp):", src_text)
+        self.assertIn("return inp * 10", src_text)
+        self.assertEqual(val_out, 30)
+        undo_result = journal.undo_to(mark)
+        self.assertEqual((undo_result["ok"], module_obj.compute(3)), (True, 4))
+        base_lines, _ = inspect.getsourcelines(module_obj.compute)
+        self.assertIn("return val + 1", "".join(base_lines))
+
 
 if __name__ == "__main__":
     unittest.main()
