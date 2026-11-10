@@ -134,7 +134,8 @@ class StartState(unittest.TestCase):
         s0 = ST.Snapshot([model], opt, sched)
         for _ in range(2):
             self._train(model, opt, sched, x)
-        s0.restore()
+        self.assertFalse(s0.restore()["ok"])          # Adam's new state: refused, nothing written
+        self.assertTrue(s0.restore(allow_extra=True)["ok"])   # the lab's start: kept, zeroed next
         zeroed, unknown = ST.zero_new_state(opt, set(s0.host))
         self.assertEqual(unknown, [])
         self.assertEqual(len(zeroed), 3 * 4)                 # 4 tensors x (exp_avg, exp_avg_sq, step)

@@ -42,7 +42,9 @@ def _dump():
 
 
 def _wrap(name, before, after):
-    fn = getattr(tr, name)
+    fn = getattr(tr, name, None)
+    if fn is None:                              # not in this Megatron version (e.g. kernel warm-up)
+        return
 
     def w(*a, **k):
         T.setdefault(before, time.time())
