@@ -2,27 +2,40 @@ name: CPU tests
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
 permissions:
   contents: read
+env:
+  PYTHONNOUSERSITE: "1"
+  CUDA_VISIBLE_DEVICES: ""
+  FASTRSI_VLLM_PYTHON: ""
 jobs:
   conformance-cases:
     name: Conformance cases fail labs that lack their property (fake labs, CPU)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
       - working-directory: core/livelab
         run: python3 -m unittest discover -s conformance -t . -v
   livelab-framework:
     name: Framework kernel, forksafe, and conformance c0-c10 on the toy lab (CPU)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
       - name: Run the kernel's unittest cases on the toy engine (standard library only; torch cases skip)
@@ -34,11 +47,15 @@ jobs:
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
   fastvideo-adapter:
     name: FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
       - name: Run the adapter's unittest cases (spawned workers in FastVideo's pipe protocol, deadlines, a killed worker, respawn)
@@ -52,34 +69,49 @@ jobs:
         run: python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
   vllm-adapter:
     name: vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
       - name: Run the adapter's unittest cases (host, worker group, sides, graph detection; collective_rpc is an in-process loop)
         run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
   vllm-services:
     name: vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
-      - run: python3 -m pip install pytest
+      - name: Create isolated job virtualenv with pytest
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest-venv"
+          "$RUNNER_TEMP/pytest-venv/bin/python" -m pip install --quiet --disable-pip-version-check pytest
       - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (FASTRSI_VLLM_PYTHON) or torch skip and are listed (-rs)
-        run: python3 -m pytest -v -rs repos/vllm/livelab/services
+        run: '"$RUNNER_TEMP/pytest-venv/bin/python" -m pytest -v -rs repos/vllm/livelab/services'
   megatron-livelab:
     name: Megatron live-lab and tool golden tests (CPU; torch cases skip)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
       - name: Run Megatron live-lab unittest cases (overlay, mailbox, phase stamps, zygote; torch cases skip)
