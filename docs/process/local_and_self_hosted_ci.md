@@ -101,9 +101,17 @@ gh api repos/GindaChen/fastrsi/actions/runners --jq '.runners[] | {name, status,
 
 ## Mode 2: Local Commit-Status CI (`statuses/<sha>`)
 
-When GitHub Actions job dispatch is blocked at the account level (for example by an account billing
-or spending-limit hold, which GitHub enforces prior to runner selection on private repositories) or
-while open pull requests have not yet rebased onto the `FASTRSI_CI_RUNNER` workflow definition:
+Self-hosted runner jobs (`FASTRSI_CI_RUNNER=self-hosted`) dispatch and execute natively on GitHub
+Actions at `$0/min` even when GitHub-hosted `ubuntu-latest` jobs are blocked by an account
+spending-limit or payment hold (because GitHub enforces hosted-minute billing checks only on
+GitHub-hosted runner labels). However, Mode 2 is needed whenever:
+
+- open pull requests were branched before `vars.FASTRSI_CI_RUNNER` was added to
+  `.github/workflows/cpu-tests.yml` and `.github/workflows/pr-rules.yml` (so their branch workflow
+  definitions still hardcode `runs-on: ubuntu-latest` until rebased); or
+- no self-hosted runner is currently online.
+
+In those cases:
 
 1. **Pause GitHub Actions check-run creation** so pushes do not attach synthetic `failure` check
    runs:
