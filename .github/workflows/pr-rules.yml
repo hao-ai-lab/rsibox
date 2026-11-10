@@ -2,17 +2,34 @@ name: PR rules
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Optional PR number to validate (omit to check the dispatched ref)
+        required: false
 permissions:
   contents: read
+  pull-requests: read
 jobs:
   title:
     name: Title is <type>(<scope>) summary (see AGENTS.md)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -z "$INPUT_PR" ]; then
+              echo "OK: workflow_dispatch without pr input; skipping PR-only title check"
+              exit 0
+            fi
+            printf '%s' "$INPUT_PR" | grep -Eq '^[0-9]+$' || { echo "Invalid pr input"; exit 1; }
+            PR_TITLE=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR" --jq '.title')
+          fi
           echo "Title: $PR_TITLE"
           if printf '%s' "$PR_TITLE" | grep -Eq '^(feat|fix|perf|docs|test|ci|refactor|chore)\([a-z0-9-]+\)!?: .+'; then
             echo "OK"
@@ -23,18 +40,41 @@ jobs:
           fi
   attribution:
     name: No AI co-authors or generated-with lines (see AGENTS.md)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
+          persist-credentials: false
       - env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_PR" ]; then
+              printf '%s' "$INPUT_PR" | grep -Eq '^[0-9]+$' || { echo "Invalid pr input"; exit 1; }
+              PR_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR")
+              PR_TITLE=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("title") or "")')
+              PR_BODY=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body") or "")')
+              BASE=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["base"]["sha"])')
+              HEAD=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+              git fetch --no-tags origin "$BASE" "+refs/pull/$INPUT_PR/head"
+            else
+              HEAD=$(git rev-parse HEAD)
+              BASE=$(git merge-base "origin/${DEFAULT_BRANCH:-main}" "$HEAD" || true)
+              if [ -z "$BASE" ] || [ "$BASE" = "$HEAD" ]; then
+                BASE=$(git rev-parse "${HEAD}~1" 2>/dev/null || printf '%s' "$HEAD")
+              fi
+            fi
+          fi
           pattern='(co-authored-by:.*(claude|anthropic|codex|openai|gemini|antigravity|copilot))|generated with \[?(claude|codex|gemini|antigravity)'
           bad=0
           if git log --format=%B "$BASE..$HEAD" | grep -Eiq "$pattern"; then
@@ -48,53 +88,114 @@ jobs:
           exit $bad
   leak-check:
     name: Added lines have no common env-detail or secret patterns (pattern check, not a guarantee)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
+          persist-credentials: false
       - env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-        run: bash .github/scripts/leak-check.sh "$BASE" "$HEAD"
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_PR" ]; then
+              printf '%s' "$INPUT_PR" | grep -Eq '^[0-9]+$' || { echo "Invalid pr input"; exit 1; }
+              PR_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR")
+              BASE=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["base"]["sha"])')
+              HEAD=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+              git fetch --no-tags origin "$BASE" "+refs/pull/$INPUT_PR/head"
+            else
+              HEAD=$(git rev-parse HEAD)
+              BASE=$(git merge-base "origin/${DEFAULT_BRANCH:-main}" "$HEAD" || true)
+              if [ -z "$BASE" ] || [ "$BASE" = "$HEAD" ]; then
+                BASE=$(git rev-parse "${HEAD}~1" 2>/dev/null || printf '%s' "$HEAD")
+              fi
+            fi
+          fi
+          bash .github/scripts/leak-check.sh "$BASE" "$HEAD"
   loop-record:
     name: PRs that change repos/<engine>/ fill every Loop record field (presence only, see AGENTS.md)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
+          persist-credentials: false
       - env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$INPUT_PR" ]; then
+              printf '%s' "$INPUT_PR" | grep -Eq '^[0-9]+$' || { echo "Invalid pr input"; exit 1; }
+              PR_JSON=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$INPUT_PR")
+              PR_BODY=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body") or "")')
+              BASE=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["base"]["sha"])')
+              HEAD=$(printf '%s' "$PR_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+              git fetch --no-tags origin "$BASE" "+refs/pull/$INPUT_PR/head"
+            else
+              HEAD=$(git rev-parse HEAD)
+              BASE=$(git merge-base "origin/${DEFAULT_BRANCH:-main}" "$HEAD" || true)
+              if [ -z "$BASE" ] || [ "$BASE" = "$HEAD" ]; then
+                BASE=$(git rev-parse "${HEAD}~1" 2>/dev/null || printf '%s' "$HEAD")
+              fi
+            fi
+          fi
           changed=$(git diff --name-only "$BASE...$HEAD")
           engines=$(printf '%s\n' "$changed" | sed -n 's|^repos/\([^/]*\)/.*|\1|p' | sort -u)
-          if [ -z "$engines" ]; then echo "OK: no file under repos/<engine>/ changed; no loop record needed"; exit 0; fi
-          echo "Engines changed: $engines"
-          printf '%s' "$PR_BODY" | python3 -c '
-          import re, sys
+          core_livelab=$(printf '%s\n' "$changed" | grep -E '^core/livelab/' || true)
+          if [ -z "$engines" ] && [ -z "$core_livelab" ]; then
+            echo "OK: no file under repos/<engine>/ or core/livelab/ changed; no loop record or GPU verification contract needed"
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -z "$INPUT_PR" ]; then
+            echo "::notice::workflow_dispatch without pr input; pass -f pr=<number> to validate PR Loop record body"
+            exit 0
+          fi
+          echo "Engines changed: ${engines:-none}; core/livelab changed: $([ -n "$core_livelab" ] && echo yes || echo no)"
+          HAS_ENGINE=$([ -n "$engines" ] && echo 1 || echo 0) printf '%s' "$PR_BODY" | python3 -c '
+          import os, re, sys
           body = re.sub(r"<!--.*?-->", "", sys.stdin.read().replace("\r", ""), flags=re.S)
-          m = re.search(r"^## Loop record\s*$(.*?)(?=^## |\Z)", body, flags=re.M | re.S)
-          if not m:
-              sys.exit("Missing a \"## Loop record\" section (see .github/pull_request_template.md)")
-          fields = ["Engine", "Upstream PRs", "Function groups", "Rule added",
-                    "Overheads measured", "Receipts", "Not verified"]
-          empty = [f for f in fields
-                   if not re.search(r"^- " + f + r":[ \t]*\S", m.group(1), flags=re.M)]
-          if empty:
-              sys.exit("Loop record fields with no text (write none if it does not apply): " + ", ".join(empty))
-          print("OK: every loop record field has text. Not checked: whether it is true.")
+          if os.environ.get("HAS_ENGINE") == "1":
+              m = re.search(r"^## Loop record\s*$(.*?)(?=^## |\Z)", body, flags=re.M | re.S)
+              if not m:
+                  sys.exit("Missing a \"## Loop record\" section (see .github/pull_request_template.md)")
+              fields = ["Engine", "Upstream PRs", "Function groups", "Rule added",
+                        "Overheads measured", "Receipts", "Not verified"]
+              empty = [f for f in fields
+                       if not re.search(r"^- " + f + r":[ \t]*\S", m.group(1), flags=re.M)]
+              if empty:
+                  sys.exit("Loop record fields with no text (write none if it does not apply): " + ", ".join(empty))
+          gpu_fields = ["Ideal full GPU test", "Actual tests run", "Why unrun GPU paths were skipped"]
+          empty_gpu = [f for f in gpu_fields
+                       if not re.search(r"^- " + f + r":[ \t]*\S", body, flags=re.M)]
+          if empty_gpu:
+              sys.exit("GPU verification fields with no text (mandatory when repos/<engine>/ or core/livelab/ changes): " + ", ".join(empty_gpu))
+          print("OK: every required loop record and 3-part GPU verification field has text.")
           '
   cross-engine-imports:
     name: No repos/<engine>/ code imports from another repos/<other>/ (shared code goes to core/livelab)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
       - run: |
           bad=0
           for dir in repos/*/; do
