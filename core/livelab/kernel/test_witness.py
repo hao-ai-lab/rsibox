@@ -291,12 +291,14 @@ class CodeRestartWitnessTest(unittest.TestCase):
         summary = W.summarize_restart_witness(
             {"rank0": counts_rank0, "rank1": counts_rank1}
         )
+        # per-rank minimum (audit #21: a sum proved a target that one rank never ran)
         self.assertEqual(
             summary,
             {
-                "witness": {"scale": 5, "Engine.step": 5},
+                "witness": {"scale": 2, "Engine.step": 2},
                 "proven": True,
                 "finding": None,
+                "per_rank": {"rank0": counts_rank0, "rank1": counts_rank1},
             },
         )
 

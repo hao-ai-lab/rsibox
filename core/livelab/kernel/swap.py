@@ -201,7 +201,17 @@ class Staged:
         self.items = {}          # key -> JSON summary
         self.line_map = {}       # (qualname, patch line) -> base line (stage's line_maps)
         self.jits = []           # (jit.plan's plan, witness key): JIT kernels to rebuild
-        self.jit_adds = []       # (added JIT object, witness key)
+        self.jit_adds = []       # (added JIT object, witness key), built at apply
+        self.pending_adds = []   # added definitions to build at apply (analysis records)
+        self.add_slots = []      # (owner, name) each added definition goes to
+
+
+class _Deferred:
+    """New defaults that name a definition the edit adds: evaluated at apply, once it is
+    built."""
+
+    def __init__(self, q, stub):
+        self.q, self.stub = q, stub
 
 
 _compile = compile          # `stage` has a parameter named compile
@@ -443,9 +453,15 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     # 6. new defaults: a stub the caller evaluates in the module's globals
     for (q, i), r in zip(todo, [r for r in tres if r["status"] == "ok"]):
         bnode, pnode = bq[q][i], pq[q][i]
-        if "<locals>" not in q and isinstance(pnode, _DEF) and \
-                _defaults_key(bnode) != _defaults_key(pnode):
+        if not isinstance(pnode, _DEF) or _defaults_key(bnode) == _defaults_key(pnode):
+            continue
+        if "<locals>" not in q:
             r["defaults"] = _defaults_stub(q, pnode, futures)
+        else:
+            # a nested def's defaults live on each closure, made when the enclosing call ran
+            # the def statement: a swap gives live closures the new code with the old
+            # defaults (TypeError at the next call), so it blocks (audit #10)
+            r["nested_signature"] = (f"{ast.unparse(bnode.args)} -> {ast.unparse(pnode.args)}")
 
     # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
     meths = {}
@@ -818,36 +834,22 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             L.code_tree(c, None, (new_idx, parent))
         timings["compile_s"] = at["compile_s"]
         timings["parse_compile_s"] = round(timings["parse_s"] + timings["compile_s"], 6)
-        # 5. added definitions, built in a scratch namespace
-        built = {}                         # class -> {name: member added so far}
-        top = dict(st.imports)             # new imports and top-level definitions so far
-        if a["added"]:
-            # an added decorator runs here and starts with the witness call: bind the no-op
-            # stub (what undo leaves anyway; at_base ignores it), apply binds the hook
-            mod.__dict__.setdefault(W.HIT, W.stub)
+        # 5. added definitions: built at apply, not here (audit #23): building runs their
+        # decorators and class bodies, whose side effects (a registry, a JIT build) must not
+        # happen for a transaction that is then aborted. Here only where each one goes and
+        # its witness key.
+        top = dict(st.imports)             # new imports (added definitions join at apply)
         for ad in a["added"]:
-            ns = dict(top)
-            if ad["cls"] is not None:      # decorators and defaults see the live class body
-                ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), top,
-                                          built.get(ad["cls"]))
-            with JIT.seeded_lines(mod.__file__, source):    # @triton.jit reads its lines
-                exec(_raise(ad), mod.__dict__, ns)
-            q, cls_name, name = ad["q"], ad["cls"], ad["name"]
-            if cls_name is not None:
-                built.setdefault(cls_name, {})[name] = ns[cls_name].__dict__[name]
-            if cls_name is None:
-                top[name] = ns[name]       # a later added definition may use it
-                st.adds.append((mod.__dict__, name, ns[name]))
-            else:
-                obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
-                _set_class_cell(obj, cls)
-                st.adds.append((cls, name, obj))
+            if ad.get("error"):
+                raise _Failed(ad["error"])
+            owner = mod.__dict__ if ad["cls"] is None else getattr(mod, ad["cls"])
+            st.pending_adds.append(ad)
+            st.add_slots.append((owner, ad["name"]))
             if ad["def"]:
-                k = L.key_of(kname, q, ad["line"])
+                k = L.key_of(kname, ad["q"], ad["line"])
                 st.keys.append(k)
                 st.items[k] = {"added": True}
-                if cls_name is None and JIT.unwrap(ns[name])[0] is not None:
-                    st.jit_adds.append((ns[name], k))
+                ad["key"] = k
     except Exception as e:
         fs.append(F.finding("patch_invalid", _err(e),
                             "the patch compiles and its imports run", subject=kname))
@@ -883,12 +885,22 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                     bad = True
                 chain.append((o, c))
             c = parent.get(c)
+        if "nested_signature" in r and olds:
+            fs.append(F.finding("nested_signature", f"{q}: parameters {r['nested_signature']}",
+                                "the same defaults as the live closures", subject=k))
+            bad = True
         if bad:
             continue
         defaults = kwdefaults = J.KEEP
         if "defaults" in r:
             try:
                 defaults, kwdefaults = _defaults(mod, q, r["defaults"], top)
+            except NameError as e:
+                if getattr(e, "name", None) in {n for _, n in st.add_slots}:
+                    defaults = _Deferred(q, r["defaults"])   # names an added definition
+                else:
+                    fs.append(F.finding("defaults_not_evaluated", _err(e),
+                                        "the new defaults evaluate", subject=k))
             except Exception as e:
                 fs.append(F.finding("defaults_not_evaluated", _err(e),
                                     "the new defaults evaluate", subject=k))
@@ -1090,7 +1102,7 @@ def validate(st, frames=True):
             fs.append(F.finding("changed_since_prepare",
                                 f"{fn.__qualname__} runs code {L.content_hash(now)}",
                                 f"the staged base {h}", subject=fn.__qualname__))
-    for owner, name, _ in st.adds:
+    for owner, name in st.add_slots:
         present = name in owner if isinstance(owner, dict) else name in vars(owner)
         if present:
             fs.append(F.finding("changed_since_prepare", f"{name} was added meanwhile",
@@ -1293,6 +1305,39 @@ def closure_pairs(st):
     return pairs
 
 
+def _build_adds(st, journal):
+    """Build the definitions the edit adds (stage only planned them), in a scratch namespace:
+    their decorators and class bodies run now, at the commit. Returns the namespace of new
+    imports and top-level definitions (for deferred defaults)."""
+    mod, top = st.mod, dict(st.imports)
+    st.adds, st.jit_adds = [], []
+    if not st.pending_adds:
+        return top
+    # an added decorator runs here and may call the new body, which starts with the
+    # witness call: bind the no-op stub where the module lacks the name (journaled)
+    # (the stub is what undo leaves anyway; at_base ignores the name)
+    mod.__dict__.setdefault(W.HIT, W.stub)
+    built = {}                         # class -> {name: member added so far}
+    for ad in st.pending_adds:
+        ns = dict(top)
+        if ad["cls"] is not None:      # decorators and defaults see the live class body
+            ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), top, built.get(ad["cls"]))
+        with JIT.seeded_lines(mod.__file__, st.source):    # @triton.jit reads its lines
+            exec(_raise(ad), mod.__dict__, ns)
+        cls_name, name = ad["cls"], ad["name"]
+        if cls_name is None:
+            top[name] = ns[name]       # a later added definition may use it
+            st.adds.append((mod.__dict__, name, ns[name]))
+            if ad["def"] and JIT.unwrap(ns[name])[0] is not None:
+                st.jit_adds.append((ns[name], ad["key"]))
+        else:
+            obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
+            built.setdefault(cls_name, {})[name] = obj
+            _set_class_cell(obj, cls)
+            st.adds.append((cls, name, obj))
+    return top
+
+
 def apply(st, journal, witness):
     """Make a staged swap visible, every change through the journal. Never raises: on an
     error it undoes its own entries and returns not-ok. First it journals the nested-code
@@ -1318,6 +1363,7 @@ def apply(st, journal, witness):
                     linecache.cache[target_file] = previous
 
             journal.on_undo(_restore_linecache)
+        top = _build_adds(st, journal)
         journal.record_closures(closure_pairs(st), mod=st.mod)
         for name, value in st.imports.items():
             journal.set_item(g, name, value)
@@ -1331,7 +1377,12 @@ def apply(st, journal, witness):
         for k in st.keys:
             journal.set_item(witness.counts, k, 0)
             witness.capture_counts[k] = 0   # read only for committed keys: not journaled
+        for k in st.keys:
+            if hasattr(witness, "reset"):
+                witness.reset(k)
         for fn, code, d, kw in st.swaps:
+            if isinstance(d, _Deferred):
+                d, kw = _defaults(st.mod, d.q, d.stub, top)
             journal.set_code(fn, code, d, kw)
         for owner, name, obj in st.adds:
             if isinstance(owner, dict):

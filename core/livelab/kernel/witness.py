@@ -37,6 +37,7 @@ import functools
 import gc
 import inspect
 import sys
+import time
 import types
 
 from . import findings as F
@@ -56,22 +57,40 @@ class Witness:
         self.capture_counts = {}    # calls while a graph was recorded (see the module doc)
         self.capturing = capturing  # fn() -> bool, asked at every call; None: never
         self._capture = 0           # > 0 inside `capture()`
+        self.probe_errors = {}      # calls whose `capturing` probe raised: never live
+        self.first_hit = {}         # key -> time.monotonic() of its first live call
+        self.first_hit_wall = {}    # the same on the wall clock (other hosts)
         self.hook = _hook(self)     # what the swap binds as __fastrsi_hit__
         trace_safe(self.hook)
 
     def _capturing(self):
+        """True, False, or None when the probe raised (the call is then not proven live)."""
         if self._capture:
             return True
         if self.capturing is None:
             return False
         try:
             return bool(self.capturing())
-        except Exception:           # a probe that fails counts the call as live
-            return False
+        except Exception:           # fail closed: a probe that fails proves nothing
+            return None
 
     def hit(self, key):
-        c = self.capture_counts if self._capturing() else self.counts
+        cap = self._capturing()
+        if cap is None:
+            self.probe_errors[key] = self.probe_errors.get(key, 0) + 1
+            return
+        c = self.capture_counts if cap else self.counts
         c[key] = c.get(key, 0) + 1
+        if not cap and key not in self.first_hit:
+            self.first_hit[key] = time.monotonic()
+            self.first_hit_wall[key] = time.time()
+
+    def reset(self, key):
+        """Forget a key's capture count, probe errors and first-hit time (apply: a new swap's
+        counters start at 0; the live count goes through the journal)."""
+        self.capture_counts[key] = 0
+        for d in (self.probe_errors, self.first_hit, self.first_hit_wall):
+            d.pop(key, None)
 
     @contextlib.contextmanager
     def capture(self):
@@ -92,11 +111,33 @@ class Witness:
             journal.set_item(self.counts, key, 0)
         else:
             self.counts[key] = 0
-        self.capture_counts[key] = 0
+        self.reset(key)
 
         def hook(*_a, **_k):
             self.hit(key)
         return hook
+
+    def arm_launch(self, key, label, journal=None):
+        """A Triton launch hook for one kernel that runs the code of `key` (the kernel itself
+        or a caller that inlines it): every launch counts `key` and the kernel's own key
+        `launch_key(key, label)`, so the proof says which kernel launched. `key` itself is
+        armed by `arm` (once per edit)."""
+        own = launch_key(key, label)
+        if journal is not None:
+            journal.set_item(self.counts, own, 0)
+        else:
+            self.counts[own] = 0
+        self.reset(own)
+
+        def hook(*_a, **_k):
+            self.hit(key)
+            self.hit(own)
+        return hook
+
+    def launches(self, key):
+        """{kernel label: live launches} of the kernels armed for `key` (arm_launch)."""
+        pre = key + LAUNCH_SEP
+        return {k[len(pre):]: n for k, n in self.counts.items() if k.startswith(pre)}
 
     def snapshot(self):
         return dict(self.counts)
@@ -110,6 +151,12 @@ class Witness:
         for k in keys:
             n, cap = self.counts.get(k, 0), self.capture_counts.get(k, 0)
             if n:
+                continue
+            probe = self.probe_errors.get(k, 0)
+            if probe:
+                out.append(F.finding("zero_witness", f"0 proven live calls; {probe} call(s) "
+                                     "whose capture probe raised (not counted: fail closed)",
+                                     "at least one live call with a working probe", subject=k))
                 continue
             running = [c for c in (old_codes or {}).get(k, ()) if c in live]
             if running:
@@ -129,9 +176,21 @@ class Witness:
         res = F.ok(counts={k: self.counts.get(k, 0) for k in keys},
                    capture_counts={k: self.capture_counts.get(k, 0) for k in keys},
                    ran={k: ran(self.capture_counts.get(k, 0), self.counts.get(k, 0))
-                        for k in keys})
+                        for k in keys},
+                   probe_errors={k: self.probe_errors[k] for k in keys if k in self.probe_errors},
+                   first_hit={k: self.first_hit[k] for k in keys if k in self.first_hit},
+                   first_hit_wall={k: self.first_hit_wall[k] for k in keys
+                                   if k in self.first_hit_wall})
         res["findings"] = out
         return res
+
+
+LAUNCH_SEP = "@launch:"
+
+
+def launch_key(key, label):
+    """The per-kernel counter of a Triton launch that runs `key`'s code."""
+    return f"{key}{LAUNCH_SEP}{label}"
 
 
 def stub(key):
@@ -413,32 +472,35 @@ def collect_restart_witness(targets):
 
 
 def summarize_restart_witness(counts_by_target):
-    """Aggregate per-target call counts across ranks and determine whether all edited
-    targets executed at least once (`proven: True`) or any target had 0 calls
-    (`proven: False`, `finding: "zero_witness"`).
-    """
-    aggregated = {}
-    if isinstance(counts_by_target, (list, tuple)):
-        for rank_entry in counts_by_target:
-            rank_counts = collect_restart_witness(rank_entry)
-            for target_name, call_count in rank_counts.items():
-                aggregated[target_name] = aggregated.get(target_name, 0) + int(call_count)
-    elif isinstance(counts_by_target, dict):
-        if counts_by_target and all(isinstance(val, dict) for val in counts_by_target.values()):
-            for rank_counts in counts_by_target.values():
-                for target_name, call_count in rank_counts.items():
-                    aggregated[target_name] = aggregated.get(target_name, 0) + int(call_count)
-        else:
-            aggregated = collect_restart_witness(counts_by_target)
-    else:
-        aggregated = collect_restart_witness(counts_by_target)
+    """Whether every edited target executed on every rank. Several ranks (a list, or a dict
+    of per-rank dicts): `witness` is the per-rank minimum (a target proven only where it ran
+    on each rank), `per_rank` the counts as given; `proven: True` only when every target has
+    at least one call on every rank, else `finding: "zero_witness"`. One rank: its counts.
+    A rank whose counts cannot be read (an exception) fails closed: not proven, the error in
+    `errors`."""
+    per_rank, errors = {}, {}
 
-    total_calls = sum(aggregated.values())
-    all_targets_reached = bool(aggregated) and total_calls > 0 and all(
-        call_count > 0 for call_count in aggregated.values()
-    )
-    return {
-        "witness": aggregated,
-        "proven": all_targets_reached,
-        "finding": None if all_targets_reached else "zero_witness",
-    }
+    def read(label, entry):
+        try:
+            per_rank[label] = {k: int(v) for k, v in collect_restart_witness(entry).items()}
+        except Exception as e:          # fail closed
+            errors[label] = f"{type(e).__name__}: {e}"
+    if isinstance(counts_by_target, (list, tuple)):
+        for i, entry in enumerate(counts_by_target):
+            read(f"rank{i}", entry)
+    elif isinstance(counts_by_target, dict) and counts_by_target and all(
+            isinstance(v, dict) for v in counts_by_target.values()):
+        for label, entry in counts_by_target.items():
+            read(str(label), entry)
+    else:
+        read("rank0", counts_by_target)
+    keys = sorted({k for c in per_rank.values() for k in c})
+    aggregated = {k: min(c.get(k, 0) for c in per_rank.values()) for k in keys}
+    proven = bool(aggregated) and not errors and all(n > 0 for n in aggregated.values())
+    out = {"witness": aggregated, "proven": proven,
+           "finding": None if proven else "zero_witness"}
+    if len(per_rank) > 1 or errors:
+        out["per_rank"] = per_rank
+    if errors:
+        out["errors"] = errors
+    return out

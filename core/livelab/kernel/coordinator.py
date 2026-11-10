@@ -88,6 +88,7 @@ import types
 import uuid
 
 from . import findings as F
+from . import jit as JIT
 from . import journal as J
 from . import locate as L
 from . import receipt as R
@@ -103,6 +104,7 @@ def txn_ref(ref):
 
 
 PHASE2 = ("validate", "commit", "abort", "undo")
+UNDO_WAIT_S = 30.0   # the longest an undo without a deadline waits for an in-flight commit
 
 
 class Participant:
@@ -238,6 +240,10 @@ class LocalParticipant(Participant):
         self._base = {}               # plan module -> (digest, names) when first touched
         self._ours = {}               # plan module -> names a transaction or cell added to it
         self._scope_keys = None       # scope objects' attribute names at the first prepare
+        self._seq = {}                # committed txn -> commit order (undo cascades by it)
+        self._next_seq = 0
+        self._lock = threading.Lock()  # the commit/undo decision of an in-flight job
+        self._inflight = {}           # txn -> {"done": Event, "gone": bool} while it commits
 
     def _live_source(self, module):
         """The text the live module runs: the latest committed transaction's, else None."""
@@ -462,18 +468,42 @@ class LocalParticipant(Participant):
     def commit(self, txn):
         """Apply the staged transaction at the quiesce point. With a deadline (`txn` is
         {"txn", "deadline_at"}), a commit that would start after deadline_at does nothing:
-        the host already counted this participant as failed and undid the others."""
+        the host already counted this participant as failed and undid the others.
+
+        Two-phase decision (audit #8): the job makes the patch visible, then, before it
+        returns from the quiesce point (no step has run the patch yet), it decides under a
+        lock whether the commit stands. It stands only while the caller still waits for it
+        and the deadline has not passed; otherwise the job undoes its own entries and the
+        transaction ends aborted (or undone, when the host's undo already came). The caller
+        that gives up (the quiesce call raised) marks the job gone under the same lock: if
+        the job had already decided, the reply says what it decided, so the host and this
+        participant never disagree."""
         txn, deadline_at = txn_ref(txn)
         if txn not in self._staged:
             return F.not_ok(f"nothing staged for {txn}")
         staged, cells, accept = self._staged.pop(txn)
         self._state[txn] = "aborted"  # until the commit below succeeds
-        gone = []                     # set if the quiesce call gave up: the job must not run
+        job = self._inflight[txn] = {"done": threading.Event(), "gone": False,
+                                     "started": False, "result": None}
+        t_call = time.monotonic()
+
+        def late(now=None):
+            return deadline_at is not None and (now or time.time()) > deadline_at
 
         def do():
-            if gone:
-                return F.not_ok("commit cancelled before it ran")
-            if deadline_at is not None and time.time() > deadline_at:
+            t_start = time.monotonic()
+            with self._lock:
+                if job["gone"]:
+                    return F.not_ok("commit cancelled before it ran")
+                job["started"] = True
+            try:
+                r = body(t_start)
+            finally:
+                job["done"].set()
+            return r
+
+        def body(t_start):
+            if late():
                 return F.not_ok("commit started after the phase-2 deadline; nothing applied",
                                 [{**F.finding("deadline_missed", "commit reached the "
                                               f"participant {time.time() - deadline_at:.3f} s "
@@ -487,6 +517,7 @@ class LocalParticipant(Participant):
                     u = self.journal.undo_to(mark)
                     self._rolled_back(txn, u, [])
                     return {**r, "findings": r.get("findings", []) + u["findings"]}
+            t_applied = time.monotonic()
             fs = []
             armed, n_routes = [], len(self.journal.routes)
 
@@ -527,7 +558,27 @@ class LocalParticipant(Participant):
                 self._rolled_back(txn, u, fs)
                 return F.not_ok(f"commit refused: {d['blocking']}", fs + u["findings"],
                                 rebuild_routes=rebuild_routes)
-            self._marks[txn] = mark
+            # the decision: still wanted (caller waiting, deadline not passed)? Under the
+            # lock, so the caller's give-up and this decision are ordered.
+            with self._lock:
+                abandon = ("the caller gave up (quiesce timed out) while the commit applied"
+                           if job["gone"] else
+                           "the commit finished after the phase-2 deadline" if late() else None)
+                if abandon is None:
+                    self._marks[txn] = mark
+                    self._seq[txn] = self._next_seq
+                    self._next_seq += 1
+                    self._state[txn] = "committed"
+            if abandon is not None:
+                u = self.journal.undo_to(mark)
+                self._rolled_back(txn, u, [])
+                with self._lock:
+                    if self._state.get(txn) not in ("undone", "partial"):
+                        self._state[txn] = "aborted"
+                return F.not_ok(f"commit abandoned: {abandon}; rolled back here", [{
+                    **F.finding("deadline_missed", abandon, "commit decided while the host "
+                                "waits for it"), "participant": self.name}] + u["findings"],
+                    abandoned=True)
             self._done[txn] = staged
             self._sources[txn] = self._pending.pop(txn, {})
             self._maps[txn] = self._pending_maps.pop(txn, {})
@@ -537,16 +588,35 @@ class LocalParticipant(Participant):
                                 + [c for st in staged for _, _, obj in st.adds
                                    for c in _codes_of(obj)])
             self._cell_keys[txn] = armed
-            self._state[txn] = "committed"
+            t_end = time.monotonic()
             return F.ok(changes=len(self.journal.entries) - mark, findings=fs,
                         journal=self.journal.describe(mark),
+                        timings={"quiesce_wait_s": round(t_start - t_call, 6),
+                                 "apply_s": round(t_applied - t_start, 6),
+                                 "cells_s": round(t_end - t_applied, 6),
+                                 "commit_s": round(t_end - t_start, 6),
+                                 "committed_mono": t_end},
                         **({"rebuild_routes": rebuild_routes} if rebuild_routes else {}))
 
         try:
-            return self.quiesce(do)
+            r = self.quiesce(do)
+            with self._lock:
+                self._inflight.pop(txn, None)
+            return r
         except Exception as e:
-            gone.append(True)
-            return F.not_ok(f"commit: {type(e).__name__}: {e}")
+            with self._lock:
+                job["gone"] = True
+                committed = self._state.get(txn) == "committed"
+                running = job["started"] and not job["done"].is_set()
+                if not running:
+                    self._inflight.pop(txn, None)
+            if committed:
+                # the job decided to commit before the caller gave up: say so
+                return F.ok(note=f"committed; the quiesce call then raised {type(e).__name__}: "
+                            f"{e}", late_reply=True)
+            # not committed, and it never will be: a job still running rolls itself back
+            # before it leaves the quiesce point (see above); undo waits for it
+            return F.not_ok(f"commit: {type(e).__name__}: {e}", in_flight=running)
 
     def _rolled_back(self, txn, u, cell_findings):
         """A commit rolled back (journal.undo_to its mark). When that could not restore
@@ -570,7 +640,18 @@ class LocalParticipant(Participant):
         return F.ok()
 
     def undo(self, txn):
-        txn, _ = txn_ref(txn)
+        txn, deadline_at = txn_ref(txn)
+        job = self._inflight.get(txn)
+        if job is not None and not job["done"].is_set():
+            # a commit whose caller gave up is still applying (audit #8): it rolls itself
+            # back before it leaves the quiesce point; wait for that, so this reply is true
+            wait = UNDO_WAIT_S if deadline_at is None else max(0.0, deadline_at - time.time())
+            if not job["done"].wait(wait):
+                return F.not_ok(f"undo: the commit of {txn} is still applying", [{
+                    **F.finding("deadline_missed", f"the commit of {txn} was still applying "
+                                f"{wait:.3f} s later (it rolls itself back when it ends)",
+                                "an undo that can say what this participant runs"),
+                    "participant": self.name}], in_flight=True)
         if txn in self._partial:
             # An earlier undo ran the whole journal back but could not restore everything
             # (e.g. closure_not_restored). Nothing is left to undo, and saying "undone" now
@@ -581,37 +662,55 @@ class LocalParticipant(Participant):
             # deadline applied nothing). Drop what is staged, so a commit arriving after this
             # applies nothing, and record the undo: every participant (every rank) of an undone
             # transaction then says "undone", not some "aborted" and some "undone".
-            if txn in self._state:
-                self._staged.pop(txn, None)
-                self._pending.pop(txn, None)
-                self._pending_maps.pop(txn, None)
-                self._state[txn] = "undone"
+            with self._lock:
+                if txn in self._state:
+                    self._staged.pop(txn, None)
+                    self._pending.pop(txn, None)
+                    self._pending_maps.pop(txn, None)
+                    self._state[txn] = "undone"
             return F.ok(undone=0, note="nothing committed")
         mark = self._marks[txn]
-        # The journal undoes back to the mark, so it also undoes every transaction committed
-        # after this one. Say so and record their state: they must not stay "committed".
-        later = sorted((t for t, m in self._marks.items() if m > mark),
-                       key=lambda t: self._marks[t])
+        gone = []                     # set if the quiesce call gave up before the job ran
+
+        def job_undo():
+            with self._lock:
+                if gone:
+                    return None               # cancelled: never runs unrecorded (audit #18)
+                gone.append("started")
+            # The journal undoes back to the mark, so it also undoes every transaction
+            # committed after this one (by commit order: two may share a mark). Say so and
+            # record their state: they must not stay "committed". The bookkeeping runs here,
+            # in the job, so it happens even when the caller has given up.
+            seq = self._seq.get(txn, -1)
+            later = sorted((t for t, n in self._seq.items() if n > seq and t in self._marks),
+                           key=lambda t: self._seq[t])
+            r = self.journal.undo_to(mark)
+            for t in [txn] + later:
+                self._marks.pop(t, None)
+                self._seq.pop(t, None)
+                for d in (self._done, self._sources, self._codes, self._maps, self._cell_keys):
+                    d.pop(t, None)
+                self._state[t] = "undone" if r["ok"] else "partial"
+            if not r["ok"]:
+                for t in [txn] + later:      # which txn's entry failed, the journal does not say
+                    self._partial[t] = r.get("findings", [])
+            if later:
+                r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
+                    **F.finding("undo_cascade",
+                                f"undoing {txn} also undid later transactions {later}",
+                                f"only {txn} undone"), "participant": self.name}]}
+            return r
         try:
-            r = self.quiesce(lambda: self.journal.undo_to(mark))
+            r = self.quiesce(job_undo)
         except Exception as e:
-            return F.not_ok(f"undo: {type(e).__name__}: {e}")
-        # The journal is back at the mark either way (a failed inverse is skipped and
-        # reported), and it undid every later transaction too.
-        for t in [txn] + later:
-            self._marks.pop(t, None)
-            for d in (self._done, self._sources, self._codes, self._maps, self._cell_keys):
-                d.pop(t, None)
-            self._state[t] = "undone" if r["ok"] else "partial"
-        if not r["ok"]:
-            for t in [txn] + later:      # which txn's entry failed, the journal does not say
-                self._partial[t] = r.get("findings", [])
-        if later:
-            r = {**r, "also_undone": later, "findings": r.get("findings", []) + [{
-                **F.finding("undo_cascade",
-                            f"undoing {txn} also undid later transactions {later}",
-                            f"only {txn} undone"), "participant": self.name}]}
-        return r
+            with self._lock:
+                started = bool(gone)
+                if not started:
+                    gone.append("cancelled")
+            return F.not_ok(f"undo: {type(e).__name__}: {e}" + (
+                "; the undo had started and finishes on its own (ask status)" if started else
+                "; cancelled: nothing undone"), in_flight=started)
+        return r if r is not None else F.not_ok("undo cancelled")
 
     def proof(self, txn):
         hashes, keys = {}, list(self._cell_keys.get(txn, []))
@@ -647,6 +746,22 @@ class LocalParticipant(Participant):
                 "a transaction committed here", subject=txn), "participant": self.name}],
                 counts={}, capture_counts={})
         r = self.witness.check(keys, old)
+        # Triton: which kernel launched for each edited kernel, and whether a binary of the
+        # new text exists (apply emptied the caches): a hook that fired with no compiled
+        # kernel never reached a launch of the new binary, so it proves nothing (audit #9)
+        launches = {}
+        for st in self._done.get(txn, []):
+            for pl, k in st.jits:
+                per = self.witness.launches(k) if hasattr(self.witness, "launches") else {}
+                launches[k] = per
+                built = JIT.compiled(pl["affected"])
+                if r["counts"].get(k) and not any(n and built.get(lab) for lab, n in per.items()):
+                    r["findings"].append(F.finding(
+                        "zero_witness", f"{r['counts'][k]} launch hook call(s), but no kernel "
+                        f"that launched holds a binary compiled from the edited text {built}",
+                        "a launch of a kernel compiled after the edit", subject=k))
+        if launches:
+            r["launches"] = launches
         if not keys:
             r["findings"].append(F.finding(
                 "no_witness_possible", "the transaction swapped no code and its cells armed "
@@ -911,6 +1026,50 @@ class Lane:
         return (True, box["value"]) if done.is_set() else (False, None)
 
 
+class Timeline(dict):
+    """A receipt timeline: unix seconds (comparable across hosts, as before), and beside
+    each stamp the monotonic clock (`mono`), which every span uses (audit #20: a wall-clock
+    step made gap_s or undo_s wrong). A subclass that stamps `tl[k] = self.clock()` gets
+    the monotonic stamp too."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.mono = {key: time.monotonic() for key in self}
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.mono[key] = time.monotonic()
+
+    def pop(self, key, *default):
+        self.mono.pop(key, None)
+        return super().pop(key, *default)
+
+    def at(self, key, wall, mono):
+        """Stamp key with a time taken earlier (wall, mono)."""
+        super().__setitem__(key, wall)
+        self.mono[key] = mono
+
+    def span(self, a, b):
+        if a in self.mono and b in self.mono:
+            return round(self.mono[b] - self.mono[a], 6)
+        return round(self[b] - self[a], 6) if a in self and b in self else None
+
+    def relative(self, origin="edit"):
+        """{stamp: monotonic seconds since origin} for the receipt."""
+        o = self.mono.get(origin)
+        return {k: round(v - o, 6) for k, v in self.mono.items()} if o is not None else {}
+
+
+def _edit_stamp(edit_time, clock):
+    """(wall, mono) of the edit: edit_time is unix seconds (when the agent made the edit);
+    its monotonic time is now minus the wall clock's age of it. None: now (the start of
+    run(); the receipt says so in `edit_source`)."""
+    mono, wall = time.monotonic(), clock()
+    if edit_time is None:
+        return wall, mono
+    return edit_time, mono - max(0.0, time.time() - edit_time)
+
+
 class Coordinator:
     """The transaction host. Two phases:
 
@@ -1008,6 +1167,21 @@ class Coordinator:
         if deadline_at is None:
             return _call(p, method, arg)
         ref = {"txn": arg, "deadline_at": deadline_at} if method in PHASE2 else arg
+        if method in ("validate", "abort") and p.name not in missed and \
+                time.time() >= deadline_at:
+            # The deadline passed before this participant's turn (audit #19: no re-armed
+            # deadline). Not its fault, and nothing of it changes: validate is not asked (the
+            # vote is lost, so the transaction aborts), and abort is sent without a wait
+            # (dropping staged state is safe whenever it lands; no commit can follow).
+            if method == "validate":
+                return F.not_ok("validate not asked: the phase-2 deadline passed before this "
+                                "participant's turn", not_asked=True)
+            if getattr(p, "bounded", False):
+                return _call(p, method, ref)
+            lane = self._lanes.get(p.name) or self._lanes.setdefault(p.name, Lane(p.name))
+            done, r = lane.call(lambda: _call(p, method, ref), deadline_at)
+            return r if done else F.ok(queued=True, note="abort sent after the deadline; "
+                                       "not waited for")
         if getattr(p, "bounded", False):
             r = _call(p, method, ref)
             late = any(f.get("check") == "deadline_missed" for f in r.get("findings", []))
@@ -1089,7 +1263,8 @@ class Coordinator:
         d = self.phase2_deadline_s
         # validate and commit by half the deadline, the rollback by all of it: the gap ends
         # within the deadline even when a commit misses its half
-        # (deadlines are on the shared wall clock, which participants also read)
+        # (deadlines are on the shared wall clock, which participants also read; a deadline
+        # that has passed is not re-armed: later calls get no wait and count as missed)
         g = time.time()
         commit_at, end_at = (None, None) if d is None else (g + d / 2, g + d)
         missed = t["missed"] = set()
@@ -1097,20 +1272,14 @@ class Coordinator:
         def call(p, method, deadline_at):
             return self._bounded(p, method, txn, deadline_at, missed)
         for p in self.participants:
-            validate_deadline = (
-                None if commit_at is None else
-                (commit_at if time.time() < commit_at else time.time() + d / 2)
-            )
+            validate_deadline = commit_at   # never re-armed once passed (audit #19)
             res[p.name]["validate"] = call(p, "validate", validate_deadline)
         tl["vote"] = now()
         rollback = {"status": "not_needed", "participants": {}}
         out = {"rollback": rollback, "extra": [], "hashes": {}}
         if not all(res[p.name]["validate"]["ok"] for p in self.participants):
             for p in self.participants:
-                abort_deadline = (
-                    None if end_at is None else
-                    (end_at if time.time() < end_at else time.time() + d / 2)
-                )
+                abort_deadline = end_at   # never re-armed once passed (audit #19)
                 res[p.name]["abort"] = call(p, "abort", abort_deadline)
             out["outcome"] = "aborted"
         else:
@@ -1136,19 +1305,21 @@ class Coordinator:
                 # commit (not waited for), so it runs if that commit lands after all.
                 rollback_targets = [failed] + list(reversed(committed))
                 for p in rollback_targets:
-                    undo_deadline = (
-                        None if end_at is None else
-                        (end_at if time.time() < end_at else time.time() + d / 2)
-                    )
+                    undo_deadline = end_at   # never re-armed once passed (audit #19)
                     rollback["participants"][p.name] = res[p.name]["undo"] = \
                         call(p, "undo", undo_deadline)
                 for p in self.participants:
                     if p not in committed:
-                        abort_deadline = (
-                            None if end_at is None else
-                            (end_at if time.time() < end_at else time.time() + d / 2)
-                        )
+                        abort_deadline = end_at   # never re-armed once passed (audit #19)
                         res[p.name]["abort"] = call(p, "abort", abort_deadline)
+                for name, u in rollback["participants"].items():
+                    if any(x.get("in_flight") for x in (u.get("ranks") or [u])) and \
+                            name not in missed:
+                        # a commit still applying there: the host cannot say what it runs
+                        missed.add(name)
+                        self.poison.append({**F.finding(
+                            "deadline_missed", f"{name}: a commit was still applying at undo",
+                            "every commit decided within the gap"), "participant": name})
                 rollback["status"] = ("undone" if all(
                     u["ok"] for u in rollback["participants"].values()) else "partial")
                 if rollback["status"] != "undone":
@@ -1166,7 +1337,8 @@ class Coordinator:
         this replaces. Returns {"ok", "outcome", "txn", "receipt", "written"}, where outcome is
         committed, aborted, rolled_back, or in-doubt (resolve it with `status`)."""
         now = self.clock
-        tl = {"edit": edit_time if edit_time is not None else now()}
+        tl = Timeline()
+        tl.at("edit", *_edit_stamp(edit_time, now))
         txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"
         plan = {**plan, "id": txn}
         if self.poison:              # a late participant may still switch: undo or respawn
@@ -1176,7 +1348,9 @@ class Coordinator:
                     "findings": [F.finding("session_poisoned", "; ".join(
                         f"{f['participant']}: {f['check']}" for f in self.poison),
                         "a host whose participants all met their deadlines")]}
-        t = self.txns[txn] = {"plan": plan, "edit": tl["edit"], "tl": tl, "state": "prepared",
+        t = self.txns[txn] = {"plan": plan, "edit": tl["edit"], "edit_mono": tl.mono["edit"],
+                              "edit_source": "run_start" if edit_time is None else "caller",
+                              "tl": tl, "state": "prepared",
                               "res": {p.name: {} for p in self.participants},
                               "started": False, "cancelled": False, "done": False,
                               "receipt": False, "baseline": baseline_restart,
@@ -1299,6 +1473,8 @@ class Coordinator:
         agree = all(checks) if checks else None
 
         def span(a, b):
+            if isinstance(tl, Timeline):
+                return tl.span(a, b)
             return round(tl[b] - tl[a], 6) if a in tl and b in tl else None
         rec = {
             "schema": R.SCHEMA, "kind": "txn", "id": txn,
@@ -1324,11 +1500,14 @@ class Coordinator:
             "decisions": {"accepted": sorted({f["check"] for f in fs if f.get("accepted")}),
                           "blocking": sorted({f["check"] for f in fs
                                               if not f.get("accepted")})},
-            "outcome": out["outcome"], "timeline": tl,
-            # with a rebuild, the edit runs in every step only once the rebuild is done
-            "edit_to_run_s": span("edit", "rebuilt" if t.get("rebuilt") and "rebuilt" in tl
-                                  else "committed"),
+            "outcome": out["outcome"], "timeline": dict(tl),
+            "timeline_mono": tl.relative() if isinstance(tl, Timeline) else {},
+            "edit_source": t.get("edit_source"),
+            # the first execution of the edit is seen only after the commit, by the witness:
+            # the `proof` receipt has it (audit #20); here nothing has run yet
+            "edit_to_run_s": None,
             "edit_to_commit_s": span("edit", "committed"),
+            "edit_to_rebuilt_s": span("edit", "rebuilt") if t.get("rebuilt") else None,
             "rebuild": out.get("rebuild"),
             "recapture_s": ((out.get("rebuild") or {}).get("seconds") or {}).get("R1"),
             "prepare_s": span("prepare_start", "prepared"),
@@ -1362,7 +1541,20 @@ class Coordinator:
                 witness[n] = r.get("counts", {})
                 capture[n] = r.get("capture_counts", {})
         edit = self.txns.get(txn, {}).get("edit")
+        edit_mono = self.txns.get(txn, {}).get("edit_mono")
         t = now()
+        t_mono = time.monotonic()
+        # first execution: per participant (per rank) the first live witness hit of the edit
+        # (CLOCK_MONOTONIC, shared by the processes of one host); the edit has run everywhere
+        # at the latest of them (audit #20). None when some participant shows no hit.
+        firsts = {}
+        for n, r in res.items():
+            for x in (r.get("ranks") or [r]):
+                label = f"{n}/rank{x.get('rank')}" if r.get("ranks") else n
+                hits = list((x.get("first_hit") or {}).values())
+                firsts[label] = min(hits) if hits else None
+        run_at = (max(firsts.values()) if firsts and all(v is not None for v in firsts.values())
+                  else None)
         rec = {"schema": R.SCHEMA, "kind": "proof", "id": txn,
                "witness": witness,
                # calls made while graphs were captured, apart from the live ones above: a
@@ -1371,8 +1563,14 @@ class Coordinator:
                "ran": {w: {k: W.ran(capture.get(w, {}).get(k, 0), n) for k, n in c.items()}
                        for w, c in witness.items()},
                "findings": fs, "golden": golden,
+               "launches": {n: r.get("launches") for n, r in res.items() if r.get("launches")},
                "timeline": {"edit": edit, "proved": t},
-               "edit_to_finish_s": round(t - edit, 6) if edit is not None else None}
+               "first_run_s": {k: (round(v - edit_mono, 6) if v is not None and
+                                   edit_mono is not None else None) for k, v in firsts.items()},
+               "edit_to_run_s": (round(run_at - edit_mono, 6)
+                                 if run_at is not None and edit_mono is not None else None),
+               "edit_to_finish_s": (round(t_mono - edit_mono, 6) if edit_mono is not None
+                                    else round(t - edit, 6) if edit is not None else None)}
         return {"ok": all(r["ok"] for r in res.values()) and not fs, "receipt": rec,
                 "written": self._write(rec)}
 
@@ -1390,18 +1588,12 @@ class Coordinator:
         d, missed = self.phase2_deadline_s, set()
         end_at = None if d is None else time.time() + d
         for p in reversed(self.participants):
-            undo_deadline = (
-                None if end_at is None else
-                (end_at if time.time() < end_at else time.time() + d / 2)
-            )
+            undo_deadline = end_at   # never re-armed once passed (audit #19)
             res[p.name]["undo"] = self._bounded(p, "undo", txn, undo_deadline, missed)
         tl["code_undone"] = self.clock()
         for kind in resets:
             for p in self.participants:
-                reset_deadline = (
-                    None if end_at is None else
-                    (end_at if time.time() < end_at else time.time() + d / 2)
-                )
+                reset_deadline = end_at   # never re-armed once passed (audit #19)
                 res[p.name].setdefault("reset", {})[kind] = self._bounded(
                     p, "reset", kind, reset_deadline, missed)
         txn_record = self.txns.get(txn)
@@ -1419,8 +1611,19 @@ class Coordinator:
         produced. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
         now = self.clock
         t = self.txns.get(txn, {})
+        with self._lock:
+            state = t.get("state") if t else None
+        # refuse what cannot be undone (audit #18): an unknown id, an undone one, one
+        # that never committed. No receipt: nothing was asked of any participant.
+        why = (f"unknown transaction {txn}" if not t else
+               f"{txn} is already undone" if state == "undone" else
+               f"{txn} did not commit ({t.get('outcome')})" if state == "aborted" and
+               not t.get("pending_rollback") else None)
+        if why:
+            return {"ok": False, "status": "refused", "error": why, "participants": {},
+                    "receipt": None, "written": {"ok": False, "error": "refused: no receipt"}}
         resets = t.get("plan", {}).get("undo_resets", [])
-        tl = {"queued": now()}
+        tl = Timeline(queued=now())
         rb = {}
         undo_state = {"started": False, "cancelled": False, "done": False}
 
@@ -1465,7 +1668,7 @@ class Coordinator:
                                             "a step gap within the timeout")] if err else []),
                "rebuild": rb or None,
                "recapture_s": (rb.get("seconds") or {}).get("R1"),
-               "timeline": tl, "undo_s": round(tl["undo_end"] - tl["queued"], 6)}
+               "timeline": dict(tl), "undo_s": tl.span("queued", "undo_end")}
         if t and rb.get("ok"):
             t["rebuilt"] = []
         if t and not undo_state["cancelled"]:
@@ -1475,6 +1678,13 @@ class Coordinator:
                 t["state"] = "undone" if ok else (
                     "in-doubt" if status_label == "in-doubt" else "partial"
                 )
+                # transactions the participants undid with it (journal cascade): the host
+                # says so too, never "committed" for code that is gone
+                for x in calls:
+                    for r in (x.get("ranks") or [x]):
+                        for later in r.get("also_undone") or ():
+                            if later in self.txns and ok:
+                                self.txns[later]["state"] = "undone"
         return {"ok": ok, "status": status_label, "participants": res, "receipt": rec,
                 "written": self._write(rec)}
 
