@@ -117,7 +117,7 @@ def ask_service(url, token, payload):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pr", required=True)
-    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "GindaChen/fastrsi"))
+    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "hao-ai-lab/fastrsi"))
     ap.add_argument("--engine", choices=["agy", "service"], default="agy")
     ap.add_argument("--model", default="gemini-4-argon-high")
     ap.add_argument("--url", default=os.environ.get("FASTRSI_REVIEW_URL"))

@@ -125,7 +125,7 @@ GPU pairs.
 Over 42 rounds (Qwen3-14B architecture, TP 2; our 2026-11-07 run), the agent chose a flag restart
 for 4 launch-config ideas and a live swap for 20 code ideas, and gave no edit 16 times. Three of the
 four flags fail here: `--gradient-accumulation-fusion` (no apex for the LM head's non-TE linear),
-`--use-precision-aware-optimizer` (lab setup, fixed in https://github.com/GindaChen/fastrsi/pull/84)
+`--use-precision-aware-optimizer` (lab setup, fixed in https://github.com/hao-ai-lab/fastrsi/pull/84)
 and the TE cross-entropy fusion (Megatron's argument check).
 
 Kept, each confirmed on 4 independent pairs:
