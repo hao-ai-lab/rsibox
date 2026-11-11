@@ -30,6 +30,12 @@ Install took 22 ms; the 32K point is not measured yet.
 """
 
 
+GPU_FIELDS = """- Ideal full GPU test: 2x B200 conformance
+- Actual tests run: CPU unit tests only
+- Why unrun GPU paths were skipped: no GPU on this machine
+"""
+
+
 def rewrite(old, new, body=BODY):
     assert old in body, old
     return body.replace(old, new)
@@ -50,6 +56,13 @@ class Accepts(unittest.TestCase):
         rejected a rewrite that only added backticks)."""
         new = rewrite("Install took 22 ms; the 32K point", "Install took `22 ms`; the `32K` point")
         self.assertEqual(check(TITLE, BODY, TITLE, new), [])
+
+    def test_dates_ranges_and_gpu_fields_kept(self):
+        """No false alarm on dates, ranges and hyphenated words: the sign rule must not read
+        the hyphen in 2026-11-08 or 0.13-1.0 as a minus."""
+        body = BODY + GPU_FIELDS + "\nRun on 2026-11-08: 0.13-1.0 ms, a x-2 shift, -3 dB.\n"
+        new = rewrite("Run on 2026-11-08:", "Ran on 2026-11-08:", body)
+        self.assertEqual(check(TITLE, body, TITLE, new), [])
 
     def test_code_span_unwrapped(self):
         new = rewrite("We hot-swap `sparse_attn_indexer` from", "We hot-swap sparse_attn_indexer from")
@@ -94,6 +107,27 @@ class Rejects(unittest.TestCase):
     def test_loop_record_field_removed(self):
         new = rewrite("- Receipts: none\n", "")
         self.assertIn("Loop record field missing: Receipts", check(TITLE, BODY, TITLE, new))
+
+    def test_gpu_verification_field_removed(self):
+        """Pain point: the three GPU verification fields are mandatory in pr-rules.yml, but a
+        rewrite that dropped one passed this checker, so an applied rewrite failed CI."""
+        body = BODY + GPU_FIELDS
+        new = rewrite("- Actual tests run: CPU unit tests only\n", "", body)
+        self.assertIn("Loop record field missing: Actual tests run", check(TITLE, body, TITLE, new))
+
+    def test_sign_or_comparator_flipped(self):
+        """Pain point: +5.1% to -5.1%, or < 0.05 to > 0.05, kept the digits and passed."""
+        body = BODY + "\nSpeedup is +5.1% with loss < 0.05.\n"
+        for old, new in (("+5.1%", "-5.1%"), ("< 0.05", "> 0.05"), ("< 0.05", "0.05")):
+            p = check(TITLE, body, TITLE, rewrite(old, new, body))
+            self.assertTrue(any("numbers" in x for x in p), (old, new, p))
+
+    def test_one_of_two_equal_numbers_dropped(self):
+        """BODY says 22 ms twice (prose and Loop record). Dropping one occurrence loses a fact
+        even though the number still appears once."""
+        new = rewrite("- Overheads measured: install 22 ms (receipt r1)", "- Overheads measured: install (receipt r1)")
+        p = check(TITLE, BODY, TITLE, new)
+        self.assertTrue(any("dropped numbers" in x for x in p), p)
 
     def test_ai_attribution_added(self):
         new = BODY + "\nGenerated with [Claude Code](https://claude.com/claude-code)\n"

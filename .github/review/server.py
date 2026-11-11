@@ -37,7 +37,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 KINDS = {"pr-description": {"agy"}, "code-review": {"agy", "codex"}}
-MODELS = {"agy": {"gemini-4-argon-high", "gemini-4-argon-medium", "gemini-3.8-flash-high"},
+MODELS = {"agy": {"gemini-4-argon-high", "gemini-4-argon-medium"},     # never Gemini 3.8 (AGENTS.md)
           "codex": {"default"}}
 EXPECT = {"pr-description": "<<<TITLE", "code-review": '"findings"'}
 MAX_PROMPT = 120_000          # one argv string is capped at 128 KiB on Linux (agy takes -p)
@@ -267,7 +267,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "not found"})
         if not self.authorized():
             return self.send(401, {"error": "unauthorized"})
-        size = int(self.headers.get("Content-Length") or 0)
+        try:
+            size = int(self.headers.get("Content-Length") or "")
+        except ValueError:
+            return self.send(400, {"error": "Content-Length must be an integer"})
+        if size <= 0:
+            return self.send(400, {"error": "Content-Length must be positive"})
         if size > 2 * MAX_PROMPT:
             return self.send(413, {"error": "request too large"})
         try:
@@ -295,6 +300,18 @@ class Handler(BaseHTTPRequestHandler):
         log(f"{self.address_string()} {fmt % args}")
 
 
+MIN_TOKEN = 20
+
+
+def load_token(path):
+    """The bearer token, or exit: an empty or short token file would make a guessable (or the
+    empty) Authorization header valid."""
+    token = Path(path).read_text().strip()
+    if len(token) < MIN_TOKEN:
+        sys.exit(f"token in {path} has {len(token)} characters; need at least {MIN_TOKEN}")
+    return token
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -302,8 +319,9 @@ def main():
     args = ap.parse_args()
     token_file = os.path.expanduser(os.environ.get("FASTRSI_REVIEW_TOKEN_FILE",
                                                    "~/.config/fastrsi-review/token"))
+    token = load_token(token_file)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    server.token = open(token_file).read().strip()
+    server.token = token
     server.bins = {e: shutil.which(os.environ.get(e.upper(), e)) for e in ("agy", "codex")}
     server.bins = {e: b for e, b in server.bins.items() if b}
     server.secret_files = [token_file, "~/.gemini/antigravity-cli/antigravity-oauth-token",

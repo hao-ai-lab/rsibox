@@ -6,12 +6,15 @@ engineer understands every line on first read.
 
 ## Rules
 
-- Keep every fact. Every number, unit, PR or issue reference, commit hash, file path, function
-  name and code span in backticks must appear in your version exactly as written. Add no new
+- Keep every fact. Every number (with its sign or comparator, such as +5.1% or < 0.05, and
+  every time it appears), unit, PR or issue reference, commit hash, file path, function name
+  and code span in backticks must appear in your version exactly as written. Add no new
   numbers, claims, references or links.
 - Keep the structure: the same `##` sections in the same order. Keep the "Loop record" section
   and all its field labels (Engine, Upstream PRs, Function groups, Rule added, Overheads
-  measured, Receipts, Not verified) if the original has them. Keep "none" where it was "none".
+  measured, Receipts, Not verified, Ideal full GPU test, Actual tests run, Why unrun GPU paths
+  were skipped) if the original has them, written as `- Label: text`. Keep "none" where it
+  was "none".
 - Keep hedges that matter ("not verified", "not run", "estimate") but say them briefly.
 - Plain words, short sentences, active voice. Lead with what changed and why. One idea per
   bullet. Gloss jargon on first use. No hype, no filler, no "It's not X, it's Y".
