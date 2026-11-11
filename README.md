@@ -2,8 +2,6 @@
 
 Test an edit to a running ML engine without restarting it.
 
-<!-- links: paper, blog, results page -->
-
 A coding agent (or a person) optimizing vLLM, Megatron-LM or FastVideo pays a full engine restart
 for every idea it tries. FastRSI installs the edit into the warm engine process, proves that the new
 code actually ran, measures it, and undoes it. When an edit cannot be swapped in safely, it refuses
@@ -38,10 +36,16 @@ own. 204 s of the 228 s restart is setup that the edit did not invalidate. The o
 Python 3.11 or newer, no GPU, no third-party packages. From the repository root:
 
 ```sh
+# The 11 conformance cases on the toy lab (about 1.5 s on a laptop)
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab
+# Installed in a venv, so it runs from any directory
+python3 -m venv .venv && . .venv/bin/activate && pip install -e .
+python3 -m conformance --lab kernel.toy_lab:ToyLab
+# The same 11 cases on a FastVideo-shaped toy engine with real worker processes (about 5 s)
+PYTHONPATH=core/livelab:repos/fastvideo/livelab python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
 ```
 
-About 1.5 s on a laptop. Excerpt of the output:
+Excerpt of the output of the first command:
 
 ```
 case                  result  seconds  evidence
@@ -51,14 +55,6 @@ c8_crash_and_hang     pass      1.035  crash: poisoned by ['participant_failed']
 c10_not_proven        pass      0.044  proven False, findings ['zero_witness', 'zero_witness']
 
 11/11 as expected
-```
-
-```sh
-# Installed in a venv, so it runs from any directory
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-python3 -m conformance --lab kernel.toy_lab:ToyLab
-# The same 11 cases on a FastVideo-shaped toy engine with real worker processes (about 5 s)
-PYTHONPATH=core/livelab:repos/fastvideo/livelab python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
 ```
 
 The toy lab is two worker ranks stepping together. Each case drives it only through the lab
@@ -148,7 +144,8 @@ template/            scaffold for a new engine
 
 ## Tests
 
-What CPU CI runs (`.github/workflows/cpu-tests.yml`); torch, vLLM and Linux-only cases skip on a laptop:
+What CPU CI runs (`.github/workflows/cpu-tests.yml`), next to the two conformance runs of the
+quickstart; torch, vLLM and Linux-only cases skip on a laptop:
 
 ```sh
 python3 -m unittest discover -s core/livelab/kernel -t core/livelab
@@ -159,6 +156,7 @@ python3 -m pytest -rs repos/vllm/livelab/services            # needs pytest
 python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab
 python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab
 python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab
+python3 -m unittest discover -s repos/megatron/tools
 ```
 
 Rules for contributors, people and agents: [`AGENTS.md`](AGENTS.md).
