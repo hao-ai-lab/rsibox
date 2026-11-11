@@ -363,3 +363,11 @@
 }
 @media (prefers-reduced-motion: reduce) { .toc-btn, .toc-tick::before, .toc-tick span { transition: none; } }
 .toc { flex-direction: column-reverse; }
+
+/* first step: room to watch the restart, then a aside; the window eases in when the scene changes */
+.st-step:first-child { min-height: 125vh; justify-content: flex-start; padding-top: 16vh; }
+.st-aside { margin-top: 38vh !important; font-family: var(--font-anthropic-serif); font-size: 19px !important; color: var(--fr-ink) !important; }
+.st-win.swap { animation: st-swap 0.5s cubic-bezier(.2, .7, .2, 1); }
+@keyframes st-swap { from { opacity: 0; transform: translateY(14px); } }
+@media (max-width: 820px) { .st-step:first-child { min-height: 130vh; padding-top: 0; justify-content: flex-end; } .st-aside { margin-top: 30vh !important; } }
+@media (prefers-reduced-motion: reduce) { .st-win.swap { animation: none; } }

@@ -47,7 +47,8 @@
   // Top half of the window: the code change as a diff. `rows` are [sign, text] with sign ' ', '-' or '+'.
   const diff = (file, rows) => { ed.hidden = false; bar2.hidden = false; ed.parentNode.classList.add('split'); edFile.textContent = file; edDiff.replaceChildren();
     rows.forEach(([sg, txt], i) => { const l = $('div', 'dl ' + (sg === '+' ? 'add' : sg === '-' ? 'del' : sg === '@' ? 'hunk' : ''), null, edDiff); $('span', 'dg', sg === '@' ? '' : sg, l); $('span', null, txt, l); l.style.animationDelay = (i * 70) + 'ms'; }); };
-  const win = (t, capText, top) => { ed.hidden = true; bar2.hidden = true; ed.parentNode.classList.remove('split'); title.textContent = t; body.replaceChildren(); body.classList.toggle('top', !!top); cap.textContent = capText; };
+  const stWin = ed.parentNode;
+  const win = (t, capText, top) => { stWin.classList.remove('swap'); void stWin.offsetWidth; stWin.classList.add('swap'); ed.hidden = true; bar2.hidden = true; ed.parentNode.classList.remove('split'); title.textContent = t; body.replaceChildren(); body.classList.toggle('top', !!top); cap.textContent = capText; };
   const line = (cls, txt, parent) => $('div', 'ln ' + (cls || ''), txt, parent || body);
   const bar = (parent) => { const b = $('span', 'bar', null, parent); return $('i', null, null, b); };
   async function cmd(c, text) { const l = line(''); $('span', 'ps', '$ ', l); await c.type($('span', null, '', l), text); await c.wait(260); }
