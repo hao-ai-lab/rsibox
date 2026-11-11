@@ -1,10 +1,10 @@
 {
  "meta": {
   "generated": "2026-11-11",
-  "repo": "GindaChen/fastrsi",
+  "repo": "hao-ai-lab/fastrsi",
   "repo_ref": "origin/main @ 3689728 (2026-11-10)",
   "naming": "The paper says LiveLab; the public name is FastRSI.",
-  "source_convention": "repo paths are relative to the repo root at origin/main, with line numbers; 'atom:<id>' is a paper atom; 'PR #N' is a GindaChen/fastrsi pull request description.",
+  "source_convention": "repo paths are relative to the repo root at origin/main, with line numbers; 'atom:<id>' is a paper atom; 'PR #N' is a hao-ai-lab/fastrsi pull request description.",
   "status_values": {
    "merged_gpu_verified": "on main, and a GPU run of it is recorded (kb file or PR description)",
    "merged_cpu_only": "on main, tested on CPU only; no GPU run recorded",

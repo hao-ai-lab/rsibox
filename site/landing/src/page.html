@@ -1,7 +1,7 @@
 <div class="fr pg">
   <nav class="pg-nav" aria-label="Site">
     <a class="pg-mark" href="#top">FastRSI</a>
-    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a href="audit/#prs" data-tab="prs">Supported PRs</a><a href="audit/#coverage" data-tab="coverage">Coverage</a><a href="audit/#conventions" data-tab="conventions">Conventions</a><a href="audit/#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/GindaChen/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
+    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a href="audit/#prs" data-tab="prs">Supported PRs</a><a href="audit/#coverage" data-tab="coverage">Coverage</a><a href="audit/#conventions" data-tab="conventions">Conventions</a><a href="audit/#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
   <header class="pg-hero" id="top">
@@ -31,7 +31,7 @@
     <dialog class="try-dlg" id="try-dlg" aria-labelledby="try-h">
       <h2 class="fr-h2" id="try-h">Try FastRSI</h2>
       <p class="fr-sub" id="try-status">Paste this prompt into your coding agent. It needs Python 3.11, no GPU and no dependencies.</p>
-      <pre class="install-p" id="install-text">Clone https://github.com/GindaChen/fastrsi and read AGENTS.md and core/agents/livelab_overview.md.
+      <pre class="install-p" id="install-text">Clone https://github.com/hao-ai-lab/fastrsi and read AGENTS.md and core/agents/livelab_overview.md.
 Run the toy live lab's conformance suite (about 3 s on CPU):
   PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab
 Show me the result, then walk me through one install, check and uninstall on the toy lab.</pre>
@@ -247,7 +247,7 @@ Show me the result, then walk me through one install, check and uninstall on the
     <p class="fr-sub">The live-lab kernel is pure Python with no dependencies. The toy lab runs on a laptop.</p>
     <div class="fr-card use">
       <ol class="use-steps">
-        <li><b>Run the toy lab.</b> Or let your coding agent do it: <button type="button" class="fr-btn try-open">Try it</button><pre>git clone https://github.com/GindaChen/fastrsi && cd fastrsi
+        <li><b>Run the toy lab.</b> Or let your coding agent do it: <button type="button" class="fr-btn try-open">Try it</button><pre>git clone https://github.com/hao-ai-lab/fastrsi && cd fastrsi
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre></li>
         <li><b>Read a recorded walkthrough.</b> Each engine keeps its replayed edits, with real output, under <code>repos/&lt;engine&gt;/examples/</code>.</li>
         <li><b>Bring your own engine.</b> Copy <code>template/livelab/</code>, wire it to the gap between two steps, pass conformance, then follow the offline toolsmith's prompt in <code>core/agents/</code>.</li>
@@ -257,6 +257,6 @@ PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre>
   </section>
 
   <footer class="pg-foot">
-    <p class="fr-note">FastRSI is open source: <a href="https://github.com/GindaChen/fastrsi">github.com/GindaChen/fastrsi</a>. In the story above, the phase times and the 2.4&nbsp;s probe are measured on vLLM (Nemotron 3.5 Super, one GB200); the speedup values typed in the terminal and notebook are illustrative.</p>
+    <p class="fr-note">FastRSI is open source: <a href="https://github.com/hao-ai-lab/fastrsi">github.com/hao-ai-lab/fastrsi</a>.</p>
   </footer>
 </div>
