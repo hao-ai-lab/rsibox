@@ -1,8 +1,10 @@
 """Tests for weight_scaling_colocate.py.
 
-CPU (always): ledger, digest comparison and gate logic, no torch needed.
+CPU (always): ledger, digest comparison and gate logic, no torch needed; the pool's failover,
+rollback and accept with fake engines and holders; copy() when one rank fails.
 GPU (FASTRSI_GPU_E2E=1, FASTRSI_VLLM_MODEL=<path>, FASTRSI_VLLM_PYTHON=<venv python>,
-FASTRSI_GPUS=g0,g1): real holders (vllm preload), real vLLM engines leased over CUDA IPC, a
+FASTRSI_GPUS=g0,g1, default the first two of CUDA_VISIBLE_DEVICES, else 0,1; free ports;
+the temp folders are removed afterwards): real holders (vllm preload), real vLLM engines leased over CUDA IPC, a
 holder seeded over NCCL, and the pool. One regression test per bug of the PR #125 model:
   (a) a passing patch that was never accepted leaked into the active state;
   (b) rollback was a shallow copy;
@@ -10,6 +12,7 @@ holder seeded over NCCL, and the pool. One regression test per bug of the PR #12
 Run under the vLLM venv:  FASTRSI_GPU_E2E=1 ... python -m pytest -x -v this_file
 """
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -197,7 +200,10 @@ GMU = 0.35
 def pool():
     model = os.environ["FASTRSI_VLLM_MODEL"]
     python = os.environ.get("FASTRSI_VLLM_PYTHON", sys.executable)
-    g0, g1 = (int(x) for x in os.environ.get("FASTRSI_GPUS", "0,1").split(","))
+    # the GPUs this job was given (CUDA_VISIBLE_DEVICES), not GPUs 0 and 1 of the host
+    visible = [x for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x.strip()]
+    gpus = os.environ.get("FASTRSI_GPUS") or ",".join((visible or ["0", "1"])[:2])
+    g0, g1 = (int(x) for x in gpus.split(","))
     work = tempfile.mkdtemp(prefix="wsc-test-", dir=os.environ.get("FASTRSI_TEST_TMP"))
     # AF_UNIX paths are limited to 107 bytes: the socket dir stays short, outside `work`
     sock = tempfile.mkdtemp(prefix="wsc-")
@@ -209,12 +215,12 @@ def pool():
         h1.start(model, python, MML, dummy=True)
         seed = W.copy(model, sock, g0, g1, MML, python, work)
         assert seed["ok"], seed
-        a = W.Engine("A", g0, 8851, work, h0)
-        s = W.Engine("S", g1, 8852, work, h1)
+        a = W.Engine("A", g0, W._free_port(), work, h0)
+        s = W.Engine("S", g1, W._free_port(), work, h1)
         engines += [a, s]
         a.start(model, python, GMU, MML)
         s.start(model, python, GMU, MML)
-        p = W.Pool(model, python, work, a, s, 8859)
+        p = W.Pool(model, python, work, a, s, W._free_port(), max_model_len=MML)
         # the seeded holder serves the same model as the disk-loaded one
         assert W.digests_agree(p.ref_digest, p.digest(s))["ok"]
         yield p
@@ -224,6 +230,8 @@ def pool():
             e.stop()
         h0.stop()
         h1.stop()
+        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(sock, ignore_errors=True)
 
 
 def _clean(pool, eng):
