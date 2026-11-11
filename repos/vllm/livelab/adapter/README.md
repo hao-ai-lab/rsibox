@@ -145,6 +145,7 @@ each rank with its own copy of the toy engine.
 | `test_one_bucket_is_recaptured_in_the_gap_and_undo_puts_the_base_graphs_back` | a committed edit whose graphs replay the old code (stale graph), or an undo that leaves the edit's graphs replaying |
 | `test_extend_captures_a_left_out_bucket_later` | a bucket left eager forever after a selective R1 |
 | `test_an_extend_that_fails_on_one_rank_is_dropped_on_every_rank` | one TP rank replaying a graph while another runs the same step eager after a failed extend |
+| `test_a_drop_that_fails_poisons_the_host` | ranks left replaying different graphs after a drop that failed, with the host still taking transactions |
 | `test_a_dropped_extend_gives_every_mode_its_left_out_buckets_back` | a dropped extend that gave back the left-out buckets of the last mode only |
 | `test_undo_after_an_extend_with_nothing_to_capture` | an extend's undo entry raising `UnboundLocalError`, so undo of the transaction was incomplete |
 | `test_an_extend_that_outlives_the_gap_poisons_the_host` | an extend still capturing in the loop after its caller gave up, with the host still taking transactions |

@@ -471,10 +471,10 @@ class OverlayTest(unittest.TestCase):
         Not: the services finder itself (its own folder's tests)."""
         import importlib.abc
         import importlib.util
-        over = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, over, True)
-        with open(os.path.join(over, "core.py"), "w") as f:
-            f.write("SRC = 'overlay'\n\n\nclass EngineCoreProc:\n"
+        overlay_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, overlay_dir, True)
+        with open(os.path.join(overlay_dir, "core.py"), "w") as core_file:
+            core_file.write("SRC = 'overlay'\n\n\nclass EngineCoreProc:\n"
                     "    def _handle_client_request(self, t, r):\n        pass\n\n"
                     "    def _process_engine_step(self):\n        pass\n\n"
                     "    def run_busy_loop(self):\n        pass\n")
@@ -495,17 +495,18 @@ class OverlayTest(unittest.TestCase):
             def find_spec(self, name, path, target=None):
                 if name == "vllm.v1.engine.core":
                     return importlib.util.spec_from_file_location(
-                        name, os.path.join(over, "core.py"))
+                        name, os.path.join(overlay_dir, "core.py"))
                 return None
-        pkgs = {n: types.ModuleType(n) for n in ("vllm", "vllm.v1", "vllm.v1.engine")}
+        pkgs = {package_name: types.ModuleType(package_name)
+                for package_name in ("vllm", "vllm.v1", "vllm.v1.engine")}
         for package in pkgs.values():
             package.__path__ = []
-        meta = [Foreign(), H._After(), Overlay()] + list(sys.meta_path)
-        with mock.patch.dict(sys.modules, pkgs), mock.patch.object(sys, "meta_path", meta):
+        finders = [Foreign(), H._After(), Overlay()] + list(sys.meta_path)
+        with mock.patch.dict(sys.modules, pkgs), mock.patch.object(sys, "meta_path", finders):
             sys.modules.pop("vllm.v1.engine.core", None)
-            mod = importlib.import_module("vllm.v1.engine.core")
-            self.assertEqual(mod.SRC, "overlay")
-            self.assertIn("_patch_core", mod.EngineCoreProc.run_busy_loop.__qualname__)
+            core_module = importlib.import_module("vllm.v1.engine.core")
+            self.assertEqual(core_module.SRC, "overlay")
+            self.assertIn("_patch_core", core_module.EngineCoreProc.run_busy_loop.__qualname__)
 
 
 class ImportTest(unittest.TestCase):

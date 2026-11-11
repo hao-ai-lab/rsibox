@@ -377,19 +377,19 @@ class Host:
         captured drop that extend in the same gap, so every rank keeps replaying the same
         descriptors; a drop that fails poisons the host (ranks may replay different graphs)."""
         payload = {"txn": txn, "sizes": sizes, "extend_id": f"{txn}/extend{next(self._extends)}"}
-        r = self.workers.recapture_extend(payload)
-        if r.get("ok"):
-            return r
+        reply = self.workers.recapture_extend(payload)
+        if reply.get("ok"):
+            return reply
         drop = self.workers.recapture_extend_drop(payload)
-        r = {**r, "dropped": drop}
+        reply = {**reply, "dropped": drop}
         if not drop.get("ok"):
             finding = {**F.finding(
                 "rebuild_failed", f"recapture_extend of {txn} failed on a rank and the other "
                 f"ranks could not drop it: {drop.get('error')}",
                 "every rank replays the same descriptors"), "participant": "workers"}
             self.co.poison.append(finding)
-            r["findings"] = list(r.get("findings") or []) + [finding]
-        return r
+            reply["findings"] = list(reply.get("findings") or []) + [finding]
+        return reply
 
     def in_loop(self, fn, gap=False, timeout=60.0):
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
@@ -450,8 +450,8 @@ class Host:
             if self.co.poison:
                 return F.not_ok("host poisoned: undo or respawn first", poison=self.co.poison)
             t0 = time.perf_counter()
-            r = self._in_gap(lambda: self._extend(cmd["txn"], cmd.get("sizes")))
-            return {**r, "seconds": round(time.perf_counter() - t0, 6)}
+            reply = self._in_gap(lambda: self._extend(cmd["txn"], cmd.get("sizes")))
+            return {**reply, "seconds": round(time.perf_counter() - t0, 6)}
         if op == "ping":
             return F.ok(pid=os.getpid(), poison=self.co.poison, parallel=self.dp)
         return F.not_ok(f"unknown op {op!r}")
@@ -584,10 +584,10 @@ class _After(importlib.abc.MetaPathFinder):
         # only the finders after this one: a finder in front of it that asks every other
         # finder (live_reconfig's does) would otherwise be asked again, forever
         later = finders[finders.index(self) + 1:] if self in finders else finders
-        for f in later:
-            if isinstance(f, _After) or not hasattr(f, "find_spec"):
+        for finder in later:
+            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
                 continue
-            spec = f.find_spec(name, path, target)
+            spec = finder.find_spec(name, path, target)
             if spec is not None:
                 break
         if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
