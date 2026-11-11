@@ -108,6 +108,41 @@ class _Sched:
         self.num_steps += increment
 
 
+def _quantized_class():
+    """A small stand-in for Transformer Engine's FP8/MXFP8 parameter: its bytes live in plain
+    tensors (`_data` int8 codes, `_scale` one fp32 scale); reading it dequantizes, and copy_ into
+    it quantizes again with a scale taken from the values, as TE does. Defined lazily (needs torch)."""
+
+    class Quantized(torch.Tensor):
+        @staticmethod
+        def __new__(cls, data, scale):
+            t = torch.Tensor._make_subclass(cls, torch.empty(data.shape, dtype=torch.float32))
+            t._data, t._scale = data, scale
+            return t
+
+        def dequant(self):
+            return self._data.float() * self._scale
+
+        @classmethod
+        def __torch_function__(cls, func, types, args=(), kwargs=None):
+            kwargs = kwargs or {}
+            if func is torch.Tensor.copy_ and isinstance(args[0], cls):
+                dst, src = args[0], args[1]
+                src = src.dequant() if isinstance(src, cls) else src
+                with torch.no_grad():
+                    dst._scale.copy_(src.abs().max() / 127)
+                    dst._data.copy_(torch.round(src / dst._scale).to(torch.int8))
+                return dst
+            if func is torch.Tensor.copy_:
+                src = args[1].dequant() if isinstance(args[1], cls) else args[1]
+                return torch.Tensor.copy_(args[0], src, *args[2:], **kwargs)
+            unwrap = lambda x: x.dequant() if isinstance(x, cls) else x  # noqa: E731
+            with torch._C.DisableTorchFunctionSubclass():
+                return func(*[unwrap(a) for a in args], **{k: unwrap(v) for k, v in kwargs.items()})
+
+    return Quantized
+
+
 @unittest.skipIf(torch is None, "needs torch")
 class StartState(unittest.TestCase):
     def _train(self, model, opt, sched, x):
@@ -151,6 +186,32 @@ class StartState(unittest.TestCase):
         self.assertEqual(a, b)
         self.assertEqual(a, c)
         self.assertEqual(sched.num_steps, 3)
+
+    def test_quantized_weights_come_back_byte_for_byte(self):
+        """fp8_param runs keep each weight as a quantized tensor (TE's MXFP8Tensor) whose bytes
+        sit in plain data and scale tensors. Input: a quantized weight with codes in [-50, 50]
+        and scale 0.01, a snapshot, then a step that changes its codes and scale; restore.
+        Expect: the codes and the scale are the snapshot's, byte for byte. Copying through the
+        quantized tensor (what the snapshot did before) brings back the same values with a new
+        scale (max / 127) and other codes, so a check would not start from the built weights.
+        What it does not prove: that every quantized type keeps all its bytes in attributes."""
+        from fastrsi_megatron import state as ST
+        Q = _quantized_class()
+        torch.manual_seed(0)
+        data = torch.randint(-50, 51, (4, 8), dtype=torch.int8)
+        scale = torch.tensor(0.01)
+        q = Q(data.clone(), scale.clone())
+        self.assertEqual([n for n, _ in ST.raw_parts(q)], ["._data", "._scale"])
+        model = torch.nn.Module()
+        model.register_buffer("w", q)
+        opt = _MegatronLikeOptimizer(torch.nn.Linear(2, 2))
+        snap = ST.Snapshot([model], opt, _Sched())
+        with torch.no_grad():                       # what an optimizer step does to its bytes
+            q._data.add_(3)
+            q._scale.mul_(2)
+        self.assertTrue(snap.restore()["ok"])
+        self.assertTrue(torch.equal(q._data, data))
+        self.assertTrue(torch.equal(q._scale, scale))
 
     def test_unknown_state_is_reported_not_zeroed(self):
         """A state key that is not a fresh Adam's zero (here a master copy kept in the state)

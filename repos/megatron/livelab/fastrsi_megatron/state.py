@@ -25,6 +25,10 @@ optimizer step, so the lab takes S0 before any step, runs the warm-up steps (ker
 lazy state), then puts S0 back and zeroes the state the warm-up created: moments and step
 counters are zero in a fresh Adam. A state key it does not know is reported, never zeroed.
 
+Quantized parameters (FP8 / MXFP8 weights, `fp8_param`) are copied as the plain tensors that hold
+their bytes (data and scales), never through the quantized tensor itself, which would round
+them again.
+
 Copies live in pinned host memory: about 14 bytes per parameter per rank with bf16 weights,
 fp32 master weights and two fp32 moments.
 """
@@ -51,13 +55,32 @@ def inner_optimizers(optimizer):
     return list(getattr(optimizer, "chained_optimizers", None) or [optimizer])
 
 
+def raw_parts(t):
+    """[(suffix, plain tensor)] that hold t's bytes. A quantized parameter (Transformer Engine's
+    FP8 and MXFP8 tensors) is a tensor subclass that keeps its bytes in plain tensors among its
+    attributes (`_rowwise_data`, `_rowwise_scale_inv`, `_columnwise_data`, ...). Copying through
+    the subclass dequantizes on the way out and quantizes again on the way in, which does not
+    give back the same bytes, so the plain tensors are copied instead. A plain tensor is itself."""
+    if type(t) is torch.Tensor or not hasattr(t, "__dict__"):
+        return [("", t)]
+    parts = sorted((k, v) for k, v in vars(t).items() if type(v) is torch.Tensor)
+    return [(f".{k}", v) for k, v in parts] or [("", t)]
+
+
 def tensors(model, optimizer):
-    """{name: tensor} of every tensor a train step changes, deduplicated by storage."""
+    """{name: plain tensor} of every tensor a train step changes, deduplicated by storage.
+    Quantized parameters appear as their parts (`raw_parts`)."""
     out, seen = {}, set()
 
     def add(name, t):
         if not torch.is_tensor(t):
             return
+        if type(t) is not torch.Tensor:
+            parts = raw_parts(t)
+            if parts[0][1] is not t:
+                for suffix, part in parts:
+                    add(name + suffix, part)
+                return
         k = (t.data_ptr(), t.numel(), t.dtype)
         if k in seen or t.numel() == 0:
             return
