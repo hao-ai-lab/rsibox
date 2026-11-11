@@ -55,7 +55,7 @@ def socket_name(gpu_uuid):
     return f"vllm_weight_cache_{h.hexdigest()}.sock"
 
 
-def socket_path_finding(socket_dir):
+def long_socket_path_finding(socket_dir):
     """A `weights_socket_path` finding when the daemon's sockets in socket_dir would be longer
     than AF_UNIX allows, else None. Every GPU's socket name has the same length (a hex digest),
     so this needs no GPU uuid. The daemon binds only after loading the weights, so a too-long
@@ -227,7 +227,7 @@ def stop(p, grace=10):
 
 def start(a, extra):
     cmd = daemon_cmd(a.model, a.socket_dir, a.tp, a.max_model_len, a.vllm, extra)
-    finding = socket_path_finding(a.socket_dir)
+    finding = long_socket_path_finding(a.socket_dir)
     if finding:
         return {"pid": None, "cmd": cmd, "ready": False, "error": finding["observed"],
                 "seconds": 0.0, "finding": finding}
