@@ -1392,7 +1392,8 @@ def apply(st, journal, witness):
         for p, k in st.jits:               # after the code swap: undo restores it first
             JIT.apply(p, journal, witness, k)
         for obj, k in st.jit_adds:
-            JIT.arm_added(obj, k, [p for p, _ in st.jits], journal, witness)
+            JIT.arm_added(obj, k, [p for p, _ in st.jits], journal, witness,
+                          added=[other for other, _ in st.jit_adds if other is not obj])
         for owner, name in st.removes:     # only reached when removed_definition was accepted
             journal.delete(owner, name)
     except Exception as e:

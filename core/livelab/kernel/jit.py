@@ -148,11 +148,10 @@ def _resolve(node, scope):
     return None
 
 
-def calls(caller, callee):
-    """Does the caller's text name the callee (through its globals or closure)?"""
-    name = callee.fn.__name__
-    if name not in caller._src:              # cheap text filter before the parse
-        return False
+def named(caller):
+    """The ids of the objects the caller's text names, through its globals and closure, and
+    of the JIT callables they wrap. No text filter on the callee's name: a kernel may call a
+    helper under an alias (`from a import helper as act`) or through a module attribute."""
     scope = dict(caller.__globals__)
     fn = caller.fn
     for n, c in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
@@ -160,21 +159,35 @@ def calls(caller, callee):
             scope[n] = c.cell_contents
         except ValueError:
             pass
+    out = set()
     for n in ast.walk(caller.parse()):
         if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load):
             v = _resolve(n, scope)
-            if v is callee or (v is not None and unwrap(v)[0] is callee):
-                return True
-    return False
+            if v is not None:
+                out.add(id(v))
+                inner = unwrap(v)[0]
+                if inner is not None:
+                    out.add(id(inner))
+    return out
+
+
+def calls(caller, callee):
+    """Does the caller's text name the callee (through its globals or closure)?"""
+    return id(callee) in named(caller)
 
 
 def callers_of(jit_fn, jits):
-    """The JIT callables that call jit_fn, at any depth (breadth first, no repeats)."""
-    out, seen, todo = [], {id(jit_fn)}, [jit_fn]
+    """The JIT callables that call jit_fn, at any depth (breadth first, no repeats). Each
+    candidate's text is parsed once per call (`named`)."""
+    out, seen, todo, names = [], {id(jit_fn)}, [jit_fn], {}
     while todo:
         current = todo.pop(0)
         for candidate in jits.values():
-            if id(candidate) not in seen and calls(candidate, current):
+            if id(candidate) in seen:
+                continue
+            if id(candidate) not in names:
+                names[id(candidate)] = named(candidate)
+            if id(current) in names[id(candidate)]:
                 seen.add(id(candidate))
                 out.append(candidate)
                 todo.append(candidate)
@@ -459,9 +472,10 @@ def invalidate_compiled_frames(target_functions, journal=None):
     }
 
 
-def arm_added(obj, key, plans, journal, witness):
-    """A JIT kernel the edit adds: count its launches and those of the rebuilt kernels whose
-    new text names it (they inline it). Returns how many JIT functions carry the hook."""
+def arm_added(obj, key, plans, journal, witness, added=()):
+    """A JIT kernel the edit adds: count its launches, those of the rebuilt kernels whose
+    new text names it, and those of the other added JIT kernels (`added`) that call it at any
+    depth (they inline it). Returns how many JIT functions carry the hook."""
     jf, _ = unwrap(obj)
     if jf is None or missing(jf):
         return 0
@@ -473,6 +487,12 @@ def arm_added(obj, key, plans, journal, witness):
                 if id(f) not in seen:
                     seen.add(id(f))
                     fns.append(f)
+    others = {id(o): o for o in (unwrap(a)[0] for a in added)
+              if o is not None and not missing(o)}
+    for f in callers_of(jf, others):
+        if id(f) not in seen:
+            seen.add(id(f))
+            fns.append(f)
     _hook_into(fns, witness, journal, key)
     return len(fns)
 
