@@ -1,0 +1,615 @@
+{
+ "meta": {
+  "generated": "2026-11-11",
+  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
+  "kind_note": "`kind` is functionality or performance. Where the repo does not say, it is my reading of the title and the entry's note says so; null means not recorded.",
+  "diff_note": "Diff size is null unless the repo records it or ships the patch file.",
+  "counts": {
+   "vllm_named_with_result": 9,
+   "megatron_replayed_with_result": 4,
+   "fastvideo_replayed_with_result": 3,
+   "unsupported": 6,
+   "vllm_tagged_not_replayed": 3
+  }
+ },
+ "engines": [
+  {
+   "engine": "vLLM",
+   "aggregate": {
+    "what": "Standing replay of 19 merged upstream vLLM PRs through v1",
+    "when": "2026-11-06/07",
+    "setup": "GB200; Qwen3-8B and Qwen3.5-35B-A3B-FP8; TP1 and TP2; eager and CUDA graphs",
+    "first_pass": {
+     "live_in_place": 8,
+     "forked_restart": 11,
+     "full_restart": 0,
+     "live_edit_to_run_s": "0.38-1.94",
+     "warm_plain_restart_s": "43-231"
+    },
+    "after_fixes": {
+     "live_in_place": 7,
+     "note": "#62872 moved from in place to a forked restart once constructor edits always block; 'the 7 other in-place PRs were unchanged'."
+    },
+    "forked_restart_s": {
+     "Qwen3-8B": "9.2-68.8",
+     "Qwen3.5-35B-A3B-FP8 TP2 graphs": "115-185"
+    },
+    "bugs_found": 4,
+    "per_pr_table": null,
+    "note": "The repo names only 6 of the 19 PRs. The full per-PR outcome table, titles, diff sizes and measured effects are not in the repo.",
+    "source": "docs/lessons.md:65-81; repos/vllm/kb/lessons.md:5"
+   },
+   "prs": [
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 62872,
+     "title": "a `Scheduler.__init__` edit (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "STATE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "first pass: 0.38 s in place; after the constructor rule (PR #53): forked restart 16.6 s eager / 51.2 s graph",
+     "check_time": null,
+     "restart_time_replaced": "warm plain restart 43-231 s (range over the replay)",
+     "measured_effect": "none recorded",
+     "source": "docs/lessons.md:75-76; repos/vllm/kb/lessons.md:12,27",
+     "note": "First pass installed live in 0.38 s. Constructor edits now always route to a forked restart, so today it does not install live. Undo returns to base after PR #55.",
+     "route": "forked restart (constructor_edit)"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 61323,
+     "title": "norm layer constructors (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "STATE",
+      "NATIVE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "forked restart 9.2 s eager / 44.9 s graph (was a plain-restart fallback: 113 s / 195 s)",
+     "check_time": null,
+     "restart_time_replaced": "113 s eager / 195 s graph",
+     "measured_effect": "none recorded",
+     "source": "docs/lessons.md:72-73; repos/vllm/kb/lessons.md:12,20",
+     "note": "First pass: live swap committed with witness 0 (bug), and the forked servers died on a duplicate op name. Fixed in PRs #52 and #53.",
+     "route": "forked restart (constructor_edit)"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 59941,
+     "title": "graph-split decorator edit (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "GRAPH",
+      "RANKS"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": null,
+     "check_time": null,
+     "restart_time_replaced": null,
+     "measured_effect": "none recorded",
+     "source": "docs/lessons.md:74; repos/vllm/kb/lessons.md:13",
+     "note": "First pass at TP2 with CUDA graphs committed with witness 0 on both ranks. After PR #54 it is refused at prepare (`captured_target`) and the component is restarted. Per-PR time not recorded.",
+     "route": "forked restart (captured_target)"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 58231,
+     "title": "Triton kernel edit (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "GRAPH"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": null,
+     "check_time": null,
+     "restart_time_replaced": null,
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/lessons.md:11",
+     "note": "Went to a restart in the replay because a plain code swap cannot rebuild Triton kernels. In-place Triton rebuild landed later (PR #108) and has not been re-run on this PR.",
+     "route": "forked restart"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 61213,
+     "title": "Triton kernel edit (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "GRAPH"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": null,
+     "check_time": null,
+     "restart_time_replaced": null,
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/lessons.md:11",
+     "note": "Same as #58231.",
+     "route": "forked restart"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 62046,
+     "title": "Triton kernel edit (title not recorded)",
+     "kind": null,
+     "function_groups": [
+      "GRAPH"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": null,
+     "check_time": null,
+     "restart_time_replaced": null,
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/lessons.md:11",
+     "note": "Same as #58231.",
+     "route": "forked restart"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 57951,
+     "title": "Scheduler hot patch + drain request/prefix queues",
+     "kind": "performance",
+     "function_groups": [
+      "OP",
+      "STATE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": true,
+     "install_time": "0.6 s",
+     "check_time": null,
+     "restart_time_replaced": "66.3 s",
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/mechanisms.md:7",
+     "note": "Example row from the earlier PR survey (prototype era), not from the v1 replay."
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 57140,
+     "title": "GDN spec outputs into caller buffer",
+     "kind": "performance",
+     "function_groups": [
+      "GRAPH"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": true,
+     "install_time": "2.4 s",
+     "check_time": null,
+     "restart_time_replaced": "70.6 s",
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/mechanisms.md:8",
+     "note": "Prototype-era example."
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 49750,
+     "title": "fused add RMSNorm",
+     "kind": "performance",
+     "function_groups": [
+      "NATIVE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": true,
+     "install_time": "28 s",
+     "check_time": null,
+     "restart_time_replaced": null,
+     "measured_effect": "none recorded",
+     "source": "repos/vllm/kb/mechanisms.md:10",
+     "note": "Prototype-era example; C++/CUDA compiled into a versioned side library."
+    }
+   ],
+   "tagged_not_replayed": [
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 62240,
+     "title": "DeepSelect top-k in the prefill indexer",
+     "kind": "performance",
+     "function_groups": [
+      "OP"
+     ],
+     "diff": {
+      "files": 1,
+      "added": 37,
+      "removed": 20,
+      "note": "counted by me from the patch file"
+     },
+     "blog_gain_at_32K": "+15.6%",
+     "status": "tagged, not replayed in this repo ('No receipts yet')",
+     "source": "repos/vllm/examples/dsv41-prefill/README.md:6-10,41"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 62359,
+     "title": "2 MB pages for shared Engram host tables",
+     "kind": "performance",
+     "function_groups": [
+      "RESOURCE",
+      "RANKS",
+      "STATE",
+      "OP",
+      "restart"
+     ],
+     "diff": {
+      "files": 6,
+      "added": 418,
+      "removed": 68,
+      "note": "counted by me from the patch file; the README says 5 files, 1 new, for non-test files"
+     },
+     "blog_gain_at_32K": "+2.8%",
+     "status": "tagged, not replayed in this repo",
+     "source": "repos/vllm/examples/dsv41-prefill/README.md:6-10; groups.md:22-36"
+    },
+    {
+     "upstream_repo": "vllm-project/vllm",
+     "pr": 59894,
+     "title": "Extend SWA bounded replay to layer 20",
+     "kind": "performance",
+     "function_groups": [
+      "STATE",
+      "GRAPH",
+      "RANKS"
+     ],
+     "diff": {
+      "files": 6,
+      "added": 219,
+      "removed": 75,
+      "note": "counted by me from the patch file; the README says 4 files for non-test files"
+     },
+     "blog_gain_at_32K": "+19.9%",
+     "status": "tagged, not replayed in this repo",
+     "source": "repos/vllm/examples/dsv41-prefill/README.md:6-10; groups.md:38-50"
+    }
+   ]
+  },
+  {
+   "engine": "Megatron-LM",
+   "aggregate": {
+    "what": "Standing replay of merged upstream Megatron-LM PRs",
+    "when": "2026-11-07",
+    "setup": "Qwen3-14B architecture, TP 2 with sequence parallel, 2 GB200; megatron-core 0.20 dev (ae76c60e6)",
+    "attempted": 8,
+    "live_committed": 2,
+    "refused_then_code_restart": 2,
+    "need_manual_rebase": 2,
+    "do_not_apply": 2,
+    "live_pass_total_s": 218,
+    "install_s": "0.07-0.60",
+    "code_restart_s": "79-89",
+    "speed_effect": "none: none of these PRs is a speedup on this workload",
+    "source": "repos/megatron/examples/upstream-replay/README.md:29-69; repos/megatron/kb/costs.md:221-226"
+   },
+   "prs": [
+    {
+     "upstream_repo": "NVIDIA/Megatron-LM",
+     "pr": 8532,
+     "title": "fp32 token-scaling factors for low-precision grad buffers",
+     "kind": "functionality",
+     "function_groups": [
+      "OP"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": true,
+     "install_time": "0.18 s (3 modules)",
+     "check_time": "one 4-step check (time per check not recorded)",
+     "restart_time_replaced": "79-89 s (code restart to lab ready)",
+     "measured_effect": "installed but not reached: witness 0 on all 3 `scale_gradients`; loss within 4.4e-5 of base",
+     "source": "repos/megatron/examples/upstream-replay/README.md:34",
+     "note": "bf16 buffers on this workload never call the changed code."
+    },
+    {
+     "upstream_repo": "NVIDIA/Megatron-LM",
+     "pr": 8844,
+     "title": "cache `get_start_time_from_progress_log`",
+     "kind": "performance",
+     "function_groups": [
+      "OP"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": true,
+     "install_time": "0.37 s",
+     "check_time": "one 4-step check",
+     "restart_time_replaced": "79-89 s",
+     "measured_effect": "installed but not reached: witness 0 (start-up-only code); loss within 1.5e-4",
+     "source": "repos/megatron/examples/upstream-replay/README.md:35",
+     "note": "Kind inferred from the title; no speed effect was measured."
+    },
+    {
+     "upstream_repo": "NVIDIA/Megatron-LM",
+     "pr": 8579,
+     "title": "`math.isclose` for gradient-scaling asserts (DDP)",
+     "kind": "functionality",
+     "function_groups": [
+      "OP",
+      "STATE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "refused in 0.07 s (`constructor_edit`), then code restart: 88.8 s to lab ready",
+     "check_time": "one 8-step check",
+     "restart_time_replaced": null,
+     "measured_effect": "runs, no regression: loss within 1.0e-3, grad norm within 2.6e-3 of base",
+     "source": "repos/megatron/examples/upstream-replay/README.md:33",
+     "note": "Via the zygote this PR took 148.7 s once (first fork, slow warm-up, unexplained).",
+     "route": "code restart"
+    },
+    {
+     "upstream_repo": "NVIDIA/Megatron-LM",
+     "pr": 7575,
+     "title": "partial activation offload fix",
+     "kind": "functionality",
+     "function_groups": [
+      "OP",
+      "STATE"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "refused in 0.60 s (`constructor_edit`, `new_fields`, `removed_definition`), then code restart: 78.8 s; 40.9 s from the zygote",
+     "check_time": "one 8-step check",
+     "restart_time_replaced": null,
+     "measured_effect": "runs, no regression: loss within 1.5e-3, grad norm 3.9e-3",
+     "source": "repos/megatron/examples/upstream-replay/README.md:36,45-48",
+     "note": "One hunk left out: its file is not in this tree.",
+     "route": "code restart"
+    }
+   ]
+  },
+  {
+   "engine": "FastVideo",
+   "aggregate": {
+    "what": "Standing replay of four real H3 PRs",
+    "when": "2026-11-07",
+    "setup": "1 GB200, FastVideo pin 376e445f, MiniMax H3",
+    "attempted": 4,
+    "live_committed": 1,
+    "refused_then_warm_restart": 2,
+    "do_not_apply": 1,
+    "speed_effect": "none measurable on this text-to-video workload",
+    "source": "repos/fastvideo/examples/pr-replay/README.md:1-27; PR #85"
+   },
+   "prs": [
+    {
+     "upstream_repo": "hao-ai-lab/FastVideo",
+     "pr": 1882,
+     "title": "reuse cached VAE offload in H3 conditioning",
+     "kind": "performance",
+     "function_groups": [
+      "OP"
+     ],
+     "diff": {
+      "files": 1,
+      "added": null,
+      "removed": null,
+      "note": "one non-test module, 5 hunks; line counts not recorded"
+     },
+     "installed_live": true,
+     "install_time": "0.086 s in the lab; edit-to-run 0.81 s",
+     "check_time": "6.10 s base, 6.00 s edited, 6.01 s after undo (one video each)",
+     "restart_time_replaced": "107 s (warm restart to the end of the first video)",
+     "measured_effect": "witness 0: the changed code (keyframe / reference-image VAE encoding) is not reached by text-to-video, so this workload cannot measure it; output bit-exact",
+     "source": "repos/fastvideo/examples/pr-replay/README.md:22; PR #116",
+     "note": "Replayed in reverse (the PR is already in the pin). Kind inferred from the title."
+    },
+    {
+     "upstream_repo": "hao-ai-lab/FastVideo",
+     "pr": 1900,
+     "title": "fused VSA64 tile layout for SM100",
+     "kind": "performance",
+     "function_groups": [
+      "OP",
+      "STATE",
+      "restart"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "refused in 0.20 s (`removed_definition`, `outside_changes`)",
+     "check_time": "6.19 s warm video in a new process",
+     "restart_time_replaced": "107 s",
+     "measured_effect": "bit-exact; the generic VSA path is not used by H3, so no effect on this workload",
+     "source": "repos/fastvideo/examples/pr-replay/README.md:23; PR #116",
+     "note": "Replayed in reverse.",
+     "route": "warm restart in a new process"
+    },
+    {
+     "upstream_repo": "hao-ai-lab/FastVideo",
+     "pr": 2040,
+     "title": "decode eight VAE tiles per call by default",
+     "kind": "performance",
+     "function_groups": [
+      "OP",
+      "restart"
+     ],
+     "diff": {
+      "files": null,
+      "added": null,
+      "removed": null,
+      "note": "not recorded"
+     },
+     "installed_live": false,
+     "install_time": "refused in 0.18 s (`outside_changes`: an `envs.py` default and module-level code)",
+     "check_time": "6.13 s warm video in a new process",
+     "restart_time_replaced": "86 s",
+     "measured_effect": "bit-exact; the workload already sets the tile batch to 12, so the default does not matter here",
+     "source": "repos/fastvideo/examples/pr-replay/README.md:24; PR #116",
+     "route": "warm restart in a new process"
+    }
+   ]
+  }
+ ],
+ "unsupported": [
+  {
+   "engine": "Megatron-LM",
+   "upstream_repo": "NVIDIA/Megatron-LM",
+   "pr": 8524,
+   "title": "step-wise LR multipliers",
+   "reason": "Live swap refused in 0.16 s (`constructor_edit`, `new_fields`, `outside_changes`, `patch_invalid`); the fuzzy apply put a hunk in the wrong place, caught by the compile check in 0.1 s. Needs a manual rebase; not run.",
+   "source": "repos/megatron/examples/upstream-replay/README.md:37"
+  },
+  {
+   "engine": "Megatron-LM",
+   "upstream_repo": "NVIDIA/Megatron-LM",
+   "pr": 8246,
+   "title": "RMSNorm gamma weight-decay multiplier",
+   "reason": "Not attempted: the fuzzy apply misplaced a hunk (syntax error, caught in 0.1 s). Needs a manual rebase.",
+   "source": "repos/megatron/examples/upstream-replay/README.md:38"
+  },
+  {
+   "engine": "Megatron-LM",
+   "upstream_repo": "NVIDIA/Megatron-LM",
+   "pr": 7158,
+   "title": "per-group optimizer step counts",
+   "reason": "Does not apply to the lab's tree (drift).",
+   "source": "repos/megatron/examples/upstream-replay/README.md:39"
+  },
+  {
+   "engine": "Megatron-LM",
+   "upstream_repo": "NVIDIA/Megatron-LM",
+   "pr": 8424,
+   "title": "residual contracts refactor",
+   "reason": "Does not apply to the lab's tree (drift).",
+   "source": "repos/megatron/examples/upstream-replay/README.md:40"
+  },
+  {
+   "engine": "FastVideo",
+   "upstream_repo": "hao-ai-lab/FastVideo",
+   "pr": 2041,
+   "title": "fused VAE decoder QK RMSNorm and partial RoPE",
+   "reason": "Does not apply to the pin `376e445f`: refused in 0.11 s with `patch_invalid` (the fuzzy apply broke `envs.py`). No restart measurement either.",
+   "source": "repos/fastvideo/examples/pr-replay/README.md:25"
+  },
+  {
+   "engine": "vLLM",
+   "upstream_repo": "vllm-project/vllm",
+   "pr": null,
+   "title": "edit classes, not single PRs",
+   "reason": "Start-up logic, launch flags and environment variables are unsupported (11% of 80 surveyed performance PRs need a restart). Transactions at data parallel > 1 are refused (`participant_missing`).",
+   "source": "repos/vllm/kb/mechanisms.md:11,24-26; repos/vllm/livelab/adapter/README.md"
+  }
+ ],
+ "agent_commit_replays_from_paper": [
+  {
+   "what": "Race commits replayed back to back by a script (no agent), live vs a restart per check, median per check",
+   "rows": [
+    {
+     "task": "GQA kernel",
+     "restart_s": 177,
+     "live_s": 6.7
+    },
+    {
+     "task": "DeepSeek prefill (vLLM)",
+     "restart_s": 199,
+     "live_s": 55
+    },
+    {
+     "task": "MoE forward kernel",
+     "restart_s": 58,
+     "live_s": 33
+    },
+    {
+     "task": "MoE backward kernel",
+     "restart_s": 151,
+     "live_s": 119
+    }
+   ],
+   "verdict_agreement": "116 of 116",
+   "speedups": "1.2-27x",
+   "note": "These are agent commits from the paper's races, not upstream PRs.",
+   "source": "atom:a2-replay"
+  },
+  {
+   "what": "34 Megatron agent commits sampled from the 632 that a function swap could not install",
+   "result": "34 installed in place, 0 fell back to a restart; loss matched the start and the witness was OK on all 34",
+   "install": {
+    "patch_s_median": 3.17,
+    "reload_s_median": 0.55,
+    "note": "medians computed by me from the atom's source ledger (34 rows)"
+   },
+   "note": "Measured on the paper's LiveLab build for Megatron (2026-10-28), which re-imports changed files. This is not the code in repos/megatron on main, whose live swap refuses constructor and module-level edits.",
+   "source": "atom:t1-coverage; atom:m4-reload-share"
+  },
+  {
+   "what": "One Megatron agent's 14 successive commits installed in order into one live process, each also run as a restart",
+   "result": "median -1.3%; 11 of 14 within 3%",
+   "source": "atom:f1-fidelity-lineage"
+  }
+ ],
+ "honest_summary": [
+  "No replayed upstream PR in the repo shows a measured speedup: the Megatron and FastVideo PRs either were not reached by the workload or changed nothing measurable on it.",
+  "Measured speedups in the repo come from the hill-climbs (agent-written edits), not from upstream PRs: Megatron +5.1% (14B) to +8.5% (2 nodes); FastVideo 1.45x (1 GPU) and 1.52x (2 GPUs).",
+  "About half of the real PRs could not be swapped live (Megatron 3 of 6 attempted; FastVideo 2 of 3 that applied) and went to a restart tier."
+ ]
+}

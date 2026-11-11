@@ -1,0 +1,203 @@
+// Landing demo, install prompt, architecture walk-through and the "try one edit" playground.
+(function () {
+  const $ = (t, c, x, p) => { const n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; if (p) p.appendChild(n); return n; };
+  const reduced = !window.matchMedia || matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // Recorded on FastVideo (MiniMax H3 decoding), one GB200: repos/fastvideo/examples/h3-live-edit.
+  const REC = { edit_to_run: 0.72, install: 0.06, check: 6.02, undo: 0.014, psnr: 48.1, warm: 72, cold: 500 };
+
+  // ---- landing figure 1: one vLLM evaluation in three bars. Each bar starts as the one above it and shrinks.
+  const hl = document.getElementById('hero-ladder');
+  if (hl && window.dash) {
+    const lad = dash.data('eval_ladder').data.filter((r) => r.engine === 'vllm-d8x32k');
+    const steps = [...new Set(lad.map((r) => +r.step))].sort((x, y) => x - y), last = steps[steps.length - 1];
+    const rows = [[steps[0], 'Restart for every check'], [last - 2, 'Cut all system overhead'], [last, 'Targeted probe']];
+    const phases = [...new Set(lad.map((r) => r.phase))];
+    const sec = (st, ph) => { const r = lad.find((x) => +x.step === st && x.phase === ph); return r ? +r.seconds : 0; };
+    const tot = (st) => phases.reduce((x, ph) => x + sec(st, ph), 0), base = tot(steps[0]);
+    rows.forEach(([st, label], i) => {
+      const t = tot(st), r = $('div', 'hl-row', null, hl); $('span', 'hl-l', label, r);
+      const bar = $('span', 'hl-bar', null, r), prev = i ? rows[i - 1][0] : st;
+      const segs = phases.map((ph) => { const sg = $('i', null, null, bar); sg.style.background = 'var(--ph-' + ph + ')'; sg.style.width = (100 * sec(reduced ? st : prev, ph) / base) + '%'; return [sg, 100 * sec(st, ph) / base]; });
+      const v = $('span', 'hl-v fr-num', (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s', r);
+      if (i) $('b', null, (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×', v);
+      if (!reduced) {
+        r.style.opacity = 0; v.style.opacity = 0;
+        const at = 300 + i * 1300;
+        setTimeout(() => { r.style.transition = 'opacity 0.25s'; r.style.opacity = 1; }, at);
+        setTimeout(() => segs.forEach(([sg, w]) => { sg.style.transition = 'width 0.85s cubic-bezier(.2,.7,.2,1)'; sg.style.width = w + '%'; }), at + (i ? 300 : 0));
+        setTimeout(() => { v.style.transition = 'opacity 0.3s'; v.style.opacity = 1; }, at + (i ? 1000 : 200));
+      }
+    });
+  }
+
+  // ---- landing figure 2: the vLLM race. Staircases draw in time order with a dot at each improvement; the "sooner" bracket appears last.
+  const hr = document.getElementById('hero-race');
+  if (hr && window.dash) {
+    const NS = 'http://www.w3.org/2000/svg', el = (t, a, p) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; };
+    const W = 480, Hh = 250, m = { l: 46, r: 46, t: 46, b: 36 };
+    const wl = dash.data('race_workloads').data.find((w) => w.workload === 'vllm-d8x32k'), T = +wl.budget_h;
+    document.getElementById('hero-race-sub').textContent = wl.label + ', best speedup found in ' + T + ' h';
+    const pts = (arm) => dash.data('race_steps').data.filter((r) => r.workload === 'vllm-d8x32k' && r.arm === arm && r.kind === 'best').map((r) => [+r.t_h, +r.value]).sort((x, y) => x[0] - y[0]);
+    const C = pts('codex'), F = pts('fastrsi'), endC = C[C.length - 1][1], endF = F[F.length - 1][1], target = endC, hi = Math.max(endF, endC);
+    const tC = C.find((p) => p[1] >= target)[0], hit = F.find((p) => p[1] >= target), tF = hit ? hit[0] : null;
+    const ticks = []; for (let v = 1; v <= hi + 1e-9; v += 0.05) ticks.push(v);
+    const top = Math.max(hi, ticks[ticks.length - 1]) + 0.012;
+    const x = (t) => m.l + (W - m.l - m.r) * t / T, y = (v) => Hh - m.b - (Hh - m.t - m.b) * (v - 1) / (top - 1);
+    const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + Hh, role: 'img', class: 'hr-svg', 'aria-label': wl.label + ': best speedup over ' + T + ' hours. Baseline ends at ' + endC.toFixed(2) + '×, FastRSI at ' + endF.toFixed(2) + '×.' }, hr);
+    ticks.forEach((v) => { el('line', { x1: x(0), x2: x(T), y1: y(v), y2: y(v), class: v === 1 ? 'hr-ax' : 'hr-grid' }, svg); el('text', { x: m.l - 7, y: y(v) + 3.5, class: 'hr-t', 'text-anchor': 'end' }, svg).textContent = v.toFixed(2) + '×'; });
+    el('line', { x1: x(0), x2: x(0), y1: y(1), y2: m.t - 8, class: 'hr-ax' }, svg);
+    el('text', { x: 6, y: m.t - 16, class: 'hr-t' }, svg).textContent = 'best speedup so far';
+    for (let h = 0; h <= T; h += 1) el('text', { x: x(h), y: Hh - m.b + 15, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = h;
+    el('text', { x: x(T / 2), y: Hh - 4, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = 'hours of agent time';
+    const clipId = 'hr-clip', clip = el('rect', { x: 0, y: 0, width: reduced ? W : x(0), height: Hh }, el('clipPath', { id: clipId }, el('defs', {}, svg)));
+    const path = (P) => { let d = 'M' + x(0) + ' ' + y(1); for (const [t, val] of P) d += 'H' + x(t) + 'V' + y(val); return d + 'H' + x(T); };
+    const g = el('g', { 'clip-path': 'url(#' + clipId + ')' }, svg);
+    el('path', { d: path(C), class: 'hr-c' }, g); el('path', { d: path(F), class: 'hr-f' }, g);
+    const dots = [];
+    [[C, 'hr-pc'], [F, 'hr-pf']].forEach(([P, cls]) => P.forEach(([t, v]) => { const c = el('circle', { cx: x(t), cy: y(v), r: 2.6, class: cls }, svg); if (!reduced) c.style.opacity = 0; dots.push([t, c]); }));
+    const fin = el('g', { class: 'hr-fin' }, svg);
+    el('line', { x1: x(0), x2: x(T), y1: y(target), y2: y(target), class: 'hr-tg' }, fin);
+    const close = Math.abs(y(endF) - y(endC)) < 11;
+    el('text', { x: x(T) + 5, y: y(endC) + (close ? 9 : 3.5), class: 'hr-t hr-tc' }, fin).textContent = endC.toFixed(2) + '×';
+    el('text', { x: x(T) + 5, y: y(endF) + (close ? -2 : 3.5), class: 'hr-t hr-tf' }, fin).textContent = endF.toFixed(2) + '×';
+    if (tF != null) {
+      const by = y(top) - 4;
+      el('path', { d: 'M' + x(tF) + ' ' + y(target) + 'V' + by + 'H' + x(tC) + 'V' + y(target), class: 'hr-br' }, fin);
+      el('circle', { cx: x(tF), cy: y(target), r: 4.5, class: 'hr-df' }, fin); el('circle', { cx: x(tC), cy: y(target), r: 4.5, class: 'hr-dc' }, fin);
+      const lab = el('text', { x: (x(tF) + x(tC)) / 2, y: by - 8, class: 'hr-big', 'text-anchor': 'middle' }, fin);
+      lab.textContent = (tC / tF).toFixed(1) + '× sooner';
+      el('tspan', { class: 'hr-bigs', dx: 8 }, lab).textContent = (tC - tF).toFixed(1) + ' h earlier';
+    }
+    if (!reduced) {
+      fin.style.opacity = 0;
+      const t0 = performance.now() + 700, DUR = 3200;
+      const tick = (now) => {
+        const k = Math.max(0, Math.min(1, (now - t0) / DUR)), th = k * T;
+        clip.setAttribute('width', x(th));
+        dots.forEach(([t, c]) => { if (t <= th) c.style.opacity = 1; });
+        if (k < 1) requestAnimationFrame(tick); else { fin.style.transition = 'opacity 0.5s'; fin.style.opacity = 1; }
+      };
+      requestAnimationFrame(tick);
+      setTimeout(() => { clip.setAttribute('width', W); dots.forEach(([, c]) => (c.style.opacity = 1)); fin.style.opacity = 1; }, 700 + DUR + 1500);   // lands complete even if frames are throttled
+    }
+  }
+
+  // ---- click a landing figure: show the full figure in a popup, then put it back in the page
+  const fd = document.getElementById('fig-dlg'), slot = document.getElementById('fig-slot');
+  if (fd && fd.showModal) {
+    let home = null, node = null;
+    const back = () => { if (node && home) { home.replaceWith(node); node = home = null; } };
+    document.querySelectorAll('[data-pop]').forEach((a) => a.addEventListener('click', (e) => {
+      const sec = document.getElementById(a.dataset.pop); if (!sec) return;
+      e.preventDefault(); back();
+      home = document.createElement('div'); home.style.height = sec.offsetHeight + 'px';
+      sec.replaceWith(home); node = sec; slot.appendChild(sec); fd.showModal(); fd.scrollTop = 0;
+      const rp = sec.querySelector('#ladder-replay'); if (rp) setTimeout(() => rp.click(), 150);
+    }));
+    fd.addEventListener('close', () => { if (!fd.open) back(); });
+    document.getElementById('fig-close').addEventListener('click', () => fd.close());
+    fd.addEventListener('click', (e) => { if (e.target === fd) fd.close(); });
+  }
+
+  // ---- the loop: light each stage in turn, with an arrow popping between them. The two evaluation stages hold longest.
+  const lp = document.getElementById('lp');
+  if (lp && !reduced && 'IntersectionObserver' in window) {
+    const parts = [...lp.querySelectorAll('[data-lp]')].sort((x, y) => x.dataset.lp - y.dataset.lp);
+    const hold = [900, 450, 2400, 450, 1500, 450, 1100, 900];   // ms per stage; illustrative pacing, not measured
+    let i = -1, timer = null, seen = false;
+    const step = () => {
+      i = (i + 1) % parts.length;
+      if (i === 0) parts.forEach((n) => n.classList.remove('on', 'done'));
+      parts.forEach((n, k) => { n.classList.toggle('on', k === i); if (k < i) n.classList.add('done'); });
+      timer = setTimeout(step, hold[i]);
+    };
+    lp.classList.add('lp-live');
+    new IntersectionObserver((es) => es.forEach((e) => {
+      if (e.isIntersecting && !timer) { seen = true; step(); } else if (!e.isIntersecting && timer) { clearTimeout(timer); timer = null; }
+    }), { threshold: 0.4 }).observe(lp);
+  }
+
+  // ---- "Try it": copy the prompt and show it
+  const dlg = document.getElementById('try-dlg'), text = document.getElementById('install-text'), status = document.getElementById('try-status');
+  const copyPrompt = async () => {
+    try { await navigator.clipboard.writeText(text.textContent); status.textContent = 'Copied. Paste it into your coding agent. It needs Python 3.11, no GPU and no dependencies.'; }
+    catch (e) { const r = document.createRange(); r.selectNodeContents(text); const s = getSelection(); s.removeAllRanges(); s.addRange(r); status.textContent = 'Copy the selected prompt, then paste it into your coding agent. It needs Python 3.11, no GPU and no dependencies.'; }
+  };
+  const openTry = () => { if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', ''); copyPrompt(); };
+  document.querySelectorAll('#try-open, .try-open').forEach((b) => b.addEventListener('click', openTry));
+  const cp = document.getElementById('install-copy'); if (cp) cp.addEventListener('click', copyPrompt);
+  const cl = document.getElementById('try-close'); if (cl) cl.addEventListener('click', () => dlg.close());
+  if (dlg) dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
+
+  // ---- architecture: the step at mid-screen lights its part of the diagram and shows its panel
+  const ar = document.getElementById('ar');
+  if (ar) {
+    const steps = [...document.querySelectorAll('#arch .st-step')];
+    const show = (el) => { const at = el.dataset.at; ar.dataset.at = at; steps.forEach((s) => s.classList.toggle('is-on', s === el)); ar.querySelectorAll('.ar-panel').forEach((p) => { p.hidden = p.dataset.p !== at; }); };
+    steps[0].classList.add('is-on');
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting) show(e.target); }, { root: document, rootMargin: matchMedia('(max-width: 820px)').matches ? '-78% 0px -21% 0px' : '-45% 0px -45% 0px', threshold: 0 });
+      steps.forEach((s) => io.observe(s));
+    }
+  }
+
+  // ---- what the offline toolsmith built: before and after, per engine
+  const bl = document.getElementById('built-list');
+  if (bl && typeof BUILT !== 'undefined' && BUILT.length) {
+    const pick = document.getElementById('built-pick');
+    const fmt = (v) => (/[a-z]/i.test(v) ? v : v + ' s').replace(/(\d) \(/, '$1 s (');
+    const draw = (e) => {
+      bl.replaceChildren(); [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === e.engine)));
+      e.mechanisms.forEach((m, i) => {
+        const r = $('div', 'bl-row', null, bl), l = $('div', 'bl-l', null, r); $('b', null, m.name, l); $('span', null, m.what, l);
+        const v = $('div', 'bl-v', null, r), w = $('span', 'bar', null, v), f = $('i', null, null, w);
+        const t = $('div', 'bl-t', null, v); $('span', 'bl-b', fmt(m.before), t); $('span', 'bl-a', '→ ' + fmt(m.after), t);
+        if (m.b / m.a >= 1.15) $('span', 'bl-x fr-num', (m.b / m.a >= 10 ? Math.round(m.b / m.a) : (m.b / m.a).toFixed(1)) + '×', t);
+        r.title = m.setup;
+        const to = 'scaleX(' + Math.max(0.006, Math.min(1, m.a / m.b)) + ')';
+        if (reduced) f.style.transform = to; else { f.style.transform = 'scaleX(1)'; setTimeout(() => { f.style.transition = 'transform 0.9s cubic-bezier(.2,.7,.2,1)'; f.style.transform = to; }, 120 + i * 70); }
+      });
+    };
+    BUILT.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => draw(e)); });
+    draw(BUILT[0]);
+  }
+
+  // ---- playground: three recorded cases
+  const pl = document.getElementById('pl');
+  if (pl) {
+    const CASES = [
+      { name: 'An edit that works', about: 'A one-line change to the H3 decoder. The probe generates one clip and compares it with the golden output.',
+        install: ['{ "ok": true, "outcome": "committed",', '  "mechanisms": ["R0 swap"],', '  "edit_to_run_s": 0.72, "cost_s": 0.06 }'], iok: true,
+        check: ['{ "seconds": 6.02, "psnr_vs_golden": 48.1,', '  "proven": true,   // the edited line ran once on rank 0', '}'], cok: true, csec: REC.check,
+        undo: ['{ "ok": true, "state": "base", "cost_s": 0.014 }'],
+        verdict: 'Result in ' + (REC.edit_to_run + REC.check).toFixed(1) + ' s. A restart to see the same edit takes about ' + REC.warm + ' s warm and about ' + REC.cold + ' s cold.' },
+      { name: 'An edit the probe never runs', about: 'A replayed upstream change to methods this workload does not call. The install succeeds, so a naive check would report a pass.',
+        install: ['{ "ok": true, "outcome": "committed" }'], iok: true,
+        check: ['{ "proven": false,  // zero witness:', '  // no call reached the edited code', '}'], cok: false, csec: REC.check,
+        undo: ['{ "ok": true, "state": "base" }'],
+        verdict: 'Not counted. The lab injects a marker at the top of every edited function; with zero hits, the check is never a pass.' },
+      { name: 'A broken edit', about: 'A patch with a syntax error, one of the faults we inject to test the lab.',
+        install: ['{ "ok": false, "outcome": "aborted",', '  // rejected before installing', '}'], iok: false,
+        verdict: 'Nothing was installed and the engine never left its base state. Other faults (an exception in the forward pass, out of memory, a NaN loss) fail the check and keep the process.' },
+    ];
+    const cases = document.getElementById('pl-cases'), about = document.getElementById('pl-about'), out = document.getElementById('pl-out'), state = document.getElementById('pl-state'), hint = document.getElementById('pl-hint');
+    const bI = document.getElementById('pl-install'), bC = document.getElementById('pl-check'), bU = document.getElementById('pl-undo');
+    let cur = CASES[0], busy = false;
+    const setState = (s) => { state.textContent = s; state.className = s === 'edited' ? 'warn' : ''; };
+    const block = async (call, linesOut, ok, sec) => {
+      const b = $('div', 'pl-blk', null, out); $('div', 'pl-call', '> ' + call, b);
+      if (sec && !reduced) { const w = $('span', 'bar', null, b), i = $('i', null, null, w); i.style.transition = 'transform ' + Math.min(1.6, sec / 4) + 's linear'; await sleep(30); i.style.transform = 'scaleX(1)'; await sleep(Math.min(1600, sec * 250)); w.remove(); }
+      linesOut.forEach((l) => $('div', 'pl-json ' + (ok ? '' : 'bad'), l, b)); out.scrollTop = out.scrollHeight;
+    };
+    const pick = (c) => { cur = c; out.replaceChildren(); about.textContent = c.about; setState('base'); bI.disabled = false; bC.disabled = bU.disabled = true; hint.textContent = 'Start with install.';
+      [...cases.children].forEach((b, i) => b.setAttribute('aria-pressed', String(CASES[i] === c))); };
+    CASES.forEach((c) => { const b = $('button', 'fr-chip', c.name, cases); b.type = 'button'; b.addEventListener('click', () => { if (!busy) pick(c); }); });
+    const guard = (fn) => async () => { if (busy) return; busy = true; try { await fn(); } finally { busy = false; } };
+    bI.addEventListener('click', guard(async () => { bI.disabled = true; await block('install(patch)', cur.install, cur.iok);
+      if (cur.iok) { setState('edited'); bC.disabled = false; bU.disabled = false; hint.textContent = 'Now check it.'; } else { $('div', 'pl-verdict', cur.verdict, out); hint.textContent = 'Pick another case.'; } }));
+    bC.addEventListener('click', guard(async () => { bC.disabled = true; await block('check()', cur.check, cur.cok, cur.csec); $('div', 'pl-verdict', cur.verdict, out); out.scrollTop = out.scrollHeight; hint.textContent = 'Uninstall to return to base.'; }));
+    bU.addEventListener('click', guard(async () => { bU.disabled = bC.disabled = true; await block('uninstall()', cur.undo, true); setState('base'); bI.disabled = false; hint.textContent = 'Back at base. Install again or pick another case.'; }));
+    pick(CASES[0]);
+  }
+})();

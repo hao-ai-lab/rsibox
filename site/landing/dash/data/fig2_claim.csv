@@ -1,0 +1,2 @@
+model_speedup,tok_s,hours_before,hours_after,cut_pct
+30,1500,5.9,5.53,6

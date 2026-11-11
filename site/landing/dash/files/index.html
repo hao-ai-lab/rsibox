@@ -1,0 +1,90 @@
+<meta name="dash-one-writer">
+<link rel="stylesheet" href="fr.css">
+<div class="fr">
+  <header class="fr-head" id="top">
+    <h1 class="fr-title">FastRSI: Unblock the evaluation bottleneck for RSI</h1>
+    <p class="fr-lede"><b>TLDR: FastRSI is an agentic framework that reduce evaluation overhead to accelerate RSI. </b>FastRSI first make a system <b>"live-editable" </b>such that changing a few lines of code in-place do not need to restart the engine. Then, FastRSI encourage agent to develop "<b>targeted probes</b>" so that a cheaper but verifiably stable evaluation can deliver strong signal of improvement. We show that FastRSI reaches final result <b class="fr-num" data-draw="lede-min" data-source="race_sooner" data-field="ratio">—</b> – <b class="fr-num" data-draw="lede-max" data-source="race_sooner" data-field="ratio">—</b> sooner when provided to ML system tasks, and show even better speedup as the token generation speeds up.</p>
+    <ul class="fr-arms" aria-label="The two sides">
+      <li><span class="fr-sw fr-sw-codex"></span>Baseline</li>
+      <li><span class="fr-sw fr-sw-fast"></span>FastRSI</li>
+    </ul>
+  </header>
+
+  <!-- Section 1: race -->
+  <section class="fr-sec" id="sooner" aria-labelledby="sooner-h">
+    <h2 class="fr-h2" id="sooner-h">FastRSI help agent reach the same result sooner</h2>
+    <p class="fr-sub">We compare FastRSI against a basic codex agent, using GPT 6 Astra (high). The two agents configuration run over the same hardware for 2~3 times, and taking the best trajectory as the main one to highlight in the trace. Each point on the stair case line is a valid improvement verified post-hoc. </p>
+    <div class="fr-card" id="race-card">
+      <div class="fr-picker" role="group" aria-label="Workload" data-draw="race-picker" data-source="race_workloads"></div>
+      <div class="fr-player">
+        <button type="button" class="fr-btn" id="race-play" aria-pressed="false"><span class="fr-ico" aria-hidden="true"></span><span class="fr-lbl-play">Play</span><span class="fr-lbl-pause" hidden="">Pause</span></button>
+        <input type="range" class="fr-range" id="race-scrub" min="0" max="1000" value="1000" aria-label="Race time">
+        <button type="button" class="fr-btn fr-btn-quiet" id="race-target-reset" hidden="">Reset to Baseline's final</button>
+      </div>
+      <div class="fr-race-opts">
+        <div class="fr-seg" role="group" aria-label="Tooltip view">
+          <button type="button" class="fr-chip" id="race-view-checks" aria-pressed="true">Checks</button>
+          <button type="button" class="fr-chip" id="race-view-why" aria-pressed="false">Why it improved</button>
+        </div>
+        <label class="fr-toggle"><input type="checkbox" id="race-others"> Show other runs</label>
+      </div>
+      <div class="fr-race" id="race-chart" data-draw="race" data-source="race_steps race_checks race_sooner race_workloads race_runs race_run_counts race_why race_best_checks race_diffs">—</div>
+      <ul class="fr-keys" aria-label="Marks">
+        <li><span class="fr-k fr-k-dot"></span>one check</li>
+        <li><span class="fr-k fr-k-ring"></span>new best</li>
+        <li><span class="fr-k fr-k-other"></span>other runs (when shown)</li>
+        <li><span class="fr-k fr-k-dash"></span>result to reach: Baseline's final, or drag it to another value Baseline reached</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- Section 2: evaluation ladder -->
+  <section class="fr-sec" id="eval-time" aria-labelledby="eval-time-h">
+    <h2 class="fr-h2" id="eval-time-h">Shrink the time each evaluation takes</h2>
+    <p class="fr-sub">The race is won here: FastRSI trims the overhead around every check. Each row removes one cost; the dashed box is the row above, and the blue number is the speedup over the first row.</p>
+    <div class="fr-card" id="ladder-card">
+      <div class="fr-ladder-top">
+        <div class="fr-picker" role="group" aria-label="Engine" data-draw="ladder-picker" data-source="race_workloads"></div>
+        <label class="fr-toggle"><input type="checkbox" id="ladder-startup"> Startup only</label>
+      </div>
+      <p class="fr-about" data-draw="ladder-setup" data-source="race_workloads">—</p>
+      <ul class="fr-keys fr-phases" aria-label="Phases" data-draw="ladder-legend" data-source="eval_phases eval_ladder"></ul>
+      <div class="fr-ladder" id="ladder-chart" data-draw="ladder" data-source="eval_ladder ladder_totals ladder_rungs eval_phases">—</div>
+      <div class="fr-floorbox" id="ladder-floor" data-draw="ladder-floor" data-source="race_workloads ladder_rungs"></div>
+      <div class="fr-foot">
+        <p class="fr-note">Each row names the cost it cuts. A row marked derived was not timed as its own setup: it is worked out from measured rows, as its small print says. Startup only leaves out the check's own workload, log-prob and quality checks. Each engine was measured on its own setup, so compare speedups within an engine.</p>
+        <button type="button" class="fr-btn fr-btn-quiet" id="ladder-replay">Replay</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Section 3: model speed -->
+  <section class="fr-sec" id="model-speed" aria-labelledby="model-speed-h">
+    <h2 class="fr-h2" id="model-speed-h">Faster thinking makes evaluation the bottleneck</h2>
+    <p class="fr-sub">How many times faster FastRSI finishes the same work: Baseline's hours divided by FastRSI's hours to replay each logged run with the model generating faster and everything else fixed. Restarting per check soon hits a floor, so FastRSI's lead grows as the model gets faster.</p>
+    <div class="fr-card" id="speed-card">
+      <div class="fr-speed-ctl">
+        <label class="fr-ctl-lbl" for="speed-slider">Model generation speed</label>
+        <output class="fr-speed-now" data-draw="speed-now" data-source="speed_stops">—</output>
+      </div>
+      <div class="fr-slider-wrap">
+        <input type="range" class="fr-range fr-range-speed" id="speed-slider" min="0" max="1000" value="0" aria-label="Model generation speed">
+        <div class="fr-ticks" data-draw="speed-ticks" data-source="speed_stops"></div>
+      </div>
+      <div class="fr-speedup" id="speedup-chart" data-draw="speed-chart" data-source="replay_compare race_workloads">—</div>
+      <div class="fr-tablewrap">
+        <table class="fr-table" id="speed-table" data-source="replay_compare" data-row-key="key">
+          <thead><tr><th>System</th><th data-field="codex_h">Baseline, h</th><th data-field="fastrsi_h">FastRSI, h</th><th data-field="speedup">FastRSI speedup</th></tr></thead>
+          <tbody data-draw="speed-table"></tbody>
+        </table>
+      </div>
+      <p class="fr-note">Hours are at the speed picked above. The replay gives speed-ups, not tokens per second: tok/s here is 50 tok/s times each speed-up. Every step replays each run's logged tool calls and checks with the model time divided by the speed-up. Nothing is drawn between 100× and ∞.</p>
+      <p class="fr-note">The measured base is ≈<span class="fr-num" data-source="fig2_breakdown" data-field="tok_s" data-where="row=1">49</span> tok/s; this page rounds it to 50.</p>
+    </div>
+
+  </section>
+</div>
+<script src="fr-core.js"></script>
+<script src="s1-race.js"></script>
+<script src="s2-ladder.js"></script>
+<script src="s3-speed.js"></script>

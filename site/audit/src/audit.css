@@ -1,0 +1,104 @@
+/* Audit page. Layout: the home page's 980px column; a tab bar under a short header switches four views.
+   Everything here is built from the home page's tokens (tokens.css) and the fr-* parts (fr.css). */
+.au-hero { padding: 36px 0 28px; margin-bottom: 0; border-bottom: 0; }
+.au-hero .pg-title { font-size: clamp(30px, 4.6vw, 44px); max-width: none; margin-bottom: 14px; }
+.au-tabs { display: flex; flex-wrap: wrap; gap: 2px 26px; border-bottom: 1px solid var(--fr-rule); margin-bottom: 36px; }
+.au-tabs a { text-decoration: none; padding: 10px 0 9px; font-size: 14.5px; color: var(--fr-muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.au-tabs a:hover { color: var(--fr-ink); }
+.au-tabs a[aria-current="page"] { color: var(--fr-ink); border-bottom-color: var(--fr-ink); }
+.au-tabs a:focus-visible, .au a:focus-visible, .au-pt:focus-visible { outline: 2px solid var(--fr-fast); outline-offset: 2px; }
+.au-view { display: grid; gap: 36px; min-width: 0; }
+.au-view > * { min-width: 0; }
+.au-sec { display: grid; gap: 12px; min-width: 0; margin: 0; }
+.au-sec > * { min-width: 0; margin-top: 0; margin-bottom: 0; }
+.au-intro { font-size: 16.5px; line-height: 1.55; color: var(--fr-ink); max-width: 70ch; margin: 0; }
+.au-h3 { font-size: 15.5px; font-weight: 500; margin: 0; }
+.au-p { margin: 0; max-width: 75ch; line-height: 1.55; color: var(--fr-muted); font-size: 14px; }
+.au-p b, .au-list b { color: var(--fr-ink); font-weight: 500; }
+.au code, .au-tip code { font-family: var(--mono); font-size: 0.9em; background: color-mix(in oklab, var(--fr-ink) 7%, transparent); border-radius: 4px; padding: 1px 4px; overflow-wrap: anywhere; }
+.au-pre { margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.65; white-space: pre; overflow-x: auto; background: color-mix(in oklab, var(--fr-ink) 6%, transparent); border-radius: 8px; padding: 10px 12px; }
+.au-list { margin: 0; padding-left: 18px; display: grid; gap: 6px; font-size: 14px; line-height: 1.5; color: var(--fr-muted); max-width: 80ch; }
+.au-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr)); gap: 16px; }
+.au-card { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.au-card > * { min-width: 0; margin: 0; }
+.au-callout { border-left: 2px solid var(--fr-ink); padding: 2px 0 2px 14px; font-size: 15px; line-height: 1.55; max-width: 72ch; margin: 0; }
+.au-callout.is-gap { border-left-color: var(--bad); }
+
+/* tables: text-first, so undo fr-table's right-aligned mono headers */
+.au-t { font-size: 13px; }
+.au-t th, .au-t td { vertical-align: top; padding: 8px 14px 8px 0; line-height: 1.45; }
+.au-t th:not(:first-child) { text-align: left; font-family: inherit; }
+.au-t th { white-space: nowrap; }
+.au-t td.n, .au-t th.n { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.au-t td.k { white-space: nowrap; }
+.au-t td b { font-weight: 500; }
+.au-t tr:last-child td { border-bottom: 0; }
+.au-t .sub { display: block; color: var(--fr-muted); margin-top: 3px; }
+.au-t a { color: inherit; }
+.au-w1 { min-width: 940px; } .au-w2 { min-width: 760px; } .au-w3 { min-width: 560px; }
+.au-src { font-family: var(--mono); font-size: 11.5px; color: var(--fr-muted); overflow-wrap: anywhere; line-height: 1.45; }
+td.au-src { min-width: 150px; max-width: 230px; }
+.au-nr { color: var(--fr-muted); font-style: italic; }
+.au-scrollhint { display: none; }
+@media (max-width: 720px) { .au-scrollhint { display: block; } }
+
+/* status marks */
+.au-b { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--fr-rule); color: var(--fr-ink); white-space: nowrap; font-family: var(--font-anthropic-sans); font-style: normal; }
+.au-b.good { border-color: color-mix(in oklab, var(--good) 65%, var(--fr-rule)); background: color-mix(in oklab, var(--good) 14%, transparent); }
+.au-b.warn { border-color: color-mix(in oklab, var(--warn) 70%, var(--fr-rule)); background: color-mix(in oklab, var(--warn) 13%, transparent); }
+.au-b.bad { border-color: color-mix(in oklab, var(--bad) 70%, var(--fr-rule)); background: color-mix(in oklab, var(--bad) 13%, transparent); }
+.au-b.mute { color: var(--fr-muted); }
+.au-g { display: inline-block; font-family: var(--mono); font-size: 11px; border: 1px solid var(--fr-rule); border-radius: 5px; padding: 0 5px; margin: 0 4px 3px 0; }
+.au-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+
+/* "not measured yet" */
+.au-nm { border: 1px dashed color-mix(in oklab, var(--warn) 70%, var(--fr-rule)); border-radius: var(--cds-radius); padding: var(--cds-pad-lg); display: grid; gap: 10px; background: color-mix(in oklab, var(--warn) 5%, transparent); }
+.au-nm > * { margin: 0; min-width: 0; }
+.au-nm .au-t td { color: var(--fr-muted); }
+
+/* key/value facts */
+.au-kv { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 16px; font-size: 13px; margin: 0; }
+.au-kv dt, .au-kv dd { margin: 0; padding: 5px 0; border-bottom: 1px solid var(--fr-rule); }
+.au-kv dt { color: var(--fr-muted); }
+.au-kv dd { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.au-kv dt:nth-last-child(2), .au-kv dd:last-child { border-bottom: 0; }
+
+/* chart */
+.au-chart { position: relative; min-height: 300px; }
+.au-chart .axt { font-family: var(--font-anthropic-sans); font-size: 11.5px; }
+.au-chart .lb { font-size: 10.5px; fill: var(--fr-ink); }
+.au-chart .conn { stroke: var(--fr-muted); stroke-width: 1; stroke-dasharray: 2 3; }
+.au-chart .rs { stroke: var(--fr-codex); stroke-width: 3; stroke-linecap: round; fill: none; }
+.au-chart .dot.live { fill: var(--fr-fast); stroke: var(--color-panel); stroke-width: 1.5; }
+.au-chart .dot.tier { fill: var(--color-panel); stroke: var(--fr-fast); stroke-width: 2.25; }
+.au-chart .au-pt { cursor: default; outline-offset: 4px; }
+.au-chart .hit { fill: transparent; stroke: none; }
+.au-k-live { width: 10px; height: 10px; border-radius: 50%; background: var(--fr-fast); display: inline-block; }
+.au-k-tier { width: 10px; height: 10px; border-radius: 50%; border: 2.25px solid var(--fr-fast); box-sizing: border-box; display: inline-block; }
+.au-k-rs { width: 16px; height: 3px; border-radius: 2px; background: var(--fr-codex); display: inline-block; }
+.au-tip { white-space: normal !important; }
+.fr-tip.au-tipbox > * { white-space: normal; }
+.fr-tip.au-tipbox { width: auto; max-width: min(320px, calc(100% - 16px)); }
+.au-foot { margin-top: 48px; }
+
+/* static survey */
+.sv-limits { color: var(--fr-ink); font-size: 14.5px; border-left: 2px solid var(--warn); padding: 4px 0 4px 32px; }
+.sv-limits li { color: var(--fr-muted); }
+.sv-row { display: grid; gap: 6px; padding-top: 12px; border-top: 1px solid var(--fr-rule); }
+.sv-row > * { margin: 0; min-width: 0; }
+.sv-rowhead { display: flex; flex-wrap: wrap; gap: 2px 18px; align-items: baseline; font-size: 13px; color: var(--fr-muted); }
+.sv-rowhead > b { font-size: 15px; font-weight: 500; color: var(--fr-ink); }
+.sv-rowhead span b { color: var(--fr-ink); }
+.sv-unc b { color: var(--warn) !important; }
+.sv-bar { display: flex; height: 10px; border-radius: 3px; overflow: hidden; min-width: 120px; gap: 1px; }
+.sv-bar.big { height: 26px; border-radius: 4px; }
+.sv-s { min-width: 2px; display: flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--color-bg); overflow: hidden; white-space: nowrap; }
+.sv-swap { background: var(--fr-fast); } .sv-swap_recapture { background: var(--ph-cuda_graph_capture); } .sv-rebuild { background: var(--ph-weight_load); }
+.sv-respawn { background: var(--ph-kernel_autotune); } .sv-restart { background: var(--fr-codex); }
+.sv-none { background: color-mix(in oklab, var(--fr-ink) 16%, var(--color-panel)); color: var(--fr-ink); }
+.au .fr-keys .fr-k[class*="sv-"] { width: 12px; height: 12px; border-radius: 2px; }
+td.sv-cell { min-width: 180px; vertical-align: middle; }
+.sv-multi { min-height: 0; margin-top: 0; }
+.sv-step { min-height: 190px; }
+.sv-step .sv-lb { font-family: var(--font-anthropic-sans); font-size: 11.5px; fill: var(--fr-ink); }
+.sv-steps { font-size: 12.5px; }

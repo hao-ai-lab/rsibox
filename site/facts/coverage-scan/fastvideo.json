@@ -1,0 +1,3179 @@
+{
+ "schema": "fastrsi-survey/1",
+ "engine": "fastvideo",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "fastvideo-1",
+ "engine_rules_sha256": "49eb9ad1c93e61cfcdd39587c62b160ebfa41e59a2bed8f1a80057bd7e467c51",
+ "upstream": {
+  "repo": "hao-ai-lab/FastVideo",
+  "commit": "376e445f0e8d192c2d9a5f28010a6b3a7012667e",
+  "version": "0.2.1 (the pin of kb/priors.md)",
+  "scanned_commit": "376e445f0e8d192c2d9a5f28010a6b3a7012667e",
+  "pin_match": true
+ },
+ "lab": {
+  "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+  "capabilities": {
+   "swap": true,
+   "swap_recapture": false,
+   "jit_rebuild": false,
+   "rebuild": true,
+   "respawn": true
+  }
+ },
+ "unparsed": {
+  "files": 0,
+  "lines": 0
+ },
+ "functions": {
+  "total": 8421,
+  "by_install": {
+   "swap": {
+    "total": 5546,
+    "covered": 5207
+   },
+   "swap_recapture": {
+    "total": 553,
+    "covered": 0
+   },
+   "rebuild": {
+    "total": 1845,
+    "covered": 1793
+   },
+   "respawn": {
+    "total": 309,
+    "covered": 309
+   },
+   "restart": {
+    "total": 168,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 453,
+   "NATIVE": 100,
+   "OP": 5546,
+   "RANKS": 309,
+   "RESOURCE": 140,
+   "STATE": 1705,
+   "restart": 168
+  },
+  "by_rule": {
+   "compiled": 11,
+   "constructor": 1130,
+   "default_op": 5546,
+   "jit_kernel": 100,
+   "launch_flags": 34,
+   "name_resource": 51,
+   "name_state": 575,
+   "path": 974
+  },
+  "firm": 1241,
+  "uncertain": 7180,
+  "live_covered": 7000,
+  "respawn_covered": 309,
+  "restart": 168,
+  "not_covered": 944
+ },
+ "lines": {
+  "total": 192098,
+  "by_install": {
+   "swap": {
+    "total": 99812,
+    "covered": 94820
+   },
+   "swap_recapture": {
+    "total": 9580,
+    "covered": 0
+   },
+   "rebuild": {
+    "total": 72946,
+    "covered": 69022
+   },
+   "respawn": {
+    "total": 3851,
+    "covered": 3851
+   },
+   "restart": {
+    "total": 5909,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 6116,
+   "NATIVE": 3464,
+   "OP": 99812,
+   "RANKS": 3851,
+   "RESOURCE": 3767,
+   "STATE": 69179,
+   "restart": 5909
+  },
+  "by_rule": {
+   "compiled": 100,
+   "constructor": 20529,
+   "default_op": 99812,
+   "jit_kernel": 3464,
+   "launch_flags": 2321,
+   "module_level": 33901,
+   "name_resource": 792,
+   "name_state": 14749,
+   "path": 16430
+  },
+  "firm": 57994,
+  "uncertain": 134104,
+  "live_covered": 163842,
+  "respawn_covered": 3851,
+  "restart": 5909,
+  "not_covered": 18496
+ },
+ "native": {
+  "files": 48,
+  "lines": 11860,
+  "install": "restart",
+  "by_ext": {
+   ".cpp": {
+    "files": 1,
+    "lines": 62
+   },
+   ".cu": {
+    "files": 13,
+    "lines": 3040
+   },
+   ".cuh": {
+    "files": 8,
+    "lines": 4351
+   },
+   ".h": {
+    "files": 16,
+    "lines": 3110
+   },
+   ".hpp": {
+    "files": 10,
+    "lines": 1297
+   }
+  }
+ },
+ "modules": {
+  "fastvideo-kernel": {
+   "functions": {
+    "total": 28,
+    "by_install": {
+     "swap": {
+      "total": 27,
+      "covered": 27
+     },
+     "swap_recapture": {
+      "total": 1,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 1,
+     "OP": 27
+    },
+    "by_rule": {
+     "default_op": 27,
+     "jit_kernel": 1
+    },
+    "firm": 1,
+    "uncertain": 27,
+    "live_covered": 27,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 698,
+    "by_install": {
+     "swap": {
+      "total": 481,
+      "covered": 481
+     },
+     "swap_recapture": {
+      "total": 16,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 201,
+      "covered": 201
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 16,
+     "OP": 481,
+     "STATE": 201
+    },
+    "by_rule": {
+     "default_op": 481,
+     "jit_kernel": 16,
+     "module_level": 201
+    },
+    "firm": 217,
+    "uncertain": 481,
+    "live_covered": 682,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 16
+   },
+   "native": {
+    "files": 48,
+    "lines": 11860
+   }
+  },
+  "fastvideo-kernel/python/fastvideo_kernel": {
+   "functions": {
+    "total": 249,
+    "by_install": {
+     "swap": {
+      "total": 183,
+      "covered": 183
+     },
+     "swap_recapture": {
+      "total": 53,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 13,
+      "covered": 13
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 53,
+     "OP": 183,
+     "RESOURCE": 1,
+     "STATE": 12
+    },
+    "by_rule": {
+     "constructor": 3,
+     "default_op": 183,
+     "jit_kernel": 53,
+     "name_resource": 1,
+     "name_state": 9
+    },
+    "firm": 56,
+    "uncertain": 193,
+    "live_covered": 196,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 53
+   },
+   "lines": {
+    "total": 7399,
+    "by_install": {
+     "swap": {
+      "total": 4145,
+      "covered": 4145
+     },
+     "swap_recapture": {
+      "total": 2596,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 658,
+      "covered": 658
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 2596,
+     "OP": 4145,
+     "RESOURCE": 7,
+     "STATE": 651
+    },
+    "by_rule": {
+     "constructor": 31,
+     "default_op": 4145,
+     "jit_kernel": 2596,
+     "module_level": 450,
+     "name_resource": 7,
+     "name_state": 170
+    },
+    "firm": 3077,
+    "uncertain": 4322,
+    "live_covered": 4803,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2596
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/__init__.py": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 5,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 5
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "STATE": 5
+    },
+    "by_rule": {
+     "module_level": 5
+    },
+    "firm": 5,
+    "uncertain": 0,
+    "live_covered": 5,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/api": {
+   "functions": {
+    "total": 85,
+    "by_install": {
+     "swap": {
+      "total": 77,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 7,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 77,
+     "STATE": 7,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 77,
+     "launch_flags": 1,
+     "name_state": 5
+    },
+    "firm": 2,
+    "uncertain": 83,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 84
+   },
+   "lines": {
+    "total": 2283,
+    "by_install": {
+     "swap": {
+      "total": 1139,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 916,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 228,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1139,
+     "STATE": 916,
+     "restart": 228
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 1139,
+     "launch_flags": 228,
+     "module_level": 849,
+     "name_state": 61
+    },
+    "firm": 855,
+    "uncertain": 1428,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 228,
+    "not_covered": 2055
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/attention": {
+   "functions": {
+    "total": 296,
+    "by_install": {
+     "swap": {
+      "total": 241,
+      "covered": 241
+     },
+     "swap_recapture": {
+      "total": 4,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 51,
+      "covered": 51
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 4,
+     "OP": 241,
+     "STATE": 51
+    },
+    "by_rule": {
+     "constructor": 27,
+     "default_op": 241,
+     "jit_kernel": 4,
+     "name_state": 24
+    },
+    "firm": 31,
+    "uncertain": 265,
+    "live_covered": 292,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 4
+   },
+   "lines": {
+    "total": 5384,
+    "by_install": {
+     "swap": {
+      "total": 3774,
+      "covered": 3774
+     },
+     "swap_recapture": {
+      "total": 88,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1522,
+      "covered": 1522
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 88,
+     "OP": 3774,
+     "STATE": 1522
+    },
+    "by_rule": {
+     "constructor": 374,
+     "default_op": 3774,
+     "jit_kernel": 88,
+     "module_level": 769,
+     "name_state": 379
+    },
+    "firm": 1231,
+    "uncertain": 4153,
+    "live_covered": 5296,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 88
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/benchmarks": {
+   "functions": {
+    "total": 27,
+    "by_install": {
+     "swap": {
+      "total": 24,
+      "covered": 24
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 1
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 24,
+     "STATE": 1,
+     "restart": 2
+    },
+    "by_rule": {
+     "default_op": 24,
+     "launch_flags": 2,
+     "name_state": 1
+    },
+    "firm": 0,
+    "uncertain": 27,
+    "live_covered": 25,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1045,
+    "by_install": {
+     "swap": {
+      "total": 493,
+      "covered": 493
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 190,
+      "covered": 190
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 362,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 493,
+     "STATE": 190,
+     "restart": 362
+    },
+    "by_rule": {
+     "default_op": 493,
+     "launch_flags": 362,
+     "module_level": 142,
+     "name_state": 48
+    },
+    "firm": 142,
+    "uncertain": 903,
+    "live_covered": 683,
+    "respawn_covered": 0,
+    "restart": 362,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/configs": {
+   "functions": {
+    "total": 201,
+    "by_install": {
+     "swap": {
+      "total": 133,
+      "covered": 133
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 64,
+      "covered": 64
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 4,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 133,
+     "STATE": 64,
+     "restart": 4
+    },
+    "by_rule": {
+     "constructor": 62,
+     "default_op": 133,
+     "launch_flags": 4,
+     "name_state": 2
+    },
+    "firm": 62,
+    "uncertain": 139,
+    "live_covered": 197,
+    "respawn_covered": 0,
+    "restart": 4,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 6277,
+    "by_install": {
+     "swap": {
+      "total": 1026,
+      "covered": 1026
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 4949,
+      "covered": 4949
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 302,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1026,
+     "STATE": 4949,
+     "restart": 302
+    },
+    "by_rule": {
+     "constructor": 574,
+     "default_op": 1026,
+     "launch_flags": 302,
+     "module_level": 4345,
+     "name_state": 30
+    },
+    "firm": 4919,
+    "uncertain": 1358,
+    "live_covered": 5975,
+    "respawn_covered": 0,
+    "restart": 302,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/dataset": {
+   "functions": {
+    "total": 137,
+    "by_install": {
+     "swap": {
+      "total": 103,
+      "covered": 103
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 32,
+      "covered": 32
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 103,
+     "RESOURCE": 2,
+     "STATE": 30,
+     "restart": 2
+    },
+    "by_rule": {
+     "constructor": 21,
+     "default_op": 103,
+     "launch_flags": 2,
+     "name_resource": 2,
+     "name_state": 9
+    },
+    "firm": 21,
+    "uncertain": 116,
+    "live_covered": 135,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 3572,
+    "by_install": {
+     "swap": {
+      "total": 2116,
+      "covered": 2116
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1242,
+      "covered": 1242
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 214,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2116,
+     "RESOURCE": 6,
+     "STATE": 1236,
+     "restart": 214
+    },
+    "by_rule": {
+     "constructor": 430,
+     "default_op": 2116,
+     "launch_flags": 214,
+     "module_level": 605,
+     "name_resource": 6,
+     "name_state": 201
+    },
+    "firm": 1035,
+    "uncertain": 2537,
+    "live_covered": 3358,
+    "respawn_covered": 0,
+    "restart": 214,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/distributed": {
+   "functions": {
+    "total": 176,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 12,
+      "covered": 12
+     },
+     "respawn": {
+      "total": 164,
+      "covered": 164
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 164,
+     "STATE": 12
+    },
+    "by_rule": {
+     "constructor": 12,
+     "path": 164
+    },
+    "firm": 12,
+    "uncertain": 164,
+    "live_covered": 12,
+    "respawn_covered": 164,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 2654,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 732,
+      "covered": 732
+     },
+     "respawn": {
+      "total": 1922,
+      "covered": 1922
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 1922,
+     "STATE": 732
+    },
+    "by_rule": {
+     "constructor": 340,
+     "module_level": 392,
+     "path": 1922
+    },
+    "firm": 732,
+    "uncertain": 1922,
+    "live_covered": 732,
+    "respawn_covered": 1922,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/entrypoints": {
+   "functions": {
+    "total": 389,
+    "by_install": {
+     "swap": {
+      "total": 262,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 45,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 82,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 262,
+     "STATE": 45,
+     "restart": 82
+    },
+    "by_rule": {
+     "constructor": 21,
+     "default_op": 262,
+     "launch_flags": 3,
+     "name_state": 24,
+     "path": 79
+    },
+    "firm": 21,
+    "uncertain": 368,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 82,
+    "not_covered": 307
+   },
+   "lines": {
+    "total": 8378,
+    "by_install": {
+     "swap": {
+      "total": 3853,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3008,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1517,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 3853,
+     "STATE": 3008,
+     "restart": 1517
+    },
+    "by_rule": {
+     "constructor": 233,
+     "default_op": 3853,
+     "launch_flags": 38,
+     "module_level": 1823,
+     "name_state": 952,
+     "path": 1479
+    },
+    "firm": 2056,
+    "uncertain": 6322,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 1517,
+    "not_covered": 6861
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/envs.py": {
+   "functions": {
+    "total": 27,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 27
+    },
+    "by_rule": {
+     "path": 27
+    },
+    "firm": 0,
+    "uncertain": 27,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 27,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 818,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 818,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 818
+    },
+    "by_rule": {
+     "path": 818
+    },
+    "firm": 0,
+    "uncertain": 818,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 818,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/eval": {
+   "functions": {
+    "total": 381,
+    "by_install": {
+     "swap": {
+      "total": 287,
+      "covered": 287
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 92,
+      "covered": 92
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 287,
+     "STATE": 92,
+     "restart": 2
+    },
+    "by_rule": {
+     "constructor": 50,
+     "default_op": 287,
+     "launch_flags": 2,
+     "name_state": 42
+    },
+    "firm": 50,
+    "uncertain": 331,
+    "live_covered": 379,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 7464,
+    "by_install": {
+     "swap": {
+      "total": 4631,
+      "covered": 4631
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2801,
+      "covered": 2801
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 32,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4631,
+     "STATE": 2801,
+     "restart": 32
+    },
+    "by_rule": {
+     "constructor": 414,
+     "default_op": 4631,
+     "launch_flags": 32,
+     "module_level": 1797,
+     "name_state": 590
+    },
+    "firm": 2211,
+    "uncertain": 5253,
+    "live_covered": 7432,
+    "respawn_covered": 0,
+    "restart": 32,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/fastvideo_args.py": {
+   "functions": {
+    "total": 28,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 28,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 28
+    },
+    "by_rule": {
+     "path": 28
+    },
+    "firm": 0,
+    "uncertain": 28,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 28,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1291,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1291,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 1291
+    },
+    "by_rule": {
+     "path": 1291
+    },
+    "firm": 0,
+    "uncertain": 1291,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 1291,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/forward_context.py": {
+   "functions": {
+    "total": 2,
+    "by_install": {
+     "swap": {
+      "total": 2,
+      "covered": 2
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2
+    },
+    "by_rule": {
+     "default_op": 2
+    },
+    "firm": 0,
+    "uncertain": 2,
+    "live_covered": 2,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 68,
+    "by_install": {
+     "swap": {
+      "total": 46,
+      "covered": 46
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 22,
+      "covered": 22
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 46,
+     "STATE": 22
+    },
+    "by_rule": {
+     "default_op": 46,
+     "module_level": 22
+    },
+    "firm": 22,
+    "uncertain": 46,
+    "live_covered": 68,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/hooks": {
+   "functions": {
+    "total": 51,
+    "by_install": {
+     "swap": {
+      "total": 44,
+      "covered": 44
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 7,
+      "covered": 7
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 44,
+     "STATE": 7
+    },
+    "by_rule": {
+     "constructor": 7,
+     "default_op": 44
+    },
+    "firm": 7,
+    "uncertain": 44,
+    "live_covered": 51,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 507,
+    "by_install": {
+     "swap": {
+      "total": 350,
+      "covered": 350
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 157,
+      "covered": 157
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 350,
+     "STATE": 157
+    },
+    "by_rule": {
+     "constructor": 66,
+     "default_op": 350,
+     "module_level": 91
+    },
+    "firm": 157,
+    "uncertain": 350,
+    "live_covered": 507,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/image_processor.py": {
+   "functions": {
+    "total": 7,
+    "by_install": {
+     "swap": {
+      "total": 6,
+      "covered": 6
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 1
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 6,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 6
+    },
+    "firm": 1,
+    "uncertain": 6,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 167,
+    "by_install": {
+     "swap": {
+      "total": 148,
+      "covered": 148
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 19,
+      "covered": 19
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 148,
+     "STATE": 19
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 148,
+     "module_level": 17
+    },
+    "firm": 19,
+    "uncertain": 148,
+    "live_covered": 167,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/layers": {
+   "functions": {
+    "total": 350,
+    "by_install": {
+     "swap": {
+      "total": 270,
+      "covered": 270
+     },
+     "swap_recapture": {
+      "total": 14,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 66,
+      "covered": 66
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 3,
+     "NATIVE": 11,
+     "OP": 270,
+     "RESOURCE": 1,
+     "STATE": 65
+    },
+    "by_rule": {
+     "compiled": 3,
+     "constructor": 41,
+     "default_op": 270,
+     "jit_kernel": 11,
+     "name_resource": 1,
+     "name_state": 24
+    },
+    "firm": 55,
+    "uncertain": 295,
+    "live_covered": 336,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 14
+   },
+   "lines": {
+    "total": 5625,
+    "by_install": {
+     "swap": {
+      "total": 3321,
+      "covered": 3321
+     },
+     "swap_recapture": {
+      "total": 307,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1997,
+      "covered": 1997
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 42,
+     "NATIVE": 265,
+     "OP": 3321,
+     "RESOURCE": 8,
+     "STATE": 1989
+    },
+    "by_rule": {
+     "compiled": 42,
+     "constructor": 661,
+     "default_op": 3321,
+     "jit_kernel": 265,
+     "module_level": 937,
+     "name_resource": 8,
+     "name_state": 391
+    },
+    "firm": 1905,
+    "uncertain": 3720,
+    "live_covered": 5318,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 307
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/logger.py": {
+   "functions": {
+    "total": 11,
+    "by_install": {
+     "swap": {
+      "total": 9,
+      "covered": 9
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 2
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 9,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 11,
+    "live_covered": 11,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 241,
+    "by_install": {
+     "swap": {
+      "total": 173,
+      "covered": 173
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 68,
+      "covered": 68
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 173,
+     "STATE": 68
+    },
+    "by_rule": {
+     "default_op": 173,
+     "module_level": 31,
+     "name_state": 37
+    },
+    "firm": 31,
+    "uncertain": 210,
+    "live_covered": 241,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/logging_utils": {
+   "functions": {
+    "total": 2,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 1
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 1
+    },
+    "firm": 1,
+    "uncertain": 1,
+    "live_covered": 2,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 15,
+    "by_install": {
+     "swap": {
+      "total": 6,
+      "covered": 6
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 9
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 6,
+     "STATE": 9
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 6,
+     "module_level": 7
+    },
+    "firm": 9,
+    "uncertain": 6,
+    "live_covered": 15,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/mlx_runtime": {
+   "functions": {
+    "total": 429,
+    "by_install": {
+     "swap": {
+      "total": 399,
+      "covered": 399
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 29,
+      "covered": 29
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 399,
+     "RESOURCE": 1,
+     "STATE": 28,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 16,
+     "default_op": 399,
+     "launch_flags": 1,
+     "name_resource": 1,
+     "name_state": 12
+    },
+    "firm": 16,
+    "uncertain": 413,
+    "live_covered": 428,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 9470,
+    "by_install": {
+     "swap": {
+      "total": 7213,
+      "covered": 7213
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2212,
+      "covered": 2212
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 45,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7213,
+     "RESOURCE": 22,
+     "STATE": 2190,
+     "restart": 45
+    },
+    "by_rule": {
+     "constructor": 333,
+     "default_op": 7213,
+     "launch_flags": 45,
+     "module_level": 1515,
+     "name_resource": 22,
+     "name_state": 342
+    },
+    "firm": 1848,
+    "uncertain": 7622,
+    "live_covered": 9425,
+    "respawn_covered": 0,
+    "restart": 45,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/models": {
+   "functions": {
+    "total": 2472,
+    "by_install": {
+     "swap": {
+      "total": 1184,
+      "covered": 1184
+     },
+     "swap_recapture": {
+      "total": 481,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 807,
+      "covered": 807
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 450,
+     "NATIVE": 31,
+     "OP": 1184,
+     "RESOURCE": 112,
+     "STATE": 695
+    },
+    "by_rule": {
+     "compiled": 8,
+     "constructor": 601,
+     "default_op": 1184,
+     "jit_kernel": 31,
+     "name_resource": 23,
+     "name_state": 94,
+     "path": 531
+    },
+    "firm": 640,
+    "uncertain": 1832,
+    "live_covered": 1991,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 481
+   },
+   "lines": {
+    "total": 55249,
+    "by_install": {
+     "swap": {
+      "total": 22806,
+      "covered": 22806
+     },
+     "swap_recapture": {
+      "total": 6573,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 25870,
+      "covered": 25870
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 6074,
+     "NATIVE": 499,
+     "OP": 22806,
+     "RESOURCE": 3495,
+     "STATE": 22375
+    },
+    "by_rule": {
+     "compiled": 58,
+     "constructor": 13489,
+     "default_op": 22806,
+     "jit_kernel": 499,
+     "module_level": 6655,
+     "name_resource": 520,
+     "name_state": 2231,
+     "path": 8991
+    },
+    "firm": 20701,
+    "uncertain": 34548,
+    "live_covered": 48676,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 6573
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/performance": {
+   "functions": {
+    "total": 19,
+    "by_install": {
+     "swap": {
+      "total": 19,
+      "covered": 19
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 19
+    },
+    "by_rule": {
+     "default_op": 19
+    },
+    "firm": 0,
+    "uncertain": 19,
+    "live_covered": 19,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 445,
+    "by_install": {
+     "swap": {
+      "total": 387,
+      "covered": 387
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 58,
+      "covered": 58
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 387,
+     "STATE": 58
+    },
+    "by_rule": {
+     "default_op": 387,
+     "module_level": 58
+    },
+    "firm": 58,
+    "uncertain": 387,
+    "live_covered": 445,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/performance_dashboard": {
+   "functions": {
+    "total": 28,
+    "by_install": {
+     "swap": {
+      "total": 23,
+      "covered": 23
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 4,
+      "covered": 4
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 23,
+     "STATE": 4,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 23,
+     "launch_flags": 1,
+     "name_state": 3
+    },
+    "firm": 1,
+    "uncertain": 27,
+    "live_covered": 27,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 432,
+    "by_install": {
+     "swap": {
+      "total": 152,
+      "covered": 152
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 268,
+      "covered": 268
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 12,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 152,
+     "STATE": 268,
+     "restart": 12
+    },
+    "by_rule": {
+     "constructor": 5,
+     "default_op": 152,
+     "launch_flags": 12,
+     "module_level": 51,
+     "name_state": 212
+    },
+    "firm": 56,
+    "uncertain": 376,
+    "live_covered": 420,
+    "respawn_covered": 0,
+    "restart": 12,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/pipelines": {
+   "functions": {
+    "total": 1077,
+    "by_install": {
+     "swap": {
+      "total": 808,
+      "covered": 808
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 258,
+      "covered": 258
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 11,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 808,
+     "RESOURCE": 1,
+     "STATE": 257,
+     "restart": 11
+    },
+    "by_rule": {
+     "constructor": 110,
+     "default_op": 808,
+     "launch_flags": 11,
+     "name_resource": 1,
+     "name_state": 147
+    },
+    "firm": 110,
+    "uncertain": 967,
+    "live_covered": 1066,
+    "respawn_covered": 0,
+    "restart": 11,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 31576,
+    "by_install": {
+     "swap": {
+      "total": 19402,
+      "covered": 19402
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 11380,
+      "covered": 11380
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 794,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 19402,
+     "RESOURCE": 34,
+     "STATE": 11346,
+     "restart": 794
+    },
+    "by_rule": {
+     "constructor": 933,
+     "default_op": 19402,
+     "launch_flags": 794,
+     "module_level": 6814,
+     "name_resource": 34,
+     "name_state": 3599
+    },
+    "firm": 7747,
+    "uncertain": 23829,
+    "live_covered": 30782,
+    "respawn_covered": 0,
+    "restart": 794,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/platforms": {
+   "functions": {
+    "total": 105,
+    "by_install": {
+     "swap": {
+      "total": 104,
+      "covered": 104
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 1
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 104,
+     "RESOURCE": 1
+    },
+    "by_rule": {
+     "default_op": 104,
+     "name_resource": 1
+    },
+    "firm": 0,
+    "uncertain": 105,
+    "live_covered": 105,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1062,
+    "by_install": {
+     "swap": {
+      "total": 885,
+      "covered": 885
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 177,
+      "covered": 177
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 885,
+     "RESOURCE": 3,
+     "STATE": 174
+    },
+    "by_rule": {
+     "default_op": 885,
+     "module_level": 174,
+     "name_resource": 3
+    },
+    "firm": 174,
+    "uncertain": 888,
+    "live_covered": 1062,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/profiler.py": {
+   "functions": {
+    "total": 23,
+    "by_install": {
+     "swap": {
+      "total": 20,
+      "covered": 20
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 3
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 20,
+     "STATE": 3
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 20,
+     "name_state": 1
+    },
+    "firm": 2,
+    "uncertain": 21,
+    "live_covered": 23,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 386,
+    "by_install": {
+     "swap": {
+      "total": 232,
+      "covered": 232
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 154,
+      "covered": 154
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 232,
+     "STATE": 154
+    },
+    "by_rule": {
+     "constructor": 27,
+     "default_op": 232,
+     "module_level": 114,
+     "name_state": 13
+    },
+    "firm": 141,
+    "uncertain": 245,
+    "live_covered": 386,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/registry.py": {
+   "functions": {
+    "total": 21,
+    "by_install": {
+     "swap": {
+      "total": 17,
+      "covered": 17
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 4,
+      "covered": 4
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 17,
+     "STATE": 4
+    },
+    "by_rule": {
+     "default_op": 17,
+     "name_state": 4
+    },
+    "firm": 0,
+    "uncertain": 21,
+    "live_covered": 21,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1160,
+    "by_install": {
+     "swap": {
+      "total": 225,
+      "covered": 225
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 935,
+      "covered": 935
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 225,
+     "STATE": 935
+    },
+    "by_rule": {
+     "default_op": 225,
+     "module_level": 96,
+     "name_state": 839
+    },
+    "firm": 96,
+    "uncertain": 1064,
+    "live_covered": 1160,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/third_party": {
+   "functions": {
+    "total": 620,
+    "by_install": {
+     "swap": {
+      "total": 526,
+      "covered": 526
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 92,
+      "covered": 92
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 526,
+     "RESOURCE": 2,
+     "STATE": 90,
+     "restart": 2
+    },
+    "by_rule": {
+     "constructor": 79,
+     "default_op": 526,
+     "launch_flags": 2,
+     "name_resource": 2,
+     "name_state": 11
+    },
+    "firm": 79,
+    "uncertain": 541,
+    "live_covered": 618,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 8507,
+    "by_install": {
+     "swap": {
+      "total": 4590,
+      "covered": 4590
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3834,
+      "covered": 3834
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 83,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4590,
+     "RESOURCE": 11,
+     "STATE": 3823,
+     "restart": 83
+    },
+    "by_rule": {
+     "constructor": 1016,
+     "default_op": 4590,
+     "launch_flags": 83,
+     "module_level": 2646,
+     "name_resource": 11,
+     "name_state": 161
+    },
+    "firm": 3662,
+    "uncertain": 4845,
+    "live_covered": 8424,
+    "respawn_covered": 0,
+    "restart": 83,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/train": {
+   "functions": {
+    "total": 651,
+    "by_install": {
+     "swap": {
+      "total": 519,
+      "covered": 519
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 129,
+      "covered": 129
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 3,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 519,
+     "RESOURCE": 9,
+     "STATE": 120,
+     "restart": 3
+    },
+    "by_rule": {
+     "constructor": 47,
+     "default_op": 519,
+     "launch_flags": 3,
+     "name_resource": 9,
+     "name_state": 73
+    },
+    "firm": 47,
+    "uncertain": 604,
+    "live_covered": 648,
+    "respawn_covered": 0,
+    "restart": 3,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 18027,
+    "by_install": {
+     "swap": {
+      "total": 11937,
+      "covered": 11937
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5911,
+      "covered": 5911
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 179,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 11937,
+     "RESOURCE": 64,
+     "STATE": 5847,
+     "restart": 179
+    },
+    "by_rule": {
+     "constructor": 1369,
+     "default_op": 11937,
+     "launch_flags": 179,
+     "module_level": 1998,
+     "name_resource": 64,
+     "name_state": 2480
+    },
+    "firm": 3367,
+    "uncertain": 14660,
+    "live_covered": 17848,
+    "respawn_covered": 0,
+    "restart": 179,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/training": {
+   "functions": {
+    "total": 264,
+    "by_install": {
+     "swap": {
+      "total": 171,
+      "covered": 171
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 92,
+      "covered": 92
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 171,
+     "RESOURCE": 6,
+     "STATE": 86,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 11,
+     "default_op": 171,
+     "launch_flags": 1,
+     "name_resource": 6,
+     "name_state": 75
+    },
+    "firm": 11,
+    "uncertain": 253,
+    "live_covered": 263,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 7689,
+    "by_install": {
+     "swap": {
+      "total": 4967,
+      "covered": 4967
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2710,
+      "covered": 2710
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 12,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4967,
+     "RESOURCE": 72,
+     "STATE": 2638,
+     "restart": 12
+    },
+    "by_rule": {
+     "constructor": 87,
+     "default_op": 4967,
+     "launch_flags": 12,
+     "module_level": 778,
+     "name_resource": 72,
+     "name_state": 1773
+    },
+    "firm": 865,
+    "uncertain": 6824,
+    "live_covered": 7677,
+    "respawn_covered": 0,
+    "restart": 12,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/utils.py": {
+   "functions": {
+    "total": 65,
+    "by_install": {
+     "swap": {
+      "total": 57,
+      "covered": 57
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 7,
+      "covered": 7
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 57,
+     "RESOURCE": 4,
+     "STATE": 3,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 3,
+     "default_op": 57,
+     "launch_flags": 1,
+     "name_resource": 4
+    },
+    "firm": 3,
+    "uncertain": 62,
+    "live_covered": 64,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1053,
+    "by_install": {
+     "swap": {
+      "total": 906,
+      "covered": 906
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 127,
+      "covered": 127
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 20,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 906,
+     "RESOURCE": 45,
+     "STATE": 82,
+     "restart": 20
+    },
+    "by_rule": {
+     "constructor": 14,
+     "default_op": 906,
+     "launch_flags": 20,
+     "module_level": 68,
+     "name_resource": 45
+    },
+    "firm": 82,
+    "uncertain": 971,
+    "live_covered": 1033,
+    "respawn_covered": 0,
+    "restart": 20,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/version.py": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 1
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "STATE": 1
+    },
+    "by_rule": {
+     "module_level": 1
+    },
+    "firm": 1,
+    "uncertain": 0,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/worker": {
+   "functions": {
+    "total": 151,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 6
+     },
+     "respawn": {
+      "total": 145,
+      "covered": 145
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 145,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 6,
+     "path": 145
+    },
+    "firm": 6,
+    "uncertain": 145,
+    "live_covered": 6,
+    "respawn_covered": 145,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 2294,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 365,
+      "covered": 365
+     },
+     "respawn": {
+      "total": 1929,
+      "covered": 1929
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 1929,
+     "STATE": 365
+    },
+    "by_rule": {
+     "constructor": 69,
+     "module_level": 296,
+     "path": 1929
+    },
+    "firm": 365,
+    "uncertain": 1929,
+    "live_covered": 365,
+    "respawn_covered": 1929,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "fastvideo/workflow": {
+   "functions": {
+    "total": 49,
+    "by_install": {
+     "swap": {
+      "total": 30,
+      "covered": 30
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 19,
+      "covered": 19
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 30,
+     "STATE": 19
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 30,
+     "name_state": 13
+    },
+    "firm": 6,
+    "uncertain": 43,
+    "live_covered": 49,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 856,
+    "by_install": {
+     "swap": {
+      "total": 408,
+      "covered": 408
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 448,
+      "covered": 448
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 408,
+     "STATE": 448
+    },
+    "by_rule": {
+     "constructor": 54,
+     "default_op": 408,
+     "module_level": 154,
+     "name_state": 240
+    },
+    "firm": 208,
+    "uncertain": 648,
+    "live_covered": 856,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  }
+ },
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

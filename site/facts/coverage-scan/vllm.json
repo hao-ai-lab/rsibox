@@ -1,0 +1,5245 @@
+{
+ "schema": "fastrsi-survey/1",
+ "engine": "vllm",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "vllm-1",
+ "engine_rules_sha256": "6c68c48b8201af4b6d4494d8bbfb1837aa885f760a644e16e880419c299c2a78",
+ "upstream": {
+  "repo": "vllm-project/vllm",
+  "commit": "4e0ad572036166a8bdf1782f4a07b4e33016646b",
+  "version": "main at 2026-10-29 (the commit kb/costs.md and examples/dsv41-prefill use)",
+  "scanned_commit": "4e0ad572036166a8bdf1782f4a07b4e33016646b",
+  "pin_match": true
+ },
+ "lab": {
+  "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+  "capabilities": {
+   "swap": true,
+   "swap_recapture": true,
+   "jit_rebuild": false,
+   "rebuild": false,
+   "respawn": true
+  }
+ },
+ "unparsed": {
+  "files": 0,
+  "lines": 0
+ },
+ "functions": {
+  "total": 38609,
+  "by_install": {
+   "swap": {
+    "total": 14821,
+    "covered": 12090
+   },
+   "swap_recapture": {
+    "total": 16937,
+    "covered": 9997
+   },
+   "rebuild": {
+    "total": 5481,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 1120,
+    "covered": 1120
+   },
+   "restart": {
+    "total": 250,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 16085,
+   "NATIVE": 1334,
+   "OP": 14821,
+   "RANKS": 638,
+   "RESOURCE": 482,
+   "STATE": 4999,
+   "restart": 250
+  },
+  "by_rule": {
+   "compiled": 25,
+   "constructor": 3714,
+   "default_op": 14821,
+   "dsl_kernel": 482,
+   "jit_kernel": 852,
+   "launch_flags": 38,
+   "name_resource": 143,
+   "name_state": 1285,
+   "path": 17249
+  },
+  "firm": 5073,
+  "uncertain": 33536,
+  "live_covered": 22087,
+  "respawn_covered": 1120,
+  "restart": 250,
+  "not_covered": 15152
+ },
+ "lines": {
+  "total": 982421,
+  "by_install": {
+   "swap": {
+    "total": 274503,
+    "covered": 214158
+   },
+   "swap_recapture": {
+    "total": 367858,
+    "covered": 179115
+   },
+   "rebuild": {
+    "total": 165405,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 164576,
+    "covered": 164576
+   },
+   "restart": {
+    "total": 10079,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 313495,
+   "NATIVE": 78744,
+   "OP": 274503,
+   "RANKS": 9916,
+   "RESOURCE": 9951,
+   "STATE": 285733,
+   "restart": 10079
+  },
+  "by_rule": {
+   "compiled": 650,
+   "constructor": 115961,
+   "default_op": 274503,
+   "dsl_kernel": 24381,
+   "jit_kernel": 54363,
+   "launch_flags": 2314,
+   "module_level": 130279,
+   "name_resource": 3797,
+   "name_state": 39493,
+   "path": 336680
+  },
+  "firm": 325634,
+  "uncertain": 656787,
+  "live_covered": 393273,
+  "respawn_covered": 164576,
+  "restart": 10079,
+  "not_covered": 414493
+ },
+ "native": {
+  "files": 337,
+  "lines": 127487,
+  "install": "restart",
+  "by_ext": {
+   ".cpp": {
+    "files": 55,
+    "lines": 26085
+   },
+   ".cu": {
+    "files": 119,
+    "lines": 54067
+   },
+   ".cuh": {
+    "files": 77,
+    "lines": 20049
+   },
+   ".h": {
+    "files": 38,
+    "lines": 8991
+   },
+   ".hpp": {
+    "files": 48,
+    "lines": 18295
+   }
+  }
+ },
+ "modules": {
+  "csrc": {
+   "functions": {
+    "total": 19,
+    "by_install": {
+     "swap": {
+      "total": 15,
+      "covered": 15
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 15,
+     "STATE": 3,
+     "restart": 1
+    },
+    "by_rule": {
+     "default_op": 15,
+     "launch_flags": 1,
+     "name_state": 3
+    },
+    "firm": 0,
+    "uncertain": 19,
+    "live_covered": 15,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 1020,
+    "by_install": {
+     "swap": {
+      "total": 422,
+      "covered": 422
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 114,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 478,
+      "covered": 478
+     },
+     "restart": {
+      "total": 6,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 422,
+     "STATE": 592,
+     "restart": 6
+    },
+    "by_rule": {
+     "default_op": 422,
+     "launch_flags": 6,
+     "module_level": 478,
+     "name_state": 114
+    },
+    "firm": 478,
+    "uncertain": 542,
+    "live_covered": 422,
+    "respawn_covered": 478,
+    "restart": 6,
+    "not_covered": 114
+   },
+   "native": {
+    "files": 335,
+    "lines": 126048
+   }
+  },
+  "vllm/__init__.py": {
+   "functions": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1
+    },
+    "by_rule": {
+     "default_op": 1
+    },
+    "firm": 0,
+    "uncertain": 1,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 85,
+    "by_install": {
+     "swap": {
+      "total": 8,
+      "covered": 8
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 77,
+      "covered": 77
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 8,
+     "STATE": 77
+    },
+    "by_rule": {
+     "default_op": 8,
+     "module_level": 77
+    },
+    "firm": 77,
+    "uncertain": 8,
+    "live_covered": 8,
+    "respawn_covered": 77,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/_aiter_ops.py": {
+   "functions": {
+    "total": 225,
+    "by_install": {
+     "swap": {
+      "total": 222,
+      "covered": 222
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 222,
+     "STATE": 3
+    },
+    "by_rule": {
+     "default_op": 222,
+     "name_state": 3
+    },
+    "firm": 0,
+    "uncertain": 225,
+    "live_covered": 222,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 4516,
+    "by_install": {
+     "swap": {
+      "total": 4113,
+      "covered": 4113
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 277,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 126,
+      "covered": 126
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4113,
+     "STATE": 403
+    },
+    "by_rule": {
+     "default_op": 4113,
+     "module_level": 126,
+     "name_state": 277
+    },
+    "firm": 126,
+    "uncertain": 4390,
+    "live_covered": 4113,
+    "respawn_covered": 126,
+    "restart": 0,
+    "not_covered": 277
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/_custom_ops.py": {
+   "functions": {
+    "total": 226,
+    "by_install": {
+     "swap": {
+      "total": 215,
+      "covered": 215
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 11,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 215,
+     "RESOURCE": 1,
+     "STATE": 10
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 215,
+     "name_resource": 1,
+     "name_state": 9
+    },
+    "firm": 1,
+    "uncertain": 225,
+    "live_covered": 215,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 11
+   },
+   "lines": {
+    "total": 4274,
+    "by_install": {
+     "swap": {
+      "total": 4093,
+      "covered": 4093
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 102,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 79,
+      "covered": 79
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4093,
+     "RESOURCE": 2,
+     "STATE": 179
+    },
+    "by_rule": {
+     "constructor": 5,
+     "default_op": 4093,
+     "module_level": 79,
+     "name_resource": 2,
+     "name_state": 95
+    },
+    "firm": 84,
+    "uncertain": 4190,
+    "live_covered": 4093,
+    "respawn_covered": 79,
+    "restart": 0,
+    "not_covered": 102
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/_xpu_ops.py": {
+   "functions": {
+    "total": 40,
+    "by_install": {
+     "swap": {
+      "total": 35,
+      "covered": 35
+     },
+     "swap_recapture": {
+      "total": 3,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 1,
+     "NATIVE": 2,
+     "OP": 35,
+     "STATE": 2
+    },
+    "by_rule": {
+     "compiled": 1,
+     "default_op": 35,
+     "jit_kernel": 2,
+     "name_state": 2
+    },
+    "firm": 3,
+    "uncertain": 37,
+    "live_covered": 35,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 1191,
+    "by_install": {
+     "swap": {
+      "total": 793,
+      "covered": 793
+     },
+     "swap_recapture": {
+      "total": 267,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 106,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 25,
+      "covered": 25
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 32,
+     "NATIVE": 235,
+     "OP": 793,
+     "STATE": 131
+    },
+    "by_rule": {
+     "compiled": 32,
+     "default_op": 793,
+     "jit_kernel": 235,
+     "module_level": 25,
+     "name_state": 106
+    },
+    "firm": 292,
+    "uncertain": 899,
+    "live_covered": 793,
+    "respawn_covered": 25,
+    "restart": 0,
+    "not_covered": 373
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/assets": {
+   "functions": {
+    "total": 22,
+    "by_install": {
+     "swap": {
+      "total": 22,
+      "covered": 22
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 22
+    },
+    "by_rule": {
+     "default_op": 22
+    },
+    "firm": 0,
+    "uncertain": 22,
+    "live_covered": 22,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 201,
+    "by_install": {
+     "swap": {
+      "total": 142,
+      "covered": 142
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 59,
+      "covered": 59
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 142,
+     "STATE": 59
+    },
+    "by_rule": {
+     "default_op": 142,
+     "module_level": 59
+    },
+    "firm": 59,
+    "uncertain": 142,
+    "live_covered": 142,
+    "respawn_covered": 59,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/benchmarks": {
+   "functions": {
+    "total": 371,
+    "by_install": {
+     "swap": {
+      "total": 311,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 32,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 28,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 311,
+     "STATE": 32,
+     "restart": 28
+    },
+    "by_rule": {
+     "constructor": 20,
+     "default_op": 311,
+     "launch_flags": 28,
+     "name_state": 12
+    },
+    "firm": 20,
+    "uncertain": 351,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 28,
+    "not_covered": 343
+   },
+   "lines": {
+    "total": 13483,
+    "by_install": {
+     "swap": {
+      "total": 9279,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 735,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1358,
+      "covered": 1358
+     },
+     "restart": {
+      "total": 2111,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9279,
+     "STATE": 2093,
+     "restart": 2111
+    },
+    "by_rule": {
+     "constructor": 262,
+     "default_op": 9279,
+     "launch_flags": 2111,
+     "module_level": 1358,
+     "name_state": 473
+    },
+    "firm": 1620,
+    "uncertain": 11863,
+    "live_covered": 0,
+    "respawn_covered": 1358,
+    "restart": 2111,
+    "not_covered": 10014
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/collect_env.py": {
+   "functions": {
+    "total": 47,
+    "by_install": {
+     "swap": {
+      "total": 46,
+      "covered": 46
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 46,
+     "restart": 1
+    },
+    "by_rule": {
+     "default_op": 46,
+     "launch_flags": 1
+    },
+    "firm": 0,
+    "uncertain": 47,
+    "live_covered": 46,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 791,
+    "by_install": {
+     "swap": {
+      "total": 622,
+      "covered": 622
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 143,
+      "covered": 143
+     },
+     "restart": {
+      "total": 26,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 622,
+     "STATE": 143,
+     "restart": 26
+    },
+    "by_rule": {
+     "default_op": 622,
+     "launch_flags": 26,
+     "module_level": 143
+    },
+    "firm": 143,
+    "uncertain": 648,
+    "live_covered": 622,
+    "respawn_covered": 143,
+    "restart": 26,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/compilation": {
+   "functions": {
+    "total": 540,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 437,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 103,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 437,
+     "STATE": 103
+    },
+    "by_rule": {
+     "constructor": 103,
+     "path": 437
+    },
+    "firm": 103,
+    "uncertain": 437,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 540
+   },
+   "lines": {
+    "total": 12694,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 8915,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1898,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1881,
+      "covered": 1881
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 8915,
+     "STATE": 3779
+    },
+    "by_rule": {
+     "constructor": 1898,
+     "module_level": 1881,
+     "path": 8915
+    },
+    "firm": 3779,
+    "uncertain": 8915,
+    "live_covered": 0,
+    "respawn_covered": 1881,
+    "restart": 0,
+    "not_covered": 10813
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/config": {
+   "functions": {
+    "total": 464,
+    "by_install": {
+     "swap": {
+      "total": 444,
+      "covered": 444
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 20,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 444,
+     "STATE": 20
+    },
+    "by_rule": {
+     "constructor": 15,
+     "default_op": 444,
+     "name_state": 5
+    },
+    "firm": 15,
+    "uncertain": 449,
+    "live_covered": 444,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 20
+   },
+   "lines": {
+    "total": 14093,
+    "by_install": {
+     "swap": {
+      "total": 7802,
+      "covered": 7802
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2028,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 4263,
+      "covered": 4263
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7802,
+     "STATE": 6291
+    },
+    "by_rule": {
+     "constructor": 1862,
+     "default_op": 7802,
+     "module_level": 4263,
+     "name_state": 166
+    },
+    "firm": 6125,
+    "uncertain": 7968,
+    "live_covered": 7802,
+    "respawn_covered": 4263,
+    "restart": 0,
+    "not_covered": 2028
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/connections.py": {
+   "functions": {
+    "total": 30,
+    "by_install": {
+     "swap": {
+      "total": 26,
+      "covered": 26
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 4,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 26,
+     "STATE": 4
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 26
+    },
+    "firm": 4,
+    "uncertain": 26,
+    "live_covered": 26,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 4
+   },
+   "lines": {
+    "total": 472,
+    "by_install": {
+     "swap": {
+      "total": 409,
+      "covered": 409
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 28,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 35,
+      "covered": 35
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 409,
+     "STATE": 63
+    },
+    "by_rule": {
+     "constructor": 28,
+     "default_op": 409,
+     "module_level": 35
+    },
+    "firm": 63,
+    "uncertain": 409,
+    "live_covered": 409,
+    "respawn_covered": 35,
+    "restart": 0,
+    "not_covered": 28
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/cute_utils": {
+   "functions": {
+    "total": 39,
+    "by_install": {
+     "swap": {
+      "total": 34,
+      "covered": 34
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 34,
+     "RESOURCE": 1,
+     "STATE": 4
+    },
+    "by_rule": {
+     "default_op": 34,
+     "name_resource": 1,
+     "name_state": 4
+    },
+    "firm": 0,
+    "uncertain": 39,
+    "live_covered": 34,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 634,
+    "by_install": {
+     "swap": {
+      "total": 531,
+      "covered": 531
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 41,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 62,
+      "covered": 62
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 531,
+     "RESOURCE": 15,
+     "STATE": 88
+    },
+    "by_rule": {
+     "default_op": 531,
+     "module_level": 62,
+     "name_resource": 15,
+     "name_state": 26
+    },
+    "firm": 62,
+    "uncertain": 572,
+    "live_covered": 531,
+    "respawn_covered": 62,
+    "restart": 0,
+    "not_covered": 41
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/device_allocator": {
+   "functions": {
+    "total": 68,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 68,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RESOURCE": 65,
+     "STATE": 3
+    },
+    "by_rule": {
+     "constructor": 3,
+     "path": 65
+    },
+    "firm": 3,
+    "uncertain": 65,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 68
+   },
+   "lines": {
+    "total": 911,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 733,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 178,
+      "covered": 178
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "RESOURCE": 718,
+     "STATE": 193
+    },
+    "by_rule": {
+     "constructor": 15,
+     "module_level": 178,
+     "path": 718
+    },
+    "firm": 193,
+    "uncertain": 718,
+    "live_covered": 0,
+    "respawn_covered": 178,
+    "restart": 0,
+    "not_covered": 733
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/distributed": {
+   "functions": {
+    "total": 3429,
+    "by_install": {
+     "swap": {
+      "total": 2347,
+      "covered": 2347
+     },
+     "swap_recapture": {
+      "total": 2,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 574,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 505,
+      "covered": 505
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 2,
+     "OP": 2347,
+     "RANKS": 505,
+     "RESOURCE": 60,
+     "STATE": 514,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 238,
+     "default_op": 2347,
+     "jit_kernel": 2,
+     "launch_flags": 1,
+     "name_resource": 60,
+     "name_state": 276,
+     "path": 505
+    },
+    "firm": 240,
+    "uncertain": 3189,
+    "live_covered": 2347,
+    "respawn_covered": 505,
+    "restart": 1,
+    "not_covered": 576
+   },
+   "lines": {
+    "total": 73112,
+    "by_install": {
+     "swap": {
+      "total": 39601,
+      "covered": 39601
+     },
+     "swap_recapture": {
+      "total": 88,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 16434,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 16962,
+      "covered": 16962
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 88,
+     "OP": 39601,
+     "RANKS": 7691,
+     "RESOURCE": 1525,
+     "STATE": 24180,
+     "restart": 27
+    },
+    "by_rule": {
+     "constructor": 6982,
+     "default_op": 39601,
+     "jit_kernel": 88,
+     "launch_flags": 27,
+     "module_level": 9271,
+     "name_resource": 1525,
+     "name_state": 7927,
+     "path": 7691
+    },
+    "firm": 16341,
+    "uncertain": 56771,
+    "live_covered": 39601,
+    "respawn_covered": 16962,
+    "restart": 27,
+    "not_covered": 16522
+   },
+   "native": {
+    "files": 1,
+    "lines": 44
+   }
+  },
+  "vllm/engine": {
+   "functions": {
+    "total": 85,
+    "by_install": {
+     "swap": {
+      "total": 45,
+      "covered": 45
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 39,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 45,
+     "STATE": 1,
+     "restart": 39
+    },
+    "by_rule": {
+     "default_op": 45,
+     "name_state": 1,
+     "path": 39
+    },
+    "firm": 0,
+    "uncertain": 85,
+    "live_covered": 45,
+    "respawn_covered": 0,
+    "restart": 39,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 3169,
+    "by_install": {
+     "swap": {
+      "total": 244,
+      "covered": 244
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 43,
+      "covered": 43
+     },
+     "restart": {
+      "total": 2877,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 244,
+     "STATE": 48,
+     "restart": 2877
+    },
+    "by_rule": {
+     "default_op": 244,
+     "module_level": 43,
+     "name_state": 5,
+     "path": 2877
+    },
+    "firm": 43,
+    "uncertain": 3126,
+    "live_covered": 244,
+    "respawn_covered": 43,
+    "restart": 2877,
+    "not_covered": 5
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/entrypoints": {
+   "functions": {
+    "total": 1328,
+    "by_install": {
+     "swap": {
+      "total": 988,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 252,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 88,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 988,
+     "RESOURCE": 1,
+     "STATE": 251,
+     "restart": 88
+    },
+    "by_rule": {
+     "constructor": 62,
+     "default_op": 988,
+     "launch_flags": 5,
+     "name_resource": 1,
+     "name_state": 189,
+     "path": 83
+    },
+    "firm": 62,
+    "uncertain": 1266,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 88,
+    "not_covered": 1240
+   },
+   "lines": {
+    "total": 38219,
+    "by_install": {
+     "swap": {
+      "total": 21069,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6881,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 8503,
+      "covered": 8503
+     },
+     "restart": {
+      "total": 1766,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 21069,
+     "RESOURCE": 10,
+     "STATE": 15374,
+     "restart": 1766
+    },
+    "by_rule": {
+     "constructor": 1326,
+     "default_op": 21069,
+     "launch_flags": 121,
+     "module_level": 8503,
+     "name_resource": 10,
+     "name_state": 5545,
+     "path": 1645
+    },
+    "firm": 9829,
+    "uncertain": 28390,
+    "live_covered": 0,
+    "respawn_covered": 8503,
+    "restart": 1766,
+    "not_covered": 27950
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/env_override.py": {
+   "functions": {
+    "total": 21,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 21,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 21
+    },
+    "by_rule": {
+     "path": 21
+    },
+    "firm": 0,
+    "uncertain": 21,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 21,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 605,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 605,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 605
+    },
+    "by_rule": {
+     "path": 605
+    },
+    "firm": 0,
+    "uncertain": 605,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 605,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/envs.py": {
+   "functions": {
+    "total": 22,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 22,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 22
+    },
+    "by_rule": {
+     "path": 22
+    },
+    "firm": 0,
+    "uncertain": 22,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 22,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 1589,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1589,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 1589
+    },
+    "by_rule": {
+     "path": 1589
+    },
+    "firm": 0,
+    "uncertain": 1589,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 1589,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/exceptions.py": {
+   "functions": {
+    "total": 12,
+    "by_install": {
+     "swap": {
+      "total": 3,
+      "covered": 3
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 3,
+     "STATE": 9
+    },
+    "by_rule": {
+     "constructor": 9,
+     "default_op": 3
+    },
+    "firm": 9,
+    "uncertain": 3,
+    "live_covered": 3,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 9
+   },
+   "lines": {
+    "total": 141,
+    "by_install": {
+     "swap": {
+      "total": 18,
+      "covered": 18
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 55,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 68,
+      "covered": 68
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 18,
+     "STATE": 123
+    },
+    "by_rule": {
+     "constructor": 55,
+     "default_op": 18,
+     "module_level": 68
+    },
+    "firm": 123,
+    "uncertain": 18,
+    "live_covered": 18,
+    "respawn_covered": 68,
+    "restart": 0,
+    "not_covered": 55
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/forward_context.py": {
+   "functions": {
+    "total": 12,
+    "by_install": {
+     "swap": {
+      "total": 9,
+      "covered": 9
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9,
+     "STATE": 3
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 9,
+     "name_state": 2
+    },
+    "firm": 1,
+    "uncertain": 11,
+    "live_covered": 9,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 295,
+    "by_install": {
+     "swap": {
+      "total": 171,
+      "covered": 171
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 51,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 73,
+      "covered": 73
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 171,
+     "STATE": 124
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 171,
+     "module_level": 73,
+     "name_state": 47
+    },
+    "firm": 77,
+    "uncertain": 218,
+    "live_covered": 171,
+    "respawn_covered": 73,
+    "restart": 0,
+    "not_covered": 51
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/inputs": {
+   "functions": {
+    "total": 9,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 7,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 9,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 506,
+    "by_install": {
+     "swap": {
+      "total": 104,
+      "covered": 104
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 54,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 348,
+      "covered": 348
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 104,
+     "STATE": 402
+    },
+    "by_rule": {
+     "default_op": 104,
+     "module_level": 348,
+     "name_state": 54
+    },
+    "firm": 348,
+    "uncertain": 158,
+    "live_covered": 104,
+    "respawn_covered": 348,
+    "restart": 0,
+    "not_covered": 54
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/ir": {
+   "functions": {
+    "total": 46,
+    "by_install": {
+     "swap": {
+      "total": 35,
+      "covered": 35
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 11,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 35,
+     "STATE": 11
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 35,
+     "name_state": 7
+    },
+    "firm": 4,
+    "uncertain": 42,
+    "live_covered": 35,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 11
+   },
+   "lines": {
+    "total": 651,
+    "by_install": {
+     "swap": {
+      "total": 325,
+      "covered": 325
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 260,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 66,
+      "covered": 66
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 325,
+     "STATE": 326
+    },
+    "by_rule": {
+     "constructor": 148,
+     "default_op": 325,
+     "module_level": 66,
+     "name_state": 112
+    },
+    "firm": 214,
+    "uncertain": 437,
+    "live_covered": 325,
+    "respawn_covered": 66,
+    "restart": 0,
+    "not_covered": 260
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/kernels": {
+   "functions": {
+    "total": 115,
+    "by_install": {
+     "swap": {
+      "total": 97,
+      "covered": 97
+     },
+     "swap_recapture": {
+      "total": 5,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 13,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 5,
+     "OP": 97,
+     "STATE": 13
+    },
+    "by_rule": {
+     "constructor": 7,
+     "default_op": 97,
+     "jit_kernel": 5,
+     "name_state": 6
+    },
+    "firm": 12,
+    "uncertain": 103,
+    "live_covered": 97,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 18
+   },
+   "lines": {
+    "total": 2783,
+    "by_install": {
+     "swap": {
+      "total": 1924,
+      "covered": 1924
+     },
+     "swap_recapture": {
+      "total": 135,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 238,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 486,
+      "covered": 486
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 135,
+     "OP": 1924,
+     "STATE": 724
+    },
+    "by_rule": {
+     "constructor": 84,
+     "default_op": 1924,
+     "jit_kernel": 135,
+     "module_level": 486,
+     "name_state": 154
+    },
+    "firm": 705,
+    "uncertain": 2078,
+    "live_covered": 1924,
+    "respawn_covered": 486,
+    "restart": 0,
+    "not_covered": 373
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/logger.py": {
+   "functions": {
+    "total": 23,
+    "by_install": {
+     "swap": {
+      "total": 17,
+      "covered": 17
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 17,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 17,
+     "name_state": 5
+    },
+    "firm": 1,
+    "uncertain": 22,
+    "live_covered": 17,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 6
+   },
+   "lines": {
+    "total": 326,
+    "by_install": {
+     "swap": {
+      "total": 154,
+      "covered": 154
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 93,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 79,
+      "covered": 79
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 154,
+     "STATE": 172
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 154,
+     "module_level": 79,
+     "name_state": 91
+    },
+    "firm": 81,
+    "uncertain": 245,
+    "live_covered": 154,
+    "respawn_covered": 79,
+    "restart": 0,
+    "not_covered": 93
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/logging_utils": {
+   "functions": {
+    "total": 15,
+    "by_install": {
+     "swap": {
+      "total": 9,
+      "covered": 9
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 9,
+     "name_state": 2
+    },
+    "firm": 4,
+    "uncertain": 11,
+    "live_covered": 9,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 6
+   },
+   "lines": {
+    "total": 344,
+    "by_install": {
+     "swap": {
+      "total": 129,
+      "covered": 129
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 135,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 80,
+      "covered": 80
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 129,
+     "STATE": 215
+    },
+    "by_rule": {
+     "constructor": 24,
+     "default_op": 129,
+     "module_level": 80,
+     "name_state": 111
+    },
+    "firm": 104,
+    "uncertain": 240,
+    "live_covered": 129,
+    "respawn_covered": 80,
+    "restart": 0,
+    "not_covered": 135
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/logits_process.py": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 12,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 12,
+      "covered": 12
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "STATE": 12
+    },
+    "by_rule": {
+     "module_level": 12
+    },
+    "firm": 12,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 12,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/logprobs.py": {
+   "functions": {
+    "total": 14,
+    "by_install": {
+     "swap": {
+      "total": 12,
+      "covered": 12
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 12,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 12,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 14,
+    "live_covered": 12,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 156,
+    "by_install": {
+     "swap": {
+      "total": 108,
+      "covered": 108
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 8,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 40,
+      "covered": 40
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 108,
+     "STATE": 48
+    },
+    "by_rule": {
+     "default_op": 108,
+     "module_level": 40,
+     "name_state": 8
+    },
+    "firm": 40,
+    "uncertain": 116,
+    "live_covered": 108,
+    "respawn_covered": 40,
+    "restart": 0,
+    "not_covered": 8
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/lora": {
+   "functions": {
+    "total": 419,
+    "by_install": {
+     "swap": {
+      "total": 338,
+      "covered": 338
+     },
+     "swap_recapture": {
+      "total": 23,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 58,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 23,
+     "OP": 338,
+     "RESOURCE": 2,
+     "STATE": 56
+    },
+    "by_rule": {
+     "constructor": 25,
+     "default_op": 338,
+     "jit_kernel": 23,
+     "name_resource": 2,
+     "name_state": 31
+    },
+    "firm": 48,
+    "uncertain": 371,
+    "live_covered": 338,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 81
+   },
+   "lines": {
+    "total": 12094,
+    "by_install": {
+     "swap": {
+      "total": 7677,
+      "covered": 7677
+     },
+     "swap_recapture": {
+      "total": 2054,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1434,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 929,
+      "covered": 929
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 2054,
+     "OP": 7677,
+     "RESOURCE": 13,
+     "STATE": 2350
+    },
+    "by_rule": {
+     "constructor": 467,
+     "default_op": 7677,
+     "jit_kernel": 2054,
+     "module_level": 929,
+     "name_resource": 13,
+     "name_state": 954
+    },
+    "firm": 3450,
+    "uncertain": 8644,
+    "live_covered": 7677,
+    "respawn_covered": 929,
+    "restart": 0,
+    "not_covered": 3488
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/model_executor": {
+   "functions": {
+    "total": 13331,
+    "by_install": {
+     "swap": {
+      "total": 989,
+      "covered": 989
+     },
+     "swap_recapture": {
+      "total": 10137,
+      "covered": 9997
+     },
+     "rebuild": {
+      "total": 2155,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 50,
+      "covered": 50
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 9997,
+     "NATIVE": 190,
+     "OP": 989,
+     "RESOURCE": 275,
+     "STATE": 1880
+    },
+    "by_rule": {
+     "compiled": 14,
+     "constructor": 1793,
+     "default_op": 989,
+     "dsl_kernel": 50,
+     "jit_kernel": 140,
+     "name_resource": 1,
+     "name_state": 87,
+     "path": 10257
+    },
+    "firm": 1997,
+    "uncertain": 11334,
+    "live_covered": 10986,
+    "respawn_covered": 50,
+    "restart": 0,
+    "not_covered": 2295
+   },
+   "lines": {
+    "total": 319068,
+    "by_install": {
+     "swap": {
+      "total": 18384,
+      "covered": 18384
+     },
+     "swap_recapture": {
+      "total": 187923,
+      "covered": 179115
+     },
+     "rebuild": {
+      "total": 62815,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 49946,
+      "covered": 49946
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 179115,
+     "NATIVE": 13322,
+     "OP": 18384,
+     "RESOURCE": 5445,
+     "STATE": 102802
+    },
+    "by_rule": {
+     "compiled": 425,
+     "constructor": 55383,
+     "default_op": 18384,
+     "dsl_kernel": 4514,
+     "jit_kernel": 8808,
+     "module_level": 45432,
+     "name_resource": 9,
+     "name_state": 1987,
+     "path": 184126
+    },
+    "firm": 114562,
+    "uncertain": 204506,
+    "live_covered": 197499,
+    "respawn_covered": 49946,
+    "restart": 0,
+    "not_covered": 71623
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/model_inspection.py": {
+   "functions": {
+    "total": 5,
+    "by_install": {
+     "swap": {
+      "total": 5,
+      "covered": 5
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 5
+    },
+    "by_rule": {
+     "default_op": 5
+    },
+    "firm": 0,
+    "uncertain": 5,
+    "live_covered": 5,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 96,
+    "by_install": {
+     "swap": {
+      "total": 94,
+      "covered": 94
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 2,
+      "covered": 2
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 94,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 94,
+     "module_level": 2
+    },
+    "firm": 2,
+    "uncertain": 94,
+    "live_covered": 94,
+    "respawn_covered": 2,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/models": {
+   "functions": {
+    "total": 7122,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 6024,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 666,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 432,
+      "covered": 432
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 5645,
+     "NATIVE": 811,
+     "STATE": 666
+    },
+    "by_rule": {
+     "compiled": 5,
+     "constructor": 666,
+     "dsl_kernel": 432,
+     "jit_kernel": 379,
+     "path": 5640
+    },
+    "firm": 1482,
+    "uncertain": 5640,
+    "live_covered": 0,
+    "respawn_covered": 432,
+    "restart": 0,
+    "not_covered": 6690
+   },
+   "lines": {
+    "total": 218011,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 148664,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 25899,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 43448,
+      "covered": 43448
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 125265,
+     "NATIVE": 43266,
+     "STATE": 49480
+    },
+    "by_rule": {
+     "compiled": 25,
+     "constructor": 25899,
+     "dsl_kernel": 19867,
+     "jit_kernel": 23399,
+     "module_level": 23581,
+     "path": 125240
+    },
+    "firm": 92771,
+    "uncertain": 125240,
+    "live_covered": 0,
+    "respawn_covered": 43448,
+    "restart": 0,
+    "not_covered": 174563
+   },
+   "native": {
+    "files": 1,
+    "lines": 1395
+   }
+  },
+  "vllm/multimodal": {
+   "functions": {
+    "total": 545,
+    "by_install": {
+     "swap": {
+      "total": 474,
+      "covered": 474
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 71,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 474,
+     "RESOURCE": 2,
+     "STATE": 69
+    },
+    "by_rule": {
+     "constructor": 38,
+     "default_op": 474,
+     "name_resource": 2,
+     "name_state": 31
+    },
+    "firm": 38,
+    "uncertain": 507,
+    "live_covered": 474,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 71
+   },
+   "lines": {
+    "total": 10659,
+    "by_install": {
+     "swap": {
+      "total": 7920,
+      "covered": 7920
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 915,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1824,
+      "covered": 1824
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7920,
+     "RESOURCE": 120,
+     "STATE": 2619
+    },
+    "by_rule": {
+     "constructor": 470,
+     "default_op": 7920,
+     "module_level": 1824,
+     "name_resource": 120,
+     "name_state": 325
+    },
+    "firm": 2294,
+    "uncertain": 8365,
+    "live_covered": 7920,
+    "respawn_covered": 1824,
+    "restart": 0,
+    "not_covered": 915
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/outputs.py": {
+   "functions": {
+    "total": 21,
+    "by_install": {
+     "swap": {
+      "total": 19,
+      "covered": 19
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 19,
+     "STATE": 2
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 19
+    },
+    "firm": 2,
+    "uncertain": 19,
+    "live_covered": 19,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 391,
+    "by_install": {
+     "swap": {
+      "total": 172,
+      "covered": 172
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 57,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 162,
+      "covered": 162
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 172,
+     "STATE": 219
+    },
+    "by_rule": {
+     "constructor": 57,
+     "default_op": 172,
+     "module_level": 162
+    },
+    "firm": 219,
+    "uncertain": 172,
+    "live_covered": 172,
+    "respawn_covered": 162,
+    "restart": 0,
+    "not_covered": 57
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/parser": {
+   "functions": {
+    "total": 525,
+    "by_install": {
+     "swap": {
+      "total": 473,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 52,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 473,
+     "STATE": 52
+    },
+    "by_rule": {
+     "constructor": 41,
+     "default_op": 473,
+     "name_state": 11
+    },
+    "firm": 41,
+    "uncertain": 484,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 525
+   },
+   "lines": {
+    "total": 12232,
+    "by_install": {
+     "swap": {
+      "total": 9216,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1090,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1926,
+      "covered": 1926
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9216,
+     "STATE": 3016
+    },
+    "by_rule": {
+     "constructor": 758,
+     "default_op": 9216,
+     "module_level": 1926,
+     "name_state": 332
+    },
+    "firm": 2684,
+    "uncertain": 9548,
+    "live_covered": 0,
+    "respawn_covered": 1926,
+    "restart": 0,
+    "not_covered": 10306
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/platforms": {
+   "functions": {
+    "total": 314,
+    "by_install": {
+     "swap": {
+      "total": 305,
+      "covered": 305
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 305,
+     "RESOURCE": 5,
+     "STATE": 4
+    },
+    "by_rule": {
+     "default_op": 305,
+     "name_resource": 5,
+     "name_state": 4
+    },
+    "firm": 0,
+    "uncertain": 314,
+    "live_covered": 305,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 9
+   },
+   "lines": {
+    "total": 4607,
+    "by_install": {
+     "swap": {
+      "total": 4081,
+      "covered": 4081
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 117,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 409,
+      "covered": 409
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4081,
+     "RESOURCE": 42,
+     "STATE": 484
+    },
+    "by_rule": {
+     "default_op": 4081,
+     "module_level": 409,
+     "name_resource": 42,
+     "name_state": 75
+    },
+    "firm": 409,
+    "uncertain": 4198,
+    "live_covered": 4081,
+    "respawn_covered": 409,
+    "restart": 0,
+    "not_covered": 117
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/plugins": {
+   "functions": {
+    "total": 27,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 27
+    },
+    "by_rule": {
+     "path": 27
+    },
+    "firm": 0,
+    "uncertain": 27,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 27,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 527,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 527,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "restart": 527
+    },
+    "by_rule": {
+     "path": 527
+    },
+    "firm": 0,
+    "uncertain": 527,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 527,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/pooling_params.py": {
+   "functions": {
+    "total": 13,
+    "by_install": {
+     "swap": {
+      "total": 11,
+      "covered": 11
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 11,
+     "STATE": 2
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 11
+    },
+    "firm": 2,
+    "uncertain": 11,
+    "live_covered": 11,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 230,
+    "by_install": {
+     "swap": {
+      "total": 157,
+      "covered": 157
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 64,
+      "covered": 64
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 157,
+     "STATE": 73
+    },
+    "by_rule": {
+     "constructor": 9,
+     "default_op": 157,
+     "module_level": 64
+    },
+    "firm": 73,
+    "uncertain": 157,
+    "live_covered": 157,
+    "respawn_covered": 64,
+    "restart": 0,
+    "not_covered": 9
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/profiler": {
+   "functions": {
+    "total": 84,
+    "by_install": {
+     "swap": {
+      "total": 67,
+      "covered": 67
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 17,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 67,
+     "STATE": 17
+    },
+    "by_rule": {
+     "constructor": 7,
+     "default_op": 67,
+     "name_state": 10
+    },
+    "firm": 7,
+    "uncertain": 77,
+    "live_covered": 67,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 17
+   },
+   "lines": {
+    "total": 1127,
+    "by_install": {
+     "swap": {
+      "total": 602,
+      "covered": 602
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 411,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 114,
+      "covered": 114
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 602,
+     "STATE": 525
+    },
+    "by_rule": {
+     "constructor": 173,
+     "default_op": 602,
+     "module_level": 114,
+     "name_state": 238
+    },
+    "firm": 287,
+    "uncertain": 840,
+    "live_covered": 602,
+    "respawn_covered": 114,
+    "restart": 0,
+    "not_covered": 411
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/ray": {
+   "functions": {
+    "total": 4,
+    "by_install": {
+     "swap": {
+      "total": 4,
+      "covered": 4
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 4
+    },
+    "by_rule": {
+     "default_op": 4
+    },
+    "firm": 0,
+    "uncertain": 4,
+    "live_covered": 4,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 103,
+    "by_install": {
+     "swap": {
+      "total": 70,
+      "covered": 70
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 33,
+      "covered": 33
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 70,
+     "STATE": 33
+    },
+    "by_rule": {
+     "default_op": 70,
+     "module_level": 33
+    },
+    "firm": 33,
+    "uncertain": 70,
+    "live_covered": 70,
+    "respawn_covered": 33,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/reasoning": {
+   "functions": {
+    "total": 208,
+    "by_install": {
+     "swap": {
+      "total": 181,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 27,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 181,
+     "STATE": 27
+    },
+    "by_rule": {
+     "constructor": 21,
+     "default_op": 181,
+     "name_state": 6
+    },
+    "firm": 21,
+    "uncertain": 187,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 208
+   },
+   "lines": {
+    "total": 3503,
+    "by_install": {
+     "swap": {
+      "total": 2439,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 352,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 712,
+      "covered": 712
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2439,
+     "STATE": 1064
+    },
+    "by_rule": {
+     "constructor": 268,
+     "default_op": 2439,
+     "module_level": 712,
+     "name_state": 84
+    },
+    "firm": 980,
+    "uncertain": 2523,
+    "live_covered": 0,
+    "respawn_covered": 712,
+    "restart": 0,
+    "not_covered": 2791
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/renderers": {
+   "functions": {
+    "total": 355,
+    "by_install": {
+     "swap": {
+      "total": 319,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 36,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 319,
+     "STATE": 36
+    },
+    "by_rule": {
+     "constructor": 17,
+     "default_op": 319,
+     "name_state": 19
+    },
+    "firm": 17,
+    "uncertain": 338,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 355
+   },
+   "lines": {
+    "total": 8775,
+    "by_install": {
+     "swap": {
+      "total": 6571,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 698,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1506,
+      "covered": 1506
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 6571,
+     "STATE": 2204
+    },
+    "by_rule": {
+     "constructor": 334,
+     "default_op": 6571,
+     "module_level": 1506,
+     "name_state": 364
+    },
+    "firm": 1840,
+    "uncertain": 6935,
+    "live_covered": 0,
+    "respawn_covered": 1506,
+    "restart": 0,
+    "not_covered": 7269
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/sampling_params.py": {
+   "functions": {
+    "total": 36,
+    "by_install": {
+     "swap": {
+      "total": 31,
+      "covered": 31
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 31,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 31,
+     "name_state": 1
+    },
+    "firm": 4,
+    "uncertain": 32,
+    "live_covered": 31,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 1295,
+    "by_install": {
+     "swap": {
+      "total": 918,
+      "covered": 918
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 117,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 260,
+      "covered": 260
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 918,
+     "STATE": 377
+    },
+    "by_rule": {
+     "constructor": 95,
+     "default_op": 918,
+     "module_level": 260,
+     "name_state": 22
+    },
+    "firm": 355,
+    "uncertain": 940,
+    "live_covered": 918,
+    "respawn_covered": 260,
+    "restart": 0,
+    "not_covered": 117
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/scalar_type.py": {
+   "functions": {
+    "total": 23,
+    "by_install": {
+     "swap": {
+      "total": 23,
+      "covered": 23
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 23
+    },
+    "by_rule": {
+     "default_op": 23
+    },
+    "firm": 0,
+    "uncertain": 23,
+    "live_covered": 23,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 260,
+    "by_install": {
+     "swap": {
+      "total": 183,
+      "covered": 183
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 77,
+      "covered": 77
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 183,
+     "STATE": 77
+    },
+    "by_rule": {
+     "default_op": 183,
+     "module_level": 77
+    },
+    "firm": 77,
+    "uncertain": 183,
+    "live_covered": 183,
+    "respawn_covered": 77,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/sequence.py": {
+   "functions": {
+    "total": 8,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 7
+    },
+    "firm": 1,
+    "uncertain": 7,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 42,
+    "by_install": {
+     "swap": {
+      "total": 27,
+      "covered": 27
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 10,
+      "covered": 10
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 27,
+     "STATE": 15
+    },
+    "by_rule": {
+     "constructor": 5,
+     "default_op": 27,
+     "module_level": 10
+    },
+    "firm": 15,
+    "uncertain": 27,
+    "live_covered": 27,
+    "respawn_covered": 10,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/snapshot": {
+   "functions": {
+    "total": 91,
+    "by_install": {
+     "swap": {
+      "total": 84,
+      "covered": 84
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 84,
+     "STATE": 5,
+     "restart": 2
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 84,
+     "launch_flags": 2,
+     "name_state": 3
+    },
+    "firm": 2,
+    "uncertain": 89,
+    "live_covered": 84,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 1785,
+    "by_install": {
+     "swap": {
+      "total": 1426,
+      "covered": 1426
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 142,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 194,
+      "covered": 194
+     },
+     "restart": {
+      "total": 23,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1426,
+     "STATE": 336,
+     "restart": 23
+    },
+    "by_rule": {
+     "constructor": 23,
+     "default_op": 1426,
+     "launch_flags": 23,
+     "module_level": 194,
+     "name_state": 119
+    },
+    "firm": 217,
+    "uncertain": 1568,
+    "live_covered": 1426,
+    "respawn_covered": 194,
+    "restart": 23,
+    "not_covered": 142
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/tasks.py": {
+   "functions": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1
+    },
+    "by_rule": {
+     "default_op": 1
+    },
+    "firm": 0,
+    "uncertain": 1,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 32,
+    "by_install": {
+     "swap": {
+      "total": 3,
+      "covered": 3
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 29,
+      "covered": 29
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 3,
+     "STATE": 29
+    },
+    "by_rule": {
+     "default_op": 3,
+     "module_level": 29
+    },
+    "firm": 29,
+    "uncertain": 3,
+    "live_covered": 3,
+    "respawn_covered": 29,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/third_party": {
+   "functions": {
+    "total": 498,
+    "by_install": {
+     "swap": {
+      "total": 441,
+      "covered": 441
+     },
+     "swap_recapture": {
+      "total": 31,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 26,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 31,
+     "OP": 441,
+     "STATE": 26
+    },
+    "by_rule": {
+     "constructor": 21,
+     "default_op": 441,
+     "jit_kernel": 31,
+     "name_state": 5
+    },
+    "firm": 52,
+    "uncertain": 446,
+    "live_covered": 441,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 57
+   },
+   "lines": {
+    "total": 10776,
+    "by_install": {
+     "swap": {
+      "total": 5407,
+      "covered": 5407
+     },
+     "swap_recapture": {
+      "total": 2488,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 187,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 2694,
+      "covered": 2694
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 2488,
+     "OP": 5407,
+     "STATE": 2881
+    },
+    "by_rule": {
+     "constructor": 117,
+     "default_op": 5407,
+     "jit_kernel": 2488,
+     "module_level": 2694,
+     "name_state": 70
+    },
+    "firm": 5299,
+    "uncertain": 5477,
+    "live_covered": 5407,
+    "respawn_covered": 2694,
+    "restart": 0,
+    "not_covered": 2675
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/tilelang_utils": {
+   "functions": {
+    "total": 7,
+    "by_install": {
+     "swap": {
+      "total": 6,
+      "covered": 6
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 6,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 6
+    },
+    "firm": 1,
+    "uncertain": 6,
+    "live_covered": 6,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 83,
+    "by_install": {
+     "swap": {
+      "total": 55,
+      "covered": 55
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 25,
+      "covered": 25
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 55,
+     "STATE": 28
+    },
+    "by_rule": {
+     "constructor": 3,
+     "default_op": 55,
+     "module_level": 25
+    },
+    "firm": 28,
+    "uncertain": 55,
+    "live_covered": 55,
+    "respawn_covered": 25,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/tokenizers": {
+   "functions": {
+    "total": 157,
+    "by_install": {
+     "swap": {
+      "total": 146,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 11,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 146,
+     "STATE": 11
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 146,
+     "name_state": 9
+    },
+    "firm": 2,
+    "uncertain": 155,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 157
+   },
+   "lines": {
+    "total": 3072,
+    "by_install": {
+     "swap": {
+      "total": 2358,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 265,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 449,
+      "covered": 449
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2358,
+     "STATE": 714
+    },
+    "by_rule": {
+     "constructor": 71,
+     "default_op": 2358,
+     "module_level": 449,
+     "name_state": 194
+    },
+    "firm": 520,
+    "uncertain": 2552,
+    "live_covered": 0,
+    "respawn_covered": 449,
+    "restart": 0,
+    "not_covered": 2623
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/tool_parsers": {
+   "functions": {
+    "total": 359,
+    "by_install": {
+     "swap": {
+      "total": 313,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 46,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 313,
+     "STATE": 46
+    },
+    "by_rule": {
+     "constructor": 33,
+     "default_op": 313,
+     "name_state": 13
+    },
+    "firm": 33,
+    "uncertain": 326,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 359
+   },
+   "lines": {
+    "total": 12039,
+    "by_install": {
+     "swap": {
+      "total": 9413,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 843,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1783,
+      "covered": 1783
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 9413,
+     "STATE": 2626
+    },
+    "by_rule": {
+     "constructor": 577,
+     "default_op": 9413,
+     "module_level": 1783,
+     "name_state": 266
+    },
+    "firm": 2360,
+    "uncertain": 9679,
+    "live_covered": 0,
+    "respawn_covered": 1783,
+    "restart": 0,
+    "not_covered": 10256
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/tracing": {
+   "functions": {
+    "total": 17,
+    "by_install": {
+     "swap": {
+      "total": 14,
+      "covered": 14
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 14,
+     "STATE": 3
+    },
+    "by_rule": {
+     "default_op": 14,
+     "name_state": 3
+    },
+    "firm": 0,
+    "uncertain": 17,
+    "live_covered": 14,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 384,
+    "by_install": {
+     "swap": {
+      "total": 198,
+      "covered": 198
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 50,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 136,
+      "covered": 136
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 198,
+     "STATE": 186
+    },
+    "by_rule": {
+     "default_op": 198,
+     "module_level": 136,
+     "name_state": 50
+    },
+    "firm": 136,
+    "uncertain": 248,
+    "live_covered": 198,
+    "respawn_covered": 136,
+    "restart": 0,
+    "not_covered": 50
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/transformers_utils": {
+   "functions": {
+    "total": 631,
+    "by_install": {
+     "swap": {
+      "total": 469,
+      "covered": 469
+     },
+     "swap_recapture": {
+      "total": 2,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 160,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 2,
+     "OP": 469,
+     "STATE": 160
+    },
+    "by_rule": {
+     "compiled": 2,
+     "constructor": 136,
+     "default_op": 469,
+     "name_state": 24
+    },
+    "firm": 138,
+    "uncertain": 493,
+    "live_covered": 469,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 162
+   },
+   "lines": {
+    "total": 17442,
+    "by_install": {
+     "swap": {
+      "total": 10046,
+      "covered": 10046
+     },
+     "swap_recapture": {
+      "total": 106,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 4696,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 2594,
+      "covered": 2594
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 106,
+     "OP": 10046,
+     "STATE": 7290
+    },
+    "by_rule": {
+     "compiled": 106,
+     "constructor": 4284,
+     "default_op": 10046,
+     "module_level": 2594,
+     "name_state": 412
+    },
+    "firm": 6984,
+    "uncertain": 10458,
+    "live_covered": 10046,
+    "respawn_covered": 2594,
+    "restart": 0,
+    "not_covered": 4802
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/triton_utils": {
+   "functions": {
+    "total": 17,
+    "by_install": {
+     "swap": {
+      "total": 12,
+      "covered": 12
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 12,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 3,
+     "default_op": 12,
+     "name_state": 2
+    },
+    "firm": 3,
+    "uncertain": 14,
+    "live_covered": 12,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 425,
+    "by_install": {
+     "swap": {
+      "total": 185,
+      "covered": 185
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 82,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 158,
+      "covered": 158
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 185,
+     "STATE": 240
+    },
+    "by_rule": {
+     "constructor": 34,
+     "default_op": 185,
+     "module_level": 158,
+     "name_state": 48
+    },
+    "firm": 192,
+    "uncertain": 233,
+    "live_covered": 185,
+    "respawn_covered": 158,
+    "restart": 0,
+    "not_covered": 82
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/usage": {
+   "functions": {
+    "total": 12,
+    "by_install": {
+     "swap": {
+      "total": 11,
+      "covered": 11
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 11,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 11
+    },
+    "firm": 1,
+    "uncertain": 11,
+    "live_covered": 11,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 219,
+    "by_install": {
+     "swap": {
+      "total": 156,
+      "covered": 156
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 20,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 43,
+      "covered": 43
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 156,
+     "STATE": 63
+    },
+    "by_rule": {
+     "constructor": 20,
+     "default_op": 156,
+     "module_level": 43
+    },
+    "firm": 63,
+    "uncertain": 156,
+    "live_covered": 156,
+    "respawn_covered": 43,
+    "restart": 0,
+    "not_covered": 20
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/utils": {
+   "functions": {
+    "total": 626,
+    "by_install": {
+     "swap": {
+      "total": 558,
+      "covered": 558
+     },
+     "swap_recapture": {
+      "total": 1,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 47,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 20,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 1,
+     "OP": 558,
+     "RESOURCE": 1,
+     "STATE": 46,
+     "restart": 20
+    },
+    "by_rule": {
+     "compiled": 1,
+     "constructor": 25,
+     "default_op": 558,
+     "name_resource": 1,
+     "name_state": 21,
+     "path": 20
+    },
+    "firm": 26,
+    "uncertain": 600,
+    "live_covered": 558,
+    "respawn_covered": 0,
+    "restart": 20,
+    "not_covered": 48
+   },
+   "lines": {
+    "total": 9568,
+    "by_install": {
+     "swap": {
+      "total": 7156,
+      "covered": 7156
+     },
+     "swap_recapture": {
+      "total": 21,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 755,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1114,
+      "covered": 1114
+     },
+     "restart": {
+      "total": 522,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 21,
+     "OP": 7156,
+     "RESOURCE": 4,
+     "STATE": 1865,
+     "restart": 522
+    },
+    "by_rule": {
+     "compiled": 21,
+     "constructor": 192,
+     "default_op": 7156,
+     "module_level": 1114,
+     "name_resource": 4,
+     "name_state": 559,
+     "path": 522
+    },
+    "firm": 1327,
+    "uncertain": 8241,
+    "live_covered": 7156,
+    "respawn_covered": 1114,
+    "restart": 522,
+    "not_covered": 776
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/v1": {
+   "functions": {
+    "total": 5917,
+    "by_install": {
+     "swap": {
+      "total": 4568,
+      "covered": 4568
+     },
+     "swap_recapture": {
+      "total": 272,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 944,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 133,
+      "covered": 133
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 2,
+     "NATIVE": 270,
+     "OP": 4568,
+     "RANKS": 133,
+     "RESOURCE": 69,
+     "STATE": 875
+    },
+    "by_rule": {
+     "compiled": 2,
+     "constructor": 401,
+     "default_op": 4568,
+     "jit_kernel": 270,
+     "name_resource": 69,
+     "name_state": 474,
+     "path": 133
+    },
+    "firm": 673,
+    "uncertain": 5244,
+    "live_covered": 4568,
+    "respawn_covered": 133,
+    "restart": 0,
+    "not_covered": 1216
+   },
+   "lines": {
+    "total": 156573,
+    "by_install": {
+     "swap": {
+      "total": 86955,
+      "covered": 86955
+     },
+     "swap_recapture": {
+      "total": 17197,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 34080,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 18341,
+      "covered": 18341
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 41,
+     "NATIVE": 17156,
+     "OP": 86955,
+     "RANKS": 2225,
+     "RESOURCE": 2057,
+     "STATE": 48139
+    },
+    "by_rule": {
+     "compiled": 41,
+     "constructor": 14027,
+     "default_op": 86955,
+     "jit_kernel": 17156,
+     "module_level": 16116,
+     "name_resource": 2057,
+     "name_state": 17996,
+     "path": 2225
+    },
+    "firm": 47340,
+    "uncertain": 109233,
+    "live_covered": 86955,
+    "respawn_covered": 18341,
+    "restart": 0,
+    "not_covered": 51277
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/version.py": {
+   "functions": {
+    "total": 2,
+    "by_install": {
+     "swap": {
+      "total": 2,
+      "covered": 2
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2
+    },
+    "by_rule": {
+     "default_op": 2
+    },
+    "firm": 0,
+    "uncertain": 2,
+    "live_covered": 2,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 22,
+    "by_install": {
+     "swap": {
+      "total": 15,
+      "covered": 15
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 7,
+      "covered": 7
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 15,
+     "STATE": 7
+    },
+    "by_rule": {
+     "default_op": 15,
+     "module_level": 7
+    },
+    "firm": 7,
+    "uncertain": 15,
+    "live_covered": 15,
+    "respawn_covered": 7,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "vllm/vllm_flash_attn": {
+   "functions": {
+    "total": 11,
+    "by_install": {
+     "swap": {
+      "total": 10,
+      "covered": 10
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 10,
+     "STATE": 1
+    },
+    "by_rule": {
+     "default_op": 10,
+     "name_state": 1
+    },
+    "firm": 0,
+    "uncertain": 11,
+    "live_covered": 10,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 708,
+    "by_install": {
+     "swap": {
+      "total": 558,
+      "covered": 558
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 87,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 63,
+      "covered": 63
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 558,
+     "STATE": 150
+    },
+    "by_rule": {
+     "default_op": 558,
+     "module_level": 63,
+     "name_state": 87
+    },
+    "firm": 63,
+    "uncertain": 645,
+    "live_covered": 558,
+    "respawn_covered": 63,
+    "restart": 0,
+    "not_covered": 87
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  }
+ },
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

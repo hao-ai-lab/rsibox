@@ -1,0 +1,207 @@
+<div class="fr pg au">
+  <nav class="pg-nav" aria-label="Site">
+    <a class="pg-mark" href="../">FastRSI</a>
+    <span class="pg-links"><a href="../">Home</a><a href="https://github.com/GindaChen/fastrsi">Code</a></span>
+  </nav>
+
+  <header class="pg-hero au-hero" id="top">
+    <h1 class="fr-title pg-title">FastRSI Audit</h1>
+    <p class="fr-lede pg-lede">The detail behind the <a href="../">FastRSI home page</a>: which upstream pull requests were replayed in a live engine, what is and is not measured about coverage and conversion, the conventions every lab follows, and the fault-injection results. <b>Every row names its source. A value that was never recorded says "not recorded".</b></p>
+  </header>
+
+  <nav class="au-tabs" id="au-tabs" aria-label="Views">
+    <a href="#prs" data-tab="prs">Supported PRs</a>
+    <a href="#coverage" data-tab="coverage">Coverage and conversion</a>
+    <a href="#conventions" data-tab="conventions">Conventions</a>
+    <a href="#faults" data-tab="faults">Faults</a>
+  </nav>
+
+  <main>
+    <section class="au-view" data-view="prs" aria-label="Supported PRs"></section>
+    <section class="au-view" data-view="coverage" aria-label="Coverage and conversion" hidden></section>
+
+    <section class="au-view" data-view="conventions" aria-label="Conventions" hidden>
+      <p class="au-intro">The rules every engine's live lab follows: the interface, the six function groups, how a transaction and its witness work, the rules for agents, and the conformance cases. This view quotes the repo's documents. It does not show how well any engine follows them; the conformance results at the end are the only measurement here.</p>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">Which interface version is in force</h2>
+        <p class="au-p">Version 0 is in force. Version 1 is marked <b>"Draft, not adopted. <code>INTERFACE.md</code> (version 0) stays in force."</b> All three engine labs are written against the version 1 draft verbs.</p>
+        <div class="fr-tablewrap"><table class="fr-table au-t au-w3">
+          <thead><tr><th>Lab</th><th>Implements</th><th>As stated in the repo</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><b>vLLM</b></td><td><span class="au-b warn">v1 draft</span></td><td>The architecture document lists the interface as <code>core/livelab/INTERFACE-v1.md</code>, "draft with conformance cases; on main".</td><td class="au-src">repos/vllm/docs/architecture.md:153</td></tr>
+            <tr><td class="k"><b>Megatron-LM</b></td><td><span class="au-b warn">v1 draft</span></td><td>"Interface: <code>core/livelab/INTERFACE-v1.md</code> (draft)."</td><td class="au-src">repos/megatron/livelab/README.md:5</td></tr>
+            <tr><td class="k"><b>FastVideo</b></td><td><span class="au-b warn">v1 draft verbs</span></td><td>"Implements <code>core/livelab/INTERFACE.md</code> (the v1 draft verbs) and the conformance harness."</td><td class="au-src">repos/fastvideo/livelab/README.md:4</td></tr>
+            <tr><td class="k"><b>Toy lab (CPU)</b></td><td><span class="au-b warn">v1 draft</span></td><td>The reference implementation of the draft: the shared transaction kernel on a toy engine.</td><td class="au-src">core/livelab/INTERFACE-v1.md</td></tr>
+          </tbody>
+        </table></div>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">The interface</h2>
+        <h3 class="au-h3">Version 0 (in force): four calls and a status</h3>
+        <div class="fr-tablewrap"><table class="fr-table au-t au-w2">
+          <thead><tr><th>Call</th><th>Takes</th><th>Does</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><code>install(patch)</code></td><td>a patch</td><td>"Stages and binds a change on every worker rank at once, refreshing only what it invalidates. Refuses unsupported edits before touching state."</td><td>install id, the mechanism used per function, or a refusal with its reason</td></tr>
+            <tr><td class="k"><code>check(workload)</code></td><td>a workload (a probe)</td><td>"Runs a probe inside the warm engine"</td><td>latency or throughput, output correctness against base, whether the patched path ran, an optional profiler trace, and the check's own cost in seconds</td></tr>
+            <tr><td class="k"><code>reset()</code></td><td>nothing</td><td>"Drains in-flight work and restores volatile state (caches, buffers, RNG, iterators) so the next check starts from the same state"</td><td>which state was reset</td></tr>
+            <tr><td class="k"><code>uninstall()</code></td><td>nothing</td><td>"Reverts to base in place"</td><td>proof that base invariants hold again</td></tr>
+            <tr><td class="k"><code>status()</code></td><td>nothing</td><td>Reports the lab's state</td><td><code>base</code>, <code>edited</code> or <code>poisoned</code></td></tr>
+          </tbody>
+        </table></div>
+        <p class="au-src">core/livelab/INTERFACE.md</p>
+
+        <h3 class="au-h3">Version 1 (draft): the same verbs, each a transaction</h3>
+        <div class="fr-tablewrap"><table class="fr-table au-t au-w2">
+          <thead><tr><th>Verb</th><th>Takes</th><th>Transaction</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><code>install(patch)</code></td><td><code>{"files": {module: full patched text}, "accept": [check], "undo_resets": [...]}</code></td><td>plan the patch, then one transaction</td><td><code>id</code>, <code>outcome</code>, <code>codes</code> (blocking checks), <code>mechanisms</code> (recipes run), findings, seconds</td></tr>
+            <tr><td class="k"><code>check(workload)</code></td><td>a workload</td><td>none; runs the workload in the warm engine, then proves every live transaction</td><td><code>output</code>, <code>proven</code> (true, false, or null when nothing is live), witness counts per participant, findings, seconds</td></tr>
+            <tr><td class="k"><code>reset(kind)</code></td><td><code>state</code> or <code>respawn</code></td><td><code>state</code>: drain in-flight work and clear cached data. <code>respawn</code>: restart the worker group from warm caches</td><td>what was reset, seconds</td></tr>
+            <tr><td class="k"><code>uninstall(id)</code></td><td>a transaction id</td><td>undo <code>id</code> and every later transaction, newest first, each followed by its plan's undo resets</td><td>ids undone, state, seconds</td></tr>
+            <tr><td class="k"><code>status()</code> / <code>status(id)</code></td><td>nothing, or a transaction id</td><td>none</td><td><code>base</code>, <code>edited</code> or <code>poisoned</code>; live ids; code fingerprint; poison findings. With an id: that transaction's host state</td></tr>
+          </tbody>
+        </table></div>
+        <p class="au-p">The lab needs no planner: each participant's prepare finds the changed definitions from its one parse of the running text and the patched text. A patch may change several modules at once; the commit "applies them all or none".</p>
+        <p class="au-src">core/livelab/INTERFACE-v1.md, "Verbs"</p>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">The six function groups</h2>
+        <p class="au-p">A group says what kind of code an edit touches, and so what an install must refresh.</p>
+        <div class="fr-tablewrap"><table class="fr-table au-t au-w2">
+          <thead><tr><th>Group</th><th>What it is</th><th>How an edit to it is installed</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><span class="au-g">OP</span></td><td>Body of a per-call Python function</td><td>Swap the Python function or object in place</td></tr>
+            <tr><td class="k"><span class="au-g">GRAPH</span></td><td>Code inside a CUDA graph or torch.compile region</td><td>Swap, then selectively re-trace or recapture the affected compiled graphs</td></tr>
+            <tr><td class="k"><span class="au-g">STATE</span></td><td>Objects built once at start (buffers, runners, batch builders)</td><td>Swap, then rebuild the pre-allocated buffers, runners or tables it touches</td></tr>
+            <tr><td class="k"><span class="au-g">RESOURCE</span></td><td>Load-time memory layout and allocation</td><td>Allocate new, copy, switch, free</td></tr>
+            <tr><td class="k"><span class="au-g">RANKS</span></td><td>Anything all GPUs must agree on</td><td>Any of the above, committed on all ranks or none</td></tr>
+            <tr><td class="k"><span class="au-g">NATIVE</span></td><td>CUDA/C++ kernel source</td><td>Compile into a versioned shared library, rebind the op, recapture</td></tr>
+            <tr><td class="k"><span class="au-g">restart</span></td><td>Not a group: startup logic, launch flags, environment variables</td><td>Refused; needs a restart</td></tr>
+          </tbody>
+        </table></div>
+        <p class="au-src">core/agents/livelab_overview.md, "Function groups"; core/livelab/INTERFACE.md, "How install refreshes"</p>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">Transaction rules</h2>
+        <pre class="au-pre">phase 1, steps go on:   prepare on every participant (stage beside the old state, check, vote)
+phase 2, one step gap:  validate on every participant (staged code still current)
+                        -> commit on all, or abort on all
+                        -> a commit that fails undoes the committed ones in the same gap</pre>
+        <ul class="au-list">
+          <li><b>Three outcomes.</b> <code>committed</code> (all switched), <code>aborted</code> (none switched), <code>rolled_back</code> (switched and undone in the same gap).</li>
+          <li><b>Participants.</b> Worker ranks (quiesce between two steps), the engine core (inside its busy loop, between steps) and the API server (between requests; not in the kernel yet). "Every participant call returns <code>{"ok": bool, ...}</code> and never raises; a crash or a malformed reply counts as not-ok."</li>
+          <li><b>A caller that times out asks, never assumes.</b> <code>status(id)</code> answers <code>prepared</code>, <code>committed</code>, <code>aborted</code>, <code>undone</code> or <code>in-doubt</code>.</li>
+          <li><b>Undo is exact for code, not for data.</b> "The journal restores the same code and attribute objects and removes every name it added." Data the new code wrote needs the plan's undo resets: drain, cache clear, snapshot revert.</li>
+          <li><b>Checks advise.</b> Every check returns a finding, never an exception. The caller's <code>accept</code> list decides, and only overridable findings can be accepted. Physical limits cannot: <code>patch_invalid</code>, <code>no_live_function</code>, <code>closure_changed</code>, <code>empty_change</code>, <code>participant_failed</code>, <code>tampered</code>, <code>session_poisoned</code> and the rest of the catalog.</li>
+          <li><b>Deleting a definition is an edit</b> (<code>removed_definition</code>), and "an edit that changes no code is refused" (<code>empty_change</code>).</li>
+          <li><b>Poison.</b> The lab records a code fingerprint per participant. It is poisoned by "a fingerprint that differs (code changed outside the journal), a crash, a hang, a lost participant, a failed undo or rollback, an unresolved in-doubt transaction, a participant that missed the phase-2 deadline". A poisoned lab refuses <code>install</code> with <code>session_poisoned</code> until <code>reset("respawn")</code>.</li>
+          <li><b>Receipts.</b> "Written by one shared writer, never by engine code or agents." A transaction leaves linked <code>txn</code>, <code>proof</code> and <code>undo</code> records that share its id. The writer "needs a human owner" before its receipts count.</li>
+        </ul>
+        <p class="au-src">core/livelab/INTERFACE-v1.md, "Transactions", "Findings and accept", "Receipts"; core/livelab/kernel/README.md, "Invariants"</p>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">Witness rules</h2>
+        <ul class="au-list">
+          <li><b>"Witness proves that swapped code ran, per participant."</b> The swap puts a counter call at the top of each new function body.</li>
+          <li><b>"A swap that never ran is never a pass."</b> Zero live calls is <code>running_frame</code> when a frame of the old code is still running, else <code>zero_witness</code> (not reached). The check then reads <code>proven: False</code>.</li>
+          <li><b>Capture is not a run.</b> Calls made while the engine captures a graph "prove capture, not a run", so they are counted apart.</li>
+          <li><b>No witness, no proof.</b> A transaction whose witness has no key at all is a <code>no_witness_possible</code> finding at proof.</li>
+          <li><b>The witness hook is never deleted.</b> "Code compiled or captured while an edit was installed may still call it. Undo binds a no-op stub."</li>
+          <li><b>For agents:</b> "A check counts only if it says the patched path ran."</li>
+        </ul>
+        <p class="au-src">core/livelab/kernel/README.md, "Witness"; core/livelab/INTERFACE-v1.md; core/agents/livelab_overview.md</p>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">Rules for agents and for the kernel</h2>
+        <div class="au-cards">
+          <div class="fr-card au-card">
+            <h3 class="au-h3">Skill rules (the agent using a lab)</h3>
+            <ul class="au-list">
+              <li>Before every experiment, read the engine's knowledge base: probes, their cost, reset rules, unsupported paths.</li>
+              <li>"Pick the cheapest probe that still runs the code you changed."</li>
+              <li>Send a promising result to the full evaluation asynchronously and keep working.</li>
+              <li>"On <code>poisoned</code>, or when the cost hook says a call restarted, do not keep measuring on that lab."</li>
+              <li>"A check counts only if it says the patched path ran."</li>
+              <li>"A result counts only with the lab's receipt. Never write or edit one."</li>
+              <li>Slow check, failed install or an uncovered module: call the online toolsmith.</li>
+            </ul>
+            <p class="au-src">core/agents/livelab_overview.md</p>
+          </div>
+          <div class="fr-card au-card">
+            <h3 class="au-h3">Toolsmith principles, offline</h3>
+            <ul class="au-list">
+              <li><b>"Prove it offline, check cheaply online."</b> Every guarantee should be settled once, at toolsmith time.</li>
+              <li>"Prefer a design that makes the bad case impossible over a check that detects it."</li>
+              <li>"Prove each such design once with a test that tries the bad case and must fail."</li>
+              <li>"Keep an online check only if it is small", and say its cost next to it.</li>
+              <li>"Every component reports its own time."</li>
+              <li>Stay inside one engine: "Do not invent cross-engine abstractions."</li>
+              <li>Verify each tool with base → edit → injected fault → reverted base, compare against a fresh process, then pass conformance.</li>
+              <li>In the knowledge base, "every number cites how it was measured."</li>
+            </ul>
+            <p class="au-src">core/agents/toolsmith_offline.md</p>
+          </div>
+          <div class="fr-card au-card">
+            <h3 class="au-h3">Toolsmith principles, online</h3>
+            <ul class="au-list">
+              <li>Before a new kind of experiment, price it in writing: the restart class and state pollution, the predicted cost, and the cheapest probe.</li>
+              <li>"A difference smaller than that noise needs repeats, not one run per point."</li>
+              <li>Do not become overly conservative: when a structural edit is better, "price the necessary component or engine restart honestly and take it."</li>
+              <li>Extend coverage "with the smallest concrete mechanism that works for this engine".</li>
+              <li>"Verify the new or changed tool against a fresh process before handing it back."</li>
+            </ul>
+            <p class="au-src">core/agents/toolsmith_online.md</p>
+          </div>
+          <div class="fr-card au-card">
+            <h3 class="au-h3">Kernel invariants</h3>
+            <ul class="au-list">
+              <li><b>"Nothing raises to the caller."</b> A failure is a finding.</li>
+              <li><b>"Checks advise."</b> A check returns a finding; the caller's accept list decides.</li>
+              <li><b>"Undo is exact for code, not for data."</b></li>
+              <li><b>"Attributes outside <code>__dict__</code> go through <code>getattr</code> / <code>setattr</code>."</b></li>
+              <li><b>"The heap scan unfreezes the gc."</b> The scan yields the interpreter lock in slices.</li>
+              <li><b>"The witness's frame check stays cheap."</b> It walks thread stacks and does not scan the whole heap.</li>
+            </ul>
+            <p class="au-src">core/livelab/kernel/README.md, "Invariants"</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="au-sec">
+        <h2 class="fr-h2">The 11 conformance cases</h2>
+        <p class="au-p">"A lab's receipts count only after it passes every case." Each case drives a lab only through the five verbs plus a small test harness.</p>
+        <div class="fr-tablewrap"><table class="fr-table au-t au-w3">
+          <thead><tr><th>Case</th><th>Passes only if</th></tr></thead>
+          <tbody>
+            <tr><td class="k"><code>c0_repeatable</code></td><td>The workload gives the same output when nothing changes.</td></tr>
+            <tr><td class="k"><code>c1_noop</code></td><td>A change that keeps behavior installs, runs (witness), and leaves output bit-exact.</td></tr>
+            <tr><td class="k"><code>c2_visible</code></td><td>A visible edit changes output, and the witness fires on every participant.</td></tr>
+            <tr><td class="k"><code>c3_fresh_equivalence</code></td><td>The live edit's output equals a fresh process started with that edit.</td></tr>
+            <tr><td class="k"><code>c4_uninstall</code></td><td>Undo returns output and code identity to base.</td></tr>
+            <tr><td class="k"><code>c5_failed_install</code></td><td>A fault in the middle of an install leaves base, proven.</td></tr>
+            <tr><td class="k"><code>c6_refusal</code></td><td>Unsupported edits are refused with the right code, and nothing changes.</td></tr>
+            <tr><td class="k"><code>c7_chain</code></td><td>Stacked edits each run; undoing them one by one returns each earlier output exactly.</td></tr>
+            <tr><td class="k"><code>c8_crash_and_hang</code></td><td>Crash, hang, lost participant and tampered code each poison the session; respawn returns to base.</td></tr>
+            <tr><td class="k"><code>c9_soak</code></td><td>Output returns to base after repeated cycles of install and undo.</td></tr>
+            <tr><td class="k"><code>c10_not_proven</code></td><td>An edit that never runs installs, but its check reads <code>proven: False</code> with <code>zero_witness</code>.</td></tr>
+          </tbody>
+        </table></div>
+        <p class="au-src">core/livelab/conformance/README.md</p>
+        <h3 class="au-h3">Recorded results</h3>
+        <div id="conf-results"></div>
+      </section>
+    </section>
+
+    <section class="au-view" data-view="faults" aria-label="Faults" hidden></section>
+  </main>
+
+  <footer class="pg-foot au-foot">
+    <p class="fr-note">FastRSI Audit is the detail companion to the <a href="../">FastRSI home page</a>. Sources are paths in the FastRSI repo (with line numbers), pull requests of that repo, upstream pull requests on GitHub, or an earlier measurement run. Facts gathered on 2026-11-11.</p>
+  </footer>
+</div>

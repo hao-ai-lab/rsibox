@@ -1,0 +1,447 @@
+{
+ "schema": "fastrsi-survey/1/history",
+ "engine": "fastvideo",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "fastvideo-1",
+ "engine_rules_sha256": "49eb9ad1c93e61cfcdd39587c62b160ebfa41e59a2bed8f1a80057bd7e467c51",
+ "upstream": {
+  "repo": "hao-ai-lab/FastVideo",
+  "commit": "376e445f0e8d192c2d9a5f28010a6b3a7012667e",
+  "version": "0.2.1 (the pin of kb/priors.md)",
+  "scanned_commit": "376e445f0e8d192c2d9a5f28010a6b3a7012667e"
+ },
+ "ref": "origin/main",
+ "lab_path": "repos/fastvideo/livelab",
+ "points": [
+  {
+   "index": 0,
+   "commit": "25487160de442ce7d21c99cf75db85b974aae86e",
+   "date": "2026-11-08T17:21:51-08:00",
+   "subject": "feat(fastvideo): copy the transaction kernel into the FastVideo lab (#68)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": true,
+   "functions": {
+    "total": 8421,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 168,
+    "not_covered": 8253,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 5909,
+    "not_covered": 186189,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 1,
+   "commit": "db30007ac05d600b755b65fc42be3af85caeacaa",
+   "date": "2026-11-08T17:22:37-08:00",
+   "subject": "fix(livelab): let a transaction edit a definition an earlier one added (#77)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 168,
+    "not_covered": 8253,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 5909,
+    "not_covered": 186189,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 2,
+   "commit": "13a8c4f15450a19948e4baf4ce974d4a5fa533f0",
+   "date": "2026-11-08T17:23:41-08:00",
+   "subject": "fix(vllm): forward fingerprint through a kernel GroupParticipant (#71)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 168,
+    "not_covered": 8253,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 5909,
+    "not_covered": 186189,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 3,
+   "commit": "313495dbcd14d5c8a30a74c4c37d2f559340c5e4",
+   "date": "2026-11-08T17:26:59-08:00",
+   "subject": "feat(fastvideo): live lab adapter for FastVideo workers (#76)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": true,
+   "functions": {
+    "total": 8421,
+    "live_covered": 5207,
+    "respawn_covered": 0,
+    "restart": 168,
+    "not_covered": 3046,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 94820,
+    "respawn_covered": 0,
+    "restart": 5909,
+    "not_covered": 91369,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 4,
+   "commit": "4845f2f3b222e820ea18effa384bceeaaba6922f",
+   "date": "2026-11-08T18:32:42-08:00",
+   "subject": "feat(fastvideo): cheaper H3 restarts: in-place rebuild, zygote respawn, weights holder, path-stable JIT caches (#87)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": true,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 5,
+   "commit": "0064a9e1baa544ae927d14a52189acd3cc48d628",
+   "date": "2026-11-08T22:06:08-08:00",
+   "subject": "refactor(livelab)!: move shared kernel and forksafe into template/livelab (#107)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 6,
+   "commit": "3b643601ac992e6bf0256b1109da7d348fbfb676",
+   "date": "2026-11-09T01:02:19-08:00",
+   "subject": "test(fastvideo): cover forkserver prepare hook and holder loader hook on CPU (#114)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 7,
+   "commit": "3d2d250bd2dd7cad628c70f5977d66480028bc1d",
+   "date": "2026-11-09T01:32:05-08:00",
+   "subject": "refactor(core)!: move shared livelab into core/livelab and agent prompts into core/agents (#122)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 8,
+   "commit": "e9bfb4da12eab16c6254cbc097400f00e57ac0ee",
+   "date": "2026-11-09T22:26:10-08:00",
+   "subject": "perf(livelab): enforce NUMA affinity, thread-pool clamping, GC freeze, and env audit (#128)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 9,
+   "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+   "date": "2026-11-10T10:44:24-08:00",
+   "subject": "ci(b200): real B200 CI for trusted SHAs, safe runner routing, working quickstart (#139)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": true,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8421,
+    "live_covered": 7000,
+    "respawn_covered": 309,
+    "restart": 168,
+    "not_covered": 944,
+    "by_install_covered": {
+     "swap": 5207,
+     "swap_recapture": 0,
+     "rebuild": 1793,
+     "respawn": 309,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 192098,
+    "live_covered": 163842,
+    "respawn_covered": 3851,
+    "restart": 5909,
+    "not_covered": 18496,
+    "by_install_covered": {
+     "swap": 94820,
+     "swap_recapture": 0,
+     "rebuild": 69022,
+     "respawn": 3851,
+     "restart": 0
+    }
+   }
+  }
+ ],
+ "note": "Rules and upstream tree fixed at this run; only the lab's files vary. A step is the commit whose files first satisfy a capability's evidence.",
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

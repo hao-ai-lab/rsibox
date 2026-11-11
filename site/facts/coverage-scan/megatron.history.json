@@ -1,0 +1,657 @@
+{
+ "schema": "fastrsi-survey/1/history",
+ "engine": "megatron",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "megatron-1",
+ "engine_rules_sha256": "ff010b82af404c6472deb4f7f2ebe727a565a37fb554320000c4de6861975d01",
+ "upstream": {
+  "repo": "NVIDIA/Megatron-LM",
+  "commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7",
+  "version": "megatron-core 0.20.0 (kb/sources.md; scanned without our local modifications)",
+  "scanned_commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7"
+ },
+ "ref": "origin/main",
+ "lab_path": "repos/megatron/livelab",
+ "points": [
+  {
+   "index": 0,
+   "commit": "5958f7f732775d1d3c312ab6e698db33b36edce2",
+   "date": "2026-11-08T16:30:28-08:00",
+   "subject": "feat(megatron): training start state, gap rounds, client channels and phase stamps for the live lab (#73)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": true,
+   "functions": {
+    "total": 8907,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 8717,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 272993,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 1,
+   "commit": "fa00397616c2c0cf199b1c98175f2fc2d2ab2231",
+   "date": "2026-11-08T16:31:13-08:00",
+   "subject": "feat(megatron): host the transaction kernel in the train-step gap (#74)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": true,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 1948,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 105285,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 2,
+   "commit": "ef979439b08399571d3804552b6147016e85db0c",
+   "date": "2026-11-08T16:32:13-08:00",
+   "subject": "test(megatron): pass conformance c0-c10 on a real Megatron job (#75)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 1948,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 105285,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 3,
+   "commit": "e761c42fd47f745bf0c0571941d31a2cbf19a5b5",
+   "date": "2026-11-08T16:39:55-08:00",
+   "subject": "fix(megatron): report unknown optimizer state at lab setup instead of crashing (#84)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 1948,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 105285,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 4,
+   "commit": "9db7a7bf0a25b4a027b68d81dd0b4d1701139578",
+   "date": "2026-11-08T16:50:44-08:00",
+   "subject": "feat(megatron): split the first train step into microbatches and optimizer (#81)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 1948,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 105285,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 5,
+   "commit": "77ef13fed141c5c403a945b582d01b689dde64ae",
+   "date": "2026-11-08T16:50:51-08:00",
+   "subject": "feat(megatron): restart ranks by fork from a pre-imported zygote (#82)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 0,
+    "restart": 190,
+    "not_covered": 1948,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 0,
+    "restart": 10308,
+    "not_covered": 105285,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 6,
+   "commit": "cd45ba70894b734c225d419b814f5b8b038b6353",
+   "date": "2026-11-08T16:52:38-08:00",
+   "subject": "feat(megatron): code restart from the zygote by re-importing megatron in the forked ranks (#88)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": true,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 7,
+   "commit": "0064a9e1baa544ae927d14a52189acd3cc48d628",
+   "date": "2026-11-08T22:06:08-08:00",
+   "subject": "refactor(livelab)!: move shared kernel and forksafe into template/livelab (#107)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 8,
+   "commit": "b795978f4426bb368162882eb3633bd28c684c9f",
+   "date": "2026-11-09T01:01:47-08:00",
+   "subject": "test(megatron): exercise Lab._setup on CPU with a toy model and optimizer (#111)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 9,
+   "commit": "989b628d9b0037cff8f3c8b2cef373c1f1d56f79",
+   "date": "2026-11-09T01:13:51-08:00",
+   "subject": "docs(portal): clarify layout, grounded status, and plain-word mechanisms (#118)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 10,
+   "commit": "3d2d250bd2dd7cad628c70f5977d66480028bc1d",
+   "date": "2026-11-09T01:32:05-08:00",
+   "subject": "refactor(core)!: move shared livelab into core/livelab and agent prompts into core/agents (#122)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 11,
+   "commit": "b0c9b53b391c0c47565eda918141ad2a6f98e6ed",
+   "date": "2026-11-09T22:18:54-08:00",
+   "subject": "perf(megatron): clamp zygote compile/OMP threads and freeze pre-fork GC heap (#124)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 12,
+   "commit": "e9bfb4da12eab16c6254cbc097400f00e57ac0ee",
+   "date": "2026-11-09T22:26:10-08:00",
+   "subject": "perf(livelab): enforce NUMA affinity, thread-pool clamping, GC freeze, and env audit (#128)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 13,
+   "commit": "43004a5941cef1562d44b27d38b3c02eada50a4f",
+   "date": "2026-11-10T10:38:40-08:00",
+   "subject": "fix(megatron): lab survives bad and gone clients, zygote supervises its ranks, reset fails closed (#138)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 14,
+   "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+   "date": "2026-11-10T10:44:24-08:00",
+   "subject": "ci(b200): real B200 CI for trusted SHAs, safe runner routing, working quickstart (#139)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6769,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1775,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 167708,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 68798,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  }
+ ],
+ "note": "Rules and upstream tree fixed at this run; only the lab's files vary. A step is the commit whose files first satisfy a capability's evidence.",
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

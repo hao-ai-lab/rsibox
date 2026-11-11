@@ -1,0 +1,22 @@
+phase,label,order,kind
+kernel_autotune,Kernel autotune,1,startup
+weight_load,Weight load,2,startup
+import_init,"Import, config, other init",3,startup
+not_split,"Start-up, not split in the logs",4,startup
+jit_build,JIT build and compile,5,startup
+cuda_graph_capture,CUDA graph capture,6,startup
+engine_init,Engine init,7,startup
+rebuild,Rebuild model and optimizer from the seed (not split),8,startup
+first_step,First train step (lazy set-up),9,startup
+warmup,Warm-up (steps or a clip),10,startup
+warmup_protocol,Warm-up steps 5-30 (scoring protocol),11,startup
+live_install,Install the edit,0,startup
+other,Other,13,startup
+run_workload,Run the check workload,14,check
+logprob_check,Log-prob check,15,check
+quality_check,Quality check and save,16,check
+rewarm_clip,Warm-up clip (scoring protocol),0.3,startup
+reload_other,"Reload and other, not split",0.6,startup
+swap_reload_rewarm,"Swap, reload, re-warm",0.5,startup
+restore_state,Restore saved state,8.5,startup
+swap_quality,"Swap and quality gate, no re-warm",0.55,startup
