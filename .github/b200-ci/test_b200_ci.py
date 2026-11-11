@@ -84,7 +84,7 @@ class Lab(unittest.TestCase):
     def run_ci(self, sha, *extra):
         argv = ["--sha", sha, "--source", str(self.src), "--work", str(self.work), "--uv", self.uv,
                 "--post", *extra]
-        with mock.patch.object(runner, "post_status", lambda s, st: self.posted.append(st)), \
+        with mock.patch.object(runner, "post_status", lambda sha, status: self.posted.append(status)), \
                 contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(SystemExit) as exit_:
                 runner.main(argv)
@@ -119,7 +119,7 @@ class Refusals(Lab):
         """Results written before this change have no "final" key; they stay skipped."""
         old = self.work / "results" / "old.json"
         old.parent.mkdir(parents=True)
-        old.write_text(json.dumps({"run_dir": "x", "status": {"state": "success"}}))
+        old.write_text(json.dumps({"run_dir": "old-run", "status": {"state": "success"}}))
         self.assertTrue(loop.is_final(old))
 
 
@@ -133,7 +133,7 @@ class RunnerErrors(Lab):
         self.assertEqual(self.run_ci(self.trusted, *args), 2)
         rec = self.result(self.trusted)
         self.assertEqual((rec["attempts"], rec["final"]), (1, False))
-        self.assertEqual([p["state"] for p in self.posted], ["pending", "pending"])
+        self.assertEqual([status["state"] for status in self.posted], ["pending", "pending"])
         self.assertIn("will retry (1/2)", self.posted[-1]["description"])
         time.sleep(1.1)                      # run ids are per second
         self.assertEqual(self.run_ci(self.trusted, *args), 2)
@@ -141,32 +141,69 @@ class RunnerErrors(Lab):
         self.assertEqual((rec["attempts"], rec["final"]), (2, True))
         self.assertEqual(self.posted[-1]["state"], "error")
 
-    def test_runner_error_before_trust_posts_nothing(self):
-        """A failed fetch means trust is unknown: nothing may be posted on that SHA."""
+    def test_runner_error_before_trust_posts_nothing_and_is_never_final(self):
+        """A failed fetch means trust is unknown: nothing may be posted on that SHA. Pain
+        point: three such errors in a row (a short network outage) retired the head of main
+        for good. They are now not counted and never final."""
         self.src = self.src.parent / "missing-repo"
-        self.assertEqual(self.run_ci(self.trusted, "--stages", "quickstart", "--max-attempts", "1"), 2)
+        for _ in range(2):
+            self.assertEqual(self.run_ci(self.trusted, "--stages", "quickstart", "--max-attempts", "1"), 2)
+            time.sleep(1.1)                  # run ids are per second
         rec = self.result(self.trusted)
-        self.assertEqual((rec["final"], self.posted), (True, []))
+        self.assertEqual((rec["final"], rec["attempts"], self.posted), (False, 0, []))
+
+    def slow_quickstart(self, block):
+        (self.src / "README.md").write_text(f"## Quickstart\n```sh\n{block}\n```\n")
+        git("commit", "--quiet", "-am", "slow quickstart", cwd=self.src)
+        return git("rev-parse", "HEAD", cwd=self.src)
+
+    def assert_dead(self, pid_path: Path):
+        """The process whose pid the quickstart wrote to `pid_path` is gone."""
+        pid = int(pid_path.read_text())
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.1)
+        os.kill(pid, 9)
+        self.fail(f"grandchild {pid} survived the stopped run")
+
+    def test_deadline_on_the_last_step_is_a_runner_error_and_kills_the_group(self):
+        """Pain point: a deadline that cut the last step was recorded as a final `failure`
+        (posted), and the step's own children (here `sleep 300`) kept running after the
+        runner exited. Now: a non-final runner error, status still pending, group killed."""
+        grandchild = self.work.parent / "grandchild.pid"
+        sha = self.slow_quickstart(f"sleep 300 & echo $! > {grandchild}; wait")
+        version = "%d.%d" % sys.version_info[:2]
+        started = time.monotonic()
+        code = self.run_ci(sha, "--stages", "quickstart", "--quickstart-pythons", version,
+                           "--deadline-seconds", "8")
+        self.assertLess(time.monotonic() - started, 30)
+        rec = self.result(sha)
+        self.assertEqual((code, rec["attempts"], rec["final"]), (2, 1, False))
+        self.assertIn("deadline", rec["status"]["description"])
+        self.assertEqual([status["state"] for status in self.posted], ["pending", "pending"])
+        self.assert_dead(grandchild)
 
     def test_sigterm_stops_the_run_and_counts_as_a_runner_error(self):
         """Pain point: the loop gave up waiting on a run, which kept its GPUs and went on next
         to the following one. SIGTERM (what the loop sends) now ends the running step and
         leaves a non-final runner-error result."""
-        (self.src / "README.md").write_text("## Quickstart\n```sh\nsleep 60\n```\n")
-        git("commit", "--quiet", "-am", "slow quickstart", cwd=self.src)
-        sha = git("rev-parse", "HEAD", cwd=self.src)
-        py = "%d.%d" % sys.version_info[:2]
+        grandchild = self.work.parent / "grandchild.pid"
+        sha = self.slow_quickstart(f"sleep 60 & echo $! > {grandchild}; wait")
+        version = "%d.%d" % sys.version_info[:2]
         proc = subprocess.Popen([sys.executable, str(HERE / "run_b200_ci.py"), "--sha", sha,
                                  "--source", str(self.src), "--work", str(self.work), "--uv", self.uv,
-                                 "--stages", "quickstart", "--quickstart-pythons", py],
+                                 "--stages", "quickstart", "--quickstart-pythons", version],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             pid_file = self.work / "active" / f"{sha}.pid"
             deadline = time.time() + 60
-            while time.time() < deadline and not list(self.work.glob("runs/*/quickstart-py*.sh")):
-                time.sleep(0.1)
-            time.sleep(1)                            # into `sleep 60`
+            while time.time() < deadline and not (grandchild.exists() and grandchild.read_text().strip()):
+                time.sleep(0.1)                      # until the step is inside `sleep 60`
             self.assertEqual(pid_file.read_text(), str(proc.pid))
+            self.assertTrue(loop.is_runner(proc.pid, sha))
             t0 = time.monotonic()
             proc.terminate()
             self.assertEqual(proc.wait(timeout=30), 2)
@@ -177,6 +214,7 @@ class RunnerErrors(Lab):
         self.assertEqual((rec["attempts"], rec["final"]), (1, False))
         self.assertIn("Stopped", rec["status"]["description"])
         self.assertFalse(pid_file.exists())
+        self.assert_dead(grandchild)
 
     def test_deadline(self):
         clock = runner.Deadline(1)
@@ -200,13 +238,13 @@ class Quickstart(Lab):
     def test_quickstart_runs_both_blocks_in_a_fresh_venv(self):
         """End to end on CPU: trusted SHA, real clone, real `python -m venv`, both blocks run,
         a final success result and a success status."""
-        py = "%d.%d" % sys.version_info[:2]
-        code = self.run_ci(self.trusted, "--stages", "quickstart", "--quickstart-pythons", py,
+        version = "%d.%d" % sys.version_info[:2]
+        code = self.run_ci(self.trusted, "--stages", "quickstart", "--quickstart-pythons", version,
                            "--keep-envs")
         rec = self.result(self.trusted)
-        out = Path(rec["run_dir"], "envs", f"quickstart-src-{py}", "quickstart.out").read_text()
+        out = Path(rec["run_dir"], "envs", f"quickstart-src-{version}", "quickstart.out").read_text()
         self.assertEqual((code, rec["final"], out), (0, True, "first\nsecond\n"))
-        self.assertEqual([p["state"] for p in self.posted], ["pending", "success"])
+        self.assertEqual([status["state"] for status in self.posted], ["pending", "success"])
         self.assertFalse((self.work / "active" / f"{self.trusted}.pid").exists())
 
 
@@ -223,12 +261,12 @@ class Gpus(Lab):
             runner.pick_gpus("auto:1", "0,1,2,3", locks, smi)
         with self.assertRaises(runner.Refused):
             runner.pick_gpus("1", "0,1,2,3", locks, smi)       # explicit, but locked
-        for h in held:
-            h.close()
+        for handle in held:
+            handle.close()
         again, held3 = runner.pick_gpus("auto:2", "0,1,2,3", locks, smi)
         self.assertEqual(again, "0,1")
-        for h in held2 + held3:
-            h.close()
+        for handle in held2 + held3:
+            handle.close()
 
     def test_pool_and_busy_checks(self):
         smi = self.smi("0, 1, 0", "1, 9000, 0", "2, 1, 0", "4, 1, 0")
@@ -240,8 +278,8 @@ class Gpus(Lab):
         self.smi("0, 1, 0", "1, 9000, 0", "2, 30000, 88", "4, 1, 0")
         with self.assertRaises(runner.Refused):                # 2 got busy before the gpu stage
             runner.check_still_idle(value, "auto:2", smi)
-        for h in held:
-            h.close()
+        for handle in held:
+            handle.close()
 
 
 class Loop(Lab):
@@ -257,8 +295,8 @@ class Loop(Lab):
         """Pain point: --python, --quickstart-pythons and --timeout given to the loop never
         reached the runner, which silently used its defaults."""
         argv = self.args()
-        ns = loop.build_parser().parse_args(argv)
-        got = loop.runner_argv(ns, "a" * 40, 7, self.work)
+        parsed = loop.build_parser().parse_args(argv)
+        got = loop.runner_argv(parsed, "a" * 40, 7, self.work)
         joined = " ".join(got)
         for flag in ("--python 3.13", "--quickstart-pythons 3.11,3.13", "--timeout 77",
                      "--stages quickstart", "--max-attempts 3", "--deadline-seconds 540", "--pr 7"):
@@ -268,12 +306,12 @@ class Loop(Lab):
         """Two passes of the real loop, through a stand-in rack-run that starts the real
         runner. Pass 1 runs both heads: the untrusted one is refused (non-final), the trusted
         one passes its quickstart (final). Pass 2 launches only the untrusted one again."""
-        py = "%d.%d" % sys.version_info[:2]
-        argv = self.args("--once", "--quickstart-pythons", py)
+        version = "%d.%d" % sys.version_info[:2]
+        argv = self.args("--once", "--quickstart-pythons", version)
         launches = self.work.parent / "launches.txt"
         script(self.bin / "rack-run", f'echo "$4" >> {launches}\n'
                'while [ "$1" != "--" ]; do shift; done; shift\n"$@" >/dev/null 2>&1 &\n')
-        heads = [(self.untrusted, None, "x"), (self.trusted, None, "main")]
+        heads = [(self.untrusted, None, "fork-like"), (self.trusted, None, "main")]
         with mock.patch.object(loop, "candidates", lambda: heads), \
                 mock.patch.dict(os.environ, {"PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"}), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -286,21 +324,31 @@ class Loop(Lab):
         self.assertEqual(self.result(self.trusted)["status"]["state"], "success")
 
 
-    def test_loop_stops_a_run_that_outlives_its_wait(self):
-        """Pain point: after --max-wait the loop moved on and left the run going. It now sends
-        SIGTERM to the runner's pid, and the runner records a runner-error attempt."""
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    def test_loop_signals_only_the_runner_named_in_the_pid_file(self):
+        """Pain point: a SIGKILLed runner leaves a fresh pid file, and the loop could SIGTERM
+        whatever process reused that pid. Only a live process whose command line is the
+        runner for that SHA is signalled; a stale pid file is ignored."""
+        sha = "c" * 40
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        other = subprocess.Popen(sleeper)                                  # pid reused by someone else
+        runner_like = subprocess.Popen(sleeper + ["run_b200_ci.py", "--sha", sha])
         try:
-            pid_file = self.work / "active" / f"{'c' * 40}.pid"
+            pid_file = self.work / "active" / f"{sha}.pid"
             pid_file.parent.mkdir(parents=True)
             since = time.time() - 1
-            pid_file.write_text(str(child.pid))
-            self.assertTrue(loop.stop_run(self.work, "c" * 40, since))
-            self.assertEqual(child.wait(timeout=10), -15)
-            os.utime(pid_file, (since - 100, since - 100))   # a stale pid file is left alone
-            self.assertFalse(loop.stop_run(self.work, "c" * 40, since))
+            pid_file.write_text(str(other.pid))
+            self.assertFalse(loop.stop_run(self.work, sha, since))
+            self.assertIsNone(other.poll())
+            pid_file.write_text(str(runner_like.pid))
+            os.utime(pid_file, (since - 100, since - 100))
+            self.assertFalse(loop.stop_run(self.work, sha, since))         # older than the launch
+            pid_file.touch()
+            self.assertTrue(loop.stop_run(self.work, sha, since))
+            self.assertEqual(runner_like.wait(timeout=10), -15)
         finally:
-            child.kill()
+            for proc in (other, runner_like):
+                proc.kill()
+                proc.wait()
 
 
 if __name__ == "__main__":

@@ -20,8 +20,9 @@ then write logs, summary.json, summary.md and the commit status it would post
 
 Retries: <work>/results/<sha>.json says whether the result is final; the loop reruns a SHA
 until it is. A refusal (untrusted SHA, no free GPUs) is never final and posts no final
-status. A runner error is one attempt of --max-attempts; only the last is final. A test
-result is always final.
+status. A runner error before the SHA is verified (fetch) is never final; after that it is
+one attempt of --max-attempts, and only the last is final. A step cut by
+--deadline-seconds or SIGTERM is a runner error. A test result is always final.
 Exit code: 0 success, 1 test failure, 2 infrastructure error or refusal.
 """
 import argparse
@@ -58,10 +59,14 @@ class Stopped(Exception):
 
 
 class Deadline:
-    """Caps a whole run, so a stuck run cannot hold its GPUs after the loop gave up on it."""
+    """Caps a whole run (--deadline-seconds). A step cut by it, or any later step, raises
+    Stopped, which is recorded as a runner error, never as a test result."""
 
     def __init__(self, seconds: int):
         self.end = time.monotonic() + seconds if seconds else None
+
+    def expired(self) -> bool:
+        return self.end is not None and time.monotonic() >= self.end
 
     def timeout(self, per_step: int) -> float:
         if self.end is None:
@@ -70,6 +75,32 @@ class Deadline:
         if left <= 0:
             raise Stopped("runner deadline reached")
         return min(per_step, left)
+
+
+def run_group(argv, per_step: int, deadline: Deadline, **kw):
+    """Run one step in its own process group; return its exit code, or "timeout" when the
+    per-step timeout cut it. On a timeout, the run deadline, SIGTERM (Stopped) or any other
+    exception the whole group is killed, grandchildren included, before this returns or
+    raises. A process that leaves the group (setsid) is not covered."""
+    proc = subprocess.Popen(argv, start_new_session=True, **kw)
+    try:
+        return proc.wait(timeout=deadline.timeout(per_step))
+    except subprocess.TimeoutExpired:
+        kill_group(proc)
+        if deadline.expired():
+            raise Stopped("runner deadline reached during a step")
+        return "timeout"
+    except BaseException:
+        kill_group(proc)
+        raise
+
+
+def kill_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.wait()
 
 
 def now():
@@ -158,13 +189,13 @@ def pick_gpus(spec: str, pool: str, lock_dir: Path, nvidia_smi: str = "nvidia-sm
         for idx in chosen:
             handle = lock_gpu(lock_dir, idx)
             if handle is None:
-                for h in handles:
-                    h.close()
+                for held in handles:
+                    held.close()
                 raise Refused(f"GPU {idx} is locked by another CI run")
             handles.append(handle)
         return spec, handles
     want = int(spec.split(":", 1)[1]) if ":" in spec else 1
-    idle = [i for i in idle_gpus(nvidia_smi) if allowed is None or i in allowed]
+    idle = [idx for idx in idle_gpus(nvidia_smi) if allowed is None or idx in allowed]
     chosen, handles = [], []
     for idx in idle:
         if len(chosen) == want:
@@ -175,8 +206,8 @@ def pick_gpus(spec: str, pool: str, lock_dir: Path, nvidia_smi: str = "nvidia-sm
             handles.append(handle)
     still_idle = set(idle_gpus(nvidia_smi)) if chosen else set()
     if len(chosen) < want or not set(chosen) <= still_idle:
-        for h in handles:
-            h.close()
+        for held in handles:
+            held.close()
         raise Refused(f"need {want} idle, unlocked GPUs in pool {pool or 'all'}, found {chosen} "
                       f"(idle: {idle})")
     return ",".join(chosen), handles
@@ -195,11 +226,13 @@ def check_still_idle(gpus: str, spec: str, nvidia_smi: str):
 
 def make_env(uv: str, path: Path, python: str, pkgs: list, log, deadline: Deadline) -> float:
     t0 = time.monotonic()
-    sh([uv, "venv", "--quiet", "--python", python, str(path)], stdout=log, stderr=subprocess.STDOUT,
-       timeout=deadline.timeout(1800))
-    for group in pkgs:
-        sh([uv, "pip", "install", "--quiet", "--python", str(path / "bin" / "python"), *group],
-           stdout=log, stderr=subprocess.STDOUT, timeout=deadline.timeout(1800))
+    commands = [[uv, "venv", "--quiet", "--python", python, str(path)]]
+    commands += [[uv, "pip", "install", "--quiet", "--python", str(path / "bin" / "python"), *group]
+                 for group in pkgs]
+    for argv in commands:
+        exit_code = run_group(argv, 1800, deadline, stdout=log, stderr=subprocess.STDOUT)
+        if exit_code != 0:
+            raise RuntimeError(f"{shlex.join(argv[:3])} exited {exit_code}")
     return time.monotonic() - t0
 
 
@@ -287,24 +320,20 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
         with open(log_path, "w") as log:
             log.write("$ (cd %s && %s)\n" % (step["cwd"], shlex.join(step["argv"])))
             log.flush()
-            try:
-                rc = subprocess.run(step["argv"], cwd=src / step["cwd"], env=env, stdout=log,
-                                    stderr=subprocess.STDOUT,
-                                    timeout=deadline.timeout(timeout)).returncode
-            except subprocess.TimeoutExpired:
-                rc = "timeout"
+            exit_code = run_group(step["argv"], timeout, deadline, cwd=src / step["cwd"], env=env,
+                           stdout=log, stderr=subprocess.STDOUT)
         tests = parse_results(step, res)
         if step["kind"] == "cmd":
-            tests = [{"id": step["name"], "outcome": "passed" if rc == 0 else "failed",
+            tests = [{"id": step["name"], "outcome": "passed" if exit_code == 0 else "failed",
                       "seconds": round(time.monotonic() - t0, 3), "detail": ""}]
         counts = {}
         for t in tests:
             counts[t["outcome"]] = counts.get(t["outcome"], 0) + 1
-        ok = rc == 0 and not counts.get("failed") and not counts.get("error")
-        out["steps"].append({"name": step["name"], "rc": rc, "ok": ok, "counts": counts,
+        ok = exit_code == 0 and not counts.get("failed") and not counts.get("error")
+        out["steps"].append({"name": step["name"], "rc": exit_code, "ok": ok, "counts": counts,
                              "seconds": round(time.monotonic() - t0, 1),
                              "log": str(log_path.relative_to(run_dir)), "tests": tests})
-        print(f"[{stage}] {step['name']}: rc={rc} {counts} {time.monotonic() - t0:.1f}s", flush=True)
+        print(f"[{stage}] {step['name']}: rc={exit_code} {counts} {time.monotonic() - t0:.1f}s", flush=True)
     out["seconds"] = round(time.monotonic() - t_stage, 1)
     out["ok"] = all(s["ok"] for s in out["steps"])
     out["counts"] = totals(out["steps"])
@@ -350,17 +379,14 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path, deadline: Deadlin
         # A plain `python -m venv` with pip, as a user would make it (no uv, no extras).
         r = subprocess.run([uv, "python", "find", "--no-project", python], capture_output=True, text=True)
         base = r.stdout.strip() or f"python{python}"
-        rc = subprocess.run([base, "-m", "venv", str(venv)], stdout=log, stderr=subprocess.STDOUT,
-                            timeout=deadline.timeout(600)).returncode
-        if rc == 0:
+        exit_code = run_group([base, "-m", "venv", str(venv)], 600, deadline, stdout=log,
+                       stderr=subprocess.STDOUT)
+        if exit_code == 0:
             env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "FASTRSI_"))}
             env["CUDA_VISIBLE_DEVICES"] = ""
-            try:
-                rc = subprocess.run(["bash", str(script)], stdout=log, stderr=subprocess.STDOUT,
-                                    env=env, cwd=qsrc, timeout=deadline.timeout(1800)).returncode
-            except subprocess.TimeoutExpired:
-                rc = "timeout"
-    return {"python": python, "ok": rc == 0, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
+            exit_code = run_group(["bash", str(script)], 1800, deadline, stdout=log,
+                           stderr=subprocess.STDOUT, env=env, cwd=qsrc)
+    return {"python": python, "ok": exit_code == 0, "rc": exit_code, "seconds": round(time.monotonic() - t0, 1),
             "log": str(log_path.relative_to(run_dir))}
 
 
@@ -454,8 +480,10 @@ def settle(summary: dict, status: dict, result: Path, max_attempts: int):
     The loop reruns a SHA until its record is final:
     - refused: not final, attempts unchanged. No final status; a pending status already
       posted is updated to say the run will be retried.
-    - runner error: one more attempt; final (and its error status posted) only on the last of
-      max_attempts, otherwise the status stays pending.
+    - runner error before the SHA was verified as trusted (fetch, mirror): not final and not
+      counted, so an outage never retires a head.
+    - runner error after that: one more attempt; final (and its error status posted) only on
+      the last of max_attempts, otherwise the status stays pending.
     - test result: final, with its status.
     Nothing is posted for a SHA that was not verified as trusted (no pending posted)."""
     trusted = summary.get("pending_posted", False)
@@ -465,6 +493,8 @@ def settle(summary: dict, status: dict, result: Path, max_attempts: int):
         retry = {"state": "pending", "context": CONTEXT,
                  "description": ("not run yet, will retry: " + summary["refused"])[:140]}
         return dict(record, refused=summary["refused"], final=False), (retry if trusted else None)
+    if summary.get("infra_error") and "branches" not in summary:
+        return dict(record, final=False), None
     if summary.get("infra_error"):
         record.update(attempts=attempts + 1, final=attempts + 1 >= max_attempts)
         if record["final"]:
@@ -576,8 +606,8 @@ def main(argv=None):
                                           and gpu[i]["outcome"] != "skipped")
             summary["still_skipped"] = sorted((i, t["detail"]) for i, t in gpu.items() if t["outcome"] == "skipped")
         if "quickstart" in stages:
-            summary["quickstart"] = [quickstart(src, a.uv, p, run_dir, deadline)
-                                     for p in a.quickstart_pythons.split(",")]
+            summary["quickstart"] = [quickstart(src, a.uv, version, run_dir, deadline)
+                                     for version in a.quickstart_pythons.split(",")]
     except Refused as e:
         summary["refused"] = str(e)
     except Exception as e:  # infrastructure (or Stopped), not a test result

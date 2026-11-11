@@ -119,15 +119,15 @@ class Rejects(unittest.TestCase):
         """Pain point: +5.1% to -5.1%, or < 0.05 to > 0.05, kept the digits and passed."""
         body = BODY + "\nSpeedup is +5.1% with loss < 0.05.\n"
         for old, new in (("+5.1%", "-5.1%"), ("< 0.05", "> 0.05"), ("< 0.05", "0.05")):
-            p = check(TITLE, body, TITLE, rewrite(old, new, body))
-            self.assertTrue(any("numbers" in x for x in p), (old, new, p))
+            problems = check(TITLE, body, TITLE, rewrite(old, new, body))
+            self.assertTrue(any("numbers" in problem for problem in problems), (old, new, problems))
 
     def test_one_of_two_equal_numbers_dropped(self):
         """BODY says 22 ms twice (prose and Loop record). Dropping one occurrence loses a fact
         even though the number still appears once."""
         new = rewrite("- Overheads measured: install 22 ms (receipt r1)", "- Overheads measured: install (receipt r1)")
-        p = check(TITLE, BODY, TITLE, new)
-        self.assertTrue(any("dropped numbers" in x for x in p), p)
+        problems = check(TITLE, BODY, TITLE, new)
+        self.assertTrue(any("dropped numbers" in problem for problem in problems), problems)
 
     def test_ai_attribution_added(self):
         new = BODY + "\nGenerated with [Claude Code](https://claude.com/claude-code)\n"

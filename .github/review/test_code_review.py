@@ -137,17 +137,19 @@ class Service(unittest.TestCase):
         """AGENTS.md and docs/process/developer_workflow.md prohibit Gemini 3.8."""
         req = {"kind": "pr-description", "engine": "agy", "model": "gemini-3.8-flash-high", "prompt": "x"}
         self.assertIn("model", server.validate(req))
-        self.assertFalse([m for engine in server.MODELS.values() for m in engine if "3.8" in m])
+        allowed = [model for models in server.MODELS.values() for model in models]
+        self.assertFalse([model for model in allowed if "3.8" in model], allowed)
 
     def test_short_or_empty_token_file_refuses_to_start(self):
         """Pain point: an empty token file made `Authorization: Bearer ` (empty token) valid."""
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as folder:
+            token_file = Path(folder, "token")
             for text in ("", "\n", "short\n"):
-                Path(d, "token").write_text(text)
+                token_file.write_text(text)
                 with self.assertRaises(SystemExit):
-                    server.load_token(str(Path(d, "token")))
-            Path(d, "token").write_text("t" * 32 + "\n")
-            self.assertEqual(server.load_token(str(Path(d, "token"))), "t" * 32)
+                    server.load_token(str(token_file))
+            token_file.write_text("t" * 32 + "\n")
+            self.assertEqual(server.load_token(str(token_file)), "t" * 32)
 
     def test_bad_content_length_is_a_clean_4xx(self):
         """Pain point: Content-Length -1 made the handler read the body to EOF (no size cap),

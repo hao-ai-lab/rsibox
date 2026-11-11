@@ -6,8 +6,9 @@ hao-ai-lab/fastrsi itself (fork PRs are skipped here and refused again by the ru
 Each candidate runs through Rack (`rack-run`, which supervises the job and records it),
 one at a time. A SHA with a final result in <work>/results/ is not rerun; a refusal or a runner error
 (before the last attempt) leaves a non-final result, so the SHA is tried again.
-A run that has not finished after --max-wait seconds is stopped (SIGTERM to the pid in
-<work>/active/<sha>.pid) before the next one starts, so two runs never overlap.
+A run that has not written a result after --max-wait seconds gets SIGTERM (the pid in
+<work>/active/<sha>.pid, if that process is still that runner) before the next one starts.
+That is best effort: what keeps two runs off the same GPU is the runner's GPU locks.
 
     python3 b200_ci_loop.py --once            # one pass, print what it would run
     python3 b200_ci_loop.py --interval 300    # loop; add --post to post statuses
@@ -88,14 +89,24 @@ def wait_run(work: Path, sha: str, since: float, seconds: float, poll: float) ->
     return True
 
 
+def is_runner(pid: int, sha: str) -> bool:
+    """True if `pid` is alive and its command line is run_b200_ci.py for `sha`. A runner that
+    was SIGKILLed leaves its pid file behind, and the pid may since belong to another
+    process: that one is never signalled."""
+    found = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
+    return found.returncode == 0 and "run_b200_ci.py" in found.stdout and sha in found.stdout
+
+
 def stop_run(work: Path, sha: str, since: float) -> bool:
-    """SIGTERM the runner of `sha` launched since `since`; True if a signal was sent. A pid file
-    older than the launch belongs to a dead run whose pid may have been reused: left alone."""
+    """SIGTERM the runner of `sha` launched since `since`; True if a signal was sent."""
     pid_file = work / "active" / f"{sha}.pid"
     if not fresh(pid_file, since):
         return False
     try:
-        os.kill(int(pid_file.read_text()), signal.SIGTERM)
+        pid = int(pid_file.read_text())
+        if not is_runner(pid, sha):
+            return False
+        os.kill(pid, signal.SIGTERM)
     except (OSError, ValueError):
         return False
     return True

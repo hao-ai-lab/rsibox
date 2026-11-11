@@ -37,8 +37,10 @@ vLLM cases that GitHub-hosted CPU jobs always skip, and builds a single `b200-gp
   | Outcome | `final` | Status posted with `--post` |
   |---|---|---|
   | test result (success or failure) | true | the result |
-  | refused: SHA on no branch, PR head moved, GPUs busy or locked | false | none on an untrusted SHA; otherwise the pending status says it will retry |
-  | runner error (network, env build, `--deadline-seconds`, SIGTERM) | true only on the last of `--max-attempts` (3) | pending "will retry" until then, then `error` |
+  | refused before the pending status: SHA on no branch, PR head moved, GPUs busy or locked at pick time | false | none |
+  | refused after it: a picked GPU became busy before the `gpu` stage | false | pending, saying it will retry |
+  | runner error before the SHA is verified (fetch, mirror) | false, not counted | none |
+  | runner error after that (env build, `--deadline-seconds`, SIGTERM) | true only on the last of `--max-attempts` (3) | pending "will retry" until then, then `error` |
 
   Nothing is posted on a SHA before it is verified to be on a branch of this repo.
 
@@ -48,8 +50,12 @@ vLLM cases that GitHub-hosted CPU jobs always skip, and builds a single `b200-gp
 It reruns a head until its result is final, and passes `--python`, `--quickstart-pythons`,
 `--stages`, `--timeout`, `--max-attempts` and `--source` through to the runner. A run gets
 `--deadline-seconds` just under the loop's `--max-wait`; if it still has not written a result
-by then, the loop sends SIGTERM to the pid in `~/fastrsi-ci/active/<sha>.pid`, which ends the
-running step and records a runner-error attempt, before it starts the next head.
+by then, the loop sends SIGTERM to the pid in `~/fastrsi-ci/active/<sha>.pid` (only if that
+process's command line is still the runner for that SHA), before it starts the next head.
+Each step runs in its own process group; a step cut by the deadline or by SIGTERM is killed
+with its whole group and recorded as a runner-error attempt. Not guaranteed: a process that
+leaves its group (`setsid`, a daemon) survives, and if the runner was SIGKILLed the loop
+cannot stop anything. The GPU locks, not the loop, keep two runs off the same GPU.
 
 `python3 .github/b200-ci/test_b200_ci.py -v` runs the runner and loop golden cases on CPU (real
 git, real venvs; stand-ins for `nvidia-smi`, `rack-run` and the status call).
