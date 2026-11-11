@@ -27,7 +27,7 @@
   const mb = document.getElementById('mini-best');
   if (mb) [['Restart per try', RESTART, 'var(--fr-codex)'], ['A few steps, engine warm', PROBE, 'var(--fr-fast)']].forEach(([label, sec, col], i) => {
     const r = $('div', 'mb-row', null, mb); $('span', 'mb-l', label, r); const b = $('span', 'mb-bar', null, r), f = $('i', null, null, b); f.style.width = Math.max(1, 100 * sec / RESTART) + '%'; f.style.background = col;
-    const v = $('span', 'mb-v fr-num', s1(sec), r); if (i) $('b', null, Math.round(RESTART / sec) + '×', v);
+    const v = $('span', 'mb-v fr-num', null, r); $('b', null, i ? Math.round(RESTART / sec) + '×' : '', v); $('span', null, s1(sec), v);
   });
   let gen = 0; class Stop extends Error {}
   function ctx(fast) {

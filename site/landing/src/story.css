@@ -371,3 +371,7 @@
 @keyframes st-swap { from { opacity: 0; transform: translateY(14px); } }
 @media (max-width: 820px) { .st-step:first-child { min-height: 130vh; padding-top: 0; justify-content: flex-end; } .st-aside { margin-top: 30vh !important; } }
 @media (prefers-reduced-motion: reduce) { .st-win.swap { animation: none; } }
+
+/* speedup first, then the time, each in its own right-aligned column */
+.hl-v, .mb-v { display: grid; grid-template-columns: 2.6em 3.9em; gap: 8px; justify-content: end; text-align: right; }
+.hl-v b, .mb-v b { margin: 0; }
