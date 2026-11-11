@@ -185,6 +185,71 @@ class Pieces(unittest.TestCase):
         self.assertEqual(c.get_device_properties(0), "orig")
         self.assertEqual(c.current_device(), 7)
 
+    def test_children_are_found_by_parent_pid_not_process_group(self):
+        """reap_all() kills what _children() returns. Each rank calls setsid(), so its process
+        group is its own pid, never the zygote's: matching on the group finds no rank and no
+        adopted orphan, and they outlive the job. Input: a /proc-format directory with the
+        zygote (1000), a rank (2001, its own session), an orphan the subreaper took in (3005,
+        comm `a b) (c` with spaces and parentheses) and an unrelated process (4000, group
+        1000). Expect: children [2001, 3005]; the tree of 1000 holds all three. Proves the
+        parse of real stat lines; not the Linux run (ZygoteSupervision cases)."""
+        lines = {1000: "1000 (python3) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 100",
+                 2001: "2001 (python3) S 1000 2001 2001 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 200",
+                 3005: "3005 (a b) (c) R 1000 3005 3005 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 3",
+                 4000: "4000 (other) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 400"}
+        with tempfile.TemporaryDirectory() as proc:
+            for pid, line in lines.items():
+                os.makedirs(os.path.join(proc, str(pid)))
+                with open(os.path.join(proc, str(pid), "stat"), "w") as f:
+                    f.write(line + "\n")
+            os.makedirs(os.path.join(proc, "self"))
+            self.assertEqual(zygote.stat_ppid(lines[3005]), 1000)
+            self.assertEqual(sorted(zygote._children(1000, proc)), [2001, 3005])
+            self.assertEqual(sorted(zygote._tree(1000, proc)), [1000, 2001, 3005])
+
+    def test_auto_numa_bind_returns_the_cpus_forksafe_bound(self):
+        """forksafe.bind_rank_numa_and_cpus answers {"bound_cpus", "numa_node", "source"}; bind()
+        read "bound" and "cpus", so an automatic NUMA pin always reported None. Input:
+        FASTRSI_ZYGOTE_AUTO_NUMA=1 and forksafe's answer for a GPU local to CPUs 0-3 (the sysfs
+        read itself is forksafe's, tested in core/livelab). Expect: [0, 1, 2, 3]; with no CPUs
+        found, None."""
+        from unittest import mock
+        answer = {"bound_cpus": [0, 1, 2, 3], "numa_node": 0, "source": "sysfs"}
+        with mock.patch.dict(os.environ, {"FASTRSI_ZYGOTE_AUTO_NUMA": "1"}), \
+                mock.patch.object(zygote.forksafe, "bind_rank_numa_and_cpus", return_value=answer):
+            self.assertEqual(zygote.bind({}, 0), [0, 1, 2, 3])
+            answer.update(bound_cpus=[], source="none")
+            self.assertIsNone(zygote.bind({}, 0))
+
+    def test_code_restart_unbinds_a_refreshed_submodule_from_its_parent(self):
+        """`--refresh pkg.sub` with `pkg` kept loaded: `from pkg import sub` returns the parent's
+        attribute when it exists, so without an unbind it keeps the zygote's old module and the
+        overlay never runs. Input (in a fresh interpreter, as a forked rank): pkg/sub.py `VAL = 1`
+        imported, an overlay `pkg.sub.py` with `VAL = 2`, drop_modules for refresh ["pkg.sub"],
+        then the overlay finder. Expect: pkg.sub dropped, `from pkg import sub` gives VAL 2, and
+        pkg stays the same module object."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "src", "pkg"))
+            open(os.path.join(d, "src", "pkg", "__init__.py"), "w").close()
+            with open(os.path.join(d, "src", "pkg", "sub.py"), "w") as f:
+                f.write("VAL = 1\n")
+            os.makedirs(os.path.join(d, "ov"))
+            with open(os.path.join(d, "ov", "pkg.sub.py"), "w") as f:
+                f.write("VAL = 2\n")
+            code = ("import json, sys, pkg, pkg.sub\n"
+                    "from fastrsi_megatron import overlay, zygote\n"
+                    "old = pkg\n"
+                    "dropped = zygote.drop_modules({'refresh': ['pkg.sub']})\n"
+                    "overlay.install()\n"
+                    "from pkg import sub\n"
+                    "print(json.dumps(['pkg.sub' in dropped, sub.VAL, sys.modules['pkg'] is old]))\n")
+            env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
+                                                                os.path.join(d, "src")]),
+                   "FASTRSI_OVERLAY": os.path.join(d, "ov"), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 env=env)
+            self.assertEqual(json.loads(out.stdout or "null"), [True, 2, True], out.stderr)
+
     def test_cpu_list_parses_ranges(self):
         self.assertEqual(zygote.cpu_list("0-3,8,10-11"), {0, 1, 2, 3, 8, 10, 11})
 

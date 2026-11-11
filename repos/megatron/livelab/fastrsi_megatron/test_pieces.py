@@ -5,10 +5,12 @@ GPU (receipt in ../README.md); these cases pin the three pieces a reader cannot 
 """
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +52,40 @@ class Overlay(unittest.TestCase):
             self.assertEqual(json.loads(on.stdout), [2, orig], on.stderr)
             self.assertEqual(json.loads(off.stdout)[0], 1, off.stderr)
 
+    def test_source_lookups_see_the_overlay_text_not_the_disk_file(self):
+        """inspect.getsource (and so @triton.jit, torch.compile's Dynamo and tracebacks) reads
+        linecache, which reads the file on disk when it exists: an overlaid module would show the
+        unedited source while it runs the edit. Input: pkg/mod.py `f() -> 1 # DISK`, its lines
+        already in linecache (a zygote that imported it before the fork), an overlay with
+        `f() -> 2 # OVERLAY`, and overlay.install() called a second time (zygote --refresh).
+        Expect: f() == 2, getsource and linecache show the overlay line, and one finder."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "src", "pkg"))
+            open(os.path.join(d, "src", "pkg", "__init__.py"), "w").close()
+            with open(os.path.join(d, "src", "pkg", "mod.py"), "w") as f:
+                f.write("def f():\n    return 1  # DISK\n")
+            os.makedirs(os.path.join(d, "ov"))
+            with open(os.path.join(d, "ov", "pkg.mod.py"), "w") as f:
+                f.write("def f():\n    return 2  # OVERLAY\n")
+            code = ("import inspect, json, linecache, sys, importlib.util\n"
+                    "path = importlib.util.find_spec('pkg.mod').origin\n"
+                    "linecache.getlines(path)\n"
+                    "from fastrsi_megatron import overlay\n"
+                    "overlay.install()\n"
+                    "import pkg.mod as m\n"
+                    "finders = [x for x in sys.meta_path if type(x).__name__ == 'OverlayFinder']\n"
+                    "print(json.dumps([m.f(), inspect.getsource(m.f), linecache.getline(path, 2),"
+                    " len(finders)]))\n")
+            env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
+                                                                os.path.join(d, "src")]),
+                   "FASTRSI_OVERLAY": os.path.join(d, "ov")}
+            env.pop("FASTRSI_KERNEL", None)
+            on = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                env=env)
+            self.assertEqual(json.loads(on.stdout or "null"),
+                             [2, "def f():\n    return 2  # OVERLAY\n",
+                              "    return 2  # OVERLAY\n", 1], on.stderr)
+
 
 class Mailbox(unittest.TestCase):
     def test_request_and_reply_through_a_directory(self):
@@ -79,6 +115,29 @@ class Mailbox(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(TimeoutError):
                 client.call_mailbox(d, {"verb": "check"}, timeout=0.2, poll_s=0.01)
+
+
+class ConformanceJob(unittest.TestCase):
+    def test_killed_job_leaves_no_folder_or_socket_and_ports_are_fresh(self):
+        """The conformance lab starts a job per spawn, respawn and fresh check (c8 alone respawns
+        four times): each left a fastrsi-mg-* folder and its socket behind, and every lab of one
+        process reused one fixed port. Input: a job `echo started; exec sleep 30` and a file at its
+        socket path, then kill(). Expect: the process is gone, its folder and socket removed, the
+        log tail read before; two _free_port() calls give bindable ports."""
+        from fastrsi_megatron import conformance_lab
+        job = conformance_lab._Job("echo started; exec sleep 30", {}, "test")
+        open(job.sock, "w").close()
+        deadline = time.time() + 10
+        while not job.tail() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(job.tail(), ["started"])
+        job.kill()
+        self.assertIsNotNone(job.p.poll())
+        self.assertFalse(os.path.exists(job.dir), job.dir)
+        self.assertFalse(os.path.exists(job.sock), job.sock)
+        for port in (conformance_lab._free_port(), conformance_lab._free_port()):
+            with socket.socket() as s:
+                s.bind(("127.0.0.1", port))
 
 
 class _MegatronLikeOptimizer:

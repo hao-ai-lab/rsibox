@@ -39,8 +39,13 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   and step counters zero, scheduler at its start, RNG fixed, batches frozen. So a fresh process
   started with an edit reaches the same S (conformance c3). State keys the lab does not know
   how to reset are a finding at start (`optimizer_state_unknown`), never zeroed silently.
-- **Poison:** the lab cannot answer for a hung or dead rank; the client's timeout or a closed
-  connection poisons it, and `reset("respawn")` restarts the job (the harness does it).
+- **Poison:** a rank that dies or hangs in a round fails that round on rank 0 after the round
+  timeout (`FASTRSI_ROUND_TIMEOUT_S`, default 900 s; longer than the longest check), which
+  poisons the session (`participant_failed`); no round runs after it. The client's own timeout
+  or a closed connection poisons it on the client's side first, and `reset("respawn")` restarts
+  the job (the harness does it).
+- **Faults reach the rank they name:** `inject` takes a rank number or a participant name
+  (`rank1`); a target that names no rank is refused, never skipped on every rank.
 - **Clients cannot break the lab.** A request that is not a JSON object with a string `verb`
   gets an error reply. A client that times out or disconnects before its reply costs only that
   reply: rank 0 logs `client gone before the reply` and serves the next request; the other ranks
@@ -48,13 +53,18 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
 - **Reset fails closed.** S covers weights, fp32 masters, buffers, Adam state, param-group
   scalars, scheduler, grad scaler, and torch CPU/CUDA, TP-tracker, Python and numpy RNG. If the
   live state has a tensor S lacks, lacks one S has, or one changed shape or dtype, `reset` (and
-  `check`) answer ok false and write nothing. `digest` returns each rank's sha256 of every piece,
-  so a round trip is shown bit for bit. `resume` puts S back (`state: "keep"` skips that) and feeds
+  `check`) answer ok false and write nothing. `digest` returns each rank's sha256 of every piece
+  (numpy not needed), so a round trip is shown bit for bit; a digest that fails on a rank returns
+  no hash. `resume` puts S back (`state: "keep"` skips that) and feeds
   the job's next steps the frozen batches first: the job continues as if the lab had not run.
 - **Respawn kills by PID tree.** torchrun starts workers in sessions of their own: a kill of the
   launcher's process group leaves them holding GPU memory.
 
 ## What install covers here
+
+A patch may edit any module the job has imported; each one it names joins the session's code
+fingerprint (status, tamper checks). A module the job has not imported is refused
+(`patch_invalid`).
 
 The kernel's live code swap (function bodies, every rank) and repair cells. Not yet: edits of
 `jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (which require a model

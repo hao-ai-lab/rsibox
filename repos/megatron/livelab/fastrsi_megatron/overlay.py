@@ -3,9 +3,13 @@
 FASTRSI_OVERLAY=<dir> holds `<dotted.module.name>.py` files. Importing this module installs a
 finder that loads those modules from the overlay text, with the original file name, so code
 objects keep the same `co_filename` and line numbers as the live lab's swapped code. It must be
-imported before the overlaid modules are."""
+imported before the overlaid modules are.
+
+The overlay text also goes into linecache under that file name, so inspect.getsource, tracebacks,
+@triton.jit and torch.compile see the edit, not the file on disk."""
 import importlib.abc
 import importlib.machinery
+import linecache
 import os
 import sys
 
@@ -23,9 +27,15 @@ class _Loader(importlib.machinery.SourceFileLoader):
     def path_stats(self, path):
         raise OSError("overlay: no bytecode cache")
 
+    def exec_module(self, module):
+        # mtime None: linecache.checkcache keeps the entry (it would reload a file entry from disk)
+        linecache.cache[self.path] = (len(self._text), None, self._text.splitlines(True), self.path)
+        super().exec_module(module)
+
 
 class OverlayFinder(importlib.abc.MetaPathFinder):
     def __init__(self, root):
+        self.root = root
         self.files = {f[:-3]: os.path.join(root, f) for f in os.listdir(root) if f.endswith(".py")}
 
     def find_spec(self, name, path=None, target=None):
@@ -41,9 +51,17 @@ class OverlayFinder(importlib.abc.MetaPathFinder):
 
 
 def install(root=None):
+    """Put an OverlayFinder for `root` (default FASTRSI_OVERLAY) first on sys.meta_path, once per
+    root. Returns the finder, or None without an overlay."""
     root = root or os.environ.get("FASTRSI_OVERLAY")
-    if root and os.path.isdir(root):
-        sys.meta_path.insert(0, OverlayFinder(root))
+    if not (root and os.path.isdir(root)):
+        return None
+    for finder in sys.meta_path:
+        if isinstance(finder, OverlayFinder) and finder.root == root:
+            return finder
+    finder = OverlayFinder(root)
+    sys.meta_path.insert(0, finder)
+    return finder
 
 
 install()

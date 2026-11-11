@@ -216,7 +216,15 @@ class Lab:
 
     # -- rounds --------------------------------------------------------------------------
     def round(self, msg):
-        return self.ranks.round(msg, self.handle)
+        """Rank 0: one round. A round that fails (a rank died or did not answer in time) poisons
+        the session, once, and raises G.RoundFailed; every later round raises it at once."""
+        try:
+            return self.ranks.round(msg, self.handle)
+        except G.RoundFailed as e:
+            if self.host is not None and not self.host.poisoned():
+                self.host.fault("participant_failed", f"round failed: {e}",
+                                "every rank answers each round")
+            raise
 
     def handle(self, msg):
         """Every rank: one request of a round. Never raises."""
@@ -323,6 +331,30 @@ class Lab:
             self.host = SS.Session(co, [m for m in mods if m in sys.modules])
         return self.host
 
+    @staticmethod
+    def _track(s, names):
+        """Add the modules a patch edits to the session's fingerprint (status and tamper checks
+        then cover them), at every stack depth: no committed transaction changed them yet, so
+        their code now is their code at each depth. A change made to them before this call is
+        taken as their base."""
+        new = [m for m in dict.fromkeys(names) if m not in s.modules]
+        if not new:
+            return
+        codes = {}
+        for p in s.co.participants:
+            r = C._call(p, "fingerprint", new)
+            if not r["ok"]:
+                return                          # install's own verify reports the participant
+            codes[p.name] = r["code"]
+        for fp in s.expected:
+            for name, code in codes.items():
+                old = dict(fp.get(name) or {})
+                for key, value in code.items():  # {rank: {function: identity}} or {function: ...}
+                    both = isinstance(value, dict) and isinstance(old.get(key), dict)
+                    old[key] = {**old[key], **value} if both else value
+                fp[name] = old
+        s.modules += new
+
     def _text(self, m):
         for d in reversed(self.live_text):
             if m in d:
@@ -375,9 +407,20 @@ class Lab:
     def verb(self, verb, req):
         s = self._host()
         if verb == "install":
-            patch = req["patch"]
-            modules = {m: {"source": new, "base_hash": L.text_hash(self._text(m))}
-                       for m, new in patch["files"].items()}
+            patch = req.get("patch")
+            files = patch.get("files") if isinstance(patch, dict) else None
+            try:
+                if not isinstance(files, dict):
+                    raise ValueError("a patch is an object with `files`: {module: source}")
+                modules = {m: {"source": new, "base_hash": L.text_hash(self._text(m))}
+                           for m, new in files.items()}
+            except (KeyError, OSError, TypeError, ValueError) as e:
+                why = f"module {e} is not loaded" if isinstance(e, KeyError) else str(e)
+                return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
+                        "mechanisms": [], "receipt": None, "findings": [F.finding(
+                            "patch_invalid", why, "modules the running job has imported")]}
+            if not s.poisoned():
+                self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
                     "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
             res = s.install(plan, edit_time=patch.get("edit_time"))
@@ -436,8 +479,10 @@ class Lab:
             ok = all(r.get("ok") for r in rs)
             ds = [r.get("digest") for r in rs]
             import hashlib
+            # no digest when a rank gave none: two failed digests must not compare equal
             return {"ok": ok, "ranks": ds,
-                    "digest": hashlib.sha256(json.dumps(ds, sort_keys=True).encode()).hexdigest(),
+                    "digest": hashlib.sha256(json.dumps(ds, sort_keys=True).encode()).hexdigest()
+                    if ok else None,
                     "rank_s": [r.get("seconds") for r in rs], "seconds": round(_now() - t0, 4),
                     **({} if ok else {"error": "; ".join(str(r.get("error")) for r in rs
                                                          if not r.get("ok"))})}
@@ -454,7 +499,12 @@ class Lab:
         if verb == "repl":
             return {"ok": True, "ranks": self.round({"op": "repl", "code": req["code"]})}
         if verb == "inject":
-            rs = self.round({"op": "inject", **{k: v for k, v in req.items() if k != "verb"}})
+            try:
+                target = target_rank(req.get("target"), self.ranks.world)
+            except ValueError as e:
+                return {"ok": False, "error": str(e), "ranks": []}
+            rs = self.round({"op": "inject", **{k: v for k, v in req.items() if k != "verb"},
+                             "target": target})
             return {"ok": all(r["ok"] for r in rs), "ranks": rs}
         if verb == "resume" and req.get("state", "start") == "start":
             rs = self.round({"op": "prepare_resume"})
@@ -498,6 +548,20 @@ class _Replay:
         if self.items:
             return self.items.pop(0)
         return next(self.it)
+
+
+def target_rank(target, world):
+    """An inject target -> the rank it names, or None for every rank. Takes a rank number or a
+    participant name ("rank1", "1"); raises ValueError for anything that names no rank, so a
+    fault is never skipped on every rank while the reply says ok."""
+    if target is None:
+        return None
+    text = str(target) if isinstance(target, int) and not isinstance(target, bool) else \
+        target if isinstance(target, str) else ""
+    digits = text[4:] if text.startswith("rank") else text
+    if not digits.isdigit() or int(digits) >= world:
+        raise ValueError(f"inject target {target!r} names no rank of 0..{world - 1}")
+    return int(digits)
 
 
 def _version():

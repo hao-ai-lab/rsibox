@@ -29,6 +29,7 @@ Copies live in pinned host memory: about 14 bytes per parameter per rank with bf
 fp32 master weights and two fp32 moments.
 """
 import copy
+import ctypes
 import hashlib
 import json
 import random
@@ -38,7 +39,7 @@ import torch
 
 try:
     import numpy as np
-except ImportError:                             # numpy is optional for the lab itself
+except ImportError:     # optional here; torch.distributed's object collectives need it
     np = None
 
 ZERO_KEYS = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq", "step")
@@ -259,19 +260,26 @@ def _category(name):
 CHUNK = 256 << 20
 
 
+def _host_bytes(u8):
+    """The bytes of a contiguous uint8 CPU tensor, without numpy when it is not installed."""
+    if np is not None:
+        return memoryview(u8.numpy())
+    return ctypes.string_at(u8.data_ptr(), u8.numel()) if u8.numel() else b""
+
+
 def _hash_tensor(h, t, buf):
     """Feed t's dtype, shape and exact bytes to h; GPU tensors through the pinned buffer."""
     h.update(f"{t.dtype}{tuple(t.shape)}".encode())
     u8 = t.detach().contiguous().reshape(-1).view(torch.uint8)
     if u8.device.type == "cpu":
-        h.update(memoryview(u8.numpy()))
+        h.update(_host_bytes(u8))
         return buf
     if buf is None:
         buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
     for i in range(0, u8.numel(), CHUNK):
         m = min(CHUNK, u8.numel() - i)
         buf[:m].copy_(u8[i:i + m])
-        h.update(memoryview(buf[:m].numpy()))
+        h.update(_host_bytes(buf[:m]))
     return buf
 
 

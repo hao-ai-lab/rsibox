@@ -9,8 +9,11 @@ for its commands:
 
 Gloo, not NCCL: the rounds carry Python objects, run on the CPU, and never touch the training
 streams. A client that times out or disconnects before its reply costs only that reply: reply()
-returns False and the host serves the next request (the ranks never see it). The group's timeout is long because ranks wait in it while the lab is idle; a hang is
-caught by the client's own timeout (see client.py), which poisons the lab.
+returns False and the host serves the next request (the ranks never see it). The ranks wait for
+the next message on a group with a long timeout, since they wait there while the lab is idle; the
+replies come back on a second group whose timeout bounds a round (FASTRSI_ROUND_TIMEOUT_S), so a
+rank that dies or hangs in a round fails it on rank 0 (RoundFailed), which poisons the lab. A
+client's own timeout (see client.py) is shorter and poisons it on the client's side first.
 
 Clients reach rank 0 through a Unix socket (one JSON line in, one JSON line out; the path must
 be under 108 bytes) or, from another host, a mailbox directory on a shared file system:
@@ -27,15 +30,29 @@ import time
 from datetime import timedelta
 
 
-class Ranks:
-    """The gloo group and the round."""
+class RoundFailed(RuntimeError):
+    """A round did not complete on every rank (a rank died or did not answer within the round
+    timeout). The group is not used again: every later round raises this at once."""
 
-    def __init__(self, timeout_s=7 * 24 * 3600):
+
+class Ranks:
+    """The gloo groups and the round. Ranks wait for rank 0's next message on `group`, whose
+    timeout is long because they wait there while the lab is idle; the replies come back on
+    `active`, whose timeout (FASTRSI_ROUND_TIMEOUT_S, default 900 s) bounds a round once every
+    rank has the message: it must exceed the longest request (a check of FASTRSI_CHECK_STEPS_MAX
+    steps). A rank that dies or hangs in a round then fails it on rank 0 instead of blocking."""
+
+    def __init__(self, timeout_s=7 * 24 * 3600, round_timeout_s=None):
         import torch.distributed as dist
+        if round_timeout_s is None:
+            round_timeout_s = float(os.environ.get("FASTRSI_ROUND_TIMEOUT_S", "900"))
         self.dist = dist
         self.rank = dist.get_rank()
         self.world = dist.get_world_size()
         self.group = dist.new_group(backend="gloo", timeout=timedelta(seconds=timeout_s))
+        self.active = dist.new_group(backend="gloo", timeout=timedelta(seconds=round_timeout_s))
+        self.round_timeout_s = round_timeout_s
+        self.failed = None
 
     def bcast(self, msg=None):
         box = [msg]
@@ -44,13 +61,20 @@ class Ranks:
 
     def gather(self, reply):
         out = [None] * self.world if self.rank == 0 else None
-        self.dist.gather_object(reply, out, dst=0, group=self.group)
+        self.dist.gather_object(reply, out, dst=0, group=self.active)
         return out
 
     def round(self, msg, handle):
-        """Rank 0 only: every rank handles msg; returns the replies in rank order."""
-        self.bcast(msg)
-        return self.gather(handle(msg))
+        """Rank 0 only: every rank handles msg; returns the replies in rank order. Raises
+        RoundFailed when a rank does not answer (and for every round after that one)."""
+        if self.failed:
+            raise RoundFailed(f"an earlier round failed: {self.failed}")
+        try:
+            self.bcast(msg)
+            return self.gather(handle(msg))
+        except RuntimeError as e:               # gloo: timeout, peer gone
+            self.failed = f"{msg.get('op')}: {type(e).__name__}: {str(e)[:300]}"
+            raise RoundFailed(self.failed) from e
 
 
 class Server:
