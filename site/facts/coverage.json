@@ -1,0 +1,273 @@
+{
+ "meta": {
+  "generated": "2026-11-11",
+  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
+  "headline": "No code-coverage measurement of live-editability exists: nothing counts functions, files or lines per engine or per function group. The repo has no coverage tool and no template file. What exists is coverage by edit kind and by sampled commit or PR, listed under `measured`.",
+  "search": "`git grep -i coverage origin/main` finds three prose mentions only (core/agents/orchestrator.md:73, core/agents/toolsmith_offline.md:10, docs/process/developer_workflow.md:15). No script, schema or data file. The atoms have one coverage item, t1-coverage.",
+  "nothing_was_run": "No scan was run for this file: the repo documents no static coverage scan."
+ },
+ "measured": [
+  {
+   "id": "megatron-edit-kinds",
+   "engine": "Megatron-LM",
+   "what": "Which kinds of edit install in place",
+   "unit": "edit kinds, plus sampled agent commits",
+   "method": "1,437 agent-written Megatron commits were classified by a script as: no code change, installable by a function swap, or needing a restart. 34 commits were then drawn evenly from the restart group and installed into one running process, each followed by a correctness check.",
+   "when": "2026-10-28 (date in the atom's source folder name)",
+   "rows": [
+    [
+     "Top-level code",
+     "restart",
+     "in place"
+    ],
+    [
+     "File added or removed",
+     "restart",
+     "in place"
+    ],
+    [
+     "Triton GPU kernel",
+     "restart",
+     "in place"
+    ],
+    [
+     "Custom op redefined",
+     "crash",
+     "in place (new op version)"
+    ],
+    [
+     "JSON / C++ extension source",
+     "restart",
+     "in place"
+    ],
+    [
+     "Distributed-state module",
+     "restart",
+     "in place, check passes"
+    ],
+    [
+     "34 sampled restart commits",
+     "34 restart",
+     "34 in place, 0 fall back"
+    ]
+   ],
+   "columns": [
+    "Edit kind",
+    "Function swap",
+    "LiveLab"
+   ],
+   "commit_survey": {
+    "total": 1437,
+    "no_code_change": 429,
+    "function_swap_works": 376,
+    "needed_a_restart": 632,
+    "restart_share_note": "632 of 1,437 is 44%",
+    "restart_reasons": {
+     "Top-level code (e.g. a config default)": 326,
+     "File added or removed": 196,
+     "Other decorated function": 64,
+     "Triton GPU kernel (@triton.jit)": 45,
+     "class definition changed": 1
+    }
+   },
+   "sample": {
+    "n": 34,
+    "live_editable": 34,
+    "partial_reset": null,
+    "restart": 0
+   },
+   "caveat": "This is the paper's LiveLab build for Megatron, which re-imports changed files. It is not the lab in repos/megatron on main: that one swaps function bodies and refuses constructors, new fields and module-level changes (3 of 6 real upstream PRs were refused). Do not present 34/34 as a property of the public repo's Megatron lab.",
+   "source": "atom:t1-coverage; atom:m4-reload-share; atom:m4-restart-reasons"
+  },
+  {
+   "id": "vllm-pr-survey",
+   "engine": "vLLM",
+   "what": "Which mechanism a real performance PR needs",
+   "unit": "upstream performance PRs",
+   "method": "959 performance PRs found; 80 inspected by hand and assigned a mechanism and function group. A classification of what each PR would need, not a test that each installs.",
+   "when": "not dated in the repo (the survey predates 2026-11-04)",
+   "rows": [
+    {
+     "mechanism": "Swap Python methods or objects in place",
+     "share_of_80_pct": 20,
+     "groups": [
+      "OP",
+      "STATE"
+     ],
+     "class": "live"
+    },
+    {
+     "mechanism": "Swap code inside compiled graphs, recapture graphs, re-JIT kernels",
+     "share_of_80_pct": 51,
+     "groups": [
+      "GRAPH"
+     ],
+     "class": "partial reset"
+    },
+    {
+     "mechanism": "Swap code and rebuild pre-allocated buffers or runners",
+     "share_of_80_pct": 9,
+     "groups": [
+      "STATE",
+      "RESOURCE"
+     ],
+     "class": "partial reset"
+    },
+    {
+     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture",
+     "share_of_80_pct": 9,
+     "groups": [
+      "NATIVE"
+     ],
+     "class": "partial reset"
+    },
+    {
+     "mechanism": "Needs a restart (startup logic, environment variables)",
+     "share_of_80_pct": 11,
+     "groups": [],
+     "class": "restart"
+    }
+   ],
+   "caveat": "Shares are of 80 hand-read PRs, not of code. The class column (live / partial reset / restart) is my mapping of the five mechanisms onto your three buckets.",
+   "source": "repos/vllm/kb/mechanisms.md:3-11"
+  },
+  {
+   "id": "vllm-19-pr-replay",
+   "engine": "vLLM",
+   "what": "What v1 actually did with 19 merged upstream PRs",
+   "unit": "upstream PRs",
+   "method": "Each PR replayed through the lab on GB200 (two models, TP1 and TP2, eager and CUDA graphs).",
+   "when": "2026-11-06/07",
+   "counts": {
+    "live_in_place": 8,
+    "forked_restart_from_warm_process": 11,
+    "full_restart": 0
+   },
+   "after_fixes": {
+    "live_in_place": 7,
+    "forked_restart_from_warm_process": 12,
+    "note": "12 is my arithmetic from 'the 7 other in-place PRs were unchanged'; the repo states only the 7."
+   },
+   "source": "docs/lessons.md:17-18,67-77"
+  },
+  {
+   "id": "megatron-upstream-replay",
+   "engine": "Megatron-LM",
+   "what": "What the public repo's lab did with real upstream PRs",
+   "unit": "upstream PRs",
+   "method": "Live swap first; a code restart when refused.",
+   "when": "2026-11-07",
+   "counts": {
+    "attempted": 6,
+    "live_in_place": 2,
+    "restart": 2,
+    "not_run_needs_rebase": 2,
+    "do_not_apply": 2
+   },
+   "source": "repos/megatron/examples/upstream-replay/README.md:31-40,58-60"
+  },
+  {
+   "id": "fastvideo-upstream-replay",
+   "engine": "FastVideo",
+   "what": "What the lab did with real upstream H3 PRs",
+   "unit": "upstream PRs",
+   "method": "Live swap first; a warm restart in a new process for every PR.",
+   "when": "2026-11-07",
+   "counts": {
+    "attempted": 4,
+    "live_in_place": 1,
+    "restart": 2,
+    "do_not_apply": 1
+   },
+   "note": "The in-place rebuild (0.19-1.27 s) is documented as covering the refused kinds (constructor, new field, module constant), but these PRs were measured with a warm restart, not a rebuild.",
+   "source": "repos/fastvideo/examples/pr-replay/README.md:20-25; repos/fastvideo/kb/costs.md:143-147"
+  },
+  {
+   "id": "vllm-flag-tiers",
+   "engine": "vLLM",
+   "what": "`vllm serve` flags by reconfiguration tier",
+   "unit": "CLI flags",
+   "method": "Hand classification in a matrix; tier latencies are targets.",
+   "when": "PR #123 merged 2026-11-10",
+   "counts": {
+    "in_process_instant": 7,
+    "in_process_graph": 6,
+    "warm_weights_ipc": 3,
+    "live_reshard_or_cold": 8,
+    "counted_by": "me, from the matrix rows"
+   },
+   "verified_live_on_gpu": [
+    "--max-num-seqs"
+   ],
+   "implemented_live_not_gpu_run": [
+    "--max-num-batched-tokens"
+   ],
+   "caveat": "PR #137 states that every other flag change restarts the engine today. The matrix is a plan, not a coverage measurement.",
+   "source": "repos/vllm/kb/reconfiguration_matrix.md:20-72; PR #137"
+  },
+  {
+   "id": "conformance",
+   "engine": "all",
+   "what": "Protocol conformance c0-c10 (not coverage, but the only per-engine pass table)",
+   "unit": "cases",
+   "results": {
+    "toy lab (CPU)": "11/11",
+    "Megatron-LM (tiny model, 2 ranks, GB200)": "11/11",
+    "FastVideo (2 ranks, GB200)": "11/11",
+    "FastVideo (1 rank)": "10/11 (c2 needs two participants by design)",
+    "vLLM": null
+   },
+   "note": "No conformance pass table for a real vLLM engine is in the repo.",
+   "source": "core/livelab/conformance/README.md:45-70; repos/megatron/livelab/README.md:83-105; repos/fastvideo/examples/h3-conformance/README.md:9-57"
+  }
+ ],
+ "not_covered_stated_by_repo": {
+  "vLLM": [
+   "start-up logic, launch flags, environment variables",
+   "data parallel > 1",
+   "graph rebuild under load",
+   "component restart and the KV holder are not built"
+  ],
+  "Megatron-LM": [
+   "torch.compile (`jit_fuser`) functions",
+   "CUDA graph regions",
+   "constructors (need a model rebuild)",
+   "optimizer construction",
+   "Transformer Engine C++ code"
+  ],
+  "FastVideo": [
+   "code inside torch.compile regions (the VAE)",
+   "Triton kernel sources edited in place",
+   "CUDA graphs of the NVFP4 VAE decoder",
+   "native fastvideo-kernel code",
+   "4 ranks"
+  ],
+  "source": "repos/vllm/kb/mechanisms.md:24-26; repos/vllm/docs/architecture.md:155-162; repos/megatron/livelab/README.md:59-61; repos/fastvideo/livelab/README.md ('Not covered')"
+ },
+ "template_for_code_coverage": {
+  "status": "DATA MISSING. This shape is my proposal from the repo's function groups; no file in the repo defines it and no number below exists.",
+  "shape": {
+   "engine": "vLLM | Megatron-LM | FastVideo",
+   "engine_commit": "<sha>",
+   "workload": "<kb/workload.md>",
+   "measured_at": "<date>",
+   "unit": "functions (and lines)",
+   "method": "<static scan with the kernel's detectors + a run-time witness of which functions the workload executes>",
+   "rows": [
+    {
+     "group": "OP | GRAPH | STATE | RESOURCE | NATIVE | RANKS | restart",
+     "module": "<path>",
+     "functions_total": null,
+     "live_editable": null,
+     "partial_reset": null,
+     "restart": null,
+     "not_exercised": null
+    }
+   ]
+  },
+  "command_that_would_produce_it": null,
+  "command_note": "No such command exists in the repo. The closest building blocks are the kernel's change analysis and detectors (core/livelab/kernel/swap.py, findings.py), which classify one edit at a time, and the witness, which records which functions ran. A coverage scan would have to be written on top of them.",
+  "earlier_design_outside_the_repo": "A 2026-10-20 design note for a line-level 'coverage browser' of vLLM exists in the research folder (shades: live / in-process heavier / restart / not exercised, from an install rule plus an execution witness). Its percentages (41% / 22% / 9%) are in a mock-up, not measured, and it targets the earlier prototype, not this repo. Do not quote them.",
+  "source": "git grep over origin/main; core/livelab/kernel/README.md"
+ }
+}

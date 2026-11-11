@@ -1,0 +1,343 @@
+{
+ "meta": {
+  "generated": "2026-11-11",
+  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
+  "headline": "There is no recorded wall time, agent count or round count for the offline conversion of any engine. Everything under derived_from_git is my derivation, not a logged fact.",
+  "fact_vs_derivation": "`recorded_facts` and `upstream_patches.ledger` quote the repo. `derived_from_git` is computed by me; the method is in `how`.",
+  "whole_repo": {
+   "commits_on_main": 100,
+   "merged_prs": 99,
+   "first_commit": "2026-11-04",
+   "last_commit": "2026-11-10",
+   "source": "git log origin/main; gh pr list",
+   "derived": true
+  },
+  "shared_core": {
+   "commits_touching_core": 15,
+   "core_livelab": {
+    "files": 39,
+    "lines": 12673
+   },
+   "kernel": {
+    "files": 27,
+    "lines": 10183
+   },
+   "conformance": {
+    "files": 6,
+    "lines": 669
+   },
+   "agent_prompts": {
+    "files": 6,
+    "lines": 405
+   },
+   "source": "git ls-tree origin/main core",
+   "derived": true
+  },
+  "caution": [
+   "Main is squash-merged and several PR batches were merged minutes apart, so commit dates bound the calendar window (7 days for the whole repo) but not the effort.",
+   "The measurements inside the Megatron and FastVideo PRs are dated 2026-11-07, one to two days before those PRs merged.",
+   "vLLM had a long prototype phase before this repo's history starts (docs/lessons.md:10-18); its duration is not recorded here."
+  ]
+ },
+ "engines": [
+  {
+   "engine": "vLLM",
+   "folder": "repos/vllm",
+   "wall_time": {
+    "value": null,
+    "note": "No wall-time record of the offline conversion exists in the repo, the atoms or the paper text. The paper only says the toolsmith runs 'offline, once per repository'.",
+    "source": "searched: repos/vllm/, docs/lessons.md, atoms index.json, paper.txt lines 359-440"
+   },
+   "agents": {
+    "value": null,
+    "note": "Number of agents used for the conversion is not recorded.",
+    "source": "same search"
+   },
+   "iterations_or_rounds": {
+    "value": null,
+    "note": "Not recorded for the conversion itself. Hill-climb iteration counts exist but measure the optimization loop, not the conversion (see recorded_facts).",
+    "source": "same search"
+   },
+   "recorded_facts": [
+    {
+     "fact": "The first prototype was about 45k lines with 245 run records and 51 hand repairs; the v1 redesign is about 7.7k lines of code plus 4.4k of tests.",
+     "source": "docs/lessons.md:10-18"
+    },
+    {
+     "fact": "On the same 19 upstream PRs, v1 needed a full restart on 0 (prototype: 2) and went live in place on 8 (prototype: 6).",
+     "source": "docs/lessons.md:17-18"
+    },
+    {
+     "fact": "The orchestrator prompt says the prototype replayed 53 real upstream PRs live before v1.",
+     "source": "core/agents/orchestrator.md:10-11"
+    },
+    {
+     "fact": "The first v1 replay on GPUs found 4 bugs the CPU toy could not show; fixed in PRs #52-#55.",
+     "source": "docs/lessons.md:28-34"
+    }
+   ],
+   "derived_from_git": {
+    "how": "Derived by me from git on origin/main @ 3689728 (2026-11-10). Commits: `git log origin/main --oneline -- repos/<engine>` (main is squash-merged, so one commit is about one PR). Dates: first and last author date of those commits. Lines added/deleted: sum of `git log --numstat -- repos/<engine>`. Current size: line count of every tracked file under the folder at origin/main.",
+    "commits_touching_folder": 47,
+    "first_commit": "2026-11-04",
+    "last_commit": "2026-11-10",
+    "lines_added_all_history": 24175,
+    "lines_deleted_all_history": 9798,
+    "current_tree_by_folder": {
+     "docs": {
+      "files": 2,
+      "lines": 169
+     },
+     "examples": {
+      "files": 5,
+      "lines": 1427
+     },
+     "kb": {
+      "files": 6,
+      "lines": 301
+     },
+     "livelab": {
+      "files": 34,
+      "lines": 12475
+     },
+     "tools": {
+      "files": 1,
+      "lines": 5
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 19,
+     "non_test_lines": 7848,
+     "test_files": 12,
+     "test_lines": 4401
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 39,
+     "additions": 24624,
+     "deletions": 2164,
+     "first_merged_utc": "2026-11-07T01:18Z",
+     "last_merged_utc": "2026-11-10T18:38Z",
+     "how": "`gh pr list --state merged`, grouped by the scope in the conventional-commit title, e.g. feat(vllm). Recorded by GitHub; the grouping is mine."
+    },
+    "source": "git history of origin/main @ 3689728 (2026-11-10); gh pr list"
+   },
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "repos/vllm has no patches/ folder. PR descriptions state the lab runs against unmodified vLLM (0.15.1 in PRs #136/#137, a 0.33.0 fork in #135). The lab hooks in at run time: a worker extension class, a sitecustomize module and an engine-core patch applied at import.",
+    "source": "PR #135; PR #137; repos/vllm/livelab/adapter/README.md"
+   },
+   "notes": [
+    "The added/deleted totals are inflated: the shared kernel was first built under repos/vllm (PRs #18-#32), then moved to template/ (#107) and core/ (#122). The kernel now lives in core/livelab (39 files, 12,673 lines; kernel alone 27 files, 10,183 lines).",
+    "The 7,848 non-test lines under repos/vllm/livelab are close to, but not the same count as, the 'about 7.7k lines' in docs/lessons.md, which was written before later services were added."
+   ]
+  },
+  {
+   "engine": "Megatron-LM",
+   "folder": "repos/megatron",
+   "wall_time": {
+    "value": null,
+    "note": "No wall-time record of the offline conversion exists in the repo, the atoms or the paper text. The paper only says the toolsmith runs 'offline, once per repository'.",
+    "source": "searched: repos/megatron/, docs/lessons.md, atoms index.json, paper.txt lines 359-440"
+   },
+   "agents": {
+    "value": null,
+    "note": "Number of agents used for the conversion is not recorded.",
+    "source": "same search"
+   },
+   "iterations_or_rounds": {
+    "value": null,
+    "note": "Not recorded for the conversion itself. Hill-climb iteration counts exist but measure the optimization loop, not the conversion (see recorded_facts).",
+    "source": "same search"
+   },
+   "recorded_facts": [
+    {
+     "fact": "All Megatron lab measurements are dated 2026-11-07; the lab PRs #72-#88 merged within about 25 minutes on 2026-11-09 UTC, so merge times do not show how long the work took.",
+     "source": "repos/megatron/kb/costs.md:3-6; gh pr list"
+    },
+    {
+     "fact": "Hill-climb on the finished lab (not the conversion): 82 iterations 00:55-06:23 PST, 206 iterations by 12:05 PST, Qwen3-14B architecture, TP 2 on 2 GB200.",
+     "source": "repos/megatron/examples/codex-hillclimb/README.md:6,63-65"
+    },
+    {
+     "fact": "Conformance c0-c10 passed 11/11 on a real 2-rank Megatron job (tiny model).",
+     "source": "repos/megatron/livelab/README.md:83-105"
+    }
+   ],
+   "derived_from_git": {
+    "how": "Derived by me from git on origin/main @ 3689728 (2026-11-10). Commits: `git log origin/main --oneline -- repos/<engine>` (main is squash-merged, so one commit is about one PR). Dates: first and last author date of those commits. Lines added/deleted: sum of `git log --numstat -- repos/<engine>`. Current size: line count of every tracked file under the folder at origin/main.",
+    "commits_touching_folder": 20,
+    "first_commit": "2026-11-08",
+    "last_commit": "2026-11-10",
+    "lines_added_all_history": 5174,
+    "lines_deleted_all_history": 316,
+    "current_tree_by_folder": {
+     "examples": {
+      "files": 2,
+      "lines": 338
+     },
+     "kb": {
+      "files": 5,
+      "lines": 514
+     },
+     "livelab": {
+      "files": 14,
+      "lines": 3783
+     },
+     "patches": {
+      "files": 4,
+      "lines": 128
+     },
+     "tools": {
+      "files": 2,
+      "lines": 95
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 9,
+     "non_test_lines": 2465,
+     "test_files": 4,
+     "test_lines": 1149
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 15,
+     "additions": 5111,
+     "deletions": 177,
+     "first_merged_utc": "2026-11-09T00:29Z",
+     "last_merged_utc": "2026-11-10T18:38Z",
+     "how": "`gh pr list --state merged`, grouped by the scope in the conventional-commit title, e.g. feat(vllm). Recorded by GitHub; the grouping is mine."
+    },
+    "source": "git history of origin/main @ 3689728 (2026-11-10); gh pr list"
+   },
+   "upstream_patches": {
+    "ledger": "repos/megatron/patches/README.md",
+    "count": 3,
+    "kind": "performance edits the hill-climb kept, not patches needed for the conversion",
+    "patches": [
+     {
+      "file": "lmhead-sp-allgather-before-cast.patch",
+      "files": 1,
+      "added": 6,
+      "removed": 3,
+      "gain": "+1.24% tokens/s/GPU (4-pair median)",
+      "upstream": "candidate"
+     },
+     {
+      "file": "te-layernorm-linear-gather-before-norm.patch",
+      "files": 1,
+      "added": 38,
+      "removed": 2,
+      "gain": "+2.97% (4-pair median)",
+      "upstream": "not as is (needs guards)"
+     },
+     {
+      "file": "residual-plain-add-without-bias-dropout.patch",
+      "files": 1,
+      "added": 16,
+      "removed": 0,
+      "gain": "+5.0% on 14B; +6.0% on the 32B architecture, 2 nodes",
+      "upstream": "candidate"
+     }
+    ],
+    "note": "Diff sizes counted by me from the patch files. The base is megatron-core 0.20 dev 'commit ae76c60e6 plus local modifications'; those local modifications are not listed. The lab itself hooks in by wrapping `pretrain()` from its own runner; PR #138 says megatron-core is unmodified.",
+    "source": "repos/megatron/patches/README.md:1-12; PR #138"
+   },
+   "notes": [
+    "The kernel is reused unchanged from core/livelab; the Megatron-specific lab is 2,465 non-test Python lines."
+   ]
+  },
+  {
+   "engine": "FastVideo",
+   "folder": "repos/fastvideo",
+   "wall_time": {
+    "value": null,
+    "note": "No wall-time record of the offline conversion exists in the repo, the atoms or the paper text. The paper only says the toolsmith runs 'offline, once per repository'.",
+    "source": "searched: repos/fastvideo/, docs/lessons.md, atoms index.json, paper.txt lines 359-440"
+   },
+   "agents": {
+    "value": null,
+    "note": "Number of agents used for the conversion is not recorded.",
+    "source": "same search"
+   },
+   "iterations_or_rounds": {
+    "value": null,
+    "note": "Not recorded for the conversion itself. Hill-climb iteration counts exist but measure the optimization loop, not the conversion (see recorded_facts).",
+    "source": "same search"
+   },
+   "recorded_facts": [
+    {
+     "fact": "All FastVideo lab measurements are dated 2026-11-07; the PRs #67-#87 merged on 2026-11-09 UTC.",
+     "source": "repos/fastvideo/kb/costs.md:9,47,58; gh pr list"
+    },
+    {
+     "fact": "Hill-climb on the finished lab (not the conversion): Claude subagents 7 iterations (5 kept); Codex 166 iterations (107 measured, 4 kept); a second 2-GPU climb of 58 iterations (48 measured, 11 kept).",
+     "source": "repos/fastvideo/patches/h3-hillclimb/README.md:30-33,61-62"
+    },
+    {
+     "fact": "Conformance c0-c10 passed 11/11 on 2 ranks; 10/11 on 1 rank (c2 needs two participants by design).",
+     "source": "repos/fastvideo/examples/h3-conformance/README.md:9-57"
+    }
+   ],
+   "derived_from_git": {
+    "how": "Derived by me from git on origin/main @ 3689728 (2026-11-10). Commits: `git log origin/main --oneline -- repos/<engine>` (main is squash-merged, so one commit is about one PR). Dates: first and last author date of those commits. Lines added/deleted: sum of `git log --numstat -- repos/<engine>`. Current size: line count of every tracked file under the folder at origin/main.",
+    "commits_touching_folder": 14,
+    "first_commit": "2026-11-08",
+    "last_commit": "2026-11-10",
+    "lines_added_all_history": 15159,
+    "lines_deleted_all_history": 7543,
+    "current_tree_by_folder": {
+     "docs": {
+      "files": 2,
+      "lines": 207
+     },
+     "examples": {
+      "files": 6,
+      "lines": 545
+     },
+     "kb": {
+      "files": 6,
+      "lines": 358
+     },
+     "livelab": {
+      "files": 23,
+      "lines": 3161
+     },
+     "patches": {
+      "files": 20,
+      "lines": 3345
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 16,
+     "non_test_lines": 2206,
+     "test_files": 6,
+     "test_lines": 873
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 8,
+     "additions": 15028,
+     "deletions": 196,
+     "first_merged_utc": "2026-11-09T01:19Z",
+     "last_merged_utc": "2026-11-09T09:10Z",
+     "how": "`gh pr list --state merged`, grouped by the scope in the conventional-commit title, e.g. feat(vllm). Recorded by GitHub; the grouping is mine."
+    },
+    "source": "git history of origin/main @ 3689728 (2026-11-10); gh pr list"
+   },
+   "upstream_patches": {
+    "ledger": "repos/fastvideo/patches/h3-hillclimb/README.md",
+    "count": 19,
+    "kind": "performance edits the hill-climb kept (bit-exact), not patches needed for the conversion",
+    "total_added": 2094,
+    "total_removed": 450,
+    "base": "hao-ai-lab/FastVideo 376e445f",
+    "result": "1 GPU: 6.10/6.12 s -> 4.20/4.23 s per video (1.45x); 2 GPUs: 4.41/4.42 s -> 2.93/2.88 s (1.52x); every video bit-identical to the golden",
+    "note": "Totals counted by me from the 19 patch files. None is proposed upstream yet. Patches 15-17 run out of GPU memory on a second sequence length. The lab hooks in at run time (it patches `Executor.get_class` so the engine always runs in spawned workers).",
+    "source": "repos/fastvideo/patches/h3-hillclimb/README.md:1-91; repos/fastvideo/livelab/README.md"
+   },
+   "notes": [
+    "The added/deleted totals are inflated by PR #68, which copied the kernel into the FastVideo lab (+7,210 lines) before PR #107 moved it to a shared folder.",
+    "3,345 of the current lines are the 19 hill-climb patch files, not lab code."
+   ]
+  }
+ ]
+}

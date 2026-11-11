@@ -1,0 +1,1833 @@
+{
+ "schema": "fastrsi-survey/1/history",
+ "engine": "vllm",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "vllm-1",
+ "engine_rules_sha256": "6c68c48b8201af4b6d4494d8bbfb1837aa885f760a644e16e880419c299c2a78",
+ "upstream": {
+  "repo": "vllm-project/vllm",
+  "commit": "4e0ad572036166a8bdf1782f4a07b4e33016646b",
+  "version": "main at 2026-10-29 (the commit kb/costs.md and examples/dsv41-prefill use)",
+  "scanned_commit": "4e0ad572036166a8bdf1782f4a07b4e33016646b"
+ },
+ "ref": "origin/main",
+ "lab_path": "repos/vllm/livelab",
+ "points": [
+  {
+   "index": 0,
+   "commit": "5dbf7adf144c8bd39a099b47adee616486c4e4a2",
+   "date": "2026-11-04T01:52:33-08:00",
+   "subject": "feat(core): restart around a skill and per-engine live labs",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": false
+   },
+   "changed": true,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 250,
+    "not_covered": 38359,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 10079,
+    "not_covered": 972342,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 0,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 1,
+   "commit": "7d83b793731f62af60ba86c90b7001227a44de8c",
+   "date": "2026-11-06T17:18:37-08:00",
+   "subject": "feat(vllm): refresh edited modules when forking from the zygote (#15)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": true,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 2,
+   "commit": "9ec68e65751591e7dc794c77e6a54202df72a248",
+   "date": "2026-11-06T19:09:44-08:00",
+   "subject": "feat(vllm): add kernel 1/6 \u2014 findings and locate (#18)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 3,
+   "commit": "f55acdaa4414a0b61f0df2c3d7f7d9e75503a0fe",
+   "date": "2026-11-06T19:13:45-08:00",
+   "subject": "feat(vllm): add journal undo log (kernel 2/6) (#20)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 4,
+   "commit": "863a61ad8ed9915a1a477e76ca7d4c4a7cb4d901",
+   "date": "2026-11-06T19:21:12-08:00",
+   "subject": "feat(vllm): add kernel 3/8 \u2014 witness (#21)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 5,
+   "commit": "8598d85b015c9922f7e7a2f518b576407ac3465f",
+   "date": "2026-11-06T20:04:40-08:00",
+   "subject": "feat(vllm): add engine launcher for the live lab services (#22)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 6,
+   "commit": "42a10da0cf0a9865922877116eadada6eb44d995",
+   "date": "2026-11-06T20:44:59-08:00",
+   "subject": "feat(vllm): land kernel 4/9 and 5/9 on main (#36)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 7,
+   "commit": "3969a6aafa7d696c97728a45a39df60070b5bdee",
+   "date": "2026-11-06T20:51:36-08:00",
+   "subject": "feat(vllm): add kernel 6/9 \u2014 detectors: new fields and line maps (#28)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 8,
+   "commit": "f2f79633856ffbecc63ac5ee32fbff675106d7d9",
+   "date": "2026-11-06T20:51:36-08:00",
+   "subject": "feat(vllm): add kernel 7/9 \u2014 transaction participant (#29)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 9,
+   "commit": "9ec8cd3fbfc623663407a0d69b079436caad74f6",
+   "date": "2026-11-06T21:49:49-08:00",
+   "subject": "feat(vllm): add kernel 8/9 \u2014 transaction host (#31)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 10,
+   "commit": "9789c30dd32472a3bce8ceb5e65bb13ac5ddd6f7",
+   "date": "2026-11-06T21:59:10-08:00",
+   "subject": "feat(vllm): add kernel 9/9 \u2014 session and the toy lab (#32)",
+   "capabilities": {
+    "swap": false,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 0,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 37239,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 0,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 807766,
+    "by_install_covered": {
+     "swap": 0,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 11,
+   "commit": "6bf7975ffc7bd5dd1f088cc1efff8c7d42ca8f12",
+   "date": "2026-11-06T22:10:09-08:00",
+   "subject": "feat(vllm): add adapter 1/3 \u2014 engine-core host and worker extension (#34)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": true,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 12,
+   "commit": "b8c906a9f7ea5b0f61e8313243c50a2eae8897b6",
+   "date": "2026-11-06T22:10:27-08:00",
+   "subject": "feat(vllm): add adapter 2/3 \u2014 side channel and graph detection (#35)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 13,
+   "commit": "be83e2ba7d6653305fa5a9c2778ef338f8f7373b",
+   "date": "2026-11-06T22:12:31-08:00",
+   "subject": "fix(vllm): fix kernel locate review follow-ups (#46)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 14,
+   "commit": "dc0d56337ce469773cb18eba83c8d5787a07b67f",
+   "date": "2026-11-06T22:12:39-08:00",
+   "subject": "fix(vllm): resolve swap analysis and detector review follow-ups (#47)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 15,
+   "commit": "e75903996e0a55161fdad52e8bb5652b22226955",
+   "date": "2026-11-06T22:12:47-08:00",
+   "subject": "fix(vllm): address kernel participant review follow-ups (#48)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 16,
+   "commit": "171af1d0b86707a0e18743d8e43e0c2dc186c764",
+   "date": "2026-11-06T23:10:19-08:00",
+   "subject": "feat(vllm)!: parse vLLM flags with vLLM's own parser (#37)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 17,
+   "commit": "a55dbaa419ae10d953999dd6a8268007e2660009",
+   "date": "2026-11-06T23:39:45-08:00",
+   "subject": "fix(vllm): let a refreshed fork re-register vLLM's CustomOp names (#52)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 18,
+   "commit": "986b0a8d5ecc982ddd57d9173573c24e1410ae27",
+   "date": "2026-11-06T23:40:00-08:00",
+   "subject": "fix(vllm): block constructor edits in the kernel swap (#53)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 19,
+   "commit": "76623b9d54ad83c23542ef5e4e96402339fc97e4",
+   "date": "2026-11-06T23:40:14-08:00",
+   "subject": "fix(vllm): refuse an edit of the graph-split decorator on a graph engine (#54)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 20,
+   "commit": "bf7981aee2e814e3a2b3b8b732f2844cc4a220ef",
+   "date": "2026-11-06T23:40:27-08:00",
+   "subject": "fix(vllm): tell lazy imports from leftover names in the kernel's at_base (#55)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 21,
+   "commit": "cbcb894a5772a105ae2934bbcac831565238990f",
+   "date": "2026-11-07T00:14:27-08:00",
+   "subject": "feat(vllm): add state holders for ipc weights and kv plan (#30)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 22,
+   "commit": "2cc5f5e986718585d2533b28fa33044154c30db8",
+   "date": "2026-11-07T00:14:27-08:00",
+   "subject": "fix(vllm): keep CUDA uninitialized in zygote-forked API servers (#38)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 23,
+   "commit": "d2b9821ae5c47fb6ff49b6c3fd6b568839091381",
+   "date": "2026-11-07T00:14:27-08:00",
+   "subject": "fix(vllm): never record or reuse a KV plan with no KV memory (#40)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 24,
+   "commit": "51e2fa8f4967914725bf873d6238efcbb8a9b7ec",
+   "date": "2026-11-08T15:47:07-08:00",
+   "subject": "docs(vllm): describe the live lab's current state in docstrings, without history (#97)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 25,
+   "commit": "e51693eab93fe02858aa005a71e28ff872d2434f",
+   "date": "2026-11-08T16:09:36-08:00",
+   "subject": "fix(vllm): keep the services' output contracts (accepted findings, one JSON line, fork check) (#70)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 26,
+   "commit": "db30007ac05d600b755b65fc42be3af85caeacaa",
+   "date": "2026-11-08T17:22:37-08:00",
+   "subject": "fix(livelab): let a transaction edit a definition an earlier one added (#77)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 27,
+   "commit": "13a8c4f15450a19948e4baf4ce974d4a5fa533f0",
+   "date": "2026-11-08T17:23:41-08:00",
+   "subject": "fix(vllm): forward fingerprint through a kernel GroupParticipant (#71)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 28,
+   "commit": "2a7df3c82a8133a8330e139fb1ecd517578d5d12",
+   "date": "2026-11-08T20:03:43-08:00",
+   "subject": "refactor(vllm): style pass \u2014 livelab services (#61)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 29,
+   "commit": "0064a9e1baa544ae927d14a52189acd3cc48d628",
+   "date": "2026-11-08T22:06:08-08:00",
+   "subject": "refactor(livelab)!: move shared kernel and forksafe into template/livelab (#107)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 12090,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 25149,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 214158,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 593608,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 0,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 30,
+   "commit": "28484a6190a87d2fc7d63bd8b35264fcca44d4d2",
+   "date": "2026-11-09T00:54:08-08:00",
+   "subject": "feat(vllm): selective step-gap CUDA graph recapture in the live-lab adapter (#110)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": true,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 31,
+   "commit": "989b628d9b0037cff8f3c8b2cef373c1f1d56f79",
+   "date": "2026-11-09T01:13:51-08:00",
+   "subject": "docs(portal): clarify layout, grounded status, and plain-word mechanisms (#118)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 32,
+   "commit": "3d2d250bd2dd7cad628c70f5977d66480028bc1d",
+   "date": "2026-11-09T01:32:05-08:00",
+   "subject": "refactor(core)!: move shared livelab into core/livelab and agent prompts into core/agents (#122)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 33,
+   "commit": "e9bfb4da12eab16c6254cbc097400f00e57ac0ee",
+   "date": "2026-11-09T22:26:10-08:00",
+   "subject": "perf(livelab): enforce NUMA affinity, thread-pool clamping, GC freeze, and env audit (#128)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 34,
+   "commit": "7678aa47370612059a40b52fe90364bf491406c2",
+   "date": "2026-11-09T22:27:41-08:00",
+   "subject": "fix(livelab): gate vLLM step loop on late phase-2 rollback and resolve review backlog (#131)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 35,
+   "commit": "9b1f78cd1d4790f97c7d136c40ee46690ddf0b34",
+   "date": "2026-11-09T22:58:57-08:00",
+   "subject": "docs(process): codify Boss-Subagent workflow SOP, warm-cache tax table, and vLLM launcher receipts (#126)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 36,
+   "commit": "65e5bd35996c2bb208d5466f2839a0a0ebb983b3",
+   "date": "2026-11-09T22:59:01-08:00",
+   "subject": "feat(vllm): add engine.py reconfigure with warm-weight IPC tier classification (#123)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 37,
+   "commit": "7d86e8dd00e9636bbf01d2470cfb83163ccf3f86",
+   "date": "2026-11-09T22:59:06-08:00",
+   "subject": "feat(vllm): add steady-state KV snapshot replay and speculative acceptance mocker (#129)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 38,
+   "commit": "cfd348607677793b0f7b658828b4a10bfb96811a",
+   "date": "2026-11-09T22:59:11-08:00",
+   "subject": "feat(vllm): add ParallelismResharder for 2D DP<->TP and MoE TP<->EP (#130)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 39,
+   "commit": "f13583bf3c6a04d644fdfa69f9b8c769707f13f3",
+   "date": "2026-11-09T22:59:16-08:00",
+   "subject": "feat(vllm): add colocated weight lease, NCCL seeder, and accept-gated standby pool (#125)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 40,
+   "commit": "deefbcb3054cab3d9f0b85762db89f9a460daecc",
+   "date": "2026-11-10T10:38:49-08:00",
+   "subject": "fix(vllm): real weight lease, NCCL seeder and standby pool (replaces the PR #125 simulation) (#135)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 41,
+   "commit": "9dde23f3836f77351ff8732102b1590e61ba95aa",
+   "date": "2026-11-10T10:38:58-08:00",
+   "subject": "fix(vllm): real live reconfigure, verified engine stop, per-group KV snapshot (#137)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 42,
+   "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+   "date": "2026-11-10T10:44:24-08:00",
+   "subject": "ci(b200): real B200 CI for trusted SHAs, safe runner routing, working quickstart (#139)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": true,
+    "jit_rebuild": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 38609,
+    "live_covered": 22087,
+    "respawn_covered": 1120,
+    "restart": 250,
+    "not_covered": 15152,
+    "by_install_covered": {
+     "swap": 12090,
+     "swap_recapture": 9997,
+     "rebuild": 0,
+     "respawn": 1120,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 982421,
+    "live_covered": 393273,
+    "respawn_covered": 164576,
+    "restart": 10079,
+    "not_covered": 414493,
+    "by_install_covered": {
+     "swap": 214158,
+     "swap_recapture": 179115,
+     "rebuild": 0,
+     "respawn": 164576,
+     "restart": 0
+    }
+   }
+  }
+ ],
+ "note": "Rules and upstream tree fixed at this run; only the lab's files vary. A step is the commit whose files first satisfy a capability's evidence.",
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

@@ -1,0 +1,1051 @@
+{
+ "schema": "fastrsi-survey/1",
+ "engine": "megatron",
+ "scan_date": "2026-11-11",
+ "ruleset_version": "1",
+ "engine_rules_version": "megatron-1",
+ "engine_rules_sha256": "ff010b82af404c6472deb4f7f2ebe727a565a37fb554320000c4de6861975d01",
+ "upstream": {
+  "repo": "NVIDIA/Megatron-LM",
+  "commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7",
+  "version": "megatron-core 0.20.0 (kb/sources.md; scanned without our local modifications)",
+  "scanned_commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7",
+  "pin_match": true
+ },
+ "lab": {
+  "commit": "368972862b421e51fdb68d68723c88655be8e4e9",
+  "capabilities": {
+   "swap": true,
+   "swap_recapture": false,
+   "jit_rebuild": false,
+   "rebuild": false,
+   "respawn": true
+  }
+ },
+ "unparsed": {
+  "files": 0,
+  "lines": 0
+ },
+ "functions": {
+  "total": 8907,
+  "by_install": {
+   "swap": {
+    "total": 6769,
+    "covered": 6769
+   },
+   "swap_recapture": {
+    "total": 585,
+    "covered": 0
+   },
+   "rebuild": {
+    "total": 1190,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 173,
+    "covered": 173
+   },
+   "restart": {
+    "total": 190,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 418,
+   "NATIVE": 209,
+   "OP": 6769,
+   "RANKS": 131,
+   "RESOURCE": 123,
+   "STATE": 1067,
+   "restart": 190
+  },
+  "by_rule": {
+   "compiled": 91,
+   "constructor": 549,
+   "default_op": 6769,
+   "dsl_kernel": 42,
+   "jit_kernel": 167,
+   "launch_flags": 9,
+   "name_resource": 79,
+   "name_state": 509,
+   "path": 692
+  },
+  "firm": 849,
+  "uncertain": 8058,
+  "live_covered": 6769,
+  "respawn_covered": 173,
+  "restart": 190,
+  "not_covered": 1775
+ },
+ "lines": {
+  "total": 283301,
+  "by_install": {
+   "swap": {
+    "total": 167708,
+    "covered": 167708
+   },
+   "swap_recapture": {
+    "total": 19522,
+    "covered": 0
+   },
+   "rebuild": {
+    "total": 49276,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 36487,
+    "covered": 36487
+   },
+   "restart": {
+    "total": 10308,
+    "covered": 0
+   }
+  },
+  "by_group": {
+   "GRAPH": 10407,
+   "NATIVE": 12442,
+   "OP": 167708,
+   "RANKS": 2848,
+   "RESOURCE": 4259,
+   "STATE": 75329,
+   "restart": 10308
+  },
+  "by_rule": {
+   "compiled": 1120,
+   "constructor": 23948,
+   "default_op": 167708,
+   "dsl_kernel": 3327,
+   "jit_kernel": 9115,
+   "launch_flags": 836,
+   "module_level": 30312,
+   "name_resource": 2811,
+   "name_state": 20049,
+   "path": 24075
+  },
+  "firm": 67822,
+  "uncertain": 215479,
+  "live_covered": 167708,
+  "respawn_covered": 36487,
+  "restart": 10308,
+  "not_covered": 68798
+ },
+ "native": {
+  "files": 2,
+  "lines": 834,
+  "install": "restart",
+  "by_ext": {
+   ".cpp": {
+    "files": 1,
+    "lines": 743
+   },
+   ".cu": {
+    "files": 1,
+    "lines": 91
+   }
+  }
+ },
+ "modules": {
+  "gpt_builders.py": {
+   "functions": {
+    "total": 2,
+    "by_install": {
+     "swap": {
+      "total": 2,
+      "covered": 2
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2
+    },
+    "by_rule": {
+     "default_op": 2
+    },
+    "firm": 0,
+    "uncertain": 2,
+    "live_covered": 2,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 145,
+    "by_install": {
+     "swap": {
+      "total": 125,
+      "covered": 125
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 20,
+      "covered": 20
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 125,
+     "STATE": 20
+    },
+    "by_rule": {
+     "default_op": 125,
+     "module_level": 20
+    },
+    "firm": 20,
+    "uncertain": 125,
+    "live_covered": 125,
+    "respawn_covered": 20,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/core": {
+   "functions": {
+    "total": 7736,
+    "by_install": {
+     "swap": {
+      "total": 5933,
+      "covered": 5933
+     },
+     "swap_recapture": {
+      "total": 585,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1041,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 173,
+      "covered": 173
+     },
+     "restart": {
+      "total": 4,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 418,
+     "NATIVE": 209,
+     "OP": 5933,
+     "RANKS": 131,
+     "RESOURCE": 119,
+     "STATE": 922,
+     "restart": 4
+    },
+    "by_rule": {
+     "compiled": 91,
+     "constructor": 491,
+     "default_op": 5933,
+     "dsl_kernel": 42,
+     "jit_kernel": 167,
+     "launch_flags": 4,
+     "name_resource": 75,
+     "name_state": 422,
+     "path": 511
+    },
+    "firm": 791,
+    "uncertain": 6945,
+    "live_covered": 5933,
+    "respawn_covered": 173,
+    "restart": 4,
+    "not_covered": 1626
+   },
+   "lines": {
+    "total": 240730,
+    "by_install": {
+     "swap": {
+      "total": 143697,
+      "covered": 143697
+     },
+     "swap_recapture": {
+      "total": 19522,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 44862,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 32537,
+      "covered": 32537
+     },
+     "restart": {
+      "total": 112,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "GRAPH": 10407,
+     "NATIVE": 12442,
+     "OP": 143697,
+     "RANKS": 2848,
+     "RESOURCE": 3519,
+     "STATE": 67705,
+     "restart": 112
+    },
+    "by_rule": {
+     "compiled": 1120,
+     "constructor": 23059,
+     "default_op": 143697,
+     "dsl_kernel": 3327,
+     "jit_kernel": 9115,
+     "launch_flags": 112,
+     "module_level": 26362,
+     "name_resource": 2071,
+     "name_state": 17264,
+     "path": 14603
+    },
+    "firm": 62983,
+    "uncertain": 177747,
+    "live_covered": 143697,
+    "respawn_covered": 32537,
+    "restart": 112,
+    "not_covered": 64384
+   },
+   "native": {
+    "files": 2,
+    "lines": 834
+   }
+  },
+  "megatron/elastification": {
+   "functions": {
+    "total": 113,
+    "by_install": {
+     "swap": {
+      "total": 82,
+      "covered": 82
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 30,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 82,
+     "STATE": 30,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 11,
+     "default_op": 82,
+     "launch_flags": 1,
+     "name_state": 19
+    },
+    "firm": 11,
+    "uncertain": 102,
+    "live_covered": 82,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 30
+   },
+   "lines": {
+    "total": 3862,
+    "by_install": {
+     "swap": {
+      "total": 2794,
+      "covered": 2794
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 447,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 334,
+      "covered": 334
+     },
+     "restart": {
+      "total": 287,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2794,
+     "STATE": 781,
+     "restart": 287
+    },
+    "by_rule": {
+     "constructor": 111,
+     "default_op": 2794,
+     "launch_flags": 287,
+     "module_level": 334,
+     "name_state": 336
+    },
+    "firm": 445,
+    "uncertain": 3417,
+    "live_covered": 2794,
+    "respawn_covered": 334,
+    "restart": 287,
+    "not_covered": 447
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/inference": {
+   "functions": {
+    "total": 7,
+    "by_install": {
+     "swap": {
+      "total": 6,
+      "covered": 6
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 6,
+     "restart": 1
+    },
+    "by_rule": {
+     "default_op": 6,
+     "launch_flags": 1
+    },
+    "firm": 0,
+    "uncertain": 7,
+    "live_covered": 6,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 383,
+    "by_install": {
+     "swap": {
+      "total": 140,
+      "covered": 140
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 43,
+      "covered": 43
+     },
+     "restart": {
+      "total": 200,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 140,
+     "STATE": 43,
+     "restart": 200
+    },
+    "by_rule": {
+     "default_op": 140,
+     "launch_flags": 200,
+     "module_level": 43
+    },
+    "firm": 43,
+    "uncertain": 340,
+    "live_covered": 140,
+    "respawn_covered": 43,
+    "restart": 200,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/post_training": {
+   "functions": {
+    "total": 29,
+    "by_install": {
+     "swap": {
+      "total": 26,
+      "covered": 26
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 26,
+     "STATE": 2,
+     "restart": 1
+    },
+    "by_rule": {
+     "default_op": 26,
+     "launch_flags": 1,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 29,
+    "live_covered": 26,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 1016,
+    "by_install": {
+     "swap": {
+      "total": 737,
+      "covered": 737
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 40,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 91,
+      "covered": 91
+     },
+     "restart": {
+      "total": 148,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 737,
+     "STATE": 131,
+     "restart": 148
+    },
+    "by_rule": {
+     "default_op": 737,
+     "launch_flags": 148,
+     "module_level": 91,
+     "name_state": 40
+    },
+    "firm": 91,
+    "uncertain": 925,
+    "live_covered": 737,
+    "respawn_covered": 91,
+    "restart": 148,
+    "not_covered": 40
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/rank_log_setup.py": {
+   "functions": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 1
+    },
+    "by_rule": {
+     "default_op": 1
+    },
+    "firm": 0,
+    "uncertain": 1,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 35,
+    "by_install": {
+     "swap": {
+      "total": 23,
+      "covered": 23
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 12,
+      "covered": 12
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 23,
+     "STATE": 12
+    },
+    "by_rule": {
+     "default_op": 23,
+     "module_level": 12
+    },
+    "firm": 12,
+    "uncertain": 23,
+    "live_covered": 23,
+    "respawn_covered": 12,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/rl": {
+   "functions": {
+    "total": 253,
+    "by_install": {
+     "swap": {
+      "total": 226,
+      "covered": 226
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 26,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 226,
+     "STATE": 26,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 10,
+     "default_op": 226,
+     "launch_flags": 1,
+     "name_state": 16
+    },
+    "firm": 10,
+    "uncertain": 243,
+    "live_covered": 226,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 26
+   },
+   "lines": {
+    "total": 7254,
+    "by_install": {
+     "swap": {
+      "total": 5196,
+      "covered": 5196
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 972,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1060,
+      "covered": 1060
+     },
+     "restart": {
+      "total": 26,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 5196,
+     "STATE": 2032,
+     "restart": 26
+    },
+    "by_rule": {
+     "constructor": 240,
+     "default_op": 5196,
+     "launch_flags": 26,
+     "module_level": 1060,
+     "name_state": 732
+    },
+    "firm": 1300,
+    "uncertain": 5954,
+    "live_covered": 5196,
+    "respawn_covered": 1060,
+    "restart": 26,
+    "not_covered": 972
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "megatron/training": {
+   "functions": {
+    "total": 756,
+    "by_install": {
+     "swap": {
+      "total": 484,
+      "covered": 484
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 90,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 182,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 484,
+     "RESOURCE": 4,
+     "STATE": 86,
+     "restart": 182
+    },
+    "by_rule": {
+     "constructor": 37,
+     "default_op": 484,
+     "launch_flags": 1,
+     "name_resource": 4,
+     "name_state": 49,
+     "path": 181
+    },
+    "firm": 37,
+    "uncertain": 719,
+    "live_covered": 484,
+    "respawn_covered": 0,
+    "restart": 182,
+    "not_covered": 90
+   },
+   "lines": {
+    "total": 29325,
+    "by_install": {
+     "swap": {
+      "total": 14578,
+      "covered": 14578
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2938,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 2274,
+      "covered": 2274
+     },
+     "restart": {
+      "total": 9535,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 14578,
+     "RESOURCE": 740,
+     "STATE": 4472,
+     "restart": 9535
+    },
+    "by_rule": {
+     "constructor": 538,
+     "default_op": 14578,
+     "launch_flags": 63,
+     "module_level": 2274,
+     "name_resource": 740,
+     "name_state": 1660,
+     "path": 9472
+    },
+    "firm": 2812,
+    "uncertain": 26513,
+    "live_covered": 14578,
+    "respawn_covered": 2274,
+    "restart": 9535,
+    "not_covered": 2938
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "model_provider.py": {
+   "functions": {
+    "total": 2,
+    "by_install": {
+     "swap": {
+      "total": 2,
+      "covered": 2
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 2
+    },
+    "by_rule": {
+     "default_op": 2
+    },
+    "firm": 0,
+    "uncertain": 2,
+    "live_covered": 2,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 56,
+    "by_install": {
+     "swap": {
+      "total": 44,
+      "covered": 44
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 12,
+      "covered": 12
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 44,
+     "STATE": 12
+    },
+    "by_rule": {
+     "default_op": 44,
+     "module_level": 12
+    },
+    "firm": 12,
+    "uncertain": 44,
+    "live_covered": 44,
+    "respawn_covered": 12,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "pretrain_gpt.py": {
+   "functions": {
+    "total": 8,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 1
+    },
+    "by_rule": {
+     "default_op": 7,
+     "name_state": 1
+    },
+    "firm": 0,
+    "uncertain": 8,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 495,
+    "by_install": {
+     "swap": {
+      "total": 374,
+      "covered": 374
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 17,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 104,
+      "covered": 104
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_group": {
+     "OP": 374,
+     "STATE": 121
+    },
+    "by_rule": {
+     "default_op": 374,
+     "module_level": 104,
+     "name_state": 17
+    },
+    "firm": 104,
+    "uncertain": 391,
+    "live_covered": 374,
+    "respawn_covered": 104,
+    "restart": 0,
+    "not_covered": 17
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  }
+ },
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}

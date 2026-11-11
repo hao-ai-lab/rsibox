@@ -1,0 +1,663 @@
+{
+ "meta": {
+  "generated": "2026-11-11",
+  "repo": "hao-ai-lab/fastrsi",
+  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
+  "naming": "The paper says LiveLab; the public name is FastRSI.",
+  "source_convention": "repo paths are relative to the repo root at origin/main, with line numbers; 'atom:<id>' is a paper atom; 'PR #N' is a hao-ai-lab/fastrsi pull request description.",
+  "status_values": {
+   "merged_gpu_verified": "on main, and a GPU run of it is recorded (kb file or PR description)",
+   "merged_cpu_only": "on main, tested on CPU only; no GPU run recorded",
+   "measured_not_in_repo": "a measurement exists (paper atom or earlier tree) but no module for it is on main",
+   "planned": "named in the docs as not built / not yet"
+  }
+ },
+ "shared_kernel": {
+  "what": "All three labs use one transaction kernel (core/livelab/kernel): locate, swap, journal, witness, findings, two-phase coordinator, session.",
+  "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
+  "gpu_fix_receipt": "PR #136 (B200, TP=2)",
+  "source": "core/livelab/kernel/README.md; PR #136"
+ },
+ "engines": [
+  {
+   "engine": "vLLM",
+   "upstream": "vllm-project/vllm",
+   "folder": "repos/vllm",
+   "mechanisms": [
+    {
+     "name": "Live code swap (transaction kernel + vLLM adapter)",
+     "what": "Replaces changed function bodies on every worker rank and in the engine core between the same two engine steps, with an undo journal and a witness that the new code ran.",
+     "startup_cost_removed": "The whole restart (imports, weight load, profile run, JIT warm-up, CUDA graph capture).",
+     "measured_saving": {
+      "before": "43-231 (warm plain restart)",
+      "after": "0.38-1.94 (edit-to-run, 8 of 19 replayed upstream PRs)",
+      "unit": "s",
+      "setup": "GB200, Qwen3-8B and Qwen3.5-35B-A3B-FP8, TP1 and TP2, eager and CUDA graphs, 2026-11-06/07"
+     },
+     "status": "merged_gpu_verified",
+     "source": "docs/lessons.md:67-70; PR #136",
+     "note": "PR #136 GPU receipt (B200, Qwen3-8B, TP=2): edit to committed 0.187 s, edit to first execution 0.190 s. Data parallel > 1 is refused (repos/vllm/livelab/adapter/README.md).",
+     "extra_receipts": [
+      {
+       "metric": "edit to committed",
+       "value": 0.187,
+       "unit": "s",
+       "setup": "B200, vLLM 0.15.1, Qwen3-8B, TP=2",
+       "source": "PR #136"
+      }
+     ]
+    },
+    {
+     "name": "Triton kernel rebuild in place",
+     "what": "Rebuilds an edited @triton.jit kernel inside the running process and counts its launches as the witness, instead of restarting to recompile it.",
+     "startup_cost_removed": "Process restart for a GPU-kernel edit.",
+     "measured_saving": {
+      "before": 13.26,
+      "after": "0.257 warm / 0.430 cold (edit to verified output)",
+      "unit": "s",
+      "setup": "1x B200, vLLM 0.33.0, Qwen3-8B, eager; baseline is a warm model load"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #108; PR #136",
+     "note": "Install 78-80 ms. repos/vllm/docs/architecture.md:99-100 also records 0.07 s vs a 61.5 s restart. PR #136 re-verified the launch witness at TP=2 (1692/1692)."
+    },
+    {
+     "name": "Selective CUDA graph recapture",
+     "what": "After a commit, recaptures only the CUDA graphs the edit touches, in the same step gap, and keeps the old graphs for an instant undo.",
+     "startup_cost_removed": "Full CUDA graph capture at start-up (and the restart around it).",
+     "measured_saving": {
+      "before": 35.8,
+      "after": 0.41,
+      "unit": "s",
+      "setup": "1x B200, Qwen3-8B TP1, 166 graphs; 1-bucket recapture 0.369 s; full 166-graph recapture 5.48-6.09 s; undo 1.2-2 ms"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #110",
+     "note": "Verified at TP1 only. TP>1, GB200 and the V2 model runner are listed as not verified. PR #144 (open) fixes recapture_extend keeping TP ranks in step."
+    },
+    {
+     "name": "Zygote (fork server) with module refresh",
+     "what": "Imports vLLM and its libraries once, then forks each `vllm serve` from that state; modules edited since are re-imported in the fork.",
+     "startup_cost_removed": "Python and library imports (8,631 modules, 12.7 s).",
+     "measured_saving": {
+      "before": 20.9,
+      "after": 10.9,
+      "unit": "s",
+      "setup": "1x B200, Qwen3-8B TP1 eager, launch to /health, 2026-11-06; leaf edit 10.2 s, core edit 12.4-13.7 s"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/vllm/kb/costs.md:69-97; PR #15"
+    },
+    {
+     "name": "Weight holder over CUDA IPC (`weights.py`, `vllm preload` daemon)",
+     "what": "A daemon keeps the processed weights on the GPU; a restarted engine maps them instead of reading the checkpoint.",
+     "startup_cost_removed": "Weight load from disk.",
+     "measured_saving": {
+      "before": 6.82,
+      "after": 2.24,
+      "unit": "s",
+      "setup": "load_model step, 1x GB200, Qwen3-8B TP1 eager, 2026-11-07; time to healthy 51.85 -> 46.80 s"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/vllm/kb/costs.md:99-111; PR #30",
+     "note": "Not verified at TP>1 or in graph mode."
+    },
+    {
+     "name": "KV-cache plan reuse (`kvplan.py`)",
+     "what": "Saves the measured KV-cache memory plan and restores it on the next start, skipping the profiling forward pass.",
+     "startup_cost_removed": "The memory-profile run that sizes the KV cache.",
+     "measured_saving": {
+      "before": "1.33-2.10",
+      "after": "0.005-0.006",
+      "unit": "s",
+      "setup": "1x GB200, Qwen3-8B TP1 eager; time to healthy 51.85 -> 43.97 s; cold cache root profile run 62.27 s (PR #30)"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/vllm/kb/costs.md:107-110; PR #30"
+    },
+    {
+     "name": "Launcher with all three holders (zygote + IPC weights + KV plan)",
+     "what": "One CLI (`engine.py start`) that starts a server from the zygote with resident weights and a reused KV plan.",
+     "startup_cost_removed": "Imports, weight read and profile run together.",
+     "measured_saving": {
+      "before": 51.85,
+      "after": 7.37,
+      "unit": "s",
+      "setup": "1x GB200, Qwen3-8B TP1 eager, 2026-11-07; 7.0x; greedy output bit-identical"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/vllm/kb/costs.md:104-111"
+    },
+    {
+     "name": "Weight lease, NCCL seeder and standby pool",
+     "what": "K engines on a GPU share one weight copy; a holder on another GPU is filled by an NCCL copy instead of a checkpoint read; a router fails over to a standby engine.",
+     "startup_cost_removed": "Weight read and per-engine weight memory; recovery time after a crash or a bad patch.",
+     "measured_saving": {
+      "before": 3.56,
+      "after": 1.23,
+      "unit": "s",
+      "setup": "weight attach, 1 node of B200 GPUs, Qwen3-8B TP1, vLLM 0.33.0 fork; MoE model 12.87 -> 2.10 s; engine weight memory 15.27 GiB -> 0.0 GiB"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #135",
+     "note": "The PR says plainly that start-up savings are small: time to healthy 32.31 -> 29.80 s. Other numbers: NCCL seed 31.5 ms for 16.4 GB; failover 29.8-66.1 ms from fault to first token (Qwen3-8B). Weight patches only; TP>1, EP and cross-node not run. Replaces the PR #125 version, which was a simulation."
+    },
+    {
+     "name": "Live reconfigure of scheduler limits",
+     "what": "Changes `max_num_seqs` (and `max_num_batched_tokens`) in the running engine between two steps and reads the value back before recording it.",
+     "startup_cost_removed": "A restart to change a launch flag.",
+     "measured_saving": {
+      "before": "27.6 (1.0 s stop + 26.6 s to healthy)",
+      "after": "0.0022 (round trip; 0.027 ms in the engine loop)",
+      "unit": "s",
+      "setup": "B200, vLLM 0.15.1, Qwen3-8B, `--max-num-seqs 4`"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #137",
+     "note": "Only `max_num_seqs` was changed live on GPU. `max_num_batched_tokens` is implemented but not run on GPU. Every other flag restarts the engine. The tier latencies in repos/vllm/kb/reconfiguration_matrix.md are targets, not measurements."
+    },
+    {
+     "name": "KV-cache snapshot and replay",
+     "what": "Saves the KV blocks and RNG state of a running batch per KV-cache group and restores them, so the same steps can be replayed.",
+     "startup_cost_removed": "Re-prefilling a long context before each candidate step.",
+     "measured_saving": {
+      "before": null,
+      "after": null,
+      "unit": "ms",
+      "setup": "B200, gemma-3-1b-it (7 KV groups), 3.41 MB snapshot; 16/16 replayed steps token-identical",
+      "capture_ms": 5.5,
+      "restore_ms": 1.6
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #137; PR #129",
+     "note": "No before/after start-up saving is recorded. The module is quarantined: it covers the model runner only and nothing in the measured path uses it. PR #129 (the original) was CPU-only."
+    },
+    {
+     "name": "Parallelism resharder (TP/DP/EP)",
+     "what": "Re-slices resident weights for a new tensor-, data- or expert-parallel layout without reading the checkpoint.",
+     "startup_cost_removed": "Weight reload when the parallel layout changes.",
+     "measured_saving": null,
+     "status": "merged_cpu_only",
+     "source": "PR #130",
+     "note": "CPU tensor tests only; no GPU collective was run. PR #148 (open) adds a MoE reshard refusal."
+    },
+    {
+     "name": "Fork-safety guards, NUMA affinity and thread clamping (`core/livelab/forksafe.py`)",
+     "what": "Answers import-time GPU queries from NVML so the zygote never initializes CUDA, binds forked workers to their GPU's CPU socket and clamps thread pools.",
+     "startup_cost_removed": "Lets a fork server exist at all; no direct start-up saving recorded.",
+     "measured_saving": null,
+     "status": "merged_cpu_only",
+     "source": "PR #128",
+     "note": "PR #128 records no GPU overhead numbers. The no-CUDA-in-zygote guard itself is exercised by every GPU zygote run above."
+    },
+    {
+     "name": "Autotune config reuse",
+     "what": "Reuse the kernel autotuner's saved configuration instead of re-tuning at start.",
+     "startup_cost_removed": "Kernel autotune at start-up.",
+     "measured_saving": {
+      "before": 228,
+      "after": 157,
+      "unit": "s",
+      "setup": "one-line scheduler edit check on 1 GB200, warm on-disk caches (earlier measurement)"
+     },
+     "status": "measured_not_in_repo",
+     "source": "repos/vllm/kb/costs.md:5-21",
+     "note": "A row of the earlier cost ladder; no module on main implements it. On DeepSeek-V4.1-Flash TP4, autotune took 627.2 s warm and was re-run despite saved configs (repos/vllm/kb/costs.md:33-37)."
+    },
+    {
+     "name": "Keep CUDA graphs across a check",
+     "what": "Keep captured CUDA graphs instead of recapturing them.",
+     "startup_cost_removed": "CUDA graph capture.",
+     "measured_saving": {
+      "before": 100,
+      "after": 58,
+      "unit": "s",
+      "setup": "same earlier ladder, 1 GB200"
+     },
+     "status": "measured_not_in_repo",
+     "source": "repos/vllm/kb/costs.md:10-18",
+     "note": "Ladder row from the earlier measurement. On main the equivalent is the live process plus selective recapture."
+    },
+    {
+     "name": "Component restart (worker group, engine core, API server)",
+     "what": "Restart only the process that owns the invalidated state, against holders that outlive it.",
+     "startup_cost_removed": "Most of a warm engine restart.",
+     "measured_saving": null,
+     "status": "planned",
+     "source": "repos/vllm/docs/architecture.md:155-162",
+     "note": "Not built; its 2-10 s cost is an estimate."
+    },
+    {
+     "name": "KV memory holder",
+     "what": "A holder process that owns the KV pool so an engine-core restart keeps the prefix cache.",
+     "startup_cost_removed": "KV allocation and re-prefill.",
+     "measured_saving": null,
+     "status": "planned",
+     "source": "repos/vllm/docs/architecture.md:112,158"
+    }
+   ],
+   "cost_ladders": [
+    {
+     "title": "Restart vs live, one-line scheduler edit, 1 GB200 (earlier measurement, warm on-disk caches)",
+     "source": "repos/vllm/kb/costs.md:5-21",
+     "rows": [
+      [
+       "Restart with caches (baseline)",
+       228
+      ],
+      [
+       "+ reuse autotune config",
+       157
+      ],
+      [
+       "+ keep model weights",
+       100
+      ],
+      [
+       "+ keep CUDA graphs",
+       58
+      ],
+      [
+       "+ keep the live process (hot swap)",
+       23.6
+      ],
+      [
+       "then skip the logprob check",
+       14.1
+      ],
+      [
+       "then test with a small batch",
+       2.4
+      ]
+     ],
+     "unit": "s"
+    }
+   ],
+   "headline": {
+    "text": "Server start 51.85 s -> 7.37 s with zygote, IPC weights and KV plan reuse (Qwen3-8B TP1 eager, 1 GB200).",
+    "source": "repos/vllm/kb/costs.md:104-111"
+   }
+  },
+  {
+   "engine": "Megatron-LM",
+   "upstream": "NVIDIA/Megatron-LM",
+   "folder": "repos/megatron",
+   "mechanisms": [
+    {
+     "name": "Live swap in the train-step gap",
+     "what": "Replaces changed function bodies on every rank in the gap before a train step, through one gloo round per kernel call.",
+     "startup_cost_removed": "The whole restart: imports, init, kernel warm-up and the slow first train step.",
+     "measured_saving": {
+      "before": "57.5 (tiny) / 59.8 (14B), process start to first step done",
+      "after": "0.05 (install, tiny) / 0.10 median (14B hill-climb)",
+      "unit": "s",
+      "setup": "GB200, TP 2, megatron-core 0.20 dev, 2026-11-07"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/megatron/kb/costs.md:24,128-131; PR #74; PR #78",
+     "note": "Covers function bodies and repair cells. Not yet: torch.compile (`jit_fuser`) functions, CUDA graph regions, constructors, optimizer construction, Transformer Engine C++ (repos/megatron/livelab/README.md:59-61)."
+    },
+    {
+     "name": "Start-state snapshot and restore",
+     "what": "Keeps a code-independent start state (weights, Adam state, scheduler, RNG, frozen batches) in pinned host memory and restores it before every check.",
+     "startup_cost_removed": "Re-initializing the job to get a comparable starting point.",
+     "measured_saving": {
+      "before": null,
+      "after": "0.25-0.27",
+      "unit": "s",
+      "setup": "restore of 96.3 GiB per rank, Qwen3-14B architecture TP 2, GB200; 1.9 s on 2x B200 (PR #138); 0.79 s for 106.8 GiB at 32B TP 4"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/megatron/kb/costs.md:138-142; PR #138",
+     "note": "No 'before' number is recorded for this step alone; the alternative is a restart."
+    },
+    {
+     "name": "Zygote (rank fork server)",
+     "what": "One process per node holds torch, Transformer Engine and Megatron imported with CUDA untouched; a restart forks the ranks from it.",
+     "startup_cost_removed": "Interpreter start and imports (10-52 s per torchrun start).",
+     "measured_saving": {
+      "before": "58.0 (14B) / 110.1 (32B)",
+      "after": "17.1-19.6 (14B) / 24.5-27.5 (32B)",
+      "unit": "s",
+      "setup": "request to first train step done, 4x GB200, env on network file system vs zygote, 2026-11-07; 15.0-16.5 / 22.8-25.1 s with Dynamo and Inductor preloaded"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/megatron/kb/costs.md:51-71; repos/megatron/livelab/README.md:146-152; PR #82",
+     "note": "Forked ranks ran 2-11% slower in steady state than torchrun ranks, cause not found; the README says to use torchrun for throughput and the zygote for loss and correctness checks (repos/megatron/livelab/README.md:160-167)."
+    },
+    {
+     "name": "Node-local environment (`tools/stage_local.sh`)",
+     "what": "Copies the Python environment, Megatron and the compile caches to the node's RAM disk so imports do not read a network file system.",
+     "startup_cost_removed": "Import time from a network file system.",
+     "measured_saving": {
+      "before": "58.0 (14B) / 110.1 (32B)",
+      "after": "29.3 (14B) / 37.6 (32B)",
+      "unit": "s",
+      "setup": "4x GB200; staging costs 161-247 s once per node"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/megatron/kb/costs.md:51-71; PR #83"
+    },
+    {
+     "name": "Code restart from the zygote (import overlay)",
+     "what": "For an edit the live swap refuses, forks from the zygote and re-imports only `megatron` with the edited modules.",
+     "startup_cost_removed": "Re-importing torch and Transformer Engine on a code restart.",
+     "measured_saving": {
+      "before": 78.8,
+      "after": 40.9,
+      "unit": "s",
+      "setup": "upstream PR NVIDIA/Megatron-LM#7575, request to lab ready; megatron re-import 1.4 s"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/megatron/examples/upstream-replay/README.md:45-50; PR #88",
+     "note": "One other run took 148.7 s (kernel warm-up 65.8 s instead of 4-5 s), not explained."
+    },
+    {
+     "name": "Zygote supervision and fail-closed reset",
+     "what": "The zygote reaps its ranks, ranks die with the zygote, a gone client cannot kill the lab, and `reset` refuses when the state keys do not match.",
+     "startup_cost_removed": "Stuck GPUs and manual clean-up after a fault; no start-up saving.",
+     "measured_saving": null,
+     "status": "merged_gpu_verified",
+     "source": "PR #138",
+     "note": "30-check GPU driver on 2x B200, all pass: reset 1.9 s, install about 0.05 s, loss bit-identical after faults."
+    },
+    {
+     "name": "Thread clamping and GC freeze in the zygote",
+     "what": "Clamps OMP and compile threads to 1 and freezes the garbage-collector heap before forking.",
+     "startup_cost_removed": "Extra threads per forked rank (31 fewer).",
+     "measured_saving": null,
+     "status": "merged_cpu_only",
+     "source": "PR #124",
+     "note": "The steady-state step-time confirmation on GPU is listed as not verified."
+    },
+    {
+     "name": "Launch tricks for Megatron-Bridge (nvcc cache, stash pre-allocation, 1 graph warm-up step)",
+     "what": "Three start-up changes for the full-model two-tray recipe.",
+     "startup_cost_removed": "Compile and warm-up time at launch.",
+     "measured_saving": {
+      "before": 442.9,
+      "after": 159.7,
+      "unit": "s",
+      "setup": "Megatron-Bridge 0.6.1, Qwen3-30B-A3B, two 4-GPU GB200 trays, median of 3, container start to first steady step"
+     },
+     "status": "measured_not_in_repo",
+     "source": "atom:m-ladder-megatron-launch",
+     "note": "Measured in a different worktree; not part of repos/megatron on main. Not the race-5 recipe."
+    },
+    {
+     "name": "Edits inside torch.compile functions, CUDA graph regions, constructors (model rebuild)",
+     "what": "Live install of these edit kinds.",
+     "startup_cost_removed": "Restart for those edits.",
+     "measured_saving": null,
+     "status": "planned",
+     "source": "repos/megatron/livelab/README.md:59-61",
+     "note": "Listed as 'Not yet'. Today they are refused and go to a code restart."
+    }
+   ],
+   "cost_ladders": [
+    {
+     "title": "Megatron restart tiers, request to first train step done (4 GB200, one node, 2026-11-07)",
+     "source": "repos/megatron/kb/costs.md:51-61",
+     "unit": "s",
+     "rows": [
+      [
+       "torchrun, environment on network file system",
+       "14B 58.0",
+       "32B 110.1"
+      ],
+      [
+       "torchrun, environment node-local",
+       "14B 29.3",
+       "32B 37.6"
+      ],
+      [
+       "zygote fork",
+       "14B 17.1-19.6",
+       "32B 24.5-27.5"
+      ],
+      [
+       "live swap (no restart)",
+       "install 0.05-0.10",
+       ""
+      ]
+     ]
+    }
+   ],
+   "headline": {
+    "text": "Restart to first train step 58.0 s -> 17.1-19.6 s from the zygote (14B, TP 2); a live swap installs in 0.05-0.10 s.",
+    "source": "repos/megatron/kb/costs.md:51-61,128"
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "upstream": "hao-ai-lab/FastVideo",
+   "folder": "repos/fastvideo",
+   "mechanisms": [
+    {
+     "name": "Live swap in the request gap",
+     "what": "Replaces changed function bodies on every worker rank between two generation requests.",
+     "startup_cost_removed": "The whole restart: imports, model load, JIT and first-video warm-up.",
+     "measured_saving": {
+      "before": "about 72 (warm restart) / about 500 (cold)",
+      "after": "0.72 (edit-to-run; 0.06 s in the lab)",
+      "unit": "s",
+      "setup": "1 GB200, MiniMax H3 (FastH3), 2026-11-07"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:56-72; PR #76",
+     "note": "Conformance 11/11 on 2 ranks. Not covered: code inside torch.compile regions, Triton kernel sources, the VAE decoder's CUDA graphs, native kernel code (repos/fastvideo/livelab/README.md, 'Not covered')."
+    },
+    {
+     "name": "In-place rebuild (`services/rebuild.py`)",
+     "what": "Re-imports edited modules in the warm worker and rebuilds the objects made from them, keeping the process, CUDA context and weights; for constructors, new fields and module constants.",
+     "startup_cost_removed": "Worker respawn for edits the live swap refuses.",
+     "measured_saving": {
+      "before": "43.0-45.0 (plain respawn)",
+      "after": "0.19-1.27 (1 GPU) / 0.31-1.16 (2 ranks)",
+      "unit": "s",
+      "setup": "GB200, 2026-11-07; +2.8-3.2 s when per-layer CUDA graphs must be re-captured"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:132-157; PR #87",
+     "note": "PR #146 (open) makes the rebuild atomic and fixes live swaps on the rebuilt base."
+    },
+    {
+     "name": "Zygote respawn (`services/zygote.py`)",
+     "what": "Forks new workers from a server that already imported FastVideo (357 modules), without touching CUDA.",
+     "startup_cost_removed": "Worker interpreter start and imports (17-20 s).",
+     "measured_saving": {
+      "before": "43.0-45.0",
+      "after": "14.05-15.33 (1 GPU) / 18.30-18.33 (2 ranks)",
+      "unit": "s",
+      "setup": "GB200, paired runs, 2026-11-07"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:136-138,175-178; PR #87"
+    },
+    {
+     "name": "Weights holder (`services/holder.py`)",
+     "what": "A holder process keeps the DiT, text encoder and VAE on the GPU; respawned workers map them by CUDA IPC, and the holder refuses when loader or model code changed.",
+     "startup_cost_removed": "Component loads from disk (10.9 s of a zygote respawn).",
+     "measured_saving": {
+      "before": "14.05-15.33 (zygote respawn alone)",
+      "after": "4.78 and 5.62 (with the VAE held)",
+      "unit": "s",
+      "setup": "1 GB200; DiT: 1,838 tensors (36.9 GiB) mapped in 0.12 s; 13.56-14.56 s at 2 ranks with DiT and text encoder only"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:94,136,163-174; PR #87",
+     "note": "The audio VAE cannot be shared (a non-leaf tensor that requires grad) and is loaded by the worker (0.9 s)."
+    },
+    {
+     "name": "Path-stable JIT caches (`services/jitcache.py`)",
+     "what": "Keeps the FlashInfer, Triton and Inductor cache roots at the path they were built at, presets Inductor's `torch_key`, and turns on Triton's autotune cache.",
+     "startup_cost_removed": "JIT rebuild and autotune in a fresh process.",
+     "measured_saving": {
+      "before": 6.3,
+      "after": 2.2,
+      "unit": "s",
+      "setup": "per-process JIT in the first video, 1 GB200; avoids a 153-159 s FlashInfer rebuild when a cache root is moved; Triton autotune 1.94-2.64 s gone"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:97-101,139-140,179-192; PR #87",
+     "note": "A fresh process still pays 17-38 s of imports and 30-35 s of loads."
+    },
+    {
+     "name": "Release of old captured state on rebuild (`rebuild.release_held`)",
+     "what": "Frees CUDA graphs and static buffers held by replaced modules before the new code captures its own.",
+     "startup_cost_removed": "Out-of-memory after a rebuild (a correctness guard, not a time saving).",
+     "measured_saving": null,
+     "status": "merged_gpu_verified",
+     "source": "repos/fastvideo/kb/costs.md:153-157",
+     "note": "Each of 4 rebuilds released 100 CUDA graphs and 62.3 GiB of static buffers; every video bit-exact."
+    },
+    {
+     "name": "Edits inside torch.compile regions, Triton kernel bodies in place, VAE decoder CUDA graphs, native kernels",
+     "what": "Live install of these edit kinds in the FastVideo lab.",
+     "startup_cost_removed": "Restart or respawn for those edits.",
+     "measured_saving": null,
+     "status": "planned",
+     "source": "repos/fastvideo/livelab/README.md ('Not covered'); repos/fastvideo/examples/h3-conformance/README.md:69-72",
+     "note": "Listed as not covered / not shown."
+    }
+   ],
+   "cost_ladders": [
+    {
+     "title": "FastVideo restart ladder, request to first video (1 GB200 unless noted, 2026-11-07)",
+     "source": "repos/fastvideo/kb/costs.md:132-141",
+     "unit": "s (overhead before the request can run)",
+     "rows": [
+      [
+       "Live swap",
+       "0.06"
+      ],
+      [
+       "In-place rebuild",
+       "0.19-1.27"
+      ],
+      [
+       "Zygote respawn with weights holder",
+       "4.78-5.62"
+      ],
+      [
+       "Zygote respawn",
+       "14.05-15.33"
+      ],
+      [
+       "Plain respawn",
+       "43.0-45.0"
+      ],
+      [
+       "Warm restart, path-stable caches",
+       "51.4"
+      ],
+      [
+       "Cold restart",
+       "289"
+      ]
+     ]
+    },
+    {
+     "title": "Start-up ladder: FastVideo FastH3, 2 GB200s (paper atom, measured 2026-10-20 in an earlier tree)",
+     "source": "atom:m-ladder-fastvideo-h3",
+     "unit": "s total",
+     "rows": [
+      [
+       "Fresh start (baseline)",
+       61.5
+      ],
+      [
+       "+ Skip random init",
+       54.2
+      ],
+      [
+       "+ Cache autotune and prompt embeddings",
+       41.9
+      ],
+      [
+       "+ Keep DiT weights in /dev/shm",
+       37.5
+      ],
+      [
+       "+ No CUDA at import",
+       32.4
+      ],
+      [
+       "+ Keep the driver, pre-imported zygote",
+       17.5
+      ],
+      [
+       "+ Retain the live worker",
+       9.3
+      ]
+     ],
+     "note": "Medians of 2-3 runs; outputs hash-match the baseline. The check itself is 9.3 s."
+    }
+   ],
+   "headline": {
+    "text": "Edit-to-run 0.72 s live against about 72 s for a warm restart and about 500 s for a cold one (MiniMax H3, 1 GB200).",
+    "source": "repos/fastvideo/kb/costs.md:72"
+   }
+  }
+ ],
+ "prs_135_141": [
+  {
+   "pr": 135,
+   "title": "real weight lease, NCCL seeder and standby pool",
+   "gpu_receipt": true,
+   "gpu": "B200 GPUs on 1 node, Qwen3-8B and Qwen3.5-35B-A3B-FP8",
+   "tests": "6 passed with FASTRSI_GPU_E2E=1 (3 CPU, 3 GPU regressions)",
+   "source": "PR #135"
+  },
+  {
+   "pr": 136,
+   "title": "commit/undo two-phase decision, identity Triton witness, monotonic timing",
+   "gpu_receipt": true,
+   "gpu": "B200, Qwen3-8B, TP=2",
+   "tests": "kernel suite 110 OK; GPU proof covers audit rows #8, #9, #20, #21; rows #10, #18, #19, #23 CPU only",
+   "source": "PR #136"
+  },
+  {
+   "pr": 137,
+   "title": "real live reconfigure, verified engine stop, per-group KV snapshot",
+   "gpu_receipt": true,
+   "gpu": "B200, Qwen3-8B and gemma-3-1b-it",
+   "tests": "72 services tests pass on the GPU host",
+   "source": "PR #137"
+  },
+  {
+   "pr": 138,
+   "title": "Megatron lab survives bad and gone clients, zygote supervises its ranks, reset fails closed",
+   "gpu_receipt": true,
+   "gpu": "2x B200, Qwen3-14B architecture TP 2",
+   "tests": "30-check GPU driver, all pass; 36 CPU cases",
+   "source": "PR #138"
+  },
+  {
+   "pr": 139,
+   "title": "real B200 CI for trusted SHAs",
+   "gpu_receipt": null,
+   "note": "CI infrastructure; its description was fetched but not read in detail for this file.",
+   "source": "PR #139"
+  },
+  {
+   "pr": 140,
+   "title": "results dashboard built from the paper's figure data",
+   "state": "open, not merged",
+   "gpu_receipt": null,
+   "source": "PR #140"
+  },
+  {
+   "pr": 141,
+   "title": "GPU receipts go in the PR description, not the repo",
+   "gpu_receipt": false,
+   "note": "Docs only. Explains why no receipt files are in the repo: receipts live in PR descriptions.",
+   "source": "PR #141"
+  }
+ ],
+ "caveats": [
+  "GPU receipts are summaries inside PR descriptions and kb files; the raw run logs are not in the repo (PR #141).",
+  "Most vLLM GPU runs are TP1 on one GPU; TP>1 is verified only for the kernel fix (PR #136) and the 19-PR replay.",
+  "PR #123 (reconfigure) and #125 (weight pool) were merged CPU-only and partly simulated; PRs #137 and #135 replaced them with GPU-verified versions."
+ ]
+}
