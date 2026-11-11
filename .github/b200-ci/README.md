@@ -13,8 +13,8 @@ vLLM cases that GitHub-hosted CPU jobs always skip, and builds a single `b200-gp
 ## Trust
 
 - The runner fetches only `refs/heads/*` and never `refs/pull/*`. It refuses a SHA that no branch of
-  GindaChen/fastrsi contains, which covers fork PR heads (they exist only under `refs/pull/N/head`).
-- `--pr N` also requires the PR's head repo to be GindaChen/fastrsi and its head SHA to equal `--sha`.
+  hao-ai-lab/fastrsi contains, which covers fork PR heads (they exist only under `refs/pull/N/head`).
+- `--pr N` also requires the PR's head repo to be hao-ai-lab/fastrsi and its head SHA to equal `--sha`.
 - Run the runner from a trusted copy (`~/fastrsi-ci/runner`), never from the commit under test.
 
 ## Run one commit (on B200)

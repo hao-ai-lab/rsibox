@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B200 CI: test one trusted commit of GindaChen/fastrsi on the B200 machine.
+"""B200 CI: test one trusted commit of hao-ai-lab/fastrsi on the B200 machine.
 
 Stdlib only. Run it on B200, inside a Rack-supervised job (see README.md here):
 
@@ -33,7 +33,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-REPO = "GindaChen/fastrsi"
+REPO = "hao-ai-lab/fastrsi"
 CONTEXT = "b200-gpu"
 HERE = Path(__file__).resolve().parent
 TORCH_SPEC = ["torch==2.9.1", "--index-url", "https://download.pytorch.org/whl/cu128",

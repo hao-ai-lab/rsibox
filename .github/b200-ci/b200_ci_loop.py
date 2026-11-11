@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Poll GindaChen/fastrsi and run the B200 CI once per new trusted head.
+"""Poll hao-ai-lab/fastrsi and run the B200 CI once per new trusted head.
 
 Candidates are the head of main and the heads of open PRs whose head repository is
-GindaChen/fastrsi itself (fork PRs are skipped here and refused again by the runner).
+hao-ai-lab/fastrsi itself (fork PRs are skipped here and refused again by the runner).
 Each candidate runs through Rack (`rack-run`, which supervises the job and records it),
 one at a time. A SHA with a result in <work>/results/ is not rerun.
 
@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO = "GindaChen/fastrsi"
+REPO = "hao-ai-lab/fastrsi"
 HERE = Path(__file__).resolve().parent
 
 
