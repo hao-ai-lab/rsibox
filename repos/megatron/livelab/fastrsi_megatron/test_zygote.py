@@ -236,6 +236,26 @@ class Pieces(unittest.TestCase):
             self.assertEqual(sorted(zygote._children(1000, proc)), [2001, 3005])
             self.assertEqual(sorted(zygote._tree(1000, proc)), [1000, 2001, 3005])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: /proc")
+    def test_children_the_zygote_had_before_the_job_survive_the_reap(self):
+        """reap_all kills every child it finds by parent pid. A process the zygote itself started
+        before the job (a helper) must survive it. Input (in a fresh interpreter, so the reap
+        touches only its own children): a helper child, then a job child, then
+        reap_all(keep={helper}). Expect: the job child reaped, the helper still running."""
+        code = ("import json, os, signal, subprocess, sys, time\n"
+                "from fastrsi_megatron import zygote\n"
+                "sleep = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
+                "helper = subprocess.Popen(sleep)\n"
+                "job = subprocess.Popen(sleep)\n"
+                "reaped = zygote.reap_all(timeout=10, keep={helper.pid})\n"
+                "alive = helper.poll() is None\n"
+                "helper.kill(); helper.wait()\n"
+                "print(json.dumps([job.pid in reaped, alive]))\n")
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                             timeout=60)
+        self.assertEqual(json.loads(out.stdout or "null"), [True, True], out.stderr)
+
     def test_auto_numa_bind_returns_the_cpus_forksafe_bound(self):
         """forksafe.bind_rank_numa_and_cpus answers {"bound_cpus", "numa_node", "source"}; bind()
         read "bound" and "cpus", so an automatic NUMA pin always reported None. Input:

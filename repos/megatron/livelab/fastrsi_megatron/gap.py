@@ -81,6 +81,9 @@ class Ranks:
         self.group = dist.new_group(backend="gloo", timeout=timedelta(seconds=timeout_s))
         self.round_timeout_s = round_timeout_s
         self.failed = None
+        # (work, tensor) of every send and receive rank 0 posted in the round that failed: gloo
+        # may still write a late reply into the tensor, so both live as long as the process
+        self.abandoned = []
 
     # -- the other ranks ---------------------------------------------------------------
     def _recv(self, tag_size, tag_payload, source=0):
@@ -117,20 +120,25 @@ class Ranks:
         every round after that one)."""
         if self.failed:
             raise RoundFailed(f"an earlier round failed: {self.failed}")
+        posted = []                             # (work, tensor) of this round
+
+        def post(work, tensor):
+            posted.append((work, tensor))
+            return work
         try:
             others = range(1, self.world)
             size, payload = _encode(msg)
             deadline = time.monotonic() + self.round_timeout_s
             for tag, tensor in ((TAG_MSG_SIZE, size), (TAG_MSG, payload)):
-                sends = [self.dist.isend(tensor, dst=rank, group=self.group, tag=tag)
+                sends = [post(self.dist.isend(tensor, dst=rank, group=self.group, tag=tag), tensor)
                          for rank in others]
                 for rank, work in zip(others, sends):
                     self._wait(work, deadline, f"send to rank {rank}")
             sizes = {}
             for rank in others:                 # posted before rank 0's own part
                 reply_size = self.torch.zeros(1, dtype=self.torch.int64)
-                sizes[rank] = (reply_size, self.dist.irecv(reply_size, src=rank,
-                                                           group=self.group, tag=TAG_REPLY_SIZE))
+                sizes[rank] = (reply_size, post(self.dist.irecv(
+                    reply_size, src=rank, group=self.group, tag=TAG_REPLY_SIZE), reply_size))
             own = handle(msg)
             deadline = time.monotonic() + self.round_timeout_s
             replies = [own]
@@ -138,11 +146,13 @@ class Ranks:
                 reply_size, work = sizes[rank]
                 self._wait(work, deadline, f"reply of rank {rank}")
                 reply = self.torch.empty(int(reply_size.item()), dtype=self.torch.uint8)
-                self._wait(self.dist.irecv(reply, src=rank, group=self.group, tag=TAG_REPLY),
+                self._wait(post(self.dist.irecv(reply, src=rank, group=self.group,
+                                                tag=TAG_REPLY), reply),
                            deadline, f"reply of rank {rank}")
                 replies.append(_decode(reply))
             return replies
         except Exception as error:              # any failure of a send or receive poisons
+            self.abandoned += posted            # never freed: a late reply may still land
             self.failed = f"{msg.get('op')}: " + (
                 str(error) if isinstance(error, RoundFailed)
                 else f"{type(error).__name__}: {str(error)[:300]}")

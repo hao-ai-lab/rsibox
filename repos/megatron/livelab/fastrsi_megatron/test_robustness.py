@@ -412,11 +412,27 @@ class RanksRound(unittest.TestCase):
         self.assertTrue(self.procs[1].is_alive())
         self.assertEqual(self.call({"verb": "status"})["state"], "base")
 
+    def test_reply_after_a_failed_round_does_not_kill_rank_0(self):
+        """Input: rank 1 sleeps 5 s in its check step (hang fault), round timeout 3 s, then its
+        reply arrives about 2 s after rank 0 gave up. Expect: the check answers ok False within
+        5 s, the lab is poisoned, and rank 0 survives the late reply: alive 4 s later and still
+        answering status (poisoned). Before the fix rank 0 died with SIGABRT (gloo: "Cannot lock
+        pointer to unbound buffer") when the reply landed in a receive buffer it had dropped."""
+        self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 1})["ok"])
+        started = time.time()
+        check = self.call({"verb": "check", "steps": 1}, 30)
+        self.assertLess(time.time() - started, 5)
+        self.assertFalse(check["ok"], check)
+        time.sleep(4)                           # rank 1's reply lands meanwhile
+        self.assertTrue(self.procs[0].is_alive(), f"rank 0 exit code {self.procs[0].exitcode}")
+        self.assert_poisoned_by_a_failed_round()
+        self.assertTrue(self.procs[1].is_alive())
+
     def test_rank_dying_while_rank_0_is_busy_fails_the_round_within_the_bound(self):
         """Input: rank 1 exits at its check step (crash fault) while rank 0 sleeps 5 s in its own
         step; round timeout 3 s. Expect: the check answers ok False within 5 + 3 s and some
-        slack (15 s), then the lab is poisoned by participant_failed. With replies on a gloo
-        collective, rank 0 gave no answer in 45 s."""
+        slack (15 s), then the lab is poisoned by participant_failed. On base (replies gathered
+        with gather_object on the 7-day group) the check got no answer in 30 s."""
         self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 0})["ok"])
         self.assertTrue(self.call({"verb": "inject", "fault": "crash", "target": 1})["ok"])
         started = time.time()
@@ -648,10 +664,10 @@ class ResetFailsClosed(unittest.TestCase):
         equal (rng differs: without numpy there is no numpy RNG state). Fails without the fix only
         where numpy is missing (torch-only), where the first digest is already the no-numpy one."""
         from fastrsi_megatron import state as ST
-        fx = LabFixture(self)
-        with_numpy = ST.digest([fx.model], fx.opt, fx.sched)
+        fixture = LabFixture(self)
+        with_numpy = ST.digest([fixture.model], fixture.opt, fixture.sched)
         with mock.patch.object(ST, "np", None):
-            without = ST.digest([fx.model], fx.opt, fx.sched)
+            without = ST.digest([fixture.model], fixture.opt, fixture.sched)
         pieces = ("weights", "master_weights", "buffers", "optimizer", "scheduler")
         self.assertEqual({piece: without[piece] for piece in pieces},
                          {piece: with_numpy[piece] for piece in pieces})
@@ -677,10 +693,10 @@ class ResetFailsClosed(unittest.TestCase):
         step) compared equal, the same as a bitwise round trip. Input: an optimizer state tensor
         on the meta device (no data, its digest raises). Expect: ok False, digest None, the
         rank's error."""
-        fx = LabFixture(self)
-        master = fx.opt.shard_fp32_from_float16_groups[0][0]
-        fx.opt.optimizer.state[master]["exp_avg"] = torch.zeros(3, device="meta")
-        reply = fx.lab.verb("digest", {"verb": "digest"})
+        fixture = LabFixture(self)
+        master = fixture.opt.shard_fp32_from_float16_groups[0][0]
+        fixture.opt.optimizer.state[master]["exp_avg"] = torch.zeros(3, device="meta")
+        reply = fixture.lab.verb("digest", {"verb": "digest"})
         self.assertFalse(reply["ok"], reply)
         self.assertIsNone(reply["digest"])
         self.assertIn("meta", reply["error"])

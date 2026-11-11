@@ -603,11 +603,11 @@ def _client_gone(conn):
         return True
 
 
-def _children(me=None, proc="/proc"):
+def _children(parent_pid=None, proc="/proc"):
     """Our direct children (ranks, guards, orphans the subreaper took in), by parent pid. Each
     rank leads a session of its own, so its process group is never ours."""
-    me = os.getpid() if me is None else me
-    return [child for child, parent in _ppids(proc).items() if parent == me]
+    parent_pid = os.getpid() if parent_pid is None else parent_pid
+    return [child for child, parent in _ppids(proc).items() if parent == parent_pid]
 
 
 def reap_all(timeout=10.0, keep=()):
@@ -768,9 +768,9 @@ def request(sock, req, out=sys.stdout):
         connection.sendall((json.dumps(req) + "\n").encode())
         with connection.makefile() as lines:
             for line in lines:
-                ev = json.loads(line)
-                yield ev
-                if ev["event"] in ("exited", "refused", "error", "stopped", "pong"):
+                event = json.loads(line)
+                yield event
+                if event["event"] in ("exited", "refused", "error", "stopped", "pong"):
                     break
 
 

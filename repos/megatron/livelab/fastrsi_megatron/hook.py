@@ -509,9 +509,10 @@ class Lab:
                 target = target_rank(req.get("target"), self.ranks.world)
             except ValueError as error:
                 return {"ok": False, "error": str(error), "ranks": []}
-            rs = self.round({"op": "inject", **{k: v for k, v in req.items() if k != "verb"},
-                             "target": target})
-            return {"ok": all(r["ok"] for r in rs), "ranks": rs}
+            replies = self.round({"op": "inject", "target": target,
+                                  **{key: value for key, value in req.items()
+                                     if key not in ("verb", "target")}})
+            return {"ok": all(reply["ok"] for reply in replies), "ranks": replies}
         if verb == "resume" and req.get("state", "start") == "start":
             rs = self.round({"op": "prepare_resume"})
             if not all(r.get("ok") for r in rs):
