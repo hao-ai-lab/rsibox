@@ -89,6 +89,23 @@ class LeakyUninstall(FakeLab):
         return {"ok": True, "undone": [tid], "state": "base", "cost_s": 0.0}
 
 
+class OneRankSilent(FakeLab):
+    """One participant reports no witness calls at all (an empty map)."""
+    def check(self, workload=None):
+        r = super().check(workload)
+        if r["witness"]:
+            r["witness"]["p1"] = {}
+        return r
+
+
+class OneParticipant(FakeLab):
+    """An honest lab with a single participant."""
+    def check(self, workload=None):
+        r = super().check(workload)
+        r["witness"] = {"p0": r["witness"]["p0"]} if r["witness"] else {}
+        return r
+
+
 class CasesCatchMissingProperties(unittest.TestCase):
     def assertCase(self, case, lab, expected):
         r = cases.run(case, lab)
@@ -104,6 +121,15 @@ class CasesCatchMissingProperties(unittest.TestCase):
     def test_c2_visible_catches_an_install_that_changes_nothing(self):
         self.assertCase("c2_visible", FakeLab, "pass")
         self.assertCase("c2_visible", SilentInstall, "FAIL")
+
+    def test_c2_visible_needs_calls_on_every_participant_however_many(self):
+        """Input: a 2-participant lab where p1's witness map is empty, and an honest lab with
+        one participant. Expected: FAIL, then pass. Pain point: c2 took the minimum over the
+        calls it found, so an empty map passed, and it asked for at least 2 participants, so
+        an honest single-participant lab failed. Not: a lab that leaves a participant out of
+        the witness entirely (the lab's own `proven` covers that)."""
+        self.assertCase("c2_visible", OneRankSilent, "FAIL")
+        self.assertCase("c2_visible", OneParticipant, "pass")
 
     def test_c4_uninstall_catches_an_undo_that_leaves_the_edit(self):
         self.assertCase("c4_uninstall", FakeLab, "pass")

@@ -105,9 +105,9 @@ def c2_visible(lab):
     c = lab.check()
     expect(c["output"] != out0, "output differs from base", _short(c["output"]))
     expect(c["proven"] is True, "proven: every live edit ran", c["findings"])
-    counts = [n for w in c["witness"].values() for n in w.values()]
-    expect(len(c["witness"]) >= 2 and counts and min(counts) > 0,
-           "witness > 0 on every participant", c["witness"])
+    witness = c["witness"] or {}
+    expect(witness and all(w and min(w.values()) > 0 for w in witness.values()),
+           "witness > 0 on every participant", witness)
     expect(lab.uninstall()["ok"], "uninstall succeeds")
     return [f"output {_short(out0)} -> {_short(c['output'])}",
             f"calls per participant {_calls(c['witness'])}"]
