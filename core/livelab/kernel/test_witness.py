@@ -14,6 +14,7 @@ import ast
 import gc
 import threading
 import time
+import types
 import unittest
 
 from . import findings as F
@@ -336,6 +337,32 @@ class CodeRestartWitnessTest(unittest.TestCase):
                 "finding": "zero_witness",
             },
         )
+
+    def test_a_property_and_the_same_name_in_two_modules(self):
+        """Input: (a) `C.val`, a @property, instrumented and read twice; (b) `scale`
+        instrumented in two modules, called twice in the first and never in the second, then
+        the other way round. Expected: (a) C().val is still 42 (a value, not a bound method)
+        and counts 2; (b) the bare name "scale" collects 0 both times (the module that never
+        ran it), "module:scale" each module's own count. Pain point: a property became a
+        plain method, so `C().val` returned a function; and the second module's wrapper
+        replaced the first under the bare name, so the bare name read one module's count and
+        could prove an edit the other never ran. Not: an uninstrument API (there is none)."""
+        prop_mod = types.ModuleType("kt_restart_prop")
+        exec("class C:\n    @property\n    def val(self):\n        return 42\n",
+             prop_mod.__dict__)
+        targets = W.instrument_module_functions(prop_mod, ["C.val"])
+        self.assertEqual((prop_mod.C().val, prop_mod.C().val), (42, 42))
+        self.assertEqual(W.collect_restart_witness(targets), {"C.val": 2})
+        for first in (0, 1):
+            mods = [types.ModuleType(f"kt_restart_same{first}_{i}") for i in (0, 1)]
+            for m in mods:
+                exec("def scale(x):\n    return x * 2\n", m.__dict__)
+                W.instrument_module_functions(m, ["scale"])
+            mods[first].scale(1)
+            mods[first].scale(2)
+            self.assertEqual(W.collect_restart_witness(["scale"]), {"scale": 0}, first)
+            self.assertEqual(W.collect_restart_witness([f"{mods[first].__name__}:scale"]),
+                             {f"{mods[first].__name__}:scale": 2})
 
 
 if __name__ == "__main__":

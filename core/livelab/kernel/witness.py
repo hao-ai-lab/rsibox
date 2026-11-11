@@ -316,6 +316,7 @@ def inject(node, key):
 
 
 _RESTART_INSTRUMENTED_TARGETS = {}
+_RESTART_BY_NAME = {}       # bare target name -> [wrapper per module]
 
 
 def instrument_module_functions(module, function_names):
@@ -361,6 +362,9 @@ def instrument_module_functions(module, function_names):
         elif isinstance(raw_attr, classmethod):
             descriptor_kind = "classmethod"
             orig_callable = raw_attr.__func__
+        elif isinstance(raw_attr, property) and raw_attr.fget is not None:
+            descriptor_kind = "property"      # count the getter, keep the descriptor
+            orig_callable = raw_attr.fget
         else:
             orig_callable = getattr(parent_obj, leaf_name)
 
@@ -388,6 +392,8 @@ def instrument_module_functions(module, function_names):
             setattr(parent_obj, leaf_name, staticmethod(wrapper))
         elif descriptor_kind == "classmethod":
             setattr(parent_obj, leaf_name, classmethod(wrapper))
+        elif descriptor_kind == "property":
+            setattr(parent_obj, leaf_name, raw_attr.getter(wrapper))
         else:
             setattr(parent_obj, leaf_name, wrapper)
             if parent_obj is module:
@@ -399,6 +405,11 @@ def instrument_module_functions(module, function_names):
                                 loaded_dict[attr_key] = wrapper
 
         instrumented[target_name] = wrapper
+        # the bare name may be instrumented in several modules (one per rank): keep them all,
+        # one per module; collect reads the smallest count (a module that never ran it: 0)
+        same_name = [w for w in _RESTART_BY_NAME.get(target_name, ())
+                     if getattr(w, "__fastrsi_module__", None) != module_name]
+        _RESTART_BY_NAME[target_name] = same_name + [wrapper]
         _RESTART_INSTRUMENTED_TARGETS[target_name] = wrapper
         _RESTART_INSTRUMENTED_TARGETS[f"{module_name}:{target_name}"] = wrapper
 
@@ -443,15 +454,15 @@ def collect_restart_witness(targets):
             counts_map = getattr(mod_obj, "__fastrsi_restart_counts__", {})
             collected[target_name] = int(counts_map.get(target_name, 0))
         elif isinstance(item, str):
-            wrapper = _RESTART_INSTRUMENTED_TARGETS.get(item)
-            if wrapper is not None:
+            wrappers = _RESTART_BY_NAME.get(item) or [
+                w for w in (_RESTART_INSTRUMENTED_TARGETS.get(item),) if w is not None]
+            counts = []
+            for wrapper in wrappers:
                 target_name = getattr(wrapper, "__fastrsi_target__", item)
                 counts_map = getattr(wrapper, "__fastrsi_counts__", {})
-                collected[item] = int(
-                    counts_map.get(target_name, getattr(wrapper, "__fastrsi_calls__", 0))
-                )
-            else:
-                collected[item] = 0
+                counts.append(int(
+                    counts_map.get(target_name, getattr(wrapper, "__fastrsi_calls__", 0))))
+            collected[item] = min(counts) if counts else 0
         else:
             unwrapped = (
                 item.__func__
