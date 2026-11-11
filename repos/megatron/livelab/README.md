@@ -39,11 +39,15 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   and step counters zero, scheduler at its start, RNG fixed, batches frozen. So a fresh process
   started with an edit reaches the same S (conformance c3). State keys the lab does not know
   how to reset are a finding at start (`optimizer_state_unknown`), never zeroed silently.
-- **Poison:** a rank that dies or hangs in a round fails that round on rank 0 after the round
-  timeout (`FASTRSI_ROUND_TIMEOUT_S`, default 900 s; longer than the longest check), which
-  poisons the session (`participant_failed`); no round runs after it. The client's own timeout
-  or a closed connection poisons it on the client's side first, and `reset("respawn")` restarts
-  the job (the harness does it).
+- **Poison:** a round is point-to-point messages between rank 0 and each rank; rank 0 waits for
+  each with a deadline, never in a collective. It waits at most `FASTRSI_ROUND_TIMEOUT_S`
+  (default 900 s) for its sends, and at most that long after its own part for the replies. A
+  rank that has not answered by then (it exited, was killed, hangs, or is slower than rank 0 by
+  more than the timeout) or a send or receive that fails fails the round and poisons the session
+  (`participant_failed`); no round runs after it. A rank that answers before a slower rank 0
+  just waits. Not bounded: rank 0's own part (a hang in rank 0's own train step). The client's
+  timeout or a closed connection may poison it on the client's side first, and
+  `reset("respawn")` restarts the job (the harness does it).
 - **Faults reach the rank they name:** `inject` takes a rank number or a participant name
   (`rank1`); a target that names no rank is refused, never skipped on every rank.
 - **Clients cannot break the lab.** A request that is not a JSON object with a string `verb`

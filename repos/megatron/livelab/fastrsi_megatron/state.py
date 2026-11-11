@@ -39,7 +39,7 @@ import torch
 
 try:
     import numpy as np
-except ImportError:     # optional here; torch.distributed's object collectives need it
+except ImportError:                             # numpy is optional for the lab itself
     np = None
 
 ZERO_KEYS = ("exp_avg", "exp_avg_sq", "max_exp_avg_sq", "step")
@@ -260,11 +260,19 @@ def _category(name):
 CHUNK = 256 << 20
 
 
-def _host_bytes(u8):
-    """The bytes of a contiguous uint8 CPU tensor, without numpy when it is not installed."""
+BYTES_PER_READ = 1 << 30                        # one ctypes read; its size is a C int
+
+
+def _feed(digest_state, host_bytes, bytes_per_read=BYTES_PER_READ):
+    """Feed the bytes of a contiguous uint8 CPU tensor to a hash, without numpy when it is not
+    installed (then in reads of at most `bytes_per_read` bytes)."""
     if np is not None:
-        return memoryview(u8.numpy())
-    return ctypes.string_at(u8.data_ptr(), u8.numel()) if u8.numel() else b""
+        digest_state.update(memoryview(host_bytes.numpy()))
+        return
+    address, length = host_bytes.data_ptr(), host_bytes.numel()
+    for offset in range(0, length, bytes_per_read):
+        digest_state.update(ctypes.string_at(address + offset,
+                                             min(bytes_per_read, length - offset)))
 
 
 def _hash_tensor(h, t, buf):
@@ -272,14 +280,14 @@ def _hash_tensor(h, t, buf):
     h.update(f"{t.dtype}{tuple(t.shape)}".encode())
     u8 = t.detach().contiguous().reshape(-1).view(torch.uint8)
     if u8.device.type == "cpu":
-        h.update(_host_bytes(u8))
+        _feed(h, u8)
         return buf
     if buf is None:
         buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
     for i in range(0, u8.numel(), CHUNK):
         m = min(CHUNK, u8.numel() - i)
         buf[:m].copy_(u8[i:i + m])
-        h.update(_host_bytes(buf[:m]))
+        _feed(h, buf[:m])
     return buf
 
 

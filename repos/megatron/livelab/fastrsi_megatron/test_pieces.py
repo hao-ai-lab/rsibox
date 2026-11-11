@@ -59,32 +59,33 @@ class Overlay(unittest.TestCase):
         already in linecache (a zygote that imported it before the fork), an overlay with
         `f() -> 2 # OVERLAY`, and overlay.install() called a second time (zygote --refresh).
         Expect: f() == 2, getsource and linecache show the overlay line, and one finder."""
-        with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, "src", "pkg"))
-            open(os.path.join(d, "src", "pkg", "__init__.py"), "w").close()
-            with open(os.path.join(d, "src", "pkg", "mod.py"), "w") as f:
-                f.write("def f():\n    return 1  # DISK\n")
-            os.makedirs(os.path.join(d, "ov"))
-            with open(os.path.join(d, "ov", "pkg.mod.py"), "w") as f:
-                f.write("def f():\n    return 2  # OVERLAY\n")
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "src", "pkg"))
+            open(os.path.join(folder, "src", "pkg", "__init__.py"), "w").close()
+            with open(os.path.join(folder, "src", "pkg", "mod.py"), "w") as source:
+                source.write("def f():\n    return 1  # DISK\n")
+            os.makedirs(os.path.join(folder, "ov"))
+            with open(os.path.join(folder, "ov", "pkg.mod.py"), "w") as source:
+                source.write("def f():\n    return 2  # OVERLAY\n")
             code = ("import inspect, json, linecache, sys, importlib.util\n"
                     "path = importlib.util.find_spec('pkg.mod').origin\n"
                     "linecache.getlines(path)\n"
                     "from fastrsi_megatron import overlay\n"
                     "overlay.install()\n"
-                    "import pkg.mod as m\n"
-                    "finders = [x for x in sys.meta_path if type(x).__name__ == 'OverlayFinder']\n"
-                    "print(json.dumps([m.f(), inspect.getsource(m.f), linecache.getline(path, 2),"
-                    " len(finders)]))\n")
+                    "import pkg.mod as module\n"
+                    "finders = [finder for finder in sys.meta_path\n"
+                    "           if type(finder).__name__ == 'OverlayFinder']\n"
+                    "print(json.dumps([module.f(), inspect.getsource(module.f),\n"
+                    "                  linecache.getline(path, 2), len(finders)]))\n")
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
-                                                                os.path.join(d, "src")]),
-                   "FASTRSI_OVERLAY": os.path.join(d, "ov")}
+                                                                os.path.join(folder, "src")]),
+                   "FASTRSI_OVERLAY": os.path.join(folder, "ov")}
             env.pop("FASTRSI_KERNEL", None)
-            on = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+            run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                 env=env)
-            self.assertEqual(json.loads(on.stdout or "null"),
+            self.assertEqual(json.loads(run.stdout or "null"),
                              [2, "def f():\n    return 2  # OVERLAY\n",
-                              "    return 2  # OVERLAY\n", 1], on.stderr)
+                              "    return 2  # OVERLAY\n", 1], run.stderr)
 
 
 class Mailbox(unittest.TestCase):
@@ -136,8 +137,8 @@ class ConformanceJob(unittest.TestCase):
         self.assertFalse(os.path.exists(job.dir), job.dir)
         self.assertFalse(os.path.exists(job.sock), job.sock)
         for port in (conformance_lab._free_port(), conformance_lab._free_port()):
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", port))
+            with socket.socket() as listener:
+                listener.bind(("127.0.0.1", port))
 
 
 class _MegatronLikeOptimizer:

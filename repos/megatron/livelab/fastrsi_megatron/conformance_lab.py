@@ -62,9 +62,9 @@ def _descendants(root):
 def _free_port():
     """A TCP port free right now (the kernel's pick), so a respawn or a second lab never reuses a
     port still held by the job before it."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class _Job:

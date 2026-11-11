@@ -220,9 +220,9 @@ class Lab:
         the session, once, and raises G.RoundFailed; every later round raises it at once."""
         try:
             return self.ranks.round(msg, self.handle)
-        except G.RoundFailed as e:
+        except G.RoundFailed as failure:
             if self.host is not None and not self.host.poisoned():
-                self.host.fault("participant_failed", f"round failed: {e}",
+                self.host.fault("participant_failed", f"round failed: {failure}",
                                 "every rank answers each round")
             raise
 
@@ -332,28 +332,28 @@ class Lab:
         return self.host
 
     @staticmethod
-    def _track(s, names):
+    def _track(session, names):
         """Add the modules a patch edits to the session's fingerprint (status and tamper checks
         then cover them), at every stack depth: no committed transaction changed them yet, so
         their code now is their code at each depth. A change made to them before this call is
         taken as their base."""
-        new = [m for m in dict.fromkeys(names) if m not in s.modules]
+        new = [name for name in dict.fromkeys(names) if name not in session.modules]
         if not new:
             return
         codes = {}
-        for p in s.co.participants:
-            r = C._call(p, "fingerprint", new)
-            if not r["ok"]:
+        for participant in session.co.participants:
+            answer = C._call(participant, "fingerprint", new)
+            if not answer["ok"]:
                 return                          # install's own verify reports the participant
-            codes[p.name] = r["code"]
-        for fp in s.expected:
+            codes[participant.name] = answer["code"]
+        for expected in session.expected:
             for name, code in codes.items():
-                old = dict(fp.get(name) or {})
+                merged = dict(expected.get(name) or {})
                 for key, value in code.items():  # {rank: {function: identity}} or {function: ...}
-                    both = isinstance(value, dict) and isinstance(old.get(key), dict)
-                    old[key] = {**old[key], **value} if both else value
-                fp[name] = old
-        s.modules += new
+                    both = isinstance(value, dict) and isinstance(merged.get(key), dict)
+                    merged[key] = {**merged[key], **value} if both else value
+                expected[name] = merged
+        session.modules += new
 
     def _text(self, m):
         for d in reversed(self.live_text):
@@ -409,16 +409,22 @@ class Lab:
         if verb == "install":
             patch = req.get("patch")
             files = patch.get("files") if isinstance(patch, dict) else None
-            try:
-                if not isinstance(files, dict):
-                    raise ValueError("a patch is an object with `files`: {module: source}")
-                modules = {m: {"source": new, "base_hash": L.text_hash(self._text(m))}
-                           for m, new in files.items()}
-            except (KeyError, OSError, TypeError, ValueError) as e:
-                why = f"module {e} is not loaded" if isinstance(e, KeyError) else str(e)
+            why, modules = None, {}
+            if not isinstance(files, dict):
+                why = "a patch is an object with `files`: {module: source}"
+            for name, new in (files or {}).items():
+                if name not in sys.modules:
+                    why = f"module {name!r} is not loaded in the job"
+                    break
+                try:
+                    modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
+                except (AttributeError, OSError, TypeError, ValueError) as error:
+                    why = f"module {name!r} has no readable source file ({type(error).__name__})"
+                    break
+            if why:
                 return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
                         "mechanisms": [], "receipt": None, "findings": [F.finding(
-                            "patch_invalid", why, "modules the running job has imported")]}
+                            "patch_invalid", why, "modules the running job imported from source")]}
             if not s.poisoned():
                 self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
@@ -501,8 +507,8 @@ class Lab:
         if verb == "inject":
             try:
                 target = target_rank(req.get("target"), self.ranks.world)
-            except ValueError as e:
-                return {"ok": False, "error": str(e), "ranks": []}
+            except ValueError as error:
+                return {"ok": False, "error": str(error), "ranks": []}
             rs = self.round({"op": "inject", **{k: v for k, v in req.items() if k != "verb"},
                              "target": target})
             return {"ok": all(r["ok"] for r in rs), "ranks": rs}
@@ -556,11 +562,15 @@ def target_rank(target, world):
     fault is never skipped on every rank while the reply says ok."""
     if target is None:
         return None
-    text = str(target) if isinstance(target, int) and not isinstance(target, bool) else \
-        target if isinstance(target, str) else ""
-    digits = text[4:] if text.startswith("rank") else text
-    if not digits.isdigit() or int(digits) >= world:
-        raise ValueError(f"inject target {target!r} names no rank of 0..{world - 1}")
+    if isinstance(target, int) and not isinstance(target, bool):
+        text = str(target)
+    else:
+        text = target if isinstance(target, str) else ""
+    digits = text[len("rank"):] if text.startswith("rank") else text
+    if not (digits.isascii() and digits.isdigit() and digits == str(int(digits))
+            and int(digits) < world):
+        raise ValueError(f"inject target {target!r} names no rank: give 0..{world - 1} "
+                         f"or rank0..rank{world - 1}")
     return int(digits)
 
 

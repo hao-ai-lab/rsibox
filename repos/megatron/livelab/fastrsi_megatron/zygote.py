@@ -467,12 +467,12 @@ def drop_modules(req, here=None):
     so the next import loads them again, from the overlay where it has them. Each is also unbound
     from its parent package when the parent stays loaded: `from pkg import sub` returns the
     parent's attribute when it has one, which would be the old module. Returns the names."""
-    drop = [n for n, m in list(sys.modules.items()) if refreshed(req, n)
-            or (here and not n.startswith(KEEP_LOADED)
-                and os.path.abspath(getattr(m, "__file__", None) or "/").startswith(here))]
-    old = {n: sys.modules.pop(n, None) for n in drop}
-    for n, module in old.items():
-        parent_name, _, child = n.rpartition(".")
+    drop = [name for name, module in list(sys.modules.items()) if refreshed(req, name)
+            or (here and not name.startswith(KEEP_LOADED)
+                and os.path.abspath(getattr(module, "__file__", None) or "/").startswith(here))]
+    old = {name: sys.modules.pop(name, None) for name in drop}
+    for name, module in old.items():
+        parent_name, _, child = name.rpartition(".")
         parent = sys.modules.get(parent_name)
         if parent is not None and module is not None and getattr(parent, child, None) is module:
             delattr(parent, child)
@@ -545,11 +545,11 @@ def stat_ppid(text):
 def _ppids(proc="/proc"):
     """{pid: ppid} of every process listed under `proc`."""
     out = {}
-    for p in os.listdir(proc) if os.path.isdir(proc) else []:
-        if p.isdigit():
+    for entry in os.listdir(proc) if os.path.isdir(proc) else []:
+        if entry.isdigit():
             try:
-                with open(os.path.join(proc, p, "stat")) as f:
-                    out[int(p)] = stat_ppid(f.read())
+                with open(os.path.join(proc, entry, "stat")) as stat_file:
+                    out[int(entry)] = stat_ppid(stat_file.read())
             except (OSError, IndexError, ValueError):
                 pass
     return out
@@ -610,24 +610,28 @@ def _children(me=None, proc="/proc"):
     return [child for child, parent in _ppids(proc).items() if parent == me]
 
 
-def reap_all(timeout=10.0):
-    """Kill whatever is still our child (ranks, or orphans the subreaper took in) and reap
-    until none is left. Returns the pids reaped."""
+def reap_all(timeout=10.0, keep=()):
+    """Kill whatever is still our child (ranks, guards, or orphans the subreaper took in), except
+    the children in `keep` (the zygote's own, alive before the job), and reap until none is left.
+    Returns the pids reaped."""
     reaped, deadline, killed = [], time.time() + timeout, set()
     while time.time() < deadline:
-        for p in _children():
-            if p not in killed:
-                kill_tree(p, signal.SIGKILL)
-                killed.add(p)
+        left = [child for child in _children() if child not in keep]
+        for child in left:
+            if child not in killed:
+                kill_tree(child, signal.SIGKILL)
+                killed.add(child)
         try:
             pid, _ = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
             return reaped
         if pid:
             reaped.append(pid)
+        elif not left:
+            return reaped
         else:
             time.sleep(0.02)
-    log("reap_timeout", left=_children())
+    log("reap_timeout", left=[child for child in _children() if child not in keep])
     return reaped
 
 
@@ -657,6 +661,7 @@ def handle(req, lsock, conn, src):
         _send(conn, {"event": "refused", "findings": block})
         return
     me, pids = os.getpid(), []
+    before = set(_children())                   # the zygote's own helpers: never reaped
     t0 = req.get("t0", time.time())
     try:
         for r in range(int(req["nproc"])):
@@ -699,7 +704,7 @@ def handle(req, lsock, conn, src):
         _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
                      "s": round(time.time() - t0, 3)})
     finally:
-        reaped = reap_all()                     # ranks left by an exception, guards, orphans
+        reaped = reap_all(keep=before)          # ranks left by an exception, guards, orphans
         if pids:
             log("job_reaped", ranks=pids, reaped=len(reaped))
 
@@ -758,10 +763,10 @@ def serve(sock, mods, script=None, forksafe=True):
 
 def request(sock, req, out=sys.stdout):
     """Send one request; yield each reply event."""
-    with socket.socket(socket.AF_UNIX) as c:
-        c.connect(sock)
-        c.sendall((json.dumps(req) + "\n").encode())
-        with c.makefile() as lines:
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(sock)
+        connection.sendall((json.dumps(req) + "\n").encode())
+        with connection.makefile() as lines:
             for line in lines:
                 ev = json.loads(line)
                 yield ev

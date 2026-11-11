@@ -25,6 +25,11 @@ if os.environ.get("FAIL_RANK") == os.environ["RANK"]:
     sys.exit(7)
 if os.environ.get("HANG"):
     import time; time.sleep(60)
+if os.environ.get("ORPHAN"):    # a child in a session of its own, left behind when the rank exits
+    import subprocess
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                           start_new_session=True)
+    open(os.path.join(os.environ["OUT"], "orphan%s" % os.environ["RANK"]), "w").write(str(kid.pid))
 """
 
 
@@ -87,6 +92,30 @@ class Zygote(unittest.TestCase):
         self.assertEqual(evs[-1]["rc"], [-15, 7])
         self.assertLess(time.time() - t, 20)
         self.assertEqual(self.start()[-1]["rc"], [0, 0])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: /proc, child subreaper")
+    def test_an_orphan_that_left_the_rank_group_is_reaped_after_the_job(self):
+        """A rank starts a child in a session of its own (out of the rank's process group, so the
+        guard's group kill misses it) and exits 0; the child is adopted by the zygote (child
+        subreaper). Expect: after `exited`, the child is gone (reap_all finds it by parent pid)
+        and the zygote serves again. Before the fix reap_all matched the process group and left
+        it running."""
+        events = self.start(nproc=1, env={"ORPHAN": "1"})
+        self.assertEqual(events[-1]["rc"], [0])
+        with open(os.path.join(self.d, "orphan0")) as pid_file:
+            orphan = int(pid_file.read())
+
+        def gone():
+            try:
+                with open(f"/proc/{orphan}/stat") as stat_file:
+                    return stat_file.read().rsplit(")", 1)[1].split()[0] == "Z"
+            except OSError:
+                return True
+        deadline = time.time() + 15
+        while not gone() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(gone(), f"orphan {orphan} still running")
+        self.assertEqual(self.start(nproc=1)[-1]["rc"], [0])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_edited_source_is_a_finding_unless_accepted(self):
@@ -200,8 +229,8 @@ class Pieces(unittest.TestCase):
         with tempfile.TemporaryDirectory() as proc:
             for pid, line in lines.items():
                 os.makedirs(os.path.join(proc, str(pid)))
-                with open(os.path.join(proc, str(pid), "stat"), "w") as f:
-                    f.write(line + "\n")
+                with open(os.path.join(proc, str(pid), "stat"), "w") as stat_file:
+                    stat_file.write(line + "\n")
             os.makedirs(os.path.join(proc, "self"))
             self.assertEqual(zygote.stat_ppid(lines[3005]), 1000)
             self.assertEqual(sorted(zygote._children(1000, proc)), [2001, 3005])
@@ -228,24 +257,25 @@ class Pieces(unittest.TestCase):
         imported, an overlay `pkg.sub.py` with `VAL = 2`, drop_modules for refresh ["pkg.sub"],
         then the overlay finder. Expect: pkg.sub dropped, `from pkg import sub` gives VAL 2, and
         pkg stays the same module object."""
-        with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, "src", "pkg"))
-            open(os.path.join(d, "src", "pkg", "__init__.py"), "w").close()
-            with open(os.path.join(d, "src", "pkg", "sub.py"), "w") as f:
-                f.write("VAL = 1\n")
-            os.makedirs(os.path.join(d, "ov"))
-            with open(os.path.join(d, "ov", "pkg.sub.py"), "w") as f:
-                f.write("VAL = 2\n")
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "src", "pkg"))
+            open(os.path.join(folder, "src", "pkg", "__init__.py"), "w").close()
+            with open(os.path.join(folder, "src", "pkg", "sub.py"), "w") as source:
+                source.write("VAL = 1\n")
+            os.makedirs(os.path.join(folder, "ov"))
+            with open(os.path.join(folder, "ov", "pkg.sub.py"), "w") as source:
+                source.write("VAL = 2\n")
             code = ("import json, sys, pkg, pkg.sub\n"
                     "from fastrsi_megatron import overlay, zygote\n"
                     "old = pkg\n"
                     "dropped = zygote.drop_modules({'refresh': ['pkg.sub']})\n"
                     "overlay.install()\n"
                     "from pkg import sub\n"
-                    "print(json.dumps(['pkg.sub' in dropped, sub.VAL, sys.modules['pkg'] is old]))\n")
+                    "print(json.dumps(['pkg.sub' in dropped, sub.VAL,\n"
+                    "                  sys.modules['pkg'] is old]))\n")
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
-                                                                os.path.join(d, "src")]),
-                   "FASTRSI_OVERLAY": os.path.join(d, "ov"), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
+                                                                os.path.join(folder, "src")]),
+                   "FASTRSI_OVERLAY": os.path.join(folder, "ov"), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
             out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                  env=env)
             self.assertEqual(json.loads(out.stdout or "null"), [True, 2, True], out.stderr)
