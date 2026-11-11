@@ -493,3 +493,37 @@ def test_pytorch_tensor_compatibility_when_available() -> None:
     assert rep4.is_ok
     assert torch_mod.equal(dp_holders[0].tensors["gate_up"], full_weights["gate_up"])
     assert torch_mod.equal(dp_holders[0].tensors["moe_w13"], full_weights["moe_w13"])
+
+
+def test_tp_dp_reshard_refuses_moe_holders_sharded_by_expert() -> None:
+    """Input: 4 experts on (tp=4, ep=4, moe_tp=1), each rank holding one whole expert, and the
+    same experts on (tp=1, dp=4, ep=4). Action: reshard_tp_dp to TP1/DP4 and to TP4/DP1.
+    Expect: an error finding `reshard_moe_mesh_unsupported` and no tensors written. Before: the
+    TP gather concatenated four different experts into one expert of 4x the intermediate size
+    (first case) or kept rank 0's single expert and dropped the other three (second case), and
+    reported ok. Does not prove: an EP-aware TP<->DP path (none exists; transpose with
+    reshard_moe_tp_ep to moe_tp == tp, ep == 1 first)."""
+    resharder = ParallelismResharder()
+    num_experts, inter_size, hidden_size = 4, 8, 4
+    full = {
+        "moe.w13": _make_3d_tensor(num_experts, 2 * inter_size, hidden_size, base=1),
+        "moe.w2": _make_3d_tensor(num_experts, hidden_size, inter_size, base=2),
+    }
+    specs = {
+        "moe.w13": ShardSpec(kind="moe_w13", num_experts=num_experts),
+        "moe.w2": ShardSpec(kind="moe_w2", num_experts=num_experts),
+    }
+    tp4, _ = resharder.reshard_dp_to_tp(full, 4, specs)
+    tp4_ep4, rep = resharder.reshard_moe_tp_to_ep(tp4, specs)
+    assert rep.is_ok and tp4_ep4[0].tensors["moe.w13"].shape == (1, 2 * inter_size, hidden_size)
+    dp4_ep4 = [
+        RankWeightHolder(rank=r, tp_size=1, dp_size=4, ep_size=4, moe_tp_size=1,
+                         tensors=dict(tp4_ep4[r].tensors))
+        for r in range(4)
+    ]
+    for holders, target_tp, target_dp in ((tp4_ep4, 1, 4), (dp4_ep4, 4, 1)):
+        out, report = resharder.reshard_tp_dp(
+            holders, specs, target_tp_size=target_tp, target_dp_size=target_dp)
+        assert not report.is_ok, report.to_dict()
+        assert [f.code for f in report.findings] == ["reshard_moe_mesh_unsupported"]
+        assert all(not holder.tensors for holder in out)
