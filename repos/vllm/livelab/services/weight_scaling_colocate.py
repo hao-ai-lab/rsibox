@@ -711,11 +711,13 @@ class Pool:
       there is no in-process snapshot to be shallow.
     - (c) Failover goes to the other holder, never to an engine on the faulted holder, and the
       faulted holder is re-copied before its engine serves again.
-    - (d) An engine that failed over away, or that holds an unaccepted patch it no longer
-      serves, is tainted until restore_holder or respawn shows its digest matches the ledger:
-      failover never goes to a tainted engine and restore_holder never copies from one. The
-      pending patch remembers its engine, so rollback repairs that engine and accept refuses
-      once that engine has stopped serving.
+    - (d) An engine that failed over away, holds an unaccepted patch it no longer serves, is
+      being re-copied, or got an accept replay that did not complete, is tainted until
+      restore_holder, respawn or accept's digest shows it matches the ledger: failover never
+      goes to a tainted engine, restore_holder never copies from one (nor from the engine with
+      the pending patch), and evaluate refuses while any engine is tainted. The pending patch
+      remembers its engine, so rollback repairs that engine and accept refuses once that
+      engine has stopped serving; accept holds the lock across its replay.
     """
 
     def __init__(self, model, python, work, active: Engine, standby: Engine, router_port,
@@ -790,11 +792,13 @@ class Pool:
     # -- repairs (the side that does not serve) --
     def restore_holder(self, broken: Engine, good: Engine):
         """Re-copy broken's holder from good's over NCCL, reset broken's prefix cache, and check
-        it now matches the ledger digest."""
+        it now matches the ledger digest. broken stays tainted until it does."""
         with self.lock:
-            if broken is good or good.name in self.tainted:
+            if broken is good or good.name in self.tainted or good is self.pending_engine:
                 raise RuntimeError(f"restore {broken.name} from {good.name}: the source is "
-                                   "the same engine or does not hold the ledger")
+                                   "the same engine, holds an unaccepted patch, or does not "
+                                   "hold the ledger")
+            self.tainted.add(broken.name)   # the copy overwrites it, even if it then fails
         rep = copy(self.model, broken.holder.socket_dir, good.holder.gpu, broken.holder.gpu,
                    max_model_len=self.max_model_len, log_dir=self.work, python=self.python)
         if not rep["ok"]:
@@ -832,6 +836,11 @@ class Pool:
         out = {"patch": patch.id}
         if self.pending is not None:
             out["rolled_back_pending"] = self.rollback("superseded by " + patch.id)
+        with self.lock:
+            if self.tainted:
+                # a rejected patch could not fail over, nor a pending one be rolled back
+                raise RuntimeError(f"evaluate {patch.id}: {sorted(self.tainted)} not repaired "
+                                   "(restore_holder or respawn first)")
         eng = self.active
         with self.router.drained() as drain_s:
             r = eng.rpc("lease_apply", patch.to_json())
@@ -875,6 +884,8 @@ class Pool:
     def accept(self):
         """Commit the pending patch: ledger, then replay onto the standby, then the new
         reference (tokens/logprobs and digest) is the ledger's."""
+        # The lock is held across the replay, so no failover can swap the engines in between
+        # (a failover waits for it); a standby whose replay did not complete is tainted.
         with self.lock:
             patch = self.pending
             if patch is None:
@@ -883,21 +894,23 @@ class Pool:
                 raise RuntimeError(f"accept {patch.id}: its engine "
                                    f"{self.pending_engine.name} no longer serves (failed over); "
                                    "rollback() instead")
-        r = self.standby.rpc("lease_apply", patch.to_json())
-        if not r.get("ok"):
-            raise RuntimeError(f"replay {patch.id} on standby: {r}")
-        self.standby.reset_prefix_cache()
-        self.ledger.append(patch)
-        with self.lock:
+            active, standby = self.active, self.standby
+            self.tainted.add(standby.name)
+            replay = standby.rpc("lease_apply", patch.to_json())
+            if not replay.get("ok"):
+                raise RuntimeError(f"replay {patch.id} on standby {standby.name}: {replay}")
+            standby.reset_prefix_cache()
+            self.ledger.append(patch)
             self.pending = self.pending_engine = None
         with self.router.drained():
-            self.ref = reference(self.active.port, self.model)
-        self.ref_digest = self.digest(self.active)
-        sb = digests_agree(self.ref_digest, self.digest(self.standby))
-        if not sb["ok"]:
+            self.ref = reference(active.port, self.model)
+        self.ref_digest = self.digest(active)
+        standby_agree = digests_agree(self.ref_digest, self.digest(standby))
+        if standby_agree["ok"]:
             with self.lock:
-                self.tainted.add(self.standby.name)
-        return {"accepted": patch.id, "ledger": self.ledger.ids, "standby_digest_ok": sb["ok"]}
+                self.tainted.discard(standby.name)
+        return {"accepted": patch.id, "ledger": self.ledger.ids,
+                "standby_digest_ok": standby_agree["ok"]}
 
     def close(self):
         self._stop.set()

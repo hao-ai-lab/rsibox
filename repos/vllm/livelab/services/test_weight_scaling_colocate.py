@@ -142,6 +142,78 @@ def test_failover_never_returns_to_a_holder_that_was_not_repaired(cpu_pool):
     assert pool.failover("503 on S", engine_s) is not None and pool.active is engine_a
 
 
+def test_evaluate_refuses_while_a_holder_is_not_repaired(cpu_pool):
+    """Input: A fails over to S and A's holder is not re-copied yet. Action: evaluate a patch
+    the gate would reject (x100), then one it would pass (x2). Expect: both refused before
+    anything is applied; S serves at 1.0. Before: the rejected patch could not fail over and S
+    kept serving it (restore refused); the passing one could then only be accepted."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.failover("transient 500", engine_a)
+    for value in (100.0, 2.0):
+        with pytest.raises(RuntimeError, match="not repaired"):
+            pool.evaluate(W.Patch(f"x{value}", "w", "scale", value))
+    assert pool.active is engine_s and engine_s.holder.weight == 1.0 and pool.pending is None
+
+
+@pytest.mark.parametrize("fails_at", ["replay", "digest"])
+def test_a_standby_whose_accept_replay_did_not_complete_is_tainted(cpu_pool, fails_at):
+    """Input: a patch x2 pending on A; S's replay half-applies and answers not ok, or S's
+    digest after the replay raises. Action: accept(), then A fails. Expect: accept raises, S
+    is tainted and the failover to S is refused. Before: S stayed untainted and the next
+    failover routed traffic onto its half-patched weights."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    real_rpc = engine_s.rpc
+
+    def broken_rpc(method, arg="{}", timeout=300):
+        if method == "lease_apply" and fails_at == "replay":
+            engine_s.holder.weight *= 1.5
+            return {"ok": False, "error": "replay died halfway"}
+        if method == "lease_digest" and fails_at == "digest" and engine_s.holder.weight != 1.0:
+            raise RuntimeError("engine S stopped answering")
+        return real_rpc(method, arg, timeout)
+    engine_s.rpc = broken_rpc
+    with pytest.raises(RuntimeError):
+        pool.accept()
+    assert engine_s.name in pool.tainted
+    assert pool.failover("A died", engine_a) is None and pool.active is engine_a
+
+
+def test_a_failover_cannot_land_between_accepts_check_and_its_replay(cpu_pool):
+    """Input: a patch x2 pending on A; a failover A -> S is forced the moment accept() first
+    releases the pool lock. Action: accept(). Expect: the replay reached S, not A: A and S at
+    2.0 and the ledger holds p1. Before: accept released the lock after its check, the
+    failover swapped the engines, and the replay patched A a second time (4.0) while S stayed
+    at 1.0."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    inner = pool.lock
+
+    class FailoverOnFirstRelease:
+        def __enter__(self):
+            return inner.__enter__()
+
+        def __exit__(self, *exc_info):
+            result = inner.__exit__(*exc_info)
+            pool.lock = inner
+            pool.failover("A 500 during accept", engine_a)
+            return result
+    pool.lock = FailoverOnFirstRelease()
+    pool.accept()
+    assert (engine_a.holder.weight, engine_s.holder.weight) == (2.0, 2.0)
+    assert pool.ledger.ids == ["p1"]
+
+
+def test_restore_never_copies_from_the_engine_with_the_pending_patch(cpu_pool):
+    """Input: a patch x2 pending on A. Action: restore_holder(S, A). Expect: refused, S stays
+    at 1.0. Before: S got A's unaccepted weights and stayed untainted."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    with pytest.raises(RuntimeError, match="unaccepted"):
+        pool.restore_holder(engine_s, engine_a)
+    assert engine_s.holder.weight == 1.0
+
+
 # Stands in for the vLLM venv's python in copy(): it is run as `python <script> copy-rank
 # --rank R ...`. Rank 1 fails at once (as when its holder does not answer); rank 0 would wait
 # in NCCL init for its peer for 15 minutes (here: 60 s).
