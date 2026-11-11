@@ -689,6 +689,11 @@ class Pool:
       there is no in-process snapshot to be shallow.
     - (c) Failover goes to the other holder, never to an engine on the faulted holder, and the
       faulted holder is re-copied before its engine serves again.
+    - (d) An engine that failed over away, or that holds an unaccepted patch it no longer
+      serves, is tainted until restore_holder or respawn shows its digest matches the ledger:
+      failover never goes to a tainted engine and restore_holder never copies from one. The
+      pending patch remembers its engine, so rollback repairs that engine and accept refuses
+      once that engine has stopped serving.
     """
 
     def __init__(self, model, python, work, active: Engine, standby: Engine, router_port,
@@ -697,6 +702,8 @@ class Pool:
         self.active, self.standby = active, standby
         self.ledger = Ledger()
         self.pending: Patch | None = None
+        self.pending_engine: Engine | None = None
+        self.tainted: set[str] = set()       # engine names whose holder may not hold the ledger
         self.tol = tol
         self.lock = threading.RLock()
         self.events = []
@@ -730,7 +737,14 @@ class Pool:
             if failed is not self.active:
                 return None                  # already switched
             t = time.monotonic()
+            if self.standby.name in self.tainted:
+                last = self.events[-1] if self.events else {}
+                if last.get("ev") != "failover_refused":     # the watchdog retries every 50 ms
+                    self.events.append({"t": t, "ev": "failover_refused", "reason": reason,
+                                        "from": failed.name, "tainted": self.standby.name})
+                return None
             self.active, self.standby = self.standby, self.active
+            self.tainted.add(failed.name)
             rec = {"t": t, "ev": "failover", "reason": reason, "from": failed.name,
                    "to": self.active.name}
             self.events.append(rec)
@@ -754,12 +768,19 @@ class Pool:
     def restore_holder(self, broken: Engine, good: Engine):
         """Re-copy broken's holder from good's over NCCL, reset broken's prefix cache, and check
         it now matches the ledger digest."""
+        with self.lock:
+            if broken is good or good.name in self.tainted:
+                raise RuntimeError(f"restore {broken.name} from {good.name}: the source is "
+                                   "the same engine or does not hold the ledger")
         rep = copy(self.model, broken.holder.socket_dir, good.holder.gpu, broken.holder.gpu,
                    log_dir=self.work, python=self.python)
         if not rep["ok"]:
             raise RuntimeError(f"restore copy failed: {rep}")
         broken.reset_prefix_cache()
         agree = self.check_integrity(broken)
+        if agree["ok"]:
+            with self.lock:
+                self.tainted.discard(broken.name)
         rec = {"t": time.monotonic(), "ev": "restore", "engine": broken.name,
                "copy": rep, "digest_ok": agree["ok"]}
         self.events.append(rec)
@@ -773,6 +794,9 @@ class Pool:
         eng.pid = None
         rep = eng.start(self.model, self.python, gmu, max_model_len)
         agree = self.check_integrity(eng)
+        if agree["ok"]:
+            with self.lock:
+                self.tainted.discard(eng.name)
         rec = {"t": time.monotonic(), "ev": "respawn", "engine": eng.name, "start": rep,
                "digest_ok": agree["ok"]}
         self.events.append(rec)
@@ -796,39 +820,60 @@ class Pool:
         out["drain_s"] = drain_s
         out.update({"touched": r["touched"], "apply_s": r["seconds"], "gate": gate})
         if gate["pass"]:
-            self.pending = patch
+            with self.lock:
+                self.pending, self.pending_engine = patch, eng
             out["state"] = "pending"
             return out
         out["state"] = "rejected"
         out["failover"] = self.failover(f"patch {patch.id} rejected", eng)
+        if out["failover"] is None and self.active is eng:
+            raise RuntimeError(f"patch {patch.id} rejected and the standby "
+                               f"{self.standby.name} does not hold the ledger: {eng.name} "
+                               "keeps serving the rejected patch")
         out["restore"] = self.restore_holder(eng, self.active)
         return out
 
     def rollback(self, why):
-        """Undo the pending patch: the standby (ledger state) takes over, the patched holder is
-        re-copied from it."""
-        patch, eng = self.pending, self.active
-        self.pending = None
-        fo = self.failover(f"rollback {patch.id}: {why}", eng)
+        """Undo the pending patch: the standby (ledger state) takes over if the patched engine
+        still serves, and the patched holder is re-copied from the serving one."""
+        with self.lock:
+            patch, eng = self.pending, self.pending_engine
+            fo = None
+            if eng is self.active:
+                fo = self.failover(f"rollback {patch.id}: {why}", eng)
+                if fo is None:
+                    raise RuntimeError(f"rollback {patch.id}: the standby "
+                                       f"{self.standby.name} does not hold the ledger")
+            self.tainted.add(eng.name)
+            self.pending = self.pending_engine = None
         rs = self.restore_holder(eng, self.active)
         return {"patch": patch.id, "failover": fo, "restore": rs}
 
     def accept(self):
         """Commit the pending patch: ledger, then replay onto the standby, then the new
         reference (tokens/logprobs and digest) is the ledger's."""
-        patch = self.pending
-        if patch is None:
-            raise RuntimeError("nothing pending to accept")
+        with self.lock:
+            patch = self.pending
+            if patch is None:
+                raise RuntimeError("nothing pending to accept")
+            if self.pending_engine is not self.active:
+                raise RuntimeError(f"accept {patch.id}: its engine "
+                                   f"{self.pending_engine.name} no longer serves (failed over); "
+                                   "rollback() instead")
         r = self.standby.rpc("lease_apply", patch.to_json())
         if not r.get("ok"):
             raise RuntimeError(f"replay {patch.id} on standby: {r}")
         self.standby.reset_prefix_cache()
         self.ledger.append(patch)
-        self.pending = None
+        with self.lock:
+            self.pending = self.pending_engine = None
         with self.router.drained():
             self.ref = reference(self.active.port, self.model)
         self.ref_digest = self.digest(self.active)
         sb = digests_agree(self.ref_digest, self.digest(self.standby))
+        if not sb["ok"]:
+            with self.lock:
+                self.tainted.add(self.standby.name)
         return {"accepted": patch.id, "ledger": self.ledger.ids, "standby_digest_ok": sb["ok"]}
 
     def close(self):

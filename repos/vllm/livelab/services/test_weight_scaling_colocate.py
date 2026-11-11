@@ -49,6 +49,95 @@ def test_gate_compare_tokens_and_tolerance():
     assert not W.gate_compare(ref, [{"tokens": ["a", "b"], "logprobs": [-0.1, -0.9]}], 0.05)["pass"]
 
 
+# CPU stand-ins for the GPU side of the pool, so Pool's own state machine (failover, rollback,
+# accept) runs for real: each fake engine leases one fake holder whose "weights" are one number,
+# lease_apply scales it, lease_digest reports it, W.copy copies it between holders (the NCCL
+# copy), and W.reference answers with logprobs that follow it (the HTTP reference prompts).
+
+class _FakeHolder:
+    def __init__(self, gpu):
+        self.gpu, self.socket_dir, self.weight = gpu, "/nonexistent", 1.0
+
+
+class _FakeEngine:
+    def __init__(self, name, gpu):
+        self.name, self.gpu, self.port, self.pid = name, gpu, 40000 + gpu, None
+        self.holder = _FakeHolder(gpu)
+
+    def reset_prefix_cache(self):
+        return 200
+
+    def rpc(self, method, arg="{}", timeout=300):
+        if method == "lease_digest":
+            return {"ok": True, "seconds": 0.0, "digest": {"w": repr(self.holder.weight)}}
+        if method == "lease_apply":
+            self.holder.weight *= float(__import__("json").loads(arg)["value"])
+            return {"ok": True, "seconds": 0.0, "touched": 1}
+        raise AssertionError(method)
+
+
+@pytest.fixture
+def cpu_pool(monkeypatch):
+    engines = {}
+
+    def fake_reference(port, model, max_tokens=16):
+        eng = next(e for e in engines.values() if e.port == port)
+        return [{"tokens": ["ok"], "logprobs": [-0.1 * eng.holder.weight]}]
+
+    def fake_copy(model, socket_dir, src_gpu, dst_gpu, *args, **kwargs):
+        holders = {e.holder.gpu: e.holder for e in engines.values()}
+        holders[dst_gpu].weight = holders[src_gpu].weight
+        return {"ok": True}
+
+    monkeypatch.setattr(W, "reference", fake_reference)
+    monkeypatch.setattr(W, "copy", fake_copy)
+    engines.update(A=_FakeEngine("A", 0), S=_FakeEngine("S", 1))
+    p = W.Pool("m", sys.executable, tempfile.gettempdir(), engines["A"], engines["S"],
+               W._free_port(), tol=1.0)
+    p._stop.set()
+    yield p, engines["A"], engines["S"]
+    p.close()
+
+
+def test_rollback_after_a_failover_restores_the_patched_holder_not_the_clean_one(cpu_pool):
+    """Input: a passing patch x2 pending on A, then a failover A -> S (watchdog or a 5xx).
+    Action: rollback(). Expect: S keeps serving and both holders hold the ledger (weight 1.0).
+    Before: rollback failed back over to A and copied A's unaccepted weights onto S (both 2.0)."""
+    pool, a, s = cpu_pool
+    assert pool.evaluate(W.Patch("p1", "w", "scale", 2.0))["state"] == "pending"
+    pool.failover("transient 500", a)
+    pool.rollback("discard p1")
+    assert pool.active is s and (a.holder.weight, s.holder.weight) == (1.0, 1.0)
+    assert pool.check_integrity(pool.active)["ok"] and pool.check_integrity(pool.standby)["ok"]
+
+
+def test_accept_refuses_when_the_patched_engine_no_longer_serves(cpu_pool):
+    """Input: a patch x2 pending on A, then a failover A -> S. Action: accept(). Expect: a
+    refusal, nothing in the ledger, and S (serving) still unpatched at 1.0; rollback() then
+    repairs A. Before: accept replayed the patch onto A again (4.0), left S unpatched and
+    recorded p1 in the ledger."""
+    pool, a, s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    pool.failover("transient 500", a)
+    with pytest.raises(RuntimeError, match="no longer serves"):
+        pool.accept()
+    assert pool.ledger.ids == [] and s.holder.weight == 1.0 and a.holder.weight == 2.0
+    pool.rollback("discard p1")
+    assert (a.holder.weight, s.holder.weight) == (1.0, 1.0)
+
+
+def test_failover_never_returns_to_a_holder_that_was_not_repaired(cpu_pool):
+    """Input: A fails over to S (A's holder corrupted, not yet re-copied), then S reports a 5xx.
+    Action: failover again. Expect: refused (S keeps serving); after restore_holder(A, S) a
+    failover to A is allowed. Before: the second failover routed traffic onto the corrupted A."""
+    pool, a, s = cpu_pool
+    a.holder.weight = -999.0
+    pool.failover("digest mismatch", a)
+    assert pool.failover("503 on S", s) is None and pool.active is s
+    assert pool.restore_holder(a, s)["digest_ok"]
+    assert pool.failover("503 on S", s) is not None and pool.active is a
+
+
 # ------------------------------------------------------------------------------------- GPU --
 
 GPU = os.environ.get("FASTRSI_GPU_E2E") == "1"
