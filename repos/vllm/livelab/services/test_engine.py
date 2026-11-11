@@ -275,6 +275,57 @@ def test_zygote_runs_with_the_engine_env():
         _stop(rep["pid"])
 
 
+def _stub_parser():
+    """STUB_PARSER's vLLM parser, in this process, plus two flags as vLLM declares them: a
+    boolean with a --no- form and a flag that takes one or more values."""
+    import argparse, vllm_args
+    code = {}
+    exec(STUB_PARSER["vllm/entrypoints/common/cli_args.py"].split("\n", 2)[2], code)
+    parser = code["make_arg_parser"](argparse.ArgumentParser(prog="vllm serve"))
+    parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--served-model-name", nargs="+")
+    return lambda argv: vllm_args.parse(argv, parser)
+
+
+def test_an_override_that_moves_the_model_is_a_finding():
+    """Input: running argvs whose model the merge cannot keep apart from a flag
+    (`--trust-remote-code M`: a boolean before the positional model; `--served-model-name a b`:
+    two values), and the overrides `--model N`, `--no-trust-remote-code` and
+    `--served-model-name c`. Action: vllm_args.override, both argvs parsed, override_finding.
+    Expect: a `vllm_args_override` finding for each (the merged argv would serve the old
+    model, vLLM's default or "b"), and none for `M --trust-remote-code --port 8000` + `--model
+    N`. Before: reconfigure stopped the engine and restarted it on the wrong model. Does not
+    prove: a merge that keeps the model but moves another flag's values."""
+    import vllm_args
+    parse = _stub_parser()
+    cases = (
+        (["--trust-remote-code", "Qwen/Qwen3-8B", "--port", "8000"], ["--model", "N"]),
+        (["--trust-remote-code", "Qwen/Qwen3-8B", "--port", "8000"], ["--no-trust-remote-code"]),
+        (["--model", "Qwen/Qwen3-8B", "--served-model-name", "a", "b"],
+         ["--served-model-name", "c"]),
+    )
+    for base, patch in cases:
+        old, new = parse(base), parse(vllm_args.override(base, patch))
+        assert old["ok"] and new["ok"], (old, new)
+        finding = vllm_args.override_finding(patch, old, new)
+        assert finding and finding["check"] == "vllm_args_override", (base, patch, new["args"])
+    base, patch = ["Qwen/Qwen3-8B", "--trust-remote-code", "--port", "8000"], ["--model", "N"]
+    new = parse(vllm_args.override(base, patch))
+    assert new["args"]["model"] == "N"
+    assert vllm_args.override_finding(patch, parse(base), new) is None
+
+
+def test_a_reconfigure_value_vllm_cannot_run_is_a_finding():
+    """Input: a merged argv with `--max-num-seqs 0` (vLLM's parser takes any int). Action:
+    engine.value_finding. Expect: a `vllm_value` finding naming max_num_seqs; none for 8.
+    Before: the live agent refused 0, so reconfigure fell back to a restart and stopped the
+    running engine for a server that cannot run with that value."""
+    parse = _stub_parser()
+    finding = engine.value_finding(parse(["M", "--max-num-seqs", "0"]))
+    assert finding["check"] == "vllm_value" and "max_num_seqs" in finding["observed"][0]
+    assert engine.value_finding(parse(["M", "--max-num-seqs", "8"])) is None
+
+
 def test_zygote_env_pins_cute_dsl_arch_without_fork(monkeypatch):
     """Input: a fake nvidia-smi that reports compute capability 10.0; the launcher arguments of
     `engine.py zygote --zygote S` and of `engine.py start --zygote S`, both without --fork.
@@ -750,6 +801,7 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
             (["--bogus-flag"], "vllm_args", None),
             (["-tp", "2"], "weights_reconfig_tier2", "tier2a_reshard"),
             (["--kv-cache-dtype", "fp8"], "weights_reconfig_tier2", "tier2b_weight_format"),
+            (["--max-num-seqs", "0"], "vllm_value", None),
         ):
             refused_proc = subprocess.run(
                 [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),

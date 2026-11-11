@@ -309,6 +309,25 @@ def override(base_argv, patch_argv):
     return merged_argv
 
 
+def override_finding(patch_argv, old_parsed, new_parsed):
+    """A `vllm_args_override` finding when the merged argv (override) would serve another model
+    than it should: the patch's (positional or --model), else the running engine's. None when
+    it matches. _tokenize_argv knows the arity of a few flags only, so a boolean flag right
+    before the positional model, or a flag with several values, can move or drop the model in
+    the merge; a reconfigure checks this before it stops the engine."""
+    patch_model, _ = _tokenize_argv(patch_argv)
+    want = patch_model if patch_model is not None else (old_parsed.get("args") or {}).get("model")
+    got = (new_parsed.get("args") or {}).get("model")
+    if got == want:
+        return None
+    return {"check": "vllm_args_override",
+            "observed": f"the merged argv would serve {got!r}",
+            "expected": f"{want!r} (the override's model, else the running engine's)",
+            "why": "the merge took a value of a neighbouring flag for the model, or dropped it",
+            "actions": ["put the model first or pass it as --model in the override",
+                        "start the engine again with its full argv (engine.py start)"]}
+
+
 def _build_control_actions(changed, new_args):
     """The live control actions for a delta whose every field has a consumer (LIVE_FIELDS):
     one `set_scheduler_limits` that live_reconfig.py applies on the engine loop thread."""

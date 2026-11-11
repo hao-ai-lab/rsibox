@@ -227,6 +227,20 @@ def socket_dir(a, v):
     return a.weights_socket_dir or weights.default_socket_dir()
 
 
+def value_finding(parsed):
+    """A `vllm_value` finding when a live scheduler field (live_reconfig.LIVE_FIELDS) has a
+    value no engine runs with (not a positive integer), else None. vLLM's parser takes any
+    int; a reconfigure refuses such a value before it stops the running engine."""
+    args = parsed.get("args") or {}
+    values = {f: args[f] for f in live_reconfig.LIVE_FIELDS if args.get(f) is not None}
+    problems = live_reconfig.check_values(values, {})
+    if not problems:
+        return None
+    return {"check": "vllm_value", "observed": problems, "expected": "positive integers",
+            "why": "the restart would start a server that cannot run, after stopping this one",
+            "actions": ["pass a positive value"]}
+
+
 def argv_findings(a, v):
     """Findings about the parsed `vllm serve` argv that stop the start (each names both values
     or what is missing)."""
@@ -802,6 +816,9 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         old_parsed.get("ok") and new_parsed.get("ok")
     ) else None
     findings, preflight_report = argv_findings(launcher_args, new_parsed), {}
+    if not findings and reconfig is not None:
+        findings = [f for f in (vllm_args.override_finding(patch_vargv, old_parsed, new_parsed),
+                                value_finding(new_parsed)) if f]
     if not findings and reconfig is not None:
         findings = reconfig_findings(launcher_args, new_parsed, reconfig)
     if not findings:
