@@ -179,6 +179,38 @@ class SessionTest(unittest.TestCase):
         self.assertTrue(sess.uninstall()["ok"])          # undo stays allowed while poisoned
         self.assertEqual(sess.state(), "poisoned")
 
+    def test_ranks_that_disagree_after_commit_poison_the_session(self):
+        """Input: a session over a group of 2 ranks; rank 1's client changes its own
+        Engine.step code right after its commit returns ok (a rank that did not switch
+        cleanly). Expected: the install commits, the receipt says commit_hashes.agree False
+        with a ranks_disagree finding, and the session is poisoned (status() says so) and a
+        second install is refused with session_poisoned. Pain point: the session recorded the
+        split fingerprint as the expected one, so verify() passed and the lab reported
+        "edited" while its ranks ran different code. Not: ranks_disagree accepted by the plan
+        when only some ranks hold a function by design (that stays "edited")."""
+        n0, _, _ = fresh("split0")
+        n1, eng1, _ = fresh("split1")
+        lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+        lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+
+        def rank1(method, payload):
+            res = getattr(lp1, method)(payload)
+            if method == "commit":
+                step = eng1.Engine.step
+                step.__code__ = step.__code__.replace(co_consts=step.__code__.co_consts + ("x",))
+            return res
+        group = C.GroupParticipant("workers", [lp0, C.CallParticipant("r1", rank1)])
+        sess = SS.Session(C.Coordinator([group], phase2_deadline_s=None), ["toy.engine"])
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        res = sess.install(plan)
+        rec = res["receipt"]
+        self.assertEqual((res["outcome"], rec["commit_hashes"]["agree"]), ("committed", False))
+        self.assertIn("ranks_disagree", [f["check"] for f in rec["findings"]])
+        self.assertEqual((res["state"], sess.status()["state"]), ("poisoned", "poisoned"))
+        self.assertEqual(sess.install(plan)["findings"][0]["check"], "session_poisoned")
+
 
 if __name__ == "__main__":
     unittest.main()

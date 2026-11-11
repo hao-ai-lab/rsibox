@@ -12,7 +12,8 @@ the interface's `status()` needs:
 - poison: findings that put the session in a state the host cannot prove. Set by a
   fingerprint that differs from the expected one (`tampered`: code changed outside the
   journal, or a participant that does not answer), by an undo that failed, by a transaction
-  left in doubt, by a participant that missed the phase-2 deadline (the coordinator's
+  left in doubt, by a commit after which participants or ranks run different code
+  (`ranks_disagree`), by a participant that missed the phase-2 deadline (the coordinator's
   `poison`), or by the lab itself (`fault`: a crash or a hang it saw). A poisoned session
   refuses `install` with `session_poisoned` and allows only `uninstall` (undo; the session
   stays poisoned) and `recovered()` (after the lab respawned its worker group).
@@ -23,6 +24,23 @@ from . import coordinator as C
 from . import findings as F
 from . import locate as L
 import json
+
+
+def _split_commit(receipt, plan):
+    """Why a committed transaction leaves participants or ranks on different code (the
+    receipt's commit_hashes.agree is False), or None. Excused only when every proof answered
+    and every ranks_disagree finding is one the plan's accept covers (`decide`: overridable,
+    so no function differs, only which ranks hold it)."""
+    hashes = (receipt or {}).get("commit_hashes") or {}
+    if hashes.get("agree") is not False:
+        return None
+    proofs = [r.get("proof") or {} for r in ((receipt or {}).get("participants") or {}).values()]
+    splits = [f for f in receipt.get("findings", []) if f.get("check") == "ranks_disagree"]
+    if splits and all(p.get("ok", True) for p in proofs) and \
+            F.decide(splits, plan.get("accept") if isinstance(plan, dict) else ())["proceed"]:
+        return None
+    why = "; ".join(f.get("observed", "") for f in splits) or "a proof did not answer"
+    return f"code hashes differ after commit: {why}"[:500]
 
 
 class Session:
@@ -119,6 +137,10 @@ class Session:
             if fp is None:
                 self.fault("tampered", "a participant did not answer after commit",
                            "every participant answers")
+            split = _split_commit(res.get("receipt"), plan)
+            if split:
+                self.fault("ranks_disagree", split, "every participant and every rank runs "
+                           "the code the commit installed", subject=res["txn"])
             self.stack.append(res["txn"])
             self.expected.append(fp)
         else:                                    # aborted or rolled back: base must hold
