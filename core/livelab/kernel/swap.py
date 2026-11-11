@@ -419,6 +419,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
 
     # 2b. removed definitions
     removed = removed_definitions(base_tree, tree)
+    nested = sorted(_nested_methods(base_tree) ^ _nested_methods(tree))
 
     # 4. top-level imports, compiled; the caller runs those the module lacks or that changed
     base_imports = {ast.dump(stmt) for stmt in base_tree.body
@@ -483,7 +484,22 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
             "imports": imports, "outside_changes": outside, "timings": timings,
-            "aliases": aliases, "new_fields": new_fields}
+            "aliases": aliases, "new_fields": new_fields, "nested_changes": nested}
+
+
+def _nested_methods(tree):
+    """Qualnames of the methods of classes nested in a class (`Outer.Inner.m`): stage adds
+    and removes only top-level definitions and methods of top-level classes."""
+    out = set()
+
+    def walk(body, prefix, depth):
+        for n in body:
+            if isinstance(n, ast.ClassDef):
+                walk(n.body, f"{prefix}{n.name}.", depth + 1)
+            elif isinstance(n, _DEF) and depth >= 2:
+                out.add(prefix + n.name)
+    walk(tree.body, "", 0)
+    return out
 
 
 def _defaults_key(node):
@@ -983,6 +999,12 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                 subject=k), "route": "T1"})
 
     # 7. anything else changed? (compared by the analysis)
+    if a.get("nested_changes"):        # a swap cannot add or remove them: not overridable
+        fs.append({**F.finding(
+            "outside_changes", f"the edit adds or removes methods of a nested class: "
+            f"{', '.join(a['nested_changes'][:5])}; the live class would not get them (a new "
+            "call to one raises AttributeError)", "only top-level definitions and methods of "
+            "top-level classes added or removed", subject=kname), "overridable": False})
     if a["outside_changes"]:
         fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
                             "(beyond added definitions and imports)",
