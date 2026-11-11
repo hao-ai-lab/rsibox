@@ -23,6 +23,12 @@
   const H = { tries: 0, wait: 0 };
   const hud = (per) => { hTries.textContent = H.tries; hWait.textContent = H.wait < 60 ? H.wait.toFixed(H.wait < 10 && H.wait % 1 ? 1 : 0) + ' s' : clock(H.wait); if (per) hPer.textContent = per; };
 
+  // Under the notebook step: the best case as two bars, restart per try against a few steps on a warm engine.
+  const mb = document.getElementById('mini-best');
+  if (mb) [['Restart per try', RESTART, 'var(--fr-codex)'], ['A few steps, engine warm', PROBE, 'var(--fr-fast)']].forEach(([label, sec, col], i) => {
+    const r = $('div', 'mb-row', null, mb); $('span', 'mb-l', label, r); const b = $('span', 'mb-bar', null, r), f = $('i', null, null, b); f.style.width = Math.max(1, 100 * sec / RESTART) + '%'; f.style.background = col;
+    const v = $('span', 'mb-v fr-num', s1(sec), r); if (i) $('b', null, Math.round(RESTART / sec) + '×', v);
+  });
   let gen = 0; class Stop extends Error {}
   function ctx(fast) {
     const id = ++gen, alive = () => id === gen;

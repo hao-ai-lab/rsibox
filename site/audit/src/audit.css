@@ -102,3 +102,6 @@ td.sv-cell { min-width: 180px; vertical-align: middle; }
 .sv-step { min-height: 190px; }
 .sv-step .sv-lb { font-family: var(--font-anthropic-sans); font-size: 11.5px; fill: var(--fr-ink); }
 .sv-steps { font-size: 12.5px; }
+
+/* the site tabs in the header replace the page's own tab row */
+.au-tabs { display: none; }

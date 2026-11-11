@@ -12,7 +12,7 @@
 
   <!-- Section 1: race -->
   <section class="fr-sec" id="sooner" aria-labelledby="sooner-h">
-    <h2 class="fr-h2" id="sooner-h">FastRSI help agent reach the same result sooner</h2>
+    <h2 class="fr-h2" id="sooner-h">Agents reach the same result sooner</h2>
     <p class="fr-sub">We compare FastRSI against a basic codex agent, using GPT 6 Astra (high). The two agents configuration run over the same hardware for 2~3 times, and taking the best trajectory as the main one to highlight in the trace. Each point on the stair case line is a valid improvement verified post-hoc. </p>
     <div class="fr-card" id="race-card">
       <div class="fr-picker" role="group" aria-label="Workload" data-draw="race-picker" data-source="race_workloads"></div>
@@ -40,7 +40,7 @@
 
   <!-- Section 2: evaluation ladder -->
   <section class="fr-sec" id="eval-time" aria-labelledby="eval-time-h">
-    <h2 class="fr-h2" id="eval-time-h">Shrink the time each evaluation takes</h2>
+    <h2 class="fr-h2" id="eval-time-h">Each evaluation takes less time</h2>
     <p class="fr-sub">The race is won here: FastRSI trims the overhead around every check. Each row removes one cost; the dashed box is the row above, and the blue number is the speedup over the first row.</p>
     <div class="fr-card" id="ladder-card">
       <div class="fr-ladder-top">
@@ -60,7 +60,7 @@
 
   <!-- Section 3: model speed -->
   <section class="fr-sec" id="model-speed" aria-labelledby="model-speed-h">
-    <h2 class="fr-h2" id="model-speed-h">Faster thinking makes evaluation the bottleneck</h2>
+    <h2 class="fr-h2" id="model-speed-h">The faster the model thinks, the more this matters</h2>
     <p class="fr-sub">How many times faster FastRSI finishes the same work: Baseline's hours divided by FastRSI's hours to replay each logged run with the model generating faster and everything else fixed. Restarting per check soon hits a floor, so FastRSI's lead grows as the model gets faster.</p>
     <div class="fr-card" id="speed-card">
       <div class="fr-speed-ctl">

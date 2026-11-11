@@ -316,7 +316,7 @@
   function route() {
     let v = location.hash.slice(1); if (!VIEWS.includes(v)) v = 'prs';
     document.querySelectorAll('.au-view').forEach((s) => { s.hidden = s.dataset.view !== v; });
-    document.querySelectorAll('#au-tabs a').forEach((a) => { if (a.dataset.tab === v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    document.querySelectorAll('#au-tabs a, .pg-tabs a[data-tab]').forEach((a) => { if (a.dataset.tab === v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
     if (v === 'prs') drawChart(); if (v === 'coverage') drawSteps();
   }
   renderPrs(); renderCoverage(); renderFaults(); renderConformance();

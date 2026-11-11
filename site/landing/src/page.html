@@ -1,7 +1,7 @@
 <div class="fr pg">
-  <nav class="pg-nav" aria-label="On this page">
+  <nav class="pg-nav" aria-label="Site">
     <a class="pg-mark" href="#top">FastRSI</a>
-    <span class="pg-links"><a href="#loop">The loop</a><a href="#story">Why</a><a href="#arch">Architecture</a><a href="#sooner">Results</a><a href="audit/">Audit</a><a href="https://github.com/GindaChen/fastrsi">Code</a></span>
+    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a href="audit/#prs" data-tab="prs">Supported PRs</a><a href="audit/#coverage" data-tab="coverage">Coverage</a><a href="audit/#conventions" data-tab="conventions">Conventions</a><a href="audit/#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/GindaChen/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
   <header class="pg-hero" id="top">
@@ -41,7 +41,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <!-- The loop -->
   <section class="fr-sec pg-loop" id="loop" aria-labelledby="loop-h">
-    <h2 class="fr-h2" id="loop-h">Recursive self-improvement is a loop, and evaluation is its slow step</h2>
+    <h2 class="fr-h2" id="loop-h">Self-improvement is a loop, and evaluation is its slowest step</h2>
     <p class="fr-sub">An agent edits the system, evaluates the edit, keeps it if it helped, and goes again. Every turn of the loop waits on the evaluation. That wait has two parts, and FastRSI goes after both.</p>
     <div class="fr-card lp">
       <div class="lp-track" id="lp" role="img" aria-label="The loop: edit, start the system, run the evaluation, keep or revert, repeat. Starting the system and running the evaluation are the long steps.">
@@ -78,19 +78,26 @@ Show me the result, then walk me through one install, check and uninstall on the
           <p class="st-kicker">From a notebook</p>
           <h3>Keep the engine alive.</h3>
           <p>One hacky way to preserve the state: move everything into a Jupyter notebook, if that is possible at all. Load the engine once, edit the file, reload the one module you changed, and run just a few steps, enough to tell whether the idea works.</p>
-          <p>A try now takes <b class="fr-num" data-st="probe_s">2.4</b>&nbsp;s. A wrong idea costs almost nothing, so you try more of them.</p>
+          <p>A try now takes <b class="fr-num" data-st="probe_s">2.4</b>&nbsp;s. This is the best case: nothing is cheaper than editing an engine that is already warm.</p>
+          <div class="st-mini" id="mini-best" aria-hidden="true"></div>
         </article>
         <article class="st-step" data-scene="catch">
           <p class="st-kicker">The catch</p>
           <h3>Until a reload lies to you.</h3>
-          <p>Hot reload by hand is fragile. Objects built before the edit keep the old code. Compiled graphs replay what they captured. The last try leaves caches and counters behind.</p>
-          <p>The number looks great and you can't trust it. The only safe move is to restart, and you are back to waiting.</p>
+          <p>Hot reload by hand is fragile, and it does not last. Sooner or later a number looks great and you can't trust it.</p>
+          <div class="st-mini st-frag"><span>stale objects</span><span>stale graphs</span><span>dirty state</span><b>&#x2717; fragile: restart to be sure</b></div>
         </article>
         <article class="st-step" data-scene="fastrsi">
           <p class="st-kicker">FastRSI, part one</p>
           <h3>Make the notebook trick safe.</h3>
-          <p>FastRSI installs each edit into the running engine as a transaction. It works out which state the edit touches, rebuilds only that, and keeps everything else warm.</p>
-          <p>A bad edit fails the check the way a restart would, and the engine survives it. The agent gets the notebook's speed without the notebook's lies.</p>
+          <p>FastRSI keeps the notebook's speed and adds a safety net. Each edit is a transaction that takes the cheapest path that is still safe, and falls back to the next one when it has to.</p>
+          <ol class="st-mini st-fall">
+            <li><b>Install into the live engine</b><span>cheapest</span></li>
+            <li><b>Rebuild only what the edit touched</b></li>
+            <li><b>Respawn from a warm copy</b></li>
+            <li><b>Full restart</b><span>last resort</span></li>
+          </ol>
+          <p>A bad edit fails its check and is reverted. The engine survives it.</p>
         </article>
         <article class="st-step" data-scene="probe">
           <p class="st-kicker">FastRSI, part two</p>
@@ -118,7 +125,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <!-- Architecture -->
   <section class="pg-story" id="arch" aria-labelledby="arch-h">
-    <h2 class="fr-h2" id="arch-h">How FastRSI is built: prepare once, then improve live</h2>
+    <h2 class="fr-h2" id="arch-h">FastRSI prepares an engine once, then improves it live</h2>
     <p class="fr-sub">Two stages. An offline toolsmith turns the engine into a live lab once. Then a developer agent improves the engine inside that lab, with an online toolsmith extending the lab whenever the agent outgrows it.</p>
     <div class="st">
       <div class="st-steps">
@@ -217,7 +224,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <!-- What the toolsmith built -->
   <section class="fr-sec" id="built" aria-labelledby="built-h">
-    <h2 class="fr-h2" id="built-h">What the offline toolsmith built</h2>
+    <h2 class="fr-h2" id="built-h">What it built for each engine</h2>
     <p class="fr-sub">Each row is one mechanism the toolsmith added to keep part of the engine warm, with the time it took before and after. All are merged and measured on GPUs. Rows are separate measurements, so they do not add up.</p>
     <div class="fr-card" id="built-card">
       <div class="fr-picker" role="group" aria-label="Engine" id="built-pick"></div>
@@ -228,14 +235,14 @@ Show me the result, then walk me through one install, check and uninstall on the
 
 
   <div class="pg-bridge" id="results">
-    <h2 class="fr-h2">What that buys an agent</h2>
+    <h2 class="fr-h2">What it buys the agent</h2>
     <p class="fr-sub">Three measurements from real runs on vLLM, Megatron-LM and FastVideo: how much sooner the agent gets there, where the time per check went, and why the gap widens as models get faster.</p>
   </div>
 
 {{RESULTS}}
 
   <section class="fr-sec" id="use" aria-labelledby="use-h">
-    <h2 class="fr-h2" id="use-h">Use it</h2>
+    <h2 class="fr-h2" id="use-h">Try it on your machine</h2>
     <p class="fr-sub">The live-lab kernel is pure Python with no dependencies. The toy lab runs on a laptop.</p>
     <div class="fr-card use">
       <ol class="use-steps">
