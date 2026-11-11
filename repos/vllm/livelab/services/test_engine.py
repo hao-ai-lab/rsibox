@@ -274,6 +274,38 @@ def test_zygote_runs_with_the_engine_env():
         _stop(rep["pid"])
 
 
+def test_zygote_child_applies_an_accepted_env_difference():
+    """Input: a zygote started with KEEP=start, CHANGE=old, GONE=x whose imports then set KEEP
+    (as torch or vLLM set variables at import), and a fork request with CHANGE=new, ADDED=a,
+    GONE unset and KEEP=start, with the `env` finding accepted. Action: zygote._child in a real
+    forked process, with a stand-in `vllm.entrypoints.cli.main` that records os.environ.
+    Expect: the server sees CHANGE=new and ADDED=a, no GONE, and KEEP keeps its import-time
+    value. Before: only VOLATILE keys were copied, so the server ran with CHANGE=old, no ADDED
+    and GONE=x although the finding said accepting it applies them. Does not prove: which
+    variables vLLM reads at import (an accepted one of those keeps the zygote's import)."""
+    import types
+    d = _short_dir()
+    out = os.path.join(d, "env.json")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            cli = types.ModuleType("vllm.entrypoints.cli.main")
+            cli.main = lambda: Path(out).write_text(json.dumps(dict(os.environ)))
+            sys.modules["vllm.entrypoints.cli.main"] = cli
+            zygote.START_ENV = {"KEEP": "start", "CHANGE": "old", "GONE": "x"}
+            os.environ.update(KEEP="set-by-import", CHANGE="old", GONE="x")
+            req = {"argv": ["vllm", "serve"], "log": os.path.join(d, "child.log"), "cwd": d,
+                   "env": {"KEEP": "start", "CHANGE": "new", "ADDED": "a"}, "accept": ["env"]}
+            zygote._child(req, [])
+        finally:
+            os._exit(3)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, Path(d, "child.log").read_text()
+    seen = json.loads(Path(out).read_text())
+    seen = {k: seen.get(k) for k in ("KEEP", "CHANGE", "ADDED", "GONE")}   # not the whole env
+    assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_zygote_parse_with_an_edit_it_cannot_refresh_is_a_stale_finding():
     """Input: a real zygote.py (torch stubbed, vLLM absent) that pre-imported a module outside
