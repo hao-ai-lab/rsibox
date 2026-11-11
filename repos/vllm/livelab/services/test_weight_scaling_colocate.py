@@ -12,6 +12,7 @@ Run under the vLLM venv:  FASTRSI_GPU_E2E=1 ... python -m pytest -x -v this_file
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,52 @@ def test_failover_never_returns_to_a_holder_that_was_not_repaired(cpu_pool):
     assert pool.failover("503 on S", s) is None and pool.active is s
     assert pool.restore_holder(a, s)["digest_ok"]
     assert pool.failover("503 on S", s) is not None and pool.active is a
+
+
+# Stands in for the vLLM venv's python in copy(): it is run as `python <script> copy-rank
+# --rank R ...`. Rank 1 fails at once (as when its holder does not answer); rank 0 would wait
+# in NCCL init for its peer for 15 minutes (here: 60 s).
+FAKE_RANK_PYTHON = """#!{py}
+import os, sys, time
+rank = sys.argv[sys.argv.index("--rank") + 1]
+open(os.path.join({out!r}, "rank" + rank), "w").write(" ".join(sys.argv[2:]))
+if rank == "1":
+    sys.exit("holder did not answer")
+time.sleep(60)
+"""
+
+
+def test_copy_stops_the_peer_rank_when_one_rank_fails(tmp_path):
+    """Input: a copy whose rank 1 exits 1 right away while rank 0 blocks. Action: copy() with
+    log_dir set. Expect: within seconds, ok False, returncodes [killed, 1], rank 0's process
+    gone; and no --max-model-len passed when none was asked (the holder's own default).
+    Before: copy() waited on rank 0 first, up to 900 s, and copy-rank then defaulted to 4096,
+    a different cache key than a holder started without --max-model-len. Does not prove: the
+    NCCL copy itself (GPU tests below)."""
+    fake = tmp_path / "python"
+    fake.write_text(FAKE_RANK_PYTHON.format(py=sys.executable, out=str(tmp_path)))
+    fake.chmod(0o755)
+    t0 = time.monotonic()
+    rep = W.copy("m", "/nonexistent", 0, 1, python=str(fake), log_dir=str(tmp_path))
+    assert time.monotonic() - t0 < 20, rep
+    assert rep["ok"] is False and rep["returncodes"][1] == 1 and rep["returncodes"][0] != 0, rep
+    assert "--max-model-len" not in (tmp_path / "rank0").read_text()
+    args = W.parser().parse_args(["copy-rank", "--rank", "0", "--init", "tcp://x:1",
+                                  "--model", "m", "--socket-dir", "/s"])
+    assert args.max_model_len is None
+
+
+def test_restore_holder_copies_with_the_pools_max_model_len(cpu_pool, monkeypatch):
+    """Input: a pool built with max_model_len=8192 (its holders' cache key). Action:
+    restore_holder. Expect: copy() is asked for max_model_len 8192. Before: restore_holder
+    omitted it and copy-rank used 4096, so the restore asked the holders for another key."""
+    pool, a, s = cpu_pool
+    pool.max_model_len = 8192
+    asked = []
+    monkeypatch.setattr(W, "copy", lambda *args, **kwargs: asked.append(
+        kwargs.get("max_model_len")) or {"ok": True})
+    pool.restore_holder(a, s)
+    assert asked == [8192]
 
 
 # ------------------------------------------------------------------------------------- GPU --

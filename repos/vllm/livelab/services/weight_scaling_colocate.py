@@ -54,6 +54,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -342,21 +343,38 @@ def _free_port():
 def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.executable,
          log_dir=None):
     """Copy the holder on src_gpu into the holder on dst_gpu over NCCL. Returns the
-    destination rank's report plus wall seconds (process start, vLLM import, IPC map, copy)."""
+    destination rank's report plus wall seconds (process start, vLLM import, IPC map, copy).
+    A rank that fails stops the other one, which would wait for it in NCCL init."""
     t0 = time.monotonic()
     init = f"tcp://127.0.0.1:{_free_port()}"
-    procs = []
-    for rank, gpu in ((0, src_gpu), (1, dst_gpu)):
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
-        cmd = [python, str(Path(__file__).resolve()), "copy-rank", "--rank", str(rank),
-               "--init", init, "--model", model, "--socket-dir", socket_dir]
-        if max_model_len:
-            cmd += ["--max-model-len", str(max_model_len)]
-        err = open(os.path.join(log_dir, f"copy_{src_gpu}_{dst_gpu}_r{rank}.log"), "w") \
-            if log_dir else subprocess.DEVNULL
-        procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=err,
-                                      text=True))
-    outs = [p.communicate(timeout=900)[0] for p in procs]
+    procs, files = [], []
+    with contextlib.ExitStack() as stack:
+        for rank, gpu in ((0, src_gpu), (1, dst_gpu)):
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+            cmd = [python, str(Path(__file__).resolve()), "copy-rank", "--rank", str(rank),
+                   "--init", init, "--model", model, "--socket-dir", socket_dir]
+            if max_model_len:
+                cmd += ["--max-model-len", str(max_model_len)]
+            err = stack.enter_context(open(os.path.join(
+                log_dir, f"copy_{src_gpu}_{dst_gpu}_r{rank}.log"), "w")) \
+                if log_dir else subprocess.DEVNULL
+            out = stack.enter_context(tempfile.TemporaryFile("w+"))   # no pipe to fill
+            files.append(out)
+            procs.append(subprocess.Popen(cmd, env=env, stdout=out, stderr=err, text=True))
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            codes = [p.poll() for p in procs]
+            if None not in codes or any(code not in (None, 0) for code in codes):
+                break
+            time.sleep(0.1)
+        for p in procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+        outs = []
+        for out in files:
+            out.seek(0)
+            outs.append(out.read())
     rcs = [p.returncode for p in procs]
     rep = {}
     for line in outs[1].splitlines()[::-1]:
@@ -701,8 +719,9 @@ class Pool:
     """
 
     def __init__(self, model, python, work, active: Engine, standby: Engine, router_port,
-                 tol=0.05):
+                 tol=0.05, max_model_len=None):
         self.model, self.python, self.work = model, python, work
+        self.max_model_len = max_model_len   # the holders' --max-model-len (their cache key)
         self.active, self.standby = active, standby
         self.ledger = Ledger()
         self.pending: Patch | None = None
@@ -777,7 +796,7 @@ class Pool:
                 raise RuntimeError(f"restore {broken.name} from {good.name}: the source is "
                                    "the same engine or does not hold the ledger")
         rep = copy(self.model, broken.holder.socket_dir, good.holder.gpu, broken.holder.gpu,
-                   log_dir=self.work, python=self.python)
+                   max_model_len=self.max_model_len, log_dir=self.work, python=self.python)
         if not rep["ok"]:
             raise RuntimeError(f"restore copy failed: {rep}")
         broken.reset_prefix_cache()
@@ -1015,7 +1034,8 @@ def demo(a):
         colo.stop()
         save()
         # 4. correctness of the lease: leased (H0, H1) == cold disk load
-        pool = Pool(model, python, work, act, sby, a.port_base + 9, tol=a.tol)
+        pool = Pool(model, python, work, act, sby, a.port_base + 9, tol=a.tol,
+                    max_model_len=mml)
         res["lease_vs_cold"] = {"A": gate_compare(res["cold_ref"], pool.ref, 0.0),
                                 "S": gate_compare(res["cold_ref"], reference(sby.port, model),
                                                   0.0),
@@ -1104,9 +1124,12 @@ def parser():
     c = sub.add_parser("copy-rank")
     c.add_argument("--rank", type=int, required=True)
     c.add_argument("--init", required=True)
-    for q in (c, sub.add_parser("copy"), sub.add_parser("demo")):
+    demo_parser = sub.add_parser("demo")
+    for q in (c, sub.add_parser("copy"), demo_parser):
         q.add_argument("--model", required=True)
-        q.add_argument("--max-model-len", type=int, default=4096)
+        # copy and copy-rank: unset means the holders were started without --max-model-len
+        q.add_argument("--max-model-len", type=int,
+                       default=4096 if q is demo_parser else None)
         q.add_argument("--python", default=sys.executable)
     cp = sub._name_parser_map["copy"]
     cp.add_argument("--socket-dir", required=True)
