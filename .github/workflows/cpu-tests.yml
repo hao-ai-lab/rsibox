@@ -47,6 +47,8 @@ jobs:
         run: python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
       - name: Run forksafe's unittest cases with stand-in torch.cuda, NVML and Triton (no GPU; the real-torch case skips without torch)
         run: python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
+      - name: Run the survey's unittest cases on its fixture tree (static scan, coverage read from lab files, history over a temporary git repository)
+        run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
       - name: Run the conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)
         working-directory: core/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab

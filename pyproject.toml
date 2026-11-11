@@ -13,5 +13,5 @@ dependencies = []
 
 [tool.setuptools]
 package-dir = { "" = "core/livelab" }
-packages = ["kernel", "kernel.toy", "conformance"]
+packages = ["kernel", "kernel.toy", "conformance", "survey"]
 py-modules = ["forksafe", "livestream"]
