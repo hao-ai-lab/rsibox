@@ -130,6 +130,60 @@ class LivestreamCrossCheckTest(unittest.TestCase):
         )
 
 
+def _checks(record, brief=None):
+    return [item["check"] for item in livestream.cross_check_step_record(record, brief)]
+
+
+class CrossCheckBypassTest(unittest.TestCase):
+    """Records that read as proven or accepted when the kernel would not say so."""
+
+    def test_a_rank_or_target_with_zero_hits_is_not_a_pass(self):
+        """Input: passing records whose witness is {rank0: {k: 8}, rank1: {k: 0}}, {rank0:
+        {k: 8}, rank1: {}}, and {op_a: 5, op_b: 0} with proven=True. Expected: each is a
+        zero_witness_pass. Pain point: hits were summed across ranks (8 + 0 > 0), an empty
+        rank counted as nothing, and proven=True skipped the per-target check, so an edit one
+        rank or one target never ran read as proven. Not: the kernel's own proof."""
+        base = {"verdict": "pass", "kept": True}
+        for witness, proven in (({"rank0": {"k": 8}, "rank1": {"k": 0}}, None),
+                                ({"rank0": {"k": 8}, "rank1": {}}, None),
+                                ({"op_a": 5, "op_b": 0}, True)):
+            record = {**base, "witness": witness, **({"proven": proven} if proven else {})}
+            self.assertEqual(_checks(record), ["zero_witness_pass"], witness)
+        self.assertEqual(_checks({**base, "witness": {"rank0": {"k": 8}, "rank1": {"k": 2}}}), [])
+
+    def test_accept_all_and_not_overridable_findings(self):
+        """Input: (a) accept="all" with an overridable constructor_edit finding; (b) a
+        `tampered` finding (overridable False) listed in accepted_findings; (c) a finding
+        `decide` already marked accepted. Expected: (a) and (c) no issue; (b)
+        unaccepted_finding_ignored. Pain point: "all" was read as the letters a and l, so
+        (a) was flagged; and a physical limit was accepted by listing its name. Not: accept
+        records with a subject (matched by check name here)."""
+        record = {"verdict": "pass", "witness": {"op": 4}, "proven": True}
+        overridable = {"check": "constructor_edit", "overridable": True}
+        self.assertEqual(_checks({**record, "accept": "all", "findings": [overridable]}), [])
+        tampered = {"check": "tampered", "overridable": False}
+        self.assertEqual(_checks({**record, "accepted_findings": ["tampered"],
+                                  "findings": [tampered]}), ["unaccepted_finding_ignored"])
+        self.assertEqual(_checks({**record, "findings": [{**overridable, "accepted": True}]}), [])
+
+    def test_kernel_route_names_have_a_tier(self):
+        """Input: briefs predicting "R0 swap" or "R9", and records whose route is "R9
+        respawn", "R10 repair" or "T1". Expected: R0 swap -> R9 respawn is a
+        silent_tier_escalation; R9 -> R10 repair is not (a repair cell runs in process, ms);
+        R0 -> T1 (an in-place rebuild) is. Pain point: the kernel's own names ("R0 swap",
+        "R10 repair", "T1") had no tier, so escalations were missed, and "R10" ranked above
+        the warm restart R9. Not: the costs of R2-R8 (unchanged)."""
+        record = {"verdict": "pass", "witness": {"op": 1}, "proven": True}
+
+        def brief(route):
+            return livestream.PricedBrief(candidate_id="c", predicted_route=route)
+        self.assertEqual(_checks({**record, "route": "R9 respawn"}, brief("R0 swap")),
+                         ["silent_tier_escalation"])
+        self.assertEqual(_checks({**record, "route": "R10 repair"}, brief("R9")), [])
+        self.assertEqual(_checks({**record, "route": "T1"}, brief("R0 swap")),
+                         ["silent_tier_escalation"])
+
+
 class DashboardSummaryTest(unittest.TestCase):
     """Verify `build_dashboard_summary` aggregates all 5 dashboard sections."""
 
@@ -191,6 +245,15 @@ class DashboardSummaryTest(unittest.TestCase):
         self.assertEqual(dashboard["yield_and_spend"]["total_candidates"], 2)
         self.assertEqual(dashboard["yield_and_spend"]["kept_candidates"], 2)
         self.assertEqual(dashboard["yield_and_spend"]["flagged_count"], 1)
+
+    def test_only_standing_replay_records_count_as_replays(self):
+        """Input: two passing steps, one marked standing_replay. Expected: total_replays 1.
+        Pain point: every step with a pass or fail verdict counted as a standing replay, so
+        the replay pass rate mixed in the hill climb's own steps. Not: replay kinds other
+        than `standing_replay` / `kind == "replay"`."""
+        step = {"verdict": "pass", "witness": {"k": 1}, "proven": True}
+        summary = livestream.build_dashboard_summary([step, {**step, "standing_replay": True}])
+        self.assertEqual(summary["standing_replay_summary"]["total_replays"], 1)
 
 
 if __name__ == "__main__":
