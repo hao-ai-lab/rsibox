@@ -165,8 +165,10 @@ def unbind(modules, n):
             pass
 
 
-def refresh(files, prefixes, modules=None, max_modules=200):
+def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
     """Re-import the edited modules from `files` ({module: new text}) and their importers.
+    `kept`: {module: text} an importer is re-imported from instead of its file (the text an
+    earlier rebuild made its base), so a refresh never reverts it to the disk text.
     Returns {"ok", "refreshed": [names], "old": {name: old module}, "findings", "seconds"}."""
     t0 = time.perf_counter()
     modules = sys.modules if modules is None else modules
@@ -180,7 +182,7 @@ def refresh(files, prefixes, modules=None, max_modules=200):
         except SyntaxError as e:
             return {"ok": False, "refreshed": [], "old": {}, "seconds": 0.0,
                     "findings": [finding("patch_invalid", f"{m}: {e}", "valid Python")]}
-    graph = import_graph(prefixes, modules, texts=files)
+    graph = import_graph(prefixes, modules, texts={**(kept or {}), **files})
     names = dependents(set(files), graph)
     if len(names) > max_modules:
         return {"ok": False, "refreshed": [], "old": {}, "seconds": 0.0, "findings": [finding(
@@ -188,12 +190,13 @@ def refresh(files, prefixes, modules=None, max_modules=200):
             f"at most {max_modules} (an edit in the package core: restart the worker)")]}
     order = [n for n in list(modules) if n in names]          # first-import order
     old = {n: modules[n] for n in order}
-    origins = {n: old[n].__file__ for n in files}
+    texts = {**{n: (kept or {})[n] for n in order if n in (kept or {})}, **files}
+    origins = {n: old[n].__file__ for n in texts}
     for n in order:
         modules.pop(n)
         unbind(modules, n)
     importlib.invalidate_caches()
-    finder = TextFinder(dict(files), origins)
+    finder = TextFinder(texts, origins)
     sys.meta_path.insert(0, finder)
     try:
         for n in order:
@@ -210,7 +213,7 @@ def refresh(files, prefixes, modules=None, max_modules=200):
                                      "the edited modules import")]}
     finally:
         sys.meta_path.remove(finder)
-    for n, text in files.items():                             # what inspect/Triton/Dynamo read
+    for n, text in texts.items():                             # what inspect/Triton/Dynamo read
         f = origins[n]
         linecache.cache[f] = (len(text), None, text.splitlines(True), f)
     return {"ok": True, "refreshed": order, "old": old, "findings": [],

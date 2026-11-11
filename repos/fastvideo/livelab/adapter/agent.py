@@ -11,6 +11,7 @@ plus `ping`, `inject` (conformance faults) and `repl` (run a cell with the worke
 Never raises for a participant call: the kernel's replies are ok-dicts. `lost` makes every
 call raise ConnectionError until the process is respawned, as a dead worker would.
 """
+import copy
 import importlib.util
 import linecache
 import os
@@ -191,10 +192,33 @@ def _restore_modules(old):
             _show_lines(name, _STATE["rebuilt"][name])
 
 
+def _snapshot(obj):
+    """obj's attributes, each with a copy of its contents when it is a dict, list or set (a
+    stage build may change those in place). None: obj has no attributes to keep."""
+    if not hasattr(obj, "__dict__"):
+        return None
+    return {name: (value, copy.copy(value) if isinstance(value, (dict, list, set)) else None)
+            for name, value in vars(obj).items()}
+
+
+def _put_back_attributes(obj, snapshot):
+    """obj's attributes as `_snapshot` saw them, containers' contents included (one level:
+    a change inside an object the pipeline holds is not taken back)."""
+    vars(obj).clear()
+    for name, (value, contents) in snapshot.items():
+        if isinstance(value, list):
+            value[:] = contents
+        elif contents is not None:
+            value.clear()
+            value.update(contents)
+        vars(obj)[name] = value
+
+
 def _roll_back(undo, pipe, saved_pipe, old):
     """Take back a rebuild that failed after it began to change the worker: the class swaps
-    and field merges (newest first), the pipeline's attributes (its stages), the modules.
-    True when every step ran; False: the worker is in an unknown state."""
+    and field merges (newest first), the pipeline's attributes and their dict/list/set
+    contents (its stages, its component table), the modules. True when every step ran (not a
+    check of the whole state); False: the worker is in an unknown state."""
     clean = True
     for step in reversed(undo):
         try:
@@ -203,8 +227,7 @@ def _roll_back(undo, pipe, saved_pipe, old):
             clean = False
     try:
         if saved_pipe is not None:
-            vars(pipe).clear()
-            vars(pipe).update(saved_pipe)
+            _put_back_attributes(pipe, saved_pipe)
         _restore_modules(old)
     except Exception:
         clean = False
@@ -217,14 +240,16 @@ def rebuild(worker, payload):
     loaded torch components (their tensors stay), and build the pipeline's stages again. The
     CUDA context, weights, JIT modules and compile caches stay. On a finding nothing changes:
     a failure after the first change (a class swap refused, the stage build raising) takes
-    every change back. `clean` in a failed reply: True when nothing is left changed.
+    every change back. `clean` in a failed reply: True when every rollback step ran (the
+    pipeline's attributes are restored one level deep).
     payload: {"files": {module: text}, "prefixes": [packages the import graph covers]}."""
     from services import rebuild as RB
     t0 = time.perf_counter()
     files = (payload or {}).get("files") or {}
     pipe = getattr(worker, "pipeline", None)
     prefixes = tuple((payload or {}).get("prefixes") or sorted({m.split(".")[0] for m in files}))
-    r = RB.refresh(files, prefixes)
+    # importers rebuilt before are re-imported from their rebuilt text, not reverted to disk
+    r = RB.refresh(files, prefixes, kept=_STATE["rebuilt"])
     out = {"rank": rank_of(worker), "pid": os.getpid(), "refreshed": r["refreshed"],
            "refresh_s": r["seconds"], "findings": list(r["findings"])}
     if not r["ok"]:                             # refresh put the old modules back itself
@@ -270,7 +295,7 @@ def rebuild(worker, payload):
     # every check passed: apply (class swaps and field merges), then the stages; a failure
     # from here on takes every change back
     undo, failed, stages, sw, ts = [], [], [], {"swapped": 0}, time.perf_counter()
-    saved_pipe = dict(vars(pipe)) if hasattr(pipe, "__dict__") else None
+    saved_pipe = _snapshot(pipe)
     try:
         for name, m, bn in plans:
             if bn is None:

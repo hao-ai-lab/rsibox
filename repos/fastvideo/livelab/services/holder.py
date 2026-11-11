@@ -32,6 +32,7 @@ DEFAULT_COMPONENTS = ("transformer", "text_encoder", "vae")   # audio_vae: a non
 STAMP_PREFIXES = ("fastvideo.models.loader", "fastvideo.layers.quantization")
 STAMP_ENV = ("FASTVIDEO_H3_ADALN_TABLE", "FASTVIDEO_H3_VAE_NVFP4_DECODER", "FASTVIDEO_ATTENTION_BACKEND",
              "FASTVIDEO_MINIMAX_H3_FUSIONS", "FASTVIDEO_H3_VSA_FP4", "FASTVIDEO_FA4")
+OWN_PACKAGES = ("fastvideo",)   # packages whose modules beside a model class are stamped too
 REQUEST_TIMEOUT_S = 10.0     # a connected client must send its request within this
 ACK_TIMEOUT_S = 120.0        # and acknowledge a served module (it maps the tensors) within this
 
@@ -47,11 +48,12 @@ def _file_hash(path):
     return h.hexdigest()
 
 
-def stamp_files(module=None, modules=None, prefixes=STAMP_PREFIXES):
+def stamp_files(module=None, modules=None, prefixes=STAMP_PREFIXES, own=OWN_PACKAGES):
     """Source files whose content decides the tensors of a component: the modules of every class
-    in its module tree (and their bases), every loaded module beside them (same package: load-time
-    setup helpers such as FastH3's NVFP4 decoder setup, which leave no class in the tree), plus
-    every loaded module under `prefixes`. A helper in another package is not stamped."""
+    in its module tree (and their bases), every loaded module beside those of the engine's own
+    packages `own` (same package: load-time setup helpers such as FastH3's NVFP4 decoder setup,
+    which leave no class in the tree), plus every loaded module under `prefixes`. A helper in
+    another package is not stamped; an edit of any sibling file forces a reload."""
     modules = sys.modules if modules is None else modules
     names = set()
     if module is not None:
@@ -60,7 +62,7 @@ def stamp_files(module=None, modules=None, prefixes=STAMP_PREFIXES):
             for c in type(o).__mro__:
                 if c.__module__ and not c.__module__.startswith(("torch", "builtins")):
                     names.add(c.__module__)
-    packages = {name.rpartition(".")[0] for name in names} - {""}
+    packages = {name.rpartition(".")[0] for name in names if name.split(".")[0] in own} - {""}
     names.update(name for name in list(modules) if name.rpartition(".")[0] in packages)
     names.update(n for n in list(modules) if n.startswith(prefixes))
     files = {}
@@ -149,7 +151,8 @@ def serve(sock_path, ready_path=None):
 def _handle(conn, entries):
     """One request: put, get (stamp-checked), files, status or stop. The holder serves one
     connection at a time: a client that sends nothing within REQUEST_TIMEOUT_S, or does not
-    acknowledge a get within ACK_TIMEOUT_S, is dropped so the next rank is served."""
+    acknowledge a get within ACK_TIMEOUT_S, is dropped so the next rank is served. Not bounded:
+    a client that stops in the middle of sending its request (`conn.recv` waits for the rest)."""
     if not conn.poll(REQUEST_TIMEOUT_S):
         raise TimeoutError(f"no request in {REQUEST_TIMEOUT_S} s")
     req = conn.recv()

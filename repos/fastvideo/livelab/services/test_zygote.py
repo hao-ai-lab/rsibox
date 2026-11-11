@@ -203,6 +203,55 @@ class ForkGuardTest(unittest.TestCase):
         self.assertEqual(Z.poison_reasons(), [])
 
 
+class ServeTest(unittest.TestCase):
+    """`_serve` in this process, as the forkserver runs it, driven into its failure branches."""
+
+    def setUp(self):
+        import multiprocessing.spawn as SP
+        self.SP, self.prepare = SP, SP.prepare
+        self.saved = (Z.LIBCUDA, Z.driver_initialized, dict(Z._SNAPSHOT))
+        self.env = {k: os.environ.get(k) for k in ("FASTRSI_ZYGOTE_PRELOAD", "FASTRSI_ZYGOTE_GC_FREEZE",
+                                                   "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")}
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastrsi_no_such_module"
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+
+    def tearDown(self):
+        self.SP.prepare = self.prepare
+        Z.LIBCUDA, Z.driver_initialized = self.saved[0], self.saved[1]
+        Z._SNAPSHOT.clear()
+        Z._SNAPSHOT.update(self.saved[2])
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_a_preload_that_raises_after_cuinit_still_refuses_workers(self):
+        """Input: the preload list names a module that does not import (ImportError), and the
+        driver reports itself initialized (the cuInit happened before the failure). Expect:
+        `_serve` returns the ImportError and the driver poison, and a forked child's prepare
+        raises. Proves: the poison check runs however the preload ends. Not: the real driver
+        call (stubbed here: no libcuda on a CPU host)."""
+        Z.driver_initialized = lambda: True
+        rep = Z._serve()
+        self.assertIn("ModuleNotFoundError", rep["preload_error"])
+        self.assertEqual(rep["poison"][0], "CUDA driver initialized in the zygote (cuInit)")
+        with self.assertRaisesRegex(RuntimeError, "cannot use CUDA"):
+            self.SP.prepare({})
+
+    def test_a_libcuda_that_cannot_answer_is_poison(self):
+        """Input: LIBCUDA names a library that loads but has no cuDeviceGetCount (this host's
+        libc). Expect: the reason says the driver state is unreadable, and a forked child's
+        prepare raises. Proves: an unknown driver state fails closed, through the real
+        `driver_initialized` ctypes path."""
+        import ctypes.util
+        Z.LIBCUDA = ctypes.util.find_library("c") or "libc.so.6"
+        rep = Z._serve()
+        self.assertTrue(rep["poison"][0].startswith("CUDA driver state unreadable (AttributeError"), rep)
+        with self.assertRaisesRegex(RuntimeError, "unreadable"):
+            self.SP.prepare({})
+
+
 def _child_poisoned(env):
     import subprocess
     code = ("import sys; sys.path.insert(0, '.'); import torch; torch.cuda.is_available(); "

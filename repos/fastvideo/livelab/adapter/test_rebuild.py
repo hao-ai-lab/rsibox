@@ -147,6 +147,42 @@ class RebuildTest(unittest.TestCase):
         self.assertEqual([v["out"] for v in src["ranks"].values()], ["True", "True"], src)
 
 
+    def test_a_second_rebuild_keeps_an_earlier_rebuilt_importer(self):
+        """Input: rebuild stages (`+ 1` -> `+ 2`); rebuild ops (a comment only), which re-imports
+        its importer stages too; then install an edit of AudioDecodingStage made on the rebuilt
+        stages text (`v % 7` -> `v % 6`). Expect: the video stays the +2 output after the second
+        rebuild, the install commits, and the next check shows both the +2 video and the new
+        audio [1, 4, 1, 4, 1, 4], proven. Proves: a rebuild re-imports an importer rebuilt
+        before from its rebuilt text, so the base the lab claims is the code the workers run
+        (before, the importer went back to its file while the lab kept the rebuilt text as base,
+        and the install committed on code that was not running)."""
+        plus2 = edit(self.lab._base(STAGES), "(v * SCALE + 1) % 251", "(v * SCALE + 2) % 251")
+        self.assertEqual(self.lab.rebuild({"files": {STAGES: plus2}})["outcome"], "rebuilt")
+        self.assertEqual(self.lab.check()["output"]["video"], [124, 178, 232, 35])
+        second = self.lab.rebuild({"files": {OPS: edit(self.lab._base(OPS), "SCALE = 2", "SCALE = 2  # touched")}})
+        self.assertEqual(second["outcome"], "rebuilt")
+        self.assertIn(STAGES, second["ranks"]["rank0"]["refreshed"])
+        self.assertEqual(self.lab.check()["output"]["video"], [124, 178, 232, 35])
+        installed = self.lab.install({"files": {STAGES: edit(plus2, "v % 7", "v % 6")}})
+        self.assertEqual(installed["outcome"], "committed", installed["findings"])
+        result = self.lab.check()
+        self.assertEqual(result["output"], {"video": [124, 178, 232, 35], "audio": [1, 4, 1, 4, 1, 4]})
+        self.assertTrue(result["proven"])
+
+
+class StagePipeline:
+    """A pipeline whose stage build changes its component table in place, then fails."""
+
+    def __init__(self, comp):
+        self.modules = {"comp": comp}
+        self.registry = ["base"]
+
+    def create_pipeline_stages(self):
+        self.modules["extra"] = object()
+        self.registry.append("half-built")
+        raise RuntimeError("stage build failed")
+
+
 class RebuildInProcessTest(unittest.TestCase):
     """agent.rebuild in this process, on a plain (non-torch) component."""
 
@@ -189,6 +225,37 @@ class RebuildInProcessTest(unittest.TestCase):
         self.assertIs(sys.modules["slotpkg.m"], self.old_module)
         self.assertIs(type(self.worker.pipeline.modules["comp"]), self.old_module.Comp)
         self.assertEqual(self.worker.pipeline.modules["comp"].run(), 1)
+
+    def test_in_place_changes_of_a_failed_stage_build_are_taken_back(self):
+        """Input: a method edit of Comp (the class swap succeeds); the pipeline's stage build adds
+        to its `modules` dict and its `registry` list in place, then raises. Expect: ok False,
+        clean, `modules` and `registry` hold exactly their old entries (same objects), and the
+        component has its old class. Proves: the rollback restores the pipeline's containers,
+        not only which objects its attributes name. Not: a change inside an object the
+        pipeline holds (one level only)."""
+        from adapter import agent
+        comp = self.worker.pipeline.modules["comp"]
+        pipe = self.worker.pipeline = StagePipeline(comp)
+        table, registry = pipe.modules, pipe.registry
+        r = agent.rebuild(self.worker, {"files": {"slotpkg.m": "class Comp:\n    def run(self):\n        return 2\n"}})
+        self.assertFalse(r["ok"])
+        self.assertEqual([f["check"] for f in r["findings"]], ["rebuild_failed"])
+        self.assertTrue(r.get("clean"))
+        self.assertIs(pipe.modules, table)
+        self.assertEqual(table, {"comp": comp})
+        self.assertIs(pipe.registry, registry)
+        self.assertEqual(registry, ["base"])
+        self.assertIs(type(comp), self.old_module.Comp)
+
+    def test_a_rollback_step_that_raises_is_not_clean(self):
+        """Input: a rollback whose one undo step raises. Expect: `_roll_back` returns False (the
+        lab poisons on it). Proves: a rollback reports clean only when every step ran."""
+        from adapter import agent
+
+        def broken_step():
+            raise RuntimeError("cannot put the old class back")
+        self.assertFalse(agent._roll_back([broken_step], None, None, {}))
+        self.assertTrue(agent._roll_back([], None, None, {}))
 
 
 if __name__ == "__main__":

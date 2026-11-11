@@ -189,15 +189,18 @@ class StampFilesTest(unittest.TestCase):
         """Input: a VAE whose class lives in spkg.vaes.vae, set up at load by a function of
         spkg.vaes.decoder_setup (no class of it in the VAE: FastH3's NVFP4 decoder setup);
         spkg.other is loaded too. Expect: stamp_files names both vaes modules and not
-        spkg.other. Proves: an edit of a load-time helper beside the model class makes the
-        holder entry stale. Not: a helper in another package (not stamped)."""
+        spkg.other; with spkg not among the engine's own packages, only the class module. Proves:
+        an edit of a load-time helper beside the model class makes the holder entry stale, and
+        third-party siblings are not stamped. Not: a helper in another package (not stamped)."""
         import spkg.other  # noqa: F401
         import spkg.vaes.decoder_setup as setup
         import spkg.vaes.vae as vae_module
         vae = vae_module.VAE()
         setup.apply(vae)
-        files = H.stamp_files(vae, prefixes=("spkg.loader",))
+        files = H.stamp_files(vae, prefixes=("spkg.loader",), own=("spkg",))
         self.assertEqual(sorted(files), ["spkg.vaes.decoder_setup", "spkg.vaes.vae"])
+        # a package not the engine's own (diffusers, transformers): only the class module
+        self.assertEqual(sorted(H.stamp_files(vae, prefixes=("spkg.loader",), own=())), ["spkg.vaes.vae"])
 
 
 if __name__ == "__main__":
