@@ -45,8 +45,8 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   not answered by then (it exited, was killed, hangs, or is slower than rank 0 by more than the
   timeout) or a send or receive that fails fails the round and poisons the session
   (`participant_failed`); no round runs after it. Rank 0 keeps the failed round's buffers, so a
-  reply that comes late lands there harmlessly. The surviving ranks then wait in their receive on
-  the long-timeout group until the harness respawns the job. A rank that answers before a slower
+  reply that comes late lands there harmlessly. The surviving ranks then wait in their receive or
+  send on the long-timeout group until the harness respawns the job. A rank that answers before a slower
   rank 0 just waits. Not bounded: rank 0's own part (a hang in rank 0's own train step). The
   client's timeout or a closed connection may poison it on the client's side first, and
   `reset("respawn")` restarts the job (the harness does it).
