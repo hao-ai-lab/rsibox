@@ -48,6 +48,8 @@ from . import gap as G
 from . import state as ST
 
 INTERFACE = "1-draft"
+# exit code of a rank other than 0 whose send or receive of a lab round failed: never a clean exit
+LOST_ROUND_EXIT = 19
 # Modules whose code identity the session fingerprints (status, tamper checks). A patch's own
 # modules are added when it installs.
 MODULES = ("megatron.core.transformer.mlp", "megatron.core.transformer.attention",
@@ -366,8 +368,14 @@ class Lab:
         """Every rank: serve the gap until resume or exit."""
         if self.rank != 0:
             while True:
-                msg = self.ranks.bcast()
-                self.ranks.gather(self.handle(msg))
+                try:
+                    msg = self.ranks.bcast()
+                    self.ranks.gather(self.handle(msg))
+                except Exception as error:      # rank 0 gave up on the round, or is gone
+                    print(f"[fastrsi] rank {self.rank}: lost the lab's round with rank 0 "
+                          f"({type(error).__name__}: {str(error)[:200]}); exiting with code "
+                          f"{LOST_ROUND_EXIT}", file=sys.stderr, flush=True)
+                    os._exit(LOST_ROUND_EXIT)
                 if msg.get("op") in ("resume", "exit"):
                     return msg["op"]
         path = os.environ.get("FASTRSI_SOCK", f"/tmp/fastrsi-mg-{os.getpid()}.sock")

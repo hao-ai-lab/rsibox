@@ -94,7 +94,9 @@ class Ranks:
         return _decode(payload)
 
     def bcast(self, msg=None):
-        """Ranks other than 0: wait for rank 0's next message."""
+        """Ranks other than 0: wait for rank 0's next message. After a round rank 0 gave up on,
+        this or gather() may block until the job is respawned, or raise (transport-dependent);
+        the lab's serve loop then exits the rank non-zero (hook.LOST_ROUND_EXIT)."""
         return self._recv(TAG_MSG_SIZE, TAG_MSG)
 
     def gather(self, reply):

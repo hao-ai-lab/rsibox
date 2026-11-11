@@ -416,8 +416,9 @@ class RanksRound(unittest.TestCase):
         """Input: rank 1 sleeps 5 s in its check step (hang fault), round timeout 3 s, then its
         reply arrives about 2 s after rank 0 gave up. Expect: the check answers ok False within
         5 s, the lab is poisoned, and rank 0 survives the late reply: alive 4 s later and still
-        answering status (poisoned). Before the fix rank 0 died with SIGABRT (gloo: "Cannot lock
-        pointer to unbound buffer") when the reply landed in a receive buffer it had dropped."""
+        answering status (poisoned); rank 1 is alive or exited with LOST_ROUND_EXIT, never 0.
+        Before the fix rank 0 died with SIGABRT (gloo: "Cannot lock pointer to unbound buffer")
+        when the reply landed in a receive buffer it had dropped."""
         self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 1})["ok"])
         started = time.time()
         check = self.call({"verb": "check", "steps": 1}, 30)
@@ -426,7 +427,11 @@ class RanksRound(unittest.TestCase):
         time.sleep(4)                           # rank 1's reply lands meanwhile
         self.assertTrue(self.procs[0].is_alive(), f"rank 0 exit code {self.procs[0].exitcode}")
         self.assert_poisoned_by_a_failed_round()
-        self.assertTrue(self.procs[1].is_alive())
+        # rank 1 either still blocks in its send or receive (gloo's macOS transport) or its
+        # send or receive failed and it left with LOST_ROUND_EXIT (Linux): never a clean 0
+        from fastrsi_megatron import hook
+        exit_code = self.procs[1].exitcode
+        self.assertIn(exit_code, (None, hook.LOST_ROUND_EXIT), f"rank 1 exit code {exit_code}")
 
     def test_rank_dying_while_rank_0_is_busy_fails_the_round_within_the_bound(self):
         """Input: rank 1 exits at its check step (crash fault) while rank 0 sleeps 5 s in its own
@@ -443,6 +448,33 @@ class RanksRound(unittest.TestCase):
         self.assert_poisoned_by_a_failed_round()
         self.procs[1].join(10)
         self.assertEqual(self.procs[1].exitcode, 17)
+
+
+@unittest.skipUnless(torch is not None, "needs torch")
+class LostRound(unittest.TestCase):
+    def test_rank_that_loses_a_round_exits_non_zero_with_a_reason(self):
+        """A rank other than 0 whose receive or send of a round fails (rank 0 gave up, or is gone)
+        must not leave like a clean finish. Input (in a fresh interpreter): the CPU lab as rank 1
+        of 2, whose next receive raises the error gloo gives for a closed peer. Expect: exit code
+        hook.LOST_ROUND_EXIT and one stderr line naming the error. Before: the exception left
+        serve(), and the test worker on Linux exited 0."""
+        from fastrsi_megatron import hook
+        code = ("import sys\n"
+                "from fastrsi_megatron.test_robustness import LabFixture\n"
+                "class Gone:\n"
+                "    rank, world, group = 1, 2, None\n"
+                "    def bcast(self, msg=None):\n"
+                "        raise RuntimeError('Connection closed by peer')\n"
+                "lab = LabFixture(None).lab\n"
+                "lab.rank, lab.ranks = 1, Gone()\n"
+                "lab.serve()\n"
+                "sys.exit(0)\n")
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE)}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=env, timeout=120)
+        self.assertEqual(out.returncode, hook.LOST_ROUND_EXIT, out.stderr[-2000:])
+        self.assertIn("rank 1: lost the lab's round with rank 0 (RuntimeError: Connection closed",
+                      out.stderr)
 
 
 @unittest.skipUnless(torch is not None, "needs torch")
