@@ -338,3 +338,28 @@
 .pg-tabs a[aria-current="page"] { color: var(--fr-ink); border-bottom-color: var(--fr-ink); }
 .pg-tabs .pg-ext { margin-left: 10px; }
 @media (max-width: 820px) { .pg-tabs { overflow-x: auto; flex-wrap: nowrap; max-width: 100%; white-space: nowrap; } .pg-tabs a { padding: 6px 9px 10px; } }
+
+/* where am I: section labels, side rail (wide screens), contents button */
+.sec-k { margin: 0 0 8px; font-family: var(--mono); font-size: 11.5px; color: var(--fr-muted); white-space: pre; }
+.fig-dlg .sec-k { display: none; }
+.toc { position: fixed; z-index: 30; right: max(14px, env(safe-area-inset-right, 0px)); bottom: calc(14px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; align-items: flex-end; gap: 8px; font-family: var(--font-anthropic-sans); }
+.toc-btn { display: inline-flex; align-items: center; gap: 9px; max-width: min(78vw, 320px); padding: 7px 12px; border-radius: 999px; border: 1px solid var(--fr-rule); background: color-mix(in oklab, var(--color-panel) 88%, transparent); backdrop-filter: blur(8px); color: var(--fr-muted); font: inherit; font-size: 12.5px; cursor: pointer; opacity: 0.8; transition: opacity 0.2s, color 0.2s; }
+.toc-btn:hover, .toc-btn:focus-visible, .toc-btn[aria-expanded="true"] { opacity: 1; color: var(--fr-ink); }
+.toc-ic { display: grid; gap: 3px; flex: none; } .toc-ic i { display: block; width: 12px; height: 1.5px; background: currentColor; border-radius: 1px; } .toc-ic i:nth-child(2) { width: 8px; }
+.toc-now { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.toc-panel { display: grid; min-width: 250px; max-width: min(86vw, 340px); max-height: 70vh; overflow: auto; padding: 6px; border: 1px solid var(--fr-rule); border-radius: 12px; background: var(--color-panel); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }
+.toc-item { display: flex; gap: 10px; align-items: baseline; text-align: left; padding: 7px 10px; border: 0; border-radius: 7px; background: none; color: var(--fr-muted); font: inherit; font-size: 13.5px; cursor: pointer; }
+.toc-item .fr-num { font-size: 11px; opacity: 0.7; }
+.toc-item:hover, .toc-item:focus-visible { background: color-mix(in oklab, var(--fr-ink) 7%, transparent); color: var(--fr-ink); }
+.toc-item.on { color: var(--fr-ink); } .toc-item.on .fr-num { color: var(--fr-fast); opacity: 1; }
+.toc-rail { display: none; }
+@media (min-width: 1380px) {
+  .toc-rail { position: fixed; z-index: 20; left: max(14px, env(safe-area-inset-left, 0px)); top: 50%; transform: translateY(-50%); display: grid; gap: 2px; }
+  .toc-tick { display: flex; align-items: center; gap: 8px; height: 18px; padding: 0; border: 0; background: none; color: var(--fr-muted); font: 11.5px var(--font-anthropic-sans); cursor: pointer; text-align: left; }
+  .toc-tick::before { content: ""; flex: none; width: 10px; height: 1.5px; background: currentColor; opacity: 0.45; transition: width 0.2s, opacity 0.2s; }
+  .toc-tick span { opacity: 0; white-space: nowrap; transition: opacity 0.2s; pointer-events: none; }
+  .toc-tick.on { color: var(--fr-ink); } .toc-tick.on::before { width: 22px; opacity: 1; background: var(--fr-fast); }
+  .toc-rail:hover .toc-tick span, .toc-tick:focus-visible span { opacity: 1; } .toc-rail:hover { background: color-mix(in oklab, var(--color-bg) 92%, transparent); border-radius: 8px; padding: 6px 10px 6px 0; }
+}
+@media (prefers-reduced-motion: reduce) { .toc-btn, .toc-tick::before, .toc-tick span { transition: none; } }
+.toc { flex-direction: column-reverse; }

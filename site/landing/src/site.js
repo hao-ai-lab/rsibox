@@ -118,6 +118,38 @@
     }), { threshold: 0.4 }).observe(lp);
   }
 
+  // ---- where am I: a numbered label on each section, a side rail on wide screens, and a small contents button everywhere
+  const TOC = [['top', 'Start'], ['loop', 'The loop'], ['story', 'Where the overhead comes from'], ['arch', 'How FastRSI works'], ['built', 'What it built per engine'],
+    ['sooner', 'Result: same result sooner'], ['eval-time', 'Result: time per evaluation'], ['model-speed', 'Result: faster models'], ['use', 'Try it']]
+    .map(([id, label]) => ({ id, label, el: document.getElementById(id) })).filter((t) => t.el);
+  if (TOC.length > 2) {
+    TOC.forEach((t, i) => { const h = i && t.el.querySelector('h2'); if (h) h.parentNode.insertBefore($('p', 'sec-k', String(i).padStart(2, '0') + ' / ' + String(TOC.length - 1).padStart(2, '0') + '  ' + t.label, null), h); });
+    const go = (t) => { t.el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' }); };
+    const rail = $('nav', 'toc-rail', null, document.body); rail.setAttribute('aria-label', 'Sections');
+    const wrap = $('div', 'toc', null, document.body), btn = $('button', 'toc-btn', null, wrap), panel = $('nav', 'toc-panel', null, wrap);
+    btn.type = 'button'; btn.setAttribute('aria-expanded', 'false'); btn.setAttribute('aria-label', 'Contents'); panel.hidden = true; panel.setAttribute('aria-label', 'Contents');
+    const bIcon = $('span', 'toc-ic', null, btn), bTxt = $('span', 'toc-now', '', btn); bIcon.setAttribute('aria-hidden', 'true'); bIcon.innerHTML = '<i></i><i></i><i></i>';
+    const items = TOC.map((t, i) => {
+      const r = $('button', 'toc-tick', null, rail); r.type = 'button'; $('span', null, t.label, r); r.addEventListener('click', () => go(t));
+      const p = $('button', 'toc-item', null, panel); p.type = 'button'; $('span', 'fr-num', String(i).padStart(2, '0'), p); $('span', null, t.label, p);
+      p.addEventListener('click', () => { panel.hidden = true; btn.setAttribute('aria-expanded', 'false'); go(t); });
+      return [r, p];
+    });
+    btn.addEventListener('click', () => { panel.hidden = !panel.hidden; btn.setAttribute('aria-expanded', String(!panel.hidden)); });
+    document.addEventListener('click', (e) => { if (!wrap.contains(e.target)) { panel.hidden = true; btn.setAttribute('aria-expanded', 'false'); } });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { panel.hidden = true; btn.setAttribute('aria-expanded', 'false'); } });
+    let cur = -1, tick = false;
+    const mark = () => {
+      tick = false; let k = 0; const line = innerHeight * 0.4;
+      TOC.forEach((t, i) => { if (t.el.isConnected && t.el.getBoundingClientRect().top <= line) k = i; });
+      if (k === cur) return; cur = k;
+      items.forEach(([r, p], i) => { r.classList.toggle('on', i === k); p.classList.toggle('on', i === k); if (i === k) { r.setAttribute('aria-current', 'true'); p.setAttribute('aria-current', 'true'); } else { r.removeAttribute('aria-current'); p.removeAttribute('aria-current'); } });
+      bTxt.textContent = k ? String(k).padStart(2, '0') + '  ' + TOC[k].label : 'Contents';
+    };
+    addEventListener('scroll', () => { if (!tick) { tick = true; requestAnimationFrame(mark); } }, { passive: true });
+    addEventListener('resize', mark); mark();
+  }
+
   // ---- "Try it": copy the prompt and show it
   const dlg = document.getElementById('try-dlg'), text = document.getElementById('install-text'), status = document.getElementById('try-status');
   const copyPrompt = async () => {
