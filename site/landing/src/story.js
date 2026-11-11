@@ -52,7 +52,7 @@
     o.replaceChildren(); const v = $('span', ok ? 'good' : 'bad', verdict, o); $('span', 't', PROBE.toFixed(1) + ' s', o);
     H.tries++; hud(); if (flag) { await c.wait(700); v.className = 'warn sus'; $('span', 'flag', flag, o); } await c.wait(420); return k;
   }
-  const NB_CAP = 'The probe time is measured: ' + PROBE.toFixed(1) + ' s for a small-batch probe on a warm vLLM engine. Speedup values are illustrative.';
+  const NB_CAP = 'The probe time is measured: ' + PROBE.toFixed(1) + ' s for a small-batch probe on a warm vLLM engine. The edits and speedup values are illustrative.';
   const loaded = (n) => { const k = cell(n); k.code.textContent = 'engine = serve("nemotron-3.5-super")'; const o = $('div', 'o', null, k.el); $('span', 't', 'ready in ' + Math.round(STARTUP) + ' s · start-up paid once', o); };
 
   const scenes = {
@@ -84,15 +84,15 @@
     async notebook(c) {
       win('notebook · scheduler-debug.ipynb', NB_CAP, true);
       H.tries = 0; H.wait = 0; hud(PROBE.toFixed(1) + ' s'); loaded(1); await c.wait(500);
-      await probeCell(c, 2, 'reload(scheduler); probe(engine, steps=10)', '0.98×  ✗ no gain', false);
-      await probeCell(c, 3, 'reload(scheduler); probe(engine, steps=10)', '1.04×  ✓ keep', true);
-      await probeCell(c, 4, 'reload(scheduler); probe(engine, steps=10)', '1.07×  ✓ keep', true);
+      await probeCell(c, 2, "!sed -i 's/budget = max_tokens/budget = max_tokens * 2/' scheduler.py\n" + 'reload(scheduler); probe(engine, steps=10)', '0.98×  ✗ no gain', false);
+      await probeCell(c, 3, "!sed -i 's/self.waiting/sorted(self.waiting, key=prompt_len)/' scheduler.py\n" + 'reload(scheduler); probe(engine, steps=10)', '1.04×  ✓ keep', true);
+      await probeCell(c, 4, "!sed -i 's/key=prompt_len/key=remaining_tokens/' scheduler.py\n" + 'reload(scheduler); probe(engine, steps=10)', '1.07×  ✓ keep', true);
       line('sum', H.tries + ' tries in ' + H.wait.toFixed(1) + ' s. One restart would still be loading weights.');
     },
     async catch(c) {
-      win('notebook · scheduler-debug.ipynb', 'Three ways a hand reload goes wrong. Speedup values are illustrative; the ' + Math.round(STARTUP) + ' s restart is measured.', true);
+      win('notebook · scheduler-debug.ipynb', 'Three ways a hand reload goes wrong. The edit and speedup values are illustrative; the ' + Math.round(STARTUP) + ' s restart is measured.', true);
       H.tries = 3; H.wait = 3 * PROBE; hud(PROBE.toFixed(1) + ' s');
-      await probeCell(c, 5, 'reload(scheduler); probe(engine, steps=10)', '1.31×  ✓', true, 'too good?');
+      await probeCell(c, 5, "!sed -i 's/preempt = True/preempt = False/' scheduler.py\n" + 'reload(scheduler); probe(engine, steps=10)', '1.31×  ✓', true, 'too good?');
       const notes = $('div', 'notes', null, body);
       for (const [h, t] of [['The edit never ran.', 'The engine still holds objects built from the old class.'], ['The graphs are stale.', 'CUDA graphs captured before the edit replay the old code.'], ['The state is dirty.', 'The last try left its cache and counters behind.']]) {
         const d = $('div', null, null, notes); $('b', null, h + ' ', d); d.appendChild(document.createTextNode(t)); await c.wait(1000);
