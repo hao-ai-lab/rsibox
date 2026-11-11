@@ -97,9 +97,10 @@
       for (const [h, t] of [['The edit never ran.', 'The engine still holds objects built from the old class.'], ['The graphs are stale.', 'CUDA graphs captured before the edit replay the old code.'], ['The state is dirty.', 'The last try left its cache and counters behind.']]) {
         const d = $('div', null, null, notes); $('b', null, h + ' ', d); d.appendChild(document.createTextNode(t)); await c.wait(1000);
       }
+      await c.wait(400); const v = $('div', 'verdict', null, body); $('span', 'vx', '✗', v); $('b', null, 'Untrusted. ', v); v.appendChild(document.createTextNode('Re-initialising everything by hand is too tedious, and there is no clean way to revert. It has to restart.')); await c.wait(1400);
       const k = cell(6); await c.type(k.code, 'engine = serve("nemotron-3.5-super")  # restart to be sure', 60);
       const o = $('div', 'o', null, k.el), b = bar(o); hud(Math.round(STARTUP) + ' s'); await c.spend(b, STARTUP, 3600);
-      o.replaceChildren(); $('span', 't', 'ready in ' + Math.round(STARTUP) + ' s. Back to waiting.', o);
+      o.replaceChildren(); $('span', 't', 'ready in ' + Math.round(STARTUP) + ' s', o); $('span', 'bad', '✗ ' + Math.round(STARTUP) + ' s wasted restarting everything', o);
     },
     async fastrsi(c) {
       win('FastRSI · live engine', 'Install time (0.02 s), probe time and CUDA graph capture (' + Math.round(GRAPH) + ' s) are measured on vLLM. Failed edits behave as in our fault-injection tests: the check fails and the process is kept.', true);
