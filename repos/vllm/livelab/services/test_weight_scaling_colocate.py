@@ -214,6 +214,59 @@ def test_restore_never_copies_from_the_engine_with_the_pending_patch(cpu_pool):
     assert engine_s.holder.weight == 1.0
 
 
+def test_a_verified_standby_takes_over_when_the_active_dies_inside_accept(cpu_pool, monkeypatch):
+    """Input: a patch x2 pending on A; A stops answering (digest and reference prompts) right
+    after the replay reached S and the ledger took p1. Action: accept(), then fail A over.
+    Expect: accept verifies S against A's digest taken before the replay and returns; the
+    failover goes to S, which serves at 2.0 and matches the ledger digest. Before (97b6ee6):
+    accept raised on the dead A, S stayed tainted with the old ledger digest, and the pool had
+    no engine it would fail over to."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    real_rpc, real_reference = engine_a.rpc, W.reference
+
+    def dead_after_ledger(method, arg="{}", timeout=300):
+        if pool.ledger.ids:
+            raise ConnectionError("engine A stopped answering")
+        return real_rpc(method, arg, timeout)
+
+    def reference_without_a(port, model, max_tokens=16):
+        if pool.ledger.ids and port == engine_a.port:
+            raise ConnectionError("engine A stopped answering")
+        return real_reference(port, model, max_tokens)
+    engine_a.rpc = dead_after_ledger
+    monkeypatch.setattr(W, "reference", reference_without_a)
+    result = pool.accept()
+    assert result["standby_digest_ok"] is True and pool.ledger.ids == ["p1"]
+    assert pool.failover("A died", engine_a) is not None and pool.active is engine_s
+    assert engine_s.holder.weight == 2.0 and pool.check_integrity(engine_s)["ok"]
+
+
+def test_a_standby_with_wrong_weights_after_accept_is_still_refused(cpu_pool):
+    """Input: a patch x2 pending on A; S's replay answers ok but leaves S at 3.0. Action:
+    accept(), then fail A over. Expect: standby_digest_ok False, S tainted, failover refused
+    (A keeps serving). Proves the accept-time check compares real digests, not a flag."""
+    pool, engine_a, engine_s = cpu_pool
+    pool.evaluate(W.Patch("p1", "w", "scale", 2.0))
+    real_rpc = engine_s.rpc
+
+    def wrong_replay(method, arg="{}", timeout=300):
+        if method == "lease_apply":
+            engine_s.holder.weight = 3.0
+            return {"ok": True, "seconds": 0.0, "touched": 1}
+        return real_rpc(method, arg, timeout)
+    engine_s.rpc = wrong_replay
+    assert pool.accept()["standby_digest_ok"] is False and engine_s.name in pool.tainted
+    assert pool.failover("A 500", engine_a) is None and pool.active is engine_a
+
+
+def test_rollback_with_nothing_pending_is_a_clear_refusal(cpu_pool):
+    """Before: rollback() with no pending patch raised AttributeError ('NoneType' ... 'id')."""
+    pool, _, _ = cpu_pool
+    with pytest.raises(RuntimeError, match="nothing pending"):
+        pool.rollback("no patch")
+
+
 # Stands in for the vLLM venv's python in copy(): it is run as `python <script> copy-rank
 # --rank R ...`. Rank 1 fails at once (as when its holder does not answer); rank 0 would wait
 # in NCCL init for its peer for 15 minutes (here: 60 s).

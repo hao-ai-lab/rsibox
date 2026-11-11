@@ -870,6 +870,8 @@ class Pool:
         still serves, and the patched holder is re-copied from the serving one."""
         with self.lock:
             patch, eng = self.pending, self.pending_engine
+            if patch is None:
+                raise RuntimeError("nothing pending to roll back")
             failover_record = None
             if eng is self.active:
                 failover_record = self.failover(f"rollback {patch.id}: {why}", eng)
@@ -883,7 +885,10 @@ class Pool:
 
     def accept(self):
         """Commit the pending patch: ledger, then replay onto the standby, then the new
-        reference (tokens/logprobs and digest) is the ledger's."""
+        reference (tokens/logprobs and digest) is the ledger's. The new ledger digest is the
+        active engine's, taken before the replay, so the standby is verified against it even if
+        the active engine dies after the replay; the reference prompts then come from the
+        verified standby."""
         # The lock is held across the replay, so no failover can swap the engines in between
         # (a failover waits for it); a standby whose replay did not complete is tainted.
         with self.lock:
@@ -895,6 +900,7 @@ class Pool:
                                    f"{self.pending_engine.name} no longer serves (failed over); "
                                    "rollback() instead")
             active, standby = self.active, self.standby
+            patched_digest = self.digest(active)          # before anything changes
             self.tainted.add(standby.name)
             replay = standby.rpc("lease_apply", patch.to_json())
             if not replay.get("ok"):
@@ -902,13 +908,18 @@ class Pool:
             standby.reset_prefix_cache()
             self.ledger.append(patch)
             self.pending = self.pending_engine = None
-        with self.router.drained():
-            self.ref = reference(active.port, self.model)
-        self.ref_digest = self.digest(active)
-        standby_agree = digests_agree(self.ref_digest, self.digest(standby))
+            self.ref_digest = patched_digest
+        standby_agree = digests_agree(patched_digest, self.digest(standby))
         if standby_agree["ok"]:
             with self.lock:
                 self.tainted.discard(standby.name)
+        with self.router.drained():
+            try:
+                self.ref = reference(active.port, self.model)
+            except Exception:  # noqa: BLE001 - the active engine died after the replay
+                if not standby_agree["ok"]:
+                    raise
+                self.ref = reference(standby.port, self.model)
         return {"accepted": patch.id, "ledger": self.ledger.ids,
                 "standby_digest_ok": standby_agree["ok"]}
 

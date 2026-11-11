@@ -5,7 +5,7 @@ torch and vLLM stubbed out. The cases that need vLLM's real parser are in test_v
 
 Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
 """
-import json, os, signal, socket, subprocess, sys, tempfile, time
+import json, os, shutil, signal, socket, subprocess, sys, tempfile, time
 import pytest
 from pathlib import Path
 
@@ -351,7 +351,7 @@ def test_zygote_child_applies_an_accepted_env_difference():
     """Input: a zygote started with KEEP=start, CHANGE=old, GONE=x whose imports then set KEEP
     (as torch or vLLM set variables at import), and a fork request with CHANGE=new, ADDED=a,
     GONE unset and KEEP=start, with the `env` finding accepted. Action: zygote._child in a real
-    forked process, with a stand-in `vllm.entrypoints.cli.main` that records os.environ.
+    forked process, with a stand-in `vllm.entrypoints.cli.main` that records those four keys.
     Expect: the server sees CHANGE=new and ADDED=a, no GONE, and KEEP keeps its import-time
     value. Before: only VOLATILE keys were copied, so the server ran with CHANGE=old, no ADDED
     and GONE=x although the finding said accepting it applies them. Does not prove: which
@@ -363,7 +363,8 @@ def test_zygote_child_applies_an_accepted_env_difference():
     if pid == 0:
         try:
             cli = types.ModuleType("vllm.entrypoints.cli.main")
-            cli.main = lambda: Path(out).write_text(json.dumps(dict(os.environ)))
+            cli.main = lambda: Path(out).write_text(json.dumps(   # those keys only, not the env
+                {key: os.environ.get(key) for key in ("KEEP", "CHANGE", "ADDED", "GONE")}))
             sys.modules["vllm.entrypoints.cli.main"] = cli
             zygote.START_ENV = {"KEEP": "start", "CHANGE": "old", "GONE": "x"}
             os.environ.update(KEEP="set-by-import", CHANGE="old", GONE="x")
@@ -372,11 +373,13 @@ def test_zygote_child_applies_an_accepted_env_difference():
             zygote._child(req, [])
         finally:
             os._exit(3)
-    _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 0, Path(work_dir, "child.log").read_text()
-    seen = json.loads(Path(out).read_text())
-    seen = {key: seen.get(key) for key in ("KEEP", "CHANGE", "ADDED", "GONE")}   # not the whole env
-    assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
+    try:
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0, Path(work_dir, "child.log").read_text()
+        seen = json.loads(Path(out).read_text())
+        assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")

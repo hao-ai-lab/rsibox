@@ -585,7 +585,9 @@ def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None):
     """Stop engine `pid` and its descendants (_descendants: its process tree, group and
     session). After `pid` itself exited, only the members that carry the launch's `marker`
     (its MARKER_ENV value) are stopped: a pid can be reused by another session's leader, and
-    without a marker nothing is signalled. SIGTERM, up to `grace` s, then SIGKILL, up to
+    without a marker nothing is signalled. /proc/<pid>/environ is the exec-time environment, so
+    a server forked from the zygote (which sets MARKER_ENV after the fork, without exec) never
+    shows it: for those, a stop after the leader exited signals nothing and says so. SIGTERM, up to `grace` s, then SIGKILL, up to
     `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
     signalled only while it still has that start time, so a reused pid is never hit.
     Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
