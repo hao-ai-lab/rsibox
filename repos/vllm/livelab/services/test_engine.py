@@ -735,20 +735,46 @@ def test_descendants_include_workers_reparented_out_of_the_engine_tree(tmp_path)
     assert sorted(engine._descendants(1000, proc_root=str(tmp_path))) == [1001, 1002]
 
 
+def test_only_members_with_the_launch_marker_are_verified(tmp_path):
+    """Input: a /proc tree with three session members of an exited leader: one with the
+    launch's marker in its environ, one with another launch's, one with none, and this test's
+    own pid with the marker. Action: verified_members. Expect: only the first; with no marker,
+    none. Before: every group or session member of a pid that may have been reused was
+    signalled. Does not prove: the signals (the Linux case below)."""
+    marker_line = f"{engine.MARKER_ENV}=/cache/engines/live/abc".encode()
+    environs = {2001: b"PATH=/bin\0" + marker_line + b"\0",
+                2002: f"{engine.MARKER_ENV}=/cache/engines/live/other".encode() + b"\0",
+                2003: b"PATH=/bin\0", os.getpid(): marker_line + b"\0"}
+    for member_pid, environ in environs.items():
+        (tmp_path / str(member_pid)).mkdir()
+        (tmp_path / str(member_pid) / "environ").write_bytes(environ)
+    members = list(environs)
+    assert engine.verified_members(members, "/cache/engines/live/abc",
+                                   proc_root=str(tmp_path)) == [2001]
+    assert engine.verified_members(members, None, proc_root=str(tmp_path)) == []
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_stop_engine_stops_the_session_after_its_leader_exited():
-    """Input: an engine leader (own session) that started a worker and exited; the worker
-    stays in the leader's session with ppid 1. Action: stop_engine(leader pid). Expect: the
-    worker is killed and stopped is True. Before: stop_engine returned at once with "was not
-    running" and the worker kept running (holding the GPU, in a real engine)."""
+    """Input: an engine leader (own session, launch marker in its env) that started a worker
+    and exited; the worker stays in the leader's session with ppid 1. Action: stop_engine(leader
+    pid) without the marker, then with it. Expect: without it nothing is signalled ("not
+    verified", worker alive: the pid may belong to another session now); with it the worker is
+    killed and stopped is True. Before: stop_engine returned at once with "was not running" and
+    the worker kept running (holding the GPU, in a real engine)."""
+    marker = tempfile.mkdtemp(prefix="live")
     leader = subprocess.Popen(
         [sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable,"
          " '-c', 'import time; time.sleep(60)']).pid, flush=True)"],
-        stdout=subprocess.PIPE, text=True, start_new_session=True)
+        stdout=subprocess.PIPE, text=True, start_new_session=True,
+        env={**os.environ, engine.MARKER_ENV: marker})
     worker = int(leader.stdout.readline())
     leader.wait(timeout=10)
     try:
-        result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+        unverified = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+        assert unverified["stopped"] is False and unverified["unverified"] == [worker]
+        assert not zygote._exited(worker)
+        result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
         assert result["stopped"] is True, result
         assert zygote._exited(worker), "the leader's session member is still running"
     finally:
