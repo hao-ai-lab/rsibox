@@ -303,6 +303,6 @@ def test_the_socket_path_check_counts_the_fips_and_draft_names(monkeypatch):
     def no_md5(*args, **kwargs):
         raise ValueError("md5 disabled (FIPS)")
     monkeypatch.setattr(hashlib, "md5", no_md5)
-    assert len(weights.socket_name("GPU-x")) == 87
+    assert len(socket_name("GPU-x")) == 87
     finding = weights.long_socket_path_finding(socket_dir)
     assert finding["check"] == "weights_socket_path" and "124 bytes" in finding["observed"]
