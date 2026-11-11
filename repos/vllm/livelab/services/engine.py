@@ -232,7 +232,8 @@ def value_finding(parsed):
     value no engine runs with (not a positive integer), else None. vLLM's parser takes any
     int; a reconfigure refuses such a value before it stops the running engine."""
     args = parsed.get("args") or {}
-    values = {f: args[f] for f in live_reconfig.LIVE_FIELDS if args.get(f) is not None}
+    values = {field_name: args[field_name] for field_name in live_reconfig.LIVE_FIELDS
+              if args.get(field_name) is not None}
     problems = live_reconfig.check_values(values, {})
     if not problems:
         return None
@@ -512,9 +513,9 @@ def _descendants(pid, proc_root="/proc"):
     for entry in entries:
         if entry.isdigit():
             try:
-                with open(f"{proc_root}/{entry}/stat") as f:
-                    fields = f.read().rsplit(")", 1)[1].split()
-                parent_pid, group_id, session_id = (int(x) for x in fields[1:4])
+                with open(f"{proc_root}/{entry}/stat") as stat_file:
+                    fields = stat_file.read().rsplit(")", 1)[1].split()
+                parent_pid, group_id, session_id = (int(value) for value in fields[1:4])
                 children_by_parent.setdefault(parent_pid, []).append(int(entry))
                 if int(entry) != pid and pid in (group_id, session_id):
                     members.append(int(entry))
@@ -817,8 +818,9 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     ) else None
     findings, preflight_report = argv_findings(launcher_args, new_parsed), {}
     if not findings and reconfig is not None:
-        findings = [f for f in (vllm_args.override_finding(patch_vargv, old_parsed, new_parsed),
-                                value_finding(new_parsed)) if f]
+        findings = [finding for finding in (
+            vllm_args.override_finding(patch_vargv, old_parsed, new_parsed),
+            value_finding(new_parsed)) if finding]
     if not findings and reconfig is not None:
         findings = reconfig_findings(launcher_args, new_parsed, reconfig)
     if not findings:

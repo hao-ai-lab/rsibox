@@ -333,17 +333,17 @@ def test_zygote_env_pins_cute_dsl_arch_without_fork(monkeypatch):
     import of CuTe DSL (through FlashInfer) does not call cuInit, and both envs agree (no `env`
     finding). Before: only --fork set it, and a zygote without --fork on a GPU host initialized
     the CUDA driver at import and stopped. Does not prove: the import on a real GPU (receipt)."""
-    d = _short_dir()
-    smi_dir = os.path.join(d, "bin")
+    work_dir = _short_dir()
+    smi_dir = os.path.join(work_dir, "bin")
     os.makedirs(smi_dir)
     _script(smi_dir, "nvidia-smi", "#!{py}\nprint('10.0')\n")
     monkeypatch.setenv("PATH", smi_dir + os.pathsep + os.environ["PATH"])
     monkeypatch.delenv("CUTE_DSL_ARCH", raising=False)
-    sock = os.path.join(d, "z.sock")
-    zyg, _ = engine.parse(["zygote", "--zygote", sock, "--cache-root", d, "--log", "x"])
-    srv, _ = engine.parse(["start", "--zygote", sock, "--cache-root", d, "--log", "x"])
-    direct, _ = engine.parse(["start", "--cache-root", d, "--log", "x"])
-    arch = [engine.engine_env(a).get("CUTE_DSL_ARCH") for a in (zyg, srv, direct)]  # not the env
+    sock = os.path.join(work_dir, "z.sock")
+    zyg, _ = engine.parse(["zygote", "--zygote", sock, "--cache-root", work_dir, "--log", "x"])
+    srv, _ = engine.parse(["start", "--zygote", sock, "--cache-root", work_dir, "--log", "x"])
+    direct, _ = engine.parse(["start", "--cache-root", work_dir, "--log", "x"])
+    arch = [engine.engine_env(launcher_args).get("CUTE_DSL_ARCH") for launcher_args in (zyg, srv, direct)]  # not the env
     assert arch == ["sm_100a", "sm_100a", None]          # a direct start without --fork: unset
 
 
@@ -357,8 +357,8 @@ def test_zygote_child_applies_an_accepted_env_difference():
     and GONE=x although the finding said accepting it applies them. Does not prove: which
     variables vLLM reads at import (an accepted one of those keeps the zygote's import)."""
     import types
-    d = _short_dir()
-    out = os.path.join(d, "env.json")
+    work_dir = _short_dir()
+    out = os.path.join(work_dir, "env.json")
     pid = os.fork()
     if pid == 0:
         try:
@@ -367,13 +367,13 @@ def test_zygote_child_applies_an_accepted_env_difference():
             sys.modules["vllm.entrypoints.cli.main"] = cli
             zygote.START_ENV = {"KEEP": "start", "CHANGE": "old", "GONE": "x"}
             os.environ.update(KEEP="set-by-import", CHANGE="old", GONE="x")
-            req = {"argv": ["vllm", "serve"], "log": os.path.join(d, "child.log"), "cwd": d,
+            req = {"argv": ["vllm", "serve"], "log": os.path.join(work_dir, "child.log"), "cwd": work_dir,
                    "env": {"KEEP": "start", "CHANGE": "new", "ADDED": "a"}, "accept": ["env"]}
             zygote._child(req, [])
         finally:
             os._exit(3)
     _, status = os.waitpid(pid, 0)
-    assert os.waitstatus_to_exitcode(status) == 0, Path(d, "child.log").read_text()
+    assert os.waitstatus_to_exitcode(status) == 0, Path(work_dir, "child.log").read_text()
     seen = json.loads(Path(out).read_text())
     seen = {k: seen.get(k) for k in ("KEEP", "CHANGE", "ADDED", "GONE")}   # not the whole env
     assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
@@ -748,8 +748,8 @@ def test_stop_engine_stops_the_session_after_its_leader_exited():
     worker = int(leader.stdout.readline())
     leader.wait(timeout=10)
     try:
-        r = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
-        assert r["stopped"] is True, r
+        result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+        assert result["stopped"] is True, result
         assert zygote._exited(worker), "the leader's session member is still running"
     finally:
         _stop(worker)

@@ -517,13 +517,13 @@ def test_tp_dp_reshard_refuses_moe_holders_sharded_by_expert() -> None:
     tp4_ep4, rep = resharder.reshard_moe_tp_to_ep(tp4, specs)
     assert rep.is_ok and tp4_ep4[0].tensors["moe.w13"].shape == (1, 2 * inter_size, hidden_size)
     dp4_ep4 = [
-        RankWeightHolder(rank=r, tp_size=1, dp_size=4, ep_size=4, moe_tp_size=1,
-                         tensors=dict(tp4_ep4[r].tensors))
-        for r in range(4)
+        RankWeightHolder(rank=rank, tp_size=1, dp_size=4, ep_size=4, moe_tp_size=1,
+                         tensors=dict(tp4_ep4[rank].tensors))
+        for rank in range(4)
     ]
     for holders, target_tp, target_dp in ((tp4_ep4, 1, 4), (dp4_ep4, 4, 1)):
         out, report = resharder.reshard_tp_dp(
             holders, specs, target_tp_size=target_tp, target_dp_size=target_dp)
         assert not report.is_ok, report.to_dict()
-        assert [f.code for f in report.findings] == ["reshard_moe_mesh_unsupported"]
+        assert [item.code for item in report.findings] == ["reshard_moe_mesh_unsupported"]
         assert all(not holder.tensors for holder in out)

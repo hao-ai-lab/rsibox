@@ -363,14 +363,14 @@ def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.exe
             procs.append(subprocess.Popen(cmd, env=env, stdout=out, stderr=err, text=True))
         deadline = time.monotonic() + 900
         while time.monotonic() < deadline:
-            codes = [p.poll() for p in procs]
+            codes = [proc.poll() for proc in procs]
             if None not in codes or any(code not in (None, 0) for code in codes):
                 break
             time.sleep(0.1)
-        for p in procs:
-            if p.poll() is None:
-                p.kill()
-            p.wait()
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
         outs = []
         for out in files:
             out.seek(0)

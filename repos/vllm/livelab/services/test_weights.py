@@ -272,16 +272,16 @@ def test_a_socket_dir_too_long_for_af_unix_is_refused_before_the_daemon_loads(d)
     assert len(os.fsencode(os.path.abspath(long_dir))) == 60
     marker = os.path.join(d, "preload-ran")
     fake = _script(d, "vllm", "#!{py}\nopen(%r, 'w').write('ran')\n" % marker)
-    t = time.time()
-    r = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
+    started = time.time()
+    result = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
                         "--socket-dir", long_dir, "--log", os.path.join(d, "preload.log"),
                         "--vllm", fake, "--timeout", "30"],
                        capture_output=True, text=True, timeout=60)
-    assert r.returncode == 2, r.stdout + r.stderr
-    rep = json.loads(r.stdout)
+    assert result.returncode == 2, result.stdout + result.stderr
+    rep = json.loads(result.stdout)
     assert rep["ready"] is False and rep["pid"] is None
     assert rep["finding"]["check"] == "weights_socket_path" and "107" in rep["finding"]["observed"]
-    assert time.time() - t < 10 and not os.path.exists(marker)
+    assert time.time() - started < 10 and not os.path.exists(marker)
     import weight_scaling_colocate
     holder = weight_scaling_colocate.Holder(0, long_dir, os.path.join(d, "holder.log"))
     with pytest.raises(RuntimeError, match="too long"):

@@ -61,11 +61,11 @@ def long_socket_path_finding(socket_dir):
     so this needs no GPU uuid. The daemon binds only after loading the weights, so a too-long
     path fails minutes in; this check costs microseconds."""
     path = os.path.join(os.path.abspath(socket_dir), socket_name("GPU-length-only"))
-    n = len(os.fsencode(path))
-    if n <= MAX_SOCK_PATH:
+    path_bytes = len(os.fsencode(path))
+    if path_bytes <= MAX_SOCK_PATH:
         return None
     return {"check": "weights_socket_path",
-            "observed": f"daemon socket path is {n} bytes > {MAX_SOCK_PATH} (AF_UNIX): {path}",
+            "observed": f"daemon socket path is {path_bytes} bytes > {MAX_SOCK_PATH} (AF_UNIX): {path}",
             "expected": f"--socket-dir short enough that the socket path fits {MAX_SOCK_PATH} "
                         "bytes",
             "why": "the daemon loads the weights, then fails to bind its socket",
