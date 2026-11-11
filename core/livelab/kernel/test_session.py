@@ -186,8 +186,8 @@ class SessionTest(unittest.TestCase):
         with a ranks_disagree finding, and the session is poisoned (status() says so) and a
         second install is refused with session_poisoned. Pain point: the session recorded the
         split fingerprint as the expected one, so verify() passed and the lab reported
-        "edited" while its ranks ran different code. Not: ranks_disagree accepted by the plan
-        when only some ranks hold a function by design (that stays "edited")."""
+        "edited" while its ranks ran different code. Not: an accept, which never excuses it
+        (test_a_rank_that_never_switched_poisons_even_with_accept_all)."""
         n0, _, _ = fresh("split0")
         n1, eng1, _ = fresh("split1")
         lp0 = C.LocalParticipant("r0", alias={"toy": n0})
@@ -210,6 +210,61 @@ class SessionTest(unittest.TestCase):
         self.assertIn("ranks_disagree", [finding["check"] for finding in rec["findings"]])
         self.assertEqual((res["state"], sess.status()["state"]), ("poisoned", "poisoned"))
         self.assertEqual(sess.install(plan)["findings"][0]["check"], "session_poisoned")
+
+    def test_a_rank_that_never_switched_poisons_even_with_accept_all(self):
+        """Input: (a) a group of 2 ranks where rank 1's client answers commit ok without
+        committing and answers proof with no code hashes; (b) 2 separate participants, the
+        second doing the same. Each plan has accept "all". Expected: the install commits,
+        the session is poisoned (ranks_disagree) and the silent rank still runs base code
+        (step(3) = 17 vs 1700). Pain point: in (a) an overridable ranks_disagree was excused
+        by the accept, and in (b) commit_hashes.agree was None (no target shared), so the
+        session recorded the split as its expected state, "edited", verify() ok. Not: a role
+        that abstains or stages nothing (a plan of repair cells only), which may show no
+        hash."""
+        plan = {"accept": "all", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        for grouped in (True, False):
+            n0, eng0, _ = fresh("silent0")
+            n1, eng1, _ = fresh("silent1")
+            lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+            lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+
+            def silent(method, payload, lp1=lp1):
+                if method == "commit":
+                    return {"ok": True, "findings": []}         # says ok, installs nothing
+                if method == "proof":
+                    return {"ok": True, "findings": [], "hashes": {}, "witness": {}}
+                return getattr(lp1, method)(payload)
+            second = C.CallParticipant("r1", silent)
+            parts = [C.GroupParticipant("workers", [lp0, second])] if grouped else [lp0, second]
+            sess = SS.Session(C.Coordinator(parts, phase2_deadline_s=None), ["toy.engine"])
+            res = sess.install(plan)
+            self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"), grouped)
+            self.assertIn("ranks_disagree", [finding["check"] for finding in sess.poisoned()])
+            self.assertEqual((eng0.Engine().step(3), eng1.Engine().step(3)), (1700, 17))
+
+    def test_a_commit_with_no_receipt_to_read_poisons(self):
+        """Input: a coordinator whose run reports committed with receipt None and keeps no
+        record of the transaction. Expected: the session is poisoned. Pain point: no receipt
+        read as "no split", so code nobody checked became the expected state. Not: the real
+        coordinator, which keeps the receipt it built (`txns[txn]["rec"]`) and the session
+        reads it from there."""
+        name, _, _ = fresh("norec")
+        coordinator = C.Coordinator([C.LocalParticipant("r0", alias={"toy": name})],
+                                    phase2_deadline_s=None)
+        real_run = coordinator.run
+
+        def run_without_receipt(plan, **kw):
+            res = real_run(plan, **kw)
+            coordinator.txns.pop(res["txn"], None)
+            return {**res, "receipt": None}
+        coordinator.run = run_without_receipt
+        sess = SS.Session(coordinator, ["toy.engine"])
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"))
 
 
 if __name__ == "__main__":

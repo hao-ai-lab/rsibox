@@ -342,8 +342,9 @@ class LocalParticipant(Participant):
     def at_base(self, _=None):
         """Is this participant back at its start state? {ok, pending_txns, journal_len,
         modules: {module: [base digest, live digest]}, extra_names (module names added and
-        left), missing_names (base module names that are gone), extra_attrs (scope attributes added and left), poisoned (an undo that could
-        not restore all)}. The witness global stays by design (a no-op stub after undo) and
+        left), missing_names (base module names that are gone; names `engine_names` accepts
+        are listed there instead, added or gone), extra_attrs (scope attributes added and
+        left), poisoned (an undo that could not restore all)}. The witness global stays by design (a no-op stub after undo) and
         is not an extra. A name the engine added since base by importing a module lazily (a
         module value that is the imported module, under a name no transaction or cell of
         this participant added: vLLM's LazyLoader binds `llguidance.hf` at first use) is
@@ -371,6 +372,11 @@ class LocalParticipant(Participant):
             if extra:
                 extra_names[m] = extra
             gone = sorted(names - set(vars(mod))) if mod is not None else []
+            # a name the engine deletes itself is listed with engine_names, as an added one
+            engine_gone = [name for name in gone if self.engine_names and self.engine_names(name)]
+            if engine_gone:
+                engine[m] = engine.get(m, []) + engine_gone
+            gone = [name for name in gone if name not in engine_gone]
             if gone:
                 missing[m] = gone
         extra_attrs = {}
@@ -1629,11 +1635,12 @@ class Coordinator:
             return {"ok": False, "status": "refused", "error": why, "participants": {},
                     "receipt": None, "written": {"ok": False, "error": "refused: no receipt"}}
         # the participants' journals also undo every transaction committed after this one
-        # (the cascade): run their undo_resets too, newest first, each kind once
+        # and still held there (the cascade): run their undo_resets too, newest first, each
+        # kind once, and give them this undo's state below
         with self._lock:
             order = list(self.txns)
             later = [other for other in order[order.index(txn) + 1:]
-                     if self.txns[other].get("state") == "committed"]
+                     if self.txns[other].get("state") in _HELD]
         resets = []
         for undone_txn in list(reversed(later)) + [txn]:
             for kind in self.txns[undone_txn].get("plan", {}).get("undo_resets", []):
@@ -1695,14 +1702,21 @@ class Coordinator:
                     "in-doubt" if status_label == "in-doubt" else "partial"
                 )
                 # transactions the participants undid with it (journal cascade): the host
-                # says so too, never "committed" for code that is gone
+                # says so too, never "committed" for code that is gone. The host's own list
+                # counts even when no reply came back (an undo in doubt).
+                cascaded = set(later)
                 for x in calls:
                     for r in (x.get("ranks") or [x]):
-                        for later_txn in r.get("also_undone") or ():
-                            if later_txn in self.txns:
-                                self.txns[later_txn]["state"] = t["state"]
+                        cascaded.update(r.get("also_undone") or ())
+                for later_txn in cascaded:
+                    if later_txn in self.txns:
+                        self.txns[later_txn]["state"] = t["state"]
         return {"ok": ok, "status": status_label, "participants": res, "receipt": rec,
                 "written": self._write(rec)}
+
+
+# host states of a transaction whose code the participants may still hold
+_HELD = ("committed", "partial", "in-doubt")
 
 
 class StepGapCoordinator(Coordinator):

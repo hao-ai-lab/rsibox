@@ -26,24 +26,33 @@ from . import locate as L
 import json
 
 
-def _split_commit(receipt, plan):
-    """Why a committed transaction leaves participants or ranks on different code (the
-    receipt's commit_hashes.agree is False), or None. Excused only when every proof answered
-    and every ranks_disagree finding is one the plan's accept covers (`decide`: overridable,
-    so no function differs, only which ranks hold it)."""
-    hashes = (receipt or {}).get("commit_hashes") or {}
-    if hashes.get("agree") is not False:
-        return None
-    replies = ((receipt or {}).get("participants") or {}).values()
-    proofs = [reply.get("proof") or {} for reply in replies]
-    splits = [finding for finding in receipt.get("findings", [])
-              if finding.get("check") == "ranks_disagree"]
-    if splits and all(proof.get("ok", True) for proof in proofs) and \
-            F.decide(splits, plan.get("accept") if isinstance(plan, dict) else ())["proceed"]:
-        return None
-    why = "; ".join(finding.get("observed", "") for finding in splits) or \
-        "a proof did not answer"
-    return f"code hashes differ after commit: {why}"[:500]
+def _split_commit(receipt):
+    """Why a committed transaction cannot be recorded as the code every participant runs, or
+    None. Never excused by an accept: a rank that did not switch must not become the expected
+    state. Reasons: no receipt to read; commit_hashes.agree False (participants or ranks
+    differ, or a proof did not answer); or a participant (a rank, in a group) that staged
+    targets at prepare and shows no code hash in its proof. A role that abstained, or staged
+    nothing (a plan of repair cells only), may show none."""
+    if not receipt:
+        return "no txn receipt to read the commit hashes from"
+    if (receipt.get("commit_hashes") or {}).get("agree") is False:
+        splits = [finding.get("observed", "") for finding in receipt.get("findings", [])
+                  if finding.get("check") == "ranks_disagree"]
+        why = "; ".join(splits) or "a proof did not answer"
+        return f"code hashes differ after commit: {why}"[:500]
+    for name, reply in (receipt.get("participants") or {}).items():
+        prepared, proof = reply.get("prepare") or {}, reply.get("proof") or {}
+        proof_by_rank = {str(unit.get("rank")): unit for unit in proof.get("ranks") or ()}
+        for unit in prepared.get("ranks") or [prepared]:
+            if unit.get("abstain") or not unit.get("staged"):
+                continue
+            rank = unit.get("rank") if prepared.get("ranks") else None
+            shown = proof if rank is None else proof_by_rank.get(str(rank), {})
+            if not shown.get("hashes"):
+                where = name if rank is None else f"{name} rank {rank}"
+                return (f"{where} staged {len(unit['staged'])} target(s) but its proof shows "
+                        "no code hash: it did not switch")
+    return None
 
 
 class Session:
@@ -140,7 +149,10 @@ class Session:
             if fp is None:
                 self.fault("tampered", "a participant did not answer after commit",
                            "every participant answers")
-            split = _split_commit(res.get("receipt"), plan)
+            # an in-doubt result carries no receipt; the coordinator keeps the one it built
+            receipt = res.get("receipt") or (
+                getattr(self.co, "txns", {}).get(res["txn"]) or {}).get("rec")
+            split = _split_commit(receipt)
             if split:
                 self.fault("ranks_disagree", split, "every participant and every rank runs "
                            "the code the commit installed", subject=res["txn"])

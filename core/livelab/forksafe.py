@@ -316,12 +316,24 @@ def pin_triton_target(capability=None, nvml=None):
     """Answer Triton's "current GPU target" from `capability` (see triton_capability) instead of
     the CUDA driver, which a module-level query would initialize. Call it before the imports
     and the returned restore() after them. Without Triton nothing is patched and restore()
-    does nothing."""
+    does nothing. With CUDA_VISIBLE_DEVICES empty (every GPU hidden) and no capability or
+    FASTRSI_ZYGOTE_CC given, nothing is patched either: the returned restore() has a
+    `skipped` reason, also printed to stderr (triton_capability itself refuses that case)."""
     try:
         from triton.backends.compiler import GPUTarget
         from triton.backends.nvidia.driver import CudaDriver
     except Exception:
         return lambda: None
+    if capability is None and not os.environ.get("FASTRSI_ZYGOTE_CC") and \
+            os.environ.get("CUDA_VISIBLE_DEVICES") is not None and \
+            not os.environ["CUDA_VISIBLE_DEVICES"].strip(", "):
+        # every GPU hidden (a CPU-only process): no target to pin, and nothing to protect
+        # (CUDA has no device to initialize); the process goes on unpinned
+        def skipped():
+            return None
+        skipped.skipped = "CUDA_VISIBLE_DEVICES is empty: Triton's target is not pinned"
+        print(f"forksafe: {skipped.skipped}", file=sys.stderr)
+        return skipped
     major, minor = triton_capability(capability, nvml)
     had = "get_current_target" in CudaDriver.__dict__
     orig = CudaDriver.__dict__.get("get_current_target")
@@ -514,7 +526,9 @@ def bind_rank_numa_and_cpus(
     sysfs_root: str = "/sys/bus/pci/devices",
 ) -> dict:
     """Bind the calling process to `explicit_cpus` or to the CPUs local to `local_rank`'s GPU,
-    within the CPUs it may run on (`os.sched_getaffinity`). Returns {bound, bound_cpus (what it
+    within the CPUs it may run on. As Linux does, a set partly outside the process's cpuset
+    binds to the part inside it (this can widen a narrower pin the process inherited); a set
+    wholly outside it (EINVAL) falls back to the CPUs of the current mask among them. Returns {bound, bound_cpus (what it
     is bound to now; empty when not bound), numa_node, source, why (None when bound)}."""
     if explicit_cpus is not None:
         target_cpus = sorted(set(int(cpu_id) for cpu_id in explicit_cpus))
@@ -531,16 +545,22 @@ def bind_rank_numa_and_cpus(
     elif not hasattr(os, "sched_setaffinity"):
         why = "this platform has no sched_setaffinity"
     else:
-        # a Slurm or container cpuset allows only some CPUs: bind to the GPU's CPUs within it
-        usable = sorted(set(target_cpus) & os.sched_getaffinity(0))
-        if not usable:
-            why = f"none of the CPUs {target_cpus[:16]} is in this process's allowed set"
-        else:
-            try:
-                os.sched_setaffinity(0, usable)
-                bound, target_cpus = True, usable
-            except OSError as exc:
-                why = f"sched_setaffinity: {exc}"
+        try:
+            os.sched_setaffinity(0, target_cpus)
+            bound = True
+        except OSError as exc:
+            # a Slurm or container cpuset excludes every one of them (EINVAL): try the
+            # GPU's CPUs within the current mask
+            usable = sorted(set(target_cpus) & os.sched_getaffinity(0))
+            why = f"sched_setaffinity({target_cpus[:16]}): {exc}"
+            if usable:
+                try:
+                    os.sched_setaffinity(0, usable)
+                    bound, why = True, None
+                except OSError as retry_exc:
+                    why += f"; within the current mask: {retry_exc}"
+        if bound:                        # what the kernel bound (the cpuset may cut it)
+            target_cpus = sorted(os.sched_getaffinity(0))
     return {"bound": bound, "bound_cpus": target_cpus if bound else [], "numa_node": numa_node,
             "source": source, "why": why}
 

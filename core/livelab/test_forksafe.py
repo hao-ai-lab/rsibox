@@ -390,6 +390,22 @@ class VisibleDevicesAfterFork(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "FASTRSI_ZYGOTE_CC"):
                 forksafe.triton_capability(nvml=nvml)
 
+    def test_pin_skips_when_every_gpu_is_hidden(self):
+        """Input: the stand-in Triton, CUDA_VISIBLE_DEVICES="" and no FASTRSI_ZYGOTE_CC (a
+        CPU-only forkserver). Expected: pin_triton_target does not raise; nothing is patched
+        (the driver's own get_current_target still answers), and restore() is a no-op that
+        carries the reason in `skipped`. Pain point: triton_capability refuses "" (no GPU to
+        target) and the FastVideo zygote calls the pin unguarded at preload, so the
+        forkserver would die. Not: a process that sees a GPU but has no NVML (still raises)."""
+        mods, CudaDriver, calls = fake_triton()
+        env = {key: val for key, val in os.environ.items() if key != "FASTRSI_ZYGOTE_CC"}
+        with mock.patch.dict(sys.modules, mods), \
+                mock.patch.dict(os.environ, {**env, "CUDA_VISIBLE_DEVICES": ""}, clear=True):
+            restore = forksafe.pin_triton_target(nvml=fake_nvml([(10, 0)]))
+            self.assertIn("CUDA_VISIBLE_DEVICES", restore.skipped)
+            self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 80, 32))
+            self.assertEqual((restore(), calls), (None, ["driver"]))
+
     def test_affinity_of_a_gpu_named_by_uuid(self):
         """Input: NVML with 2 GPUs (GPU-a local to CPUs 0-1, GPU-b to CPUs 2-3) and
         CUDA_VISIBLE_DEVICES="GPU-b" (Slurm's form); then the same without NVML, over a fake
@@ -414,27 +430,30 @@ class VisibleDevicesAfterFork(unittest.TestCase):
                                  {"cpus": [], "numa_node": None, "source": "none"})
 
     def test_bind_uses_only_cpus_this_process_may_run_on(self):
-        """Input: a cpuset allowing CPUs {2, 3} (stand-in sched_getaffinity / sched_setaffinity
-        that, like Linux under a Slurm cpuset, raise EINVAL for a set with no allowed CPU);
-        the GPU's CPUs are [0, 1, 2], then [0, 1]. Expected: bound True on [2]; then bound
-        False, no CPUs, the affinity unchanged ({2, 3}) and a reason. Pain point: Slurm's
-        cpuset made sched_setaffinity fail, the error was swallowed and the reply still
-        listed bound_cpus. Not: a real Slurm allocation (owed on a GPU node)."""
-        allowed, current = {2, 3}, [{2, 3}]
+        """Input: a cpuset of CPUs {2, 3, 4} and stand-in sched_getaffinity /
+        sched_setaffinity that behave as Linux does under it (a set is cut to the cpuset;
+        EINVAL when nothing of it is in the cpuset). The process starts pinned to {2}; the
+        GPU's CPUs are [0, 1, 2, 3], then [0, 1]. Expected: bound True on [2, 3] (widened
+        from the inherited pin, cut to the cpuset); then bound False, no CPUs, the mask
+        unchanged and a reason. Pain point: Slurm's cpuset made sched_setaffinity fail, the
+        error was swallowed and the reply still listed bound_cpus. Not: a real Slurm
+        allocation (owed on a GPU node)."""
+        cpuset, current = {2, 3, 4}, [{2}]
 
         def setaffinity(pid, cpus):
-            if not set(cpus) & allowed:
+            if not set(cpus) & cpuset:
                 raise OSError(22, "Invalid argument")
-            current[0] = set(cpus) & allowed
+            current[0] = set(cpus) & cpuset
         with mock.patch.object(forksafe.os, "sched_getaffinity", lambda pid: set(current[0]),
                                create=True), \
                 mock.patch.object(forksafe.os, "sched_setaffinity", setaffinity, create=True):
-            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1, 2])
-            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]), (True, [2], {2}))
-            current[0] = {2, 3}
+            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1, 2, 3])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0], reply["why"]),
+                             (True, [2, 3], {2, 3}, None))
             reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1])
-            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]), (False, [], {2, 3}))
-            self.assertTrue(reply["why"])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]),
+                             (False, [], {2, 3}))
+            self.assertIn("Invalid argument", reply["why"])
 
 
 class NumaThreadsAndCowHygiene(unittest.TestCase):

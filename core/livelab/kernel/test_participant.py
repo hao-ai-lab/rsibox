@@ -309,8 +309,9 @@ class EditAddedDefinitionTest(unittest.TestCase):
         base global deleted by hand makes at_base false and names it in `missing_names`. Pain
         point: undo deleted every module global holding a new nested code, even one the base
         defined, and every class attribute added since apply on any class of the module; and
-        at_base did not look for base names that were gone. Not: a base global rebound to a
-        closure that cannot go back (closure_not_restored)."""
+        at_base did not look for base names that were gone. A name `engine_names` accepts is
+        listed there instead. Not: a base global rebound to a closure that cannot go back
+        (closure_not_restored)."""
         mod_name = f"kt_keep_globals{next(_n)}"
         base_src = ("class Config:\n    pass\n\n\n"
                     "def make_shift(k):\n    def shift(x):\n        return x + k\n"
@@ -333,6 +334,11 @@ class EditAddedDefinitionTest(unittest.TestCase):
         del mod_obj.DEFAULT_SHIFT
         base_res = part.at_base()
         self.assertEqual((base_res["ok"], base_res["missing_names"]), (False, {mod_name: ["DEFAULT_SHIFT"]}))
+        part.engine_names = lambda name: name == "DEFAULT_SHIFT"    # one the engine deletes
+        base_res = part.at_base()
+        # (at_base stays false here: the module's code digest lost DEFAULT_SHIFT's function)
+        self.assertEqual((base_res["missing_names"], base_res["engine_names"]),
+                         ({}, {mod_name: ["DEFAULT_SHIFT"]}))
 
 
 LAZY = '''import importlib

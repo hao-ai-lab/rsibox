@@ -419,6 +419,24 @@ class JitRebuildTest(unittest.TestCase):
         self.assertTrue(sess.uninstall()["ok"])
         self.assertEqual((mlp.launch([1, 2]), sess.state()), ([3, 5], "base"))
 
+    def test_an_unparseable_loaded_kernel_blocks_by_name(self):
+        """Input: the leaf module plus an unrelated module holding a JIT kernel whose text no
+        longer parses (`_src` set to "def broken(:"); an edit of scale_kernel. Expected: the
+        install aborts with a jit_target finding that names the unrelated kernel, not a
+        patch_invalid SyntaxError of the edit; scale_kernel's text is unchanged. Pain point:
+        every loaded kernel is now parsed for the caller search (no name filter), and one
+        broken text read as "the patch is invalid". Not: which kernels Triton can parse."""
+        other = "import {t} as triton\n\n\n@triton.jit\ndef other_kernel(v):\n    return v\n"
+        names, texts, mods, part, sess = lab(self, {"leaf": LEAF, "other": other})
+        mods["other"].other_kernel._src = "def broken(:\n"
+        src = mods["leaf"].scale_kernel.fn._src
+        res = install(sess, names["leaf"], texts["leaf"].replace("v * 2", "v * 3"))
+        blocking = [finding for finding in findings(res) if finding["check"] == "jit_target"]
+        self.assertEqual((res["outcome"], len(blocking)), ("aborted", 1), findings(res))
+        self.assertIn(f"{names['other']}.other_kernel cannot be parsed", blocking[0]["observed"])
+        self.assertNotIn("patch_invalid", checks(res))
+        self.assertEqual(mods["leaf"].scale_kernel.fn._src, src)
+
     def test_added_kernel_calling_an_added_helper_proves_the_helper(self):
         """Input: a module with only `launch(x)`; one edit adds `@triton.jit added_helper`
         (v * 3), `@triton.jit added_kernel` calling it, and makes launch call added_kernel.

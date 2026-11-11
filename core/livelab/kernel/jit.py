@@ -176,9 +176,14 @@ def calls(caller, callee):
     return id(callee) in named(caller)
 
 
+class UnreadableKernel(RuntimeError):
+    """A loaded JIT kernel whose text cannot be parsed while its callers are searched."""
+
+
 def callers_of(jit_fn, jits):
     """The JIT callables that call jit_fn, at any depth (breadth first, no repeats). Each
-    candidate's text is parsed once per call (`named`)."""
+    candidate's text is parsed once per call (`named`). Raises UnreadableKernel naming a
+    candidate whose text does not parse."""
     out, seen, todo, names = [], {id(jit_fn)}, [jit_fn], {}
     while todo:
         current = todo.pop(0)
@@ -186,7 +191,12 @@ def callers_of(jit_fn, jits):
             if id(candidate) in seen:
                 continue
             if id(candidate) not in names:
-                names[id(candidate)] = named(candidate)
+                try:
+                    names[id(candidate)] = named(candidate)
+                except Exception as exc:      # fail closed: it may call the edited kernel
+                    raise UnreadableKernel(f"the loaded JIT kernel {label(candidate)} cannot "
+                                           f"be parsed ({type(exc).__name__}: {exc}), so "
+                                           "whether it calls the edited kernel is unknown") from exc
             if id(current) in names[id(candidate)]:
                 seen.add(id(candidate))
                 out.append(candidate)
@@ -276,7 +286,10 @@ def plan(mod, qualname, text):
         return {"ok": False, "why": text["guard"] if text else "no text of the kernel"}
     jits, tuners = scan()
     jits[id(jit_fn)] = jit_fn
-    callers = callers_of(jit_fn, jits)       # by identity only (audit #9)
+    try:
+        callers = callers_of(jit_fn, jits)   # by identity only (audit #9)
+    except UnreadableKernel as exc:
+        return {"ok": False, "why": str(exc)}
     affected = [jit_fn] + callers
     ids = {id(fn_item) for fn_item in affected}
     tuners = [wrapper for wrapper, fn_item in tuners if id(fn_item) in ids]
