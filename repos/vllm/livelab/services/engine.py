@@ -137,9 +137,10 @@ def engine_env(a, base=None):
         # CUDA uninitialized in the API server when a library probes the GPU arch at import
         # (FlashInfer at TP>1). TODO(startup boundary): the same for a direct start.
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
+    if a.fork or getattr(a, "zygote", ""):
         # CuTe DSL probes the GPU arch with cuInit at import (from flashinfer), which makes a
-        # forked child's CUDA fail. Give it the arch it would detect, from nvidia-smi, which
-        # does not touch the CUDA driver.
+        # forked child's CUDA fail; the zygote forks every server, so it needs this too. Give
+        # it the arch it would detect, from nvidia-smi, which does not touch the CUDA driver.
         arch = cute_dsl_arch(env.get("CUDA_VISIBLE_DEVICES"))
         if arch:
             env.setdefault("CUTE_DSL_ARCH", arch)
@@ -162,7 +163,7 @@ def cute_dsl_arch(visible):
             "check": "cute_dsl_arch", "observed": why, "expected": "one compute capability",
             "why": "CUTE_DSL_ARCH stays unset, so CuTe DSL probes the GPU with cuInit and "
                    "forked workers cannot use CUDA",
-            "actions": ["set CUTE_DSL_ARCH yourself", "start without --fork"]}}),
+            "actions": ["set CUTE_DSL_ARCH yourself", "start without --fork or --zygote"]}}),
             file=sys.stderr)
         return None
     major, minor = (int(x) for x in caps.pop().split("."))

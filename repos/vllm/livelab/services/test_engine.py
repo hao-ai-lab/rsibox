@@ -252,10 +252,11 @@ def test_zygote_runs_with_the_engine_env():
     rep = json.loads(r.stdout)
     try:
         assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
-        a, _ = engine.parse(["start", "--cache-root", cache, "--log", "x"])
+        a, _ = engine.parse(["start", "--zygote", sock, "--cache-root", cache, "--log", "x"])
         same = zygote.check(sock, engine.engine_env(a, base))
         assert same["ok"] is True and same["accepted_findings"] == [], same
-        a2, _ = engine.parse(["start", "--cache-root", os.path.join(d, "other"), "--log", "x"])
+        a2, _ = engine.parse(["start", "--zygote", sock, "--cache-root", os.path.join(d, "other"),
+                              "--log", "x"])
         other = zygote.check(sock, engine.engine_env(a2, base))
         assert other["ok"] is False
         assert other["findings"][0]["check"] == "env"
@@ -272,6 +273,27 @@ def test_zygote_runs_with_the_engine_env():
         assert json.loads(chk.stdout)["zygote_check"]["ok"] is True
     finally:
         _stop(rep["pid"])
+
+
+def test_zygote_env_pins_cute_dsl_arch_without_fork(monkeypatch):
+    """Input: a fake nvidia-smi that reports compute capability 10.0; the launcher arguments of
+    `engine.py zygote --zygote S` and of `engine.py start --zygote S`, both without --fork.
+    Action: engine_env() for each. Expect: both set CUTE_DSL_ARCH=sm_100a, so the zygote's
+    import of CuTe DSL (through FlashInfer) does not call cuInit, and both envs agree (no `env`
+    finding). Before: only --fork set it, and a zygote without --fork on a GPU host initialized
+    the CUDA driver at import and stopped. Does not prove: the import on a real GPU (receipt)."""
+    d = _short_dir()
+    smi_dir = os.path.join(d, "bin")
+    os.makedirs(smi_dir)
+    _script(smi_dir, "nvidia-smi", "#!{py}\nprint('10.0')\n")
+    monkeypatch.setenv("PATH", smi_dir + os.pathsep + os.environ["PATH"])
+    monkeypatch.delenv("CUTE_DSL_ARCH", raising=False)
+    sock = os.path.join(d, "z.sock")
+    zyg, _ = engine.parse(["zygote", "--zygote", sock, "--cache-root", d, "--log", "x"])
+    srv, _ = engine.parse(["start", "--zygote", sock, "--cache-root", d, "--log", "x"])
+    direct, _ = engine.parse(["start", "--cache-root", d, "--log", "x"])
+    arch = [engine.engine_env(a).get("CUTE_DSL_ARCH") for a in (zyg, srv, direct)]  # not the env
+    assert arch == ["sm_100a", "sm_100a", None]          # a direct start without --fork: unset
 
 
 def test_zygote_child_applies_an_accepted_env_difference():
