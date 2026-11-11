@@ -670,6 +670,40 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
         _stop(eng.pid)
 
 
+def test_descendants_include_workers_reparented_out_of_the_engine_tree(tmp_path):
+    """Input: a /proc tree (stat files in the kernel's format) with the engine 1000 (session
+    and group leader), its child 1001, a worker 1002 whose parent died (ppid 1) but that stays
+    in session 1000, and an unrelated process 1003. Action: _descendants(1000). Expect: 1001
+    and 1002, not 1003. Before: only the ppid links were followed, so 1002, which still holds
+    GPU memory, was never signalled. Does not prove: the signals (the Linux case below)."""
+    for pid, ppid, pgrp, sid in ((1000, 1, 1000, 1000), (1001, 1000, 1000, 1000),
+                                 (1002, 1, 1000, 1000), (1003, 1, 1003, 1003)):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(
+            f"{pid} (python3 (vllm)) S {ppid} {pgrp} {sid} " + " ".join(["0"] * 40) + "\n")
+    assert sorted(engine._descendants(1000, proc_root=str(tmp_path))) == [1001, 1002]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_the_session_after_its_leader_exited():
+    """Input: an engine leader (own session) that started a worker and exited; the worker
+    stays in the leader's session with ppid 1. Action: stop_engine(leader pid). Expect: the
+    worker is killed and stopped is True. Before: stop_engine returned at once with "was not
+    running" and the worker kept running (holding the GPU, in a real engine)."""
+    leader = subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable,"
+         " '-c', 'import time; time.sleep(60)']).pid, flush=True)"],
+        stdout=subprocess.PIPE, text=True, start_new_session=True)
+    worker = int(leader.stdout.readline())
+    leader.wait(timeout=10)
+    try:
+        r = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+        assert r["stopped"] is True, r
+        assert zygote._exited(worker), "the leader's session member is still running"
+    finally:
+        _stop(worker)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
     """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:

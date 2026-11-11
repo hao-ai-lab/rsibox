@@ -486,26 +486,36 @@ def load_engine_state(cache_root, pid):
     }
 
 
-def _descendants(pid):
-    children_by_parent, descendants = {}, []
+def _descendants(pid, proc_root="/proc"):
+    """The processes below pid (ppid links), plus every process in pid's process group or
+    session and theirs: a worker whose parent died is reparented (ppid 1) but stays in the
+    engine's session. A pid equal to a live group or session id is never reused."""
+    children_by_parent, descendants, members = {}, [], []
     try:
-        entries = os.listdir("/proc")
+        entries = os.listdir(proc_root)
     except OSError:
         return descendants
     for entry in entries:
         if entry.isdigit():
             try:
-                parent_pid = int(
-                    open(f"/proc/{entry}/stat").read().rsplit(")", 1)[1].split()[1]
-                )
+                with open(f"{proc_root}/{entry}/stat") as f:
+                    fields = f.read().rsplit(")", 1)[1].split()
+                parent_pid, group_id, session_id = (int(x) for x in fields[1:4])
                 children_by_parent.setdefault(parent_pid, []).append(int(entry))
+                if int(entry) != pid and pid in (group_id, session_id):
+                    members.append(int(entry))
             except Exception:
                 pass
-    stack = [pid]
+    stack = [pid] + members
+    seen = {pid}
     while stack:
-        for child_pid in children_by_parent.get(stack.pop(), []):
-            descendants.append(child_pid)
-            stack.append(child_pid)
+        current = stack.pop()
+        if current != pid and current not in seen:
+            seen.add(current)
+            descendants.append(current)
+        for child_pid in children_by_parent.get(current, []):
+            if child_pid not in seen:
+                stack.append(child_pid)
     return descendants
 
 
@@ -535,16 +545,18 @@ def _signal_if_same(pid, start_time, sig):
 
 
 def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0):
-    """Stop engine `pid` and its descendants: SIGTERM, up to `grace` s, then SIGKILL, up to
+    """Stop engine `pid` and its descendants (_descendants: its process tree, group and
+    session, also after `pid` itself exited): SIGTERM, up to `grace` s, then SIGKILL, up to
     `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
     signalled only while it still has that start time, so a reused pid is never hit.
     Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
     recorded process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
     t0 = time.time()
-    if zygote._exited(pid):
+    below = _descendants(pid)
+    if zygote._exited(pid) and not below:
         return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
                 "note": f"pid {pid} was not running"}
-    procs = {p: _start_time(p) for p in [pid] + _descendants(pid)}
+    procs = {p: _start_time(p) for p in [pid] + below}
     procs = {p: st for p, st in procs.items() if st is not None}
 
     def alive():
