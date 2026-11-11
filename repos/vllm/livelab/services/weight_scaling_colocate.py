@@ -387,6 +387,10 @@ class Holder:
 
     def start(self, model, python, max_model_len=None, dummy=False):
         import weights
+        finding = weights.socket_path_finding(self.socket_dir)
+        if finding:
+            raise RuntimeError(f"holder on GPU {self.gpu}: socket path too long: "
+                               f"{finding['observed']}")
         extra = ["--load-format", "dummy"] if dummy else []
         cmd = weights.daemon_cmd(model, self.socket_dir, 1, max_model_len, vllm_bin(python), extra)
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu))

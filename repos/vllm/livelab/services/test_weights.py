@@ -258,3 +258,32 @@ def test_stop_terminates_surviving_child_after_session_leader_exits(d):
     finally:
         _stop(leader_proc.pid)
         _stop(child_pid)
+
+
+def test_a_socket_dir_too_long_for_af_unix_is_refused_before_the_daemon_loads(d):
+    """Input: `weights.py start --socket-dir D` with D 60 bytes long, so D plus vLLM's 55-byte
+    socket name (`vllm_weight_cache_<md5 of the GPU uuid>.sock`) exceeds AF_UNIX's 107 bytes;
+    the same D for weight_scaling_colocate's Holder.start. Expect: weights.py exits 2 at once
+    with a `weights_socket_path` finding and the fake `vllm preload` never runs; Holder.start
+    raises before it spawns anything. Before: the daemon loaded the weights for minutes and
+    then failed at bind(). Does not prove: vLLM's own name (taken from vLLM's
+    weight_cache/protocol.py get_socket_path, not imported here)."""
+    long_dir = os.path.join(d, "s" * (60 - len(d) - 1))
+    assert len(os.fsencode(os.path.abspath(long_dir))) == 60
+    marker = os.path.join(d, "preload-ran")
+    fake = _script(d, "vllm", "#!{py}\nopen(%r, 'w').write('ran')\n" % marker)
+    t = time.time()
+    r = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
+                        "--socket-dir", long_dir, "--log", os.path.join(d, "preload.log"),
+                        "--vllm", fake, "--timeout", "30"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2, r.stdout + r.stderr
+    rep = json.loads(r.stdout)
+    assert rep["ready"] is False and rep["pid"] is None
+    assert rep["finding"]["check"] == "weights_socket_path" and "107" in rep["finding"]["observed"]
+    assert time.time() - t < 10 and not os.path.exists(marker)
+    import weight_scaling_colocate
+    holder = weight_scaling_colocate.Holder(0, long_dir, os.path.join(d, "holder.log"))
+    with pytest.raises(RuntimeError, match="too long"):
+        holder.start("m", sys.executable)
+    assert holder.proc is None and not os.path.exists(os.path.join(d, "holder.log"))
