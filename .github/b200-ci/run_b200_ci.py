@@ -17,15 +17,22 @@ build fresh virtualenvs, run
 
 then write logs, summary.json, summary.md and the commit status it would post
 (context `b200-gpu`). It posts that status only with --post.
+
+Retries: <work>/results/<sha>.json says whether the result is final; the loop reruns a SHA
+until it is. A refusal (untrusted SHA, no free GPUs) is never final and posts no final
+status. A runner error is one attempt of --max-attempts; only the last is final. A test
+result is always final.
 Exit code: 0 success, 1 test failure, 2 infrastructure error or refusal.
 """
 import argparse
 import datetime
+import fcntl
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -43,7 +50,26 @@ CPU_EXTRA = ["pytest"]  # cpu-tests.yml installs only pytest, and only for vllm-
 
 
 class Refused(Exception):
-    pass
+    """Not run, and not a result: the SHA is not trusted or the GPUs are not free."""
+
+
+class Stopped(Exception):
+    """The runner was told to stop (SIGTERM) or ran past --deadline-seconds."""
+
+
+class Deadline:
+    """Caps a whole run, so a stuck run cannot hold its GPUs after the loop gave up on it."""
+
+    def __init__(self, seconds: int):
+        self.end = time.monotonic() + seconds if seconds else None
+
+    def timeout(self, per_step: int) -> float:
+        if self.end is None:
+            return per_step
+        left = self.end - time.monotonic()
+        if left <= 0:
+            raise Stopped("runner deadline reached")
+        return min(per_step, left)
 
 
 def now():
@@ -93,35 +119,87 @@ def check_pr(pr: int, sha: str) -> dict:
 
 # ---------------------------------------------------------------- GPUs
 
-def pick_gpus(spec: str, pool: str) -> str:
-    """`spec` is an explicit CUDA_VISIBLE_DEVICES value or auto:N. auto picks N idle GPUs,
-    only from `pool` (the indices this runner is allowed on the shared machine)."""
-    allowed = set(pool.split(",")) if pool else None
-    if not spec.startswith("auto"):
-        if allowed and not set(spec.split(",")) <= allowed:
-            raise Refused(f"--gpus {spec} is outside the allowed pool {pool}")
-        return spec
-    want = int(spec.split(":", 1)[1]) if ":" in spec else 1
-    out = sh(["nvidia-smi", "--query-gpu=index,memory.used,utilization.gpu",
+def idle_gpus(nvidia_smi: str) -> list:
+    out = sh([nvidia_smi, "--query-gpu=index,memory.used,utilization.gpu",
               "--format=csv,noheader,nounits"], capture_output=True).stdout
     idle = []
     for line in out.strip().splitlines():
         idx, mem, util = [x.strip() for x in line.split(",")]
-        if (allowed is None or idx in allowed) and int(mem) < 500 and int(util) == 0:
+        if int(mem) < 500 and int(util) == 0:
             idle.append(idx)
-    if len(idle) < want:
-        raise Refused(f"need {want} idle GPUs in pool {pool or 'all'}, found {idle}")
-    return ",".join(idle[:want])
+    return idle
+
+
+def lock_gpu(lock_dir: Path, idx: str):
+    """An exclusive, non-blocking lock on one GPU index, or None if another run holds it.
+    The kernel drops the lock when the holder exits, however it exits."""
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_dir / f"gpu{idx}.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
+def pick_gpus(spec: str, pool: str, lock_dir: Path, nvidia_smi: str = "nvidia-smi"):
+    """`spec` is an explicit CUDA_VISIBLE_DEVICES value or auto:N. auto picks N idle GPUs,
+    only from `pool` (the indices this runner is allowed on the shared machine).
+    Returns (value, lock handles). Each chosen GPU is locked, so two runs never share one;
+    an auto pick is checked idle again after its lock is taken. Keep the handles open for
+    as long as the GPUs are in use."""
+    allowed = set(pool.split(",")) if pool else None
+    if not spec.startswith("auto"):
+        chosen = spec.split(",")
+        if allowed and not set(chosen) <= allowed:
+            raise Refused(f"--gpus {spec} is outside the allowed pool {pool}")
+        handles = []
+        for idx in chosen:
+            handle = lock_gpu(lock_dir, idx)
+            if handle is None:
+                for h in handles:
+                    h.close()
+                raise Refused(f"GPU {idx} is locked by another CI run")
+            handles.append(handle)
+        return spec, handles
+    want = int(spec.split(":", 1)[1]) if ":" in spec else 1
+    idle = [i for i in idle_gpus(nvidia_smi) if allowed is None or i in allowed]
+    chosen, handles = [], []
+    for idx in idle:
+        if len(chosen) == want:
+            break
+        handle = lock_gpu(lock_dir, idx)
+        if handle is not None:
+            chosen.append(idx)
+            handles.append(handle)
+    still_idle = set(idle_gpus(nvidia_smi)) if chosen else set()
+    if len(chosen) < want or not set(chosen) <= still_idle:
+        for h in handles:
+            h.close()
+        raise Refused(f"need {want} idle, unlocked GPUs in pool {pool or 'all'}, found {chosen} "
+                      f"(idle: {idle})")
+    return ",".join(chosen), handles
+
+
+def check_still_idle(gpus: str, spec: str, nvidia_smi: str):
+    """Right before the gpu stage: an auto-picked GPU that someone outside CI started using
+    since it was picked (the cpu stage takes minutes) is a refusal, not a test failure."""
+    if spec.startswith("auto"):
+        busy = set(gpus.split(",")) - set(idle_gpus(nvidia_smi))
+        if busy:
+            raise Refused(f"GPUs {sorted(busy)} became busy before the gpu stage")
 
 
 # ---------------------------------------------------------------- envs
 
-def make_env(uv: str, path: Path, python: str, pkgs: list, log) -> float:
+def make_env(uv: str, path: Path, python: str, pkgs: list, log, deadline: Deadline) -> float:
     t0 = time.monotonic()
-    sh([uv, "venv", "--quiet", "--python", python, str(path)], stdout=log, stderr=subprocess.STDOUT)
+    sh([uv, "venv", "--quiet", "--python", python, str(path)], stdout=log, stderr=subprocess.STDOUT,
+       timeout=deadline.timeout(1800))
     for group in pkgs:
         sh([uv, "pip", "install", "--quiet", "--python", str(path / "bin" / "python"), *group],
-           stdout=log, stderr=subprocess.STDOUT)
+           stdout=log, stderr=subprocess.STDOUT, timeout=deadline.timeout(1800))
     return time.monotonic() - t0
 
 
@@ -190,7 +268,8 @@ def parse_results(step, res: Path) -> list:
     return []
 
 
-def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout: int) -> dict:
+def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout: int,
+              deadline: Deadline) -> dict:
     res = run_dir / "results" / stage
     logs = run_dir / "logs" / stage
     res.mkdir(parents=True, exist_ok=True)
@@ -210,7 +289,8 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
             log.flush()
             try:
                 rc = subprocess.run(step["argv"], cwd=src / step["cwd"], env=env, stdout=log,
-                                    stderr=subprocess.STDOUT, timeout=timeout).returncode
+                                    stderr=subprocess.STDOUT,
+                                    timeout=deadline.timeout(timeout)).returncode
             except subprocess.TimeoutExpired:
                 rc = "timeout"
         tests = parse_results(step, res)
@@ -239,14 +319,24 @@ def totals(steps) -> dict:
     return c
 
 
-def quickstart(src: Path, uv: str, python: str, run_dir: Path) -> dict:
-    """Run the README quickstart code block verbatim in a fresh venv."""
-    text = (src / "README.md").read_text()
-    m = re.search(r"^## Quickstart.*?^```sh\n(.*?)^```", text, flags=re.S | re.M)
+def quickstart_script(readme: str):
+    """Every ```sh or ```bash block of the `## Quickstart` section, in order, joined; None if
+    there is none. The section ends at the next `## ` heading, so a block further down the
+    README is never run as the quickstart."""
+    section = re.search(r"^## Quickstart\b.*?$(.*?)(?=^## |\Z)", readme, flags=re.S | re.M)
+    if not section:
+        return None
+    blocks = re.findall(r"^```(?:sh|bash)[ \t]*\n(.*?)^```", section.group(1), flags=re.S | re.M)
+    return "".join(blocks) if blocks else None
+
+
+def quickstart(src: Path, uv: str, python: str, run_dir: Path, deadline: Deadline) -> dict:
+    """Run the README quickstart code blocks verbatim in a fresh venv."""
+    block = quickstart_script((src / "README.md").read_text())
     log_path = run_dir / "logs" / f"quickstart-py{python}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    if not m:
-        log_path.write_text("no ```sh block under ## Quickstart in README.md\n")
+    if block is None:
+        log_path.write_text("no ```sh or ```bash block under ## Quickstart in README.md\n")
         return {"python": python, "ok": False, "rc": "no-block", "log": str(log_path.relative_to(run_dir))}
     venv = run_dir / "envs" / f"quickstart-{python}"
     # Each Python gets its own clean clone: the block makes .venv/ in the tree it runs in.
@@ -254,18 +344,22 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path) -> dict:
     sh(["git", "clone", "--quiet", str(src), str(qsrc)])
     script = run_dir / f"quickstart-py{python}.sh"
     script.write_text("set -euxo pipefail\nsource %s/bin/activate\ncd %s\n%s" %
-                      (shlex.quote(str(venv)), shlex.quote(str(qsrc)), m.group(1)))
+                      (shlex.quote(str(venv)), shlex.quote(str(qsrc)), block))
     t0 = time.monotonic()
     with open(log_path, "w") as log:
         # A plain `python -m venv` with pip, as a user would make it (no uv, no extras).
         r = subprocess.run([uv, "python", "find", "--no-project", python], capture_output=True, text=True)
         base = r.stdout.strip() or f"python{python}"
-        rc = subprocess.run([base, "-m", "venv", str(venv)], stdout=log, stderr=subprocess.STDOUT).returncode
+        rc = subprocess.run([base, "-m", "venv", str(venv)], stdout=log, stderr=subprocess.STDOUT,
+                            timeout=deadline.timeout(600)).returncode
         if rc == 0:
             env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "FASTRSI_"))}
             env["CUDA_VISIBLE_DEVICES"] = ""
-            rc = subprocess.run(["bash", str(script)], stdout=log, stderr=subprocess.STDOUT,
-                                env=env, cwd=qsrc).returncode
+            try:
+                rc = subprocess.run(["bash", str(script)], stdout=log, stderr=subprocess.STDOUT,
+                                    env=env, cwd=qsrc, timeout=deadline.timeout(1800)).returncode
+            except subprocess.TimeoutExpired:
+                rc = "timeout"
     return {"python": python, "ok": rc == 0, "rc": rc, "seconds": round(time.monotonic() - t0, 1),
             "log": str(log_path.relative_to(run_dir))}
 
@@ -329,13 +423,66 @@ def write_md(summary: dict, status: dict, path: Path):
         L += [f"- `{i}`: {r}" for i, r in summary["still_skipped"]] + [""]
     for q in summary.get("quickstart", []):
         L.append(f"- quickstart python {q['python']}: {'ok' if q['ok'] else 'FAILED'} (rc {q['rc']}, log `{q['log']}`)")
-    L += ["", "## Status it would post", "", "```json", json.dumps(status, indent=1), "```", ""]
+    L += ["", "## Status of this run", "", "```json", json.dumps(status, indent=1), "```", ""]
+    if "posted_status" in summary:
+        posted = summary["posted_status"]
+        L += [f"- status to post: {posted['state'] + ': ' + posted['description'] if posted else 'none'}",
+              f"- result record: `{json.dumps(summary['result_record'])}`",
+              ""]
     path.write_text("\n".join(L))
+
+
+# ---------------------------------------------------------------- results
+
+def write_atomic(path: Path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def previous_attempts(result: Path) -> int:
+    try:
+        return int(json.loads(result.read_text()).get("attempts", 0))
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
+def settle(summary: dict, status: dict, result: Path, max_attempts: int):
+    """What this run leaves behind: (result record, status to post or None).
+
+    The loop reruns a SHA until its record is final:
+    - refused: not final, attempts unchanged. No final status; a pending status already
+      posted is updated to say the run will be retried.
+    - runner error: one more attempt; final (and its error status posted) only on the last of
+      max_attempts, otherwise the status stays pending.
+    - test result: final, with its status.
+    Nothing is posted for a SHA that was not verified as trusted (no pending posted)."""
+    trusted = summary.get("pending_posted", False)
+    attempts = previous_attempts(result)
+    record = {"run_dir": summary["run_dir"], "status": status, "attempts": attempts, "final": True}
+    if summary.get("refused"):
+        retry = {"state": "pending", "context": CONTEXT,
+                 "description": ("not run yet, will retry: " + summary["refused"])[:140]}
+        return dict(record, refused=summary["refused"], final=False), (retry if trusted else None)
+    if summary.get("infra_error"):
+        record.update(attempts=attempts + 1, final=attempts + 1 >= max_attempts)
+        if record["final"]:
+            return record, (status if trusted else None)
+        retry = {"state": "pending", "context": CONTEXT,
+                 "description": (f"runner error, will retry ({attempts + 1}/{max_attempts}): "
+                                 + summary["infra_error"])[:140]}
+        return record, (retry if trusted else None)
+    return record, status
+
+
+def on_sigterm(signum, frame):
+    raise Stopped("stopped by SIGTERM")
 
 
 # ---------------------------------------------------------------- main
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sha", required=True)
     ap.add_argument("--source", default=f"https://github.com/{REPO}.git",
@@ -344,28 +491,40 @@ def main():
     ap.add_argument("--pr", type=int, help="also require this PR to be same-repo with head == sha (uses gh)")
     ap.add_argument("--gpus", default="auto:2", help="CUDA_VISIBLE_DEVICES value, or auto:N idle GPUs")
     ap.add_argument("--gpu-pool", default="0,1,2,3", help="GPU indices this runner may use (B200 split)")
+    ap.add_argument("--nvidia-smi", default="nvidia-smi", help=argparse.SUPPRESS)
     ap.add_argument("--python", default="3.12")
     ap.add_argument("--quickstart-pythons", default="3.11,3.12", help="requires-python is >=3.11")
     ap.add_argument("--vllm-python", default="", help="python with vLLM for FASTRSI_VLLM_PYTHON (gpu stage)")
     ap.add_argument("--stages", default="cpu,gpu,quickstart")
     ap.add_argument("--uv", default=shutil.which("uv") or str(Path.home() / ".local/bin/uv"))
     ap.add_argument("--timeout", type=int, default=1200, help="per step, seconds")
+    ap.add_argument("--deadline-seconds", type=int, default=0,
+                    help="stop the whole run after this many seconds (0: no limit)")
+    ap.add_argument("--max-attempts", type=int, default=3,
+                    help="runner errors on one SHA before its error status is final")
     ap.add_argument("--logs-url-base", default="", help="public base URL where run dirs are served")
     ap.add_argument("--keep-envs", action="store_true")
     ap.add_argument("--post", action="store_true", help="post the status to GitHub (off by default)")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     if not re.fullmatch(r"[0-9a-f]{40}", a.sha):
         sys.exit("--sha must be a full 40-hex commit id")
+    signal.signal(signal.SIGTERM, on_sigterm)
     work = Path(a.work).expanduser()
     started = now()
     run_id = f"{a.sha[:12]}-{started:%Y%m%dT%H%M%SZ}"
     run_dir = work / "runs" / run_id
     run_dir.mkdir(parents=True)
-    summary = {"sha": a.sha, "run_id": run_id, "host": socket.gethostname(), "python": a.python,
-               "started": started.isoformat(timespec="seconds"), "argv": sys.argv, "stages": {}}
+    # The loop reads this to stop a run that outlived its wait (SIGTERM, handled above).
+    pid_file = work / "active" / f"{a.sha}.pid"
+    write_atomic(pid_file, str(os.getpid()))
+    summary = {"sha": a.sha, "run_id": run_id, "run_dir": str(run_dir), "host": socket.gethostname(),
+               "python": a.python, "started": started.isoformat(timespec="seconds"),
+               "argv": sys.argv if argv is None else argv, "stages": {}}
     t0 = time.monotonic()
+    deadline = Deadline(a.deadline_seconds)
     stages = a.stages.split(",")
+    gpu_locks = []
     try:
         mirror = sync_mirror(work, a.source)
         branches = trusted_branches(mirror, a.sha)
@@ -374,25 +533,31 @@ def main():
         summary["branches"] = branches
         if a.pr:
             summary["pr"] = check_pr(a.pr, a.sha)
+        if "gpu" in stages:
+            # Locked before anything is posted or built, and held until the run ends.
+            summary["gpus"], gpu_locks = pick_gpus(a.gpus, a.gpu_pool, work / "locks", a.nvidia_smi)
         if a.post:
             post_status(a.sha, {"state": "pending", "context": CONTEXT, "description": "running on B200"})
+            summary["pending_posted"] = True
         src = run_dir / "src"
         sh(["git", "clone", "--quiet", "--no-checkout", str(mirror), str(src)])
         sh(["git", "-C", str(src), "-c", "advice.detachedHead=false", "checkout", "--quiet", a.sha])
         envs = run_dir / "envs"
         with open(run_dir / "env-setup.log", "w") as log:
             if "cpu" in stages:
-                summary["cpu_env_s"] = round(make_env(a.uv, envs / "cpu", a.python, [CPU_EXTRA], log), 1)
+                summary["cpu_env_s"] = round(make_env(a.uv, envs / "cpu", a.python, [CPU_EXTRA], log,
+                                                      deadline), 1)
             if "gpu" in stages:
-                summary["gpus"] = pick_gpus(a.gpus, a.gpu_pool)
                 summary["gpu_env_s"] = round(make_env(a.uv, envs / "gpu", a.python,
-                                                      [TORCH_SPEC, GPU_EXTRA], log), 1)
+                                                      [TORCH_SPEC, GPU_EXTRA], log, deadline), 1)
         base_env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
         if "cpu" in stages:
             summary["stages"]["cpu"] = run_stage(
                 "cpu", src, str(envs / "cpu/bin/python"),
-                {**base_env, "CUDA_VISIBLE_DEVICES": "", "FASTRSI_VLLM_PYTHON": ""}, run_dir, a.timeout)
+                {**base_env, "CUDA_VISIBLE_DEVICES": "", "FASTRSI_VLLM_PYTHON": ""}, run_dir, a.timeout,
+                deadline)
         if "gpu" in stages:
+            check_still_idle(summary["gpus"], a.gpus, a.nvidia_smi)
             env = {**base_env, "CUDA_VISIBLE_DEVICES": summary["gpus"], "FASTRSI_TEST_GPU": "1"}
             if a.vllm_python:
                 # The vLLM python may live in a user site; give it a shim that drops our isolation.
@@ -401,7 +566,8 @@ def main():
                 shim.chmod(0o755)
                 env["FASTRSI_VLLM_PYTHON"] = str(shim)
                 summary["vllm_python"] = a.vllm_python
-            summary["stages"]["gpu"] = run_stage("gpu", src, str(envs / "gpu/bin/python"), env, run_dir, a.timeout)
+            summary["stages"]["gpu"] = run_stage("gpu", src, str(envs / "gpu/bin/python"), env, run_dir,
+                                                 a.timeout, deadline)
         if "cpu" in stages and "gpu" in stages:
             cpu = {t["id"]: t for s in summary["stages"]["cpu"]["steps"] for t in s["tests"]}
             gpu = {t["id"]: t for s in summary["stages"]["gpu"]["steps"] for t in s["tests"]}
@@ -410,27 +576,37 @@ def main():
                                           and gpu[i]["outcome"] != "skipped")
             summary["still_skipped"] = sorted((i, t["detail"]) for i, t in gpu.items() if t["outcome"] == "skipped")
         if "quickstart" in stages:
-            summary["quickstart"] = [quickstart(src, a.uv, p, run_dir) for p in a.quickstart_pythons.split(",")]
+            summary["quickstart"] = [quickstart(src, a.uv, p, run_dir, deadline)
+                                     for p in a.quickstart_pythons.split(",")]
     except Refused as e:
         summary["refused"] = str(e)
-    except Exception as e:  # infrastructure, not a test result
+    except Exception as e:  # infrastructure (or Stopped), not a test result
         summary["infra_error"] = f"{type(e).__name__}: {e}"[:300]
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        for handle in gpu_locks:
+            handle.close()
         summary["seconds"] = round(time.monotonic() - t0, 1)
         if not a.keep_envs:
             shutil.rmtree(run_dir / "envs", ignore_errors=True)
     status = build_status(summary, a.logs_url_base)
     summary["status"] = status
+    result = work / "results" / f"{a.sha}.json"
+    record, to_post = settle(summary, status, result, a.max_attempts)
+    summary["result_record"] = record
+    summary["posted_status"] = to_post
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     write_md(summary, status, run_dir / "summary.md")
-    (work / "results").mkdir(exist_ok=True)
-    (work / "results" / f"{a.sha}.json").write_text(json.dumps({"run_dir": str(run_dir), "status": status}))
+    write_atomic(result, json.dumps(record))
+    pid_file.unlink(missing_ok=True)
     print(f"run dir: {run_dir}")
-    print("status it would post to repos/%s/statuses/%s:" % (REPO, a.sha))
+    print("status for repos/%s/statuses/%s:" % (REPO, a.sha))
     print(json.dumps(status, indent=1))
-    if a.post:
-        post_status(a.sha, status)
-        print("posted")
+    if not record["final"]:
+        print("result is not final: the loop will run this SHA again")
+    if a.post and to_post is not None:
+        post_status(a.sha, to_post)
+        print("posted:", to_post["state"])
     sys.exit({"success": 0, "failure": 1}.get(status["state"], 2))
 
 
