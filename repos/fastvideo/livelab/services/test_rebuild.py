@@ -127,6 +127,39 @@ class RebuildTest(unittest.TestCase):
         self.assertIs(type(self.live), cls)
         self.assertFalse(hasattr(self.live, "gate"))
 
+    def test_a_field_the_new_constructor_drops_is_removed(self):
+        """Input: Block's constructor no longer sets `calls` (and forward no longer reads it).
+        Expect: the merge lists `calls` as removed and the live Block has no `calls`. Proves: a
+        revert of an added field takes the field away, as a fresh build would. Not: a field set
+        after construction only (not in the old constructor: it stays)."""
+        src = edit(edit(BLOCK, "        self.calls = 0\n", ""), "        self.calls += 1\n", "")
+        r, m = self.rebuild(src)
+        self.assertTrue(m["ok"], m["findings"])
+        self.assertIn("calls", m["removed"])
+        self.assertFalse(hasattr(self.live, "calls"))
+
+    def test_a_changed_config_object_is_merged(self):
+        """Input: Norm keeps a config object of a class from a module the edit does not touch
+        (rbpkg.cfg, as FastVideo's configs live apart from the DiT); the edit changes the eps it
+        is built with (1e-6 -> 1e-5). Expect: the live Norm gets the new config (eps 1e-5).
+        Proves: two objects of one class with different fields are a change, not "the same
+        object"."""
+        with open(os.path.join(self.dir, "rbpkg", "cfg.py"), "w") as f:
+            f.write("class Cfg:\n    def __init__(self, eps):\n        self.eps = eps\n")
+        src = edit(edit(BLOCK, "EPS = 1e-6\n", "EPS = 1e-6\nfrom rbpkg.cfg import Cfg\n"),
+                   "        self.eps = EPS\n", "        self.eps = EPS\n        self.cfg = Cfg(1e-6)\n")
+        with open(os.path.join(self.dir, "rbpkg", "block.py"), "w") as f:
+            f.write(src)
+        for n in [n for n in sys.modules if n.split(".")[0] == "rbpkg"]:
+            del sys.modules[n]
+        importlib.invalidate_caches()
+        import rbpkg.block
+        self.live = rbpkg.block.Block(8)
+        r, m = self.rebuild(edit(src, "Cfg(1e-6)", "Cfg(1e-5)"))
+        self.assertTrue(m["ok"], m["findings"])
+        self.assertIn("norm.cfg", m["set"])
+        self.assertEqual(self.live.norm.cfg.eps, 1e-5)
+
     def test_failed_import_puts_the_old_modules_back(self):
         """Input: an edit whose import raises. Expect: finding `refresh_failed`, and
         sys.modules holds the very same module objects as before. Proves: a refused refresh

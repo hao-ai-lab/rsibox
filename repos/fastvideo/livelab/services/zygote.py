@@ -19,8 +19,11 @@ The server must not touch the CUDA runtime (a forked child of such a process can
 At the pin two imports do: FastVideo calls `torch.cuda.is_available()` (the runtime, unless
 `PYTORCH_NVML_BASED_CUDA_CHECK=1`, which `enable` sets), and `fastvideo_kernel` asks Triton for
 the GPU target at module level, which the server answers from NVML while it imports
-(`forksafe.pin_triton_target`, FASTRSI_ZYGOTE_CC="10.0" to set it). `fork_poisoned()` checks
-the result with a probe fork.
+(`forksafe.pin_triton_target`, FASTRSI_ZYGOTE_CC="10.0" to set it). CuTe DSL (flashinfer ->
+cutlass) calls the driver's cuInit itself to find the arch unless CUTE_DSL_ARCH is set, which
+the server sets from the same capability (`pin_cute_dsl_arch`). After the preload the server
+checks both ways a fork is spoiled (`poison_reasons`: the driver's cuDeviceGetCount, torch's
+bad-fork flag in a probe fork); when one is, every forked worker refuses to start.
 
 Not refreshed (a finding in the worker log; restart the lab host): an edited extension `.so`,
 and modules outside `PREFIXES`.
@@ -99,8 +102,10 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
             "seconds": round(time.perf_counter() - t0, 4)}
 
 
-def _install_worker_hook():
+def _install_worker_hook(poison=None):
     """Runs in the server: each forked child refreshes before it unpickles its process object.
+    `poison`: why a fork of this server cannot use CUDA; then every child raises at once
+    (fail closed: a worker group that cannot start, not workers that fail later).
 
     The child's process object (target and kwargs: FastVideo's args, pipes) is unpickled by
     `multiprocessing.spawn._main` right after `prepare()`. Refreshing inside the target would
@@ -111,6 +116,9 @@ def _install_worker_hook():
     orig = SP.prepare
 
     def prepare(data):
+        if poison:
+            raise RuntimeError(f"[fastrsi-zygote] forked from a server whose forks cannot use CUDA: "
+                               f"{poison}; restart the lab host")
         if not os.environ.get("OMP_NUM_THREADS"):
             forksafe.clamp_thread_pools(num_threads=1)
         local_rank_str = os.environ.get("LOCAL_RANK", "").strip()
@@ -157,20 +165,60 @@ def fork_poisoned():
     return out == b"1"
 
 
+def driver_initialized():
+    """Has this process initialized the CUDA driver (cuInit)? cuDeviceGetCount does not
+    initialize it and answers CUDA_ERROR_NOT_INITIALIZED (3) until something has. A library
+    that calls cuInit itself (CuTe DSL through flashinfer -> cutlass) leaves torch's bad-fork
+    flag unset, so `fork_poisoned` misses it. False without libcuda."""
+    import ctypes
+    try:
+        libcuda = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return False
+    count = ctypes.c_int()
+    return libcuda.cuDeviceGetCount(ctypes.byref(count)) != 3
+
+
+def poison_reasons():
+    """Why a child forked now could not use CUDA (empty: it can)."""
+    out = []
+    if driver_initialized():
+        out.append("CUDA driver initialized in the zygote (cuInit)")
+    if fork_poisoned():
+        out.append("torch CUDA runtime initialized in the zygote (bad fork)")
+    return out
+
+
+def pin_cute_dsl_arch():
+    """CuTe DSL (imported by flashinfer -> cutlass) calls cuInit at import to find the GPU arch
+    unless CUTE_DSL_ARCH names it. Set it, when unset, from the capability Triton is pinned to
+    (FASTRSI_ZYGOTE_CC, else NVML). Returns the value, None when it cannot be found."""
+    if os.environ.get("CUTE_DSL_ARCH"):
+        return os.environ["CUTE_DSL_ARCH"]
+    try:
+        major, minor = forksafe.triton_capability()
+    except Exception:
+        return None
+    os.environ["CUTE_DSL_ARCH"] = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+    return os.environ["CUTE_DSL_ARCH"]
+
+
 def _serve():
     """In the forkserver: import the preload list without CUDA, snapshot, hook the workers."""
     t0 = time.perf_counter()
+    pin_cute_dsl_arch()
     restore = forksafe.pin_triton_target()
     try:
         for m in filter(None, os.environ.get("FASTRSI_ZYGOTE_PRELOAD", "").split(",")):
             importlib.import_module(m)
     finally:
         restore()
-    if fork_poisoned():
-        print("[fastrsi-zygote] CUDA was initialized while preloading: forked workers cannot use it",
+    poison = poison_reasons()
+    if poison:
+        print(f"[fastrsi-zygote] {poison}: forked workers cannot use CUDA; they refuse to start",
               file=sys.stderr, flush=True)
     snapshot()
-    _install_worker_hook()
+    _install_worker_hook(poison)
     if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
         forksafe.freeze_gc_before_fork()
     print(f"[fastrsi-zygote] server {os.getpid()} preloaded {len(_SNAPSHOT)} modules in "

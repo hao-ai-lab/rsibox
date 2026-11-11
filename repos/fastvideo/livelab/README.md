@@ -17,8 +17,10 @@ and `core/livelab/forksafe.py`. Importing `adapter` (or `services.zygote`) puts
   - `jitcache.py`: path-stable JIT cache roots and a `torch_key` preset (warm restart with
     path-stable caches; first-video JIT 6.3 -> 2.2 s, measured);
   - `zygote.py`: fork workers from a preloaded forkserver, refreshing modules edited since it
-    imported them, with Triton's GPU target pinned while it imports (`forksafe.pin_triton_target`)
-    (zygote respawn; 14.1 s to ready, measured);
+    imported them, with Triton's GPU target and `CUTE_DSL_ARCH` pinned while it imports
+    (`forksafe.pin_triton_target`, `pin_cute_dsl_arch`); when the preload initialized CUDA anyway
+    (driver or torch runtime), forked workers refuse to start (zygote respawn; 14.1 s to ready,
+    measured);
   - `holder.py`: keep the loaded DiT, text encoder and VAE in a holder process that respawned
     workers map by CUDA IPC, and refuse to serve when loader, quantization or model code changed
     (zygote respawn with weights holder; 4.8 s to ready, measured).
@@ -62,7 +64,7 @@ request; it is not a hook today, and edit-to-run does not need it (a video takes
 | `install(patch)` | `patch = {"files": {module: full new text}, "accept": [...], "edit_time": t}`. Live swap of every changed function on every rank, in one request gap. Refusals as the kernel's findings |
 | `check(workload)` | One generation of the workload in the warm engine. `output` = hashes of the uint8 frames and the audio; `seconds`; `psnr_vs_golden`; per-rank witness of every live edit; `proven` |
 | `reset("state")` | Empties each rank's CUDA cache. Request state (`ForwardBatch`, latents, RNG) is built per request by FastVideo |
-| `rebuild(patch)` | In-place rebuild, no new process: every worker re-imports the edited modules and their importers, live objects get the new classes, constructor edits are merged into the loaded DiT against meta builds (weights stay), stages are built again. For the edits the live swap refuses (constructors, new fields, module constants). Needs no live edits installed; the rebuilt text is the new base. `{"revert": True}` goes back to the files |
+| `rebuild(patch)` | In-place rebuild, no new process: every worker re-imports the edited modules and their importers, live objects get the new classes, constructor edits are merged into the loaded DiT against meta builds (weights stay), stages are built again. For the edits the live swap refuses (constructors, new fields, module constants). Needs no live edits installed; the rebuilt text is the new base (a later `install` is made against it). A rank that fails after it began to change takes every change back; a rank that cannot say it did poisons the lab (outcome `failed`; `partial` when only some ranks rebuilt). `{"revert": True}` goes back to the files |
 | `reset("respawn")` | Shuts the worker group down and builds a new one from the same config; clears poison |
 | `uninstall(id)` | Undo `id` and every later edit, newest first; checks the code fingerprint |
 | `status()` | base / edited / poisoned, the installed transactions, the code fingerprint |

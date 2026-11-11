@@ -25,7 +25,8 @@ _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 
-_STATE = {"participant": None, "faults": {}, "hooks": []}
+# rebuilt: {module: text} an in-place rebuild made the module's base (what it runs, not its file)
+_STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}}
 
 if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
     # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
@@ -59,10 +60,15 @@ def participant(worker):
     p = _STATE["participant"]
     if p is None:
         from kernel import coordinator as C
+
+        class Participant(C.LocalParticipant):
+            def _live_source(self, module):
+                # no committed transaction: a rebuilt module runs its rebuilt text, not its file
+                text = super()._live_source(module)
+                return text if text is not None else _STATE["rebuilt"].get(module)
         r = rank_of(worker)
         scope = {"worker": worker, "pipeline": getattr(worker, "pipeline", None)}
-        p = _STATE["participant"] = C.LocalParticipant(f"rank{r}", scope=scope,
-                                                       resets=_resets(worker))
+        p = _STATE["participant"] = Participant(f"rank{r}", scope=scope, resets=_resets(worker))
     return p
 
 
@@ -176,11 +182,42 @@ def _reset_stages(pipe):
         pipe._stage_name_mapping = {}
 
 
+def _restore_modules(old):
+    """Put the refreshed modules back; a module rebuilt before shows its rebuilt text again."""
+    from services import rebuild as RB
+    RB.restore(old)
+    for name in old:
+        if name in _STATE["rebuilt"]:
+            _show_lines(name, _STATE["rebuilt"][name])
+
+
+def _roll_back(undo, pipe, saved_pipe, old):
+    """Take back a rebuild that failed after it began to change the worker: the class swaps
+    and field merges (newest first), the pipeline's attributes (its stages), the modules.
+    True when every step ran; False: the worker is in an unknown state."""
+    clean = True
+    for step in reversed(undo):
+        try:
+            step()
+        except Exception:
+            clean = False
+    try:
+        if saved_pipe is not None:
+            vars(pipe).clear()
+            vars(pipe).update(saved_pipe)
+        _restore_modules(old)
+    except Exception:
+        clean = False
+    return clean
+
+
 def rebuild(worker, payload):
     """In-place rebuild in this warm worker: re-import the edited modules (and their importers) from
     the new text, give the live objects the new classes, merge constructor edits into the
     loaded torch components (their tensors stay), and build the pipeline's stages again. The
-    CUDA context, weights, JIT modules and compile caches stay. On a finding nothing changes.
+    CUDA context, weights, JIT modules and compile caches stay. On a finding nothing changes:
+    a failure after the first change (a class swap refused, the stage build raising) takes
+    every change back. `clean` in a failed reply: True when nothing is left changed.
     payload: {"files": {module: text}, "prefixes": [packages the import graph covers]}."""
     from services import rebuild as RB
     t0 = time.perf_counter()
@@ -190,8 +227,8 @@ def rebuild(worker, payload):
     r = RB.refresh(files, prefixes)
     out = {"rank": rank_of(worker), "pid": os.getpid(), "refreshed": r["refreshed"],
            "refresh_s": r["seconds"], "findings": list(r["findings"])}
-    if not r["ok"]:
-        return {"ok": False, **out, "cost_s": round(time.perf_counter() - t0, 4)}
+    if not r["ok"]:                             # refresh put the old modules back itself
+        return {"ok": False, **out, "clean": True, "cost_s": round(time.perf_counter() - t0, 4)}
     cmap = RB.class_map(r["old"])
     out["classes"] = sorted(f"{c.__module__}.{c.__qualname__}" for c in cmap)
     merged, plans = {}, []
@@ -227,32 +264,50 @@ def rebuild(worker, payload):
         out["findings"].append(RB.finding("rebuild_failed", traceback.format_exc()[-2000:],
                                           "the components rebuild"))
     if out["findings"]:
-        RB.restore(r["old"])
-        return {"ok": False, **out, "merged": merged, "cost_s": round(time.perf_counter() - t0, 4)}
-    # every check passed: apply (class swaps and field merges), then the stages
-    for name, m, bn in plans:
-        if bn is None:
-            objs = list(m.modules()) if callable(getattr(m, "modules", None)) else [m]
-            merged[name] = RB.swap_classes(objs, cmap)
-        else:
-            merged[name] = {**RB.merge_fields(m, *bn), "meta_build_s": merged[name]["meta_build_s"]}
-    sw = RB.swap_classes([worker, pipe], cmap)
+        _restore_modules(r["old"])
+        return {"ok": False, **out, "merged": merged, "clean": True,
+                "cost_s": round(time.perf_counter() - t0, 4)}
+    # every check passed: apply (class swaps and field merges), then the stages; a failure
+    # from here on takes every change back
+    undo, failed, stages, sw, ts = [], [], [], {"swapped": 0}, time.perf_counter()
+    saved_pipe = dict(vars(pipe)) if hasattr(pipe, "__dict__") else None
+    try:
+        for name, m, bn in plans:
+            if bn is None:
+                objs = list(m.modules()) if callable(getattr(m, "modules", None)) else [m]
+                merged[name] = RB.swap_classes(objs, cmap, undo=undo)
+            else:
+                merged[name] = {**RB.merge_fields(m, *bn, undo=undo),
+                                "meta_build_s": merged[name]["meta_build_s"]}
+            failed += merged[name]["findings"]
+        sw = RB.swap_classes([worker, pipe], cmap, undo=undo)
+        failed += sw["findings"]
+        ts = time.perf_counter()
+        if not failed and pipe is not None and hasattr(pipe, "create_pipeline_stages"):
+            _reset_stages(pipe)
+            args = getattr(pipe, "fastvideo_args", None)
+            pipe.create_pipeline_stages(*([args] if args is not None else []))
+            stages = [type(s).__name__ for s in (getattr(pipe, "_stages", None) or [])] or \
+                sorted(k for k, v in vars(pipe).items() if hasattr(v, "forward"))
+    except Exception:
+        failed.append(RB.finding("rebuild_failed", traceback.format_exc()[-2000:],
+                                 "the components and the stages rebuild"))
+    if failed:
+        out["findings"] += failed
+        clean = _roll_back(undo, pipe, saved_pipe, r["old"])
+        return {"ok": False, **out, "merged": merged, "clean": clean,
+                "cost_s": round(time.perf_counter() - t0, 4)}
+    out.update(merged=merged, swapped=sw["swapped"], stages=stages,
+               stages_s=round(time.perf_counter() - ts, 4))
     # caches the old code kept on its functions or globals (CUDA graphs, static buffers) would
-    # stay alive next to the new code's own: release them before the first new call
+    # stay alive next to the new code's own: release them before the first new call (after the
+    # stage build: a release cannot be taken back)
     held = RB.release_held(r["old"])
     out["held_released"] = [{k: h[k] for k in ("where", "cuda_bytes", "graphs")} for h in held["released"]]
     out["held_findings"] = held["findings"]
     out["cuda_bytes_released"] = held["cuda_bytes_released"]
-    ts = time.perf_counter()
-    stages = []
-    if pipe is not None and hasattr(pipe, "create_pipeline_stages"):
-        _reset_stages(pipe)
-        args = getattr(pipe, "fastvideo_args", None)
-        pipe.create_pipeline_stages(*([args] if args is not None else []))
-        stages = [type(s).__name__ for s in (getattr(pipe, "_stages", None) or [])] or \
-            sorted(k for k, v in vars(pipe).items() if hasattr(v, "forward"))
-    out.update(merged=merged, swapped=sw["swapped"], stages=stages,
-               stages_s=round(time.perf_counter() - ts, 4))
+    _STATE["rebuilt"].update(files)         # what a later live swap of these modules starts from
+    _STATE["plans"] = {}                    # the old journal's modules: its lines are not live now
     _STATE["participant"] = None            # a new base: the kernel journal starts over
     return {"ok": True, **out, "cost_s": round(time.perf_counter() - t0, 4)}
 
