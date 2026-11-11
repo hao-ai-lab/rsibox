@@ -1,11 +1,4 @@
 {
- "meta": {
-  "generated": "2026-11-11",
-  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
-  "headline": "No code-coverage measurement of live-editability exists: nothing counts functions, files or lines per engine or per function group. The repo has no coverage tool and no template file. What exists is coverage by edit kind and by sampled commit or PR, listed under `measured`.",
-  "search": "`git grep -i coverage origin/main` finds three prose mentions only (core/agents/orchestrator.md:73, core/agents/toolsmith_offline.md:10, docs/process/developer_workflow.md:15). No script, schema or data file. The atoms have one coverage item, t1-coverage.",
-  "nothing_was_run": "No scan was run for this file: the repo documents no static coverage scan."
- },
  "measured": [
   {
    "id": "megatron-edit-kinds",
@@ -13,7 +6,7 @@
    "what": "Which kinds of edit install in place",
    "unit": "edit kinds, plus sampled agent commits",
    "method": "1,437 agent-written Megatron commits were classified by a script as: no code change, installable by a function swap, or needing a restart. 34 commits were then drawn evenly from the restart group and installed into one running process, each followed by a correctness check.",
-   "when": "2026-10-28 (date in the atom's source folder name)",
+   "when": "2026-10-28",
    "rows": [
     [
      "Top-level code",
@@ -54,7 +47,7 @@
    "columns": [
     "Edit kind",
     "Function swap",
-    "LiveLab"
+    "FastRSI"
    ],
    "commit_survey": {
     "total": 1437,
@@ -76,8 +69,8 @@
     "partial_reset": null,
     "restart": 0
    },
-   "caveat": "This is the paper's LiveLab build for Megatron, which re-imports changed files. It is not the lab in repos/megatron on main: that one swaps function bodies and refuses constructors, new fields and module-level changes (3 of 6 real upstream PRs were refused). Do not present 34/34 as a property of the public repo's Megatron lab.",
-   "source": "atom:t1-coverage; atom:m4-reload-share; atom:m4-restart-reasons"
+   "caveat": "This is an earlier build of the lab for Megatron, which re-imports changed files. It is not the lab in repos/megatron on main: that one swaps function bodies and refuses constructors, new fields and module-level changes (3 of 6 real upstream PRs were refused). 34 of 34 is not a property of the public repo's Megatron lab.",
+   "source": "earlier measurement run"
   },
   {
    "id": "vllm-pr-survey",
@@ -128,7 +121,7 @@
      "class": "restart"
     }
    ],
-   "caveat": "Shares are of 80 hand-read PRs, not of code. The class column (live / partial reset / restart) is my mapping of the five mechanisms onto your three buckets.",
+   "caveat": "Shares are of 80 hand-read PRs, not of code. The class column (live, partial reset, restart) is this page's grouping of the five mechanisms.",
    "source": "repos/vllm/kb/mechanisms.md:3-11"
   },
   {
@@ -146,7 +139,7 @@
    "after_fixes": {
     "live_in_place": 7,
     "forked_restart_from_warm_process": 12,
-    "note": "12 is my arithmetic from 'the 7 other in-place PRs were unchanged'; the repo states only the 7."
+    "note": "The repo states only the 7; 12 is 19 minus 7."
    },
    "source": "docs/lessons.md:17-18,67-77"
   },
@@ -194,7 +187,7 @@
     "in_process_graph": 6,
     "warm_weights_ipc": 3,
     "live_reshard_or_cold": 8,
-    "counted_by": "me, from the matrix rows"
+    "counted_by": "counted from the matrix rows"
    },
    "verified_live_on_gpu": [
     "--max-num-seqs"
@@ -243,31 +236,5 @@
    "4 ranks"
   ],
   "source": "repos/vllm/kb/mechanisms.md:24-26; repos/vllm/docs/architecture.md:155-162; repos/megatron/livelab/README.md:59-61; repos/fastvideo/livelab/README.md ('Not covered')"
- },
- "template_for_code_coverage": {
-  "status": "DATA MISSING. This shape is my proposal from the repo's function groups; no file in the repo defines it and no number below exists.",
-  "shape": {
-   "engine": "vLLM | Megatron-LM | FastVideo",
-   "engine_commit": "<sha>",
-   "workload": "<kb/workload.md>",
-   "measured_at": "<date>",
-   "unit": "functions (and lines)",
-   "method": "<static scan with the kernel's detectors + a run-time witness of which functions the workload executes>",
-   "rows": [
-    {
-     "group": "OP | GRAPH | STATE | RESOURCE | NATIVE | RANKS | restart",
-     "module": "<path>",
-     "functions_total": null,
-     "live_editable": null,
-     "partial_reset": null,
-     "restart": null,
-     "not_exercised": null
-    }
-   ]
-  },
-  "command_that_would_produce_it": null,
-  "command_note": "No such command exists in the repo. The closest building blocks are the kernel's change analysis and detectors (core/livelab/kernel/swap.py, findings.py), which classify one edit at a time, and the witness, which records which functions ran. A coverage scan would have to be written on top of them.",
-  "earlier_design_outside_the_repo": "A 2026-10-20 design note for a line-level 'coverage browser' of vLLM exists in the research folder (shades: live / in-process heavier / restart / not exercised, from an install rule plus an execution witness). Its percentages (41% / 22% / 9%) are in a mock-up, not measured, and it targets the earlier prototype, not this repo. Do not quote them.",
-  "source": "git grep over origin/main; core/livelab/kernel/README.md"
  }
 }

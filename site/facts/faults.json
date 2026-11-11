@@ -1,95 +1,7 @@
 {
  "meta": {
-  "generated": "2026-11-11",
-  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
-  "count_note": "The paper text says 'six fault-injection tests' on Megatron-LM; the atom table has 7 rows because one is a control (a new file that should install).",
-  "detail_note": "`detail` on the Megatron rows is read by me from the atom's source ledger (one row per injected commit); the atom itself holds only the three columns.",
-  "caveat": "The t2-faults and t3 tables come from the paper's LiveLab build (2026-10-28). The conformance and PR tables come from the public repo's labs."
- },
- "paper_megatron_fault_injection": {
-  "title": "Injected faults fail the way a restart would",
-  "claim": "Every injected fault fails or recovers as a restart would; none passes silently.",
-  "setup": "Megatron, one injected commit per fault. Correctness check: the first 40 training losses must match the reference.",
-  "source": "atom:t2-faults",
-  "rows": [
-   {
-    "fault": "Syntax error",
-    "expected": "reject the edit",
-    "observed": "rejected it before installing",
-    "source": "atom:t2-faults",
-    "detail": "rejected in 0.0 s with the file and line of the syntax error"
-   },
-   {
-    "fault": "Forward-pass exception",
-    "expected": "fail the check",
-    "observed": "failed; process kept",
-    "source": "atom:t2-faults",
-    "detail": "check ended after 81.2 s with the injected RuntimeError; the next check of the base ran live"
-   },
-   {
-    "fault": "Out of memory",
-    "expected": "fail the check",
-    "observed": "failed; process kept",
-    "source": "atom:t2-faults",
-    "detail": "check ended after 96.2 s with the CUDA out-of-memory error; the next check of the base ran live"
-   },
-   {
-    "fault": "Exception in __init__",
-    "expected": "fail the check",
-    "observed": "failed; process kept",
-    "source": "atom:t2-faults",
-    "detail": "check ended after 82.2 s with the injected RuntimeError"
-   },
-   {
-    "fault": "Loss becomes NaN",
-    "expected": "fail correctness",
-    "observed": "failed correctness",
-    "source": "atom:t2-faults",
-    "detail": "the gate returned FAIL: 'missing or non-finite loss in steps 1-40'"
-   },
-   {
-    "fault": "New file (control)",
-    "expected": "install",
-    "observed": "installed in place",
-    "source": "atom:t2-faults",
-    "detail": "installed live; loss matched the start; witness OK"
-   },
-   {
-    "fault": "A worker process exits",
-    "expected": "relaunch",
-    "observed": "relaunched",
-    "source": "atom:t2-faults",
-    "detail": "the live process was lost during the check (66.4 s); the next check ran as a restart (270.4 s)"
-   }
-  ]
- },
- "paper_kernel_fault_timing": {
-  "title": "Kernel faults: time to a failure",
-  "setup": "Attention prefill kernel (GQA), one GB200 GPU, compared with FlashInfer-Bench's own evaluator and with a restart",
-  "source": "atom:t3-fib-faults",
-  "rows": [
-   {
-    "fault": "Syntax error",
-    "expected": "fail fast",
-    "observed": "Live 2.2 s; restart 2.3 s; FlashInfer-Bench 418 s",
-    "source": "atom:t3-fib-faults"
-   },
-   {
-    "fault": "GPU hang",
-    "expected": "time out and recover",
-    "observed": "Live 300 s + relaunch; restart 600 s; FlashInfer-Bench 717 s",
-    "source": "atom:t3-fib-faults",
-    "note": "Hang times are set by timeouts (300 s live, 600 s restart)."
-   },
-   {
-    "fault": "Illegal memory access",
-    "expected": "report a failure",
-    "observed": "Live: no result (a bug in the kernel worker); restart 5.0 s; FlashInfer-Bench 436 s",
-    "source": "atom:t3-fib-faults",
-    "known_bug": true
-   }
-  ],
-  "known_bug": "An illegal memory access currently returns no result in the live path."
+  "count_note": "The table has 7 rows: six fault-injection tests on Megatron-LM and one control (a new file that should install).",
+  "caveat": "The first two tables below come from an earlier build of the lab (2026-10-28). The conformance and PR tables come from the public repo's labs."
  },
  "repo_conformance_cases": [
   {
@@ -298,6 +210,91 @@
  ],
  "related_drift_guard": {
   "fact": "A live process that had installed 34 unrelated edits read up to 28% slow; a newly started one did not. The lab now relaunches a process that drifts more than 10%.",
-  "source": "atom:f3-history-drift; atom:f2-fidelity-race"
+  "source": "earlier measurement run"
+ },
+ "earlier_megatron_fault_injection": {
+  "title": "Injected faults fail the way a restart would",
+  "claim": "Every injected fault fails or recovers as a restart would; none passes silently.",
+  "setup": "Megatron, one injected commit per fault. Correctness check: the first 40 training losses must match the reference.",
+  "source": "earlier measurement run",
+  "rows": [
+   {
+    "fault": "Syntax error",
+    "expected": "reject the edit",
+    "observed": "rejected it before installing",
+    "source": "earlier measurement run",
+    "detail": "rejected in 0.0 s with the file and line of the syntax error"
+   },
+   {
+    "fault": "Forward-pass exception",
+    "expected": "fail the check",
+    "observed": "failed; process kept",
+    "source": "earlier measurement run",
+    "detail": "check ended after 81.2 s with the injected RuntimeError; the next check of the base ran live"
+   },
+   {
+    "fault": "Out of memory",
+    "expected": "fail the check",
+    "observed": "failed; process kept",
+    "source": "earlier measurement run",
+    "detail": "check ended after 96.2 s with the CUDA out-of-memory error; the next check of the base ran live"
+   },
+   {
+    "fault": "Exception in __init__",
+    "expected": "fail the check",
+    "observed": "failed; process kept",
+    "source": "earlier measurement run",
+    "detail": "check ended after 82.2 s with the injected RuntimeError"
+   },
+   {
+    "fault": "Loss becomes NaN",
+    "expected": "fail correctness",
+    "observed": "failed correctness",
+    "source": "earlier measurement run",
+    "detail": "the gate returned FAIL: 'missing or non-finite loss in steps 1-40'"
+   },
+   {
+    "fault": "New file (control)",
+    "expected": "install",
+    "observed": "installed in place",
+    "source": "earlier measurement run",
+    "detail": "installed live; loss matched the start; witness OK"
+   },
+   {
+    "fault": "A worker process exits",
+    "expected": "relaunch",
+    "observed": "relaunched",
+    "source": "earlier measurement run",
+    "detail": "the live process was lost during the check (66.4 s); the next check ran as a restart (270.4 s)"
+   }
+  ]
+ },
+ "earlier_kernel_fault_timing": {
+  "title": "Kernel faults: time to a failure",
+  "setup": "Attention prefill kernel (GQA), one GB200 GPU, compared with FlashInfer-Bench's own evaluator and with a restart",
+  "source": "earlier measurement run",
+  "rows": [
+   {
+    "fault": "Syntax error",
+    "expected": "fail fast",
+    "observed": "Live 2.2 s; restart 2.3 s; FlashInfer-Bench 418 s",
+    "source": "earlier measurement run"
+   },
+   {
+    "fault": "GPU hang",
+    "expected": "time out and recover",
+    "observed": "Live 300 s + relaunch; restart 600 s; FlashInfer-Bench 717 s",
+    "source": "earlier measurement run",
+    "note": "Hang times are set by timeouts (300 s live, 600 s restart)."
+   },
+   {
+    "fault": "Illegal memory access",
+    "expected": "report a failure",
+    "observed": "Live: no result (a bug in the kernel worker); restart 5.0 s; FlashInfer-Bench 436 s",
+    "source": "earlier measurement run",
+    "known_bug": true
+   }
+  ],
+  "known_bug": "An illegal memory access currently returns no result in the live path."
  }
 }
