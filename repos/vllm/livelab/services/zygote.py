@@ -130,7 +130,9 @@ def _child(req, conns, refresh=()):
     env keys, after dropping the `refresh` modules so the server imports them again from their
     new source. With the `env` finding accepted, the keys where the request differs from the
     zygote's start environment take the request's value (or are removed); the other keys keep
-    the zygote's post-import values."""
+    the zygote's post-import values. Risk of accepting: a key read at import time
+    (CUDA_VISIBLE_DEVICES, HF_*, VLLM_*) shows the request's value in os.environ while the
+    modules the zygote imported already acted on its start value."""
     code = 1
     try:
         for c in conns:

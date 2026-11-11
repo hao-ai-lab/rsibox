@@ -870,16 +870,16 @@ class Pool:
         still serves, and the patched holder is re-copied from the serving one."""
         with self.lock:
             patch, eng = self.pending, self.pending_engine
-            fo = None
+            failover_record = None
             if eng is self.active:
-                fo = self.failover(f"rollback {patch.id}: {why}", eng)
-                if fo is None:
+                failover_record = self.failover(f"rollback {patch.id}: {why}", eng)
+                if failover_record is None:
                     raise RuntimeError(f"rollback {patch.id}: the standby "
                                        f"{self.standby.name} does not hold the ledger")
             self.tainted.add(eng.name)
             self.pending = self.pending_engine = None
         rs = self.restore_holder(eng, self.active)
-        return {"patch": patch.id, "failover": fo, "restore": rs}
+        return {"patch": patch.id, "failover": failover_record, "restore": rs}
 
     def accept(self):
         """Commit the pending patch: ledger, then replay onto the standby, then the new
@@ -1138,12 +1138,12 @@ def parser():
     c.add_argument("--rank", type=int, required=True)
     c.add_argument("--init", required=True)
     demo_parser = sub.add_parser("demo")
-    for q in (c, sub.add_parser("copy"), demo_parser):
-        q.add_argument("--model", required=True)
+    for subparser in (c, sub.add_parser("copy"), demo_parser):
+        subparser.add_argument("--model", required=True)
         # copy and copy-rank: unset means the holders were started without --max-model-len
-        q.add_argument("--max-model-len", type=int,
-                       default=4096 if q is demo_parser else None)
-        q.add_argument("--python", default=sys.executable)
+        subparser.add_argument("--max-model-len", type=int,
+                               default=4096 if subparser is demo_parser else None)
+        subparser.add_argument("--python", default=sys.executable)
     cp = sub._name_parser_map["copy"]
     cp.add_argument("--socket-dir", required=True)
     cp.add_argument("--src-gpu", type=int, required=True)

@@ -274,8 +274,11 @@ def pool():
     python = os.environ.get("FASTRSI_VLLM_PYTHON", sys.executable)
     # the GPUs this job was given (CUDA_VISIBLE_DEVICES), not GPUs 0 and 1 of the host
     visible = [gpu for gpu in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu.strip()]
-    gpus = os.environ.get("FASTRSI_GPUS") or ",".join((visible or ["0", "1"])[:2])
-    g0, g1 = (int(x) for x in gpus.split(","))
+    gpus = (os.environ.get("FASTRSI_GPUS") or ",".join((visible or ["0", "1"])[:2])).split(",")
+    if len(gpus) < 2 or not all(gpu.strip().isdigit() for gpu in gpus[:2]):
+        pytest.skip(f"needs two GPU indices (FASTRSI_GPUS or CUDA_VISIBLE_DEVICES), got {gpus}: "
+                    "set FASTRSI_GPUS=i,j")
+    g0, g1 = int(gpus[0]), int(gpus[1])
     work = tempfile.mkdtemp(prefix="wsc-test-", dir=os.environ.get("FASTRSI_TEST_TMP"))
     # AF_UNIX paths are limited to 107 bytes: the socket dir stays short, outside `work`
     sock = tempfile.mkdtemp(prefix="wsc-")
@@ -287,19 +290,20 @@ def pool():
         h1.start(model, python, MML, dummy=True)
         seed = W.copy(model, sock, g0, g1, MML, python, work)
         assert seed["ok"], seed
-        a = W.Engine("A", g0, W._free_port(), work, h0)
-        s = W.Engine("S", g1, W._free_port(), work, h1)
-        engines += [a, s]
-        a.start(model, python, GMU, MML)
-        s.start(model, python, GMU, MML)
-        p = W.Pool(model, python, work, a, s, W._free_port(), max_model_len=MML)
+        engine_a = W.Engine("A", g0, W._free_port(), work, h0)
+        engine_s = W.Engine("S", g1, W._free_port(), work, h1)
+        engines += [engine_a, engine_s]
+        engine_a.start(model, python, GMU, MML)
+        engine_s.start(model, python, GMU, MML)
+        gpu_pool = W.Pool(model, python, work, engine_a, engine_s, W._free_port(),
+                          max_model_len=MML)
         # the seeded holder serves the same model as the disk-loaded one
-        assert W.digests_agree(p.ref_digest, p.digest(s))["ok"]
-        yield p
-        p.close()
+        assert W.digests_agree(gpu_pool.ref_digest, gpu_pool.digest(engine_s))["ok"]
+        yield gpu_pool
+        gpu_pool.close()
     finally:
-        for e in engines:
-            e.stop()
+        for started_engine in engines:
+            started_engine.stop()
         h0.stop()
         h1.stop()
         shutil.rmtree(work, ignore_errors=True)

@@ -25,7 +25,8 @@ Contract:
   cannot tell whether a socket is this engine's, so it fails too, saying so.
 - start() refuses (exit 2, a `weights_socket_path` finding, nothing started) a socket dir
   whose daemon socket path would exceed AF_UNIX's 107 bytes. The name is vLLM's, unchanged:
-  md5 of the uuid gives 55 bytes, the sha256 fallback on FIPS hosts 87.
+  md5 of the uuid gives 55 bytes, the sha256 fallback on FIPS hosts 87, and a draft model's
+  socket 6 more ("_draft"); the check counts the longest.
 - start() stops the daemon it started (its session) when the daemon does not get ready: a
   failed or timed-out daemon never stays behind holding GPU memory.
 - loader_config() turns the disk fallback off: an engine that asked for resident weights
@@ -58,9 +59,11 @@ def socket_name(gpu_uuid):
 def long_socket_path_finding(socket_dir):
     """A `weights_socket_path` finding when the daemon's sockets in socket_dir would be longer
     than AF_UNIX allows, else None. Every GPU's socket name has the same length (a hex digest),
-    so this needs no GPU uuid. The daemon binds only after loading the weights, so a too-long
-    path fails minutes in; this check costs microseconds."""
-    path = os.path.join(os.path.abspath(socket_dir), socket_name("GPU-length-only"))
+    so this needs no GPU uuid. The longest name counts: a draft model's daemon group adds
+    "_draft" (vLLM's format_socket_role_suffix). The daemon binds only after loading the
+    weights, so a too-long path fails minutes in; this check costs microseconds."""
+    name = socket_name("GPU-length-only").replace(".sock", "_draft.sock")
+    path = os.path.join(os.path.abspath(socket_dir), name)
     path_bytes = len(os.fsencode(path))
     if path_bytes <= MAX_SOCK_PATH:
         return None

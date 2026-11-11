@@ -287,3 +287,22 @@ def test_a_socket_dir_too_long_for_af_unix_is_refused_before_the_daemon_loads(d)
     with pytest.raises(RuntimeError, match="too long"):
         holder.start("m", sys.executable)
     assert holder.proc is None and not os.path.exists(os.path.join(d, "holder.log"))
+
+
+def test_the_socket_path_check_counts_the_fips_and_draft_names(monkeypatch):
+    """Input: a 30-byte socket dir. Action: long_socket_path_finding with md5 available, then
+    with md5 refused as on a FIPS host (vLLM's safe_hash then uses sha256). Expect: None with
+    md5 (30 + 1 + 61-byte draft name = 92), a finding with sha256 (30 + 1 + 93 = 124). Before:
+    the check counted the 55-byte target name only, so a draft daemon's socket could still be
+    too long. Does not prove: vLLM's name on the deployed build (taken from a vLLM checkout)."""
+    import hashlib
+    import weights
+    socket_dir = "/" + "s" * 29
+    assert weights.long_socket_path_finding(socket_dir) is None
+
+    def no_md5(*args, **kwargs):
+        raise ValueError("md5 disabled (FIPS)")
+    monkeypatch.setattr(hashlib, "md5", no_md5)
+    assert len(weights.socket_name("GPU-x")) == 87
+    finding = weights.long_socket_path_finding(socket_dir)
+    assert finding["check"] == "weights_socket_path" and "124 bytes" in finding["observed"]

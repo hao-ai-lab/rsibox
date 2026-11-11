@@ -601,7 +601,7 @@ def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None):
             return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
                     "note": note, "unverified": below}
         below = verified
-    procs = {p: _start_time(p) for p in [pid] + below}
+    procs = {proc_pid: _start_time(proc_pid) for proc_pid in [pid] + below}
     procs = {p: st for p, st in procs.items() if st is not None}
 
     def alive():

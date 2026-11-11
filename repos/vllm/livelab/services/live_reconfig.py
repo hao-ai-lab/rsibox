@@ -238,10 +238,10 @@ class _After(importlib.abc.MetaPathFinder):
         spec = None
         finders = list(sys.meta_path)
         later = finders[finders.index(self) + 1:] if self in finders else finders
-        for f in later:
-            if isinstance(f, _After) or not hasattr(f, "find_spec"):
+        for finder in later:
+            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
                 continue
-            spec = f.find_spec(name, path, target)
+            spec = finder.find_spec(name, path, target)
             if spec is not None:
                 break
         if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):

@@ -375,7 +375,7 @@ def test_zygote_child_applies_an_accepted_env_difference():
     _, status = os.waitpid(pid, 0)
     assert os.waitstatus_to_exitcode(status) == 0, Path(work_dir, "child.log").read_text()
     seen = json.loads(Path(out).read_text())
-    seen = {k: seen.get(k) for k in ("KEEP", "CHANGE", "ADDED", "GONE")}   # not the whole env
+    seen = {key: seen.get(key) for key in ("KEEP", "CHANGE", "ADDED", "GONE")}   # not the whole env
     assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
 
 
