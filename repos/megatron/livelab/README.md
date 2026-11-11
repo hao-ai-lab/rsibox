@@ -46,9 +46,9 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   timeout) or a send or receive that fails fails the round and poisons the session
   (`participant_failed`); no round runs after it. Rank 0 keeps the failed round's buffers, so a
   reply that comes late lands there harmlessly. The surviving ranks then wait in their receive or
-  send on the long-timeout group until the harness respawns the job. A rank that answers before a slower
-  rank 0 just waits. Not bounded: rank 0's own part (a hang in rank 0's own train step). The
-  client's timeout or a closed connection may poison it on the client's side first, and
+  send on the long-timeout group until the harness respawns the job. A rank that answers before a
+  slower rank 0 just waits. Not bounded: rank 0's own part (a hang in rank 0's own train step).
+  The client's timeout or a closed connection may poison it on the client's side first, and
   `reset("respawn")` restarts the job (the harness does it).
 - **Faults reach the rank they name:** `inject` takes a rank number or a participant name
   (`rank1`); a target that names no rank is refused, never skipped on every rank.
