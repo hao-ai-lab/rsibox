@@ -19,8 +19,8 @@
       const t = tot(st), r = $('div', 'hl-row', null, hl); $('span', 'hl-l', label, r);
       const bar = $('span', 'hl-bar', null, r), prev = i ? rows[i - 1][0] : st;
       const segs = phases.map((ph) => { const sg = $('i', null, null, bar); sg.style.background = 'var(--ph-' + ph + ')'; sg.style.width = (100 * sec(reduced ? st : prev, ph) / base) + '%'; return [sg, 100 * sec(st, ph) / base]; });
-      const v = $('span', 'hl-v fr-num', (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s', r);
-      if (i) $('b', null, (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×', v);
+      const v = $('span', 'hl-v fr-num', null, r);
+      $('b', null, i ? (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×' : '', v); $('span', null, (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s', v);
       if (!reduced) {
         r.style.opacity = 0; v.style.opacity = 0;
         const at = 300 + i * 1300;
