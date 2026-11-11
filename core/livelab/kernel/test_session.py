@@ -207,7 +207,7 @@ class SessionTest(unittest.TestCase):
         res = sess.install(plan)
         rec = res["receipt"]
         self.assertEqual((res["outcome"], rec["commit_hashes"]["agree"]), ("committed", False))
-        self.assertIn("ranks_disagree", [f["check"] for f in rec["findings"]])
+        self.assertIn("ranks_disagree", [finding["check"] for finding in rec["findings"]])
         self.assertEqual((res["state"], sess.status()["state"]), ("poisoned", "poisoned"))
         self.assertEqual(sess.install(plan)["findings"][0]["check"], "session_poisoned")
 

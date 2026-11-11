@@ -34,12 +34,15 @@ def _split_commit(receipt, plan):
     hashes = (receipt or {}).get("commit_hashes") or {}
     if hashes.get("agree") is not False:
         return None
-    proofs = [r.get("proof") or {} for r in ((receipt or {}).get("participants") or {}).values()]
-    splits = [f for f in receipt.get("findings", []) if f.get("check") == "ranks_disagree"]
-    if splits and all(p.get("ok", True) for p in proofs) and \
+    replies = ((receipt or {}).get("participants") or {}).values()
+    proofs = [reply.get("proof") or {} for reply in replies]
+    splits = [finding for finding in receipt.get("findings", [])
+              if finding.get("check") == "ranks_disagree"]
+    if splits and all(proof.get("ok", True) for proof in proofs) and \
             F.decide(splits, plan.get("accept") if isinstance(plan, dict) else ())["proceed"]:
         return None
-    why = "; ".join(f.get("observed", "") for f in splits) or "a proof did not answer"
+    why = "; ".join(finding.get("observed", "") for finding in splits) or \
+        "a proof did not answer"
     return f"code hashes differ after commit: {why}"[:500]
 
 

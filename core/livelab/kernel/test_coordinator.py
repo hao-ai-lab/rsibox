@@ -305,14 +305,14 @@ class UndoCascadeTest(unittest.TestCase):
     def _two(self, tag, resets, resets1, resets2):
         name, eng, _ = fresh(tag)
         part = C.LocalParticipant("rank0", alias={"toy": name}, resets=resets)
-        co = C.Coordinator([part], phase2_deadline_s=None)
+        coordinator = C.Coordinator([part], phase2_deadline_s=None)
         v1 = edit(ENG, ("return y", "return y * 10"))
         v2 = edit(v1, ("return y * 10", "return y * 100"))
         for txn, src, kinds in (("t1", v1, resets1), ("t2", v2, resets2)):
-            r = co.run({"id": txn, "undo_resets": kinds, "modules": {"toy.engine": {
+            res = coordinator.run({"id": txn, "undo_resets": kinds, "modules": {"toy.engine": {
                 "source": src, "targets": [["Engine.step", at(ENG, "def step")]]}}})
-            self.assertEqual(r["outcome"], "committed", r)
-        return co, part, eng
+            self.assertEqual(res["outcome"], "committed", res)
+        return coordinator, part, eng
 
     def test_cascade_runs_the_later_transactions_resets_too(self):
         """Input: t1 (undo_resets ["state"]) then t2 on top (undo_resets ["cache"]); undo t1.
@@ -321,13 +321,13 @@ class UndoCascadeTest(unittest.TestCase):
         ran, t2 was marked undone, so its cache reset could never run (a second undo of t2
         is refused). Not: resets that depend on each other's order beyond newest first."""
         ran = []
-        co, part, eng = self._two("casc_resets", {
+        coordinator, part, eng = self._two("casc_resets", {
             "cache": lambda: ran.append("cache"), "state": lambda: ran.append("state")},
             ["state"], ["cache"])
-        u = co.undo("t1")
-        self.assertEqual((u["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
-        self.assertEqual(u["receipt"]["resets"], ["cache", "state"])
-        self.assertEqual(co.status("t2")["state"], "undone")
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
+        self.assertEqual(undo_res["receipt"]["resets"], ["cache", "state"])
+        self.assertEqual(coordinator.status("t2")["state"], "undone")
 
     def test_a_failed_cascade_never_leaves_the_later_transaction_committed(self):
         """Input: t1 (undo_resets ["bad"], a reset that raises) then t2 on top; undo t1.
@@ -337,11 +337,11 @@ class UndoCascadeTest(unittest.TestCase):
         (cancelled), where both keep their state."""
         def bad():
             raise RuntimeError("reset failed")
-        co, part, eng = self._two("casc_fail", {"bad": bad}, ["bad"], [])
-        u = co.undo("t1")
-        self.assertEqual((u["ok"], eng.Engine().step(3), part.status("t2")["state"]),
+        coordinator, part, eng = self._two("casc_fail", {"bad": bad}, ["bad"], [])
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["ok"], eng.Engine().step(3), part.status("t2")["state"]),
                          (False, 17, "undone"))
-        self.assertEqual((co.status("t1")["state"], co.status("t2")["state"]),
+        self.assertEqual((coordinator.status("t1")["state"], coordinator.status("t2")["state"]),
                          ("partial", "partial"))
 
 

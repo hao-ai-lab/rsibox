@@ -404,18 +404,18 @@ class JitRebuildTest(unittest.TestCase):
         searched: mlp_kernel kept its old compiled kernel and the proof read zero_witness.
         Not: a caller held only in a class or a closure."""
         aliased = MLP.replace("import {act} as acts", "from {act} import act_fn as act")
-        names, texts, m, p, sess = lab(self, {"act": ACT, "mlp": aliased.replace(
+        names, texts, mods, part, sess = lab(self, {"act": ACT, "mlp": aliased.replace(
             "acts.act_fn(v)", "act(v)")})
-        mlp = m["mlp"]
+        mlp = mods["mlp"]
         self.assertEqual(mlp.launch([1, 2]), [3, 5])
-        r = install(sess, names["act"], texts["act"].replace("v * SCALE", "v + 10"))
-        self.assertEqual(r["outcome"], "committed", r)
-        rebuild = [f for f in findings(r) if f["check"] == "jit_rebuild"][0]
+        res = install(sess, names["act"], texts["act"].replace("v * SCALE", "v + 10"))
+        self.assertEqual(res["outcome"], "committed", res)
+        rebuild = [finding for finding in findings(res) if finding["check"] == "jit_rebuild"][0]
         self.assertIn(f"{names['mlp']}.mlp_kernel", rebuild["observed"])
         self.assertEqual(mlp.launch([1, 2]), [12, 13])
         key = L.key_of(names["act"], "act_fn", at(texts["act"], "@triton.jit"))
-        pr = sess.co.prove(r["txn"])
-        self.assertEqual((pr["ok"], pr["receipt"]["witness"]["rank0"]), (True, {key: 1}))
+        proof = sess.co.prove(res["txn"])
+        self.assertEqual((proof["ok"], proof["receipt"]["witness"]["rank0"]), (True, {key: 1}))
         self.assertTrue(sess.uninstall()["ok"])
         self.assertEqual((mlp.launch([1, 2]), sess.state()), ([3, 5], "base"))
 
@@ -427,20 +427,20 @@ class JitRebuildTest(unittest.TestCase):
         rebuilt kernels whose text names it, never into another added kernel, so its witness
         read 0 (zero_witness) though every launch ran it inlined. Not: a real GPU."""
         base = "import {t} as triton\n\n\ndef launch(x):\n    return x\n"
-        names, texts, m, p, sess = lab(self, {"add": base})
+        names, texts, mods, part, sess = lab(self, {"add": base})
         new = texts["add"].replace(
             "\n\n\ndef launch(x):\n    return x\n",
             "\n\n\n@triton.jit\ndef added_helper(v):\n    return v * 3\n\n\n"
             "@triton.jit\ndef added_kernel(x, n):\n    return [added_helper(v) for v in x[:n]]\n"
             "\n\ndef launch(x):\n    return added_kernel[(1,)](x, len(x))\n")
-        r = install(sess, names["add"], new)
-        self.assertEqual(r["outcome"], "committed", r)
-        self.assertEqual(m["add"].launch([2, 4]), [6, 12])
-        pr = sess.co.prove(r["txn"])
-        self.assertEqual((pr["ok"], sorted(pr["receipt"]["witness"]["rank0"].values())),
-                         (True, [1, 1, 1]), pr["receipt"]["findings"])
+        res = install(sess, names["add"], new)
+        self.assertEqual(res["outcome"], "committed", res)
+        self.assertEqual(mods["add"].launch([2, 4]), [6, 12])
+        proof = sess.co.prove(res["txn"])
+        self.assertEqual((proof["ok"], sorted(proof["receipt"]["witness"]["rank0"].values())),
+                         (True, [1, 1, 1]), proof["receipt"]["findings"])
         self.assertTrue(sess.uninstall()["ok"])
-        self.assertEqual((m["add"].launch([2, 4]), sess.state()), ([2, 4], "base"))
+        self.assertEqual((mods["add"].launch([2, 4]), sess.state()), ([2, 4], "base"))
 
     def test_selective_compiled_frame_invalidation_and_restore(self):
         """Input: a target callable carrying per-callable TorchDynamo cache attributes

@@ -493,11 +493,11 @@ def _nested_methods(tree):
     out = set()
 
     def walk(body, prefix, depth):
-        for n in body:
-            if isinstance(n, ast.ClassDef):
-                walk(n.body, f"{prefix}{n.name}.", depth + 1)
-            elif isinstance(n, _DEF) and depth >= 2:
-                out.add(prefix + n.name)
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                walk(node.body, f"{prefix}{node.name}.", depth + 1)
+            elif isinstance(node, _DEF) and depth >= 2:
+                out.add(prefix + node.name)
     walk(tree.body, "", 0)
     return out
 

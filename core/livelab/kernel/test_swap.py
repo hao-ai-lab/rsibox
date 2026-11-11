@@ -292,14 +292,14 @@ class SwapEdgeCaseTest(unittest.TestCase):
         removed = base.replace("\n\n        def g(self):\n            return 0", "")
         for new, member in ((added, "Outer.Inner.helper"), (removed, "Outer.Inner.g")):
             name = f"kt_sw{next(_n)}"
-            (m,) = temp_modules(self, {name: base})
-            r = S.stage(name, new, "auto")
-            blocking = [f for f in r["findings"] if f["check"] == "outside_changes"
-                        and not f["overridable"]]
-            self.assertEqual(len(blocking), 1, r["findings"])
+            (mod_obj,) = temp_modules(self, {name: base})
+            res = S.stage(name, new, "auto")
+            blocking = [finding for finding in res["findings"] if finding["check"] == "outside_changes"
+                        and not finding["overridable"]]
+            self.assertEqual(len(blocking), 1, res["findings"])
             self.assertIn(member, blocking[0]["observed"])
-            self.assertFalse(F.decide(r["findings"], "all")["proceed"])
-            self.assertEqual(m.Outer.Inner().f(1), 2)
+            self.assertFalse(F.decide(res["findings"], "all")["proceed"])
+            self.assertEqual(mod_obj.Outer.Inner().f(1), 2)
 
 
 if __name__ == "__main__":

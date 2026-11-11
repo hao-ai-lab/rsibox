@@ -407,8 +407,8 @@ def instrument_module_functions(module, function_names):
         instrumented[target_name] = wrapper
         # the bare name may be instrumented in several modules (one per rank): keep them all,
         # one per module; collect reads the smallest count (a module that never ran it: 0)
-        same_name = [w for w in _RESTART_BY_NAME.get(target_name, ())
-                     if getattr(w, "__fastrsi_module__", None) != module_name]
+        same_name = [other for other in _RESTART_BY_NAME.get(target_name, ())
+                     if getattr(other, "__fastrsi_module__", None) != module_name]
         _RESTART_BY_NAME[target_name] = same_name + [wrapper]
         _RESTART_INSTRUMENTED_TARGETS[target_name] = wrapper
         _RESTART_INSTRUMENTED_TARGETS[f"{module_name}:{target_name}"] = wrapper
@@ -455,7 +455,7 @@ def collect_restart_witness(targets):
             collected[target_name] = int(counts_map.get(target_name, 0))
         elif isinstance(item, str):
             wrappers = _RESTART_BY_NAME.get(item) or [
-                w for w in (_RESTART_INSTRUMENTED_TARGETS.get(item),) if w is not None]
+                one for one in (_RESTART_INSTRUMENTED_TARGETS.get(item),) if one is not None]
             counts = []
             for wrapper in wrappers:
                 target_name = getattr(wrapper, "__fastrsi_target__", item)

@@ -331,8 +331,8 @@ class EditAddedDefinitionTest(unittest.TestCase):
         del mod_obj.Config.port
         self.assertTrue(part.at_base()["ok"], part.at_base())
         del mod_obj.DEFAULT_SHIFT
-        ab = part.at_base()
-        self.assertEqual((ab["ok"], ab["missing_names"]), (False, {mod_name: ["DEFAULT_SHIFT"]}))
+        base_res = part.at_base()
+        self.assertEqual((base_res["ok"], base_res["missing_names"]), (False, {mod_name: ["DEFAULT_SHIFT"]}))
 
 
 LAZY = '''import importlib

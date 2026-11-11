@@ -341,7 +341,7 @@ def fake_nvml_uuids(caps, uuids, cpus=None):
     nvml.nvmlDeviceGetHandleByUUID = lambda uuid: uuids.index(uuid)
     if cpus is not None:
         nvml.nvmlDeviceGetCpuAffinity = lambda handle, words: [
-            sum(1 << c for c in cpus[handle] if c // 64 == w) for w in range(words)]
+            sum(1 << cpu for cpu in cpus[handle] if cpu // 64 == word) for word in range(words)]
     return nvml
 
 
@@ -375,8 +375,8 @@ class VisibleDevicesAfterFork(unittest.TestCase):
         Pain point: "" answered GPU 0's capability for a process with no GPU, a UUID list
         answered physical GPU 0's, and "100" raised an unpacking error. Not: MIG names."""
         nvml = fake_nvml_uuids([(9, 0), (10, 0)], ["GPU-a", "GPU-b"])
-        env = {k: v for k, v in os.environ.items()
-               if k not in ("FASTRSI_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
+        env = {key: val for key, val in os.environ.items()
+               if key not in ("FASTRSI_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
         with mock.patch.dict(os.environ, env, clear=True):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             with self.assertRaises(RuntimeError):
@@ -429,12 +429,12 @@ class VisibleDevicesAfterFork(unittest.TestCase):
         with mock.patch.object(forksafe.os, "sched_getaffinity", lambda pid: set(current[0]),
                                create=True), \
                 mock.patch.object(forksafe.os, "sched_setaffinity", setaffinity, create=True):
-            r = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1, 2])
-            self.assertEqual((r["bound"], r["bound_cpus"], current[0]), (True, [2], {2}))
+            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1, 2])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]), (True, [2], {2}))
             current[0] = {2, 3}
-            r = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1])
-            self.assertEqual((r["bound"], r["bound_cpus"], current[0]), (False, [], {2, 3}))
-            self.assertTrue(r["why"])
+            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]), (False, [], {2, 3}))
+            self.assertTrue(reply["why"])
 
 
 class NumaThreadsAndCowHygiene(unittest.TestCase):

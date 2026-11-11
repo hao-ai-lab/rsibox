@@ -92,18 +92,18 @@ class LeakyUninstall(FakeLab):
 class OneRankSilent(FakeLab):
     """One participant reports no witness calls at all (an empty map)."""
     def check(self, workload=None):
-        r = super().check(workload)
-        if r["witness"]:
-            r["witness"]["p1"] = {}
-        return r
+        reply = super().check(workload)
+        if reply["witness"]:
+            reply["witness"]["p1"] = {}
+        return reply
 
 
 class OneParticipant(FakeLab):
     """An honest lab with a single participant."""
     def check(self, workload=None):
-        r = super().check(workload)
-        r["witness"] = {"p0": r["witness"]["p0"]} if r["witness"] else {}
-        return r
+        reply = super().check(workload)
+        reply["witness"] = {"p0": reply["witness"]["p0"]} if reply["witness"] else {}
+        return reply
 
 
 class CasesCatchMissingProperties(unittest.TestCase):

@@ -48,8 +48,8 @@ def edit(src, *pairs):
 def loads_constant(code, value):
     """Does `code` load the constant `value`? Read from the instructions, not `co_consts`:
     Python 3.14 loads small ints with LOAD_SMALL_INT, which keeps them out of co_consts."""
-    return any(i.opname in ("LOAD_CONST", "LOAD_SMALL_INT") and i.argval == value
-               and type(i.argval) is type(value) for i in dis.get_instructions(code))
+    return any(instr.opname in ("LOAD_CONST", "LOAD_SMALL_INT") and instr.argval == value
+               and type(instr.argval) is type(value) for instr in dis.get_instructions(code))
 
 
 class LocateTest(unittest.TestCase):

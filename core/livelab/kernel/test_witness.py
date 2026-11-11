@@ -354,10 +354,10 @@ class CodeRestartWitnessTest(unittest.TestCase):
         self.assertEqual((prop_mod.C().val, prop_mod.C().val), (42, 42))
         self.assertEqual(W.collect_restart_witness(targets), {"C.val": 2})
         for first in (0, 1):
-            mods = [types.ModuleType(f"kt_restart_same{first}_{i}") for i in (0, 1)]
-            for m in mods:
-                exec("def scale(x):\n    return x * 2\n", m.__dict__)
-                W.instrument_module_functions(m, ["scale"])
+            mods = [types.ModuleType(f"kt_restart_same{first}_{index}") for index in (0, 1)]
+            for module_obj in mods:
+                exec("def scale(x):\n    return x * 2\n", module_obj.__dict__)
+                W.instrument_module_functions(module_obj, ["scale"])
             mods[first].scale(1)
             mods[first].scale(2)
             self.assertEqual(W.collect_restart_witness(["scale"]), {"scale": 0}, first)

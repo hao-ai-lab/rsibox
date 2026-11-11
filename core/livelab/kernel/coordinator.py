@@ -1632,11 +1632,11 @@ class Coordinator:
         # (the cascade): run their undo_resets too, newest first, each kind once
         with self._lock:
             order = list(self.txns)
-            later = [x for x in order[order.index(txn) + 1:]
-                     if self.txns[x].get("state") == "committed"]
+            later = [other for other in order[order.index(txn) + 1:]
+                     if self.txns[other].get("state") == "committed"]
         resets = []
-        for x in list(reversed(later)) + [txn]:
-            for kind in self.txns[x].get("plan", {}).get("undo_resets", []):
+        for undone_txn in list(reversed(later)) + [txn]:
+            for kind in self.txns[undone_txn].get("plan", {}).get("undo_resets", []):
                 if kind not in resets:
                     resets.append(kind)
         tl = Timeline(queued=now())

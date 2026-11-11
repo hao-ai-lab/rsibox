@@ -487,12 +487,12 @@ def arm_added(obj, key, plans, journal, witness, added=()):
                 if id(f) not in seen:
                     seen.add(id(f))
                     fns.append(f)
-    others = {id(o): o for o in (unwrap(a)[0] for a in added)
-              if o is not None and not missing(o)}
-    for f in callers_of(jf, others):
-        if id(f) not in seen:
-            seen.add(id(f))
-            fns.append(f)
+    others = {id(other): other for other in (unwrap(obj_added)[0] for obj_added in added)
+              if other is not None and not missing(other)}
+    for caller in callers_of(jf, others):
+        if id(caller) not in seen:
+            seen.add(id(caller))
+            fns.append(caller)
     _hook_into(fns, witness, journal, key)
     return len(fns)
 
