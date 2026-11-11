@@ -124,7 +124,8 @@ template's conformance cases c0-c10.
   that would change nothing is `empty_change`. `at_base` tells names its transactions and
   cells added to a module (journaled) from modules the engine imported lazily into it since
   base (vLLM's LazyLoader binds `llguidance.hf` at first use, #62872): the first stay
-  `extra_names` and make it false, the second are listed in `lazy_imports` and do not.
+  `extra_names` and make it false, the second are listed in `lazy_imports` and do not. A
+  base name that is gone is listed in `missing_names` and makes it false too.
 - **Host** (`coordinator.py`, part 2) runs one transaction over every participant.
   `Coordinator.run(plan)`: phase 1, prepare on all while steps go on (a no vote, or a
   participant missing from a group's reply, aborts all); phase 2, validate on all, then

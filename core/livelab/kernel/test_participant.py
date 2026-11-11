@@ -300,6 +300,40 @@ class EditAddedDefinitionTest(unittest.TestCase):
             (4, 4, True),
         )
 
+    def test_undo_keeps_base_globals_and_class_attributes_the_engine_set(self):
+        """Input: a module with `make_shift(k)` (returns `shift`, x + k), a base global
+        `DEFAULT_SHIFT = make_shift(1)` and an empty `class Config`. The edit makes shift
+        x + 10 * k. While it is installed the engine rebinds `DEFAULT_SHIFT = make_shift(2)`
+        and sets `Config.port = 8080` (a plain value). Expected: undo is ok; DEFAULT_SHIFT is
+        still bound and runs base code (5 + 2 = 7); Config.port stays; at_base is ok. Then a
+        base global deleted by hand makes at_base false and names it in `missing_names`. Pain
+        point: undo deleted every module global holding a new nested code, even one the base
+        defined, and every class attribute added since apply on any class of the module; and
+        at_base did not look for base names that were gone. Not: a base global rebound to a
+        closure that cannot go back (closure_not_restored)."""
+        mod_name = f"kt_keep_globals{next(_n)}"
+        base_src = ("class Config:\n    pass\n\n\n"
+                    "def make_shift(k):\n    def shift(x):\n        return x + k\n"
+                    "    return shift\n\n\nDEFAULT_SHIFT = make_shift(1)\n")
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        patched = base_src.replace("x + k", "x + 10 * k")
+        self.assertTrue(part.prepare({"id": "g1", "modules": {mod_name: {"source": patched}}})["ok"])
+        self.assertTrue(part.commit("g1")["ok"])
+        mod_obj.DEFAULT_SHIFT = mod_obj.make_shift(2)
+        mod_obj.Config.port = 8080
+        self.assertEqual(mod_obj.DEFAULT_SHIFT(5), 25)
+        undo_res = part.undo("g1")
+        self.assertEqual((undo_res["ok"], undo_res["findings"]), (True, []))
+        self.assertEqual((hasattr(mod_obj, "DEFAULT_SHIFT"), getattr(mod_obj.Config, "port", None)),
+                         (True, 8080))
+        self.assertEqual(mod_obj.DEFAULT_SHIFT(5), 7)
+        del mod_obj.Config.port
+        self.assertTrue(part.at_base()["ok"], part.at_base())
+        del mod_obj.DEFAULT_SHIFT
+        ab = part.at_base()
+        self.assertEqual((ab["ok"], ab["missing_names"]), (False, {mod_name: ["DEFAULT_SHIFT"]}))
+
 
 LAZY = '''import importlib
 

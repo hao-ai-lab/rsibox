@@ -342,7 +342,7 @@ class LocalParticipant(Participant):
     def at_base(self, _=None):
         """Is this participant back at its start state? {ok, pending_txns, journal_len,
         modules: {module: [base digest, live digest]}, extra_names (module names added and
-        left), extra_attrs (scope attributes added and left), poisoned (an undo that could
+        left), missing_names (base module names that are gone), extra_attrs (scope attributes added and left), poisoned (an undo that could
         not restore all)}. The witness global stays by design (a no-op stub after undo) and
         is not an extra. A name the engine added since base by importing a module lazily (a
         module value that is the imported module, under a name no transaction or cell of
@@ -351,7 +351,7 @@ class LocalParticipant(Participant):
         pool: apply, undo, then check before the next job."""
         pending = sorted(t for t, st in self._state.items()
                          if st in ("prepared", "committed", "partial"))
-        mods, extra_names, engine, lazy = {}, {}, {}, {}
+        mods, extra_names, engine, lazy, missing = {}, {}, {}, {}, {}
         for m, (digest, names) in self._base.items():
             fp = self.fingerprint([m])
             live = L.text_hash(json.dumps(fp["code"], sort_keys=True)) if fp["ok"] else None
@@ -370,6 +370,9 @@ class LocalParticipant(Participant):
             extra = [n for n in extra if n not in imp]
             if extra:
                 extra_names[m] = extra
+            gone = sorted(names - set(vars(mod))) if mod is not None else []
+            if gone:
+                missing[m] = gone
         extra_attrs = {}
         if self._scope_keys is not None:
             now = _attr_names(self.scope)
@@ -378,10 +381,11 @@ class LocalParticipant(Participant):
                 if new:
                     extra_attrs[path] = new
         poisoned = bool(self._partial)
-        ok = (not pending and not self.journal.entries and not extra_names
+        ok = (not pending and not self.journal.entries and not extra_names and not missing
               and not extra_attrs and not poisoned and all(a == b for a, b in mods.values()))
         return F.ok(**{"ok": ok}, pending_txns=pending, journal_len=len(self.journal.entries),
-                    modules=mods, extra_names=extra_names, extra_attrs=extra_attrs,
+                    modules=mods, extra_names=extra_names, missing_names=missing,
+                    extra_attrs=extra_attrs,
                     engine_names=engine, lazy_imports=lazy, poisoned=poisoned)
 
     def prepare(self, plan):

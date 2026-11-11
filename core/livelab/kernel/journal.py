@@ -199,7 +199,7 @@ def _refs(pairs):
 
 
 def _restore_closures(entry):
-    """entry: (pairs, refs at record[, mod, class_snapshots]). pairs: {id(new nested code):
+    """entry: (pairs, refs at record[, mod, class_snapshots, module names]). pairs: {id(new nested code):
     (new code, old code or None)}. Only the new codes that gained a reference since the entry
     was recorded can have a function object; when none did, no pass runs. Else one heap pass
     (`gc.get_referrers` of those codes, frozen objects included): every function whose
@@ -208,9 +208,15 @@ def _restore_closures(entry):
     pairs, base = entry[0], entry[1]
     mod_obj = entry[2] if len(entry) > 2 else None
     cls_snapshots = entry[3] if len(entry) > 3 else ()
+    mod_keys = entry[4] if len(entry) > 4 else None
+    # Only names absent when the entry was recorded, and only those that hold a new nested
+    # code (the new code cached what it made there). A name the base had, or a plain value
+    # the engine set, stays: the heap pass below gives a closure under it its old code.
     for cls_obj, base_keys in cls_snapshots:
         for attr_name in list(set(vars(cls_obj)) - base_keys):
             attr_val = vars(cls_obj).get(attr_name, MISSING)
+            if not _holds_nested_code(attr_val, pairs):
+                continue
             _clear_cached_fn_state(attr_val)
             try:
                 delattr(cls_obj, attr_name)
@@ -219,6 +225,8 @@ def _restore_closures(entry):
     if mod_obj is not None:
         mod_dict = vars(mod_obj)
         for attr_name, attr_val in list(mod_dict.items()):
+            if mod_keys is not None and attr_name in mod_keys:
+                continue
             if _holds_nested_code(attr_val, pairs):
                 _clear_cached_fn_state(attr_val)
                 mod_dict.pop(attr_name, None)
@@ -374,9 +382,9 @@ class Journal:
                     for cls_obj in vars(mod).values()
                     if isinstance(cls_obj, type)
                 )
-            self.entries.append(
-                Entry("closures", None, "closures", (pairs, _refs(pairs), mod, cls_snapshots))
-            )
+            mod_keys = set(vars(mod)) if mod is not None else None
+            self.entries.append(Entry("closures", None, "closures",
+                                      (pairs, _refs(pairs), mod, cls_snapshots, mod_keys)))
 
     def set_attr(self, obj, name, value):
         self.record_attr(obj, name)
