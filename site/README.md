@@ -18,6 +18,10 @@ Then open http://127.0.0.1:8760/ (home) and http://127.0.0.1:8760/audit/ (audit)
 | `facts/` | Sourced facts both pages read at build time: per-engine mechanisms, replayed upstream PRs, the static coverage survey, fault cases. |
 | `build.py` | Builds both pages into `public/` (git-ignored) as two self-contained HTML files. |
 
+## Header tabs
+
+The header shows Overview and GitHub. The audit views (Supported PRs, Coverage, Conventions, Faults) can also appear there as tabs; they are off until those pages are ready. `python3 site/build.py --tabs` turns them on.
+
 ## Rules
 
 - A number on a page comes from a file in `landing/dash/data/` or `facts/`. A value that is illustrative is labelled so on the page. A fact that is not recorded is shown as "not measured yet".
