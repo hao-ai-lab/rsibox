@@ -1,7 +1,8 @@
 # Where each file in data/ comes from
 
 Copied on 2026-11-10 by `tools/import_paper.py` (atoms byte for byte; the rest extracted, as described below).
-`$RSI` = `~/Projects/ambient/research/rsi-inference-design`; `$PAPER` = `~/Projects/rsi/paper`.
+`$RSI` is the research workspace that holds `paper2/`, `paper-figs-20261024/` and `megatron-lab-20261028/` (the importer's `--rsi`);
+`$PAPER` is a checkout of the paper's sources (`--paper`). Both are private and live outside this repository.
 
 | File | Origin | How |
 |---|---|---|
@@ -32,4 +33,4 @@ Copied on 2026-11-10 by `tools/import_paper.py` (atoms byte for byte; the rest e
 | `table2-ablation.json` | `$RSI/paper-figs-20261024/data/ablations.json` | `by_group["DeepSeek v4-v5 (s6-s11)"]` (paper Table 2) |
 | `decode-checks.json` | `$RSI/paper-figs-20261024/raw/decode/ledger-d{1,2}.jsonl`, `score-dec{1,2}.out` | every error-free 4-case bench, as speedup over the official start (the decode atoms carry no check dots) |
 | `steps.json` | race ledgers and gate files under `$RSI/paper-figs-20261024/raw/`, `$RSI/megatron-lab-20261028/data/race5/`, kernel and speedrun task files in `$RSI/paper-figs-20261024/data/`; subjects from `raw/commit-subjects.txt` and `data/deepseek_ideas.json` | each best-so-far step matched to the ledger row with the exact same time; unmatched steps are left out |
-| `paper_values.json` | `$HOME/Downloads/fastrsi (11).pdf`, `fastrsi (3).pdf` | transcribed by reading the PDFs |
+| `paper_values.json` | two PDF builds of the paper, `fastrsi (11).pdf` and `fastrsi (3).pdf` (the Oct 29 draft) | transcribed by reading the PDFs |

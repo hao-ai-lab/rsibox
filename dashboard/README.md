@@ -63,10 +63,11 @@ per number. A mismatch is reported and drawn on the page as a note; the data is 
 ## Updating the data
 
 `tools/import_paper.py` is the only script that reads outside this folder. Run it on the machine that
-holds the paper sources, then rebuild:
+holds the paper sources, then rebuild. Both arguments are required and have no default; `data/SOURCES.md`
+says what each directory must contain:
 
 ```sh
-python3 dashboard/tools/import_paper.py --rsi ~/Projects/ambient/research/rsi-inference-design --paper ~/Projects/rsi/paper
+python3 dashboard/tools/import_paper.py --rsi "$RSI" --paper "$PAPER"
 python3 dashboard/build.py
 ```
 

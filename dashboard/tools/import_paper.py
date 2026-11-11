@@ -53,8 +53,10 @@ def rows(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rsi", default=os.path.expanduser("~/Projects/ambient/research/rsi-inference-design"))
-    ap.add_argument("--paper", default=os.path.expanduser("~/Projects/rsi/paper"))
+    ap.add_argument("--rsi", required=True,
+                    help="research workspace that holds paper2/ and paper-figs-20261024/ ($RSI in data/SOURCES.md)")
+    ap.add_argument("--paper", required=True,
+                    help="checkout of the paper's sources, with data/ and figures/ ($PAPER in data/SOURCES.md)")
     a = ap.parse_args()
     P2, PF = f"{a.rsi}/paper2", f"{a.rsi}/paper-figs-20261024"
     os.makedirs(f"{DATA}/atoms", exist_ok=True)
