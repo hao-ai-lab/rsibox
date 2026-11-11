@@ -1612,7 +1612,9 @@ class Coordinator:
     def undo(self, txn):
         """Undo a committed transaction on every participant (newest first), then run the
         plan's `undo_resets` (R2, R3, ...) on each: code undo cannot un-write data the new code
-        produced. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
+        produced. The journal also undoes every later committed transaction (the cascade), so
+        their `undo_resets` run too (newest first, each kind once), and the host records them
+        in the same state as this one. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
         now = self.clock
         t = self.txns.get(txn, {})
         with self._lock:
@@ -1626,7 +1628,17 @@ class Coordinator:
         if why:
             return {"ok": False, "status": "refused", "error": why, "participants": {},
                     "receipt": None, "written": {"ok": False, "error": "refused: no receipt"}}
-        resets = t.get("plan", {}).get("undo_resets", [])
+        # the participants' journals also undo every transaction committed after this one
+        # (the cascade): run their undo_resets too, newest first, each kind once
+        with self._lock:
+            order = list(self.txns)
+            later = [x for x in order[order.index(txn) + 1:]
+                     if self.txns[x].get("state") == "committed"]
+        resets = []
+        for x in list(reversed(later)) + [txn]:
+            for kind in self.txns[x].get("plan", {}).get("undo_resets", []):
+                if kind not in resets:
+                    resets.append(kind)
         tl = Timeline(queued=now())
         rb = {}
         undo_state = {"started": False, "cancelled": False, "done": False}
@@ -1686,9 +1698,9 @@ class Coordinator:
                 # says so too, never "committed" for code that is gone
                 for x in calls:
                     for r in (x.get("ranks") or [x]):
-                        for later in r.get("also_undone") or ():
-                            if later in self.txns and ok:
-                                self.txns[later]["state"] = "undone"
+                        for later_txn in r.get("also_undone") or ():
+                            if later_txn in self.txns:
+                                self.txns[later_txn]["state"] = t["state"]
         return {"ok": ok, "status": status_label, "participants": res, "receipt": rec,
                 "written": self._write(rec)}
 

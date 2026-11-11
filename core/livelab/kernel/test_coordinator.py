@@ -299,6 +299,52 @@ class HostTest(unittest.TestCase):
         _ = gate_Release
 
 
+class UndoCascadeTest(unittest.TestCase):
+    """Undo of an older transaction under a newer one: the journal undoes both."""
+
+    def _two(self, tag, resets, resets1, resets2):
+        name, eng, _ = fresh(tag)
+        part = C.LocalParticipant("rank0", alias={"toy": name}, resets=resets)
+        co = C.Coordinator([part], phase2_deadline_s=None)
+        v1 = edit(ENG, ("return y", "return y * 10"))
+        v2 = edit(v1, ("return y * 10", "return y * 100"))
+        for txn, src, kinds in (("t1", v1, resets1), ("t2", v2, resets2)):
+            r = co.run({"id": txn, "undo_resets": kinds, "modules": {"toy.engine": {
+                "source": src, "targets": [["Engine.step", at(ENG, "def step")]]}}})
+            self.assertEqual(r["outcome"], "committed", r)
+        return co, part, eng
+
+    def test_cascade_runs_the_later_transactions_resets_too(self):
+        """Input: t1 (undo_resets ["state"]) then t2 on top (undo_resets ["cache"]); undo t1.
+        Expected: base code (step(3) = 17); both resets ran, t2's first (newest first); the
+        undo receipt lists both; t2 is "undone" on the host. Pain point: only t1's resets
+        ran, t2 was marked undone, so its cache reset could never run (a second undo of t2
+        is refused). Not: resets that depend on each other's order beyond newest first."""
+        ran = []
+        co, part, eng = self._two("casc_resets", {
+            "cache": lambda: ran.append("cache"), "state": lambda: ran.append("state")},
+            ["state"], ["cache"])
+        u = co.undo("t1")
+        self.assertEqual((u["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
+        self.assertEqual(u["receipt"]["resets"], ["cache", "state"])
+        self.assertEqual(co.status("t2")["state"], "undone")
+
+    def test_a_failed_cascade_never_leaves_the_later_transaction_committed(self):
+        """Input: t1 (undo_resets ["bad"], a reset that raises) then t2 on top; undo t1.
+        Expected: undo not ok, the code is at base on the participant (step(3) = 17) and t2
+        is "undone" there, and the host says t2 is "partial", the same as t1. Pain point:
+        the host kept t2 "committed" for code that was gone. Not: an undo that never started
+        (cancelled), where both keep their state."""
+        def bad():
+            raise RuntimeError("reset failed")
+        co, part, eng = self._two("casc_fail", {"bad": bad}, ["bad"], [])
+        u = co.undo("t1")
+        self.assertEqual((u["ok"], eng.Engine().step(3), part.status("t2")["state"]),
+                         (False, 17, "undone"))
+        self.assertEqual((co.status("t1")["state"], co.status("t2")["state"]),
+                         ("partial", "partial"))
+
+
 class ParticipantMissingTest(unittest.TestCase):
     def test_a_dp_client_that_drops_replies_blocks_the_transaction(self):
         """Input: a worker group of 2 data-parallel groups x 2 ranks (each rank its own copy of
