@@ -27,8 +27,10 @@
   blocking finding votes no, so the edit is reported and not applied. A `zero_witness` on
   model code or on the split decorator in graph mode is routed the same way at proof. Calls
   made while the stream captures a graph (or inside an R1) count apart from live calls.
-- **R1** (`recapture`, `r1_extend`, `graphs`): the worker's side of recapture.py, on this
-  rank's model runner (`scope["r1_engine"]` overrides it in tests).
+- **R1** (`recapture`, `recapture_extend` / `r1_extend`, `recapture_extend_drop`, `graphs`):
+  the worker's side of recapture.py, on this rank's model runner (`scope["r1_engine"]`
+  overrides it in tests). `recapture_extend_drop {txn, extend_id}` takes back that extend
+  where it captured (the host sends it when another rank's extend failed).
 - **Version log** (`tick`, `versions`). At every step the side records which code version each
   watched function runs (the targets of every plan it prepared), as `[step, {key: tag}]` at
   each change, and counts steps whose version changed between the step's two calls
@@ -294,7 +296,10 @@ class Side(Endpoint):
         if method == "graphs":
             return F.ok(**RC.graphs(eng))
         if method in ("recapture_extend", "r1_extend"):
-            return self.recapture.extend(eng, p["txn"], self.lp.journal, self.lp.witness, p.get("sizes"))
+            return self.recapture.extend(eng, p["txn"], self.lp.journal, self.lp.witness,
+                                         p.get("sizes"), p.get("extend_id"))
+        if method == "recapture_extend_drop":
+            return self.recapture.drop_extend(p["txn"], self.lp.journal, p.get("extend_id"))
         if self.lp._state.get(p["txn"]) != "committed":
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
@@ -303,7 +308,8 @@ class Side(Endpoint):
     _r1 = _recapture
 
     def _dispatch(self, method, payload):
-        if method in ("recapture", "recapture_extend", "r1_extend", "graphs"):
+        if method in ("recapture", "recapture_extend", "recapture_extend_drop", "r1_extend",
+                      "graphs"):
             return self._recapture(method, payload or {})
         if method == "versions":
             return self.versions()

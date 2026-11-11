@@ -461,6 +461,52 @@ class OverlayTest(unittest.TestCase):
             self.assertEqual(mod.SRC, "overlay")
             self.assertIn("_patch_core", mod.EngineCoreProc.run_busy_loop.__qualname__)
 
+    def test_a_second_after_finder_in_front_does_not_recurse(self):
+        """Input: a foreign "after"-style finder at sys.meta_path[0] that, like the host's,
+        asks every other finder on sys.meta_path for the module (skipping only its own
+        class), then the host's finder, then an overlay finder. Expected: importing
+        vllm.v1.engine.core resolves to the overlay's module, patched. Pain point: two such
+        finders asked each other forever (RecursionError at engine start when the live
+        reconfig hook and the adapter are both on). Fails before the fix: RecursionError.
+        Not: the services finder itself (its own folder's tests)."""
+        import importlib.abc
+        import importlib.util
+        over = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, over, True)
+        with open(os.path.join(over, "core.py"), "w") as f:
+            f.write("SRC = 'overlay'\n\n\nclass EngineCoreProc:\n"
+                    "    def _handle_client_request(self, t, r):\n        pass\n\n"
+                    "    def _process_engine_step(self):\n        pass\n\n"
+                    "    def run_busy_loop(self):\n        pass\n")
+
+        class Foreign(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name != "vllm.v1.engine.core":
+                    return None
+                for finder in list(sys.meta_path):
+                    if isinstance(finder, Foreign) or not hasattr(finder, "find_spec"):
+                        continue
+                    spec = finder.find_spec(name, path, target)
+                    if spec is not None:
+                        return spec
+                return None
+
+        class Overlay(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path, target=None):
+                if name == "vllm.v1.engine.core":
+                    return importlib.util.spec_from_file_location(
+                        name, os.path.join(over, "core.py"))
+                return None
+        pkgs = {n: types.ModuleType(n) for n in ("vllm", "vllm.v1", "vllm.v1.engine")}
+        for package in pkgs.values():
+            package.__path__ = []
+        meta = [Foreign(), H._After(), Overlay()] + list(sys.meta_path)
+        with mock.patch.dict(sys.modules, pkgs), mock.patch.object(sys, "meta_path", meta):
+            sys.modules.pop("vllm.v1.engine.core", None)
+            mod = importlib.import_module("vllm.v1.engine.core")
+            self.assertEqual(mod.SRC, "overlay")
+            self.assertIn("_patch_core", mod.EngineCoreProc.run_busy_loop.__qualname__)
+
 
 class ImportTest(unittest.TestCase):
 

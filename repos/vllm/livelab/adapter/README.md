@@ -15,7 +15,7 @@ needs one is a finding, not a silent swap.
   every rank behind one `collective_rpc`) and the engine core (an `Endpoint` in its own
   process). It serves a file control channel (`ctl.json` -> `reply/<seq>.json`) with the ops
   `txn`, `prove`, `undo`, `status`, `pstatus`, `fingerprint`, `versions`, `at_base`, `ping`,
-  `graphs`, `r1_extend`.
+  `graphs`, `recapture_extend` (alias `r1_extend`).
 - **Phase 1** (prepare) runs in a thread on every side (`side.Side`): the host sends
   `prepare_start` and then `prepare_poll` every 20 ms until no rank is pending, each one
   `collective_rpc` from the loop, so the engine keeps stepping while the ranks stage. A rank
@@ -68,7 +68,12 @@ needs one is a finding, not a silent swap.
   to Python running the new one; undo of the transaction puts back every old entry dict and
   key set (journal, no capture), so base graphs replay again and the new graphs are freed;
   a capture that fails on any rank is `rebuild_failed`, and the transaction is undone on
-  every participant in the same gap (outcome rolled_back). The receipt's `rebuild` holds
+  every participant in the same gap (outcome rolled_back), with the phase-2 deadline: a
+  participant that misses it poisons the host. `recapture_extend` runs as one gap job on every
+  rank; if any rank fails, the ranks that captured drop that extend in the same gap
+  (`recapture_extend_drop`), so every rank replays the same descriptors (a drop that fails
+  poisons the host), and a job that outlives the gap timeout poisons the host. While the host
+  is poisoned, `recapture_extend` is refused. The receipt's `rebuild` holds
   each rank's captured descriptors, seconds, eager leftovers and memory before/after, and
   `recapture_s` the gap's recapture time. Selective recapture runs only on vLLM's V1 `GPUModelRunner`
   (`VLLM_USE_V2_MODEL_RUNNER=0`); on another runner it is `rebuild_failed`, said plainly.
@@ -76,8 +81,10 @@ needs one is a finding, not a silent swap.
 - **Version log.** Each side records which code version every watched function runs at each
   step (`versions`), and any change between a step's two calls (`execute_model`,
   `sample_tokens`), so the ranks' logs show whether a step ran mixed versions.
-- **Import order.** The host's import finder asks the other finders on `sys.meta_path` for
-  `vllm.v1.engine.core` (an overlay first), so the core runs the same text the plan's base is.
+- **Import order.** The host's import finder asks only the finders after it on
+  `sys.meta_path` for `vllm.v1.engine.core` (an overlay first), so the core runs the same text
+  the plan's base is, and a finder in front of it that asks every other finder does not
+  recurse.
 
 | File | What it owns |
 |---|---|
@@ -105,7 +112,7 @@ python3 -m adapter.client <dir> '{"op": "txn", "plan": {...}}'
 
 ## Golden tests
 
-From the repo root (CPU, about 2 s; CI runs the same command):
+From the repo root (CPU, about 8 s; CI runs the same command):
 
 ```
 python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
@@ -126,6 +133,7 @@ each rank with its own copy of the toy engine.
 | `test_status_without_a_txn_is_the_hosts_overall_status` | `status` without a txn raising KeyError |
 | `test_a_gap_job_waits_for_the_batch_in_flight_and_nothing_new_is_scheduled` | a commit while a batch is in flight, finishing it on mixed code |
 | `test_the_core_comes_from_the_overlay_and_is_patched` | a false `base_mismatch` when an overlay serves the engine core |
+| `test_a_second_after_finder_in_front_does_not_recurse` | two finders that each ask every other finder, recursing until `RecursionError` at engine start |
 | `test_ranks_that_finish_early_keep_their_vote` | ranks that answered "no prepare started" after their first finished poll: a false abort |
 | `test_a_no_vote_waits_for_the_rank_still_preparing` | a no vote that ends the poll while another rank is still preparing: its vote lost, its staging racing the abort |
 | `test_an_abort_while_staging_drops_what_the_prepare_staged` | an abort during a background prepare, after which the prepare stages the transaction and watches its keys anyway |
@@ -136,6 +144,11 @@ each rank with its own copy of the toy engine.
 | `test_an_edit_of_the_split_decorator_is_refused_on_a_graph_engine` | an edit of the graph-split decorator (outside model code) that committed with no finding and a zero witness on every rank (vLLM #59941) |
 | `test_one_bucket_is_recaptured_in_the_gap_and_undo_puts_the_base_graphs_back` | a committed edit whose graphs replay the old code (stale graph), or an undo that leaves the edit's graphs replaying |
 | `test_extend_captures_a_left_out_bucket_later` | a bucket left eager forever after a selective R1 |
+| `test_an_extend_that_fails_on_one_rank_is_dropped_on_every_rank` | one TP rank replaying a graph while another runs the same step eager after a failed extend |
+| `test_a_dropped_extend_gives_every_mode_its_left_out_buckets_back` | a dropped extend that gave back the left-out buckets of the last mode only |
+| `test_undo_after_an_extend_with_nothing_to_capture` | an extend's undo entry raising `UnboundLocalError`, so undo of the transaction was incomplete |
+| `test_an_extend_that_outlives_the_gap_poisons_the_host` | an extend still capturing in the loop after its caller gave up, with the host still taking transactions |
+| `test_an_undo_after_a_failed_recapture_has_the_phase2_deadline` | the undo after a failed recapture holding the gap with no deadline, and a late rank never poisoning the host |
 | `test_pieces_of_a_bucket_are_recaptured_together_and_other_modes_are_untouched` | recapturing one piece only, so the next piece reads another capture's output address |
 | `test_a_capture_that_fails_on_one_rank_undoes_the_edit_on_every_rank` | ranks replaying different code after a failed capture, or a dispatcher key with no graph |
 | `test_five_edit_recapture_undo_cycles_keep_the_graph_count` | graphs of every past edit kept alive (graph-pool leak) |

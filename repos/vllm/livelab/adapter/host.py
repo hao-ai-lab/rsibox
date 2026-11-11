@@ -14,14 +14,16 @@ How a transaction runs (kernel `StepGapCoordinator`):
   {modules}` (per rank: content hash and code object id of every function), `versions` (per
   rank: the per-step version log), `at_base`, `ping`, `graphs` (per rank: the descriptors
   each mode can replay and every graph wrapper's entry count), `recapture_extend {txn, sizes}`
-  (capture more of the descriptors a recapture left eager, in a gap).
+  (capture more of the descriptors a recapture left eager, in a gap; if any rank fails, the
+  ranks that captured drop it in the same gap; refused while the host is poisoned).
 - Recapture (`RecaptureCoordinator`): a plan with `"rebuild": ["recapture"]` (or `"rebuild": ["R1"]`,
   optional `"recapture"` or `"r1"`: `{"modes": [mode names], "sizes": [num_tokens]}`) is recaptured
   on every rank right after its commit, in the same gap, so no step replays a graph of the old code
   next to Python running the new one. The receipt's `rebuild` and `recapture_s` say what it captured
   and how long it took; the edit runs on every step from `rebuilt` on (edit_to_run_s). A recapture that
   fails on any rank is `rebuild_failed`: the transaction is undone on every participant in the same gap
-  (each rank's recapture puts its old graphs back first), outcome rolled_back. Undo of a recaptured
+  (each rank's recapture puts its old graphs back first), outcome rolled_back; that undo has the
+  phase-2 deadline, and a participant that misses it poisons the host. Undo of a recaptured
   transaction puts the base graphs back on every rank (journal; no capture).
   Receipts also go to <dir>/receipts.jsonl (kernel `ReceiptWriter`).
 - Two participants: the workers (every rank behind one collective_rpc, `WorkerGroup`) and the
@@ -48,13 +50,15 @@ How a transaction runs (kernel `StepGapCoordinator`):
   core per DP group and this host reaches only its own, so the other groups are expected too
   and every transaction is refused naming them (DP>1 unsupported, said plainly). Only DP rank
   0 serves the channel.
-- The import finder that patches vllm.v1.engine.core asks the other finders on sys.meta_path
-  for the module (an overlay first), so import this module after the overlay's finder.
+- The import finder that patches vllm.v1.engine.core asks the finders after it on
+  sys.meta_path for the module (an overlay first), so import this module after the overlay's
+  finder.
 
 The host records every step's duration, so a reply says how long steps stalled.
 """
 import collections
 import importlib.abc
+import itertools
 import json
 import os
 import statistics
@@ -214,6 +218,9 @@ class WorkerGroup(C.Participant):
     def recapture_extend(self, payload):
         return self._rpc("recapture_extend", payload)
 
+    def recapture_extend_drop(self, payload):
+        return self._rpc("recapture_extend_drop", payload)
+
     def r1_extend(self, payload):
         return self.recapture_extend(payload)
 
@@ -275,9 +282,13 @@ class RecaptureCoordinator(C.StepGapCoordinator):
         out["extra"] += [{**f, "participant": "workers"} for f in fs]
         rb = out["rollback"] = {"status": "undone", "participants": {}}
         res = self.txns[txn]["res"]
+        # the undo gets the phase-2 deadline afresh (a participant that misses it poisons
+        # the host in _bounded, and pending_rollback then holds steps until it lands)
+        undo_deadline = time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
+        missed = set()
         for p in reversed(self.participants):
             rb["participants"][p.name] = res[p.name]["undo"] = self._bounded(
-                p, "undo", txn, None, set())
+                p, "undo", txn, undo_deadline, missed)
         if not all(u["ok"] for u in rb["participants"].values()):
             rb["status"] = "partial"
             with self._lock:
@@ -339,6 +350,7 @@ class Host:
         self.gap_timeout = GAP_TIMEOUT_S
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
         self.core_side = Side("core", scope={"core": core})
+        self._extends = itertools.count(1)
         self.dp = parallel(core)
         self.workers = WorkerGroup(self, self.dp["expected"])
         self.co = RecaptureCoordinator(
@@ -359,6 +371,25 @@ class Host:
                 "phase-2 gap job finishes in the loop while its caller waits",
             )
             raise
+
+    def _extend(self, txn, sizes):
+        """recapture_extend on every rank, in one gap job. If any rank fails, the ranks that
+        captured drop that extend in the same gap, so every rank keeps replaying the same
+        descriptors; a drop that fails poisons the host (ranks may replay different graphs)."""
+        payload = {"txn": txn, "sizes": sizes, "extend_id": f"{txn}/extend{next(self._extends)}"}
+        r = self.workers.recapture_extend(payload)
+        if r.get("ok"):
+            return r
+        drop = self.workers.recapture_extend_drop(payload)
+        r = {**r, "dropped": drop}
+        if not drop.get("ok"):
+            finding = {**F.finding(
+                "rebuild_failed", f"recapture_extend of {txn} failed on a rank and the other "
+                f"ranks could not drop it: {drop.get('error')}",
+                "every rank replays the same descriptors"), "participant": "workers"}
+            self.co.poison.append(finding)
+            r["findings"] = list(r.get("findings") or []) + [finding]
+        return r
 
     def in_loop(self, fn, gap=False, timeout=60.0):
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
@@ -416,10 +447,10 @@ class Host:
         if op == "graphs":
             return F.ok(workers=self.workers.graphs())
         if op in ("recapture_extend", "r1_extend"): # in a gap: no batch replays half-captured graphs
+            if self.co.poison:
+                return F.not_ok("host poisoned: undo or respawn first", poison=self.co.poison)
             t0 = time.perf_counter()
-            r = self.in_loop(lambda: self.workers.recapture_extend(
-                {"txn": cmd["txn"], "sizes": cmd.get("sizes")}), gap=True,
-                timeout=self.gap_timeout)
+            r = self._in_gap(lambda: self._extend(cmd["txn"], cmd.get("sizes")))
             return {**r, "seconds": round(time.perf_counter() - t0, 6)}
         if op == "ping":
             return F.ok(pid=os.getpid(), poison=self.co.poison, parallel=self.dp)
@@ -540,16 +571,21 @@ def _patch_core(mod):
 
 class _After(importlib.abc.MetaPathFinder):
     """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
-    finders load it: it asks the finders after it on sys.meta_path, in order (an overlay
+    finders load it: it asks only the finders after it on sys.meta_path, in order (an overlay
     finder first, then the installed package), instead of PathFinder directly, which would
-    bypass the overlay and report a false base_mismatch."""
+    bypass the overlay and report a false base_mismatch. Never the finders in front of it:
+    one of those may be asking it right now."""
 
     def find_spec(self, name, path, target=None):
         if name != "vllm.v1.engine.core":
             return None
         spec = None
-        for f in list(sys.meta_path):
-            if f is self or isinstance(f, _After) or not hasattr(f, "find_spec"):
+        finders = list(sys.meta_path)
+        # only the finders after this one: a finder in front of it that asks every other
+        # finder (live_reconfig's does) would otherwise be asked again, forever
+        later = finders[finders.index(self) + 1:] if self in finders else finders
+        for f in later:
+            if isinstance(f, _After) or not hasattr(f, "find_spec"):
                 continue
             spec = f.find_spec(name, path, target)
             if spec is not None:
