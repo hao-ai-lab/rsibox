@@ -11,7 +11,7 @@ import unittest
 from . import coordinator as C
 from . import session as SS
 from . import test_coordinator as TC
-from .test_locate import ENG, at, edit, fresh
+from .test_locate import ENG, OPS, at, edit, fresh
 from .test_witness import wait_for
 
 
@@ -265,6 +265,69 @@ class SessionTest(unittest.TestCase):
             "source": edit(ENG, ("return y", "return y * 100")),
             "targets": [["Engine.step", at(ENG, "def step")]]}}})
         self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"))
+
+    def test_add_only_mixed_and_removal_only_edits_end_edited(self):
+        """Input: one participant on toy.ops. (a) A plan that only adds a top-level
+        `def added_helper(x): return x + 5`, then on top (c) a plan that only removes it
+        again (removed_definition accepted); separately from base, (b) a plan that adds it
+        and edits scale (x * 3). Expected: each commits and the session is "edited", never
+        poisoned; after (a) added_helper(1) = 6; after (c) it is gone; after (b)
+        added_helper(1) = 6 and scale(3) = 9. Pain point: the switch check read only the
+        proof's code hashes, which cover swapped functions, so an add-only edit that did
+        switch read as a rank that did not (poisoned). Not: a rank that lies about its
+        witness keys."""
+        added = OPS + "\n\ndef added_helper(x):\n    return x + 5\n"
+
+        def session(tag):
+            name, _, ops = fresh(tag)
+            part = C.LocalParticipant("r0", alias={"toy": name})
+            return SS.Session(C.Coordinator([part], phase2_deadline_s=None), ["toy.ops"]), ops
+
+        def install(sess, source, accept=()):
+            res = sess.install({"accept": list(accept), "modules": {"toy.ops": {"source": source}}})
+            self.assertEqual((res["outcome"], res["state"]), ("committed", "edited"),
+                             sess.poisoned() or res.get("findings"))
+        sess, ops = session("addonly")
+        install(sess, added)
+        self.assertEqual(ops.added_helper(1), 6)
+        install(sess, OPS, accept=["removed_definition"])
+        self.assertFalse(hasattr(ops, "added_helper"))
+        sess, ops = session("addswap")
+        install(sess, added.replace("x * STEP_SCALE", "x * 3"))
+        self.assertEqual((ops.added_helper(1), ops.scale(3)), (6, 9))
+    def test_a_receipt_another_thread_is_finishing_is_waited_for(self):
+        """Input: run() reports committed with receipt None because a status() call in
+        another thread holds the finisher lock and is still building the receipt (emulated:
+        a thread holds `fin` and puts `rec` back after 0.2 s). Expected: the session waits
+        for it, reads the receipt and ends "edited". Pain point: the session poisoned a
+        healthy commit when it lost the finisher race. Not: a finisher that never ends
+        (after 30 s the session poisons: no receipt)."""
+        import threading
+        name, eng, _ = fresh("finrace")
+        coordinator = C.Coordinator([C.LocalParticipant("r0", alias={"toy": name})],
+                                    phase2_deadline_s=None)
+        real_run = coordinator.run
+
+        def run_losing_the_race(plan, **kw):
+            res = real_run(plan, **kw)
+            record = coordinator.txns[res["txn"]]
+            rec, held = record.pop("rec"), threading.Event()
+
+            def other_finisher():
+                with record["fin"]:
+                    held.set()
+                    time.sleep(0.2)
+                    record["rec"] = rec
+            threading.Thread(target=other_finisher).start()
+            held.wait()
+            return {**res, "receipt": None}
+        coordinator.run = run_losing_the_race
+        sess = SS.Session(coordinator, ["toy.engine"])
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], res["state"], eng.Engine().step(3)),
+                         ("committed", "edited", 1700))
 
 
 if __name__ == "__main__":

@@ -31,8 +31,9 @@ def _split_commit(receipt):
     None. Never excused by an accept: a rank that did not switch must not become the expected
     state. Reasons: no receipt to read; commit_hashes.agree False (participants or ranks
     differ, or a proof did not answer); or a participant (a rank, in a group) that staged
-    targets at prepare and shows no code hash in its proof. A role that abstained, or staged
-    nothing (a plan of repair cells only), may show none."""
+    items at prepare and whose proof names none of them (no code hash of a swapped function,
+    no witness key of an item, added definitions included). A role that abstained, or
+    staged nothing (a plan of repair cells only), may show none."""
     if not receipt:
         return "no txn receipt to read the commit hashes from"
     if (receipt.get("commit_hashes") or {}).get("agree") is False:
@@ -48,10 +49,13 @@ def _split_commit(receipt):
                 continue
             rank = unit.get("rank") if prepared.get("ranks") else None
             shown = proof if rank is None else proof_by_rank.get(str(rank), {})
-            if not shown.get("hashes"):
+            # the proof names what the participant committed: code hashes of the swapped
+            # functions, and witness keys of every staged item (added definitions too)
+            committed_keys = set(shown.get("hashes") or {}) | set(shown.get("witness") or {})
+            if not committed_keys & set(unit["staged"]):
                 where = name if rank is None else f"{name} rank {rank}"
-                return (f"{where} staged {len(unit['staged'])} target(s) but its proof shows "
-                        "no code hash: it did not switch")
+                return (f"{where} staged {len(unit['staged'])} item(s) but its proof names "
+                        "none of them (no code hash, no witness key): it did not switch")
     return None
 
 
@@ -149,9 +153,15 @@ class Session:
             if fp is None:
                 self.fault("tampered", "a participant did not answer after commit",
                            "every participant answers")
-            # an in-doubt result carries no receipt; the coordinator keeps the one it built
-            receipt = res.get("receipt") or (
-                getattr(self.co, "txns", {}).get(res["txn"]) or {}).get("rec")
+            # an in-doubt result carries no receipt, nor does one whose receipt another
+            # thread (a status call) is finishing: wait for that finisher, then read the
+            # receipt the coordinator kept
+            receipt = res.get("receipt")
+            record = getattr(self.co, "txns", {}).get(res["txn"]) or {}
+            finisher = record.get("fin")
+            if receipt is None and finisher is not None and finisher.acquire(timeout=30):
+                finisher.release()
+            receipt = receipt or record.get("rec")
             split = _split_commit(receipt)
             if split:
                 self.fault("ranks_disagree", split, "every participant and every rank runs "
