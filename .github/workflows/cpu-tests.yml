@@ -126,3 +126,18 @@ jobs:
           if [ -d repos/megatron/tools ]; then
             python3 -m unittest discover -s repos/megatron/tools -v
           fi
+  b200-ci-runner:
+    name: B200 CI runner and loop golden cases (CPU; real git and venvs, stand-in nvidia-smi and rack-run, no GitHub calls)
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run the runner's refusal, retry, GPU-lock, quickstart and loop cases
+        run: python3 .github/b200-ci/test_b200_ci.py -v
