@@ -12,7 +12,7 @@ from . import coordinator as C
 from . import locate as L
 from . import swap as S
 from .test_detectors import ESTIMATOR, ESTIMATOR_NEW, _n, temp_modules
-from .test_locate import ENG, OPS, at, edit, fresh
+from .test_locate import ENG, OPS, at, edit, fresh, loads_constant
 from .test_witness import wait_for
 
 
@@ -147,10 +147,10 @@ class LineMapChainTest(unittest.TestCase):
                       t["line_map_aliases"])
         self.assertEqual(list(r2["staged"]), [f"toy.ops:make_shift:{line_v1}"])
         self.assertTrue(p.commit("e2")["ok"])
-        self.assertIn(5, ops.make_shift.__code__.co_consts)
+        self.assertTrue(loads_constant(ops.make_shift.__code__, 5))
         self.assertEqual((ops.scale(3), ops.make_shift(10)(1)), (6, 11))
         self.assertTrue(p.undo("e2")["ok"])                 # make_shift back, scale still v1
-        self.assertNotIn(5, ops.make_shift.__code__.co_consts)
+        self.assertFalse(loads_constant(ops.make_shift.__code__, 5))
         self.assertIn("y = y + 0", p._live_source("toy.ops"))
         self.assertTrue(p.undo("e1")["ok"])                 # back at the file
         self.assertIsNone(p._live_source("toy.ops"))

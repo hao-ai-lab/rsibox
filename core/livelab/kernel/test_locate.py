@@ -7,8 +7,9 @@ Toy arithmetic: Engine.step(x) = shift(activate(scale(x))) with scale = x*2, act
 shift = x+10, so step(3) = 17 at base. Every test loads its own copy of the toy package
 (`toy.load_copy`), so tests never share module objects.
 
-The helpers here (`fresh`, `at`, `edit`) are shared with the later kernel tests.
+The helpers here (`fresh`, `at`, `edit`, `loads_constant`) are shared with the later kernel tests.
 """
+import dis
 import gc
 import itertools
 import os
@@ -42,6 +43,13 @@ def edit(src, *pairs):
         assert old in src, old
         src = src.replace(old, new, 1)
     return src
+
+
+def loads_constant(code, value):
+    """Does `code` load the constant `value`? Read from the instructions, not `co_consts`:
+    Python 3.14 loads small ints with LOAD_SMALL_INT, which keeps them out of co_consts."""
+    return any(i.opname in ("LOAD_CONST", "LOAD_SMALL_INT") and i.argval == value
+               and type(i.argval) is type(value) for i in dis.get_instructions(code))
 
 
 class LocateTest(unittest.TestCase):
@@ -126,7 +134,7 @@ class LocateEdgeCaseTest(unittest.TestCase):
 
     def test_content_hash_tells_apart_edits_that_keep_the_bytecode(self):
         """Input: (a) a statement moved out of a try block, which on 3.12 keeps co_code and
-        changes only the exception table; (b) `1 if x else 23` against `12 if x else 3`,
+        changes only the exception table (3.11 and 3.14 also change co_code); (b) `1 if x else 23` against `12 if x else 3`,
         same bytecode, constants (None, 1, 23) and (None, 12, 3). Expected: different
         hashes; the same code moved down 3 lines keeps its hash. Pain point: a standing
         accept or the base_mismatch check could not tell the two versions apart. Not:
@@ -139,7 +147,8 @@ class LocateEdgeCaseTest(unittest.TestCase):
                       "    except Exception:\n        return None\n    return 1\n")
         after = code("def f(a, b):\n    try:\n        a()\n    except Exception:\n"
                      "        return None\n    b()\n    return 1\n")
-        self.assertEqual(in_try.co_code, after.co_code)       # only the exception table differs
+        if sys.version_info[:2] in ((3, 12), (3, 13)):         # 3.11 and 3.14 differ in co_code
+            self.assertEqual(in_try.co_code, after.co_code)   # only the exception table differs
         self.assertNotEqual(L.content_hash(in_try), L.content_hash(after))
         self.assertNotEqual(L.content_hash(code("def f(x): return 1 if x else 23\n")),
                             L.content_hash(code("def f(x): return 12 if x else 3\n")))
