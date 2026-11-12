@@ -143,6 +143,21 @@
     fd.addEventListener('click', (e) => { if (e.target === fd) fd.close(); });
   }
 
+  // ---- the loop: how much of each Baseline run is not the model thinking (replay with thinking time removed)
+  const ls = document.getElementById('loop-share');
+  if (ls && window.dash) {
+    const rp = dash.data('replay_hours').data.filter((r) => r.arm === 'codex');
+    dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order).forEach((w) => {
+      const mine = rp.filter((r) => r.system === w.replay_system), full = mine.find((r) => +r.speedup === 1), inf = mine.find((r) => r.speedup === '' || r.speedup == null);
+      const r = $('div', 'hl-row lw-row', null, ls); $('span', 'hl-l', w.engine_label, r);
+      const bar = $('span', 'hl-bar', null, r), v = $('span', 'lw-v fr-num', null, r);
+      if (!full || !inf) { v.textContent = 'not measured yet'; return; }
+      const share = +inf.hours / +full.hours;
+      $('i', 'lw-wait', null, bar).style.width = (100 * share) + '%'; $('i', 'lw-think', null, bar).style.width = (100 * (1 - share)) + '%';
+      $('b', null, Math.round(100 * share) + '%', v); $('span', null, ' of ' + (+full.hours).toFixed(1) + ' h', v);
+    });
+  }
+
   // ---- the loop: light each stage in turn, with an arrow popping between them. The two evaluation stages hold longest.
   const lp = document.getElementById('lp');
   if (lp && !reduced && 'IntersectionObserver' in window) {

@@ -392,3 +392,11 @@
 .hero-dot.run::after { animation: hero-count var(--hero-total, 7000ms) linear both; }
 .hero-pick.paused .hero-dot.run::after { animation-play-state: paused; }
 @keyframes hero-count { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+/* loop section: share of a Baseline run that is not model thinking */
+.lw { margin-top: 12px; }
+.lw-row { grid-template-columns: 11.5em minmax(0, 1fr) 8em; }
+.lw-wait { background: var(--fr-codex); } .lw-think { background: var(--fr-rule); }
+.lw-sw-wait { background: var(--fr-codex); } .lw-sw-think { background: var(--fr-rule); }
+.lw-v { text-align: right; white-space: nowrap; color: var(--fr-muted); } .lw-v b { color: var(--fr-ink); font-weight: 500; }
+.lw-note { margin: 10px 0 0; color: var(--fr-muted); font-size: 12.5px; max-width: 70ch; }
+@media (max-width: 820px) { .lw-row { grid-template-columns: 8.5em minmax(0, 1fr) 6.6em; } }
