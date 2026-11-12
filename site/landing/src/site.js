@@ -143,19 +143,35 @@
     fd.addEventListener('click', (e) => { if (e.target === fd) fd.close(); });
   }
 
-  // ---- the loop: how much of each Baseline run is not the model thinking (replay with thinking time removed)
-  const ls = document.getElementById('loop-share');
-  if (ls && window.dash) {
-    const rp = dash.data('replay_hours').data.filter((r) => r.arm === 'codex');
-    dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order).forEach((w) => {
-      const mine = rp.filter((r) => r.system === w.replay_system), full = mine.find((r) => +r.speedup === 1), inf = mine.find((r) => r.speedup === '' || r.speedup == null);
-      const r = $('div', 'hl-row lw-row', null, ls); $('span', 'hl-l', w.engine_label, r);
-      const bar = $('span', 'hl-bar', null, r), v = $('span', 'lw-v fr-num', null, r);
-      if (!full || !inf) { v.textContent = 'not measured yet'; return; }
-      const share = +inf.hours / +full.hours;
-      $('i', 'lw-wait', null, bar).style.width = (100 * share) + '%'; $('i', 'lw-think', null, bar).style.width = (100 * (1 - share)) + '%';
-      $('b', null, Math.round(100 * share) + '%', v); $('span', null, ' of ' + (+full.hours).toFixed(1) + ' h', v);
-    });
+  // ---- the loop: one vLLM run replayed at faster model speeds. One bar steps through the speeds; evaluation takes over.
+  const lsw = document.getElementById('loop-sweep');
+  if (lsw && window.dash) {
+    const rows = dash.data('fig2_breakdown').data.slice().sort((x, y) => +x.row - +y.row);
+    const pick = document.getElementById('sweep-pick'), STEP = 3200;
+    const PARTS = [['model_generation_pct', 'fr-sh-gen'], ['overlap_pct', 'fr-sh-ovl'], ['evaluation_pct', 'fr-sh-eval']];
+    const bar = $('div', 'sw-bar', null, lsw), segs = PARTS.map(([, cls]) => { const sg = $('i', cls, null, bar); $('span', 'fr-num', null, sg); return sg; });
+    const out = $('p', 'sw-out', null, lsw), big = $('b', 'fr-num', null, out), rest = $('span', null, null, out);
+    let cur = -1, timer = null, paused = false, live = false, shown = 0, raf = 0;
+    pick.style.setProperty('--hero-total', STEP + 'ms');
+    const btns = rows.map((r, i) => { const b = $('button', 'hero-dot', r.tok_s_label, pick); b.type = 'button'; b.addEventListener('click', () => show(i)); return b; });
+    const run = () => { clearTimeout(timer); if (!reduced && live && !paused) timer = setTimeout(() => show((cur + 1) % rows.length), STEP); };
+    function show(i) {
+      const r = rows[i], ev = +r.evaluation_pct, from = shown; cur = i;
+      btns.forEach((b, k) => { b.setAttribute('aria-pressed', String(k === i)); b.classList.remove('run'); });
+      PARTS.forEach(([f], k) => { segs[k].style.width = (+r[f]) + '%'; segs[k].firstChild.textContent = +r[f] >= 6 ? (+r[f]) + '%' : ''; segs[k].title = (+r[f]) + '%'; });
+      cancelAnimationFrame(raf);
+      const t0 = performance.now(), tw = (now) => { const k = reduced ? 1 : Math.min(1, (now - t0) / 700); shown = from + (ev - from) * k; big.textContent = Math.round(shown) + '%'; if (k < 1) raf = requestAnimationFrame(tw); };
+      tw(t0); setTimeout(() => { shown = ev; big.textContent = ev + '%'; }, 900);
+      rest.textContent = ' of the run is evaluation alone, with the model already done. Model generating: ' + (+r.model_generation_pct) + '%. Whole run: ' + (+r.total_h) + ' h.';
+      lsw.setAttribute('aria-label', 'At ' + r.tok_s_label + ': model generation ' + (+r.model_generation_pct) + '%, generation overlapping evaluation ' + (+r.overlap_pct) + '%, evaluation alone ' + ev + '%, of a ' + (+r.total_h) + ' hour run.');
+      if (!reduced && live) { void btns[i].offsetWidth; btns[i].classList.add('run'); }
+      run();
+    }
+    const card = lsw.closest('.fr-card');
+    const hold = (on) => { paused = on; pick.classList.toggle('paused', on); if (on) clearTimeout(timer); else run(); };
+    card.addEventListener('mouseenter', () => hold(true)); card.addEventListener('mouseleave', () => hold(false));
+    show(0);
+    if (!reduced && 'IntersectionObserver' in window) new IntersectionObserver((es) => { const on = es[0].isIntersecting; if (on === live) return; live = on; if (on) show(0); else clearTimeout(timer); }, { threshold: 0.5 }).observe(card);
   }
 
   // ---- the loop: light each stage in turn, with an arrow popping between them. The two evaluation stages hold longest.

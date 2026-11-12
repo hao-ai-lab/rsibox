@@ -42,7 +42,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <!-- The loop -->
   <section class="fr-sec pg-loop" id="loop" aria-labelledby="loop-h">
-    <h2 class="fr-h2" id="loop-h">Self-improvement is a loop, and evaluation is its slowest step</h2>
+    <h2 class="fr-h2" id="loop-h">Self-improvement is a loop, and evaluation increasingly dominates it</h2>
     <p class="fr-sub">An agent edits the system, evaluates the edit, keeps it if it helped, and goes again. Every turn of the loop waits on the evaluation. That wait has two parts, and FastRSI goes after both.</p>
     <div class="fr-card lp">
       <div class="lp-track" id="lp" role="img" aria-label="The loop: edit, start the system, run the evaluation, keep or revert, repeat. Starting the system and running the evaluation are the long steps.">
@@ -60,6 +60,14 @@ Show me the result, then walk me through one install, check and uninstall on the
         <div class="lp-node" data-lp="6"><span class="lp-n">Keep or revert</span><span class="lp-d">did it help?</span></div>
         <div class="lp-back" data-lp="7" aria-hidden="true"><span>repeat, hundreds of times</span></div>
       </div>
+    </div>
+    <div class="fr-card sw">
+      <div class="sw-head">
+        <p class="hero-cap"><b>The faster the model, the more of the loop is evaluation</b><span class="hero-sub">One 6-hour vLLM optimization run, replayed with the model generating faster</span></p>
+        <div class="hero-pick" id="sweep-pick" role="group" aria-label="Model generation speed"></div>
+      </div>
+      <div id="loop-sweep" role="img"></div>
+      <p class="sw-keys"><span><i class="fr-sh-gen"></i>Model generating</span><span><i class="fr-sh-ovl"></i>Model generating while an evaluation runs</span><span><i class="fr-sh-eval"></i>Evaluation alone</span></p>
     </div>
   </section>
 
