@@ -13,8 +13,8 @@
     const WLS = dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order);
     const RUNGS = dash.data('ladder_rungs').data, LAD = dash.data('eval_ladder').data;
     const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen' };   // name of each engine's last measured rung
-    const HOLD = 5000;   // ms a finished engine stays up before the next one
-    let gen = 0, timer = null, cur = 0, paused = false;
+    const PLAY = 4500, HOLD = 2500, TOTAL = PLAY + HOLD;   // ms: the animation, then the pause before the next engine
+    let gen = 0, timer = null, cur = 0, paused = false, left = 0, since = 0;
     const later = (g, ms, fn) => setTimeout(() => { if (g === gen) fn(); }, ms);
     const fmtS = (t) => (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s';
 
@@ -100,22 +100,26 @@
     }
 
     const pager = document.getElementById('hero-pick'), figs = hl.closest('.hero-figs');
-    const queue = () => { clearTimeout(timer); if (!reduced && !paused && WLS.length > 1) timer = setTimeout(() => show((cur + 1) % WLS.length, true), HOLD); };
+    const auto = !reduced && WLS.length > 1;
+    const run = () => { clearTimeout(timer); if (auto && !paused) { since = performance.now(); timer = setTimeout(() => show((cur + 1) % WLS.length, true), left); } };
     function show(i, fade) {
       const g = ++gen; clearTimeout(timer); cur = i;
       const wl = WLS[i], anim = !reduced; heroWl = wl;
-      if (pager) [...pager.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === i)));
+      if (pager) [...pager.children].forEach((b, k) => { b.setAttribute('aria-pressed', String(k === i)); b.classList.remove('run'); });
       const draw = () => {
         if (g !== gen) return;
         document.getElementById('hero-ladder-sub').textContent = 'Time for one evaluation, ' + wl.engine_label;
         document.getElementById('hero-race-sub').textContent = wl.label + ', best speedup found in ' + (+wl.budget_h) + ' h';
-        ladder(wl, g, anim); race(wl, g, anim, queue);
+        ladder(wl, g, anim); race(wl, g, anim, () => {});
+        if (auto && pager) { const b = pager.children[i]; void b.offsetWidth; b.classList.add('run'); }
+        left = TOTAL; run();
         hl.style.opacity = hr.style.opacity = 1;
       };
       if (fade && anim) { hl.style.opacity = hr.style.opacity = 0; later(g, 280, draw); } else draw();
     }
+    if (pager) pager.style.setProperty('--hero-total', TOTAL + 'ms');
     if (pager) WLS.forEach((w, i) => { const b = $('button', 'hero-dot', w.engine_label, pager); b.type = 'button'; b.addEventListener('click', () => show(i, true)); });
-    const hold = (on) => { paused = on; if (on) clearTimeout(timer); else queue(); };
+    const hold = (on) => { if (on === paused) return; paused = on; if (pager) pager.classList.toggle('paused', on); if (on) { clearTimeout(timer); left = Math.max(300, left - (performance.now() - since)); } else run(); };
     figs.addEventListener('mouseenter', () => hold(true)); figs.addEventListener('mouseleave', () => hold(false));
     document.addEventListener('visibilitychange', () => hold(document.hidden));
     show(0, false);

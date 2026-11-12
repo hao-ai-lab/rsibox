@@ -384,3 +384,11 @@
 .hero-dot[aria-pressed="true"] { color: var(--fr-ink); border-bottom-color: var(--fr-fast); }
 .hero-dot:focus-visible { outline: 2px solid var(--fr-fast); outline-offset: 3px; }
 .hl-v.hl-none { display: block; color: var(--fr-muted); font-size: 12px; }
+/* the underline of the current engine fills over the time until the next one */
+.hero-dot { position: relative; border-bottom: 0; padding-bottom: 4px; }
+.hero-dot::before, .hero-dot::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; border-radius: 1px; }
+.hero-dot[aria-pressed="true"]::before { background: var(--fr-rule); }
+.hero-dot[aria-pressed="true"]::after { background: var(--fr-fast); transform-origin: left; }
+.hero-dot.run::after { animation: hero-count var(--hero-total, 7000ms) linear both; }
+.hero-pick.paused .hero-dot.run::after { animation-play-state: paused; }
+@keyframes hero-count { from { transform: scaleX(0); } to { transform: scaleX(1); } }
