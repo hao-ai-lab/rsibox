@@ -6,81 +6,119 @@
   // Recorded on FastVideo (MiniMax H3 decoding), one GB200: repos/fastvideo/examples/h3-live-edit.
   const REC = { edit_to_run: 0.72, install: 0.06, check: 6.02, undo: 0.014, psnr: 48.1, warm: 72, cold: 500 };
 
-  // ---- landing figure 1: one vLLM evaluation in three bars. Each bar starts as the one above it and shrinks.
-  const hl = document.getElementById('hero-ladder');
-  if (hl && window.dash) {
-    const lad = dash.data('eval_ladder').data.filter((r) => r.engine === 'vllm-d8x32k');
-    const steps = [...new Set(lad.map((r) => +r.step))].sort((x, y) => x - y), last = steps[steps.length - 1];
-    const rows = [[steps[0], 'Restart for every check'], [last - 2, 'Cut all system overhead'], [last, 'Targeted probe']];
-    const phases = [...new Set(lad.map((r) => r.phase))];
-    const sec = (st, ph) => { const r = lad.find((x) => +x.step === st && x.phase === ph); return r ? +r.seconds : 0; };
-    const tot = (st) => phases.reduce((x, ph) => x + sec(st, ph), 0), base = tot(steps[0]);
-    rows.forEach(([st, label], i) => {
-      const t = tot(st), r = $('div', 'hl-row', null, hl); $('span', 'hl-l', label, r);
-      const bar = $('span', 'hl-bar', null, r), prev = i ? rows[i - 1][0] : st;
-      const segs = phases.map((ph) => { const sg = $('i', null, null, bar); sg.style.background = 'var(--ph-' + ph + ')'; sg.style.width = (100 * sec(reduced ? st : prev, ph) / base) + '%'; return [sg, 100 * sec(st, ph) / base]; });
-      const v = $('span', 'hl-v fr-num', null, r);
-      $('b', null, i ? (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×' : '', v); $('span', null, (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s', v);
-      if (!reduced) {
-        r.style.opacity = 0; v.style.opacity = 0;
-        const at = 300 + i * 1300;
-        setTimeout(() => { r.style.transition = 'opacity 0.25s'; r.style.opacity = 1; }, at);
-        setTimeout(() => segs.forEach(([sg, w]) => { sg.style.transition = 'width 0.85s cubic-bezier(.2,.7,.2,1)'; sg.style.width = w + '%'; }), at + (i ? 300 : 0));
-        setTimeout(() => { v.style.transition = 'opacity 0.3s'; v.style.opacity = 1; }, at + (i ? 1000 : 200));
-      }
-    });
-  }
+  // ---- landing figures: one evaluation in three bars, and the race. They rotate through the engines, one at a time.
+  const hl = document.getElementById('hero-ladder'), hr = document.getElementById('hero-race');
+  let heroWl = null;
+  if (hl && hr && window.dash) {
+    const WLS = dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order);
+    const RUNGS = dash.data('ladder_rungs').data, LAD = dash.data('eval_ladder').data;
+    const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen' };   // name of each engine's last measured rung
+    const HOLD = 5000;   // ms a finished engine stays up before the next one
+    let gen = 0, timer = null, cur = 0, paused = false;
+    const later = (g, ms, fn) => setTimeout(() => { if (g === gen) fn(); }, ms);
+    const fmtS = (t) => (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s';
 
-  // ---- landing figure 2: the vLLM race. Staircases draw in time order with a dot at each improvement; the "sooner" bracket appears last.
-  const hr = document.getElementById('hero-race');
-  if (hr && window.dash) {
-    const NS = 'http://www.w3.org/2000/svg', el = (t, a, p) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; };
-    const W = 480, Hh = 250, m = { l: 46, r: 46, t: 46, b: 36 };
-    const wl = dash.data('race_workloads').data.find((w) => w.workload === 'vllm-d8x32k'), T = +wl.budget_h;
-    document.getElementById('hero-race-sub').textContent = wl.label + ', best speedup found in ' + T + ' h';
-    const pts = (arm) => dash.data('race_steps').data.filter((r) => r.workload === 'vllm-d8x32k' && r.arm === arm && r.kind === 'best').map((r) => [+r.t_h, +r.value]).sort((x, y) => x[0] - y[0]);
-    const C = pts('codex'), F = pts('fastrsi'), endC = C[C.length - 1][1], endF = F[F.length - 1][1], target = endC, hi = Math.max(endF, endC);
-    const tC = C.find((p) => p[1] >= target)[0], hit = F.find((p) => p[1] >= target), tF = hit ? hit[0] : null;
-    const ticks = []; for (let v = 1; v <= hi + 1e-9; v += 0.05) ticks.push(v);
-    const top = Math.max(hi, ticks[ticks.length - 1]) + 0.012;
-    const x = (t) => m.l + (W - m.l - m.r) * t / T, y = (v) => Hh - m.b - (Hh - m.t - m.b) * (v - 1) / (top - 1);
-    const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + Hh, role: 'img', class: 'hr-svg', 'aria-label': wl.label + ': best speedup over ' + T + ' hours. Baseline ends at ' + endC.toFixed(2) + '×, FastRSI at ' + endF.toFixed(2) + '×.' }, hr);
-    ticks.forEach((v) => { el('line', { x1: x(0), x2: x(T), y1: y(v), y2: y(v), class: v === 1 ? 'hr-ax' : 'hr-grid' }, svg); el('text', { x: m.l - 7, y: y(v) + 3.5, class: 'hr-t', 'text-anchor': 'end' }, svg).textContent = v.toFixed(2) + '×'; });
-    el('line', { x1: x(0), x2: x(0), y1: y(1), y2: m.t - 8, class: 'hr-ax' }, svg);
-    el('text', { x: 6, y: m.t - 16, class: 'hr-t' }, svg).textContent = 'best speedup so far';
-    for (let h = 0; h <= T; h += 1) el('text', { x: x(h), y: Hh - m.b + 15, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = h;
-    el('text', { x: x(T / 2), y: Hh - 4, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = 'hours of agent time';
-    const clipId = 'hr-clip', clip = el('rect', { x: 0, y: 0, width: reduced ? W : x(0), height: Hh }, el('clipPath', { id: clipId }, el('defs', {}, svg)));
-    const path = (P) => { let d = 'M' + x(0) + ' ' + y(1); for (const [t, val] of P) d += 'H' + x(t) + 'V' + y(val); return d + 'H' + x(T); };
-    const g = el('g', { 'clip-path': 'url(#' + clipId + ')' }, svg);
-    el('path', { d: path(C), class: 'hr-c' }, g); el('path', { d: path(F), class: 'hr-f' }, g);
-    const dots = [];
-    [[C, 'hr-pc'], [F, 'hr-pf']].forEach(([P, cls]) => P.forEach(([t, v]) => { const c = el('circle', { cx: x(t), cy: y(v), r: 2.6, class: cls }, svg); if (!reduced) c.style.opacity = 0; dots.push([t, c]); }));
-    const fin = el('g', { class: 'hr-fin' }, svg);
-    el('line', { x1: x(0), x2: x(T), y1: y(target), y2: y(target), class: 'hr-tg' }, fin);
-    const close = Math.abs(y(endF) - y(endC)) < 11;
-    el('text', { x: x(T) + 5, y: y(endC) + (close ? 9 : 3.5), class: 'hr-t hr-tc' }, fin).textContent = endC.toFixed(2) + '×';
-    el('text', { x: x(T) + 5, y: y(endF) + (close ? -2 : 3.5), class: 'hr-t hr-tf' }, fin).textContent = endF.toFixed(2) + '×';
-    if (tF != null) {
-      const by = y(top) - 4;
-      el('path', { d: 'M' + x(tF) + ' ' + y(target) + 'V' + by + 'H' + x(tC) + 'V' + y(target), class: 'hr-br' }, fin);
-      el('circle', { cx: x(tF), cy: y(target), r: 4.5, class: 'hr-df' }, fin); el('circle', { cx: x(tC), cy: y(target), r: 4.5, class: 'hr-dc' }, fin);
-      const lab = el('text', { x: (x(tF) + x(tC)) / 2, y: by - 8, class: 'hr-big', 'text-anchor': 'middle' }, fin);
-      lab.textContent = (tC / tF).toFixed(1) + '× sooner';
-      el('tspan', { class: 'hr-bigs', dx: 8 }, lab).textContent = (tC - tF).toFixed(1) + ' h earlier';
+    function ladder(wl, g, anim) {
+      hl.replaceChildren();
+      const lad = LAD.filter((r) => r.engine === wl.workload), has = (st) => lad.some((r) => +r.step === st);
+      const rg = RUNGS.filter((r) => r.engine === wl.workload && has(+r.step)).map((r) => [+r.step, r.group]).sort((a, b) => a[0] - b[0]);
+      const g0 = rg[0][1], sys = rg.filter((r) => r[1] === g0).pop()[0], end = rg[rg.length - 1][0];
+      const rows = [[rg[0][0], 'Restart for every check'], [sys, 'Cut all system overhead'], end > sys ? [end, LAST[wl.workload] || 'Shorter check'] : [null, 'Shorter check']];
+      const phases = [...new Set(lad.map((r) => r.phase))];
+      const sec = (st, ph) => { const r = lad.find((x) => +x.step === st && x.phase === ph); return r ? +r.seconds : 0; };
+      const tot = (st) => phases.reduce((x, ph) => x + sec(st, ph), 0), base = tot(rows[0][0]);
+      rows.forEach(([st, label], i) => {
+        const r = $('div', 'hl-row', null, hl); $('span', 'hl-l', label, r);
+        const bar = $('span', 'hl-bar', null, r), v = $('span', 'hl-v fr-num', null, r);
+        let segs = [];
+        if (st == null) { v.classList.add('hl-none'); v.textContent = 'not measured yet'; }
+        else {
+          const t = tot(st), prev = i ? rows[i - 1][0] : st;
+          segs = phases.map((ph) => { const sg = $('i', null, null, bar); sg.style.background = 'var(--ph-' + ph + ')'; sg.style.width = (100 * sec(anim ? prev : st, ph) / base) + '%'; return [sg, 100 * sec(st, ph) / base]; });
+          $('b', null, i ? (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×' : '', v); $('span', null, fmtS(t), v);
+        }
+        if (anim) {
+          r.style.opacity = 0; v.style.opacity = 0;
+          const at = 300 + i * 1300;
+          later(g, at, () => { r.style.transition = 'opacity 0.25s'; r.style.opacity = 1; });
+          later(g, at + (i ? 300 : 0), () => segs.forEach(([sg, w]) => { sg.style.transition = 'width 0.85s cubic-bezier(.2,.7,.2,1)'; sg.style.width = w + '%'; }));
+          later(g, at + (i ? 1000 : 200), () => { v.style.transition = 'opacity 0.3s'; v.style.opacity = 1; });
+        }
+      });
     }
-    if (!reduced) {
+
+    function race(wl, g, anim, done) {
+      hr.replaceChildren();
+      const NS = 'http://www.w3.org/2000/svg', el = (t, a, p) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; };
+      const W = 480, Hh = 250, m = { l: 46, r: 46, t: 46, b: 36 }, T = +wl.budget_h;
+      const pts = (arm) => dash.data('race_steps').data.filter((r) => r.workload === wl.workload && r.arm === arm && r.kind === 'best').map((r) => [+r.t_h, +r.value]).sort((x, y) => x[0] - y[0]);
+      const C = pts('codex'), F = pts('fastrsi'), endC = C[C.length - 1][1], endF = F[F.length - 1][1], target = endC, hi = Math.max(endF, endC);
+      const tC = C.find((p) => p[1] >= target)[0], hit = F.find((p) => p[1] >= target), tF = hit ? hit[0] : null;
+      const stp = hi - 1 < 0.2 ? 0.05 : hi - 1 < 0.5 ? 0.1 : 0.25, dp = stp < 0.1 || stp === 0.25 ? 2 : 1;
+      const ticks = []; for (let v = 1; v <= hi + 1e-9; v += stp) ticks.push(v);
+      const top = Math.max(hi, ticks[ticks.length - 1]) + (hi - 1) * 0.11;
+      const x = (t) => m.l + (W - m.l - m.r) * t / T, y = (v) => Hh - m.b - (Hh - m.t - m.b) * (v - 1) / (top - 1);
+      const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + Hh, role: 'img', class: 'hr-svg', 'aria-label': wl.label + ': best speedup over ' + T + ' hours. Baseline ends at ' + endC.toFixed(2) + '×, FastRSI at ' + endF.toFixed(2) + '×.' }, hr);
+      ticks.forEach((v) => { el('line', { x1: x(0), x2: x(T), y1: y(v), y2: y(v), class: v === 1 ? 'hr-ax' : 'hr-grid' }, svg); el('text', { x: m.l - 7, y: y(v) + 3.5, class: 'hr-t', 'text-anchor': 'end' }, svg).textContent = v.toFixed(dp) + '×'; });
+      el('line', { x1: x(0), x2: x(0), y1: y(1), y2: m.t - 8, class: 'hr-ax' }, svg);
+      el('text', { x: 6, y: m.t - 16, class: 'hr-t' }, svg).textContent = 'best speedup so far';
+      for (let h = 0; h <= T; h += 1) el('text', { x: x(h), y: Hh - m.b + 15, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = h;
+      el('text', { x: x(T / 2), y: Hh - 4, class: 'hr-t', 'text-anchor': 'middle' }, svg).textContent = 'hours of agent time';
+      const clipId = 'hr-clip-' + g, clip = el('rect', { x: 0, y: 0, width: anim ? x(0) : W, height: Hh }, el('clipPath', { id: clipId }, el('defs', {}, svg)));
+      const path = (P) => { let d = 'M' + x(0) + ' ' + y(1); for (const [t, val] of P) d += 'H' + x(t) + 'V' + y(val); return d + 'H' + x(T); };
+      const gg = el('g', { 'clip-path': 'url(#' + clipId + ')' }, svg);
+      el('path', { d: path(C), class: 'hr-c' }, gg); el('path', { d: path(F), class: 'hr-f' }, gg);
+      const dots = [];
+      [[C, 'hr-pc'], [F, 'hr-pf']].forEach(([P, cls]) => P.forEach(([t, v]) => { const c = el('circle', { cx: x(t), cy: y(v), r: 2.6, class: cls }, svg); if (anim) c.style.opacity = 0; dots.push([t, c]); }));
+      const fin = el('g', { class: 'hr-fin' }, svg);
+      el('line', { x1: x(0), x2: x(T), y1: y(target), y2: y(target), class: 'hr-tg' }, fin);
+      const close = Math.abs(y(endF) - y(endC)) < 11, up = endF >= endC ? -1 : 1;
+      el('text', { x: x(T) + 5, y: y(endC) + (close ? 3.5 - up * 5.5 : 3.5), class: 'hr-t hr-tc' }, fin).textContent = endC.toFixed(2) + '×';
+      el('text', { x: x(T) + 5, y: y(endF) + (close ? 3.5 + up * 5.5 : 3.5), class: 'hr-t hr-tf' }, fin).textContent = endF.toFixed(2) + '×';
+      if (tF != null && tF > 0 && tF < tC) {
+        const by = y(top) - 4;
+        el('path', { d: 'M' + x(tF) + ' ' + y(target) + 'V' + by + 'H' + x(tC) + 'V' + y(target), class: 'hr-br' }, fin);
+        el('circle', { cx: x(tF), cy: y(target), r: 4.5, class: 'hr-df' }, fin); el('circle', { cx: x(tC), cy: y(target), r: 4.5, class: 'hr-dc' }, fin);
+        const lab = el('text', { x: Math.max(150, Math.min(W - 120, (x(tF) + x(tC)) / 2)), y: by - 8, class: 'hr-big', 'text-anchor': 'middle' }, fin);
+        lab.textContent = (tC / tF).toFixed(1) + '× sooner';
+        el('tspan', { class: 'hr-bigs', dx: 8 }, lab).textContent = (tC - tF).toFixed(1) + ' h earlier';
+      }
+      if (!anim) { done(); return; }
       fin.style.opacity = 0;
       const t0 = performance.now() + 700, DUR = 3200;
+      let ended = false;
+      const finish = () => { if (ended || g !== gen) return; ended = true; clip.setAttribute('width', W); dots.forEach(([, c]) => (c.style.opacity = 1)); fin.style.transition = 'opacity 0.5s'; fin.style.opacity = 1; done(); };
       const tick = (now) => {
+        if (g !== gen || ended) return;
         const k = Math.max(0, Math.min(1, (now - t0) / DUR)), th = k * T;
         clip.setAttribute('width', x(th));
         dots.forEach(([t, c]) => { if (t <= th) c.style.opacity = 1; });
-        if (k < 1) requestAnimationFrame(tick); else { fin.style.transition = 'opacity 0.5s'; fin.style.opacity = 1; }
+        if (k < 1) requestAnimationFrame(tick); else finish();
       };
       requestAnimationFrame(tick);
-      setTimeout(() => { clip.setAttribute('width', W); dots.forEach(([, c]) => (c.style.opacity = 1)); fin.style.opacity = 1; }, 700 + DUR + 1500);   // lands complete even if frames are throttled
+      later(g, 700 + DUR + 1500, finish);   // lands complete even if frames are throttled
     }
+
+    const pager = document.getElementById('hero-pick'), figs = hl.closest('.hero-figs');
+    const queue = () => { clearTimeout(timer); if (!reduced && !paused && WLS.length > 1) timer = setTimeout(() => show((cur + 1) % WLS.length, true), HOLD); };
+    function show(i, fade) {
+      const g = ++gen; clearTimeout(timer); cur = i;
+      const wl = WLS[i], anim = !reduced; heroWl = wl;
+      if (pager) [...pager.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === i)));
+      const draw = () => {
+        if (g !== gen) return;
+        document.getElementById('hero-ladder-sub').textContent = 'Time for one evaluation, ' + wl.engine_label;
+        document.getElementById('hero-race-sub').textContent = wl.label + ', best speedup found in ' + (+wl.budget_h) + ' h';
+        ladder(wl, g, anim); race(wl, g, anim, queue);
+        hl.style.opacity = hr.style.opacity = 1;
+      };
+      if (fade && anim) { hl.style.opacity = hr.style.opacity = 0; later(g, 280, draw); } else draw();
+    }
+    if (pager) WLS.forEach((w, i) => { const b = $('button', 'hero-dot', w.engine_label, pager); b.type = 'button'; b.addEventListener('click', () => show(i, true)); });
+    const hold = (on) => { paused = on; if (on) clearTimeout(timer); else queue(); };
+    figs.addEventListener('mouseenter', () => hold(true)); figs.addEventListener('mouseleave', () => hold(false));
+    document.addEventListener('visibilitychange', () => hold(document.hidden));
+    show(0, false);
   }
 
   // ---- click a landing figure: show the full figure in a popup, then put it back in the page
@@ -93,6 +131,7 @@
       e.preventDefault(); back();
       home = document.createElement('div'); home.style.height = sec.offsetHeight + 'px';
       sec.replaceWith(home); node = sec; slot.appendChild(sec); fd.showModal(); fd.scrollTop = 0;
+      if (heroWl) { const chip = [...sec.querySelectorAll('.fr-chip')].find((c) => c.textContent === heroWl.engine_label || c.textContent === heroWl.label); if (chip && chip.getAttribute('aria-pressed') !== 'true') chip.click(); }
       const rp = sec.querySelector('#ladder-replay'); if (rp) setTimeout(() => rp.click(), 150);
     }));
     fd.addEventListener('close', () => { if (!fd.open) back(); });
