@@ -211,19 +211,28 @@ Show me the result, then walk me through one install, check and uninstall on the
   </section>
 
   <!-- What the toolsmith built -->
-  <section class="fr-sec" id="built" aria-labelledby="built-h">
-    <h2 class="fr-h2" id="built-h">What it built for each engine</h2>
-    <p class="fr-sub">Each row is one mechanism the toolsmith added to keep part of the engine warm, with the time it took before and after. All are merged and measured on GPUs. Rows are separate measurements, so they do not add up.</p>
-    <div class="fr-card" id="built-card">
-      <div class="fr-picker" role="group" aria-label="Engine" id="built-pick"></div>
-      <div class="bl" id="built-list"></div>
-      <p class="fr-note">Bars are drawn to each row's own scale: the full width is the time before, the filled part is the time after. The full list, with what is CPU-tested only or still planned, is on the <a href="audit/#coverage">audit page</a>.</p>
+  <section class="fr-sec cs" id="built" aria-labelledby="built-h">
+    <div class="cs-grid">
+      <div class="cs-side">
+        <h2 class="fr-h2" id="built-h">Case studies</h2>
+        <p class="fr-sub">Three mechanisms per engine that keep part of it warm, each with the time before and after. Click one for the details, or open the upstream edits that were replayed on that engine.</p>
+        <div class="cs-pick" role="group" aria-label="Engine" id="built-pick"></div>
+      </div>
+      <div class="fr-card cs-card" id="built-card">
+        <div class="bl" id="built-list"></div>
+        <p class="cs-foot"><button type="button" class="fr-chip" id="cs-edits"></button><a href="audit/#coverage">Full list on the audit page</a></p>
+      </div>
     </div>
+    <dialog class="try-dlg cs-dlg" id="cs-dlg" aria-labelledby="cs-h">
+      <h2 class="fr-h2" id="cs-h"></h2>
+      <div id="cs-body"></div>
+      <p class="try-btns"><button type="button" class="fr-btn fr-btn-quiet" id="cs-close">Close</button></p>
+    </dialog>
   </section>
 
 
   <div class="pg-bridge" id="results">
-    <h2 class="fr-h2">What it buys the agent</h2>
+    <h2 class="fr-h2">Evaluation</h2>
     <p class="fr-sub">Three measurements from real runs on vLLM, Megatron-LM and FastVideo: how much sooner the agent gets there, where the time per check went, and why the gap widens as models get faster.</p>
   </div>
 

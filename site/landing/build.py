@@ -15,6 +15,21 @@ js = lambda s: s.replace("</script", "<\\/script")
 # What the offline toolsmith built: GPU-verified mechanisms with a measured before and after (facts/engines.json).
 FACTS = os.path.join(HERE, "..", "facts", "engines.json")
 built = []
+# Replayed upstream edits per engine (prs.json beside engines.json). A speedup is computed only from two plain timings.
+edits = {}
+PRS = os.path.join(os.path.dirname(FACTS), "prs.json")
+if os.path.exists(PRS):
+    clean = lambda v: re.sub(r"\s*\(PR #\d+\)", "", str(v)).replace("`", "") if v is not None else ""
+    one = lambda v: (lambda m: float(m.group(1)) if m else None)(re.match(r"^(\d+(?:\.\d+)?) s\b(?! eager)", str(v or "")))
+    for e in json.loads(rd(PRS))["engines"]:
+        rows = []
+        for q in e["prs"]:
+            if not q.get("install_time"): continue
+            run = (lambda m: float(m.group(1)) if m else None)(re.search(r"edit-to-run (\d+(?:\.\d+)?) s", str(q["install_time"]))) or (one(q["install_time"]) if q.get("installed_live") else None)
+            rst = one(q.get("restart_time_replaced"))
+            rows.append({"pr": q["pr"], "repo": q["upstream_repo"], "title": clean(q["title"]), "live": bool(q.get("installed_live")), "install": clean(q["install_time"]), "check": clean(q.get("check_time")), "restart": clean(q.get("restart_time_replaced")), "effect": clean(q.get("measured_effect")) if q.get("measured_effect") != "none recorded" else "", "x": round(rst / run, 1) if run and rst else None})
+        rows.sort(key=lambda r: (not r["live"], -(r["x"] or 0)))
+        edits[e["engine"]] = rows
 if os.path.exists(FACTS):
     num = lambda v: (lambda m: float(m.group(0)) if m else None)(re.search(r"\d+(?:\.\d+)?", str(v)))
     for e in json.loads(rd(FACTS))["engines"]:
@@ -24,8 +39,8 @@ if os.path.exists(FACTS):
             if m.get("status") != "merged_gpu_verified" or sv.get("before") is None or sv.get("after") is None or sv.get("unit") != "s": continue
             b, a = num(sv["before"]), num(sv["after"])
             if not b or a is None: continue
-            ms.append({"name": re.sub(r"\s*\(`[^)]*\)|`", "", m["name"]).strip(), "what": m.get("what", ""), "before": str(sv["before"]), "after": str(sv["after"]), "b": b, "a": a, "setup": sv.get("setup", "")})
-        built.append({"engine": e["engine"], "mechanisms": ms})
+            ms.append({"name": re.sub(r"\s*\(`[^)]*\)|`", "", m["name"]).strip(), "what": m.get("what", ""), "before": str(sv["before"]), "after": str(sv["after"]), "b": b, "a": a, "setup": sv.get("setup", ""), "cost": m.get("startup_cost_removed", "")})
+        built.append({"engine": e["engine"], "mechanisms": ms, "edits": edits.get(e["engine"], [])})
 page = rd(f"{HERE}/src/page.html")
 page = page.replace("{{TITLE}}", title).replace("{{LEDE}}", lede)
 page = page.replace("{{RESULTS}}", "\n".join(sec(i) for i in ("sooner", "eval-time", "model-speed")))
