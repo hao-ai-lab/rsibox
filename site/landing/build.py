@@ -17,6 +17,9 @@ FACTS = os.path.join(HERE, "..", "facts", "engines.json")
 built = []
 # Replayed upstream edits per engine (prs.json beside engines.json). A speedup is computed only from two plain timings.
 edits = {}
+COPYF = os.path.join(os.path.dirname(FACTS), "case-copy.json")   # wording per case: labels and text
+COPY = json.loads(rd(COPYF)) if os.path.exists(COPYF) else {}
+COPY_BY = {c["pr"]: c for c in COPY.get("cases", [])}
 PRS = os.path.join(os.path.dirname(FACTS), "prs.json")
 if os.path.exists(PRS):
     clean = lambda v: re.sub(r"\s*\(PR #\d+\)", "", str(v)).replace("`", "") if v is not None else ""
@@ -41,6 +44,7 @@ if os.path.exists(PRS):
                 if left <= 0: break
                 files.append({"path": fl["path"], "lines": fl["lines"][:left], "cut": max(0, len(fl["lines"]) - left)}); left -= len(fl["lines"])
             r.update({"utitle": dj["title"].replace("`", ""), "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": files, "more": len(dj["files"]) - len(files)})
+        for r in rows: r["copy"] = [[b["label"], COPY_BY.get(r["pr"], {}).get(b["key"], "")] for b in COPY.get("blocks", [])]
         rows.sort(key=lambda r: (not r["live"], -(r["x"] or 0)))
         edits[e["engine"]] = rows
 if os.path.exists(FACTS):
@@ -55,6 +59,7 @@ if os.path.exists(FACTS):
             ms.append({"name": re.sub(r"\s*\(`[^)]*\)|`", "", m["name"]).strip(), "what": m.get("what", ""), "before": str(sv["before"]), "after": str(sv["after"]), "b": b, "a": a, "setup": sv.get("setup", ""), "cost": m.get("startup_cost_removed", "")})
         built.append({"engine": e["engine"], "mechanisms": ms, "edits": edits.get(e["engine"], [])})
 page = rd(f"{HERE}/src/page.html")
+page = page.replace("{{CASE_SUB}}", COPY.get("subtitle", ""))
 page = page.replace("{{TITLE}}", title).replace("{{LEDE}}", lede)
 page = page.replace("{{RESULTS}}", "\n".join(sec(i) for i in ("sooner", "eval-time", "model-speed")))
 out = f"""<title>FastRSI Home</title>

@@ -291,13 +291,12 @@
           const to = 'scaleX(' + Math.max(0.008, w) + ')'; if (reduced || !i) f.style.transform = to; else { f.style.transform = 'scaleX(1)'; setTimeout(() => { f.style.transition = 'transform 0.9s cubic-bezier(.2,.7,.2,1)'; f.style.transform = to; }, 250); }
         });
         const x = $('p', 'alt-x', null, info); $('b', 'fr-num', times(q.x), x); $('span', null, q.live ? ' sooner to a running edit' : ' faster than a plain restart' + (q.pair ? ' (' + q.pair + ')' : ''), x);
-      } else {
-        const x = $('p', 'alt-x', null, info); $('b', 'alt-na', 'Speedup not measured yet', x);
-        const kvs = $('div', 'cs-kvs', null, info), kv = (k, v) => { if (!v) return; const r = $('div', 'cs-kv', null, kvs); $('span', null, k, r); $('span', null, v, r); };
-        kv(q.live ? 'Install' : 'What happened', q.install); kv('Restart it replaces', q.restart);
-      }
-      if (q.effect) $('p', 'alt-saw', 'What we saw: ' + q.effect + '.', info);
-      $('p', 'alt-why', q.live ? 'The engine keeps its weights, compiled kernels and captured graphs. Only the changed functions are swapped in, between two steps.' : q.install ? 'This change touches code that is not swapped in place, so the lab restarts the engine from a warm copy instead of from scratch.' : 'In the replay this change went to a restart. No timing was recorded for it.', info);
+      } else $('p', 'alt-pend', 'Timing is being re-measured.', info);
+      (q.copy || []).forEach(([label, text]) => {
+        if (!text) return;
+        const blk = $('div', 'alt-blk', null, info); $('b', null, label, blk); const para = $('p', null, null, blk);
+        text.split('`').forEach((part, i) => { if (i % 2) $('code', null, part, para); else para.appendChild(document.createTextNode(part)); });
+      });
       df.replaceChildren(); df.scrollTop = 0;
       q.files.forEach((fl) => {
         $('p', 'df-file', fl.path, df); const pre = $('pre', 'df-pre', null, df);

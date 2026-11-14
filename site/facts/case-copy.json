@@ -1,0 +1,108 @@
+{
+ "rationale": "Engineers skimming a case study alongside a diff want three clear answers: what the pull request changes in the engine, how FastRSI applied or safely refused the live patch, and whether the resulting run was verified. Separating 'The change', 'How FastRSI applied it', and 'Verification' replaces vague labels with a predictable technical narrative and lets cases without recorded verification checks cleanly omit the third block.",
+ "subtitle": "Real upstream pull requests replayed on running vLLM, Megatron-LM, and FastVideo processes—showing when FastRSI patches code in place and when it safely falls back to a warm copy.",
+ "blocks": [
+  {
+   "key": "b1",
+   "label": "The change"
+  },
+  {
+   "key": "b2",
+   "label": "How FastRSI applied it"
+  },
+  {
+   "key": "b3",
+   "label": "Verification"
+  }
+ ],
+ "cases": [
+  {
+   "pr": 62872,
+   "b1": "Updates the Rust server frontend (`output.rs`, `error.rs`, `convert.rs`, `generate.rs`, `tests.rs`) and the Python v1 scheduler (`scheduler.py`) to report structured-output compilation failures as validation errors.",
+   "b2": "An initial pass patched the process in place in 0.38 s, but because this pull request modifies a constructor, FastRSI now refuses a live swap and restarts the engine from a warm pre-forked copy in 16.6 s (eager mode) or 51.2 s (CUDA graph mode), compared to 43–231 s for a warm plain restart; undoing the edit returns the engine to its base state."
+  },
+  {
+   "pr": 61323,
+   "b1": "Updates normalization layers in `layernorm.py` so that they stay neutral during dummy weight initialization in the model loader.",
+   "b2": "FastRSI restarted the engine from a warm pre-forked copy in 9.2 s (eager mode) or 44.9 s (CUDA graph mode), replacing a plain restart of 113 s (eager) or 195 s (CUDA graph) after fixing an earlier bug where a live swap was wrongly committed without executing the changed code and pre-forked servers crashed on a duplicate operator name."
+  },
+  {
+   "pr": 59941,
+   "b1": "Updates `breakable_cudagraph.py` to resolve `eager_break_during_capture` when a function is called rather than at module import time.",
+   "b2": "An initial two-GPU tensor-parallel pass with CUDA graphs applied the edit in place without the test hitting the modified code, but FastRSI now refuses the live patch during preparation because the target function is already captured in a CUDA graph, restarting the component instead."
+  },
+  {
+   "pr": 58231,
+   "b1": "Updates `topk_topp_triton.py` in the v1 sampler to fix split top-p sampling masking out every token for huge logits, which caused thinking-token budgets with speculative decoding to emit token 0.",
+   "b2": "FastRSI fell back to a restart in this replay because a plain Python code swap could not recompile Triton GPU kernels; support for rebuilding Triton kernels in place landed later and has not yet been re-run on this pull request."
+  },
+  {
+   "pr": 61213,
+   "b1": "Updates `_topk_topp_kernel()` in `topk_topp_triton.py` and `benchmark_topk_topp.py` to improve sampling performance on masked logits.",
+   "b2": "FastRSI fell back to a restart in this replay because a plain Python code swap could not recompile Triton GPU kernels; support for rebuilding Triton kernels in place landed later and has not yet been re-run on this pull request."
+  },
+  {
+   "pr": 62046,
+   "b1": "Updates `topk_topp_triton.py` in the v1 sampler to carry the boundary tie count across blocks in the split top-p mask kernel.",
+   "b2": "FastRSI fell back to a restart in this replay because a plain Python code swap could not recompile Triton GPU kernels; support for rebuilding Triton kernels in place landed later and has not yet been re-run on this pull request."
+  },
+  {
+   "pr": 57951,
+   "b1": "Updates the scheduler configuration (`config/scheduler.py`) and core v1 scheduler (`v1/core/sched/scheduler.py`) to soften the long-prefill token threshold.",
+   "b2": "In this prototype-era test, FastRSI patched the edit directly into the running engine in 0.6 s, compared to 66.3 s for a plain restart."
+  },
+  {
+   "pr": 57140,
+   "b1": "Updates `qwen_gdn_linear_attn.py` in the GDN Mamba layer to scatter mixed speculative outputs directly into the caller buffer.",
+   "b2": "In this prototype-era test, FastRSI patched the edit directly into the running engine in 2.4 s, compared to 70.6 s for a plain restart."
+  },
+  {
+   "pr": 49750,
+   "b1": "Updates the CUDA kernel in `layernorm_kernels.cu` and five model definitions (`apertus.py`, `deepseek_v2.py`, `hunyuan_v1.py`, `lfm2.py`, `lfm2_moe.py`) so RMSNorm supports non-contiguous tensors for a 1.2–3.1x kernel speedup.",
+   "b2": "In this prototype-era test, FastRSI compiled the C++/CUDA changes into a versioned side library and loaded the update into the running engine in 28 s."
+  },
+  {
+   "pr": 8532,
+   "b1": "Updates distributed data-parallel gradient handling in `data_parallel_base.py`, `distributed_data_parallel.py`, and `param_and_grad_buffer.py` to keep token-scaling factors in FP32 when using low-precision gradient buffers.",
+   "b2": "FastRSI patched all three modified modules live in 0.18 s, compared to 79–89 s for a full code restart.",
+   "b3": "Across a 4-step training check, the loss stayed within 4.4e-5 of the baseline, though this workload used BF16 buffers and never executed the modified `scale_gradients` code."
+  },
+  {
+   "pr": 8844,
+   "b1": "Updates `training.py` to cache the output of `get_start_time_from_progress_log` within a training run.",
+   "b2": "FastRSI patched the running process in place in 0.37 s, compared to 79–89 s for a full code restart.",
+   "b3": "Across a 4-step training check, the loss stayed within 1.5e-4 of the baseline; because the changed function only runs at start-up, the test workload never executed it and no speed effect was measured."
+  },
+  {
+   "pr": 8579,
+   "b1": "Updates `distributed_data_parallel.py` to use `math.isclose` for gradient scaling factor assertions in distributed data-parallel training.",
+   "b2": "FastRSI refused a live patch in 0.07 s because the pull request modifies a constructor, falling back to a code restart that took 88.8 s (and 148.7 s on one unexplained slow warm-up from the pre-forked copy).",
+   "b3": "An 8-step training check ran without regression, keeping the loss within 1.0e-3 and the gradient norm within 2.6e-3 of the baseline."
+  },
+  {
+   "pr": 7575,
+   "b1": "Updates `fine_grained_activation_offload.py`, `attention.py`, and `dsa_layer_specs.py` (with one hunk omitted because its file is not in this source tree) to fix partial activation offloading during warm-up and the backward pass.",
+   "b2": "FastRSI refused a live patch in 0.60 s because the edit modifies a constructor, adds new object fields, and removes a definition; it restarted the engine in 40.9 s from a warm pre-forked copy, compared to 78.8 s for a full code restart.",
+   "b3": "An 8-step training check ran without regression, keeping the loss within 1.5e-3 and the gradient norm within 3.9e-3 of the baseline."
+  },
+  {
+   "pr": 1882,
+   "b1": "Updates `minimax_h3_latent_preparation.py` in the MiniMax H3 pipeline to reuse cached VAE offloading during conditioning.",
+   "b2": "Replaying the pull request in reverse, FastRSI patched the live process in 0.086 s (0.81 s total from edit to run), compared to 107 s for a warm plain restart to the end of the first video.",
+   "b3": "Generating one video took 6.10 s at baseline, 6.00 s with the edit, and 6.01 s after undoing it, producing bit-exact output; however, the text-to-video test workload never executed the modified keyframe and reference-image VAE encoding code."
+  },
+  {
+   "pr": 1900,
+   "b1": "Updates the Triton kernel (`vsa_tile_layout.py`), video sparse attention backend (`video_sparse_attn.py`), environment settings (`envs.py`), denoising stage (`denoising.py`), and benchmark (`bench_vsa_tile_layout.py`) to fuse the VSA64 tile layout for SM100 inference.",
+   "b2": "Replaying the pull request in reverse, FastRSI refused a live patch in 0.20 s because the edit removes a definition and changes module-level code outside functions, running the check in a new process instead of a 107 s plain restart.",
+   "b3": "A warm check in the new process generated a video in 6.19 s with bit-exact output, though the MiniMax H3 test workload never executed the generic video sparse attention path."
+  },
+  {
+   "pr": 2040,
+   "b1": "Updates `envs.py`, `minimax_h3_parallel.py`, and `minimax_h3_video.py` so the MiniMax H3 VAE decodes eight spatial tiles per call by default.",
+   "b2": "FastRSI refused a live patch in 0.18 s because the edit modifies module-level code and a default setting in `envs.py`, running the check in a new process instead of an 86 s plain restart.",
+   "b3": "A warm check in the new process generated a video in 6.13 s with bit-exact output; because the test workload already sets the tile batch size to 12, changing the default had no effect on this run."
+  }
+ ],
+ "_about": "Case-study wording written by Gemini (gemini-4-argon-medium) from prs.json records on 2026-11-14; pasted as returned."
+}
