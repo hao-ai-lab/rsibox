@@ -1,9 +1,9 @@
 {
- "subtitle": "Sixteen merged pull requests from vLLM, Megatron-LM, and FastVideo replayed against running engines to compare traditional full-restart evaluation against live surgical patching and warm pre-forked recovery.",
+ "subtitle": "Merged pull requests from vLLM, Megatron-LM, and FastVideo, plus edits written by our own agents, replayed against running engines to compare traditional full-restart evaluation against live surgical patching and warm pre-forked recovery.",
  "blocks": [
   {
    "key": "b1",
-   "label": "What the pull request changes"
+   "label": "What the change does"
   },
   {
    "key": "b2",
@@ -11,7 +11,7 @@
   },
   {
    "key": "b3",
-   "label": "How FastRSI accelerates evaluation"
+   "label": "How FastRSI evaluates it"
   },
   {
    "key": "b4",
@@ -83,34 +83,6 @@
    "b4": "After rebinding the native library, vLLM verification runs the check workload and the log-prob check to confirm numerical accuracy and ensure the new kernel symbol ran. Plain-restart timing and check observation details were not recorded for this case."
   },
   {
-   "pr": 8532,
-   "b1": "When Megatron-LM trains with low-precision gradient communication buffers, scaling gradients by a Python `float` token-scaling factor can cause precision loss or type promotion issues during distributed data-parallel synchronization. This pull request updates `scale_gradients` across six files—including `distributed_data_parallel.py` and `param_and_grad_buffer.py`—to pass and maintain the scaling factor as an FP32 `torch.Tensor`. Keeping the factor in 32-bit floating point preserves numerical accuracy when scaling low-precision gradient buckets.",
-   "b2": "In a standard Megatron-LM workflow, testing an edit across six distributed training modules requires terminating the job and launching a fresh multi-GPU training run. A plain restart takes 79 to 89 seconds because the training engine must execute start-up, CUDA graph capture, the first step, warm-up, and the warm-up protocol before the check workload can run a single test step. Repeating distributed initialization and warmup steps for every small code change severely slows down training development.",
-   "b3": "The modified `scale_gradients` methods in `distributed_data_parallel.py` and `param_and_grad_buffer.py` are per-call Python functions (OP). FastRSI swaps the updated function bodies across all three affected runtime modules directly in place in 0.18 seconds between training steps. Avoiding the 79-to-89-second restart lets the training job continue immediately from its warm state.",
-   "b4": "FastRSI ran a four-step training check and observed a loss within 4.4e-5 of the base run, but execution tracking showed that none of the three patched `scale_gradients` methods were ever called. Because the test workload uses bf16 gradient buffers, it never enters the low-precision buffer scaling code path that this pull request modifies. Under FastRSI's verification rule, a check counts only if the edited code actually ran, so FastRSI flags that this workload cannot exercise the patch despite the fast install."
-  },
-  {
-   "pr": 8844,
-   "b1": "During a Megatron-LM training run, `get_start_time_from_progress_log` in `megatron/training/training.py` repeatedly opens and parses `progress.txt` on the shared filesystem to read the job's initial start timestamp and completed FLOP count. Because those values never change once a run has started, re-reading the file on every logging or checkpoint interval wastes filesystem I/O. This pull request splits the helper in `training.py` and decorates `_get_start_time_from_progress_log` with `@functools.cache` keyed on the save directory and world size.",
-   "b2": "Normally, trying out this nineteen-line change in `training.py` requires stopping the training job and restarting Megatron-LM from the beginning. That plain restart costs 79 to 89 seconds while the engine steps through start-up, CUDA graph capture, the first step, warm-up, and the warm-up protocol ahead of the check workload. Waiting nearly a minute and a half of cluster time just to test a `@functools.cache` decorator makes quick cleanup patches expensive to verify.",
-   "b3": "Because `get_start_time_from_progress_log` in `training.py` is a standard Python function (OP), FastRSI installs the new cached helper and updated function body in place in 0.37 seconds. The live swap completes between two training steps without interrupting the distributed process group or reloading model state. That cuts the wait before running the check from 79–89 seconds down to a fraction of a second.",
-   "b4": "To verify the edit, FastRSI executed a four-step training check and confirmed the training loss remained within 1.5e-4 of the baseline. However, runtime call tracking showed that `get_start_time_from_progress_log` was never invoked during those four steady-state steps because it is startup-only code. Because a check counts only when the edited code actually executes, FastRSI reports that an in-flight step check between steady-state iterations never reaches this startup path."
-  },
-  {
-   "pr": 8579,
-   "b1": "When initializing `DistributedDataParallel` in `distributed_data_parallel.py`, Megatron-LM asserts that the per-bucket gradient scaling factor divided by the data-parallel group size equals the target scaling factor. Using exact floating-point equality (`==`) in `__init__` caused spurious assertion failures whenever `scaling_factor / data_parallel_group.size()` produced minor IEEE-754 rounding differences. This pull request replaces the exact equality check with `math.isclose(..., rel_tol=1e-9)` so valid scaling factors pass initialization.",
-   "b2": "Testing an assertion inside `DistributedDataParallel.__init__` normally requires editing `distributed_data_parallel.py` and restarting the Megatron-LM training run. A full restart must run through start-up, CUDA graph capture, the first step, warm-up, and the warm-up protocol before reaching the check workload. Because DDP initialization happens once when wrapping the model at startup, simply swapping the method on an already-running trainer would never test the assertion.",
-   "b3": "This edit touches both OP and STATE because it modifies the `__init__` constructor of `DistributedDataParallel` in `distributed_data_parallel.py`. FastRSI detects the constructor edit and refuses the live install in 0.07 seconds rather than performing a misleading in-place swap that would skip constructor execution. It then falls back to a restart that brings the training engine back to ready in 88.8 seconds (and also tested a warm pre-forked zygote path, which took 148.7 seconds on a first fork with an unexplained slow warmup).",
-   "b4": "Because the engine restarted to run the modified `DistributedDataParallel.__init__` constructor, the updated `math.isclose` assertion executed during setup as required. FastRSI then ran an eight-step verification check (the check workload) and confirmed the training run completed with no regression, keeping the loss within 1.0e-3 and the gradient norm within 2.6e-3 of the baseline."
-  },
-  {
-   "pr": 7575,
-   "b1": "Megatron-LM's fine-grained activation offloading overlaps CPU-to-GPU activation reloads with backward computation, but partial offloading had bugs in how warmup bookkeeping, margin offload groups, and non-contiguous QKV views were handled. This pull request makes an extensive 933-line change across eight files—including `fine_grained_activation_offload.py` and `attention.py`—to add `is_offload_margin` and `_offload_info_collected` state fields, refine reload event synchronization, and check QKV tensor storage aliasing before core attention. Together, these changes prevent corrupted activations and deadlocks during warmup and backward passes.",
-   "b2": "Evaluating a 933-line change across eight core pipeline and transformer files normally requires a full Megatron-LM process restart. That restart must repeat start-up, CUDA graph capture, the first step, warm-up, and the warm-up protocol before the check workload can test the training loop. When iterating on complex activation offloading logic, waiting through full process startup and warmup after every edit slows debugging considerably.",
-   "b3": "Because this pull request modifies OP and STATE—including constructor edits, new instance fields in `fine_grained_activation_offload.py`, and a removed method definition—FastRSI refuses an in-place live install in 0.60 seconds. Instead of starting from a cold Python process, FastRSI restarts the engine from a warm pre-forked zygote that has already imported the framework, reaching a ready state in 40.9 seconds compared to 78.8 seconds for a full code restart. Refusing the unsafe live patch while recovering from the pre-forked zygote nearly halves the restart time and still reconstructs all offload state cleanly.",
-   "b4": "After rebuilding the engine from the warm pre-forked copy, FastRSI verified the patch with an eight-step training check. The check confirmed that the modified initialization and attention forward paths ran without regression, producing a training loss within 1.5e-3 of the baseline and a gradient norm within 3.9e-3."
-  },
-  {
    "pr": 1882,
    "b1": "In FastVideo's MiniMax-H3 pipeline, encoding reference keyframes for conditioning in `minimax_h3_latent_preparation.py` previously called `self.vae.to(vae_device)` directly, ignoring the host-weight cache managed by the video VAE offload system. That redundant transfer bypassed pinned CPU memory optimizations and reloaded VAE weights unnecessarily during conditioning. This pull request updates `_encode_fl2va_conditions` to load the VAE onto the target device via `pinned_offload.load(self.vae, vae_device, pin=fastvideo_args.pin_cpu_memory)` so keyframe encoding reuses the cached host weights.",
    "b2": "Under a normal workflow, testing this 225-line change in `minimax_h3_latent_preparation.py` requires killing the FastVideo process and starting a fresh run. A warm plain restart takes 107 seconds from launch to the completion of the first generated video because the engine must repeat imports and init, weight load, the JIT build, and start-up before executing the check workload. Reloading multi-gigabyte diffusion and VAE weights just to test a stage helper method turns a quick check into a nearly two-minute wait.",
@@ -130,6 +102,55 @@
    "b2": "Testing a seven-file change touching `envs.py` and the MiniMax-H3 VAE modules (`minimax_h3_video.py` and `minimax_h3_parallel.py`) normally requires restarting the FastVideo process. A plain restart takes 86 seconds because the engine must go through imports and init, weight load, the JIT build, and start-up before executing the check workload. Waiting 86 seconds to reload model weights just to test a default batch-size change slows down configuration and pipeline tuning.",
    "b3": "Although part of the diff touches per-call methods (OP), it also modifies `FASTVIDEO_H3_VAE_TILE_BATCH` at module level in `envs.py` (`restart`). FastRSI detects these module-level changes outside hot-swappable functions, refuses the live in-place install in 0.18 seconds, and runs the evaluation in a warm new process where the test video completes in 6.13 seconds. Refusing the in-place swap ensures that module-level environment defaults are properly re-evaluated rather than silently ignored.",
    "b4": "The verification check generated a warm video in 6.13 seconds and confirmed that the output remained bit-exact with the baseline. However, because this evaluation workload explicitly configures the tile batch size to 12, changing the fallback default in `envs.py` from 1 to 8 does not alter the runtime behavior on this test workload."
+  },
+  {
+   "pr": "te-layernorm-linear-gather-before-norm",
+   "b1": "A FastRSI agent wrote this edit in `TELayerNormColumnParallelLinear.forward` while optimizing training speed. When sequence parallelism is active, each GPU holds only a slice of the token sequence. The edit calls `gather_from_sequence_parallel_region` before layer normalization so the forward pass saves full-sequence activations and the backward pass avoids a second all-gather across GPUs.",
+   "b2": "Normally you edit the file and restart the training job from scratch. Here a full restart took 43.4 seconds before returning a result. The three largest phases were process start-up and imports at 22.3 seconds, distributed initialization, kernel loading, and model build at 8.0 seconds, and the first step and warm-up steps at 7.6 seconds.",
+   "b3": "FastRSI paused the running job between steps, swapped the updated `TELayerNormColumnParallelLinear.forward` method into memory in 0.2 seconds, and ran the check in 4.9 seconds. Because the edit was installed live, FastRSI skipped process start-up, distributed initialization, model build, and warm-up. Total evaluation time dropped from 43.4 seconds to 5.1 seconds, an 8.6x speedup.",
+   "b4": "FastRSI ran a 10-step check from the same saved start state and counted calls into `TELayerNormColumnParallelLinear.forward` to prove the edited code actually ran. The edit made each step about 4% faster in the paired same-process check and about 2% faster across separate fresh jobs."
+  },
+  {
+   "pr": "lmhead-sp-allgather-before-cast",
+   "b1": "A FastRSI agent wrote this edit in `LinearWithGradAccumulationAndAsyncCommunication.backward` while optimizing training speed. In the backward pass, output gradients are cast with `grad_output.to(ctx.input_dtype)` before multiplying by the weights. The edit starts the sequence-parallel input all-gather before that type conversion so GPU communication can overlap with the cast.",
+   "b2": "In a standard workflow, testing this change means editing `megatron/core/tensor_parallel/layers.py` and restarting the training job. That plain restart took 44.4 seconds in total. Process start-up and imports took 23.2 seconds, the first step and warm-up steps took 8.0 seconds, and distributed initialization, kernels, and model build took 7.3 seconds.",
+   "b3": "FastRSI installed the updated `LinearWithGradAccumulationAndAsyncCommunication` backward pass live into the running process in 0.1 seconds and ran the check in 5.4 seconds. Installing the edit live skipped process start-up, distributed setup, model construction, and warm-up steps. The entire check finished in 5.4 seconds instead of 44.4 seconds, giving an 8.2x speedup.",
+   "b4": "FastRSI ran 10 training steps from the same saved start state and counted calls into `LinearWithGradAccumulationAndAsyncCommunication` so the check only counted once the edited code ran. Step time showed no measurable change at this model size, in both the paired same-process check and separate fresh jobs."
+  },
+  {
+   "pr": "residual-plain-add-without-bias-dropout",
+   "b1": "A FastRSI agent wrote this edit in `TransformerLayer` while optimizing training speed. When `hidden_dropout` is zero, the bias is `None`, and tensor data types match, the fused bias-dropout-add helper does unnecessary work after attention and the MLP. The edit replaces `self_attn_bda` and `mlp_bda` with a plain `residual + output` addition on that path.",
+   "b2": "Normally, evaluating this change requires editing `megatron/core/transformer/transformer_layer.py` and launching a fresh training run. A plain restart took 44.4 seconds end to end. Process start-up and imports took 23.5 seconds, the first step and warm-up steps took 8.0 seconds, and distributed initialization, kernels, and model build took 7.5 seconds.",
+   "b3": "FastRSI patched `TransformerLayer` live between training steps in 0.1 seconds and ran the check in 5.0 seconds. Live installation skipped process start-up, distributed initialization, model build, and warm-up steps completely. That cut total evaluation time from 44.4 seconds to 5.2 seconds, an 8.6x speedup.",
+   "b4": "FastRSI ran 10 training steps from the same saved start state and counted calls into the updated `TransformerLayer` methods to verify the edited code ran. The edit made each step about 6% faster in the paired same-process check and about 4% faster across separate fresh jobs."
+  },
+  {
+   "pr": 8532,
+   "b1": "This change is merged upstream pull request #8532 across `data_parallel_base.py`, `distributed_data_parallel.py`, and `param_and_grad_buffer.py`. It changes `scale_gradients` to accept a `torch.Tensor` for `scaling_factor` and reshapes zero-dimensional CUDA tensors with `buffer_scale.reshape(1)`. That preserves 32-bit floating-point precision during gradient multiplication before rounding into low-precision `grad_data` buffers.",
+   "b2": "Testing this change normally requires editing the three files and restarting the training job from scratch. Here a plain restart took 43.3 seconds. Process start-up and imports took 23.5 seconds, the first step and warm-up steps took 10.7 seconds, and distributed initialization, kernels, and model build took 7.6 seconds.",
+   "b3": "FastRSI installed `scale_gradients` live, but the 10-step check never called the edited code, so after 3.5 seconds FastRSI stopped the old job and fell back to a cold restart with `torchrun`. Total time was 45.6 seconds, which was no faster than a 43.3-second plain restart. With a fix that is not merged yet, FastRSI evaluates it live in 1.3 seconds (33x faster).",
+   "b4": "Because the live check saw zero calls to `scale_gradients`, FastRSI did not accept the live run as proof and launched a fresh job instead. The fresh job then ran the same 10-step check in 1.2 seconds after completing standard start-up and warm-up."
+  },
+  {
+   "pr": 8844,
+   "b1": "This change is merged upstream pull request #8844 in `megatron/training/training.py`. It moves the file-reading logic of `get_start_time_from_progress_log` into a helper `_get_start_time_from_progress_log` decorated with `@functools.cache` keyed on `save_dir` and `world_size`. Because the job start time does not change during a run, caching avoids repeatedly reading `progress.txt`.",
+   "b2": "Without FastRSI, testing this edit means modifying `megatron/training/training.py` and restarting the training job. That plain restart took 42.0 seconds in total. Process start-up and imports took 22.2 seconds, the first step and warm-up steps took 10.0 seconds, and distributed initialization, kernels, and model build took 8.5 seconds.",
+   "b3": "FastRSI installed `get_start_time_from_progress_log` and `_get_start_time_from_progress_log` live in 0.3 seconds and ran the check in 1.1 seconds, finishing in 1.4 seconds for a speedup of about 30x. Live installation skipped process start-up, distributed initialization, model build, and warm-up. Without an explicit progress-log call in the check, the edited function never runs and FastRSI falls back to a restart (45.4 seconds vs. 42.4 seconds).",
+   "b4": "FastRSI ran the 10-step check from the same saved start state, including one call to `get_start_time_from_progress_log` because that function only runs during checkpoint logging. FastRSI counted calls into the edited code to confirm it actually executed during the 1.1-second check."
+  },
+  {
+   "pr": 8579,
+   "b1": "This change is merged upstream pull request #8579 in `megatron/core/distributed/distributed_data_parallel.py`. Inside `__init__`, exact floating-point equality checks like `scaling_factor == target_gradient_scaling_factor` could fail because of rounding noise. The edit replaces those exact comparisons with `math.isclose` using `rel_tol=1e-9`.",
+   "b2": "In a standard workflow, you edit `distributed_data_parallel.py` and restart the training job from scratch. Here a plain restart took 41.4 seconds. Process start-up and imports took 23.7 seconds, the first step and warm-up steps took 9.9 seconds, and distributed initialization, kernels, and model build took 6.3 seconds.",
+   "b3": "FastRSI refused the live install because the edit changes `__init__`, a class constructor that only runs when the model is first built, and then fell back to a cold restart with `torchrun`. That took 43.9 seconds, no faster than a 41.4-second plain restart. With a fix that is not merged yet, a warm restart from a pre-imported process takes 25.0 seconds (1.7x faster).",
+   "b4": "Because constructor changes in `__init__` cannot be proven on already-created objects between steps, FastRSI restarted the job from scratch. The fresh job constructed the model with the new `__init__` assertions and ran the same 10-step check in 1.2 seconds."
+  },
+  {
+   "pr": 7575,
+   "b1": "This change is merged upstream pull request #7575 in `fine_grained_activation_offload.py` and `attention.py`. It updates `__init__`, `offload`, and `update_offload_info` to track `is_offload_margin` and `activation_offload_fraction`, moves view checks into `_get_offload_view_meta`, and raises a `ValueError` in `forward_pre_attn_and_core_attn` when offloaded `query`, `key`, and `value` views share storage.",
+   "b2": "Normally you edit the source files and restart the training job from the beginning. That plain restart took 43.1 seconds in total. Process start-up and imports took 22.0 seconds, the first step and warm-up steps took 11.0 seconds, and distributed initialization, kernels, and model build took 8.3 seconds.",
+   "b3": "FastRSI tried to install the edit live, the install failed with an error, and it fell back to a cold restart with `torchrun`. Total time was 44.8 seconds, no faster than the 43.1-second plain restart. With a fix that is not merged yet, FastRSI refuses upfront, because the patch edits `__init__` constructors and adds new fields on existing objects, and warm-restarts from a pre-imported process in 26.1 seconds (1.7x faster).",
+   "b4": "After falling back to a full restart, the fresh job built the offload handlers with the updated `__init__` methods and ran the same 10-step check in 1.1 seconds. That verified the edit cleanly without risking corrupted state in the already-running process."
   }
  ],
  "_about": "Case-study wording written by Gemini (gemini-4-argon-medium) on 2026-11-14 from prs.json records and the upstream diffs; pasted as returned, with phase ids spelled as words."

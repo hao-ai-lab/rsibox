@@ -278,13 +278,33 @@
     const pick = document.getElementById('alt-pick'), more = document.getElementById('alt-more'), dlg3 = document.getElementById('alt-dlg'), list = document.getElementById('alt-list');
     const times = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1)) + '×', secs = (t) => (t >= 10 ? +t.toFixed(1) : t) + ' s';
     let cur = null;
-    const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.live ? 'installed live' : q.install ? 'restarted from a warm copy' : 'restarted', p);
+    const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.tag || (q.live ? 'installed live' : q.install ? 'restarted from a warm copy' : 'restarted'), p);
+    const PH = ['Failed live attempt, stop the old job', 'Process start-up and imports', 'Distributed init, kernels, model build', 'First step and warm-up steps', 'Install the edit live', 'Run the check', 'Other'];
+    // two stacked bars (plain restart, FastRSI) on one time axis, then the same phases as a small table
+    const phases = (q, info) => {
+      const g = $('div', 'alt-gain', null, info), max = Math.max(q.t_rst, q.t_run);
+      [['Plain restart', q.t_rst, q.ph[0]], [q.live ? 'FastRSI, installed live' : 'FastRSI, ' + q.tag, q.t_run, q.ph[1]]].forEach(([lab, t, ph], i) => {
+        const r = $('div', 'alt-bar', null, g); $('span', 'alt-bl', lab, r); const tr = $('span', 'alt-btr', null, r), st = $('span', 'alt-stk', null, tr); $('span', 'alt-bv fr-num', secs(t), r);
+        ph.forEach(([n, s]) => { const sg = $('i', 'ph' + PH.indexOf(n), null, st); sg.style.flex = s + ' 0 0'; sg.title = n + ': ' + s + ' s'; });
+        const w = Math.max(0.8, 100 * t / max) + '%'; if (reduced || !i) st.style.width = w; else { st.style.width = '100%'; setTimeout(() => { st.style.transition = 'width 0.9s cubic-bezier(.2,.7,.2,1)'; st.style.width = w; }, 250); }
+      });
+      const x = $('p', 'alt-x', null, info);
+      if (q.x >= 1.05) { $('b', 'fr-num', times(q.x), x); $('span', null, ' sooner from edit to check result', x); } else $('span', null, 'No gain on this one: FastRSI fell back to a full restart.', x);
+      const tb = $('table', 'alt-ph', null, info), hd = $('tr', null, null, tb); $('th', null, 'Where the time goes', hd); $('th', null, 'Restart', hd); $('th', null, 'FastRSI', hd);
+      const get = (ph, n) => { const f = ph.find((p) => p[0] === n); return f ? f[1].toFixed(1) + ' s' : '–'; };
+      PH.filter((n) => q.ph[0].concat(q.ph[1]).some((p) => p[0] === n)).forEach((n) => { const r = $('tr', null, null, tb), c = $('td', null, null, r); $('i', 'ph' + PH.indexOf(n), null, c); c.appendChild(document.createTextNode(n)); $('td', 'fr-num', get(q.ph[0], n), r); $('td', 'fr-num', get(q.ph[1], n), r); });
+      (q.notes || []).forEach((n) => $('p', 'alt-note', n, info));
+      $('p', 'alt-note', q.setup, info);
+    };
     const render = (q, info, df) => {
       info.replaceChildren();
-      const top = $('p', 'alt-pr', null, info), a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; tag(top, q);
+      const top = $('p', 'alt-pr', null, info);
+      if (q.agent) $('span', 'alt-agent', 'Our own agent edit · ' + q.repo, top); else { const a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; }
+      tag(top, q);
       $('h3', 'alt-t', q.utitle || q.title, info);
       $('p', 'alt-size fr-num', '+' + q.add + ' −' + q.del + ' in ' + q.nfiles + (q.nfiles === 1 ? ' file' : ' files'), info);
-      if (q.x) {
+      if (q.ph) phases(q, info);
+      else if (q.x) {
         const g = $('div', 'alt-gain', null, info);
         [[q.live ? 'Restart, then run' : 'Plain restart', q.t_rst, 1, 'alt-b0'], [q.live ? 'Install live, then run' : 'Restart from a warm copy', q.t_run, q.t_run / q.t_rst, 'alt-b1']].forEach(([lab, t, w, cls], i) => {
           const r = $('div', 'alt-bar', null, g); $('span', 'alt-bl', lab, r); const tr = $('span', 'alt-btr', null, r), f = $('i', cls, null, tr); $('span', 'alt-bv fr-num', secs(t), r);
@@ -319,7 +339,7 @@
       e.cases.forEach((q, i) => {
         const r = $('button', 'alt-item', null, list); r.type = 'button';
         $('b', null, (q.utitle || q.title).replace(/^(\[[^\]]+\])+\s*/, ''), r);
-        const m = $('span', 'alt-im fr-num', '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
+        const m = $('span', 'alt-im fr-num', q.agent ? 'agent edit' : '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
         r.addEventListener('click', () => choose(i));
       });
       choose(0);
