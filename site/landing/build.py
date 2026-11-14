@@ -24,10 +24,15 @@ if os.path.exists(PRS):
     for e in json.loads(rd(PRS))["engines"]:
         rows = []
         for q in e["prs"]:
-            if not q.get("install_time"): continue
             run = (lambda m: float(m.group(1)) if m else None)(re.search(r"edit-to-run (\d+(?:\.\d+)?) s", str(q["install_time"]))) or (one(q["install_time"]) if q.get("installed_live") else None)
             rst = one(q.get("restart_time_replaced"))
-            rows.append({"pr": q["pr"], "repo": q["upstream_repo"], "title": clean(q["title"]), "live": bool(q.get("installed_live")), "install": clean(q["install_time"]), "check": clean(q.get("check_time")), "restart": clean(q.get("restart_time_replaced")), "effect": clean(q.get("measured_effect")) if q.get("measured_effect") != "none recorded" else "", "x": round(rst / run, 1) if run and rst else None, "t_run": run, "t_rst": rst})
+            rows.append({"pr": q["pr"], "repo": q["upstream_repo"], "title": clean(q["title"]), "live": bool(q.get("installed_live")), "install": clean(q["install_time"]), "check": clean(q.get("check_time")), "restart": clean(q.get("restart_time_replaced")), "effect": clean(q.get("measured_effect")) if q.get("measured_effect") != "none recorded" else "", "x": round(rst / run, 1) if run and rst else None, "t_run": run, "t_rst": rst, "pair": ""})
+            r, it = rows[-1], str(q.get("install_time") or "")
+            # a refused edit that restarts from a warm copy: compare that with the plain restart, when the record gives both
+            m = re.search(r"forked restart ([\d.]+) s eager / ([\d.]+) s graph \(was a plain-restart fallback: ([\d.]+) s / ([\d.]+) s\)", it)
+            if m: r.update({"t_run": float(m.group(1)), "t_rst": float(m.group(3)), "x": round(float(m.group(3)) / float(m.group(1)), 1), "pair": "eager mode; with CUDA graphs %s s against %s s" % (m.group(2), m.group(4))})
+            m = re.search(r"code restart: ([\d.]+) s; ([\d.]+) s from the zygote", it)
+            if m: r.update({"t_run": float(m.group(2)), "t_rst": float(m.group(1)), "x": round(float(m.group(1)) / float(m.group(2)), 1)})
         for r in rows:   # the upstream diff (non-test files), fetched once from the public pull request
             f = os.path.join(os.path.dirname(FACTS), "pr-diffs", "%s__%d.json" % (r["repo"].replace("/", "__"), r["pr"]))
             if not os.path.exists(f): continue

@@ -300,33 +300,33 @@
     draw(BUILT[0]);
   }
 
-  // ---- case studies, alternative: one replayed upstream change per engine, with its diff; a popup lists the rest
+  // ---- case studies, alternative: one replayed upstream change per engine with its diff; a popup lets you switch between all of them
   const ai = document.getElementById('alt-info');
   if (ai && typeof BUILT !== 'undefined') {
-    const engs = BUILT.filter((e) => (e.edits || []).some((q) => q.files && q.files.length));
-    const pick = document.getElementById('alt-pick'), df = document.getElementById('alt-diff'), more = document.getElementById('alt-more'), dlg3 = document.getElementById('alt-dlg'), list = document.getElementById('alt-list');
+    const engs = BUILT.map((e) => ({ engine: e.engine, cases: (e.edits || []).filter((q) => q.files && q.files.length) })).filter((e) => e.cases.length);
+    const pick = document.getElementById('alt-pick'), more = document.getElementById('alt-more'), dlg3 = document.getElementById('alt-dlg'), list = document.getElementById('alt-list');
     const times = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1)) + '×', secs = (t) => (t >= 10 ? +t.toFixed(1) : t) + ' s';
     let cur = null;
-    const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.live ? 'installed live' : 'fell back to a restart', p);
-    const show = (e, q) => {
-      cur = e; [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === e.engine)));
-      more.hidden = e.edits.length < 2; more.textContent = 'Show all ' + e.edits.length;
-      ai.replaceChildren();
-      const top = $('p', 'alt-pr', null, ai), a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; tag(top, q);
-      $('h3', 'alt-t', q.utitle || q.title, ai);
-      $('p', 'alt-size fr-num', '+' + q.add + ' −' + q.del + ' in ' + q.nfiles + (q.nfiles === 1 ? ' file' : ' files'), ai);
+    const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.live ? 'installed live' : q.install ? 'restarted from a warm copy' : 'restarted', p);
+    const render = (q, info, df) => {
+      info.replaceChildren();
+      const top = $('p', 'alt-pr', null, info), a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; tag(top, q);
+      $('h3', 'alt-t', q.utitle || q.title, info);
+      $('p', 'alt-size fr-num', '+' + q.add + ' −' + q.del + ' in ' + q.nfiles + (q.nfiles === 1 ? ' file' : ' files'), info);
       if (q.x) {
-        const g = $('div', 'alt-gain', null, ai);
-        [['Restart, then run', q.t_rst, 1, 'alt-b0'], ['Install live, then run', q.t_run, q.t_run / q.t_rst, 'alt-b1']].forEach(([lab, t, w, cls], i) => {
+        const g = $('div', 'alt-gain', null, info);
+        [[q.live ? 'Restart, then run' : 'Plain restart', q.t_rst, 1, 'alt-b0'], [q.live ? 'Install live, then run' : 'Restart from a warm copy', q.t_run, q.t_run / q.t_rst, 'alt-b1']].forEach(([lab, t, w, cls], i) => {
           const r = $('div', 'alt-bar', null, g); $('span', 'alt-bl', lab, r); const tr = $('span', 'alt-btr', null, r), f = $('i', cls, null, tr); $('span', 'alt-bv fr-num', secs(t), r);
           const to = 'scaleX(' + Math.max(0.008, w) + ')'; if (reduced || !i) f.style.transform = to; else { f.style.transform = 'scaleX(1)'; setTimeout(() => { f.style.transition = 'transform 0.9s cubic-bezier(.2,.7,.2,1)'; f.style.transform = to; }, 250); }
         });
-        const x = $('p', 'alt-x', null, ai); $('b', 'fr-num', times(q.x), x); $('span', null, ' sooner to a running edit', x);
+        const x = $('p', 'alt-x', null, info); $('b', 'fr-num', times(q.x), x); $('span', null, q.live ? ' sooner to a running edit' : ' faster than a plain restart' + (q.pair ? ' (' + q.pair + ')' : ''), x);
+      } else {
+        const x = $('p', 'alt-x', null, info); $('b', 'alt-na', 'Speedup not measured yet', x);
+        const kvs = $('div', 'cs-kvs', null, info), kv = (k, v) => { if (!v) return; const r = $('div', 'cs-kv', null, kvs); $('span', null, k, r); $('span', null, v, r); };
+        kv(q.live ? 'Install' : 'What happened', q.install); kv('Restart it replaces', q.restart);
       }
-      const kv = (k, v) => { if (!v) return; const r = $('div', 'cs-kv', null, kvs); $('span', null, k, r); $('span', null, v, r); }, kvs = $('div', 'cs-kvs', null, ai);
-      if (!q.x) { kv(q.live ? 'Install' : 'What happened', q.install); kv('Restart it replaces', q.restart); }
-      kv('Check', q.check); kv('What we saw', q.effect);
-      $('p', 'alt-why', q.live ? 'The engine keeps its weights, compiled kernels and captured graphs. Only the changed functions are swapped in, between two steps.' : 'This change touches code that cannot be swapped safely, so the lab refuses it and restarts from a warm copy.', ai);
+      if (q.effect) $('p', 'alt-saw', 'What we saw: ' + q.effect + '.', info);
+      $('p', 'alt-why', q.live ? 'The engine keeps its weights, compiled kernels and captured graphs. Only the changed functions are swapped in, between two steps.' : q.install ? 'This change touches code that is not swapped in place, so the lab restarts the engine from a warm copy instead of from scratch.' : 'In the replay this change went to a restart. No timing was recorded for it.', info);
       df.replaceChildren(); df.scrollTop = 0;
       q.files.forEach((fl) => {
         $('p', 'df-file', fl.path, df); const pre = $('pre', 'df-pre', null, df);
@@ -335,20 +335,27 @@
       });
       if (q.more > 0) $('p', 'df-more', q.more + ' more changed ' + (q.more === 1 ? 'file' : 'files') + ' in the pull request', df);
     };
-    engs.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => show(e, e.edits.find((q) => q.files && q.files.length))); });
+    const show = (e) => {
+      cur = e; [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === e.engine)));
+      more.hidden = e.cases.length < 2; more.textContent = 'Show all ' + e.cases.length;
+      render(e.cases[0], ai, document.getElementById('alt-diff'));
+    };
+    const choose = (i) => { [...list.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === i))); render(cur.cases[i], document.getElementById('alt-pinfo'), document.getElementById('alt-pdiff')); };
+    engs.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => show(e)); });
     more.addEventListener('click', () => {
-      document.getElementById('alt-dh').textContent = 'Upstream changes replayed on ' + cur.engine; list.replaceChildren();
-      cur.edits.filter((q) => q.files && q.files.length).forEach((q) => {
+      document.getElementById('alt-dh').textContent = cur.engine + ': ' + cur.cases.length + ' upstream changes'; list.replaceChildren();
+      cur.cases.forEach((q, i) => {
         const r = $('button', 'alt-item', null, list); r.type = 'button';
-        const l = $('span', 'alt-il', null, r); $('b', null, q.utitle || q.title, l); $('span', 'fr-num', '#' + q.pr + ' · +' + q.add + ' −' + q.del, l);
-        const rr = $('span', 'alt-ir', null, r); tag(rr, q); if (q.x) $('span', 'bl-x fr-num', times(q.x), rr);
-        r.addEventListener('click', () => { dlg3.close(); show(cur, q); });
+        $('b', null, (q.utitle || q.title).replace(/^(\[[^\]]+\])+\s*/, ''), r);
+        const m = $('span', 'alt-im fr-num', '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
+        r.addEventListener('click', () => choose(i));
       });
       if (dlg3.showModal) { dlg3.showModal(); dlg3.scrollTop = 0; }
+      choose(0);
     });
     document.getElementById('alt-close').addEventListener('click', () => dlg3.close());
     dlg3.addEventListener('click', (ev) => { if (ev.target === dlg3) dlg3.close(); });
-    if (engs.length) pick.firstChild.click(); else document.getElementById('cases-alt').hidden = true;
+    if (engs.length) show(engs[0]); else document.getElementById('cases-alt').hidden = true;
   }
 
   // ---- playground: three recorded cases

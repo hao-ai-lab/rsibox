@@ -1,0 +1,24 @@
+{
+"repo": "vllm-project/vllm",
+"pr": 62046,
+"additions": 31,
+"changedFiles": 2,
+"deletions": 0,
+"title": "[Bugfix][Sampler] Carry the boundary tie count across blocks in the split top-p mask kernel",
+"url": "https://github.com/vllm-project/vllm/pull/62046",
+"files": [
+{
+"path": "vllm/v1/sample/ops/topk_topp_triton.py",
+"lines": [
+"@@ -1513,6 +1513,7 @@ def _topp_sb_mask_kernel(",
+"             cum = tl.cumsum(dmask.to(tl.int32)).to(tl.float32) + num_preceding",
+"             keep_dup = dmask & (cum <= numkeep)",
+"             keep = keep & (~dmask | keep_dup)",
+"+            num_preceding += tl.sum(dmask.to(tl.float32))",
+"         tl.store(ROW + i + offs, tl.where(keep, x, MASK_VALUE), mask=mask_n)",
+" ",
+" "
+]
+}
+]
+}

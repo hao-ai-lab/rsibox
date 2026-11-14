@@ -229,7 +229,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <section class="fr-sec" id="cases-alt" aria-labelledby="alt-h">
     <h2 class="fr-h2" id="alt-h">Case studies (alternative)</h2>
-    <p class="fr-sub">One real upstream change per engine, applied to a running engine. The change is on the right; what it cost to try is on the left.</p>
+    <p class="fr-sub">One real upstream change per engine, tried on a running engine. What it cost to try is on the left; the change itself is on the right.</p>
     <div class="fr-card" id="alt-card">
       <div class="alt-top"><div class="fr-picker" role="group" aria-label="Engine" id="alt-pick"></div><button type="button" class="fr-chip" id="alt-more"></button></div>
       <div class="alt-grid">
@@ -237,10 +237,12 @@ Show me the result, then walk me through one install, check and uninstall on the
         <div class="alt-diff" id="alt-diff" tabindex="0" aria-label="Code change"></div>
       </div>
     </div>
-    <dialog class="try-dlg cs-dlg" id="alt-dlg" aria-labelledby="alt-dh">
-      <h2 class="fr-h2" id="alt-dh"></h2>
-      <div id="alt-list"></div>
-      <p class="try-btns"><button type="button" class="fr-btn fr-btn-quiet" id="alt-close">Close</button></p>
+    <dialog class="try-dlg alt-dlg" id="alt-dlg" aria-labelledby="alt-dh">
+      <div class="alt-dtop"><h2 class="fr-h2" id="alt-dh"></h2><button type="button" class="fr-btn fr-btn-quiet" id="alt-close">Close</button></div>
+      <div class="alt-pop">
+        <div class="alt-cases" id="alt-list" role="group" aria-label="Case"></div>
+        <div class="alt-view"><div class="alt-info" id="alt-pinfo"></div><div class="alt-diff" id="alt-pdiff" tabindex="0" aria-label="Code change"></div></div>
+      </div>
     </dialog>
   </section>
 

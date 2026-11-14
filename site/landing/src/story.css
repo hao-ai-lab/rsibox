@@ -496,3 +496,20 @@
 .alt-il { display: flex; flex-direction: column; gap: 2px; min-width: 0; } .alt-il b { font-weight: 500; font-size: 14px; } .alt-il span { font-size: 12px; color: var(--fr-muted); }
 .alt-ir { display: flex; align-items: center; gap: 10px; flex: none; }
 @media (max-width: 820px) { .alt-grid { grid-template-columns: minmax(0, 1fr); } .alt-diff { max-height: 320px; } .alt-bar { grid-template-columns: 8.5em minmax(0, 1fr) 3.8em; } }
+/* alternative case studies: the popup holds a case switcher and the full view */
+.alt-dlg { width: min(1180px, calc(100vw - 32px)); max-height: min(90vh, 980px); overflow-y: auto; }
+.alt-dtop { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.alt-dtop .fr-h2 { margin: 0; font-size: 22px; }
+.alt-pop { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 20px; align-items: start; }
+.alt-cases { display: grid; gap: 4px; }
+.alt-cases .alt-item { border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; display: grid; gap: 3px; }
+.alt-cases .alt-item b { font-weight: 400; font-size: 13px; line-height: 1.3; }
+.alt-cases .alt-item[aria-pressed="true"] { border-color: var(--fr-rule); background: var(--color-bg); }
+.alt-cases .alt-item[aria-pressed="true"] b { font-weight: 500; }
+.alt-im { display: flex; justify-content: space-between; font-size: 12px; color: var(--fr-muted); }
+.alt-ix { color: var(--fr-fast); } .alt-ix.na { color: var(--fr-muted); }
+.alt-view { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; align-items: start; min-width: 0; }
+.alt-dlg .alt-diff { max-height: min(62vh, 620px); }
+.alt-na { font-size: 15px !important; color: var(--fr-muted) !important; font-weight: 400 !important; }
+.alt-saw { margin: 0; font-size: 13px; line-height: 1.5; color: var(--fr-ink); max-width: 46ch; }
+@media (max-width: 980px) { .alt-pop { grid-template-columns: minmax(0, 1fr); } .alt-cases { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); } .alt-view { grid-template-columns: minmax(0, 1fr); } }
