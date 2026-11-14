@@ -91,7 +91,9 @@ Some groups of state cannot be rebuilt one piece at a time. The restart unit is 
 | **Warm engine restart** | distributed setup, parallelism, weights format, anything spanning boxes | zygote fork plus state holders | 20-40 s (**est.**) |
 
 **Rule: restart the lowest box that contains the invalidated state.** A body edit is a live code swap. A new
-field on the model triggers a worker-group component restart. A scheduler constructor change restarts the engine core.
+field on the model triggers a worker-group component restart. A scheduler constructor change restarts the engine core,
+unless it only changes the fresh value of fields the live scheduler still holds empty: then the kernel re-initializes
+them in the commit's gap (`constructor_reinit`, vLLM #62872).
 Parallelism or weight-format changes touch every holder, requiring a warm engine restart.
 
 The kernel's detectors (new fields, captured targets, closures that outlive the call, removed

@@ -13,7 +13,8 @@ closures made later run the new code too). It runs the checks and returns findin
 `new_fields`, `jit_rebuild` (advisory: a Triton kernel, rebuilt in place by `jit.py`),
 `jit_target` (a Triton kernel that cannot be rebuilt in place, so it blocks) and
 `constructor_edit` (an `__init__`, `__new__` or `__post_init__` target: built instances keep
-the old state, so it blocks and routes to T1).
+the old state, so it blocks and routes to T1; one that only changes fresh field values carries
+a `reinit` plan the participant can carry out on the live instances, reinit.py).
 New imports the patch needs are executed into a scratch namespace; new functions, methods and
 classes are built in a scratch namespace (methods get the real class for `super()`). New
 methods and new defaults of methods are evaluated in a scratch class body that reads the live
@@ -46,6 +47,7 @@ from . import findings as F
 from . import jit as JIT
 from . import journal as J
 from . import locate as L
+from . import reinit as RI
 from . import witness as W
 
 # Methods that build an instance: an edit to one never reaches the instances already built.
@@ -397,10 +399,13 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
         # the text a JIT rebuild compiles: from the clean patch text, before the witness
         jt = JIT.text_of(lines, bq[q][i], node) if isinstance(node, _DEF) and (
             node.decorator_list or bq[q][i].decorator_list) else None
+        # a constructor edit that only changes fresh field values: from the clean trees
+        ri = RI.plan(bq[q][i], node) if q.rpartition(".")[2] in CONSTRUCTORS else None
         _inject(node, k, undo)
         todo.append((q, i))
         tres.append({"status": "ok", "i": i, "changed": changed, "new_line": first_line(node),
-                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node), "jit_text": jt})
+                     "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node), "jit_text": jt,
+                     **({"reinit": ri} if ri is not None else {})})
 
     # 2. added definitions: top-level ones, and methods of classes that exist in the base
     added = []
@@ -972,15 +977,24 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     # 6c. constructors: the swap reaches only instances built after it; every instance built
     # before keeps what the old constructor set (vLLM #61323 edits RMSNorm.__init__: the model's
     # norm layers were built at start-up, so a commit changes nothing they hold, witness 0).
-    # The kernel does not search the heap for instances: any constructor target blocks.
+    # Stage does not look at instances: any constructor target blocks here. When the edit only
+    # changes fresh field values (vLLM #62872), the finding carries a `reinit` plan, and the
+    # participant re-initializes those fields on every live instance or keeps it blocking
+    # (reinit.py).
     for q, line, r, k, olds in todo:
         cls, _, meth = q.rpartition(".")
         if meth in CONSTRUCTORS and cls and not cls.endswith("<locals>"):
-            fs.append({**F.finding(
+            ri = r.get("reinit") or {}
+            f = {**F.finding(
                 "constructor_edit", f"{q} changed: instances of {cls} built before the swap "
-                "keep the state the old constructor gave them; only new instances run it",
+                "keep the state the old constructor gave them; only new instances run it"
+                + ("" if ri.get("fields") else
+                   f" (not re-initializable in place: {ri.get('why', 'not a constructor')})"),
                 "a target that runs again on the objects the engine already holds",
-                subject=k), "route": "T1"})
+                subject=k), "route": "T1"}
+            if ri.get("fields") and k in st.items:
+                f["reinit"] = {"cls": cls, "meth": meth, "fields": ri["fields"]}
+            fs.append(f)
 
     # 7. anything else changed? (compared by the analysis)
     if a["outside_changes"]:

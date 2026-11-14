@@ -86,9 +86,17 @@ template's conformance cases c0-c10.
   a target named `__init__`, `__new__` or `__post_init__` gives a blocking, overridable
   `constructor_edit` finding with `"route": "component_restart"`: instances built before the swap keep what
   the old constructor set (vLLM #61323 edits `RMSNorm.__init__`; the model's norms were built
-  at start-up, so the commit changed nothing they hold and the witness read 0). The kernel
-  does not search the heap for instances, so every constructor edit blocks; accept it when the
-  class is built per request or per step. *Line maps:* a
+  at start-up, so the commit changed nothing they hold and the witness read 0). Stage does not
+  look at instances, so every constructor edit blocks there; accept it when the class is built
+  per request or per step. *Constructor reinit* (`reinit.py`): when the edit only changes the
+  fresh value fields start with (`self.x = set()` -> `self.x = {}`, vLLM #62872), the finding
+  carries a `reinit` plan; the participant scans its heap (frozen heap included) at prepare and
+  again at validate, and if every live instance still holds the old fresh value (subclass
+  constructors that never touch the field included) the finding becomes an advisory
+  `constructor_reinit` and the commit gives each instance the new value through the journal
+  (the constructor's witness counts one per instance; undo puts the old objects back and
+  reports state the new code left there). A field that holds state, a value that is not a
+  literal or empty container, or any other statement change keeps it blocking. *Line maps:* a
   second edit of a module whose first edit shifted its lines passes `base_source` (the
   installed text), `own_codes` and `line_maps` (each committed swap's `staged.line_map`,
   newest first); a definition no swap replaced still carries its original lines, and the maps
@@ -162,6 +170,7 @@ template's conformance cases c0-c10.
 |---|---|
 | `findings.py` | The findings schema, the catalog of checks, `decide`. No imports. |
 | `locate.py` | Code identity and `content_hash`; the heap and namespace scans; `locate`, `holders`. Imports only `findings`. |
+| `reinit.py` | Constructor field reinit: `plan` (two ASTs), `resolve` (heap scan, freshness), `apply` (journaled). Imports `locate`. |
 | `journal.py` | `Journal`: typed entries and their inverses, marks, `undo_to`, repair cells. Imports `findings` and `locate`. |
 | `swap.py` | The change analysis (`analyze`, `changed_targets`: text only) and the live half (`stage`, `validate`, `apply`, `stage_and_apply`, `closure_pairs`, the scratch namespace). Imports `findings`, `jit`, `journal`, `locate`, `witness`. |
 | `jit.py` | The Triton rebuild: `text_of` (text half), `plan` (find the JIT object, its callers in every loaded module by identity, its autotuners), `apply` (rebuild, reset, launch hooks, all journaled), `arm_added`, `seeded_lines`. Standard library only; imports nothing of the kernel. |
@@ -233,6 +242,11 @@ Each test's docstring says what it proves and what it does not.
 | `test_a_field_only_the_new_init_sets_blocks_and_routes_to_t1` | a swap that applied with no finding, then killed the engine with AttributeError at the next step (vLLM #63819's shape) |
 | `test_a_class_default_or_an_old_setter_is_not_a_new_field` | a false new_fields block when old instances do have the attribute |
 | `test_a_constructor_edit_blocks_and_routes_to_t1` | an `__init__` (or `__post_init__`) edit that commits with no finding while the objects built at start-up keep the old state (vLLM #61323) |
+| `test_62872_set_to_dict_reinitializes_the_live_scheduler_and_undoes` | a constructor edit that only changes a field's fresh value, sent to a forked restart (16.6 s / 51.2 s), or accepted and left running on the old set (TypeError at the first grammar error; vLLM #62872) |
+| `test_a_live_field_that_holds_state_still_blocks`, `test_state_taken_between_prepare_and_the_gap_votes_no_at_validate` | a reinit that drops state a live object already holds |
+| `test_an_instance_built_after_prepare_is_covered_and_a_frozen_heap_is_seen` | an instance missed because vLLM froze its heap, or built between prepare and the gap |
+| `test_a_subclass_constructor_is_covered_unless_it_touches_the_field` | vLLM's AsyncScheduler (the default) refused for having its own `__init__`, or a subclass that sets the field again re-initialized |
+| `test_undo_after_the_new_code_left_state_reports_it` | an undo that silently drops what the new code put in the field |
 | `test_an_edit_to_another_method_is_not_a_constructor_edit` | a constructor detector keyed on the class that would block every layer edit |
 | `test_edit_again_after_a_line_shift_follows_the_line_map` | a second edit refused with no_live_function + outside_changes after the first shifted the module's lines |
 | `test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias` | the same with no line map: the one live definition is taken, and said |
