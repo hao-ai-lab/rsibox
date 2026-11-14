@@ -236,6 +236,14 @@
   const cl = document.getElementById('try-close'); if (cl) cl.addEventListener('click', () => dlg.close());
   if (dlg) dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
 
+  // ---- cite: copy the BibTeX entry
+  const cc = document.getElementById('cite-copy'), cb = document.getElementById('cite-bib');
+  if (cc && cb) cc.addEventListener('click', () => {
+    const done = () => { cc.textContent = 'Copied'; setTimeout(() => (cc.textContent = 'Copy'), 1600); };
+    const pickText = () => { const r = document.createRange(); r.selectNodeContents(cb); const sl = getSelection(); sl.removeAllRanges(); sl.addRange(r); cc.textContent = 'Selected'; setTimeout(() => (cc.textContent = 'Copy'), 1600); };
+    try { navigator.clipboard.writeText(cb.textContent).then(done, pickText); } catch (e) { pickText(); }
+  });
+
   // ---- architecture: six steps on one diagram. Plays through once when it comes into view; click a step or a box to jump.
   const ar = document.getElementById('ar');
   if (ar) {

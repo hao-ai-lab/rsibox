@@ -437,3 +437,8 @@
 @keyframes ar-flow { from { background-position: 0 0; } to { background-position: 16px 0; } }
 @media (max-width: 820px) { .ar-detail { grid-template-columns: minmax(0, 1fr); gap: 14px; min-height: 0; } #arch .ar { padding: 14px; } #arch .ar-box span { display: block; } }
 @media (prefers-reduced-motion: reduce) { .ar-to.flow, .ar-text, .ar-panel { animation: none !important; } }
+/* cite */
+.cite-h { font-size: 22px; }
+.cite-card { position: relative; padding: 14px 16px; }
+.cite-card pre { margin: 0; overflow-x: auto; font-size: 12.5px; line-height: 1.55; color: var(--fr-ink); background: none; padding: 0; }
+.cite-copy { position: absolute; top: 10px; right: 10px; }
