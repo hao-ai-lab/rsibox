@@ -193,7 +193,7 @@
   }
 
   // ---- where am I: a numbered label on each section, a side rail on wide screens, and a small contents button everywhere
-  const TOC = [['top', 'Start'], ['loop', 'The loop'], ['story', 'Where the overhead comes from'], ['arch', 'How FastRSI works'], ['built', 'Case studies'],
+  const TOC = [['top', 'Start'], ['loop', 'The loop'], ['story', 'Where the overhead comes from'], ['arch', 'How FastRSI works'], ['built', 'Case studies'], ['cases-alt', 'Case studies (alternative)'],
     ['sooner', 'Evaluation: same result sooner'], ['eval-time', 'Evaluation: time per check'], ['model-speed', 'Evaluation: faster models'], ['use', 'Try it']]
     .map(([id, label]) => ({ id, label, el: document.getElementById(id) })).filter((t) => t.el);
   if (TOC.length > 2) {
@@ -298,6 +298,57 @@
     document.getElementById('cs-close').addEventListener('click', () => dlg2.close());
     dlg2.addEventListener('click', (ev) => { if (ev.target === dlg2) dlg2.close(); });
     draw(BUILT[0]);
+  }
+
+  // ---- case studies, alternative: one replayed upstream change per engine, with its diff; a popup lists the rest
+  const ai = document.getElementById('alt-info');
+  if (ai && typeof BUILT !== 'undefined') {
+    const engs = BUILT.filter((e) => (e.edits || []).some((q) => q.files && q.files.length));
+    const pick = document.getElementById('alt-pick'), df = document.getElementById('alt-diff'), more = document.getElementById('alt-more'), dlg3 = document.getElementById('alt-dlg'), list = document.getElementById('alt-list');
+    const times = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1)) + '×', secs = (t) => (t >= 10 ? +t.toFixed(1) : t) + ' s';
+    let cur = null;
+    const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.live ? 'installed live' : 'fell back to a restart', p);
+    const show = (e, q) => {
+      cur = e; [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === e.engine)));
+      more.hidden = e.edits.length < 2; more.textContent = 'Show all ' + e.edits.length;
+      ai.replaceChildren();
+      const top = $('p', 'alt-pr', null, ai), a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; tag(top, q);
+      $('h3', 'alt-t', q.utitle || q.title, ai);
+      $('p', 'alt-size fr-num', '+' + q.add + ' −' + q.del + ' in ' + q.nfiles + (q.nfiles === 1 ? ' file' : ' files'), ai);
+      if (q.x) {
+        const g = $('div', 'alt-gain', null, ai);
+        [['Restart, then run', q.t_rst, 1, 'alt-b0'], ['Install live, then run', q.t_run, q.t_run / q.t_rst, 'alt-b1']].forEach(([lab, t, w, cls], i) => {
+          const r = $('div', 'alt-bar', null, g); $('span', 'alt-bl', lab, r); const tr = $('span', 'alt-btr', null, r), f = $('i', cls, null, tr); $('span', 'alt-bv fr-num', secs(t), r);
+          const to = 'scaleX(' + Math.max(0.008, w) + ')'; if (reduced || !i) f.style.transform = to; else { f.style.transform = 'scaleX(1)'; setTimeout(() => { f.style.transition = 'transform 0.9s cubic-bezier(.2,.7,.2,1)'; f.style.transform = to; }, 250); }
+        });
+        const x = $('p', 'alt-x', null, ai); $('b', 'fr-num', times(q.x), x); $('span', null, ' sooner to a running edit', x);
+      }
+      const kv = (k, v) => { if (!v) return; const r = $('div', 'cs-kv', null, kvs); $('span', null, k, r); $('span', null, v, r); }, kvs = $('div', 'cs-kvs', null, ai);
+      if (!q.x) { kv(q.live ? 'Install' : 'What happened', q.install); kv('Restart it replaces', q.restart); }
+      kv('Check', q.check); kv('What we saw', q.effect);
+      $('p', 'alt-why', q.live ? 'The engine keeps its weights, compiled kernels and captured graphs. Only the changed functions are swapped in, between two steps.' : 'This change touches code that cannot be swapped safely, so the lab refuses it and restarts from a warm copy.', ai);
+      df.replaceChildren(); df.scrollTop = 0;
+      q.files.forEach((fl) => {
+        $('p', 'df-file', fl.path, df); const pre = $('pre', 'df-pre', null, df);
+        fl.lines.forEach((ln) => $('span', ln[0] === '+' ? 'df-add' : ln[0] === '-' ? 'df-del' : ln.startsWith('@@') ? 'df-hunk' : null, (ln || ' ') + '\n', pre));
+        if (fl.cut) $('p', 'df-more', fl.cut + ' more lines in the pull request', df);
+      });
+      if (q.more > 0) $('p', 'df-more', q.more + ' more changed ' + (q.more === 1 ? 'file' : 'files') + ' in the pull request', df);
+    };
+    engs.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => show(e, e.edits.find((q) => q.files && q.files.length))); });
+    more.addEventListener('click', () => {
+      document.getElementById('alt-dh').textContent = 'Upstream changes replayed on ' + cur.engine; list.replaceChildren();
+      cur.edits.filter((q) => q.files && q.files.length).forEach((q) => {
+        const r = $('button', 'alt-item', null, list); r.type = 'button';
+        const l = $('span', 'alt-il', null, r); $('b', null, q.utitle || q.title, l); $('span', 'fr-num', '#' + q.pr + ' · +' + q.add + ' −' + q.del, l);
+        const rr = $('span', 'alt-ir', null, r); tag(rr, q); if (q.x) $('span', 'bl-x fr-num', times(q.x), rr);
+        r.addEventListener('click', () => { dlg3.close(); show(cur, q); });
+      });
+      if (dlg3.showModal) { dlg3.showModal(); dlg3.scrollTop = 0; }
+    });
+    document.getElementById('alt-close').addEventListener('click', () => dlg3.close());
+    dlg3.addEventListener('click', (ev) => { if (ev.target === dlg3) dlg3.close(); });
+    if (engs.length) pick.firstChild.click(); else document.getElementById('cases-alt').hidden = true;
   }
 
   // ---- playground: three recorded cases

@@ -227,6 +227,24 @@ Show me the result, then walk me through one install, check and uninstall on the
   </section>
 
 
+  <section class="fr-sec" id="cases-alt" aria-labelledby="alt-h">
+    <h2 class="fr-h2" id="alt-h">Case studies (alternative)</h2>
+    <p class="fr-sub">One real upstream change per engine, applied to a running engine. The change is on the right; what it cost to try is on the left.</p>
+    <div class="fr-card" id="alt-card">
+      <div class="alt-top"><div class="fr-picker" role="group" aria-label="Engine" id="alt-pick"></div><button type="button" class="fr-chip" id="alt-more"></button></div>
+      <div class="alt-grid">
+        <div class="alt-info" id="alt-info"></div>
+        <div class="alt-diff" id="alt-diff" tabindex="0" aria-label="Code change"></div>
+      </div>
+    </div>
+    <dialog class="try-dlg cs-dlg" id="alt-dlg" aria-labelledby="alt-dh">
+      <h2 class="fr-h2" id="alt-dh"></h2>
+      <div id="alt-list"></div>
+      <p class="try-btns"><button type="button" class="fr-btn fr-btn-quiet" id="alt-close">Close</button></p>
+    </dialog>
+  </section>
+
+
   <div class="pg-bridge" id="results">
     <h2 class="fr-h2">Evaluation</h2>
     <p class="fr-sub">Three measurements from real runs on vLLM, Megatron-LM and FastVideo: how much sooner the agent gets there, where the time per check went, and why the gap widens as models get faster.</p>

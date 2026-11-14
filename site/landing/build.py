@@ -27,7 +27,15 @@ if os.path.exists(PRS):
             if not q.get("install_time"): continue
             run = (lambda m: float(m.group(1)) if m else None)(re.search(r"edit-to-run (\d+(?:\.\d+)?) s", str(q["install_time"]))) or (one(q["install_time"]) if q.get("installed_live") else None)
             rst = one(q.get("restart_time_replaced"))
-            rows.append({"pr": q["pr"], "repo": q["upstream_repo"], "title": clean(q["title"]), "live": bool(q.get("installed_live")), "install": clean(q["install_time"]), "check": clean(q.get("check_time")), "restart": clean(q.get("restart_time_replaced")), "effect": clean(q.get("measured_effect")) if q.get("measured_effect") != "none recorded" else "", "x": round(rst / run, 1) if run and rst else None})
+            rows.append({"pr": q["pr"], "repo": q["upstream_repo"], "title": clean(q["title"]), "live": bool(q.get("installed_live")), "install": clean(q["install_time"]), "check": clean(q.get("check_time")), "restart": clean(q.get("restart_time_replaced")), "effect": clean(q.get("measured_effect")) if q.get("measured_effect") != "none recorded" else "", "x": round(rst / run, 1) if run and rst else None, "t_run": run, "t_rst": rst})
+        for r in rows:   # the upstream diff (non-test files), fetched once from the public pull request
+            f = os.path.join(os.path.dirname(FACTS), "pr-diffs", "%s__%d.json" % (r["repo"].replace("/", "__"), r["pr"]))
+            if not os.path.exists(f): continue
+            dj = json.loads(rd(f)); left = 110; files = []
+            for fl in dj["files"]:
+                if left <= 0: break
+                files.append({"path": fl["path"], "lines": fl["lines"][:left], "cut": max(0, len(fl["lines"]) - left)}); left -= len(fl["lines"])
+            r.update({"utitle": dj["title"].replace("`", ""), "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": files, "more": len(dj["files"]) - len(files)})
         rows.sort(key=lambda r: (not r["live"], -(r["x"] or 0)))
         edits[e["engine"]] = rows
 if os.path.exists(FACTS):
