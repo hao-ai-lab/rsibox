@@ -8,7 +8,7 @@
     <div class="hero-grid">
       <div class="hero-copy">
         <h1 class="fr-title pg-title">{{TITLE}}</h1>
-        <p class="fr-lede pg-lede">FastRSI is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets its answer in seconds, not minutes.</p>
+        <p class="fr-lede pg-lede">FastRSI is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets an answer it can trust in seconds, not minutes.</p>
         <p class="hero-cta"><button type="button" class="fr-btn hero-try" id="try-open">Try it</button></p>
       </div>
       <div class="hero-figs">
@@ -134,47 +134,15 @@ Show me the result, then walk me through one install, check and uninstall on the
   </section>
 
   <!-- Architecture -->
-  <section class="pg-story" id="arch" aria-labelledby="arch-h">
+  <section class="fr-sec" id="arch" aria-labelledby="arch-h">
     <h2 class="fr-h2" id="arch-h">FastRSI prepares an engine once, then improves it live</h2>
-    <p class="fr-sub">Two stages. An offline toolsmith turns the engine into a live lab once. Then a developer agent improves the engine inside that lab, with an online toolsmith extending the lab whenever the agent outgrows it.</p>
-    <div class="st">
-      <div class="st-steps">
-        <article class="st-step" data-at="1">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Sort every function by what an edit to it disturbs.</h3>
-          <p>The offline toolsmith reads the codebase, its past PRs, issues and tests. It sorts functions into six groups. Each group has its own way to install an edit without a restart.</p>
-          <p>Only start-up logic, launch flags and environment variables still need one.</p>
-        </article>
-        <article class="st-step" data-at="2">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Build what the engine lacks.</h3>
-          <p>Each engine needs different machinery to stay warm: a process to fork from, weights held outside the worker, a saved start state to return to. The toolsmith builds these per engine and records what each one costs.</p>
-        </article>
-        <article class="st-step" data-at="3">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Prove each tool against a fresh process.</h3>
-          <p>Every tool is checked the same way: base, edit, injected fault, reverted base, each compared with a cold start. A lab's results count only after it passes all <b>11</b> conformance cases.</p>
-          <p>The guarantees are settled here, offline, so the checks that run on every edit can stay small.</p>
-        </article>
-        <article class="st-step" data-at="4">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>Every edit is a transaction.</h3>
-          <p>The developer agent thinks, edits, installs, checks and decides. An install is prepared while the engine keeps stepping, then committed in the gap between two steps, on every GPU rank or on none.</p>
-          <p>A check counts only if it shows the edited code actually ran.</p>
-        </article>
-        <article class="st-step" data-at="5">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>When the lab falls short, the toolsmith extends it.</h3>
-          <p>A check is too slow, an install fails, the lab falls back to a restart, or the agent enters code the lab does not cover. The online toolsmith prices the new kind of experiment, builds the missing piece and verifies it against a fresh process.</p>
-          <p>The engine gets more live-editable the longer the agent works on it.</p>
-        </article>
-        <article class="st-step" data-at="6">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>If the engine dies, the lab survives.</h3>
-          <p>A bad edit can hang a rank or leave a sticky CUDA error. The lab marks itself poisoned, refuses further installs, and respawns only the worker group from warm host and GPU caches.</p>
-        </article>
+    <p class="fr-sub">An offline toolsmith turns the engine into a live lab once. A developer agent then improves the engine inside that lab. Play the six steps, or click one.</p>
+    <div class="fr-card ar" id="ar">
+      <div class="ar-top">
+        <div class="hero-pick ar-pick" id="ar-pick" role="group" aria-label="Step"><button type="button" class="hero-dot" data-go="1">1 Sort</button><button type="button" class="hero-dot" data-go="2">2 Build</button><button type="button" class="hero-dot" data-go="3">3 Prove</button><button type="button" class="hero-dot" data-go="4">4 Edit live</button><button type="button" class="hero-dot" data-go="5">5 Extend</button><button type="button" class="hero-dot" data-go="6">6 Recover</button></div>
+        <button type="button" class="st-replay ar-play" id="ar-play" aria-label="Play the six steps from the start" title="Play from the start"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5a5.5 5.5 0 1 1-5.2 3.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2 2.2v4.2h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
-      <div class="st-stage ar" id="ar">
+      <div class="ar-diagram">
         <div class="ar-row">
           <p class="ar-lab">Stage 1 · offline · once per engine</p>
           <div class="ar-flow">
@@ -195,7 +163,17 @@ Show me the result, then walk me through one install, check and uninstall on the
             <div class="ar-box ar-ts" data-on="5"><b>Online toolsmith</b><span>extends the lab</span></div>
           </div>
         </div>
-        <div class="fr-card ar-panels">
+      </div>
+      <div class="ar-detail">
+        <div class="ar-texts">
+          <div class="ar-text" data-p="1"><p class="st-kicker">Stage 1 · offline</p> <h3>Sort every function by what an edit to it disturbs.</h3> <p>The offline toolsmith reads the codebase, its past PRs, issues and tests. It sorts functions into six groups. Each group has its own way to install an edit without a restart.</p> <p>Only start-up logic, launch flags and environment variables still need one.</p></div>
+          <div class="ar-text" data-p="2" hidden><p class="st-kicker">Stage 1 · offline</p> <h3>Build what the engine lacks.</h3> <p>Each engine needs different machinery to stay warm: a process to fork from, weights held outside the worker, a saved start state to return to. The toolsmith builds these per engine and records what each one costs.</p></div>
+          <div class="ar-text" data-p="3" hidden><p class="st-kicker">Stage 1 · offline</p> <h3>Prove each tool against a fresh process.</h3> <p>Every tool is checked the same way: base, edit, injected fault, reverted base, each compared with a cold start. A lab's results count only after it passes all <b>11</b> conformance cases.</p> <p>The guarantees are settled here, offline, so the checks that run on every edit can stay small.</p></div>
+          <div class="ar-text" data-p="4" hidden><p class="st-kicker">Stage 2 · online</p> <h3>Every edit is a transaction.</h3> <p>The developer agent thinks, edits, installs, checks and decides. An install is prepared while the engine keeps stepping, then committed in the gap between two steps, on every GPU rank or on none.</p> <p>A check counts only if it shows the edited code actually ran.</p></div>
+          <div class="ar-text" data-p="5" hidden><p class="st-kicker">Stage 2 · online</p> <h3>When the lab falls short, the toolsmith extends it.</h3> <p>A check is too slow, an install fails, the lab falls back to a restart, or the agent enters code the lab does not cover. The online toolsmith prices the new kind of experiment, builds the missing piece and verifies it against a fresh process.</p> <p>The engine gets more live-editable the longer the agent works on it.</p></div>
+          <div class="ar-text" data-p="6" hidden><p class="st-kicker">Stage 2 · online</p> <h3>If the engine dies, the lab survives.</h3> <p>A bad edit can hang a rank or leave a sticky CUDA error. The lab marks itself poisoned, refuses further installs, and respawns only the worker group from warm host and GPU caches.</p></div>
+        </div>
+        <div class="ar-panels">
           <div class="ar-panel" data-p="1">
             <table class="fr-table ar-groups"><thead><tr><th>Group</th><th>What it is</th><th>Installing an edit</th></tr></thead><tbody>
               <tr><td>Operator</td><td>body of a per-call Python function</td><td>swap in place</td></tr>

@@ -236,16 +236,31 @@
   const cl = document.getElementById('try-close'); if (cl) cl.addEventListener('click', () => dlg.close());
   if (dlg) dlg.addEventListener('click', (e) => { if (e.target === dlg) dlg.close(); });
 
-  // ---- architecture: the step at mid-screen lights its part of the diagram and shows its panel
+  // ---- architecture: six steps on one diagram. Plays through once when it comes into view; click a step or a box to jump.
   const ar = document.getElementById('ar');
   if (ar) {
-    const steps = [...document.querySelectorAll('#arch .st-step')];
-    const show = (el) => { const at = el.dataset.at; ar.dataset.at = at; steps.forEach((s) => s.classList.toggle('is-on', s === el)); ar.querySelectorAll('.ar-panel').forEach((p) => { p.hidden = p.dataset.p !== at; }); };
-    steps[0].classList.add('is-on');
-    if ('IntersectionObserver' in window) {
-      const io = new IntersectionObserver((es) => { for (const e of es) if (e.isIntersecting) show(e.target); }, { root: document, rootMargin: matchMedia('(max-width: 820px)').matches ? '-78% 0px -21% 0px' : '-45% 0px -45% 0px', threshold: 0 });
-      steps.forEach((s) => io.observe(s));
+    const N = 6, STEP = 5200, pick = document.getElementById('ar-pick'), btns = [...pick.children];
+    const boxes = [...ar.querySelectorAll('.ar-box')], arrows = [...ar.querySelectorAll('.ar-to')];
+    let at = 0, timer = null, playing = false, paused = false, played = false;
+    pick.style.setProperty('--hero-total', STEP + 'ms');
+    const lit = (el, n) => !!el && (el.dataset.on || '').split(' ').includes(String(n));
+    const next = () => { clearTimeout(timer); if (playing && !paused) timer = setTimeout(() => { if (at < N) show(at + 1); else { playing = false; btns[at - 1].classList.remove('run'); } }, STEP); };
+    function show(n) {
+      at = n; ar.dataset.at = n;
+      btns.forEach((b, k) => { b.setAttribute('aria-pressed', String(k === n - 1)); b.classList.remove('run'); });
+      ar.querySelectorAll('.ar-panel, .ar-text').forEach((p) => { p.hidden = p.dataset.p !== String(n); });
+      arrows.forEach((x) => { x.classList.remove('flow'); if (lit(x.previousElementSibling, n) && lit(x.nextElementSibling, n)) { void x.offsetWidth; x.classList.add('flow'); } });
+      if (playing) { void btns[n - 1].offsetWidth; btns[n - 1].classList.add('run'); }
+      next();
     }
+    const play = () => { playing = !reduced; show(1); };
+    btns.forEach((b) => b.addEventListener('click', () => { playing = false; clearTimeout(timer); show(+b.dataset.go); }));
+    boxes.forEach((bx) => { bx.tabIndex = 0; bx.setAttribute('role', 'button'); const go = () => { const on = bx.dataset.on.split(' ').map(Number); playing = false; clearTimeout(timer); show(on.includes(at) ? on[(on.indexOf(at) + 1) % on.length] : on[0]); }; bx.addEventListener('click', go); bx.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } }); });
+    document.getElementById('ar-play').addEventListener('click', play);
+    const hold = (on) => { paused = on; pick.classList.toggle('paused', on); if (on) clearTimeout(timer); else next(); };
+    ar.addEventListener('mouseenter', () => hold(true)); ar.addEventListener('mouseleave', () => hold(false));
+    show(1);
+    if (!reduced && 'IntersectionObserver' in window) { const io = new IntersectionObserver((es) => { if (es[0].isIntersecting && !played) { played = true; io.disconnect(); play(); } }, { threshold: 0.45 }); io.observe(ar); }
   }
 
   // ---- what the offline toolsmith built: before and after, per engine

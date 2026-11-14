@@ -412,3 +412,28 @@
 .sw-keys { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 10px 0 0; color: var(--fr-muted); font-size: 12px; }
 .sw-keys span { display: inline-flex; align-items: center; gap: 6px; }
 .sw-keys i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+/* how it works: one card, six steps, no scrolling story */
+#arch .ar { display: grid; gap: 18px; padding: 18px 20px 20px; position: static; }
+.ar-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ar-pick { justify-content: flex-start; gap: 6px 20px; font-size: 13.5px; }
+.ar-play { position: static; flex: none; }
+.ar-diagram { display: grid; gap: 14px; }
+.ar-box { cursor: pointer; }
+.ar-box:focus-visible { outline: 2px solid var(--fr-fast); outline-offset: 2px; }
+.ar-detail { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 28px; align-items: start; border-top: 1px solid var(--fr-rule); padding-top: 16px; min-height: 250px; }
+.ar-text h3 { font-family: var(--font-anthropic-serif); font-weight: 400; font-size: 22px; line-height: 1.2; margin: 0 0 10px; text-wrap: balance; }
+.ar-text p { margin: 0 0 10px; max-width: 44ch; line-height: 1.55; font-size: 14.5px; color: var(--fr-muted); }
+.ar-text p b { color: var(--fr-ink); }
+.ar-text .st-kicker { margin: 0 0 6px; font-size: 12px; }
+#arch .ar-panels { min-height: 0; max-height: none; overflow: visible; padding: 0; min-width: 0; }
+.ar-text:not([hidden]), .ar-panel:not([hidden]) { animation: ar-in 0.35s ease both; }
+@keyframes ar-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.ar-to.flow { background: var(--fr-fast); }
+.ar-to.flow::after { border-left-color: var(--fr-fast); }
+.ar-to.flow.ar-both::before { border-right-color: var(--fr-fast); }
+.ar-to > s { display: none; }
+.ar-to.flow { overflow: visible; }
+.ar-to.flow { background-image: linear-gradient(90deg, transparent 0 40%, var(--color-bg) 40% 60%, transparent 60%); background-size: 16px 100%; animation: ar-flow 0.7s linear infinite; background-color: var(--fr-fast); }
+@keyframes ar-flow { from { background-position: 0 0; } to { background-position: 16px 0; } }
+@media (max-width: 820px) { .ar-detail { grid-template-columns: minmax(0, 1fr); gap: 14px; min-height: 0; } #arch .ar { padding: 14px; } #arch .ar-box span { display: block; } }
+@media (prefers-reduced-motion: reduce) { .ar-to.flow, .ar-text, .ar-panel { animation: none !important; } }
