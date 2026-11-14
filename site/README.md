@@ -29,3 +29,15 @@ The header shows Overview and GitHub. The audit views (Supported PRs, Coverage, 
 - `audit/build.py` fails the build if a banned word or a private path appears in the audit page.
 - The pages load d3 from cdnjs and fonts from Google Fonts; everything else is inline.
 - To change wording, edit `landing/src/page.html` or `audit/src/page.html` and rebuild.
+
+## Case studies
+
+The home page's case studies read three files in `facts/`:
+
+| File | What it holds |
+|---|---|
+| `case-timing.json` | Measured edit-to-check-result time per case, for a plain restart and for FastRSI, with the phases that add up to each total. Written by `python3 site/facts/make-case-timing.py <cases dir> ...` from the measurement tables. |
+| `case-copy.json` | The four text blocks per case, keyed by pull request number or agent-edit id. |
+| `pr-diffs/` | The upstream diff of each replayed pull request (non-test files). |
+
+A case in `case-timing.json` that matches no pull request in `prs.json` is shown as one of our own agent edits, with the diff taken from the timing file.
