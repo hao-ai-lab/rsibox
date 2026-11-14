@@ -45,7 +45,9 @@ if os.path.exists(PRS):
                 files.append({"path": fl["path"], "lines": fl["lines"][:left], "cut": max(0, len(fl["lines"]) - left)}); left -= len(fl["lines"])
             r.update({"utitle": dj["title"].replace("`", ""), "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": files, "more": len(dj["files"]) - len(files)})
         for r in rows: r["copy"] = [[b["label"], COPY_BY.get(r["pr"], {}).get(b["key"], "")] for b in COPY.get("blocks", [])]
-        rows.sort(key=lambda r: (not r["live"], -(r["x"] or 0)))
+        # lead with edits that never restart from scratch: installed live, then restarted from a warm copy, then the rest
+        warm = lambda r: bool(re.search(r"forked restart|from the zygote", r["install"]))
+        rows.sort(key=lambda r: (0 if r["live"] else 1 if warm(r) else 2, -(r["x"] or 0)))
         edits[e["engine"]] = rows
 if os.path.exists(FACTS):
     num = lambda v: (lambda m: float(m.group(0)) if m else None)(re.search(r"\d+(?:\.\d+)?", str(v)))
