@@ -340,19 +340,22 @@
       more.hidden = e.cases.length < 2; more.textContent = 'Show all ' + e.cases.length;
       render(e.cases[0], ai, document.getElementById('alt-diff'));
     };
-    const choose = (i) => { [...list.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === i))); render(cur.cases[i], document.getElementById('alt-pinfo'), document.getElementById('alt-pdiff')); };
     engs.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => show(e)); });
-    more.addEventListener('click', () => {
-      document.getElementById('alt-dh').textContent = cur.engine + ': ' + cur.cases.length + ' upstream changes'; list.replaceChildren();
-      cur.cases.forEach((q, i) => {
+    const dpick = document.getElementById('alt-dpick');
+    let pe = null;   // engine shown in the popup
+    const choose = (i) => { [...list.children].forEach((b, k) => b.setAttribute('aria-pressed', String(k === i))); render(pe.cases[i], document.getElementById('alt-pinfo'), document.getElementById('alt-pdiff')); };
+    const fill = (e) => {
+      pe = e; [...dpick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.e === e.engine))); list.replaceChildren();
+      e.cases.forEach((q, i) => {
         const r = $('button', 'alt-item', null, list); r.type = 'button';
         $('b', null, (q.utitle || q.title).replace(/^(\[[^\]]+\])+\s*/, ''), r);
         const m = $('span', 'alt-im fr-num', '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
         r.addEventListener('click', () => choose(i));
       });
-      if (dlg3.showModal) { dlg3.showModal(); dlg3.scrollTop = 0; }
       choose(0);
-    });
+    };
+    engs.forEach((e) => { const b = $('button', 'fr-chip', null, dpick); b.type = 'button'; b.dataset.e = e.engine; b.textContent = e.engine + ' · ' + e.cases.length; b.addEventListener('click', () => fill(e)); });
+    more.addEventListener('click', () => { if (dlg3.showModal) { dlg3.showModal(); dlg3.scrollTop = 0; } fill(cur); });
     document.getElementById('alt-close').addEventListener('click', () => dlg3.close());
     dlg3.addEventListener('click', (ev) => { if (ev.target === dlg3) dlg3.close(); });
     if (engs.length) show(engs[0]); else document.getElementById('cases-alt').hidden = true;
