@@ -1,7 +1,7 @@
 <div class="fr pg">
   <nav class="pg-nav" aria-label="Site">
     <a class="pg-mark" href="#top">FastRSI</a>
-    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a href="audit/#prs" data-tab="prs">Supported PRs</a><a href="audit/#coverage" data-tab="coverage">Coverage</a><a href="audit/#conventions" data-tab="conventions">Conventions</a><a href="audit/#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
+    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
   <header class="pg-hero" id="top">
@@ -211,21 +211,17 @@ Show me the result, then walk me through one install, check and uninstall on the
   </section>
 
   <!-- What the toolsmith built -->
-  <section class="fr-sec cs" id="built" aria-labelledby="built-h">
-    <div class="cs-grid">
-      <div class="cs-side">
-        <h2 class="fr-h2" id="built-h">Case studies</h2>
-        <p class="fr-sub">Three mechanisms per engine that keep part of it warm, each with the time before and after. Click one for the details, or open the upstream edits that were replayed on that engine.</p>
-        <div class="cs-pick" role="group" aria-label="Engine" id="built-pick"></div>
-      </div>
-      <div class="fr-card cs-card" id="built-card">
-        <div class="bl" id="built-list"></div>
-        <p class="cs-foot"><button type="button" class="fr-chip" id="cs-edits"></button><a href="audit/#coverage">Full list on the audit page</a></p>
-      </div>
+  <section class="fr-sec" id="built" aria-labelledby="built-h">
+    <h2 class="fr-h2" id="built-h">Case studies</h2>
+    <p class="fr-sub">What FastRSI keeps warm in each engine, and how much time that saves.</p>
+    <div class="fr-card" id="built-card">
+      <div class="fr-picker" role="group" aria-label="Engine" id="built-pick"></div>
+      <div class="bl" id="built-list"></div>
+      <p class="cs-foot"><button type="button" class="fr-chip" id="cs-more"></button></p>
     </div>
     <dialog class="try-dlg cs-dlg" id="cs-dlg" aria-labelledby="cs-h">
       <h2 class="fr-h2" id="cs-h"></h2>
-      <div id="cs-body"></div>
+      <div class="bl" id="cs-body"></div>
       <p class="try-btns"><button type="button" class="fr-btn fr-btn-quiet" id="cs-close">Close</button></p>
     </dialog>
   </section>
@@ -247,7 +243,6 @@ Show me the result, then walk me through one install, check and uninstall on the
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre></li>
         <li><b>Read a recorded walkthrough.</b> Each engine keeps its replayed edits, with real output, under <code>repos/&lt;engine&gt;/examples/</code>.</li>
         <li><b>Bring your own engine.</b> Copy <code>template/livelab/</code>, wire it to the gap between two steps, pass conformance, then follow the offline toolsmith's prompt in <code>core/agents/</code>.</li>
-        <li><b>Check our work.</b> The <a href="audit/">audit page</a> lists the replayed upstream PRs, what is and is not measured about coverage, the interface and rules in full, and the fault tests.</li>
       </ol>
     </div>
   </section>

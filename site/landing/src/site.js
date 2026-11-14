@@ -271,48 +271,30 @@
     if (!reduced && 'IntersectionObserver' in window) { const io = new IntersectionObserver((es) => { if (es[0].isIntersecting && !played) { played = true; io.disconnect(); play(); } }, { threshold: 0.45 }); io.observe(ar); }
   }
 
-  // ---- case studies: three mechanisms per engine; a popup for each, and one for the replayed upstream edits
+  // ---- case studies: three rows per engine (what it keeps warm, time before and after); a popup holds the full list
   const bl = document.getElementById('built-list');
   if (bl && typeof BUILT !== 'undefined' && BUILT.length) {
-    const pick = document.getElementById('built-pick'), dlg2 = document.getElementById('cs-dlg'), body = document.getElementById('cs-body'), head = document.getElementById('cs-h'), eb = document.getElementById('cs-edits');
-    const fmt = (v) => (/[a-z]/i.test(v) ? v : v + ' s').replace(/(\d) \(/, '$1 s (');
-    const times = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1)) + '×';
-    const open = (title, fill) => { head.textContent = title; body.replaceChildren(); fill(body); if (dlg2.showModal) { dlg2.showModal(); dlg2.scrollTop = 0; } };
-    const kv = (p, k, v) => { if (!v) return; const r = $('div', 'cs-kv', null, p); $('span', null, k, r); $('span', null, v, r); };
+    const pick = document.getElementById('built-pick'), dlg2 = document.getElementById('cs-dlg'), body = document.getElementById('cs-body'), head = document.getElementById('cs-h'), more = document.getElementById('cs-more');
+    const fmt = (v) => { const x = String(v).replace(/ \(.*$/, ''); return /[a-z]/i.test(x) ? x : x + ' s'; };
     let cur = BUILT[0];
-    const mech = (e, m) => open(m.name, (p) => {
-      $('p', 'fr-sub', m.what, p);
-      const g = $('div', 'cs-kvs', null, p);
-      kv(g, 'Engine', e.engine); kv(g, 'What it saves', m.cost); kv(g, 'Before', fmt(m.before)); kv(g, 'After', fmt(m.after));
-      if (m.b / m.a >= 1.15) kv(g, 'Speedup', times(m.b / m.a) + ' (first figure of each)'); kv(g, 'Measured on', m.setup);
-    });
-    const edits = (e) => open('Upstream edits replayed on ' + e.engine, (p) => {
-      $('p', 'fr-sub', 'Real merged pull requests from the engine\'s own repository, applied to a running engine. Not every edit installs live: some are refused and fall back to a restart.', p);
-      e.edits.forEach((q) => {
-        const c = $('div', 'cs-edit', null, p), t = $('p', 'cs-et', null, c);
-        const a = $('a', null, q.repo + ' #' + q.pr, t); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener';
-        $('b', null, q.title, t); $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.live ? 'installed live' : 'fell back to a restart', t);
-        const g = $('div', 'cs-kvs', null, c);
-        kv(g, q.live ? 'Install' : 'Outcome', q.install); kv(g, 'Check', q.check); kv(g, 'Restart it replaces', q.restart);
-        if (q.x) kv(g, 'Speedup', times(q.x) + ' sooner to a running edit'); kv(g, 'Result', q.effect);
-      });
-      $('p', 'fr-note', 'The diffs themselves are not stored here; each link opens the upstream pull request.', p);
-    });
-    const draw = (e) => {
-      cur = e; bl.replaceChildren(); [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.e === e.engine)));
-      e.mechanisms.slice(0, 3).forEach((m, i) => {
-        const r = $('button', 'bl-row cs-row', null, bl), l = $('span', 'bl-l', null, r); r.type = 'button'; $('b', null, m.name, l);
-        const v = $('span', 'bl-v', null, r), w = $('span', 'bar', null, v), f = $('i', null, null, w);
-        const t = $('span', 'bl-t', null, v); $('span', 'bl-b', fmt(m.before).replace(/ \(.*$/, ''), t); $('span', 'bl-a', '→ ' + fmt(m.after).replace(/ \(.*$/, ''), t);
-        if (m.b / m.a >= 1.15) $('span', 'bl-x fr-num', times(m.b / m.a), t);
-        r.addEventListener('click', () => mech(e, m));
+    const rows = (into, list) => {
+      into.replaceChildren();
+      list.forEach((m, i) => {
+        const r = $('div', 'bl-row', null, into), l = $('div', 'bl-l', null, r); $('b', null, m.name, l); $('span', null, m.what, l);
+        const v = $('div', 'bl-v', null, r), w = $('span', 'bar', null, v), f = $('i', null, null, w);
+        const t = $('div', 'bl-t', null, v); $('span', 'bl-b', fmt(m.before), t); $('span', 'bl-a', '→ ' + fmt(m.after), t);
+        if (m.b / m.a >= 1.15) $('span', 'bl-x fr-num', (m.b / m.a >= 10 ? Math.round(m.b / m.a) : (m.b / m.a).toFixed(1)) + '×', t);
         const to = 'scaleX(' + Math.max(0.006, Math.min(1, m.a / m.b)) + ')';
         if (reduced) f.style.transform = to; else { f.style.transform = 'scaleX(1)'; setTimeout(() => { f.style.transition = 'transform 0.9s cubic-bezier(.2,.7,.2,1)'; f.style.transform = to; }, 120 + i * 70); }
       });
-      eb.hidden = !e.edits.length; eb.textContent = e.edits.length + ' replayed upstream edits';
     };
-    BUILT.forEach((e) => { const b = $('button', 'cs-eng', null, pick); b.type = 'button'; b.dataset.e = e.engine; $('b', null, e.engine, b); $('span', null, e.mechanisms.length + ' mechanisms measured on GPUs', b); b.addEventListener('click', () => draw(e)); });
-    eb.addEventListener('click', () => edits(cur));
+    const draw = (e) => {
+      cur = e; [...pick.children].forEach((b) => b.setAttribute('aria-pressed', String(b.textContent === e.engine)));
+      rows(bl, e.mechanisms.slice(0, 3));
+      more.hidden = e.mechanisms.length <= 3; more.textContent = 'Show all ' + e.mechanisms.length;
+    };
+    BUILT.forEach((e) => { const b = $('button', 'fr-chip', e.engine, pick); b.type = 'button'; b.addEventListener('click', () => draw(e)); });
+    more.addEventListener('click', () => { head.textContent = cur.engine; rows(body, cur.mechanisms); if (dlg2.showModal) { dlg2.showModal(); dlg2.scrollTop = 0; } });
     document.getElementById('cs-close').addEventListener('click', () => dlg2.close());
     dlg2.addEventListener('click', (ev) => { if (ev.target === dlg2) dlg2.close(); });
     draw(BUILT[0]);
