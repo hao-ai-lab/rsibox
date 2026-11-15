@@ -299,7 +299,7 @@
     const render = (q, info, df) => {
       info.replaceChildren();
       const top = $('p', 'alt-pr', null, info);
-      if (q.agent) $('span', 'alt-agent', 'Our own agent edit · ' + q.repo, top); else { const a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; }
+      if (!q.agent) { const a = $('a', null, q.repo + ' #' + q.pr + ' ↗', top); a.href = 'https://github.com/' + q.repo + '/pull/' + q.pr; a.target = '_blank'; a.rel = 'noopener'; }
       tag(top, q);
       $('h3', 'alt-t', q.utitle || q.title, info);
       $('p', 'alt-size fr-num', '+' + q.add + ' −' + q.del + ' in ' + q.nfiles + (q.nfiles === 1 ? ' file' : ' files'), info);
@@ -339,7 +339,7 @@
       e.cases.forEach((q, i) => {
         const r = $('button', 'alt-item', null, list); r.type = 'button';
         $('b', null, (q.utitle || q.title).replace(/^(\[[^\]]+\])+\s*/, ''), r);
-        const m = $('span', 'alt-im fr-num', q.agent ? 'agent edit' : '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
+        const m = $('span', 'alt-im fr-num', q.agent ? '' : '#' + q.pr, r); $('span', q.x ? 'alt-ix' : 'alt-ix na', q.x ? times(q.x) : 'n/a', m);
         r.addEventListener('click', () => choose(i));
       });
       choose(0);
