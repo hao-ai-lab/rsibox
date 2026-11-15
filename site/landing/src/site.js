@@ -279,7 +279,7 @@
     const times = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1)) + '×', secs = (t) => (t >= 10 ? +t.toFixed(1) : t) + ' s';
     let cur = null;
     const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.tag || (q.live ? 'installed live' : q.install ? 'restarted from a warm copy' : 'restarted'), p);
-    const PH = ['Failed live attempt, stop the old job', 'Process start-up and imports', 'Distributed init, kernels, model build', 'First step and warm-up steps', 'Install the edit live', 'Run the check', 'Other'];
+    const PH = ['Failed live attempt, stop the old job', 'Process start-up and imports', 'Engine and model start-up', 'Load the weights', 'Compile and JIT builds', 'CUDA graph capture', 'First step and warm-up steps', 'Install the edit live', 'Run the check', 'Other'];
     // two stacked bars (plain restart, FastRSI) on one time axis, then the same phases as a small table
     const phases = (q, info) => {
       const g = $('div', 'alt-gain', null, info), max = Math.max(q.t_rst, q.t_run);

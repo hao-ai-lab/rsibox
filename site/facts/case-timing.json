@@ -18,7 +18,7 @@
       22.32
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       8.01
      ],
      [
@@ -142,7 +142,7 @@
       23.17
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       7.33
      ],
      [
@@ -249,7 +249,7 @@
       23.51
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       7.48
      ],
      [
@@ -356,7 +356,7 @@
       23.51
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       7.61
      ],
      [
@@ -386,7 +386,7 @@
       21.62
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       8.87
      ],
      [
@@ -426,7 +426,7 @@
       23.73
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       7.34
      ],
      [
@@ -456,7 +456,7 @@
       22.0
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       8.57
      ],
      [
@@ -496,7 +496,7 @@
       22.23
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       8.45
      ],
      [
@@ -547,7 +547,7 @@
       23.72
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       6.31
      ],
      [
@@ -577,7 +577,7 @@
       23.6
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       7.12
      ],
      [
@@ -617,7 +617,7 @@
       22.0
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       8.29
      ],
      [
@@ -647,7 +647,7 @@
       23.1
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       6.97
      ],
      [
@@ -687,7 +687,7 @@
       18.11
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       50.74
      ],
      [
@@ -751,7 +751,7 @@
       17.75
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       48.5
      ],
      [
@@ -781,7 +781,7 @@
       3.15
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       38.05
      ],
      [
@@ -827,7 +827,7 @@
       18.36
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       45.59
      ],
      [
@@ -857,7 +857,7 @@
       3.19
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       46.28
      ],
      [
@@ -903,7 +903,7 @@
       18.62
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       34.58
      ],
      [
@@ -990,7 +990,7 @@
       17.48
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       44.38
      ],
      [
@@ -1012,7 +1012,7 @@
     "outcome": "installed live, proven (every edited function ran on this workload)",
     "phases": [
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       0.53
      ],
      [
@@ -1185,7 +1185,7 @@
       18.61
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       53.52
      ],
      [
@@ -1203,7 +1203,7 @@
     "outcome": "installed live, proven (every edited function ran on this workload)",
     "phases": [
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       2.13
      ],
      [
@@ -1401,7 +1401,7 @@
       20.46
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       41.66
      ],
      [
@@ -1556,7 +1556,7 @@
       19.24
      ],
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       44.1
      ],
      [
@@ -1578,7 +1578,7 @@
     "outcome": "installed live, proven (every edited function ran on this workload)",
     "phases": [
      [
-      "Distributed init, kernels, model build",
+      "Engine and model start-up",
       0.14
      ],
      [
@@ -1788,6 +1788,712 @@
     ],
     "title": "Add CUDA graph signature checking and replay for H3 feed-forward layers"
    }
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "49750",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 125.18,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.08
+     ],
+     [
+      "Engine and model start-up",
+      15.02
+     ],
+     [
+      "Load the weights",
+      13.75
+     ],
+     [
+      "Compile and JIT builds",
+      20.34
+     ],
+     [
+      "CUDA graph capture",
+      32.8
+     ],
+     [
+      "First step and warm-up steps",
+      14.85
+     ],
+     [
+      "Run the check",
+      3.73
+     ],
+     [
+      "Other",
+      0.61
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 94.57,
+    "outcome": "refused (captured_target), restarted warm from zygote",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      1.63
+     ],
+     [
+      "Process start-up and imports",
+      25.44
+     ],
+     [
+      "Engine and model start-up",
+      15.27
+     ],
+     [
+      "Load the weights",
+      3.07
+     ],
+     [
+      "Compile and JIT builds",
+      20.41
+     ],
+     [
+      "CUDA graph capture",
+      18.28
+     ],
+     [
+      "First step and warm-up steps",
+      6.08
+     ],
+     [
+      "Run the check",
+      3.77
+     ],
+     [
+      "Other",
+      0.62
+     ]
+    ]
+   },
+   "improved": {
+    "total": 82.35,
+    "outcome": "refused (captured_target), restarted warm from zygote"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "57140",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 105.86,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.14
+     ],
+     [
+      "Engine and model start-up",
+      14.78
+     ],
+     [
+      "Load the weights",
+      13.82
+     ],
+     [
+      "CUDA graph capture",
+      34.08
+     ],
+     [
+      "First step and warm-up steps",
+      14.71
+     ],
+     [
+      "Run the check",
+      3.74
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 2.57,
+    "outcome": "installed live",
+    "phases": [
+     [
+      "Install the edit live",
+      0.19
+     ],
+     [
+      "Run the check",
+      1.78
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 2.62,
+    "outcome": "installed live"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "57951",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 107.62,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.93
+     ],
+     [
+      "Engine and model start-up",
+      14.93
+     ],
+     [
+      "Load the weights",
+      14.34
+     ],
+     [
+      "CUDA graph capture",
+      34.0
+     ],
+     [
+      "First step and warm-up steps",
+      15.07
+     ],
+     [
+      "Run the check",
+      3.74
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 67.51,
+    "outcome": "refused (outside_changes), restarted warm from zygote",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      1.21
+     ],
+     [
+      "Process start-up and imports",
+      17.46
+     ],
+     [
+      "Engine and model start-up",
+      15.9
+     ],
+     [
+      "Load the weights",
+      3.67
+     ],
+     [
+      "CUDA graph capture",
+      18.16
+     ],
+     [
+      "First step and warm-up steps",
+      6.72
+     ],
+     [
+      "Run the check",
+      3.79
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 2.75,
+    "outcome": "installed live"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "58231",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 104.75,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.85
+     ],
+     [
+      "Engine and model start-up",
+      15.13
+     ],
+     [
+      "Load the weights",
+      13.81
+     ],
+     [
+      "CUDA graph capture",
+      32.07
+     ],
+     [
+      "First step and warm-up steps",
+      14.59
+     ],
+     [
+      "Run the check",
+      3.7
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 2.74,
+    "outcome": "installed live",
+    "phases": [
+     [
+      "Install the edit live",
+      0.34
+     ],
+     [
+      "Run the check",
+      1.79
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 2.84,
+    "outcome": "installed live"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "59941",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 105.77,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.28
+     ],
+     [
+      "Engine and model start-up",
+      14.89
+     ],
+     [
+      "Load the weights",
+      14.18
+     ],
+     [
+      "CUDA graph capture",
+      33.16
+     ],
+     [
+      "First step and warm-up steps",
+      14.94
+     ],
+     [
+      "Run the check",
+      3.71
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 65.73,
+    "outcome": "refused (captured_target), restarted warm from zygote",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      1.48
+     ],
+     [
+      "Process start-up and imports",
+      16.87
+     ],
+     [
+      "Engine and model start-up",
+      15.94
+     ],
+     [
+      "Load the weights",
+      3.0
+     ],
+     [
+      "CUDA graph capture",
+      18.09
+     ],
+     [
+      "First step and warm-up steps",
+      5.99
+     ],
+     [
+      "Run the check",
+      3.74
+     ],
+     [
+      "Other",
+      0.61
+     ]
+    ]
+   },
+   "improved": {
+    "total": 49.69,
+    "outcome": "refused (captured_target), restarted warm from zygote"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "61213",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 105.84,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.85
+     ],
+     [
+      "Engine and model start-up",
+      15.05
+     ],
+     [
+      "Load the weights",
+      13.76
+     ],
+     [
+      "CUDA graph capture",
+      33.09
+     ],
+     [
+      "First step and warm-up steps",
+      14.74
+     ],
+     [
+      "Run the check",
+      3.74
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 2.73,
+    "outcome": "installed live",
+    "phases": [
+     [
+      "Install the edit live",
+      0.34
+     ],
+     [
+      "Run the check",
+      1.78
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 2.82,
+    "outcome": "installed live"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "61323",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 105.2,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      23.96
+     ],
+     [
+      "Engine and model start-up",
+      14.86
+     ],
+     [
+      "Load the weights",
+      13.74
+     ],
+     [
+      "CUDA graph capture",
+      33.56
+     ],
+     [
+      "First step and warm-up steps",
+      14.75
+     ],
+     [
+      "Run the check",
+      3.73
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 169.01,
+    "outcome": "refused (captured_target,constructor_edit), restarted warm from zygote",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      1.08
+     ],
+     [
+      "Process start-up and imports",
+      16.84
+     ],
+     [
+      "Engine and model start-up",
+      15.73
+     ],
+     [
+      "Load the weights",
+      3.07
+     ],
+     [
+      "Compile and JIT builds",
+      99.94
+     ],
+     [
+      "CUDA graph capture",
+      19.0
+     ],
+     [
+      "First step and warm-up steps",
+      9.0
+     ],
+     [
+      "Run the check",
+      3.75
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 52.37,
+    "outcome": "refused (captured_target,constructor_edit), restarted warm from zygote"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "62046",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 104.96,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      24.67
+     ],
+     [
+      "Engine and model start-up",
+      15.09
+     ],
+     [
+      "Load the weights",
+      13.93
+     ],
+     [
+      "CUDA graph capture",
+      32.24
+     ],
+     [
+      "First step and warm-up steps",
+      14.72
+     ],
+     [
+      "Run the check",
+      3.71
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 2.72,
+    "outcome": "installed live",
+    "phases": [
+     [
+      "Install the edit live",
+      0.33
+     ],
+     [
+      "Run the check",
+      1.79
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 2.83,
+    "outcome": "installed live"
+   },
+   "effect": []
+  },
+  {
+   "engine": "vLLM",
+   "repo": "vllm-project/vllm",
+   "source": "upstream_pr",
+   "id": "62872",
+   "variant": "",
+   "n": 3,
+   "setup": "1 GB200 GPU, vLLM 0.31.0 serving Qwen3.6-27B (BF16, one GPU) with torch.compile and CUDA graphs, speculative decoding and structured outputs on. Warm on-disk caches. The check sends 4 greedy, 8 concurrent sampling, a JSON-schema and an invalid-grammar request. Median of 3 runs.",
+   "restart": {
+    "total": 103.94,
+    "outcome": "restarted",
+    "phases": [
+     [
+      "Process start-up and imports",
+      23.91
+     ],
+     [
+      "Engine and model start-up",
+      14.78
+     ],
+     [
+      "Load the weights",
+      14.16
+     ],
+     [
+      "CUDA graph capture",
+      32.0
+     ],
+     [
+      "First step and warm-up steps",
+      14.75
+     ],
+     [
+      "Run the check",
+      3.74
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 67.69,
+    "outcome": "refused (constructor_edit), restarted warm from zygote",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      1.62
+     ],
+     [
+      "Process start-up and imports",
+      18.17
+     ],
+     [
+      "Engine and model start-up",
+      15.7
+     ],
+     [
+      "Load the weights",
+      3.15
+     ],
+     [
+      "CUDA graph capture",
+      18.45
+     ],
+     [
+      "First step and warm-up steps",
+      6.19
+     ],
+     [
+      "Run the check",
+      3.8
+     ],
+     [
+      "Other",
+      0.6
+     ]
+    ]
+   },
+   "improved": {
+    "total": 53.41,
+    "outcome": "refused (constructor_edit), restarted warm from zygote"
+   },
+   "effect": []
   }
  ]
 }
