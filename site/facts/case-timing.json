@@ -669,6 +669,1125 @@
     "outcome": "refused (constructor_edit, new_fields, removed_definition); then warm restart from the zygote"
    },
    "effect": []
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "upstream_pr",
+   "id": "1882",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 81.14,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      18.11
+     ],
+     [
+      "Distributed init, kernels, model build",
+      50.74
+     ],
+     [
+      "First step and warm-up steps",
+      5.7
+     ],
+     [
+      "Run the check",
+      6.4
+     ],
+     [
+      "Other",
+      0.19
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 6.29,
+    "outcome": "installed live, partly proven (1 of 2 edited functions ran on this workload)",
+    "phases": [
+     [
+      "Install the edit live",
+      0.04
+     ],
+     [
+      "Run the check",
+      6.25
+     ]
+    ]
+   },
+   "improved": {
+    "total": 6.37,
+    "outcome": "installed live, partly proven (1 of 2 edited functions ran on this workload)"
+   },
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 6.3021,
+     "ratio": 0.997,
+     "percent": -0.3,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "reverse replay (merged PR undone on the pin)"
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "upstream_pr",
+   "id": "1900",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 80.77,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      17.75
+     ],
+     [
+      "Distributed init, kernels, model build",
+      48.5
+     ],
+     [
+      "First step and warm-up steps",
+      7.8
+     ],
+     [
+      "Run the check",
+      6.21
+     ],
+     [
+      "Other",
+      0.5
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 56.38,
+    "outcome": "live swap refused (outside_changes, removed_definition); in-place rebuild refused (refresh_too_wide); restarted warm from the zygote (probe: the edited code is loaded)",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      0.85
+     ],
+     [
+      "Process start-up and imports",
+      3.15
+     ],
+     [
+      "Distributed init, kernels, model build",
+      38.05
+     ],
+     [
+      "First step and warm-up steps",
+      8.01
+     ],
+     [
+      "Run the check",
+      6.32
+     ]
+    ]
+   },
+   "improved": {
+    "total": 34.28,
+    "outcome": "live swap refused (outside_changes, removed_definition); in-place rebuild refused (refresh_too_wide); restarted warm from the zygote (probe: the edited code is loaded)"
+   },
+   "effect": [
+    {
+     "method": "restart arm, second video of each fresh process",
+     "base_step_s": 6.4289,
+     "edit_step_s": 6.3736,
+     "ratio": 0.9914,
+     "percent": -0.86,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "reverse replay (merged PR undone on the pin)"
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "upstream_pr",
+   "id": "2040",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 74.79,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      18.36
+     ],
+     [
+      "Distributed init, kernels, model build",
+      45.59
+     ],
+     [
+      "First step and warm-up steps",
+      3.19
+     ],
+     [
+      "Run the check",
+      6.9
+     ],
+     [
+      "Other",
+      0.75
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 65.18,
+    "outcome": "live swap refused (outside_changes); in-place rebuild refused (refresh_too_wide); restarted warm from the zygote (probe: the edited code is loaded)",
+    "phases": [
+     [
+      "Failed live attempt, stop the old job",
+      0.91
+     ],
+     [
+      "Process start-up and imports",
+      3.19
+     ],
+     [
+      "Distributed init, kernels, model build",
+      46.28
+     ],
+     [
+      "First step and warm-up steps",
+      8.48
+     ],
+     [
+      "Run the check",
+      6.32
+     ]
+    ]
+   },
+   "improved": {
+    "total": 33.87,
+    "outcome": "live swap refused (outside_changes); in-place rebuild refused (refresh_too_wide); restarted warm from the zygote (probe: the edited code is loaded)"
+   },
+   "effect": [
+    {
+     "method": "restart arm, second video of each fresh process",
+     "base_step_s": 6.4289,
+     "edit_step_s": 6.5077,
+     "ratio": 1.0123,
+     "percent": 1.23,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "forward (PR applied to the pin)"
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "agent_edit",
+   "id": "01-vsa-heads-first-tile",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 67.9,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      18.62
+     ],
+     [
+      "Distributed init, kernels, model build",
+      34.58
+     ],
+     [
+      "First step and warm-up steps",
+      9.11
+     ],
+     [
+      "Run the check",
+      5.54
+     ],
+     [
+      "Other",
+      0.04
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 6.08,
+    "outcome": "installed live, proven (every edited function ran on this workload)",
+    "phases": [
+     [
+      "Install the edit live",
+      0.73
+     ],
+     [
+      "Run the check",
+      5.35
+     ]
+    ]
+   },
+   "improved": null,
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 5.2683,
+     "ratio": 0.8334,
+     "percent": -16.66,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "agent edit applied to the pin",
+   "diff": {
+    "additions": 4,
+    "deletions": 1,
+    "changedFiles": 1,
+    "files": [
+     {
+      "path": "fastvideo/attention/backends/video_sparse_attn_h3.py",
+      "lines": [
+       "@@ -735,8 +735,11 @@ class MiniMaxH3VSAImpl(AttentionImpl):",
+       "         holder = attn_metadata.tile_buf_holder",
+       "         if holder is None:",
+       "             raise RuntimeError(\"VSA-H3 metadata has no builder-owned tile buffer holder\")",
+       "+        # Heads-first is the no-grad default: it only moves bytes (bit-identical),",
+       "+        # and replaces the indexed BSHD assignment (an index_put) plus the",
+       "+        # kernels' three transpose copies with one Triton scatter (~10x less",
+       "+        # time per layer at 15k rows on GB200).",
+       "         if (not compiling and attn_metadata.tile_elems in _PTX_BLACKWELL_TILE_ELEMS",
+       "-                and envs.FASTVIDEO_H3_VSA_HEADS_FIRST_TILE.get()",
+       "                 and supports_heads_first_scatter(x, attn_metadata.untile_combined_index)):",
+       "             return self._tile_heads_first(x, attn_metadata, holder, kernel_tiles, needs_ptx_blackwell_pair)",
+       "         buffer_matches = (holder.buffer is not None and holder.buffer.shape == target_shape"
+      ]
+     }
+    ],
+    "title": "Enable heads-first Triton tile scatter by default in H3 sparse attention"
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "agent_edit",
+   "id": "02-qknorm-rope-16-heads",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 72.6,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      17.48
+     ],
+     [
+      "Distributed init, kernels, model build",
+      44.38
+     ],
+     [
+      "First step and warm-up steps",
+      3.81
+     ],
+     [
+      "Run the check",
+      6.83
+     ],
+     [
+      "Other",
+      0.1
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 6.52,
+    "outcome": "installed live, proven (every edited function ran on this workload)",
+    "phases": [
+     [
+      "Distributed init, kernels, model build",
+      0.53
+     ],
+     [
+      "Install the edit live",
+      0.03
+     ],
+     [
+      "Run the check",
+      5.96
+     ]
+    ]
+   },
+   "improved": null,
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 6.1065,
+     "ratio": 0.966,
+     "percent": -3.4,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "agent edit applied to the pin",
+   "diff": {
+    "additions": 103,
+    "deletions": 0,
+    "changedFiles": 1,
+    "files": [
+     {
+      "path": "fastvideo/models/dits/minimax_h3_fusions/qknorm_rope.py",
+      "lines": [
+       "@@ -121,6 +121,86 @@ def _validate_inputs(",
+       "     return batch, seq_len, num_heads, head_dim, rotary_dim",
+       " ",
+       " ",
+       "+def _qknorm_partial_rope_rows_kernel():",
+       "+    \"\"\"Return the ROWS-heads-per-program variant of ``_qknorm_partial_rope_kernel``.",
+       "+",
+       "+    Built once on first use and cached on this function.",
+       "+    \"\"\"",
+       "+    kernel = getattr(_qknorm_partial_rope_rows_kernel, \"kernel\", None)",
+       "+    if kernel is None:",
+       "+",
+       "+        @triton.jit",
+       "+        def _kernel(",
+       "+            out_ptr,",
+       "+            x_ptr,",
+       "+            weight_ptr,",
+       "+            cos_ptr,",
+       "+            sin_ptr,",
+       "+            n_rows,",
+       "+            rotary_dim,",
+       "+            half_rotary_dim,",
+       "+            num_heads,",
+       "+            seq_len,",
+       "+            eps,",
+       "+            HEAD_DIM: tl.constexpr,",
+       "+            ROWS: tl.constexpr,",
+       "+        ):",
+       "+            # ROWS heads per program (``_qknorm_partial_rope_kernel`` runs one).",
+       "+            # The RMS reduction is an explicit pairwise tree that reproduces the",
+       "+            # single-row kernel's 4-warp tl.sum order bit for bit: lane butterfly",
+       "+            # xor 16,8,4,2,1 inside each 32-column warp slice, then",
+       "+            # (w0 + w2) + (w1 + w3) across the four slices.",
+       "+            rows = tl.program_id(0).to(tl.int64) * ROWS + tl.arange(0, ROWS).to(tl.int64)",
+       "+            row_mask = rows < n_rows",
+       "+            seq_index = (rows // num_heads) % seq_len",
+       "+            cols = tl.arange(0, HEAD_DIM)",
+       "+            offs = rows[:, None] * HEAD_DIM + cols[None, :]",
+       "+            mask2 = row_mask[:, None]",
+       "+            x = tl.load(x_ptr + offs, mask=mask2, other=0.0).to(tl.float32)",
+       "+            sq = x * x",
+       "+            s = tl.reshape(sq, (ROWS, 4, 2, 16))",
+       "+            s = tl.sum(s, axis=2)",
+       "+            s = tl.reshape(s, (ROWS, 4, 2, 8))",
+       "+            s = tl.sum(s, axis=2)",
+       "+            s = tl.reshape(s, (ROWS, 4, 2, 4))",
+       "+            s = tl.sum(s, axis=2)",
+       "+            s = tl.reshape(s, (ROWS, 4, 2, 2))",
+       "+            s = tl.sum(s, axis=2)",
+       "+            s = tl.reshape(s, (ROWS, 4, 2, 1))",
+       "+            s = tl.sum(s, axis=2)",
+       "+            s = tl.reshape(s, (ROWS, 2, 2))  # [w0 w1; w2 w3]",
+       "+            s = tl.sum(s, axis=1)  # (w0 + w2), (w1 + w3)",
+       "+            s = tl.sum(s, axis=1)",
+       "+            variance = s / HEAD_DIM",
+       "+            inv_rms = tl.math.rsqrt(variance + eps)",
+       "+            weight = tl.load(weight_ptr + cols).to(tl.float32)",
+       "+            normalized = x * inv_rms[:, None] * weight[None, :]",
+       "+",
+       "+            rotary_mask = cols < rotary_dim",
+       "+            first_half = cols < half_rotary_dim",
+       "+            partner_col = tl.where(first_half, cols + half_rotary_dim, cols - half_rotary_dim)",
+       "+            pmask = mask2 & rotary_mask[None, :]",
+       "+            partner_x = tl.load(",
+       "+                x_ptr + rows[:, None] * HEAD_DIM + partner_col[None, :],",
+       "+                mask=pmask,",
+       "+                other=0.0,",
+       "+            ).to(tl.float32)",
+       "+            partner_weight = tl.load(weight_ptr + partner_col, mask=rotary_mask, other=0.0).to(tl.float32)",
+       "+            partner_normalized = partner_x * inv_rms[:, None] * partner_weight[None, :]",
+       "+            rotated = tl.where(first_half[None, :], -partner_normalized, partner_normalized)",
+       "+",
+       "+            table_offset = seq_index[:, None] * rotary_dim + cols[None, :]",
+       "+            cos = tl.load(cos_ptr + table_offset, mask=pmask, other=1.0).to(tl.float32)",
+       "+            sin = tl.load(sin_ptr + table_offset, mask=pmask, other=0.0).to(tl.float32)",
+       "+            rotary_output = normalized * cos + rotated * sin",
+       "+            output = tl.where(rotary_mask[None, :], rotary_output, normalized)",
+       "+            tl.store(out_ptr + offs, output.to(out_ptr.dtype.element_ty), mask=mask2)",
+       "+",
+       "+        kernel = _kernel",
+       "+        _qknorm_partial_rope_rows_kernel.kernel = kernel",
+       "+    return kernel",
+       "+",
+       "+",
+       " def _fused_qknorm_rope_impl(",
+       "     x: torch.Tensor,",
+       "     weight: torch.Tensor,",
+       "@@ -142,6 +222,29 @@ def _fused_qknorm_rope_impl(",
+       " ",
+       "     flat_x = x.reshape(-1, head_dim).contiguous()",
+       "     flat_out = torch.empty_like(flat_x)",
+       "+    if head_dim == 128:",
+       "+        # One head per program leaves the kernel latency bound (~0.55 ms for",
+       "+        # 832k H3 heads); 16 heads per program run ~3.7x faster with a",
+       "+        # bit-identical reduction order.",
+       "+        rows_per_program = 16",
+       "+        n_rows = flat_x.shape[0]",
+       "+        _qknorm_partial_rope_rows_kernel()[(triton.cdiv(n_rows, rows_per_program), )](",
+       "+            flat_out,",
+       "+            flat_x,",
+       "+            weight,",
+       "+            cos,",
+       "+            sin,",
+       "+            n_rows,",
+       "+            rotary_dim,",
+       "+            rotary_dim // 2,",
+       "+            num_heads,",
+       "+            seq_len,",
+       "+            eps,",
+       "+            HEAD_DIM=128,",
+       "+            ROWS=rows_per_program,",
+       "+            num_warps=4,",
+       "+        )",
+       "+        return flat_out.view(batch, seq_len, num_heads, head_dim)",
+       "     block_size = 1 << (head_dim - 1).bit_length()",
+       "     _qknorm_partial_rope_kernel[(flat_x.shape[0], )](",
+       "         flat_out,"
+      ]
+     }
+    ],
+    "title": "Process multiple attention heads per Triton program in QK-norm and RoPE"
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "agent_edit",
+   "id": "03-fused-gated-merge",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 78.71,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      18.61
+     ],
+     [
+      "Distributed init, kernels, model build",
+      53.52
+     ],
+     [
+      "Run the check",
+      6.44
+     ],
+     [
+      "Other",
+      0.15
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 8.69,
+    "outcome": "installed live, proven (every edited function ran on this workload)",
+    "phases": [
+     [
+      "Distributed init, kernels, model build",
+      2.13
+     ],
+     [
+      "Install the edit live",
+      0.55
+     ],
+     [
+      "Run the check",
+      6.0
+     ]
+    ]
+   },
+   "improved": null,
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 6.0182,
+     "ratio": 0.9521,
+     "percent": -4.8,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "agent edit applied to the pin",
+   "diff": {
+    "additions": 100,
+    "deletions": 2,
+    "changedFiles": 2,
+    "files": [
+     {
+      "path": "fastvideo/attention/backends/video_sparse_attn_h3.py",
+      "lines": [
+       "@@ -488,6 +488,91 @@ def _pool_tiles(x: torch.Tensor, variable_block_sizes: torch.Tensor, tile_elems:",
+       "     return pooled.permute(0, 2, 1, 3)",
+       " ",
+       " ",
+       "+def _h3_gated_merge_kernel():",
+       "+    \"\"\"Return the fused BHSD->BSHD transpose + gated compression merge kernel.",
+       "+",
+       "+    Built once on first use and cached on this function. ``triton`` and",
+       "+    ``triton.language`` are bound as module globals here (not locals) so the",
+       "+    kernel body resolves them as globals, which is what Triton expects.",
+       "+    \"\"\"",
+       "+    kernel = getattr(_h3_gated_merge_kernel, \"kernel\", None)",
+       "+    if kernel is None:",
+       "+        g = globals()",
+       "+        if \"_h3_tl\" not in g:",
+       "+            g[\"_h3_triton\"] = __import__(\"triton\")",
+       "+            g[\"_h3_tl\"] = __import__(\"triton.language\").language",
+       "+",
+       "+        @g[\"_h3_triton\"].jit",
+       "+        def _kernel(",
+       "+            out_ptr,",
+       "+            o_ptr,",
+       "+            c_ptr,",
+       "+            g_ptr,",
+       "+            seq_len,",
+       "+            heads,",
+       "+            tile_elems,",
+       "+            o_sb, o_sh, o_ss,",
+       "+            c_sb, c_st, c_sh,",
+       "+            g_sb, g_ss, g_sh,",
+       "+            BLOCK_S: _h3_tl.constexpr,",
+       "+            HEAD_DIM: _h3_tl.constexpr,",
+       "+        ):",
+       "+            # out[b, s, h, :] = o[b, h, s, :] + c[b, s // tile, h, :] * g[b, s, h, :]",
+       "+            # bf16*bf16 is exact in fp32, so this matches addcmul_ (one fp32 add,",
+       "+            # one RTNE round to bf16) bit for bit.",
+       "+            bh = _h3_tl.program_id(0)",
+       "+            b = bh // heads",
+       "+            h = bh % heads",
+       "+            s = _h3_tl.program_id(1).to(_h3_tl.int64) * BLOCK_S + _h3_tl.arange(0, BLOCK_S).to(_h3_tl.int64)",
+       "+            d = _h3_tl.arange(0, HEAD_DIM)",
+       "+            smask = (s < seq_len)[:, None]",
+       "+            t = s // tile_elems",
+       "+            o = _h3_tl.load(o_ptr + b * o_sb + h * o_sh + s[:, None] * o_ss + d[None, :], mask=smask,",
+       "+                            other=0.0).to(_h3_tl.float32)",
+       "+            gv = _h3_tl.load(g_ptr + b * g_sb + h * g_sh + s[:, None] * g_ss + d[None, :], mask=smask,",
+       "+                             other=0.0).to(_h3_tl.float32)",
+       "+            cv = _h3_tl.load(c_ptr + b * c_sb + h * c_sh + t[:, None] * c_st + d[None, :], mask=smask,",
+       "+                             other=0.0).to(_h3_tl.float32)",
+       "+            res = o + cv * gv",
+       "+            _h3_tl.store(out_ptr + ((b * seq_len + s[:, None]) * heads + h) * HEAD_DIM + d[None, :],",
+       "+                         res.to(out_ptr.dtype.element_ty), mask=smask)",
+       "+",
+       "+        kernel = _kernel",
+       "+        _h3_gated_merge_kernel.kernel = kernel",
+       "+    return kernel",
+       "+",
+       "+",
+       "+def _h3_gated_merge(out_bshd_view: torch.Tensor, out_c: torch.Tensor, gate: torch.Tensor,",
+       "+                    tile_elems: int) -> torch.Tensor:",
+       "+    \"\"\"Contiguous ``out_bshd_view + out_c (broadcast per tile) * gate`` in one pass.",
+       "+",
+       "+    out_bshd_view: [B, S, H, D] (any strides, last dim contiguous);",
+       "+    out_c: [B, n_tiles, H, D]; gate: [B, S, H, D]. Returns a new contiguous",
+       "+    [B, S, H, D] tensor equal to ``out_bshd_view.contiguous()`` followed by",
+       "+    the tiled ``addcmul_``.",
+       "+    \"\"\"",
+       "+    batch, seq_len, heads, dim = out_bshd_view.shape",
+       "+    result = torch.empty((batch, seq_len, heads, dim), dtype=out_bshd_view.dtype, device=out_bshd_view.device)",
+       "+    block_s = 32",
+       "+    grid = (batch * heads, (seq_len + block_s - 1) // block_s)",
+       "+    _h3_gated_merge_kernel()[grid](",
+       "+        result,",
+       "+        out_bshd_view,",
+       "+        out_c,",
+       "+        gate,",
+       "+        seq_len,",
+       "+        heads,",
+       "+        tile_elems,",
+       "+        out_bshd_view.stride(0), out_bshd_view.stride(2), out_bshd_view.stride(1),",
+       "+        out_c.stride(0), out_c.stride(1), out_c.stride(2),",
+       "+        gate.stride(0), gate.stride(1), gate.stride(2),",
+       "+        BLOCK_S=block_s,",
+       "+        HEAD_DIM=dim,",
+       "+        num_warps=4,",
+       "+    )",
+       "+    return result",
+       "+",
+       "+",
+       " def _build_block_mask(",
+       "     scores: torch.Tensor,",
+       "     num_prefix_tiles: int,",
+       "@@ -853,6 +938,7 @@ class MiniMaxH3VSAImpl(AttentionImpl):",
+       "             layer_sparsity = 0.0 if self.layer_idx in attn_metadata.dense_layers else attn_metadata.VSA_sparsity",
+       "         probe_dir = None if compiling else probe_enabled()",
+       " ",
+       "+        fuse_gated_merge = False",
+       "         scores = None",
+       "         if layer_sparsity > 0.0 or gate_compress is not None or probe_dir is not None:",
+       "             q_pooled = _pool_tiles(logical_query, attn_metadata.variable_block_sizes, tile_elems)",
+       "@@ -1042,7 +1128,15 @@ class MiniMaxH3VSAImpl(AttentionImpl):",
+       "                     )",
+       "             if has_ptx_blackwell_pair and use_ptx_blackwell:",
+       "                 out_bhsd = out_bhsd[:, :, :logical_seq_len]",
+       "-            out = out_bhsd.transpose(1, 2).contiguous()",
+       "+            out = out_bhsd.transpose(1, 2)",
+       "+            # No-grad BF16 head-128 gated merge: the transpose copy and the",
+       "+            # addcmul run as one fused pass below, reading this BHSD view.",
+       "+            fuse_gated_merge = (logical_gate is not None and not compiling and not out.requires_grad",
+       "+                                and out.is_cuda and logical_gate.dtype == out.dtype",
+       "+                                and out.dtype == torch.bfloat16 and out.shape[-1] == 128",
+       "+                                and out.stride(-1) == 1 and logical_gate.stride(-1) == 1)",
+       "+            if not fuse_gated_merge:",
+       "+                out = out.contiguous()",
+       "             # Fine attention is complete. Release its layout copies before the",
+       "             # gated compression merge creates full-sequence temporaries.",
+       "             del q_bhsd, k_bhsd, v_bhsd, out_bhsd",
+       "@@ -1063,6 +1157,8 @@ class MiniMaxH3VSAImpl(AttentionImpl):",
+       "             v_pooled = _pool_tiles(logical_value, attn_metadata.variable_block_sizes, tile_elems)",
+       "             out_c = torch.matmul(torch.softmax(scores, dim=-1), v_pooled)  # [B, H, n_tiles, D]",
+       "             out_c = out_c.permute(0, 2, 1, 3).to(out.dtype)  # [B, n_tiles, H, D]",
+       "+            if fuse_gated_merge:",
+       "+                return _h3_gated_merge(out, out_c, logical_gate, tile_elems)",
+       "             batch, seq_len, heads, dim = out.shape",
+       "             out_tiled = out.view(batch, n_tiles, tile_elems, heads, dim)",
+       "             gate_tiled = logical_gate.view(batch, n_tiles, tile_elems, heads, dim)"
+      ]
+     },
+     {
+      "path": "fastvideo/attention/layer.py",
+      "lines": [
+       "@@ -265,7 +265,9 @@ class DistributedAttention_VSA(DistributedAttention):",
+       "         # Apply backend-specific postprocess_output",
+       "         output = self.attn_impl.postprocess_output(output, ctx_attn_metadata)",
+       " ",
+       "-        output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, pad_seq_len))",
+       "+        if pad_seq_len:",
+       "+            # A zero-width pad is a full copy of the output; skip it.",
+       "+            output = torch.nn.functional.pad(output, (0, 0, 0, 0, 0, pad_seq_len))",
+       " ",
+       "         output = sequence_model_parallel_all_to_all_4D(output, scatter_dim=1, gather_dim=2)",
+       "         return output, replicated_output"
+      ]
+     }
+    ],
+    "title": "Fuse transpose and gated merge in H3 attention and skip zero padding"
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "agent_edit",
+   "id": "08-compact-video-topk",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 69.23,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      20.46
+     ],
+     [
+      "Distributed init, kernels, model build",
+      41.66
+     ],
+     [
+      "Run the check",
+      6.95
+     ],
+     [
+      "Other",
+      0.16
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 6.83,
+    "outcome": "installed live, proven (every edited function ran on this workload)",
+    "phases": [
+     [
+      "Install the edit live",
+      0.57
+     ],
+     [
+      "Run the check",
+      6.26
+     ]
+    ]
+   },
+   "improved": null,
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 6.1988,
+     "ratio": 0.9806,
+     "percent": -1.94,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "agent edit applied to the pin",
+   "diff": {
+    "additions": 49,
+    "deletions": 15,
+    "changedFiles": 1,
+    "files": [
+     {
+      "path": "fastvideo/attention/backends/video_sparse_attn_h3.py",
+      "lines": [
+       "@@ -909,18 +909,7 @@ def _build_block_mask(",
+       "     video_tile_spans: tuple[tuple[int, int], ...],",
+       "     span_sparsities: tuple[float, ...],",
+       " ) -> torch.Tensor:",
+       "-    \"\"\"scores: [B, H, n_tiles, n_tiles] -> bool mask, same shape.",
+       "-",
+       "-    Prefix rows (non-video queries) stay dense. With ``exempt``, every query",
+       "-    keeps every prefix column, and every video query keeps its own top-k of",
+       "-    EACH video region, with the budget from that region's ``span_sparsities``",
+       "-    entry. Without ``exempt`` (compete mode, generated-video region only),",
+       "-    prefix and video columns compete for one FLOP-matched top-k.",
+       "-    ``VSA_sparsity <= 0`` (dense steps and layers) keeps every tile.",
+       "-    ``video_tile_spans`` come from the cached geometry, which lays them out",
+       "-    contiguously after the prefix tiles, with one ``span_sparsities`` entry",
+       "-    each.",
+       "-    \"\"\"",
+       "+    \"\"\"Build the original mask, with compact video-only CUDA top-k inputs.\"\"\"",
+       "     n_tiles = scores.shape[-1]",
+       "     if VSA_sparsity <= 0.0:",
+       "         span_sparsities = tuple(VSA_sparsity for _ in video_tile_spans)",
+       "@@ -930,6 +919,54 @@ def _build_block_mask(",
+       "     ]",
+       "     if all(k == end - start for k, (start, end) in zip(span_topk, video_tile_spans, strict=True)):",
+       "         return torch.ones_like(scores, dtype=torch.bool)",
+       "+",
+       "+    fast = (",
+       "+        not torch.compiler.is_compiling()",
+       "+        and not torch.is_grad_enabled()",
+       "+        and not scores.requires_grad",
+       "+        and scores.is_cuda",
+       "+        and scores.dtype == torch.float32",
+       "+        and scores.ndim == 4",
+       "+        and scores.shape[0] == 1",
+       "+        and scores.shape[1] > 0",
+       "+        and scores.shape[-2] == n_tiles",
+       "+        and scores.is_contiguous()",
+       "+        and 256 <= n_tiles <= 2048",
+       "+        and 0 < num_prefix_tiles < n_tiles",
+       "+        and exempt",
+       "+        and len(video_tile_spans) == 1",
+       "+        and video_tile_spans[0] == (num_prefix_tiles, n_tiles)",
+       "+        and 0 < span_topk[0] < n_tiles - num_prefix_tiles",
+       "+    )",
+       "+    if fast:",
+       "+        from fastvideo.distributed.parallel_state import get_sp_world_size",
+       "+        fast = (",
+       "+            get_sp_world_size() == 1",
+       "+            and torch.cuda.get_device_capability(scores.device) == (10, 0)",
+       "+        )",
+       "+    if fast:",
+       "+        # At these row widths CUDA uses single-block top-k. Contiguous",
+       "+        # packing retains each row's element order and float bit patterns.",
+       "+        # Removing the optional output sort changes only index order;",
+       "+        # scatter membership and subsequent ascending mask compaction agree.",
+       "+        prefix = num_prefix_tiles",
+       "+        width = n_tiles - prefix",
+       "+        candidates = scores[:, :, prefix:, prefix:].contiguous()",
+       "+        indices = candidates.view(-1, width).topk(",
+       "+            span_topk[0], dim=-1, largest=True, sorted=False,",
+       "+        ).indices",
+       "+        indices = indices.view(",
+       "+            scores.shape[0], scores.shape[1], width, span_topk[0],",
+       "+        )",
+       "+",
+       "+        mask = torch.empty_like(scores, dtype=torch.bool)",
+       "+        mask[:, :, :prefix, :].fill_(True)",
+       "+        mask[:, :, prefix:, :prefix].fill_(True)",
+       "+        video_mask = mask[:, :, prefix:, prefix:]",
+       "+        video_mask.zero_()",
+       "+        video_mask.scatter_(-1, indices, True)",
+       "+        return mask",
+       "+",
+       "     mask = torch.zeros_like(scores, dtype=torch.bool)",
+       "     if exempt or num_prefix_tiles == 0:",
+       "         for (start, end), k_span in zip(video_tile_spans, span_topk, strict=True):",
+       "@@ -940,9 +977,6 @@ def _build_block_mask(",
+       "             mask.scatter_(-1, idx, True)",
+       "         mask[..., :num_prefix_tiles] = True",
+       "     else:",
+       "-        # compete: prefix keys enter the top-k under a FLOP-matched budget,",
+       "-        # which is defined for the generated-video region alone (the builder",
+       "-        # rejects compete mode with reference-video regions)",
+       "         k_total = min(span_topk[0] + num_prefix_tiles, n_tiles)",
+       "         idx = scores.topk(k_total, dim=-1).indices",
+       "         mask.scatter_(-1, idx, True)"
+      ]
+     }
+    ],
+    "title": "Pack video-only attention scores contiguously for faster CUDA top-k masking"
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "repo": "hao-ai-lab/FastVideo",
+   "source": "agent_edit",
+   "id": "15-ffn-cuda-graph-replay",
+   "variant": "",
+   "n": 3,
+   "setup": "All tests run back to back on one GB200 GPU with warm weight and kernel caches using a single-worker FastVideo MiniMax H3 engine (Oct 2026) that generates a 124-frame, 480x832 text-to-video clip in 8 diffusion steps, reporting the median of 3 runs.",
+   "restart": {
+    "total": 75.21,
+    "outcome": "restarted (cold process: edit, start the engine, run the check)",
+    "phases": [
+     [
+      "Process start-up and imports",
+      19.24
+     ],
+     [
+      "Distributed init, kernels, model build",
+      44.1
+     ],
+     [
+      "First step and warm-up steps",
+      4.78
+     ],
+     [
+      "Run the check",
+      6.72
+     ],
+     [
+      "Other",
+      0.37
+     ]
+    ]
+   },
+   "fastrsi": {
+    "total": 7.23,
+    "outcome": "installed live, proven (every edited function ran on this workload)",
+    "phases": [
+     [
+      "Distributed init, kernels, model build",
+      0.14
+     ],
+     [
+      "Install the edit live",
+      0.34
+     ],
+     [
+      "Run the check",
+      6.75
+     ]
+    ]
+   },
+   "improved": {
+    "total": 7.84,
+    "outcome": "installed live, proven (every edited function ran on this workload)"
+   },
+   "effect": [
+    {
+     "method": "live lab",
+     "base_step_s": 6.3213,
+     "edit_step_s": 6.3528,
+     "ratio": 1.005,
+     "percent": 0.5,
+     "output": "output identical to base (video and audio hashes)"
+    }
+   ],
+   "replay": "agent edit applied to the pin",
+   "diff": {
+    "additions": 148,
+    "deletions": 0,
+    "changedFiles": 1,
+    "files": [
+     {
+      "path": "fastvideo/models/dits/minimax_h3.py",
+      "lines": [
+       "@@ -89,6 +89,67 @@ def _enabled_minimax_h3_exact_kernels(value: str | None = None) -> frozenset[str",
+       "     return enabled",
+       " ",
+       " ",
+       "+def _h3_ff_graph_signature(ff, hidden_states, stream):",
+       "+    \"\"\"Identify the frozen FFN state; reject unversioned weight tensors.\"\"\"",
+       "+    tensors = []",
+       "+    options = []",
+       "+    for name, module in ((\"in\", ff.fc_in), (\"out\", ff.fc_out)):",
+       "+        if (type(module) is not ReplicatedLinear",
+       "+                or module.training",
+       "+                or module.bias is not None",
+       "+                or module._forward_hooks",
+       "+                or module._forward_pre_hooks",
+       "+                or module._backward_hooks):",
+       "+            return None",
+       "+        method = module.quant_method",
+       "+        if type(method).__name__ != \"NVFP4QuantizeMethod\":",
+       "+            return None",
+       "+        packed = getattr(module, \"_nvfp4_weight\", None)",
+       "+        if (not isinstance(packed, torch.Tensor)",
+       "+                or packed.device != hidden_states.device):",
+       "+            return None",
+       "+",
+       "+        owners = (",
+       "+            (\"module\", vars(module)),",
+       "+            (\"parameters\", module._parameters),",
+       "+            (\"buffers\", module._buffers),",
+       "+            (\"method\", vars(method)),",
+       "+        )",
+       "+        for owner_name, values in owners:",
+       "+            for attr, value in sorted(values.items()):",
+       "+                label = (name, owner_name, attr)",
+       "+                if isinstance(value, torch.Tensor):",
+       "+                    try:",
+       "+                        version = value._version",
+       "+                    except RuntimeError:",
+       "+                        return None",
+       "+                    tensors.append((",
+       "+                        label, id(value), value.data_ptr(), version,",
+       "+                        tuple(value.shape), tuple(value.stride()),",
+       "+                        value.dtype, value.device,",
+       "+                    ))",
+       "+                elif type(value) in (bool, int, float, str, type(None)):",
+       "+                    options.append((label, value))",
+       "+        options.append((name, id(module), id(method), type(method)))",
+       "+",
+       "+    return (",
+       "+        tuple(hidden_states.shape),",
+       "+        tuple(hidden_states.stride()),",
+       "+        hidden_states.dtype,",
+       "+        hidden_states.device,",
+       "+        stream.cuda_stream,",
+       "+        torch.is_inference_mode_enabled(),",
+       "+        torch.is_autocast_enabled(\"cuda\"),",
+       "+        torch.get_autocast_dtype(\"cuda\"),",
+       "+        ff.fuse_swiglu,",
+       "+        ff.exact_swiglu,",
+       "+        ff.use_mxfp8,",
+       "+        type(ff)._forward,",
+       "+        tuple(tensors),",
+       "+        tuple(options),",
+       "+    )",
+       "+",
+       "+",
+       " def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:",
+       "     \"\"\"Triton kernels are inference-only and trace as opaque custom ops.",
+       " ",
+       "@@ -99,6 +160,90 @@ def _can_run_minimax_h3_fusion(tensor: torch.Tensor) -> bool:",
+       "     return HAVE_TRITON and tensor.is_cuda and not torch.is_grad_enabled()",
+       " ",
+       " ",
+       "+def _h3_ff_graph_forward(ff, hidden_states):",
+       "+    \"\"\"Replay the original inference FFN, or return None for eager fallback.\"\"\"",
+       "+    if (torch.compiler.is_compiling()",
+       "+            or torch.is_grad_enabled()",
+       "+            or type(ff) is not MiniMaxH3FeedForward",
+       "+            or ff.training",
+       "+            or ff.use_mxfp8",
+       "+            or ff._forward_hooks",
+       "+            or ff._forward_pre_hooks",
+       "+            or ff._backward_hooks",
+       "+            or hidden_states.requires_grad",
+       "+            or not hidden_states.is_cuda",
+       "+            or hidden_states.dtype != torch.bfloat16",
+       "+            or hidden_states.ndim != 3",
+       "+            or hidden_states.shape[0] != 1",
+       "+            or hidden_states.shape[1] < 1024",
+       "+            or hidden_states.shape[2] <= 0",
+       "+            or not hidden_states.is_contiguous()",
+       "+            or hidden_states.storage_offset() != 0",
+       "+            or torch.cuda.get_device_capability(hidden_states.device) != (10, 0)):",
+       "+        return None",
+       "+",
+       "+    with torch.cuda.device(hidden_states.device):",
+       "+        if torch.cuda.is_current_stream_capturing():",
+       "+            return None",
+       "+        current = torch.cuda.current_stream(hidden_states.device)",
+       "+        signature = _h3_ff_graph_signature(ff, hidden_states, current)",
+       "+        if signature is None:",
+       "+            return None",
+       "+",
+       "+        cache = getattr(_h3_ff_graph_forward, \"_graphs_v2\", None)",
+       "+        if cache is None:",
+       "+            import weakref",
+       "+            cache = weakref.WeakKeyDictionary()",
+       "+            _h3_ff_graph_forward._graphs_v2 = cache",
+       "+",
+       "+        state = cache.get(ff)",
+       "+        if state is None or state[0] != signature:",
+       "+            # Each layer owns its graph pool and stable input/output storage.",
+       "+            cache.pop(ff, None)",
+       "+            static_input = torch.empty_like(hidden_states)",
+       "+            side = torch.cuda.Stream(device=hidden_states.device)",
+       "+            side.wait_stream(current)",
+       "+            try:",
+       "+                with torch.cuda.stream(side):",
+       "+                    static_input.copy_(hidden_states)",
+       "+                    for _ in range(2):",
+       "+                        warm_output = ff._forward(static_input)",
+       "+                        del warm_output",
+       "+                side.synchronize()",
+       "+",
+       "+                signature = _h3_ff_graph_signature(ff, hidden_states, current)",
+       "+                if signature is None:",
+       "+                    return None",
+       "+",
+       "+                graph = torch.cuda.CUDAGraph()",
+       "+                with torch.cuda.graph(graph, stream=side):",
+       "+                    static_output = ff._forward(static_input)",
+       "+",
+       "+                after_capture = _h3_ff_graph_signature(ff, hidden_states, current)",
+       "+                if after_capture != signature:",
+       "+                    cache[ff] = (after_capture, None, None, None)",
+       "+                    return None",
+       "+            except (RuntimeError, torch.cuda.OutOfMemoryError):",
+       "+                cache[ff] = (signature, None, None, None)",
+       "+                return None",
+       "+            finally:",
+       "+                current.wait_stream(side)",
+       "+",
+       "+            state = (signature, graph, static_input, static_output)",
+       "+            cache[ff] = state",
+       "+",
+       "+        _, graph, static_input, static_output = state",
+       "+        if graph is None:",
+       "+            return None",
+       "+",
+       "+        # FFN projections are replicated, with no SP collective inside this",
+       "+        # graph. Every rank independently copies its current local shard.",
+       "+        static_input.copy_(hidden_states)",
+       "+        graph.replay()",
+       "+        # Preserve the original fresh-output ownership across later replays.",
+       "+        return static_output.clone(memory_format=torch.preserve_format)",
+       "+",
+       "+",
+       " @torch.compile(dynamic=True, fullgraph=True)",
+       " def _gated_residual(hidden_states: torch.Tensor, gate_table: torch.Tensor, indices: torch.Tensor,",
+       "                     branch: torch.Tensor) -> torch.Tensor:",
+       "@@ -172,6 +317,9 @@ class MiniMaxH3FeedForward(nn.Module):",
+       "                 rows = slice(start, start + self.chunk_tokens)",
+       "                 out[..., rows, :] = self._forward(hidden_states[..., rows, :].contiguous())",
+       "             return out",
+       "+        graphed = _h3_ff_graph_forward(self, hidden_states)",
+       "+        if graphed is not None:",
+       "+            return graphed",
+       "         return self._forward(hidden_states)",
+       " ",
+       "     def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor:"
+      ]
+     }
+    ],
+    "title": "Add CUDA graph signature checking and replay for H3 feed-forward layers"
+   }
   }
  ]
 }

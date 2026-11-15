@@ -51,18 +51,19 @@ if os.path.exists(PRS):
         for t in TIM:
             if t["engine"] == e["engine"]: by.setdefault(t["id"], []).append(t)
         for cid, ts in by.items():
-            t = sorted(ts, key=lambda t: t["fastrsi"]["outcome"] != "installed live")[0]
+            isl = lambda o: o.startswith("installed live")   # Megatron-LM writes "installed live"; FastVideo adds how far it was proven
+            t = sorted(ts, key=lambda t: not isl(t["fastrsi"]["outcome"]))[0]
             r = next((r for r in rows if str(r["pr"]) == cid), None)
             if r is None:   # one of our own agent edits: no upstream pull request, the diff comes with the timing
                 dj = t["diff"]; r = {"pr": cid, "repo": t["repo"], "title": dj["title"], "utitle": dj["title"], "agent": True, "install": "", "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": [{"path": f["path"], "lines": f["lines"], "cut": 0} for f in dj["files"]], "more": 0}; rows.append(r)
             fr, rs, notes = t["fastrsi"], t["restart"], []
-            lab = lambda o: "installed live" if o == "installed live" else "restarted from a warm copy" if "warm restart" in o else "fell back to a restart"
+            lab = lambda o: ("installed live, partly proven" if "partly proven" in o else "installed live") if isl(o) else "restarted from a warm copy" if re.search(r"warm restart|restarted warm", o) else "fell back to a restart"
             if t["variant"]:
                 o = [x for x in ts if x is not t][0]
                 notes.append("This check makes one %s. Without it the check never runs the edited code, and FastRSI restarts instead: %.1f s against %.1f s." % (t["variant"].replace(" before the check", " first"), o["fastrsi"]["total"], o["restart"]["total"]))
             if t.get("improved"):
                 im = t["improved"]; notes.append("With a fix that is not merged yet: %.1f s (%.1f\u00d7), %s." % (im["total"], rs["total"] / im["total"], lab(im["outcome"])))
-            r.update({"live": fr["outcome"] == "installed live", "tag": lab(fr["outcome"]), "t_rst": rs["total"], "t_run": fr["total"], "x": round(rs["total"] / fr["total"], 1), "ph": [rs["phases"], fr["phases"]], "setup": t["setup"], "notes": notes, "pair": "", "variant": t["variant"]})
+            r.update({"live": isl(fr["outcome"]), "tag": lab(fr["outcome"]), "t_rst": rs["total"], "t_run": fr["total"], "x": round(rs["total"] / fr["total"], 1), "ph": [rs["phases"], fr["phases"]], "setup": t["setup"], "notes": notes, "pair": "", "variant": t["variant"]})
         for r in rows: r["copy"] = [[b["label"], COPY_BY.get(str(r["pr"]), {}).get(b["key"], "")] for b in COPY.get("blocks", [])]
         for r in rows:
             if any(t for _, t in r["copy"]): r["notes"] = []   # the case text already says it
