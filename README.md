@@ -20,7 +20,7 @@ state instead of rebuilding it. Source: [`repos/vllm/kb/costs.md`](repos/vllm/kb
 | + keep CUDA graphs | 58 s (derived) | 3.9× |
 | + keep the live process (hot swap) | 23.6 s | 9.6× |
 | then skip the logprob check | 14.1 s | |
-| then test with a small batch | 2.4 s | 95× end to end |
+| then test with a small batch | 2.4 s | 95× end to end (4.8 s / 48× with the logprob check kept) |
 
 The two derived rows are computed by removing one phase from a measured run, not measured on their
 own. 204 s of the 228 s restart is setup that the edit did not invalidate. The other engines:
