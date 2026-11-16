@@ -1,0 +1,125 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "miles",
+  "rules_version": "miles-1",
+  "upstream": {
+    "repo": "radixark/miles",
+    "commit": "7767e158bcb743b47a7db0b0674abebacc02e82a",
+    "version": "0.2.0 (THUDM/slime fork; scanned at upstream HEAD)"
+  },
+  "lab_path": "repos/miles/livelab",
+  "source_roots": [
+    "miles",
+    "miles_plugins",
+    "train.py",
+    "train_async.py",
+    "train_multi_policy.py",
+    "serve_tinker.py"
+  ],
+  "native_roots": [
+    "miles",
+    "miles_plugins"
+  ],
+  "exclude": [
+    "*/tests/*",
+    "*/test/*",
+    "*/test_utils/*",
+    "*/test_*.py",
+    "miles/kernels/quant/int4_fake/setup.py"
+  ],
+  "decorators": {
+    "dsl_kernel": [
+      "cute.jit",
+      "cute.kernel",
+      "dsl_user_op",
+      "tilelang.jit",
+      "T.prim_func"
+    ],
+    "compiled": []
+  },
+  "paths": [
+    {"glob": "train.py", "group": "restart", "why": "synchronous orchestrator entrypoint and top-level RL loop"},
+    {"glob": "train_async.py", "group": "restart", "why": "asynchronous orchestrator entrypoint and top-level RL loop"},
+    {"glob": "train_multi_policy.py", "group": "restart", "why": "multi-policy orchestrator entrypoint"},
+    {"glob": "serve_tinker.py", "group": "restart", "why": "standalone Tinker API server entrypoint"},
+    {"glob": "miles/utils/arguments.py", "group": "restart", "why": "CLI launch flags and argument validation"},
+    {"glob": "miles/utils/argparse_utils.py", "group": "restart", "why": "CLI parser construction at process start"},
+    {"glob": "miles/utils/args/*", "group": "restart", "why": "startup configuration schemas frozen after init"},
+    {"glob": "miles/utils/environ.py", "group": "restart", "why": "environment variables read at startup"},
+    {"glob": "miles/backends/megatron_utils/arguments.py", "group": "restart", "why": "Megatron launch flags parsed at start"},
+    {"glob": "miles/backends/fsdp_utils/arguments.py", "group": "restart", "why": "FSDP launch flags parsed at start"},
+    {"glob": "miles/backends/sglang_utils/arguments.py", "group": "restart", "why": "SGLang server launch flags parsed at start"},
+    {"glob": "miles/tinker/arguments.py", "group": "restart", "why": "Tinker CLI launch flags"},
+    {"glob": "miles/ray/placement_group.py", "group": "RANKS", "why": "Ray placement group bundle allocation across nodes and GPUs"},
+    {"glob": "miles/ray/specs/*", "group": "RANKS", "why": "Ray worker pool specs and actor topology"},
+    {"glob": "miles/utils/workers/*", "group": "RANKS", "why": "worker supervision, launch gates, and Ray/K8s provider handles"},
+    {"glob": "miles/utils/distributed_utils.py", "group": "RANKS", "why": "Gloo and NCCL process-group setup shared across ranks"},
+    {"glob": "miles/utils/reloadable_process_group.py", "group": "RANKS", "why": "torch.distributed process-group lifecycle"},
+    {"glob": "miles/backends/megatron_utils/parallel.py", "group": "RANKS", "why": "Megatron TP/PP/CP/EP parallel group verification"},
+    {"glob": "miles/backends/fsdp_utils/parallel.py", "group": "RANKS", "why": "FSDP device mesh and parallel state"},
+    {"glob": "miles/backends/training_utils/parallel.py", "group": "RANKS", "why": "cross-backend training parallel topology"},
+    {"glob": "miles/backends/megatron_utils/checkpoint*.py", "group": "RESOURCE", "why": "Megatron checkpoint load/save and weight materialization"},
+    {"glob": "miles/backends/fsdp_utils/checkpoint.py", "group": "RESOURCE", "why": "FSDP distributed state_dict checkpoint loading"},
+    {"glob": "miles/backends/training_utils/checkpoint/*", "group": "RESOURCE", "why": "checkpoint iteration tracking and load routing"},
+    {"glob": "miles_plugins/models/*", "group": "GRAPH", "why": "model forward layers that execute inside Megatron CUDA graphs when graph capture is enabled"},
+    {"glob": "miles/backends/fsdp_utils/models/*", "group": "GRAPH", "why": "FSDP model blocks that run under torch.compile when enabled"}
+  ],
+  "install_overrides": {},
+  "capabilities": {
+    "swap": {
+      "why": "MilesStepGate attaches MilesActorParticipant (reusing core/livelab/ray_participants.py) to RolloutExecutor/RolloutManager and MegatronTrainRayActor/FSDPTrainRayActor ranks",
+      "evidence": [[
+        {"path": "repos/miles/livelab/adapter/gate.py", "contains": "MilesStepGate"},
+        {"path": "core/livelab/ray_participants.py", "contains": "RayActorParticipant"}
+      ]],
+      "unreached": [
+        "miles/dashboard/*",
+        "miles/tinker/*",
+        "miles/router/*",
+        "miles/platforms/tpu*"
+      ]
+    },
+    "swap_recapture": {
+      "why": "no automatic Megatron/SGLang CUDA graph recapture wired inside miles adapter yet",
+      "evidence": []
+    },
+    "jit_rebuild": {
+      "why": "core/livelab/kernel/jit.py rebuilds @triton.jit kernels in place inside reached trainer and rollout Ray actors",
+      "evidence": [[
+        {"path": "repos/miles/livelab/adapter/gate.py", "contains": "MilesActorParticipant"},
+        {"path": "core/livelab/kernel/jit.py"}
+      ]],
+      "unreached": [
+        "miles/dashboard/*",
+        "miles/tinker/*",
+        "miles/router/*"
+      ]
+    },
+    "constructor_reinit": {
+      "why": "core/livelab/kernel/reinit.py re-initializes pure fresh constructor fields on live actor instances once merged",
+      "evidence": [[
+        {"path": "repos/miles/livelab/adapter/gate.py", "contains": "MilesActorParticipant"},
+        {"path": "core/livelab/kernel/reinit.py"}
+      ]],
+      "unreached": [
+        "miles/dashboard/*",
+        "miles/tinker/*",
+        "miles/router/*"
+      ]
+    },
+    "rebuild": {
+      "why": "no general STATE or RESOURCE object rebuild in miles adapter yet",
+      "evidence": []
+    },
+    "respawn": {
+      "why": "MilesLab.reset('respawn') restarts the Ray actor worker group and recovers Session state",
+      "evidence": [[
+        {"path": "repos/miles/livelab/adapter/lab.py", "contains": "self.session.recovered"}
+      ]],
+      "unreached": [
+        "miles/dashboard/*",
+        "miles/tinker/*"
+      ]
+    }
+  }
+}
