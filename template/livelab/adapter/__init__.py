@@ -1,8 +1,9 @@
 """Minimal onboarding skeleton for `repos/<new-engine>/livelab/adapter/__init__.py`.
 
 When copied to `repos/<new-engine>/livelab/adapter/__init__.py`, importing this package puts
-`<repo>/core/livelab` (or `FASTRSI_LIVELAB` when set) on `sys.path` so `from kernel import ...`
-and `import forksafe` resolve directly from the shared runtime in `core/livelab/`.
+`<repo>/core/livelab` (or `FASTRSI_LIVELAB` when set) on `sys.path` so `from kernel import ...`,
+`import ray_participants`, and `import forksafe` resolve directly from the shared runtime in
+`core/livelab/`.
 """
 import os
 import sys
@@ -16,7 +17,7 @@ _CANDIDATES = (
 )
 LIVELAB = os.path.abspath(
     os.environ.get("FASTRSI_LIVELAB")
-    or next((p for p in _CANDIDATES if os.path.isdir(p)), _CANDIDATES[0])
+    or next((candidate for candidate in _CANDIDATES if os.path.isdir(candidate)), _CANDIDATES[0])
 )
 if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
