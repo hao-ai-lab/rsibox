@@ -410,8 +410,10 @@ class KVStateSnapshotter:
 
     def capture(self, runner: Any, *, kv_mode: str | None = None, horizon_steps: int | None = None, max_step_tokens: int | None = None, journal: Any | None = None) -> KVStateSnapshot:
         t0, eff_mode = _now_ms(), kv_mode or self.kv_mode
-        if eff_mode not in self.VALID_KV_MODES or getattr(runner, "input_batch", None) is None:
-            raise ValueError(f"Unsupported kv_mode={eff_mode!r} or missing runner.input_batch")
+        if eff_mode not in self.VALID_KV_MODES:
+            raise ValueError(f"Unsupported kv_mode={eff_mode!r}; expected one of {sorted(self.VALID_KV_MODES)}")
+        if getattr(runner, "input_batch", None) is None:
+            raise ValueError("runner has no input_batch (vLLM V2 GPUModelRunner uses runner.req_states/block_tables; set VLLM_USE_V2_MODEL_RUNNER=0 for V1 snapshot_replay)")
         eff_steps = horizon_steps if horizon_steps is not None else self.horizon_steps
         eff_step_toks = max_step_tokens if max_step_tokens is not None else self.max_step_tokens
         input_batch, num_reqs = runner.input_batch, int(getattr(runner.input_batch, "num_reqs", 0))
@@ -498,8 +500,10 @@ class KVStateSnapshotter:
         runner since, or a seeded row whose generator is gone, cannot be restored: SnapshotError,
         before anything is changed. Requests that joined since are dropped with their rows."""
         t0, snap = _now_ms(), snapshot or self._last_snapshot
-        if snap is None or getattr(runner, "input_batch", None) is None:
-            raise ValueError("Valid snapshot and runner.input_batch required for restore()")
+        if snap is None:
+            raise ValueError("Valid snapshot required for restore()")
+        if getattr(runner, "input_batch", None) is None:
+            raise ValueError("runner has no input_batch (vLLM V2 GPUModelRunner uses runner.req_states/block_tables; set VLLM_USE_V2_MODEL_RUNNER=0 for V1 snapshot_replay)")
         input_batch, num_reqs, runner_requests = runner.input_batch, snap.num_reqs, getattr(runner, "requests", None)
         if isinstance(runner_requests, dict):
             missing = sorted(req_id for req_id in snap.requests if req_id not in runner_requests)
