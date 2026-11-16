@@ -1,0 +1,95 @@
+# SGLang costs
+
+Prior measurements gathered before new runs, plus the static-survey baseline. Every number names
+its source and setup; anything we have not timed yet is listed under [Not measured yet](#not-measured-yet).
+
+## FastRSI v0 overhead and conformance (Qwen3-8B, 1 GPU, sampler edits)
+
+Source: `legacy/v0` branch, `receipts/overhead-sglang.json`, `receipts/conformance-sglang.json`,
+`receipts/control-repeatability.json`, and `docs/overhead.md` (model and workload reconstructed
+at `0ab2ef8`: `lmsysorg/sglang@sha256:b1259f3ea327...`, `sglang.Engine`, `random_seed=0`,
+`max_running_requests=1`, 8 prompts x 32 greedy tokens = 256 tokens; GPU model not recorded in
+the v0 receipt).
+
+| Cost | Value | Source |
+|---|---:|---|
+| Fresh engine startup, stock median (min-max, n=3) | 79.05 s (78.86-79.23 s) | `overhead-sglang.json` |
+| Fresh engine startup, agent loaded (min-max, n=3) | 79.42 s (78.67-79.44 s) | same |
+| Workload (8 x 32 greedy tokens), stock vs agent median (n=45) | 1.0349 s vs 1.0354 s (+0.06%, within run-to-run spread) | same |
+| Live code swap install, median / p90 / max (n=40) | 79.1 / 91.9 / 740.2 ms | same |
+| Live code swap undo, median / p90 / max (n=40) | 16.0 / 19.2 / 25.6 ms | same |
+| `reset` (`engine.flush_cache()`), single call | 2.26 ms | same |
+| Host RSS, stock vs agent | 6,076-6,095 MiB vs 6,080-6,089 MiB | same |
+| Host RSS growth across 40 install/undo cycles | +48.9 MiB (+1.22 MiB/cycle) | same |
+| GPU memory, stock vs agent (and after 40 cycles) | 58,927 MiB vs 58,927 MiB (+0 MiB) | same |
+| Fresh-process equivalence check (`c3_fresh_equivalence`) | 86.09 s | `conformance-sglang.json` |
+| Crash detect / crash recover (`c8_crash_and_hang`) | 6.32 s / 59.10 s | same |
+| Hang detect (60 s timeout) / hang recover | 60.01 s / 60.29 s | same |
+| Repeatability, `max_running_requests=1`, 8 x 32 tokens | 1 distinct digest in 30 runs (`c0_repeatable`, 31.10 s) | same |
+| Repeatability, batched 32 x 64 tokens, stock (reset between runs) | 6 distinct digests in 60 runs | `control-repeatability.json` |
+| Repeatability, batched 32 x 64 tokens, agent (reset / swap+undo) | 5 / 5 distinct digests in 60 runs | same |
+
+Reading: a fresh engine start (~79 s) or crash recovery (~65 s) is roughly three orders of
+magnitude slower than a sampler swap + undo + `flush_cache` (~97 ms). Batched greedy decoding
+varied even with no agent loaded, which is why the workload gates at `max_running_requests=1`
+(`workload.md`).
+
+## Static coverage survey (`fastrsi-survey/1`)
+
+Source: `core/livelab/survey` (ruleset `1`) run against the `sgl-project/sglang` Python tree at
+snapshot `cf9845f8e` (`0.5.10.post2.dev438`), excluding test files (`kb/survey_rules.json`,
+version `sglang-1`). Command (from `core/livelab` in the survey worktree):
+
+```sh
+python3 -m survey scan --rules repos/sglang/kb/survey_rules.json \
+    --source <sglang>/python --repo . --date 2026-11-16 \
+    --out coverage_scan_sglang.json --summary
+```
+
+Totals across `<sglang>/python/sglang` (19,769 Python functions, 499,480 non-comment Python
+lines; 96 native C++/CUDA files with 20,521 lines; 1 unparsed file of 55 lines,
+`sglang/srt/models/qwen2_classification.py`, leading U+FEFF BOM):
+
+| Install class | Functions | Covered (with adapter + recapture + zygote) | Python lines | Covered lines |
+|---|---:|---:|---:|---:|
+| `swap` (`OP`) | 10,084 | 4,582 | 186,286 | 83,661 |
+| `swap_recapture` (`GRAPH` + `@triton.jit`) | 5,185 | 5,169 | 130,110 | 129,732 |
+| `rebuild` (`STATE` + `RESOURCE`) | 3,946 | 0 | 105,590 | 0 |
+| `respawn` (`RANKS` + CuteDSL/TileLang + `module_level`) | 290 | 290 | 66,238 | 47,336 |
+| `restart` (CLI, `ServerArgs`, `environ`, plugins) | 264 | - | 11,256 | - |
+| **Total Python** | **19,769** | **9,751 live (49.3%) + 290 respawn (1.5%)** | **499,480** | **213,393 live (42.7%) + 47,336 respawn (9.5%)** |
+| Native C++/CUDA (counted apart) | 96 files | 0 (restart) | 20,521 | 0 |
+
+Note on capability gating: `survey` marks a capability covered only when the evidence files in
+`survey_rules.json` exist in `--repo`. Before `adapter/{lab,agent,recapture}.py` land on disk
+(with only `services/zygote.py` present), live covered is `0 / 19,769` and respawn covered is
+`290 / 19,769` (`47,336` lines); once those three adapter files are present, the same rules file
+reports the `9,751` live-covered functions (`49.3%`) shown above.
+
+Where the 9,464 uncovered non-restart functions sit once the adapter is present:
+
+- **Out-of-scope subpackages (`sglang/multimodal_gen/*`, `sglang/lang/*`, benchmarks):** 4,612
+  functions live in `multimodal_gen` (diffusion/video generation, a separate runtime from `srt`).
+  Within `sglang/srt` alone (14,036 functions), **9,272 functions (66.1%)** are live-covered
+  (`4,117` `swap` + `5,155` `swap_recapture`) and `280` (`2.0%`) are respawn-covered.
+- **Constructors and start-time builders (`3,946` `rebuild` functions; `2,868` in `srt`, of
+  which `1,817` are `__init__`/`__post_init__`):** no in-place `rebuild` capability is wired yet.
+- **Unreached non-scheduler processes in `srt` (`1,452` `swap` functions):** `entrypoints/*`
+  (`400`), `debug_utils/*` (`448`), `function_call/*` (`181`), `TokenizerManager` /
+  `DetokenizerManager` / `DataParallelController` (`179`), and multimodal processors (`167`) run
+  outside the scheduler process where the participant lives.
+- **Firm vs heuristic share:** `2,780` functions (`14.1%`) are syntax-proved (`@triton.jit`
+  `236`, `@torch.compile` `40`, CuteDSL/TileLang `17`, constructors `2,487`); `16,989` (`85.9%`)
+  rest on path, name, or `default_op` heuristics.
+
+## Not measured yet
+
+- Phase-by-phase startup breakdown on Qwen3-0.6B and Qwen3-8B at snapshot `cf9845f8e`
+  (`init_torch_distributed`, `load_model`, `init_memory_pool`, `kernel_warmup`,
+  `CudaGraphRunner` capture).
+- Zygote fork time to ready vs fresh `sglang.Engine` start, and module-refresh cost on SGLang's
+  import graph.
+- In-place `CudaGraphRunner` recapture latency (single batch size vs full `capture_bs` sweep) at
+  TP 1 and TP > 1.
+- Overlap-scheduler drain latency (`pause_generation(mode="retract")` + `continue_generation`)
+  at the step gap.
