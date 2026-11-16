@@ -1,17 +1,17 @@
 {
  "schema": "fastrsi-survey/1/history",
  "engine": "megatron",
- "scan_date": "2026-11-11",
- "ruleset_version": "1",
- "engine_rules_version": "megatron-1",
- "engine_rules_sha256": "ff010b82af404c6472deb4f7f2ebe727a565a37fb554320000c4de6861975d01",
+ "scan_date": "2026-11-16",
+ "ruleset_version": "1.1",
+ "engine_rules_version": "megatron-1.1",
+ "engine_rules_sha256": "119a7538d669095df788bce07803771ca5142d946d3f1126782c137d4460ec18",
  "upstream": {
   "repo": "NVIDIA/Megatron-LM",
   "commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7",
   "version": "megatron-core 0.20.0 (kb/sources.md; scanned without our local modifications)",
   "scanned_commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7"
  },
- "ref": "origin/main",
+ "ref": "int/all-open-prs-20261116",
  "lab_path": "repos/megatron/livelab",
  "points": [
   {
@@ -23,6 +23,7 @@
     "swap": false,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -65,6 +66,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -107,6 +109,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -149,6 +152,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -191,6 +195,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -233,6 +238,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": false
    },
@@ -275,6 +281,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
@@ -317,6 +324,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
@@ -359,6 +367,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
@@ -401,6 +410,7 @@
     "swap": true,
     "swap_recapture": false,
     "jit_rebuild": false,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
@@ -442,20 +452,21 @@
    "capabilities": {
     "swap": true,
     "swap_recapture": false,
-    "jit_rebuild": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
-   "changed": false,
+   "changed": true,
    "functions": {
     "total": 8907,
-    "live_covered": 6769,
+    "live_covered": 6936,
     "respawn_covered": 173,
     "restart": 190,
-    "not_covered": 1775,
+    "not_covered": 1608,
     "by_install_covered": {
      "swap": 6769,
-     "swap_recapture": 0,
+     "swap_recapture": 167,
      "rebuild": 0,
      "respawn": 173,
      "restart": 0
@@ -463,13 +474,13 @@
    },
    "lines": {
     "total": 283301,
-    "live_covered": 167708,
+    "live_covered": 176823,
     "respawn_covered": 36487,
     "restart": 10308,
-    "not_covered": 68798,
+    "not_covered": 59683,
     "by_install_covered": {
      "swap": 167708,
-     "swap_recapture": 0,
+     "swap_recapture": 9115,
      "rebuild": 0,
      "respawn": 36487,
      "restart": 0
@@ -484,20 +495,21 @@
    "capabilities": {
     "swap": true,
     "swap_recapture": false,
-    "jit_rebuild": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
    "changed": false,
    "functions": {
     "total": 8907,
-    "live_covered": 6769,
+    "live_covered": 6936,
     "respawn_covered": 173,
     "restart": 190,
-    "not_covered": 1775,
+    "not_covered": 1608,
     "by_install_covered": {
      "swap": 6769,
-     "swap_recapture": 0,
+     "swap_recapture": 167,
      "rebuild": 0,
      "respawn": 173,
      "restart": 0
@@ -505,13 +517,13 @@
    },
    "lines": {
     "total": 283301,
-    "live_covered": 167708,
+    "live_covered": 176823,
     "respawn_covered": 36487,
     "restart": 10308,
-    "not_covered": 68798,
+    "not_covered": 59683,
     "by_install_covered": {
      "swap": 167708,
-     "swap_recapture": 0,
+     "swap_recapture": 9115,
      "rebuild": 0,
      "respawn": 36487,
      "restart": 0
@@ -526,20 +538,21 @@
    "capabilities": {
     "swap": true,
     "swap_recapture": false,
-    "jit_rebuild": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
    "changed": false,
    "functions": {
     "total": 8907,
-    "live_covered": 6769,
+    "live_covered": 6936,
     "respawn_covered": 173,
     "restart": 190,
-    "not_covered": 1775,
+    "not_covered": 1608,
     "by_install_covered": {
      "swap": 6769,
-     "swap_recapture": 0,
+     "swap_recapture": 167,
      "rebuild": 0,
      "respawn": 173,
      "restart": 0
@@ -547,13 +560,13 @@
    },
    "lines": {
     "total": 283301,
-    "live_covered": 167708,
+    "live_covered": 176823,
     "respawn_covered": 36487,
     "restart": 10308,
-    "not_covered": 68798,
+    "not_covered": 59683,
     "by_install_covered": {
      "swap": 167708,
-     "swap_recapture": 0,
+     "swap_recapture": 9115,
      "rebuild": 0,
      "respawn": 36487,
      "restart": 0
@@ -568,20 +581,21 @@
    "capabilities": {
     "swap": true,
     "swap_recapture": false,
-    "jit_rebuild": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
    "changed": false,
    "functions": {
     "total": 8907,
-    "live_covered": 6769,
+    "live_covered": 6936,
     "respawn_covered": 173,
     "restart": 190,
-    "not_covered": 1775,
+    "not_covered": 1608,
     "by_install_covered": {
      "swap": 6769,
-     "swap_recapture": 0,
+     "swap_recapture": 167,
      "rebuild": 0,
      "respawn": 173,
      "restart": 0
@@ -589,13 +603,13 @@
    },
    "lines": {
     "total": 283301,
-    "live_covered": 167708,
+    "live_covered": 176823,
     "respawn_covered": 36487,
     "restart": 10308,
-    "not_covered": 68798,
+    "not_covered": 59683,
     "by_install_covered": {
      "swap": 167708,
-     "swap_recapture": 0,
+     "swap_recapture": 9115,
      "rebuild": 0,
      "respawn": 36487,
      "restart": 0
@@ -610,20 +624,21 @@
    "capabilities": {
     "swap": true,
     "swap_recapture": false,
-    "jit_rebuild": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
     "rebuild": false,
     "respawn": true
    },
    "changed": false,
    "functions": {
     "total": 8907,
-    "live_covered": 6769,
+    "live_covered": 6936,
     "respawn_covered": 173,
     "restart": 190,
-    "not_covered": 1775,
+    "not_covered": 1608,
     "by_install_covered": {
      "swap": 6769,
-     "swap_recapture": 0,
+     "swap_recapture": 167,
      "rebuild": 0,
      "respawn": 173,
      "restart": 0
@@ -631,13 +646,99 @@
    },
    "lines": {
     "total": 283301,
-    "live_covered": 167708,
+    "live_covered": 176823,
     "respawn_covered": 36487,
     "restart": 10308,
-    "not_covered": 68798,
+    "not_covered": 59683,
     "by_install_covered": {
      "swap": 167708,
-     "swap_recapture": 0,
+     "swap_recapture": 9115,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 15,
+   "commit": "b8653f4f68a9b00efa1ad18cb74b0567cd133719",
+   "date": "2026-11-16T00:58:25-08:00",
+   "subject": "Merge PR #155 (7e9a8cb)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6936,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1608,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 167,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 176823,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 59683,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 9115,
+     "rebuild": 0,
+     "respawn": 36487,
+     "restart": 0
+    }
+   }
+  },
+  {
+   "index": 16,
+   "commit": "d69a34a71a551d1547247d4ccc57266637d8f26a",
+   "date": "2026-11-16T00:58:26-08:00",
+   "subject": "Merge PR #147 (d60009c)",
+   "capabilities": {
+    "swap": true,
+    "swap_recapture": false,
+    "jit_rebuild": true,
+    "constructor_reinit": false,
+    "rebuild": false,
+    "respawn": true
+   },
+   "changed": false,
+   "functions": {
+    "total": 8907,
+    "live_covered": 6936,
+    "respawn_covered": 173,
+    "restart": 190,
+    "not_covered": 1608,
+    "by_install_covered": {
+     "swap": 6769,
+     "swap_recapture": 167,
+     "rebuild": 0,
+     "respawn": 173,
+     "restart": 0
+    }
+   },
+   "lines": {
+    "total": 283301,
+    "live_covered": 176823,
+    "respawn_covered": 36487,
+    "restart": 10308,
+    "not_covered": 59683,
+    "by_install_covered": {
+     "swap": 167708,
+     "swap_recapture": 9115,
      "rebuild": 0,
      "respawn": 36487,
      "restart": 0

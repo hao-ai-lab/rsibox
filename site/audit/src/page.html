@@ -1,17 +1,19 @@
 <div class="fr pg au">
   <nav class="pg-nav" aria-label="Site">
     <a class="pg-mark" href="../">FastRSI</a>
-    <span class="pg-links pg-tabs"><a href="../">Overview</a><a href="#prs" data-tab="prs">Supported PRs</a><a href="#coverage" data-tab="coverage">Coverage</a><a href="#conventions" data-tab="conventions">Conventions</a><a href="#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
+    <span class="pg-links pg-tabs"><a href="../">Overview</a><a href="#prs" data-tab="prs">Supported PRs</a><a href="#coverage" data-tab="coverage">Coverage</a><a href="#boundaries" data-tab="boundaries">Architecture &amp; Risk</a><a href="#atlas" data-tab="atlas">Atlas (4 Panels)</a><a href="#conventions" data-tab="conventions">Conventions</a><a href="#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
   <header class="pg-hero au-hero" id="top">
     <h1 class="fr-title pg-title">FastRSI Audit</h1>
-    <p class="fr-lede pg-lede">The detail behind the <a href="../">FastRSI home page</a>: which upstream pull requests were replayed in a live engine, what is and is not measured about coverage and conversion, the conventions every lab follows, and the fault-injection results. <b>Every row names its source. A value that was never recorded says "not recorded".</b></p>
+    <p class="fr-lede pg-lede">The detail behind the <a href="../">FastRSI home page</a>: which upstream pull requests were replayed in a live engine, static six-engine coverage and capability simulation, the eight-boundary interface risk matrix, the conventions every lab follows, and the fault-injection results. <b>Every row names its source. A value that was never recorded says "not recorded".</b></p>
   </header>
 
   <nav class="au-tabs" id="au-tabs" aria-label="Views">
     <a href="#prs" data-tab="prs">Supported PRs</a>
     <a href="#coverage" data-tab="coverage">Coverage and conversion</a>
+    <a href="#boundaries" data-tab="boundaries">Architecture &amp; Risk</a>
+    <a href="#atlas" data-tab="atlas">Atlas (4 Panels)</a>
     <a href="#conventions" data-tab="conventions">Conventions</a>
     <a href="#faults" data-tab="faults">Faults</a>
   </nav>
@@ -19,6 +21,8 @@
   <main>
     <section class="au-view" data-view="prs" aria-label="Supported PRs"></section>
     <section class="au-view" data-view="coverage" aria-label="Coverage and conversion" hidden></section>
+    <section class="au-view" data-view="boundaries" aria-label="Architecture and interface risk" hidden></section>
+    <section class="au-view" data-view="atlas" aria-label="Coverage and interface risk atlas" hidden></section>
 
     <section class="au-view" data-view="conventions" aria-label="Conventions" hidden>
       <p class="au-intro">The rules every engine's live lab follows: the interface, the six function groups, how a transaction and its witness work, the rules for agents, and the conformance cases. This view quotes the repo's documents. It does not show how well any engine follows them; the conformance results at the end are the only measurement here.</p>
@@ -202,6 +206,6 @@ phase 2, one step gap:  validate on every participant (staged code still current
   </main>
 
   <footer class="pg-foot au-foot">
-    <p class="fr-note">FastRSI Audit is the detail companion to the <a href="../">FastRSI home page</a>. Sources are paths in the FastRSI repo (with line numbers), pull requests of that repo, upstream pull requests on GitHub, or an earlier measurement run. Facts gathered on 2026-11-11.</p>
+    <p class="fr-note">FastRSI Audit is the detail companion to the <a href="../">FastRSI home page</a>. Sources are paths in the FastRSI repo (with line numbers), pull requests of that repo, upstream pull requests on GitHub, or an earlier measurement run. Replay and conversion facts gathered on 2026-11-11; static six-engine survey (ruleset 1.1) and interface risk matrix updated on 2026-11-16.</p>
   </footer>
 </div>

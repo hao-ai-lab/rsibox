@@ -1,0 +1,2418 @@
+{
+ "schema": "fastrsi-interface-risks/1",
+ "updated": "2026-11-16",
+ "source": "core/livelab/INTERFACE-v1.md; FastRSI PRs #144-#156; Issue #150; repos/*/docs/architecture.md",
+ "boundaries": [
+  {
+   "id": "kernel",
+   "code": "B1",
+   "name": "kernel",
+   "title": "Transaction Coordinator, Swap, Witness, Journal, Reinit, JIT",
+   "files": "core/livelab/kernel/{coordinator,swap,witness,journal,reinit,jit,session}.py",
+   "summary": "Two-phase prepare/validate/commit across participants, journaled code and field edits, Triton JIT rebuild, and per-participant witness proof."
+  },
+  {
+   "id": "adapter",
+   "code": "B2",
+   "name": "adapter",
+   "title": "Engine-Core / Worker Reach, Step-Gap Quiesce, Graph Recapture",
+   "files": "repos/*/livelab/adapter/*, core/livelab/ray_participants.py",
+   "summary": "Hooks the running engine's step boundary across TP/PP/EP or Ray actors, quiesces in-flight work, and recaptures invalidated CUDA graphs."
+  },
+  {
+   "id": "services",
+   "code": "B3",
+   "name": "services",
+   "title": "Launcher, Weight Lease / Holder, Standby Pool, Resharder",
+   "files": "repos/vllm/livelab/services/{engine,weights,reshard}.py, repos/fastvideo/.../holder.py",
+   "summary": "Resident GPU/pinned-host weight holders, warm standby engine pools, IPC socket framing, and process-group teardown."
+  },
+  {
+   "id": "zygote",
+   "code": "B4",
+   "name": "zygote",
+   "title": "Pre-Import Fork Server & Module Refresh",
+   "files": "repos/{vllm,fastvideo,sglang}/livelab/services/zygote*.py, repos/megatron/.../zygote.py",
+   "summary": "Preloads heavy Python packages once before CUDA context creation, then forks warm worker trees that re-import edited modules."
+  },
+  {
+   "id": "forksafe",
+   "code": "B5",
+   "name": "forksafe",
+   "title": "Pre-Fork CUDA Driver/Runtime Guard, GC Freeze, NUMA Binding",
+   "files": "core/livelab/forksafe.py",
+   "summary": "Blocks cuInit and bad-fork poisoning during pre-import, routes device queries through NVML/sysfs, freezes GC, and binds NUMA affinity."
+  },
+  {
+   "id": "livestream",
+   "code": "B6",
+   "name": "livestream",
+   "title": "Telemetry Stream, Step-Record Cross-Checker, Route Tier Classifier",
+   "files": "core/livelab/livestream.py, core/livelab/receipt.py",
+   "summary": "Cross-checks per-rank witness counts, route tier ordering, and linked txn/proof/undo records."
+  },
+  {
+   "id": "reconfigure",
+   "code": "B7",
+   "name": "reconfigure",
+   "title": "Live Scheduler / Arg Delta Classification & In-Process Reconfig",
+   "files": "repos/vllm/livelab/services/{live_reconfig,vllm_args,engine}.py, repos/verl/.../set_config",
+   "summary": "Classifies CLI or trainer config deltas by restart tier and applies safe scheduler/hyperparameter updates in place after preflight checks."
+  },
+  {
+   "id": "snapshot_restore",
+   "code": "B8",
+   "name": "snapshot_restore",
+   "title": "KV-Cache Replay, RNG / Optimizer / Quantized Weight State Reset",
+   "files": "repos/vllm/.../snapshot_replay.py, repos/megatron/.../state.py, repos/{verl,miles}/...",
+   "summary": "Restores deterministic RNG, KV/Radix/Mamba caches, DataBuffer epochs, and byte-exact FP8/MXFP8 or coupled trainer-rollout weights."
+  }
+ ],
+ "engines": [
+  {
+   "engine": "vLLM",
+   "key": "vllm",
+   "kind": "Inference",
+   "repo": "vllm-project/vllm",
+   "status_label": "On main + 11/11 GPU (B200 / 2x GB200)",
+   "topology": {
+    "subtitle": "V1 multi-process serving: HTTP frontend -> EngineCore scheduler -> TP/EP GPU workers",
+    "nodes": [
+     {
+      "id": "api",
+      "label": "API Server",
+      "sub": "HTTP, tokenizers, parsers",
+      "col": 0,
+      "row": 0,
+      "cost": "2-4 s",
+      "reached": false
+     },
+     {
+      "id": "core",
+      "label": "EngineCore",
+      "sub": "V1 Scheduler busy loop",
+      "col": 1,
+      "row": 0,
+      "cost": "4-6 s",
+      "reached": true
+     },
+     {
+      "id": "zygote",
+      "label": "Zygote & Weight Holder",
+      "sub": "Pre-import fork + IPC cache",
+      "col": 1,
+      "row": 1,
+      "cost": "16.6 s fork",
+      "reached": true
+     },
+     {
+      "id": "workers",
+      "label": "TP / EP Worker Group",
+      "sub": "KernelWorkerExtension per rank",
+      "col": 2,
+      "row": 0,
+      "cost": "16-51 s",
+      "reached": true
+     },
+     {
+      "id": "kv",
+      "label": "Model & KV Cache",
+      "sub": "Weights, KV spec, block pool",
+      "col": 3,
+      "row": 1,
+      "cost": "snapshot / IPC",
+      "reached": true
+     },
+     {
+      "id": "graphs",
+      "label": "CUDA Graphs & Triton",
+      "sub": "Captured decode + @triton.jit",
+      "col": 3,
+      "row": 0,
+      "cost": "0.07-1.8 s",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "api",
+      "to": "core",
+      "boundary": "reconfigure",
+      "label": "reconfigure / args",
+      "chain": [
+       "api",
+       "core",
+       "workers",
+       "graphs"
+      ]
+     },
+     {
+      "from": "core",
+      "to": "workers",
+      "boundary": "adapter",
+      "label": "step-gap RPC",
+      "chain": [
+       "core",
+       "workers",
+       "graphs"
+      ]
+     },
+     {
+      "from": "workers",
+      "to": "graphs",
+      "boundary": "kernel",
+      "label": "swap / reinit / jit",
+      "chain": [
+       "workers",
+       "graphs"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "workers",
+      "boundary": "zygote",
+      "label": "warm fork refresh",
+      "chain": [
+       "zygote",
+       "workers",
+       "kv",
+       "graphs"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "core",
+      "boundary": "forksafe",
+      "label": "NVML + cuInit guard",
+      "chain": [
+       "zygote",
+       "core",
+       "workers"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "kv",
+      "boundary": "services",
+      "label": "IPC weight lease",
+      "chain": [
+       "zygote",
+       "kv",
+       "graphs"
+      ]
+     },
+     {
+      "from": "kv",
+      "to": "graphs",
+      "boundary": "snapshot_restore",
+      "label": "KV & RNG replay",
+      "chain": [
+       "kv",
+       "graphs"
+      ]
+     },
+     {
+      "from": "core",
+      "to": "graphs",
+      "boundary": "livestream",
+      "label": "per-rank witness",
+      "chain": [
+       "core",
+       "workers",
+       "graphs"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "engine": "Megatron-LM",
+   "key": "megatron",
+   "kind": "Pretraining",
+   "repo": "NVIDIA/Megatron-LM",
+   "status_label": "On main (11/11 GPU) + PRs #147, #155",
+   "topology": {
+    "subtitle": "SPMD torchrun training: Gloo step-gap coordinator across TP/PP/CP/EP ranks",
+    "nodes": [
+     {
+      "id": "launch",
+      "label": "Torchrun / Zygote",
+      "sub": "Pre-import forkserver (--refresh)",
+      "col": 0,
+      "row": 0,
+      "cost": "14-45 s",
+      "reached": true
+     },
+     {
+      "id": "host",
+      "label": "Rank 0 Gap Host",
+      "sub": "StepGapCoordinator (Gloo)",
+      "col": 1,
+      "row": 0,
+      "cost": "0.15 s gap",
+      "reached": true
+     },
+     {
+      "id": "ranks",
+      "label": "TP / PP / CP Ranks",
+      "sub": "Train step barrier",
+      "col": 2,
+      "row": 0,
+      "cost": "code restart",
+      "reached": true
+     },
+     {
+      "id": "buffers",
+      "label": "Param & Grad Buffers",
+      "sub": "Contiguous distributed buckets",
+      "col": 2,
+      "row": 1,
+      "cost": "state restore",
+      "reached": true
+     },
+     {
+      "id": "fp8",
+      "label": "MXFP8 & Optimizer",
+      "sub": "Quantized inner tensors + Adam",
+      "col": 3,
+      "row": 1,
+      "cost": "byte-exact S0",
+      "reached": true
+     },
+     {
+      "id": "fuser",
+      "label": "JIT Fuser & Triton",
+      "sub": "@jit_fuser + @triton.jit",
+      "col": 3,
+      "row": 0,
+      "cost": "0.1-1.3 s",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "launch",
+      "to": "ranks",
+      "boundary": "zygote",
+      "label": "OverlayFinder fork",
+      "chain": [
+       "launch",
+       "ranks",
+       "buffers",
+       "fp8",
+       "fuser"
+      ]
+     },
+     {
+      "from": "launch",
+      "to": "host",
+      "boundary": "forksafe",
+      "label": "pre-fork CUDA guard",
+      "chain": [
+       "launch",
+       "host",
+       "ranks"
+      ]
+     },
+     {
+      "from": "host",
+      "to": "ranks",
+      "boundary": "adapter",
+      "label": "gloo step-gap round",
+      "chain": [
+       "host",
+       "ranks",
+       "fuser"
+      ]
+     },
+     {
+      "from": "ranks",
+      "to": "fuser",
+      "boundary": "kernel",
+      "label": "swap / reinit / jit",
+      "chain": [
+       "ranks",
+       "fuser"
+      ]
+     },
+     {
+      "from": "ranks",
+      "to": "buffers",
+      "boundary": "services",
+      "label": "stage_local & lease",
+      "chain": [
+       "ranks",
+       "buffers",
+       "fp8"
+      ]
+     },
+     {
+      "from": "buffers",
+      "to": "fp8",
+      "boundary": "snapshot_restore",
+      "label": "MXFP8 byte restore",
+      "chain": [
+       "buffers",
+       "fp8"
+      ]
+     },
+     {
+      "from": "host",
+      "to": "fuser",
+      "boundary": "livestream",
+      "label": "all-rank witness",
+      "chain": [
+       "host",
+       "ranks",
+       "fuser"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "engine": "FastVideo",
+   "key": "fastvideo",
+   "kind": "Diffusion",
+   "repo": "hao-ai-lab/FastVideo",
+   "status_label": "On main (11/11 GPU) + PR #146",
+   "topology": {
+    "subtitle": "Sequence-parallel video generation: pinned weight holder + in-place stage rebuild",
+    "nodes": [
+     {
+      "id": "driver",
+      "label": "CLI / API Driver",
+      "sub": "Pipeline launcher (no participant)",
+      "col": 0,
+      "row": 0,
+      "cost": "restart",
+      "reached": false
+     },
+     {
+      "id": "zygote",
+      "label": "Zygote & Holder",
+      "sub": "Pinned RAM weights + forkserver",
+      "col": 1,
+      "row": 1,
+      "cost": "warm respawn",
+      "reached": true
+     },
+     {
+      "id": "sp",
+      "label": "SP Worker Group",
+      "sub": "One Agent participant per rank",
+      "col": 1,
+      "row": 0,
+      "cost": "0.12 s swap",
+      "reached": true
+     },
+     {
+      "id": "dit",
+      "label": "DiT Pipeline Stages",
+      "sub": "In-place services/rebuild.py",
+      "col": 2,
+      "row": 0,
+      "cost": "0.19-1.27 s",
+      "reached": true
+     },
+     {
+      "id": "vae",
+      "label": "Compiled VAE",
+      "sub": "torch.compile + NVFP4 graphs",
+      "col": 3,
+      "row": 1,
+      "cost": "respawn",
+      "reached": true
+     },
+     {
+      "id": "kernels",
+      "label": "Triton & CuTe Kernels",
+      "sub": "fastvideo-kernel Python + C++",
+      "col": 3,
+      "row": 0,
+      "cost": "jit / C++ build",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "zygote",
+      "to": "sp",
+      "boundary": "zygote",
+      "label": "fork + op_redefine_guard",
+      "chain": [
+       "zygote",
+       "sp",
+       "dit",
+       "vae",
+       "kernels"
+      ]
+     },
+     {
+      "from": "driver",
+      "to": "zygote",
+      "boundary": "forksafe",
+      "label": "CUTE_DSL_ARCH guard",
+      "chain": [
+       "zygote",
+       "sp",
+       "kernels"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "dit",
+      "boundary": "services",
+      "label": "pinned weight holder",
+      "chain": [
+       "zygote",
+       "dit",
+       "vae"
+      ]
+     },
+     {
+      "from": "sp",
+      "to": "dit",
+      "boundary": "adapter",
+      "label": "all-or-nothing rebuild",
+      "chain": [
+       "sp",
+       "dit",
+       "kernels"
+      ]
+     },
+     {
+      "from": "dit",
+      "to": "kernels",
+      "boundary": "kernel",
+      "label": "swap / jit_rebuild",
+      "chain": [
+       "dit",
+       "kernels"
+      ]
+     },
+     {
+      "from": "dit",
+      "to": "vae",
+      "boundary": "snapshot_restore",
+      "label": "seed & cache reset",
+      "chain": [
+       "dit",
+       "vae"
+      ]
+     },
+     {
+      "from": "sp",
+      "to": "kernels",
+      "boundary": "livestream",
+      "label": "2-rank witness",
+      "chain": [
+       "sp",
+       "dit",
+       "kernels"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "engine": "SGLang",
+   "key": "sglang",
+   "kind": "Inference",
+   "repo": "sgl-project/sglang",
+   "status_label": "Adapter branch (11/11 on 2x GB200 TP=2)",
+   "topology": {
+    "subtitle": "ZMQ Scheduler event loop per TP/PP/EP rank + RadixCache + CudaGraphRunner",
+    "nodes": [
+     {
+      "id": "tok",
+      "label": "HTTP & TokenizerMgr",
+      "sub": "Frontend + DetokenizerManager",
+      "col": 0,
+      "row": 0,
+      "cost": "unreached",
+      "reached": false
+     },
+     {
+      "id": "zmq",
+      "label": "ZMQ Broadcast",
+      "sub": "recv_requests lockstep RPC",
+      "col": 1,
+      "row": 0,
+      "cost": "<0.05 s",
+      "reached": true
+     },
+     {
+      "id": "zygote",
+      "label": "SGLang Zygote",
+      "sub": "Pre-import + linecache refresh",
+      "col": 1,
+      "row": 1,
+      "cost": "warm fork",
+      "reached": true
+     },
+     {
+      "id": "sched",
+      "label": "Scheduler & TpWorker",
+      "sub": "event_loop_normal / paused overlap",
+      "col": 2,
+      "row": 0,
+      "cost": "0.1-0.4 s",
+      "reached": true
+     },
+     {
+      "id": "radix",
+      "label": "Radix & Mamba Pools",
+      "sub": "KV allocator + hybrid GDN slots",
+      "col": 3,
+      "row": 1,
+      "cost": "flush_cache",
+      "reached": true
+     },
+     {
+      "id": "graphs",
+      "label": "CudaGraphRunner",
+      "sub": "Decode graphs + @triton.jit ops",
+      "col": 3,
+      "row": 0,
+      "cost": "0.3-1.5 s",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "zmq",
+      "to": "sched",
+      "boundary": "adapter",
+      "label": "pause_generation + gap",
+      "chain": [
+       "zmq",
+       "sched",
+       "graphs"
+      ]
+     },
+     {
+      "from": "sched",
+      "to": "graphs",
+      "boundary": "kernel",
+      "label": "swap / reinit / jit",
+      "chain": [
+       "sched",
+       "graphs"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "sched",
+      "boundary": "zygote",
+      "label": "spawn/fork refresh",
+      "chain": [
+       "zygote",
+       "sched",
+       "radix",
+       "graphs"
+      ]
+     },
+     {
+      "from": "tok",
+      "to": "zygote",
+      "boundary": "forksafe",
+      "label": "CUTE_DSL_ARCH + NVML",
+      "chain": [
+       "zygote",
+       "sched"
+      ]
+     },
+     {
+      "from": "zygote",
+      "to": "radix",
+      "boundary": "services",
+      "label": "update_weights_from_tensor",
+      "chain": [
+       "radix",
+       "graphs"
+      ]
+     },
+     {
+      "from": "sched",
+      "to": "radix",
+      "boundary": "snapshot_restore",
+      "label": "flush_cache + Mamba reset",
+      "chain": [
+       "radix",
+       "graphs"
+      ]
+     },
+     {
+      "from": "tok",
+      "to": "zmq",
+      "boundary": "reconfigure",
+      "label": "server_args delta",
+      "chain": [
+       "tok",
+       "zmq",
+       "sched",
+       "radix"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "engine": "verl",
+   "key": "verl",
+   "kind": "RL Post-Training",
+   "repo": "volcengine/verl",
+   "status_label": "Adapter branch (4x GB200 GRPO + 11/11 Toy)",
+   "topology": {
+    "subtitle": "Ray SingleController GRPO loop: TaskRunner -> WorkerDict + RewardLoop + Rollout",
+    "nodes": [
+     {
+      "id": "runner",
+      "label": "Hydra TaskRunner",
+      "sub": "RayPPOTrainer.fit() step gap",
+      "col": 0,
+      "row": 0,
+      "cost": "coordinator",
+      "reached": true
+     },
+     {
+      "id": "ray",
+      "label": "RayActorParticipant",
+      "sub": "actor_view (__ray_call__)",
+      "col": 1,
+      "row": 0,
+      "cost": "5-20 ms RPC",
+      "reached": true
+     },
+     {
+      "id": "reward",
+      "label": "Reward & AgentLoop",
+      "sub": "FileNamespace + 0.5 ms rescore",
+      "col": 1,
+      "row": 1,
+      "cost": "0.5-12 ms",
+      "reached": true
+     },
+     {
+      "id": "actors",
+      "label": "Actor / Ref WorkerDict",
+      "sub": "FSDP / Megatron GPU actors",
+      "col": 2,
+      "row": 0,
+      "cost": "39 s step vs 190 s",
+      "reached": true
+     },
+     {
+      "id": "rollout",
+      "label": "Embedded Rollout",
+      "sub": "vLLM / SGLang rollout workers",
+      "col": 3,
+      "row": 0,
+      "cost": "weight sync",
+      "reached": true
+     },
+     {
+      "id": "weights",
+      "label": "Coupled S0 Snapshot",
+      "sub": "Trainer + rollout policy state",
+      "col": 3,
+      "row": 1,
+      "cost": "pinned restore",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "runner",
+      "to": "ray",
+      "boundary": "adapter",
+      "label": "RL step-gap barrier",
+      "chain": [
+       "runner",
+       "ray",
+       "actors",
+       "rollout"
+      ]
+     },
+     {
+      "from": "ray",
+      "to": "actors",
+      "boundary": "kernel",
+      "label": "actor_view swap / reinit",
+      "chain": [
+       "actors",
+       "rollout"
+      ]
+     },
+     {
+      "from": "ray",
+      "to": "reward",
+      "boundary": "kernel",
+      "label": "file_namespace swap",
+      "chain": [
+       "reward"
+      ]
+     },
+     {
+      "from": "runner",
+      "to": "actors",
+      "boundary": "reconfigure",
+      "label": "live --set kl / clip / lr",
+      "chain": [
+       "actors",
+       "rollout"
+      ]
+     },
+     {
+      "from": "weights",
+      "to": "actors",
+      "boundary": "snapshot_restore",
+      "label": "S0 trainer + rollout sync",
+      "chain": [
+       "weights",
+       "actors",
+       "rollout"
+      ]
+     },
+     {
+      "from": "runner",
+      "to": "weights",
+      "boundary": "services",
+      "label": "node_confine + probes",
+      "chain": [
+       "weights",
+       "actors"
+      ]
+     },
+     {
+      "from": "runner",
+      "to": "rollout",
+      "boundary": "livestream",
+      "label": "multi-actor witness",
+      "chain": [
+       "actors",
+       "rollout",
+       "reward"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "engine": "miles",
+   "key": "miles",
+   "kind": "Async / Sync RL",
+   "repo": "radixark/miles",
+   "status_label": "Adapter branch (2x GB200 + 11/11 Toy)",
+   "topology": {
+    "subtitle": "Disaggregated Ray RL: RolloutManager (sgl-router) <-> DataBuffer <-> Megatron/FSDP TrainGroup",
+    "nodes": [
+     {
+      "id": "driver",
+      "label": "miles RL Driver",
+      "sub": "Sync step or async pause gate",
+      "col": 0,
+      "row": 0,
+      "cost": "coordinator",
+      "reached": true
+     },
+     {
+      "id": "buffer",
+      "label": "DataBuffer",
+      "sub": "code_epoch trajectory filter",
+      "col": 1,
+      "row": 1,
+      "cost": "epoch drain",
+      "reached": true
+     },
+     {
+      "id": "rollmgr",
+      "label": "RolloutManager",
+      "sub": "sgl-router + SGLang Ray actors",
+      "col": 1,
+      "row": 0,
+      "cost": "pause + flush",
+      "reached": true
+     },
+     {
+      "id": "train",
+      "label": "RayTrainGroup",
+      "sub": "Megatron / FSDP TrainRayActors",
+      "col": 2,
+      "row": 0,
+      "cost": "RayActorParticipant",
+      "reached": true
+     },
+     {
+      "id": "wsync",
+      "label": "P2P / NCCL Weight Sync",
+      "sub": "Trainer -> Rollout broadcast",
+      "col": 3,
+      "row": 1,
+      "cost": "coupled reset",
+      "reached": true
+     },
+     {
+      "id": "triton",
+      "label": "miles/kernels Triton",
+      "sub": "47 @triton.jit kernels + ops",
+      "col": 3,
+      "row": 0,
+      "cost": "jit_rebuild",
+      "reached": true
+     }
+    ],
+    "edges": [
+     {
+      "from": "driver",
+      "to": "rollmgr",
+      "boundary": "adapter",
+      "label": "pause + RayActorParticipant",
+      "chain": [
+       "rollmgr",
+       "buffer"
+      ]
+     },
+     {
+      "from": "driver",
+      "to": "train",
+      "boundary": "adapter",
+      "label": "train step-gap barrier",
+      "chain": [
+       "train",
+       "triton",
+       "wsync"
+      ]
+     },
+     {
+      "from": "train",
+      "to": "triton",
+      "boundary": "kernel",
+      "label": "swap / reinit / jit",
+      "chain": [
+       "train",
+       "triton"
+      ]
+     },
+     {
+      "from": "buffer",
+      "to": "wsync",
+      "boundary": "snapshot_restore",
+      "label": "epoch drain + S0 broadcast",
+      "chain": [
+       "buffer",
+       "train",
+       "wsync",
+       "rollmgr"
+      ]
+     },
+     {
+      "from": "driver",
+      "to": "wsync",
+      "boundary": "services",
+      "label": "MILES_ALLOWED_NODE_IDS",
+      "chain": [
+       "rollmgr",
+       "train",
+       "wsync"
+      ]
+     },
+     {
+      "from": "driver",
+      "to": "buffer",
+      "boundary": "reconfigure",
+      "label": "role-scoped config",
+      "chain": [
+       "driver",
+       "buffer",
+       "train"
+      ]
+     }
+    ]
+   }
+  }
+ ],
+ "cells": [
+  {
+   "boundary": "kernel",
+   "engine": "vLLM",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Session.install commits on all participants or aborts/rolls back in the same step gap (core/livelab/INTERFACE-v1.md).",
+    "Constructor fresh-field edits re-initialize live instances only when every live instance still holds the base fresh value (core/livelab/kernel/reinit.py).",
+    "Triton @triton.jit edits clear compiled caches and track aliased helper functions (core/livelab/kernel/jit.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H4",
+     "summary": "Split-brain ranks_disagree previously accepted by Session.install",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H3",
+     "summary": "Cascaded undo(t1) skipped newer transaction t2's undo_resets",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H2",
+     "summary": "_restore_closures deleted pre-existing module globals on undo",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H1",
+     "summary": "Aliased @triton.jit helper edits ran stale compiled CUBIN",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU + B200"
+    },
+    {
+     "id": "vLLM #62872",
+     "summary": "Scheduler.__init__ set() -> dict() edit cut from 17.17 s -> 1.81 s eager (9.5x) and 42.93 s -> 1.41 s CUDA-graph (30.4x; undo 1.58 ms, 23,440x)",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #156",
+     "verification": "1x B200 eager + graph N=3"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K1",
+     "severity": "high",
+     "blast_radius": "silent_corruption",
+     "summary": "Partial rollback inside kernel can leave a module half-restored without poisoning Session (Issue #150 M-M7), and reinit._subclass_why must verify Sub.__init__ calls super().__init__ on added fields (L3 audit P1).",
+     "mitigation": "Poison Session on undo_incomplete and add _calls_super_top AST check in kernel/reinit.py.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_reinit.py"
+    },
+    {
+     "id": "R-K4",
+     "severity": "medium",
+     "blast_radius": "rank_hang",
+     "summary": "Measured on 1x B200 Qwen3-8B (~200k frozen+live objects): locate.all_objects() adds 0.79 s in prepare and 0.622 s median in the phase-2 commit gap.",
+     "mitigation": "Monitor scan_s on 80 GB+ multi-rank heaps against phase-2 step-gap timeout.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_reinit.py"
+    }
+   ]
+  },
+  {
+   "boundary": "kernel",
+   "engine": "Megatron-LM",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "All TP/PP/CP ranks stage and commit identical code fingerprints inside one Gloo round (core/livelab/kernel/coordinator.py).",
+    "Undo restores original code objects and checks re-initialized fields before revert (core/livelab/kernel/journal.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H1..M-H4",
+     "summary": "Shared kernel split-brain, closure-restore, cascaded undo, and Triton alias fixes",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "2x GB200 11/11"
+    },
+    {
+     "id": "PR #156",
+     "summary": "213 pure-field Megatron constructors unlocked for in-place field re-init",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #156",
+     "verification": "CPU survey + kernel suite"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K2",
+     "severity": "low",
+     "blast_radius": "rank_hang",
+     "summary": "Concurrent thread polling coordinator.status(txn) during phase-2 commit can contend on finisher lock (Issue #150).",
+     "mitigation": "Keep status polling outside the Gloo step-gap thread.",
+     "reproducer": "python3 -m unittest discover -s core/livelab/kernel -t core/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "kernel",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Coordinator enforces all-rank witness and fingerprint parity across SP workers (repos/fastvideo/livelab/adapter/lab.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H1..M-H4",
+     "summary": "Shared kernel transaction and Triton rebuild hardening",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "2x GB200 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K3",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "A participant falsely abstaining (staged=[]) when module is unimported is not distinguished from missing import (Issue #150).",
+     "mitigation": "Check expected participant count on multi-rank swaps.",
+     "reproducer": "python3 -m unittest discover -s repos/fastvideo/livelab/adapter"
+    }
+   ]
+  },
+  {
+   "boundary": "kernel",
+   "engine": "SGLang",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "LocalParticipant inside each TP Scheduler process executes shared kernel swap, reinit, and Triton jit_rebuild in lockstep."
+   ],
+   "closed_bugs": [
+    {
+     "id": "PR #149 + #156",
+     "summary": "Verified 11/11 on 2x GB200 SglangConformanceLab (Qwen3-0.6B TP=2, c9 median install 90.7 ms, uninstall 8.0 ms)",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/sglang-livelab",
+     "verification": "2x GB200 11/11 + Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K4-SGL",
+     "severity": "low",
+     "blast_radius": "rank_hang",
+     "summary": "Heap scan in reinit.resolve() must fit inside ZMQ scheduler step gap when overlap scheduling is paused.",
+     "mitigation": "Drain overlap batch via pause_generation(mode='retract') before phase-2 commit.",
+     "reproducer": "python3 -m conformance --lab adapter.conformance_lab:SglangConformanceLab"
+    }
+   ]
+  },
+  {
+   "boundary": "kernel",
+   "engine": "verl",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "RayActorParticipant unwraps @ray.remote ActorView so swaps bind on both module class and Ray's deserialized actor copy (core/livelab/ray_participants.py).",
+    "FileNamespace locates dynamically loaded reward .py files outside sys.modules via code-object co_filename."
+   ],
+   "closed_bugs": [
+    {
+     "id": "RAY-UNWRAP",
+     "summary": "Live gsm8k.py reward swap (verdict 24.91 s, 9.0x, 8/8 reward actors) and core_algos.py swap (9.22 s, 24.3x) verified on 4x GB200 GRPO",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/verl-livelab",
+     "verification": "4x GB200 GRPO + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K3-VERL",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Heterogeneous Ray actors (trainer0..3 vs driver) import shared modules for disjoint functions; cross-role witness aggregation in gate._flush prevents false zero_witness.",
+     "mitigation": "Aggregate per-target witness counts across active role groups.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_ray_participants.py"
+    }
+   ]
+  },
+  {
+   "boundary": "kernel",
+   "engine": "miles",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Reuses core/livelab/ray_participants.py across RolloutManager and Megatron/FSDP TrainRayActors with zero cross-repo imports."
+   ],
+   "closed_bugs": [
+    {
+     "id": "RAY-SHARED",
+     "summary": "Multi-actor live swap (69.2 ms, proof_ok=True) and bit-exact undo verified on 2x GB200 miles 0.2.0 + 11/11 ToyMilesLab",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "2x GB200 + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-K3-MILES",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Role-scoped transactions in async RL allow mixed code epochs between rollout and trainer unless gated by DataBuffer epoch.",
+     "mitigation": "Tag rollout samples with code_epoch and drain_stale on reset.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_ray_participants.py"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "vLLM",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "rank_hang",
+   "verification_tier": "GPU",
+   "invariants": [
+    "RecaptureCoordinator runs selective CUDA graph recapture on all TP ranks or rolls back all ranks on single-rank failure (repos/vllm/livelab/adapter/recapture.py).",
+    "VllmLab passes 11/11 conformance (c0-c10) on live vllm serve with role-scoped worker vs EngineCore module fingerprinting (repos/vllm/livelab/adapter/conformance_lab.py).",
+    "MetaPathFinder _After delegates only to finders ordered after itself on sys.meta_path (repos/vllm/livelab/adapter/host.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "VLLM-CONF",
+     "summary": "Real-engine VllmLab 11/11 conformance verified on 1x B200 (vLLM 0.33.0, Qwen3-0.6B, 110 ms median install, 74 ms uninstall) + 40/40 CPU tests",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/vllm-conformance-lab",
+     "verification": "1x B200 11/11 + Py3.11-3.14"
+    },
+    {
+     "id": "M-H9",
+     "summary": "Single-rank recapture_extend failure rolled rank 0 back in 1.39 ms via drop_extend (host_poison=[], retry 0.782 s bit-exact)",
+     "blast_radius": "rank_hang",
+     "fixed_in_pr": "PR #144",
+     "verification": "2x GB200 Qwen3-8B TP=2"
+    },
+    {
+     "id": "M-H7",
+     "summary": "Mutual RecursionError between adapter/host._After and services/live_reconfig._After on engine start",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #144 + PR #148",
+     "verification": "B200 GPU 1 + Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A1",
+     "severity": "medium",
+     "blast_radius": "cold_fallback",
+     "summary": "PR #144 and PR #148 must merge as a pair (either alone recurses in one sys.meta_path order); API server (2,731 OP fns), vllm/models/* (6,088 GRAPH fns), and DP > 1 remain unreached.",
+     "mitigation": "Merge #144 + #148 together; add request-gap LocalParticipant in API server.",
+     "reproducer": "python3 -m unittest discover -s repos/vllm/livelab/adapter"
+    },
+    {
+     "id": "R-A4",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "Torch Dynamo AOT cache ignores edited traced source on undo and leaks ~35 MB per recompile (fix staged in stacked local branch).",
+     "mitigation": "Land AOT cache slot guard from stacked local fixes branch.",
+     "reproducer": "python3 -m unittest discover -s repos/vllm/livelab/adapter -k side"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "Megatron-LM",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "rank_hang",
+   "verification_tier": "GPU",
+   "invariants": [
+    "StepGapCoordinator runs at train-step boundary over a timeout-bounded Gloo group (repos/megatron/livelab/fastrsi_megatron/hook.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H20",
+     "summary": "Worker rank death mid-round hung rank 0 in Gloo collective for 7 days (default timeout)",
+     "blast_radius": "rank_hang",
+     "fixed_in_pr": "PR #147",
+     "verification": "CPU + 2x GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A2",
+     "severity": "medium",
+     "blast_radius": "rank_hang",
+     "summary": "Clean exit path after a failed round still calls dist.barrier on the failed group, and rank 0's own train step has no watchdog timeout (Issue #150).",
+     "mitigation": "Skip barrier when session is poisoned; guard CUDA graphs (418 fns) and @jit_fuser (91 fns).",
+     "reproducer": "python3 -m unittest discover -s repos/megatron/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "agent.rebuild constructs replacement pipeline stages completely before swapping live references and re-anchors base hashes (repos/fastvideo/livelab/adapter/agent.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H14",
+     "summary": "Failed stage rebuild wiped live pipeline stages before replacement succeeded",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #146",
+     "verification": "CPU + 2x GB200"
+    },
+    {
+     "id": "M-H15",
+     "summary": "Subsequent live swaps after rebuild failed with spurious base_mismatch",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #146",
+     "verification": "CPU + 2x GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A3",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "Stage rebuild rollback is 1-level shallow on attribute dicts; nested mutations in custom constructors survive a failed rebuild, and compiled VAE (453 fns) is unreached.",
+     "mitigation": "Poison session if nested state digest drifts on failed rebuild.",
+     "reproducer": "python3 -m unittest discover -s repos/fastvideo/livelab/adapter"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "SGLang",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "rank_hang",
+   "verification_tier": "GPU",
+   "invariants": [
+    "ZMQ control message parks all TP ranks in the same Scheduler.recv_requests iteration; overlap mode drains via pause_generation(mode='retract') before commit.",
+    "CudaGraphRunner selective recapture (R1) recaptures decode graphs across all TP ranks (0.766 s, 29.8x vs cold) with all-rank rollback on failure (0.590 s)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "SGL-TP2-GPU",
+     "summary": "11/11 SglangConformanceLab + R1 decode graph recapture (0.839 s) + single-rank capture-failure rollback verified on 2x GB200 TP=2",
+     "blast_radius": "rank_hang",
+     "fixed_in_pr": "feat/sglang-livelab",
+     "verification": "2x GB200 TP=2 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A1-SGL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "TokenizerManager and HTTP frontend processes (5,502 OP fns) remain outside the ZMQ scheduler participant.",
+     "mitigation": "Add frontend LocalParticipant for request-gap tokenizer/parser edits.",
+     "reproducer": "python3 -m conformance --lab adapter.conformance_lab:SglangConformanceLab"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "verl",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "rank_hang",
+   "verification_tier": "GPU",
+   "invariants": [
+    "RayPPOTrainer.fit() coordinates 13 warm Ray processes across 4x GB200 at the synchronous RL step gap."
+   ],
+   "closed_bugs": [
+    {
+     "id": "VERL-GAP",
+     "summary": "4x GB200 Qwen3-0.6B GSM8K GRPO live reward (6.26 s install) and advantage (0.57 s install) swaps verified across 13 warm processes",
+     "blast_radius": "rank_hang",
+     "fixed_in_pr": "feat/verl-livelab",
+     "verification": "4x GB200 GRPO + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A1-VERL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Experimental fully-async off-policy loops (verl/experimental/fully_async_policy) are excluded from the synchronous step gate.",
+     "mitigation": "Refuse install when async rollout worker is mid-generation unless paused.",
+     "reproducer": "python3 -m unittest discover -s repos/verl/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "adapter",
+   "engine": "miles",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "MilesStepGate coordinates RolloutExecutor and TrainRayActor participants at sync or buffer-quiesced step boundaries."
+   ],
+   "closed_bugs": [
+    {
+     "id": "MILES-DERIVED",
+     "summary": "Zero-copy derived adapter (597 LOC) verified on 2x GB200 (69.2 ms multi-actor swap) + 11/11 ToyMilesLab",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "2x GB200 + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-A1-MILES",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Megatron/SGLang CUDA graph recapture inside Ray actors is not wired in miles adapter yet (468 GRAPH fns).",
+     "mitigation": "Delegate actor-local graph recapture to embedded SGLang/Megatron hooks.",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "vLLM",
+   "status": "cpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "CPU",
+   "invariants": [
+    "Standby Pool taints weight holder on failover during pending patch (fail-closed) rather than double-patching or corrupting clean weights (repos/vllm/livelab/services/weights.py).",
+    "AF_UNIX control socket paths are capped <= 107 bytes; process-group teardown kills child GPU workers on leader exit."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H8",
+     "summary": "Pool.failover() during pending weight patch corrupted clean holder on rollback or double-patched on accept",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H11",
+     "summary": "reshard_tp_dp silently dropped (ep-1)/ep MoE experts while reporting is_ok=True",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H13 / M-M8",
+     "summary": "AF_UNIX > 107B crash on long scratch paths, FIPS md5 failure, and orphaned GPU workers on leader crash",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S1",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "ParallelismResharder has zero production callers and CPU-only unit tests; IPC weight cache requires custom vLLM 0.33.0 (--load-format ipc_cache) and silently skips on stock vLLM.",
+     "mitigation": "Gate reshard behind explicit multi-GPU receipt; surface load-format mismatch as a warning.",
+     "reproducer": "python3 -m unittest discover -s repos/vllm/livelab/services"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "Megatron-LM",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "GPU",
+   "invariants": [
+    "stage_local.sh stages clean editable package overlays onto node-local NVMe without mutating shared upstream checkouts."
+   ],
+   "closed_bugs": [
+    {
+     "id": "PR #147",
+     "summary": "Hardened local staging and process cleanup paths",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "PR #147",
+     "verification": "CPU + 2x GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S2-MEG",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "No separate pinned-RAM checkpoint holder daemon for cold torchrun restarts (zygote respawn handles Python restarts).",
+     "mitigation": "Use state.py in-memory snapshot for weight resets and zygote for code restarts.",
+     "reproducer": "python3 -m unittest discover -s repos/megatron/tools"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Pinned host-memory weight holder and JIT cache service survive worker respawns with bounded AF_UNIX socket paths (repos/fastvideo/livelab/services/holder.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H13-FV",
+     "summary": "Socket length cap, stale-socket cleanup, and holder lease framing hardened",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "PR #146",
+     "verification": "CPU + 2x GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S3-FV",
+     "severity": "low",
+     "blast_radius": "orphan_leak",
+     "summary": "Pinned host holder stays resident until explicit stop if outer orchestrator is SIGKILLed.",
+     "mitigation": "Monitor parent PID lease timeout in holder loop.",
+     "reproducer": "python3 -m unittest discover -s repos/fastvideo/livelab/services"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "SGLang",
+   "status": "partial_gap",
+   "risk_level": "medium",
+   "primary_blast_radius": "rank_hang",
+   "verification_tier": "Toy",
+   "invariants": [
+    "SGLang natively exposes release_memory_occupation(), resume_memory_occupation(), and update_weights_from_tensor/disk()."
+   ],
+   "closed_bugs": [
+    {
+     "id": "SGL #50144",
+     "summary": "Documented and guarded DP > 1 release_memory_occupation busy-rank race and #50142 PD room collision",
+     "blast_radius": "rank_hang",
+     "fixed_in_pr": "feat/sglang-livelab",
+     "verification": "Architecture & Toy tests"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S1-SGL",
+     "severity": "medium",
+     "blast_radius": "rank_hang",
+     "summary": "Calling release_memory_occupation when DP > 1 while one DP rank still holds in-flight requests deadlocks or corrupts allocator pools (SGLang #50144).",
+     "mitigation": "Require global DP quiescence before memory release or weight reload.",
+     "reproducer": "python3 -m unittest discover -s repos/sglang/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "verl",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "CPU",
+   "invariants": [
+    "verl_node_confine pins Ray placement groups and actors strictly to allocated cluster node IPs on shared Ray clusters.",
+    "Offline rescore (0.5 ms) and replay_adv (12 ms) tools evaluate reward/advantage edits without GPU rollout."
+   ],
+   "closed_bugs": [
+    {
+     "id": "VERL-CONFINE",
+     "summary": "Prevented Ray placement groups from spilling actors onto neighbor users' nodes on shared Ray clusters",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "feat/verl-livelab",
+     "verification": "4x GB200 + CPU"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S1-VERL",
+     "severity": "low",
+     "blast_radius": "orphan_leak",
+     "summary": "Detached Ray actors can outlive a crashed driver unless placement group lifetime='detached' is avoided.",
+     "mitigation": "Bind placement groups to driver session lifetime.",
+     "reproducer": "python3 -m unittest discover -s repos/verl/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "services",
+   "engine": "miles",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "CPU",
+   "invariants": [
+    "MILES_ALLOWED_NODE_IDS confines both RayTrainGroup and SGLangEngine rollout actors to assigned nodes; sgl-router manages rollout worker endpoints."
+   ],
+   "closed_bugs": [
+    {
+     "id": "MILES-CONFINE",
+     "summary": "Node confinement and router health-gate integration documented from slime/miles smoke harness",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "CPU tests"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-S1-MILES",
+     "severity": "low",
+     "blast_radius": "orphan_leak",
+     "summary": "Subprocess sgl-router daemon can linger if Ray driver exits abruptly.",
+     "mitigation": "Register router process group cleanup in MilesLab.close().",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "vLLM",
+   "status": "partial_gap",
+   "risk_level": "high",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "CPU",
+   "invariants": [
+    "Zygote pre-imports torch and vLLM Python modules before CUDA init, applies child env vars on fork, and refreshes edited modules via zygote_refresh.py."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H12",
+     "summary": "--zygote-accept env silently dropped CUDA_VISIBLE_DEVICES in forked child processes",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-Z2",
+     "severity": "high",
+     "blast_radius": "cold_fallback",
+     "summary": "Forked vLLM servers hit cold-fallback or bad-fork errors unless forksafe.install_properties() guards pre-fork device queries (fix in local vllm-cases branch, pending merge); zygote code is duplicated 3x across engines.",
+     "mitigation": "Fold vllm-cases install_properties guard onto main and unify core zygote helper.",
+     "reproducer": "python3 -m unittest discover -s repos/vllm/livelab/services -k zygote"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "Megatron-LM",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Zygote reaps child rank trees by ppid (not pgrp) and syncs OverlayFinder edits into linecache so @triton.jit and inspect read updated source."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H17",
+     "summary": "zygote._children() parsed pgrp instead of ppid from /proc/<pid>/stat, leaking setsid() rank orphans",
+     "blast_radius": "orphan_leak",
+     "fixed_in_pr": "PR #147",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-H18",
+     "summary": "OverlayFinder left stale on-disk text in linecache, feeding unedited source to @triton.jit",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #147",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-Z1-MEG",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Zygote implementation (209 LOC) is separate from vLLM/FastVideo zygotes and lacks op_redefine_guard if C++ custom ops re-register on refresh.",
+     "mitigation": "Distill shared zygote + op_redefine_guard into core/livelab/.",
+     "reproducer": "python3 -m unittest discover -s repos/megatron/livelab -k zygote"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Zygote installs op_redefine_guard so torch.library custom ops do not crash when edited Python modules re-import in forked workers."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H16-Z",
+     "summary": "torch.library custom-op duplicate registration crash on module refresh and socket cleanup fixed",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #146",
+     "verification": "CPU + 2x GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-Z3",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "op_redefine_guard currently lives only in FastVideo services rather than shared core.",
+     "mitigation": "Promote op_redefine_guard to core/livelab/ when unifying zygote.",
+     "reproducer": "python3 -m unittest discover -s repos/fastvideo/livelab/services -k zygote"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "SGLang",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "orphan_leak",
+   "verification_tier": "GPU",
+   "invariants": [
+    "repos/sglang/livelab/services/zygote.py preloads SGLang behind forksafe guards, honors child CUDA_VISIBLE_DEVICES, refreshes linecache, and reaps by ppid."
+   ],
+   "closed_bugs": [
+    {
+     "id": "SGL-ZYGOTE",
+     "summary": "Verified on 2x GB200 (11.75 s ready + forked CUDA matmul; c8 respawn 17.25-22.95 s) + 6/6 CPU guard tests",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/sglang-zygote",
+     "verification": "2x GB200 + Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-Z1-SGL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Zygote code stays engine-local alongside vLLM/Megatron/FastVideo zygotes until core distillation.",
+     "mitigation": "Unify shared zygote protocol in core/livelab/ after 6-engine launch.",
+     "reproducer": "python3 -m unittest discover -s repos/sglang/livelab/services -k zygote"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "verl",
+   "status": "unbuilt",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "-",
+   "invariants": [
+    "Ray manages worker actor processes; no pre-import zygote forkserver is wired into Ray worker startup yet."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-Z-VERL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Edits to RANKS or module-level constants (48 RANKS fns) fall back to restarting Ray worker actors (~190 s cold on 4x GB200).",
+     "mitigation": "Use Ray runtime_env worker prewarm pool in future iteration.",
+     "reproducer": "None (unbuilt capability; tracked in survey as respawn=false)"
+    }
+   ]
+  },
+  {
+   "boundary": "zygote",
+   "engine": "miles",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "Toy",
+   "invariants": [
+    "MilesLab.reset('respawn') restarts the Ray actor worker group and recovers Session state cleanly (622 RANKS functions covered)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "MILES-RESPAWN",
+     "summary": "Session recovery across Ray actor group respawn implemented in repos/miles/livelab/adapter/lab.py",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "ToyMilesLab 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-Z-MILES",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Ray actor respawn spawns fresh worker processes via raylet rather than forking a pre-imported zygote.",
+     "mitigation": "Keep per-step edits in swap / constructor_reinit / jit_rebuild (3,996 reached fns).",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "vLLM",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "forksafe blocks runtime CUDA init pre-fork, answers get_device_properties via NVML respecting child CUDA_VISIBLE_DEVICES, and pins CUTE_DSL_ARCH (core/livelab/forksafe.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H6",
+     "summary": "Post-fork CUDA_VISIBLE_DEVICES='1' returned GPU 0 device properties from pre-fork cache",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU + B200 GPU 1"
+    },
+    {
+     "id": "M-M13",
+     "summary": "Slurm GPU-<uuid> strings bound NUMA 1 GPUs to NUMA 0 CPUs",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #148 + #149",
+     "verification": "CPU + B200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-F2",
+     "severity": "medium",
+     "blast_radius": "cold_fallback",
+     "summary": "gc.freeze() pre-fork followed by gc.unfreeze() during locate.all_objects() heap scans causes copy-on-write page-fault amplification across forked workers.",
+     "mitigation": "Re-freeze untouched generations after swap commit.",
+     "reproducer": "python3 -m unittest core/livelab/test_forksafe.py"
+    }
+   ]
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "Megatron-LM",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "Pre-fork imports guard against accidental torch.cuda initialization before rank local_rank assignment."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H6 / M-M13",
+     "summary": "Inherits NVML device-index mapping and UUID NUMA affinity fixes from core/livelab/forksafe.py",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-F1-MEG",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "aarch64 64K-page + dual-socket sysfs NUMA topology paths use mocked sysfs in CPU CI.",
+     "mitigation": "Run test_forksafe.py on real GB200 node during L4 verification.",
+     "reproducer": "python3 -m unittest core/livelab/test_forksafe.py"
+    }
+   ]
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "CUTE_DSL_ARCH is set prior to flashinfer/cutlass import so driver-level cuInit never poisons child CUDA contexts while leaving _cuda_isInBadFork() False."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H16",
+     "summary": "Driver-level cuInit poisoning via cutlass without CUTE_DSL_ARCH silently poisoned forked child CUDA contexts",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #146 + PR #149",
+     "verification": "CPU + B200/GB200"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-F1-FV",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Third-party C++ extensions calling cuInit() directly at dlopen time bypass torch._C._cuda_init.",
+     "mitigation": "Verify cuCtxGetCurrent == NULL in zygote self-check before accepting fork requests.",
+     "reproducer": "python3 -m unittest core/livelab/test_forksafe.py"
+    }
+   ]
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "SGLang",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "SGLang zygote sets CUTE_DSL_ARCH and installs forksafe before importing flashinfer or sgl_kernel."
+   ],
+   "closed_bugs": [
+    {
+     "id": "SGL-FORKSAFE",
+     "summary": "FlashInfer + Cutlass import in sglang.srt guarded via forksafe.pin_triton_target and CUTE_DSL_ARCH",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/sglang-livelab",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-F1-SGL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "sgl-kernel C++ static initializers must be checked on SM100 GB200 when preloaded in zygote.",
+     "mitigation": "Keep sgl_kernel out of preload list if driver context initializes.",
+     "reproducer": "python3 -m unittest discover -s repos/sglang/livelab/services -k zygote"
+    }
+   ]
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "verl",
+   "status": "not_applicable",
+   "risk_level": "closed",
+   "primary_blast_radius": "none",
+   "verification_tier": "-",
+   "invariants": [
+    "Ray spawns fresh worker processes via raylet rather than forking a pre-imported CUDA parent."
+   ],
+   "closed_bugs": [],
+   "residual_risks": []
+  },
+  {
+   "boundary": "forksafe",
+   "engine": "miles",
+   "status": "not_applicable",
+   "risk_level": "closed",
+   "primary_blast_radius": "none",
+   "verification_tier": "-",
+   "invariants": [
+    "Ray spawns RolloutManager and TrainRayActor processes cleanly without parent-child CUDA fork."
+   ],
+   "closed_bugs": [],
+   "residual_risks": []
+  },
+  {
+   "boundary": "livestream",
+   "engine": "vLLM",
+   "status": "partial_gap",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "Per-participant witness requires >0 post-commit calls on every targeted participant; summing across ranks never masks a 0-hit rank (core/livelab/livestream.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H5",
+     "summary": "Summing witness counts across ranks hid 1-rank zero_witness (rank0=8, rank1=0 passed!); accept='all' iterated characters {'a','l'}",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-M5",
+     "summary": "Lexicographic route tier sort ranked R10 heavier than R9",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-L1",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "On multi-role engines (vLLM, SGLang, verl), an abstaining role (abstain=True, counts={}) triggers a false zero_witness_pass in PR #149 unless receipt['abstained'] is tracked (L3 audit P1); livestream.py remains unwired in production.",
+     "mitigation": "Track abstained roles separately from silent active ranks and wire livestream ledger into Session.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_livestream.py"
+    }
+   ]
+  },
+  {
+   "boundary": "livestream",
+   "engine": "Megatron-LM",
+   "status": "partial_gap",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "conformance_lab.py verifies per-rank witness directly via kernel Coordinator, while livestream.py remains unwired."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H5 / M-M5",
+     "summary": "Per-rank zero_witness check fixed in core/livelab/livestream.py",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-L1-MEG",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "Signed JSONL receipt ledger is not emitted automatically during Megatron benchmark runs.",
+     "mitigation": "Emit linked txn/proof/undo JSONL records from MegatronLab.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_livestream.py"
+    }
+   ]
+  },
+  {
+   "boundary": "livestream",
+   "engine": "FastVideo",
+   "status": "partial_gap",
+   "risk_level": "medium",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "FastVideoLab checks witness counts per SP rank on check(), while livestream.py telemetry stream is unwired."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-H5",
+     "summary": "Core livestream per-rank witness accounting fixed",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #149",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-L1-FV",
+     "severity": "medium",
+     "blast_radius": "silent_corruption",
+     "summary": "livestream.py not yet attached to FastVideoLab.check().",
+     "mitigation": "Attach livestream verifier to LabUnderTest base runner.",
+     "reproducer": "python3 -m unittest core/livelab/kernel/test_livestream.py"
+    }
+   ]
+  },
+  {
+   "boundary": "livestream",
+   "engine": "SGLang",
+   "status": "partial_gap",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "Toy",
+   "invariants": [
+    "SglangLab verifies per-TP-rank witness counts through Coordinator.prove() (c2_visible, c10_not_proven)."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-L1-SGL",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Relies on Coordinator.prove() directly; livestream JSONL stream not yet wired.",
+     "mitigation": "Share core LabUnderTest receipt emitter once approved.",
+     "reproducer": "python3 -m conformance --lab repos.sglang.livelab.adapter.toy_lab:ToySglangLab"
+    }
+   ]
+  },
+  {
+   "boundary": "livestream",
+   "engine": "verl",
+   "status": "partial_gap",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "Toy",
+   "invariants": [
+    "VerlLab checks witness counts across targeted Ray actors (ActorView + FileNamespace) on every check()."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-L1-VERL",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Offline rescore / replay_adv probes log timing JSONs separately from core livestream.",
+     "mitigation": "Unify RL probe telemetry with livestream schema.",
+     "reproducer": "python3 -m unittest discover -s repos/verl/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "livestream",
+   "engine": "miles",
+   "status": "partial_gap",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "Toy",
+   "invariants": [
+    "MilesLab verifies witness hits on targeted rollout or trainer Ray actors via Coordinator.prove()."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-L1-MILES",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Async rollout witness counts require at least one post-commit generation batch before prove().",
+     "mitigation": "Run check() after draining stale epoch samples.",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "vLLM",
+   "status": "gpu_verified",
+   "risk_level": "medium",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "GPU",
+   "invariants": [
+    "vllm_args classifies CLI flag deltas into R0 (in-process) .. R9 (cold) and validates new args in preflight before stopping or mutating a live engine (repos/vllm/livelab/services/engine.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-M10a",
+     "summary": "_tokenize_argv corrupted positional MODEL argument after boolean flags like --trust-remote-code",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    },
+    {
+     "id": "M-M10b",
+     "summary": "Invalid flag (--max-num-seqs 0) killed live engine before validation; zygote-forked Qwen3-8B live reconfig verified on 1x B200 (54 us apply, 2.34 ms roundtrip, bit-exact)",
+     "blast_radius": "cold_fallback",
+     "fixed_in_pr": "PR #148",
+     "verification": "1x B200 Qwen3-8B"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-R1",
+     "severity": "medium",
+     "blast_radius": "cold_fallback",
+     "summary": "1-GPU zygote-forked live reconfigure (max_num_seqs / max_num_batched_tokens) is verified on B200; TP > 1 multi-rank reconfigure and tokenizer arity drift comparison remain unverified.",
+     "mitigation": "Run TP2 live reconfigure smoke check and compare tokenizer vocab arity on arg deltas.",
+     "reproducer": "python3 -m unittest discover -s repos/vllm/livelab/services -k vllm_args"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "Megatron-LM",
+   "status": "unbuilt",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "-",
+   "invariants": [
+    "megatron/training/arguments.py is classified as restart (R9); training arg changes trigger zygote respawn or restart."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-R-MEG",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Optimizer LR/WD schedule tweaks inside functions swap live, whereas CLI arg flags require respawn.",
+     "mitigation": "Optional live arg delta classifier for non-structural training flags.",
+     "reproducer": "None (declared restart in repos/megatron/kb/coverage_rules.json)"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "FastVideo",
+   "status": "unbuilt",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "-",
+   "invariants": [
+    "fastvideo_args.py is classified as restart; per-request sampling steps/guidance pass via workload call."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-R-FV",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Server-level CLI launch flags require worker respawn.",
+     "mitigation": "Pass denoising schedule parameters per check() payload.",
+     "reproducer": "None (declared restart in repos/fastvideo/kb/coverage_rules.json)"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "SGLang",
+   "status": "unbuilt",
+   "risk_level": "low",
+   "primary_blast_radius": "cold_fallback",
+   "verification_tier": "-",
+   "invariants": [
+    "sglang/srt/server_args.py is classified as restart; live scheduler token-limit reconfig is not wired yet."
+   ],
+   "closed_bugs": [],
+   "residual_risks": [
+    {
+     "id": "R-R-SGL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Changing max_running_requests or chunked_prefill_size currently requires zygote respawn.",
+     "mitigation": "Wire ZMQ scheduler update_config RPC in follow-up.",
+     "reproducer": "None (declared restart in survey rules)"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "verl",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Live --set updates trainer scalar hyperparameters (kl_coef, clip_ratio, entropy_coeff, lr) across TaskRunner and Ray workers at the step gap with journaled undo."
+   ],
+   "closed_bugs": [
+    {
+     "id": "VERL-SET",
+     "summary": "Verified live --set ([4, 2]) on 4x GB200 Qwen3-0.6B GRPO + reversible uninstall",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/verl-livelab",
+     "verification": "4x GB200 + Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-R-VERL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Topology flags (tensor_model_parallel_size, fsdp_size) are rightly refused as restart-only.",
+     "mitigation": "Keep explicit allowlist of safe scalar RL hyperparameters.",
+     "reproducer": "python3 -m unittest discover -s repos/verl/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "reconfigure",
+   "engine": "miles",
+   "status": "cpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "CPU",
+   "invariants": [
+    "Role-scoped scalar config updates apply at the step barrier across RolloutManager and TrainRayActors."
+   ],
+   "closed_bugs": [
+    {
+     "id": "MILES-SET",
+     "summary": "Preflight-checked scalar RL config updates reversible on reset/uninstall",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-R-MILES",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Router topology and Megatron parallelism flags require cluster restart.",
+     "mitigation": "Refuse structural args before mutating actor attributes.",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "vLLM",
+   "status": "partial_gap",
+   "risk_level": "high",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "snapshot_replay validates RNG and KV metadata before mutating runner.requests or KV cache blocks (repos/vllm/livelab/services/snapshot_replay.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "M-M11",
+     "summary": "restore() previously mutated runner.requests before RNG validation failed and advanced prefill by 1 token instead of prev_sched[idx]",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #148",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR1",
+     "severity": "high",
+     "blast_radius": "cold_fallback",
+     "summary": "Confirmed on 1x B200 (vLLM 0.33.0): V2 GPUModelRunner lacks runner.input_batch -> ValueError in snapshot_replay. V1 runner (VLLM_USE_V2_MODEL_RUNNER=0) passes 28 layers bit-identically (11.15 ms capture, 1.46 ms restore).",
+     "mitigation": "Add V2 RequestState block-table adapter alongside V1 input_batch path.",
+     "reproducer": "python3 repos/vllm/livelab/services/gpu_check_snapshot_replay.py --mode replay"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "Megatron-LM",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "state.py snapshots and restores model parameters, optimizer state, RNG, and quantized TransformerEngine MXFP8 inner byte tensors bit-for-bit (repos/megatron/livelab/fastrsi_megatron/state.py)."
+   ],
+   "closed_bugs": [
+    {
+     "id": "PR #155",
+     "summary": "Copying fp8_param via .data silently dequantized & re-quantized MXFP8 weights, drifting scales across resets",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #155",
+     "verification": "CPU + 2x GB200"
+    },
+    {
+     "id": "M-H19",
+     "summary": "state.digest() crashed without numpy and missed tensor stride/offset metadata",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #147",
+     "verification": "CPU Py3.11-3.14"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR2",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Delayed-scaling FP8 amax history buffers and NVFP4 recipes outside MXFP8, plus multi-node MoE router aux buffers, need explicit recipe checks.",
+     "mitigation": "Verify state.digest() equality before and after restore on every new FP8 recipe.",
+     "reproducer": "python3 -m unittest repos/megatron/livelab/fastrsi_megatron/test_pieces.py"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "FastVideo",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "reset('state') clears step caches and restores deterministic generator seeds across all SP ranks."
+   ],
+   "closed_bugs": [
+    {
+     "id": "FV-RESET",
+     "summary": "Bit-exact latent output verified across c0, c3, c4, c7, c9 on 2x GB200",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "PR #146",
+     "verification": "2x GB200 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR-FV",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "Custom stateful caching added inside user-edited DiT attention blocks requires undo_resets.",
+     "mitigation": "Combine constructor_reinit journal revert with reset('state').",
+     "reproducer": "python3 -m unittest discover -s repos/fastvideo/livelab/adapter"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "SGLang",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "reset('state') invokes flush_cache() to clear RadixCache, req_to_token_pool, KV allocator, and hybrid Mamba/GDN state slots, and resets sampling seed=0."
+   ],
+   "closed_bugs": [
+    {
+     "id": "SGL #50139 / #50148",
+     "summary": "Bit-exact state reset verified across 11/11 TP=2 SglangConformanceLab on 2x GB200 + #50148 Mamba replay",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/sglang-livelab",
+     "verification": "2x GB200 TP=2 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR-SGL",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "flush_cache() returns False without clearing RadixCache if any request is still queued or running.",
+     "mitigation": "Drain active requests completely and assert flush_cache() succeeded on every TP rank.",
+     "reproducer": "python3 -m conformance --lab adapter.conformance_lab:SglangConformanceLab"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "verl",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "Coupled S0 policy snapshot restores trainer FSDP/Megatron weights + optimizer state AND syncs restored weights to rollout workers so c0/c3/c4 start from identical policy parameters."
+   ],
+   "closed_bugs": [
+    {
+     "id": "VERL-S0",
+     "summary": "Coupled 4-GPU S0 restore + rollout sync verified in 2.46 s on 4x GB200 GRPO (matching 4-GPU digest) + offline rescore (42 ms)",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/verl-livelab",
+     "verification": "4x GB200 GRPO + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR2-VERL",
+     "severity": "low",
+     "blast_radius": "cold_fallback",
+     "summary": "Large 70B+ FSDP sharded state_dict + Adam moments consume substantial pinned host RAM.",
+     "mitigation": "Use ctypes.string_at fast digest and per-rank pinned host shards.",
+     "reproducer": "python3 -m unittest discover -s repos/verl/livelab"
+    }
+   ]
+  },
+  {
+   "boundary": "snapshot_restore",
+   "engine": "miles",
+   "status": "gpu_verified",
+   "risk_level": "low",
+   "primary_blast_radius": "silent_corruption",
+   "verification_tier": "GPU",
+   "invariants": [
+    "reset('state') flushes uncommitted or stale code_epoch trajectories from DataBuffer, flushes SGLang RadixCache, restores trainer S0 weights (MXFP8-safe), and broadcasts weights to rollout actors."
+   ],
+   "closed_bugs": [
+    {
+     "id": "MILES-EPOCH",
+     "summary": "EpochDataBuffer drain_stale + coupled S0 weight sync across trainer and rollout GPUs verified bit-exact on 2x GB200",
+     "blast_radius": "silent_corruption",
+     "fixed_in_pr": "feat/miles-livelab",
+     "verification": "2x GB200 + Toy 11/11"
+    }
+   ],
+   "residual_risks": [
+    {
+     "id": "R-SR2-MILES",
+     "severity": "low",
+     "blast_radius": "silent_corruption",
+     "summary": "P2P/NCCL weight broadcast from MegatronTrainRayActor to SGLang rollout actors must complete on all rollout replicas before unpausing generation.",
+     "mitigation": "Await all rollout update_weights futures and increment weight_version barrier.",
+     "reproducer": "python3 -m unittest discover -s repos/miles/livelab"
+    }
+   ]
+  }
+ ]
+}

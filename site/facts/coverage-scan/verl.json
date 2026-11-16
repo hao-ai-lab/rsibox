@@ -1,0 +1,10992 @@
+{
+ "schema": "fastrsi-survey/1",
+ "engine": "verl",
+ "scan_date": "2026-11-16",
+ "ruleset_version": "1.1",
+ "engine_rules_version": "verl-1.1",
+ "engine_rules_sha256": "fc5833ea5cf7240d8e3a0108d14111d0eeca625f03882f92ad1d902f4e9a68ed",
+ "upstream": {
+  "repo": "volcengine/verl",
+  "commit": "975f063ba3d1b2b895462a77f5b917eeb6a7eeee",
+  "version": "0.10.0.dev (cd58f550 + VERL_STARTUP_TRACE pin)",
+  "scanned_commit": "975f063ba3d1b2b895462a77f5b917eeb6a7eeee",
+  "pin_match": true
+ },
+ "lab": {
+  "commit": "233fbe3b9ae75ca23e270117476974283dce560a",
+  "capabilities": {
+   "swap": true,
+   "swap_recapture": false,
+   "jit_rebuild": true,
+   "rebuild": false,
+   "respawn": false,
+   "constructor_reinit": false
+  }
+ },
+ "unparsed": {
+  "files": 0,
+  "lines": 0
+ },
+ "functions": {
+  "total": 3571,
+  "by_install": {
+   "swap": {
+    "total": 2731,
+    "covered": 2553
+   },
+   "swap_recapture": {
+    "total": 11,
+    "covered": 11
+   },
+   "rebuild": {
+    "total": 744,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 54,
+    "covered": 0
+   },
+   "restart": {
+    "total": 31,
+    "covered": 0
+   }
+  },
+  "by_cap": {
+   "swap": {
+    "total": 2731,
+    "reached": 2553,
+    "covered": 2553,
+    "firm": 0
+   },
+   "swap_recapture": {
+    "total": 0,
+    "reached": 0,
+    "covered": 0,
+    "firm": 0
+   },
+   "jit_rebuild": {
+    "total": 11,
+    "reached": 11,
+    "covered": 11,
+    "firm": 11
+   },
+   "constructor_reinit": {
+    "total": 83,
+    "reached": 71,
+    "covered": 0,
+    "firm": 83
+   },
+   "rebuild": {
+    "total": 661,
+    "reached": 610,
+    "covered": 0,
+    "firm": 182
+   },
+   "respawn": {
+    "total": 54,
+    "reached": 54,
+    "covered": 0,
+    "firm": 0
+   }
+  },
+  "by_group": {
+   "NATIVE": 11,
+   "OP": 2731,
+   "RANKS": 54,
+   "RESOURCE": 138,
+   "STATE": 606,
+   "restart": 31
+  },
+  "by_rule": {
+   "constructor": 182,
+   "constructor_reinit": 83,
+   "default_op": 2580,
+   "jit_kernel": 11,
+   "launch_flags": 5,
+   "name_resource": 15,
+   "name_state": 294,
+   "path": 401
+  },
+  "firm": 276,
+  "uncertain": 3295,
+  "live_covered": 2564,
+  "respawn_covered": 0,
+  "restart": 31,
+  "not_covered": 976
+ },
+ "lines": {
+  "total": 83083,
+  "by_install": {
+   "swap": {
+    "total": 54871,
+    "covered": 52165
+   },
+   "swap_recapture": {
+    "total": 1047,
+    "covered": 1047
+   },
+   "rebuild": {
+    "total": 15320,
+    "covered": 0
+   },
+   "respawn": {
+    "total": 11236,
+    "covered": 0
+   },
+   "restart": {
+    "total": 609,
+    "covered": 0
+   }
+  },
+  "by_cap": {
+   "swap": {
+    "total": 54871,
+    "reached": 52165,
+    "covered": 52165,
+    "firm": 0
+   },
+   "swap_recapture": {
+    "total": 0,
+    "reached": 0,
+    "covered": 0,
+    "firm": 0
+   },
+   "jit_rebuild": {
+    "total": 1047,
+    "reached": 1047,
+    "covered": 1047,
+    "firm": 1047
+   },
+   "constructor_reinit": {
+    "total": 2205,
+    "reached": 1820,
+    "covered": 0,
+    "firm": 2205
+   },
+   "rebuild": {
+    "total": 13115,
+    "reached": 12339,
+    "covered": 0,
+    "firm": 2304
+   },
+   "respawn": {
+    "total": 11236,
+    "reached": 11236,
+    "covered": 0,
+    "firm": 10282
+   }
+  },
+  "by_group": {
+   "NATIVE": 1047,
+   "OP": 54871,
+   "RANKS": 954,
+   "RESOURCE": 2730,
+   "STATE": 22872,
+   "restart": 609
+  },
+  "by_rule": {
+   "constructor": 2304,
+   "constructor_reinit": 2205,
+   "default_op": 49967,
+   "jit_kernel": 1047,
+   "launch_flags": 35,
+   "module_level": 10282,
+   "name_resource": 360,
+   "name_state": 7378,
+   "path": 9505
+  },
+  "firm": 15838,
+  "uncertain": 67245,
+  "live_covered": 53212,
+  "respawn_covered": 0,
+  "restart": 609,
+  "not_covered": 29262
+ },
+ "native": {
+  "files": 0,
+  "lines": 0,
+  "install": "restart",
+  "by_ext": {}
+ },
+ "modules": {
+  "verl/__init__.py": {
+   "functions": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1,
+      "reached": 1,
+      "covered": 1,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 1
+    },
+    "by_rule": {
+     "default_op": 1
+    },
+    "firm": 0,
+    "uncertain": 1,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 58,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 51,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 7,
+      "reached": 7,
+      "covered": 7,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 51,
+      "reached": 51,
+      "covered": 0,
+      "firm": 51
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 51
+    },
+    "by_rule": {
+     "default_op": 7,
+     "module_level": 51
+    },
+    "firm": 51,
+    "uncertain": 7,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 51
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/base_config.py": {
+   "functions": {
+    "total": 5,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 5
+    },
+    "by_rule": {
+     "path": 5
+    },
+    "firm": 0,
+    "uncertain": 5,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 54,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 12,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "reached": 42,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 12,
+      "reached": 12,
+      "covered": 0,
+      "firm": 12
+     }
+    },
+    "by_group": {
+     "STATE": 54
+    },
+    "by_rule": {
+     "module_level": 12,
+     "path": 42
+    },
+    "firm": 12,
+    "uncertain": 42,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 54
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/checkpoint_engine": {
+   "functions": {
+    "total": 135,
+    "by_install": {
+     "swap": {
+      "total": 94,
+      "covered": 94
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 41,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 94,
+      "reached": 94,
+      "covered": 94,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 8,
+      "reached": 8,
+      "covered": 0,
+      "firm": 8
+     },
+     "rebuild": {
+      "total": 33,
+      "reached": 33,
+      "covered": 0,
+      "firm": 9
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 94,
+     "STATE": 41
+    },
+    "by_rule": {
+     "constructor": 9,
+     "constructor_reinit": 8,
+     "default_op": 94,
+     "name_state": 24
+    },
+    "firm": 17,
+    "uncertain": 118,
+    "live_covered": 94,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 41
+   },
+   "lines": {
+    "total": 2924,
+    "by_install": {
+     "swap": {
+      "total": 1741,
+      "covered": 1741
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 611,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 572,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1741,
+      "reached": 1741,
+      "covered": 1741,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 88,
+      "reached": 88,
+      "covered": 0,
+      "firm": 88
+     },
+     "rebuild": {
+      "total": 523,
+      "reached": 523,
+      "covered": 0,
+      "firm": 160
+     },
+     "respawn": {
+      "total": 572,
+      "reached": 572,
+      "covered": 0,
+      "firm": 572
+     }
+    },
+    "by_group": {
+     "OP": 1741,
+     "STATE": 1183
+    },
+    "by_rule": {
+     "constructor": 160,
+     "constructor_reinit": 88,
+     "default_op": 1741,
+     "module_level": 572,
+     "name_state": 363
+    },
+    "firm": 820,
+    "uncertain": 2104,
+    "live_covered": 1741,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1183
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental": {
+   "functions": {
+    "total": 382,
+    "by_install": {
+     "swap": {
+      "total": 268,
+      "covered": 101
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 111,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 3,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 268,
+      "reached": 101,
+      "covered": 101,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 24,
+      "reached": 12,
+      "covered": 0,
+      "firm": 24
+     },
+     "rebuild": {
+      "total": 87,
+      "reached": 40,
+      "covered": 0,
+      "firm": 25
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 268,
+     "RESOURCE": 2,
+     "STATE": 109,
+     "restart": 3
+    },
+    "by_rule": {
+     "constructor": 25,
+     "constructor_reinit": 24,
+     "default_op": 268,
+     "launch_flags": 3,
+     "name_resource": 2,
+     "name_state": 60
+    },
+    "firm": 49,
+    "uncertain": 333,
+    "live_covered": 101,
+    "respawn_covered": 0,
+    "restart": 3,
+    "not_covered": 278
+   },
+   "lines": {
+    "total": 8116,
+    "by_install": {
+     "swap": {
+      "total": 5067,
+      "covered": 2511
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1959,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1063,
+      "covered": 0
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 5067,
+      "reached": 2511,
+      "covered": 2511,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 536,
+      "reached": 151,
+      "covered": 0,
+      "firm": 536
+     },
+     "rebuild": {
+      "total": 1423,
+      "reached": 669,
+      "covered": 0,
+      "firm": 324
+     },
+     "respawn": {
+      "total": 1063,
+      "reached": 1063,
+      "covered": 0,
+      "firm": 1063
+     }
+    },
+    "by_group": {
+     "OP": 5067,
+     "RESOURCE": 89,
+     "STATE": 2933,
+     "restart": 27
+    },
+    "by_rule": {
+     "constructor": 324,
+     "constructor_reinit": 536,
+     "default_op": 5067,
+     "launch_flags": 27,
+     "module_level": 1063,
+     "name_resource": 89,
+     "name_state": 1010
+    },
+    "firm": 1923,
+    "uncertain": 6193,
+    "live_covered": 2511,
+    "respawn_covered": 0,
+    "restart": 27,
+    "not_covered": 5578
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/model_merger": {
+   "functions": {
+    "total": 59,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 59,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 58,
+      "reached": 58,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "RESOURCE": 53,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 5,
+     "constructor_reinit": 1,
+     "path": 53
+    },
+    "firm": 6,
+    "uncertain": 53,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 59
+   },
+   "lines": {
+    "total": 1209,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 966,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 243,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 9
+     },
+     "rebuild": {
+      "total": 957,
+      "reached": 957,
+      "covered": 0,
+      "firm": 69
+     },
+     "respawn": {
+      "total": 243,
+      "reached": 243,
+      "covered": 0,
+      "firm": 243
+     }
+    },
+    "by_group": {
+     "RESOURCE": 888,
+     "STATE": 321
+    },
+    "by_rule": {
+     "constructor": 69,
+     "constructor_reinit": 9,
+     "module_level": 243,
+     "path": 888
+    },
+    "firm": 321,
+    "uncertain": 888,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1209
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/models": {
+   "functions": {
+    "total": 170,
+    "by_install": {
+     "swap": {
+      "total": 152,
+      "covered": 152
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 18,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 152,
+      "reached": 152,
+      "covered": 152,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 17,
+      "reached": 17,
+      "covered": 0,
+      "firm": 3
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 152,
+     "STATE": 18
+    },
+    "by_rule": {
+     "constructor": 3,
+     "constructor_reinit": 1,
+     "default_op": 152,
+     "name_state": 14
+    },
+    "firm": 4,
+    "uncertain": 166,
+    "live_covered": 152,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 18
+   },
+   "lines": {
+    "total": 6022,
+    "by_install": {
+     "swap": {
+      "total": 5292,
+      "covered": 5292
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 316,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 414,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 5292,
+      "reached": 5292,
+      "covered": 5292,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 13,
+      "reached": 13,
+      "covered": 0,
+      "firm": 13
+     },
+     "rebuild": {
+      "total": 303,
+      "reached": 303,
+      "covered": 0,
+      "firm": 21
+     },
+     "respawn": {
+      "total": 414,
+      "reached": 414,
+      "covered": 0,
+      "firm": 414
+     }
+    },
+    "by_group": {
+     "OP": 5292,
+     "STATE": 730
+    },
+    "by_rule": {
+     "constructor": 21,
+     "constructor_reinit": 13,
+     "default_op": 5292,
+     "module_level": 414,
+     "name_state": 282
+    },
+    "firm": 448,
+    "uncertain": 5574,
+    "live_covered": 5292,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 730
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/plugin": {
+   "functions": {
+    "total": 95,
+    "by_install": {
+     "swap": {
+      "total": 93,
+      "covered": 93
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 93,
+      "reached": 93,
+      "covered": 93,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 93,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 93,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 95,
+    "live_covered": 93,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 606,
+    "by_install": {
+     "swap": {
+      "total": 460,
+      "covered": 460
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 104,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 460,
+      "reached": 460,
+      "covered": 460,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "reached": 42,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 104,
+      "reached": 104,
+      "covered": 0,
+      "firm": 104
+     }
+    },
+    "by_group": {
+     "OP": 460,
+     "STATE": 146
+    },
+    "by_rule": {
+     "default_op": 460,
+     "module_level": 104,
+     "name_state": 42
+    },
+    "firm": 104,
+    "uncertain": 502,
+    "live_covered": 460,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 146
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/protocol.py": {
+   "functions": {
+    "total": 58,
+    "by_install": {
+     "swap": {
+      "total": 55,
+      "covered": 55
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 55,
+      "reached": 55,
+      "covered": 55,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 55,
+     "STATE": 3
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 55,
+     "name_state": 1
+    },
+    "firm": 2,
+    "uncertain": 56,
+    "live_covered": 55,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 1013,
+    "by_install": {
+     "swap": {
+      "total": 898,
+      "covered": 898
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 35,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 80,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 898,
+      "reached": 898,
+      "covered": 898,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 35,
+      "reached": 35,
+      "covered": 0,
+      "firm": 4
+     },
+     "respawn": {
+      "total": 80,
+      "reached": 80,
+      "covered": 0,
+      "firm": 80
+     }
+    },
+    "by_group": {
+     "OP": 898,
+     "STATE": 115
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 898,
+     "module_level": 80,
+     "name_state": 31
+    },
+    "firm": 84,
+    "uncertain": 929,
+    "live_covered": 898,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 115
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/single_controller": {
+   "functions": {
+    "total": 115,
+    "by_install": {
+     "swap": {
+      "total": 54,
+      "covered": 54
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 17,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 44,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 54,
+      "reached": 54,
+      "covered": 54,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 6,
+      "reached": 6,
+      "covered": 0,
+      "firm": 6
+     },
+     "rebuild": {
+      "total": 11,
+      "reached": 11,
+      "covered": 0,
+      "firm": 3
+     },
+     "respawn": {
+      "total": 44,
+      "reached": 44,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 54,
+     "RANKS": 44,
+     "STATE": 17
+    },
+    "by_rule": {
+     "constructor": 3,
+     "constructor_reinit": 6,
+     "default_op": 54,
+     "name_state": 8,
+     "path": 44
+    },
+    "firm": 9,
+    "uncertain": 106,
+    "live_covered": 54,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 61
+   },
+   "lines": {
+    "total": 1661,
+    "by_install": {
+     "swap": {
+      "total": 446,
+      "covered": 446
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 282,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 933,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 446,
+      "reached": 446,
+      "covered": 446,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 140,
+      "reached": 140,
+      "covered": 0,
+      "firm": 140
+     },
+     "rebuild": {
+      "total": 142,
+      "reached": 142,
+      "covered": 0,
+      "firm": 26
+     },
+     "respawn": {
+      "total": 933,
+      "reached": 933,
+      "covered": 0,
+      "firm": 186
+     }
+    },
+    "by_group": {
+     "OP": 446,
+     "RANKS": 747,
+     "STATE": 468
+    },
+    "by_rule": {
+     "constructor": 26,
+     "constructor_reinit": 140,
+     "default_op": 446,
+     "module_level": 186,
+     "name_state": 116,
+     "path": 747
+    },
+    "firm": 352,
+    "uncertain": 1309,
+    "live_covered": 446,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1215
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/third_party": {
+   "functions": {
+    "total": 41,
+    "by_install": {
+     "swap": {
+      "total": 38,
+      "covered": 38
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 38,
+      "reached": 38,
+      "covered": 38,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 38,
+     "RESOURCE": 1,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 38,
+     "name_resource": 1,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 41,
+    "live_covered": 38,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 1815,
+    "by_install": {
+     "swap": {
+      "total": 1483,
+      "covered": 1483
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 152,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 180,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1483,
+      "reached": 1483,
+      "covered": 1483,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 152,
+      "reached": 152,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 180,
+      "reached": 180,
+      "covered": 0,
+      "firm": 180
+     }
+    },
+    "by_group": {
+     "OP": 1483,
+     "RESOURCE": 57,
+     "STATE": 275
+    },
+    "by_rule": {
+     "default_op": 1483,
+     "module_level": 180,
+     "name_resource": 57,
+     "name_state": 95
+    },
+    "firm": 180,
+    "uncertain": 1635,
+    "live_covered": 1483,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 332
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/tools": {
+   "functions": {
+    "total": 20,
+    "by_install": {
+     "swap": {
+      "total": 15,
+      "covered": 15
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 15,
+      "reached": 15,
+      "covered": 15,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 15,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 15,
+     "name_state": 4
+    },
+    "firm": 1,
+    "uncertain": 19,
+    "live_covered": 15,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 396,
+    "by_install": {
+     "swap": {
+      "total": 213,
+      "covered": 213
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 79,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 104,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 213,
+      "reached": 213,
+      "covered": 213,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 79,
+      "reached": 79,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 104,
+      "reached": 104,
+      "covered": 0,
+      "firm": 104
+     }
+    },
+    "by_group": {
+     "OP": 213,
+     "STATE": 183
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 213,
+     "module_level": 104,
+     "name_state": 73
+    },
+    "firm": 110,
+    "uncertain": 286,
+    "live_covered": 213,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 183
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/trainer": {
+   "functions": {
+    "total": 385,
+    "by_install": {
+     "swap": {
+      "total": 278,
+      "covered": 278
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 80,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 278,
+      "reached": 278,
+      "covered": 278,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 5
+     },
+     "rebuild": {
+      "total": 75,
+      "reached": 75,
+      "covered": 0,
+      "firm": 11
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 278,
+     "RESOURCE": 2,
+     "STATE": 78,
+     "restart": 27
+    },
+    "by_rule": {
+     "constructor": 11,
+     "constructor_reinit": 5,
+     "default_op": 236,
+     "launch_flags": 2,
+     "name_resource": 2,
+     "name_state": 40,
+     "path": 89
+    },
+    "firm": 16,
+    "uncertain": 369,
+    "live_covered": 278,
+    "respawn_covered": 0,
+    "restart": 27,
+    "not_covered": 80
+   },
+   "lines": {
+    "total": 11633,
+    "by_install": {
+     "swap": {
+      "total": 8247,
+      "covered": 8247
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1870,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 951,
+      "covered": 0
+     },
+     "restart": {
+      "total": 565,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 8247,
+      "reached": 8247,
+      "covered": 8247,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 94,
+      "reached": 94,
+      "covered": 0,
+      "firm": 94
+     },
+     "rebuild": {
+      "total": 1776,
+      "reached": 1776,
+      "covered": 0,
+      "firm": 166
+     },
+     "respawn": {
+      "total": 951,
+      "reached": 951,
+      "covered": 0,
+      "firm": 951
+     }
+    },
+    "by_group": {
+     "OP": 8247,
+     "RESOURCE": 100,
+     "STATE": 2721,
+     "restart": 565
+    },
+    "by_rule": {
+     "constructor": 166,
+     "constructor_reinit": 94,
+     "default_op": 6326,
+     "launch_flags": 8,
+     "module_level": 951,
+     "name_resource": 100,
+     "name_state": 1111,
+     "path": 2877
+    },
+    "firm": 1211,
+    "uncertain": 10422,
+    "live_covered": 8247,
+    "respawn_covered": 0,
+    "restart": 565,
+    "not_covered": 2821
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils": {
+   "functions": {
+    "total": 1274,
+    "by_install": {
+     "swap": {
+      "total": 1056,
+      "covered": 1056
+     },
+     "swap_recapture": {
+      "total": 11,
+      "covered": 11
+     },
+     "rebuild": {
+      "total": 196,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 10,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1056,
+      "reached": 1056,
+      "covered": 1056,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 11,
+      "reached": 11,
+      "covered": 11,
+      "firm": 11
+     },
+     "constructor_reinit": {
+      "total": 18,
+      "reached": 18,
+      "covered": 0,
+      "firm": 18
+     },
+     "rebuild": {
+      "total": 178,
+      "reached": 178,
+      "covered": 0,
+      "firm": 57
+     },
+     "respawn": {
+      "total": 10,
+      "reached": 10,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 11,
+     "OP": 1056,
+     "RANKS": 10,
+     "RESOURCE": 71,
+     "STATE": 125,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 57,
+     "constructor_reinit": 18,
+     "default_op": 964,
+     "jit_kernel": 11,
+     "name_resource": 1,
+     "name_state": 50,
+     "path": 173
+    },
+    "firm": 86,
+    "uncertain": 1188,
+    "live_covered": 1067,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 206
+   },
+   "lines": {
+    "total": 28253,
+    "by_install": {
+     "swap": {
+      "total": 20178,
+      "covered": 20178
+     },
+     "swap_recapture": {
+      "total": 1047,
+      "covered": 1047
+     },
+     "rebuild": {
+      "total": 3910,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 3101,
+      "covered": 0
+     },
+     "restart": {
+      "total": 17,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 20178,
+      "reached": 20178,
+      "covered": 20178,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 1047,
+      "reached": 1047,
+      "covered": 1047,
+      "firm": 1047
+     },
+     "constructor_reinit": {
+      "total": 430,
+      "reached": 430,
+      "covered": 0,
+      "firm": 430
+     },
+     "rebuild": {
+      "total": 3480,
+      "reached": 3480,
+      "covered": 0,
+      "firm": 623
+     },
+     "respawn": {
+      "total": 3101,
+      "reached": 3101,
+      "covered": 0,
+      "firm": 2894
+     }
+    },
+    "by_group": {
+     "NATIVE": 1047,
+     "OP": 20178,
+     "RANKS": 207,
+     "RESOURCE": 1484,
+     "STATE": 5320,
+     "restart": 17
+    },
+    "by_rule": {
+     "constructor": 623,
+     "constructor_reinit": 430,
+     "default_op": 17756,
+     "jit_kernel": 1047,
+     "module_level": 2894,
+     "name_resource": 2,
+     "name_state": 1373,
+     "path": 4128
+    },
+    "firm": 4994,
+    "uncertain": 23259,
+    "live_covered": 21225,
+    "respawn_covered": 0,
+    "restart": 17,
+    "not_covered": 7011
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers": {
+   "functions": {
+    "total": 831,
+    "by_install": {
+     "swap": {
+      "total": 627,
+      "covered": 616
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 204,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 627,
+      "reached": 616,
+      "covered": 616,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 20,
+      "reached": 20,
+      "covered": 0,
+      "firm": 20
+     },
+     "rebuild": {
+      "total": 184,
+      "reached": 180,
+      "covered": 0,
+      "firm": 66
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 627,
+     "RESOURCE": 9,
+     "STATE": 195
+    },
+    "by_rule": {
+     "constructor": 66,
+     "constructor_reinit": 20,
+     "default_op": 610,
+     "name_resource": 9,
+     "name_state": 89,
+     "path": 37
+    },
+    "firm": 86,
+    "uncertain": 745,
+    "live_covered": 616,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 215
+   },
+   "lines": {
+    "total": 19323,
+    "by_install": {
+     "swap": {
+      "total": 10839,
+      "covered": 10689
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5056,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 3428,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 10839,
+      "reached": 10689,
+      "covered": 10689,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 895,
+      "reached": 895,
+      "covered": 0,
+      "firm": 895
+     },
+     "rebuild": {
+      "total": 4161,
+      "reached": 4139,
+      "covered": 0,
+      "firm": 905
+     },
+     "respawn": {
+      "total": 3428,
+      "reached": 3428,
+      "covered": 0,
+      "firm": 3428
+     }
+    },
+    "by_group": {
+     "OP": 10839,
+     "RESOURCE": 112,
+     "STATE": 8372
+    },
+    "by_rule": {
+     "constructor": 905,
+     "constructor_reinit": 895,
+     "default_op": 10278,
+     "module_level": 3428,
+     "name_resource": 112,
+     "name_state": 2882,
+     "path": 823
+    },
+    "firm": 5228,
+    "uncertain": 14095,
+    "live_covered": 10689,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 8634
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  }
+ },
+ "by_subsystem": {
+  "verl": {
+   "functions": {
+    "total": 64,
+    "by_install": {
+     "swap": {
+      "total": 56,
+      "covered": 56
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 8,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 56,
+      "reached": 56,
+      "covered": 56,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 8,
+      "reached": 8,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 56,
+     "STATE": 8
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 56,
+     "name_state": 1,
+     "path": 5
+    },
+    "firm": 2,
+    "uncertain": 62,
+    "live_covered": 56,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 8
+   },
+   "lines": {
+    "total": 1125,
+    "by_install": {
+     "swap": {
+      "total": 905,
+      "covered": 905
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 77,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 143,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 905,
+      "reached": 905,
+      "covered": 905,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 77,
+      "reached": 77,
+      "covered": 0,
+      "firm": 4
+     },
+     "respawn": {
+      "total": 143,
+      "reached": 143,
+      "covered": 0,
+      "firm": 143
+     }
+    },
+    "by_group": {
+     "OP": 905,
+     "STATE": 220
+    },
+    "by_rule": {
+     "constructor": 4,
+     "default_op": 905,
+     "module_level": 143,
+     "name_state": 31,
+     "path": 42
+    },
+    "firm": 147,
+    "uncertain": 978,
+    "live_covered": 905,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 220
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/checkpoint_engine": {
+   "functions": {
+    "total": 130,
+    "by_install": {
+     "swap": {
+      "total": 89,
+      "covered": 89
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 41,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 89,
+      "reached": 89,
+      "covered": 89,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 8,
+      "reached": 8,
+      "covered": 0,
+      "firm": 8
+     },
+     "rebuild": {
+      "total": 33,
+      "reached": 33,
+      "covered": 0,
+      "firm": 9
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 89,
+     "STATE": 41
+    },
+    "by_rule": {
+     "constructor": 9,
+     "constructor_reinit": 8,
+     "default_op": 89,
+     "name_state": 24
+    },
+    "firm": 17,
+    "uncertain": 113,
+    "live_covered": 89,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 41
+   },
+   "lines": {
+    "total": 2735,
+    "by_install": {
+     "swap": {
+      "total": 1625,
+      "covered": 1625
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 611,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 499,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1625,
+      "reached": 1625,
+      "covered": 1625,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 88,
+      "reached": 88,
+      "covered": 0,
+      "firm": 88
+     },
+     "rebuild": {
+      "total": 523,
+      "reached": 523,
+      "covered": 0,
+      "firm": 160
+     },
+     "respawn": {
+      "total": 499,
+      "reached": 499,
+      "covered": 0,
+      "firm": 499
+     }
+    },
+    "by_group": {
+     "OP": 1625,
+     "STATE": 1110
+    },
+    "by_rule": {
+     "constructor": 160,
+     "constructor_reinit": 88,
+     "default_op": 1625,
+     "module_level": 499,
+     "name_state": 363
+    },
+    "firm": 747,
+    "uncertain": 1988,
+    "live_covered": 1625,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1110
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/checkpoint_engine/delta_sync": {
+   "functions": {
+    "total": 5,
+    "by_install": {
+     "swap": {
+      "total": 5,
+      "covered": 5
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 5,
+      "reached": 5,
+      "covered": 5,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 5
+    },
+    "by_rule": {
+     "default_op": 5
+    },
+    "firm": 0,
+    "uncertain": 5,
+    "live_covered": 5,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 189,
+    "by_install": {
+     "swap": {
+      "total": 116,
+      "covered": 116
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 73,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 116,
+      "reached": 116,
+      "covered": 116,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 73,
+      "reached": 73,
+      "covered": 0,
+      "firm": 73
+     }
+    },
+    "by_group": {
+     "OP": 116,
+     "STATE": 73
+    },
+    "by_rule": {
+     "default_op": 116,
+     "module_level": 73
+    },
+    "firm": 73,
+    "uncertain": 116,
+    "live_covered": 116,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 73
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/agent_loop": {
+   "functions": {
+    "total": 86,
+    "by_install": {
+     "swap": {
+      "total": 60,
+      "covered": 60
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 26,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 60,
+      "reached": 60,
+      "covered": 60,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 9
+     },
+     "rebuild": {
+      "total": 17,
+      "reached": 17,
+      "covered": 0,
+      "firm": 9
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 60,
+     "STATE": 26
+    },
+    "by_rule": {
+     "constructor": 9,
+     "constructor_reinit": 9,
+     "default_op": 60,
+     "name_state": 8
+    },
+    "firm": 18,
+    "uncertain": 68,
+    "live_covered": 60,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 26
+   },
+   "lines": {
+    "total": 2261,
+    "by_install": {
+     "swap": {
+      "total": 1620,
+      "covered": 1620
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 338,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 303,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1620,
+      "reached": 1620,
+      "covered": 1620,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 102,
+      "reached": 102,
+      "covered": 0,
+      "firm": 102
+     },
+     "rebuild": {
+      "total": 236,
+      "reached": 236,
+      "covered": 0,
+      "firm": 136
+     },
+     "respawn": {
+      "total": 303,
+      "reached": 303,
+      "covered": 0,
+      "firm": 303
+     }
+    },
+    "by_group": {
+     "OP": 1620,
+     "STATE": 641
+    },
+    "by_rule": {
+     "constructor": 136,
+     "constructor_reinit": 102,
+     "default_op": 1620,
+     "module_level": 303,
+     "name_state": 100
+    },
+    "firm": 541,
+    "uncertain": 1720,
+    "live_covered": 1620,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 641
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/fully_async_policy": {
+   "functions": {
+    "total": 175,
+    "by_install": {
+     "swap": {
+      "total": 134,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 39,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 2,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 134,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 9,
+      "reached": 0,
+      "covered": 0,
+      "firm": 9
+     },
+     "rebuild": {
+      "total": 30,
+      "reached": 0,
+      "covered": 0,
+      "firm": 4
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 134,
+     "RESOURCE": 2,
+     "STATE": 37,
+     "restart": 2
+    },
+    "by_rule": {
+     "constructor": 4,
+     "constructor_reinit": 9,
+     "default_op": 134,
+     "launch_flags": 2,
+     "name_resource": 2,
+     "name_state": 24
+    },
+    "firm": 13,
+    "uncertain": 162,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 2,
+    "not_covered": 173
+   },
+   "lines": {
+    "total": 3046,
+    "by_install": {
+     "swap": {
+      "total": 1911,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 786,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 332,
+      "covered": 0
+     },
+     "restart": {
+      "total": 17,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1911,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 258,
+      "reached": 0,
+      "covered": 0,
+      "firm": 258
+     },
+     "rebuild": {
+      "total": 528,
+      "reached": 0,
+      "covered": 0,
+      "firm": 16
+     },
+     "respawn": {
+      "total": 332,
+      "reached": 332,
+      "covered": 0,
+      "firm": 332
+     }
+    },
+    "by_group": {
+     "OP": 1911,
+     "RESOURCE": 89,
+     "STATE": 1029,
+     "restart": 17
+    },
+    "by_rule": {
+     "constructor": 16,
+     "constructor_reinit": 258,
+     "default_op": 1911,
+     "launch_flags": 17,
+     "module_level": 332,
+     "name_resource": 89,
+     "name_state": 423
+    },
+    "firm": 606,
+    "uncertain": 2440,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 17,
+    "not_covered": 3029
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/one_step_off_policy": {
+   "functions": {
+    "total": 12,
+    "by_install": {
+     "swap": {
+      "total": 6,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 6,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 0,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 4,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 6,
+     "STATE": 5,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor_reinit": 1,
+     "default_op": 6,
+     "launch_flags": 1,
+     "name_state": 4
+    },
+    "firm": 1,
+    "uncertain": 11,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 11
+   },
+   "lines": {
+    "total": 358,
+    "by_install": {
+     "swap": {
+      "total": 186,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 117,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 45,
+      "covered": 0
+     },
+     "restart": {
+      "total": 10,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 186,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 70,
+      "reached": 0,
+      "covered": 0,
+      "firm": 70
+     },
+     "rebuild": {
+      "total": 47,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 45,
+      "reached": 45,
+      "covered": 0,
+      "firm": 45
+     }
+    },
+    "by_group": {
+     "OP": 186,
+     "STATE": 162,
+     "restart": 10
+    },
+    "by_rule": {
+     "constructor_reinit": 70,
+     "default_op": 186,
+     "launch_flags": 10,
+     "module_level": 45,
+     "name_state": 47
+    },
+    "firm": 115,
+    "uncertain": 243,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 10,
+    "not_covered": 348
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/reward_loop": {
+   "functions": {
+    "total": 54,
+    "by_install": {
+     "swap": {
+      "total": 34,
+      "covered": 34
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 20,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 34,
+      "reached": 34,
+      "covered": 34,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 2
+     },
+     "rebuild": {
+      "total": 18,
+      "reached": 18,
+      "covered": 0,
+      "firm": 10
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 34,
+     "STATE": 20
+    },
+    "by_rule": {
+     "constructor": 10,
+     "constructor_reinit": 2,
+     "default_op": 34,
+     "name_state": 8
+    },
+    "firm": 12,
+    "uncertain": 42,
+    "live_covered": 34,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 20
+   },
+   "lines": {
+    "total": 1408,
+    "by_install": {
+     "swap": {
+      "total": 768,
+      "covered": 768
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 354,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 286,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 768,
+      "reached": 768,
+      "covered": 768,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 30,
+      "reached": 30,
+      "covered": 0,
+      "firm": 30
+     },
+     "rebuild": {
+      "total": 324,
+      "reached": 324,
+      "covered": 0,
+      "firm": 138
+     },
+     "respawn": {
+      "total": 286,
+      "reached": 286,
+      "covered": 0,
+      "firm": 286
+     }
+    },
+    "by_group": {
+     "OP": 768,
+     "STATE": 640
+    },
+    "by_rule": {
+     "constructor": 138,
+     "constructor_reinit": 30,
+     "default_op": 768,
+     "module_level": 286,
+     "name_state": 186
+    },
+    "firm": 454,
+    "uncertain": 954,
+    "live_covered": 768,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 640
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/separation": {
+   "functions": {
+    "total": 42,
+    "by_install": {
+     "swap": {
+      "total": 27,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 15,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 27,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 2,
+      "reached": 0,
+      "covered": 0,
+      "firm": 2
+     },
+     "rebuild": {
+      "total": 13,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 27,
+     "STATE": 15
+    },
+    "by_rule": {
+     "constructor_reinit": 2,
+     "default_op": 27,
+     "name_state": 13
+    },
+    "firm": 2,
+    "uncertain": 40,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 42
+   },
+   "lines": {
+    "total": 754,
+    "by_install": {
+     "swap": {
+      "total": 459,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 236,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 59,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 459,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 57,
+      "reached": 0,
+      "covered": 0,
+      "firm": 57
+     },
+     "rebuild": {
+      "total": 179,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 59,
+      "reached": 59,
+      "covered": 0,
+      "firm": 59
+     }
+    },
+    "by_group": {
+     "OP": 459,
+     "STATE": 295
+    },
+    "by_rule": {
+     "constructor_reinit": 57,
+     "default_op": 459,
+     "module_level": 59,
+     "name_state": 179
+    },
+    "firm": 116,
+    "uncertain": 638,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 754
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/experimental/teacher_loop": {
+   "functions": {
+    "total": 13,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 7,
+      "reached": 7,
+      "covered": 7,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 2,
+     "constructor_reinit": 1,
+     "default_op": 7,
+     "name_state": 3
+    },
+    "firm": 3,
+    "uncertain": 10,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 6
+   },
+   "lines": {
+    "total": 289,
+    "by_install": {
+     "swap": {
+      "total": 123,
+      "covered": 123
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 128,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 38,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 123,
+      "reached": 123,
+      "covered": 123,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 19,
+      "reached": 19,
+      "covered": 0,
+      "firm": 19
+     },
+     "rebuild": {
+      "total": 109,
+      "reached": 109,
+      "covered": 0,
+      "firm": 34
+     },
+     "respawn": {
+      "total": 38,
+      "reached": 38,
+      "covered": 0,
+      "firm": 38
+     }
+    },
+    "by_group": {
+     "OP": 123,
+     "STATE": 166
+    },
+    "by_rule": {
+     "constructor": 34,
+     "constructor_reinit": 19,
+     "default_op": 123,
+     "module_level": 38,
+     "name_state": 75
+    },
+    "firm": 91,
+    "uncertain": 198,
+    "live_covered": 123,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 166
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/model_merger": {
+   "functions": {
+    "total": 59,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 59,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 58,
+      "reached": 58,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "RESOURCE": 53,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 5,
+     "constructor_reinit": 1,
+     "path": 53
+    },
+    "firm": 6,
+    "uncertain": 53,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 59
+   },
+   "lines": {
+    "total": 1209,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 966,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 243,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 9
+     },
+     "rebuild": {
+      "total": 957,
+      "reached": 957,
+      "covered": 0,
+      "firm": 69
+     },
+     "respawn": {
+      "total": 243,
+      "reached": 243,
+      "covered": 0,
+      "firm": 243
+     }
+    },
+    "by_group": {
+     "RESOURCE": 888,
+     "STATE": 321
+    },
+    "by_rule": {
+     "constructor": 69,
+     "constructor_reinit": 9,
+     "module_level": 243,
+     "path": 888
+    },
+    "firm": 321,
+    "uncertain": 888,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1209
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/models": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/models/mcore": {
+   "functions": {
+    "total": 64,
+    "by_install": {
+     "swap": {
+      "total": 55,
+      "covered": 55
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 55,
+      "reached": 55,
+      "covered": 55,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 55,
+     "STATE": 9
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 55,
+     "name_state": 8
+    },
+    "firm": 1,
+    "uncertain": 63,
+    "live_covered": 55,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 9
+   },
+   "lines": {
+    "total": 2494,
+    "by_install": {
+     "swap": {
+      "total": 2154,
+      "covered": 2154
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 208,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 132,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 2154,
+      "reached": 2154,
+      "covered": 2154,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 208,
+      "reached": 208,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 132,
+      "reached": 132,
+      "covered": 0,
+      "firm": 132
+     }
+    },
+    "by_group": {
+     "OP": 2154,
+     "STATE": 340
+    },
+    "by_rule": {
+     "constructor": 5,
+     "default_op": 2154,
+     "module_level": 132,
+     "name_state": 203
+    },
+    "firm": 137,
+    "uncertain": 2357,
+    "live_covered": 2154,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 340
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/models/transformers": {
+   "functions": {
+    "total": 106,
+    "by_install": {
+     "swap": {
+      "total": 97,
+      "covered": 97
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 97,
+      "reached": 97,
+      "covered": 97,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 8,
+      "reached": 8,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 97,
+     "STATE": 9
+    },
+    "by_rule": {
+     "constructor": 2,
+     "constructor_reinit": 1,
+     "default_op": 97,
+     "name_state": 6
+    },
+    "firm": 3,
+    "uncertain": 103,
+    "live_covered": 97,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 9
+   },
+   "lines": {
+    "total": 3528,
+    "by_install": {
+     "swap": {
+      "total": 3138,
+      "covered": 3138
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 108,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 282,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 3138,
+      "reached": 3138,
+      "covered": 3138,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 13,
+      "reached": 13,
+      "covered": 0,
+      "firm": 13
+     },
+     "rebuild": {
+      "total": 95,
+      "reached": 95,
+      "covered": 0,
+      "firm": 16
+     },
+     "respawn": {
+      "total": 282,
+      "reached": 282,
+      "covered": 0,
+      "firm": 282
+     }
+    },
+    "by_group": {
+     "OP": 3138,
+     "STATE": 390
+    },
+    "by_rule": {
+     "constructor": 16,
+     "constructor_reinit": 13,
+     "default_op": 3138,
+     "module_level": 282,
+     "name_state": 79
+    },
+    "firm": 311,
+    "uncertain": 3217,
+    "live_covered": 3138,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 390
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/plugin": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/plugin/platform": {
+   "functions": {
+    "total": 95,
+    "by_install": {
+     "swap": {
+      "total": 93,
+      "covered": 93
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 93,
+      "reached": 93,
+      "covered": 93,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 93,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 93,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 95,
+    "live_covered": 93,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 606,
+    "by_install": {
+     "swap": {
+      "total": 460,
+      "covered": 460
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 104,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 460,
+      "reached": 460,
+      "covered": 460,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 42,
+      "reached": 42,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 104,
+      "reached": 104,
+      "covered": 0,
+      "firm": 104
+     }
+    },
+    "by_group": {
+     "OP": 460,
+     "STATE": 146
+    },
+    "by_rule": {
+     "default_op": 460,
+     "module_level": 104,
+     "name_state": 42
+    },
+    "firm": 104,
+    "uncertain": 502,
+    "live_covered": 460,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 146
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/single_controller": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 7,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 7,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 7,
+      "reached": 7,
+      "covered": 0,
+      "firm": 7
+     }
+    },
+    "by_group": {
+     "STATE": 7
+    },
+    "by_rule": {
+     "module_level": 7
+    },
+    "firm": 7,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 7
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/single_controller/base": {
+   "functions": {
+    "total": 66,
+    "by_install": {
+     "swap": {
+      "total": 54,
+      "covered": 54
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 12,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 54,
+      "reached": 54,
+      "covered": 54,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 3
+     },
+     "rebuild": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 54,
+     "STATE": 12
+    },
+    "by_rule": {
+     "constructor": 1,
+     "constructor_reinit": 3,
+     "default_op": 54,
+     "name_state": 8
+    },
+    "firm": 4,
+    "uncertain": 62,
+    "live_covered": 54,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 12
+   },
+   "lines": {
+    "total": 741,
+    "by_install": {
+     "swap": {
+      "total": 446,
+      "covered": 446
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 183,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 112,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 446,
+      "reached": 446,
+      "covered": 446,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 55,
+      "reached": 55,
+      "covered": 0,
+      "firm": 55
+     },
+     "rebuild": {
+      "total": 128,
+      "reached": 128,
+      "covered": 0,
+      "firm": 12
+     },
+     "respawn": {
+      "total": 112,
+      "reached": 112,
+      "covered": 0,
+      "firm": 112
+     }
+    },
+    "by_group": {
+     "OP": 446,
+     "STATE": 295
+    },
+    "by_rule": {
+     "constructor": 12,
+     "constructor_reinit": 55,
+     "default_op": 446,
+     "module_level": 112,
+     "name_state": 116
+    },
+    "firm": 179,
+    "uncertain": 562,
+    "live_covered": 446,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 295
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/single_controller/ray": {
+   "functions": {
+    "total": 49,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 44,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 3
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 44,
+      "reached": 44,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 44,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 2,
+     "constructor_reinit": 3,
+     "path": 44
+    },
+    "firm": 5,
+    "uncertain": 44,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 49
+   },
+   "lines": {
+    "total": 913,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 99,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 814,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 85,
+      "reached": 85,
+      "covered": 0,
+      "firm": 85
+     },
+     "rebuild": {
+      "total": 14,
+      "reached": 14,
+      "covered": 0,
+      "firm": 14
+     },
+     "respawn": {
+      "total": 814,
+      "reached": 814,
+      "covered": 0,
+      "firm": 67
+     }
+    },
+    "by_group": {
+     "RANKS": 747,
+     "STATE": 166
+    },
+    "by_rule": {
+     "constructor": 14,
+     "constructor_reinit": 85,
+     "module_level": 67,
+     "path": 747
+    },
+    "firm": 166,
+    "uncertain": 747,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 913
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/third_party": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/third_party/torch": {
+   "functions": {
+    "total": 40,
+    "by_install": {
+     "swap": {
+      "total": 37,
+      "covered": 37
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 37,
+      "reached": 37,
+      "covered": 37,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 37,
+     "RESOURCE": 1,
+     "STATE": 2
+    },
+    "by_rule": {
+     "default_op": 37,
+     "name_resource": 1,
+     "name_state": 2
+    },
+    "firm": 0,
+    "uncertain": 40,
+    "live_covered": 37,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3
+   },
+   "lines": {
+    "total": 1780,
+    "by_install": {
+     "swap": {
+      "total": 1478,
+      "covered": 1478
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 152,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 150,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1478,
+      "reached": 1478,
+      "covered": 1478,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 152,
+      "reached": 152,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 150,
+      "reached": 150,
+      "covered": 0,
+      "firm": 150
+     }
+    },
+    "by_group": {
+     "OP": 1478,
+     "RESOURCE": 57,
+     "STATE": 245
+    },
+    "by_rule": {
+     "default_op": 1478,
+     "module_level": 150,
+     "name_resource": 57,
+     "name_state": 95
+    },
+    "firm": 150,
+    "uncertain": 1630,
+    "live_covered": 1478,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 302
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/third_party/vllm": {
+   "functions": {
+    "total": 1,
+    "by_install": {
+     "swap": {
+      "total": 1,
+      "covered": 1
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1,
+      "reached": 1,
+      "covered": 1,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 1
+    },
+    "by_rule": {
+     "default_op": 1
+    },
+    "firm": 0,
+    "uncertain": 1,
+    "live_covered": 1,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 35,
+    "by_install": {
+     "swap": {
+      "total": 5,
+      "covered": 5
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 30,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 5,
+      "reached": 5,
+      "covered": 5,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 30,
+      "reached": 30,
+      "covered": 0,
+      "firm": 30
+     }
+    },
+    "by_group": {
+     "OP": 5,
+     "STATE": 30
+    },
+    "by_rule": {
+     "default_op": 5,
+     "module_level": 30
+    },
+    "firm": 30,
+    "uncertain": 5,
+    "live_covered": 5,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 30
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/tools": {
+   "functions": {
+    "total": 20,
+    "by_install": {
+     "swap": {
+      "total": 15,
+      "covered": 15
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 15,
+      "reached": 15,
+      "covered": 15,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 15,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 15,
+     "name_state": 4
+    },
+    "firm": 1,
+    "uncertain": 19,
+    "live_covered": 15,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 396,
+    "by_install": {
+     "swap": {
+      "total": 213,
+      "covered": 213
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 79,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 104,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 213,
+      "reached": 213,
+      "covered": 213,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 79,
+      "reached": 79,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 104,
+      "reached": 104,
+      "covered": 0,
+      "firm": 104
+     }
+    },
+    "by_group": {
+     "OP": 213,
+     "STATE": 183
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 213,
+     "module_level": 104,
+     "name_state": 73
+    },
+    "firm": 110,
+    "uncertain": 286,
+    "live_covered": 213,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 183
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/trainer": {
+   "functions": {
+    "total": 51,
+    "by_install": {
+     "swap": {
+      "total": 9,
+      "covered": 9
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 15,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 27,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 9,
+      "reached": 9,
+      "covered": 9,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 15,
+      "reached": 15,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 9,
+     "STATE": 15,
+     "restart": 27
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 9,
+     "launch_flags": 2,
+     "name_state": 13,
+     "path": 25
+    },
+    "firm": 2,
+    "uncertain": 49,
+    "live_covered": 9,
+    "respawn_covered": 0,
+    "restart": 27,
+    "not_covered": 15
+   },
+   "lines": {
+    "total": 1210,
+    "by_install": {
+     "swap": {
+      "total": 295,
+      "covered": 295
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 293,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 57,
+      "covered": 0
+     },
+     "restart": {
+      "total": 565,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 295,
+      "reached": 295,
+      "covered": 295,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 293,
+      "reached": 293,
+      "covered": 0,
+      "firm": 31
+     },
+     "respawn": {
+      "total": 57,
+      "reached": 57,
+      "covered": 0,
+      "firm": 57
+     }
+    },
+    "by_group": {
+     "OP": 295,
+     "STATE": 350,
+     "restart": 565
+    },
+    "by_rule": {
+     "constructor": 31,
+     "default_op": 295,
+     "launch_flags": 8,
+     "module_level": 57,
+     "name_state": 262,
+     "path": 557
+    },
+    "firm": 88,
+    "uncertain": 1122,
+    "live_covered": 295,
+    "respawn_covered": 0,
+    "restart": 565,
+    "not_covered": 350
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/trainer/config": {
+   "functions": {
+    "total": 24,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 24,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 24,
+      "reached": 24,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 24
+    },
+    "by_rule": {
+     "constructor": 2,
+     "path": 22
+    },
+    "firm": 2,
+    "uncertain": 22,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 24
+   },
+   "lines": {
+    "total": 684,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 413,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 271,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 413,
+      "reached": 413,
+      "covered": 0,
+      "firm": 14
+     },
+     "respawn": {
+      "total": 271,
+      "reached": 271,
+      "covered": 0,
+      "firm": 271
+     }
+    },
+    "by_group": {
+     "STATE": 684
+    },
+    "by_rule": {
+     "constructor": 14,
+     "module_level": 271,
+     "path": 399
+    },
+    "firm": 285,
+    "uncertain": 399,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 684
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/trainer/distillation": {
+   "functions": {
+    "total": 21,
+    "by_install": {
+     "swap": {
+      "total": 19,
+      "covered": 19
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 19,
+      "reached": 19,
+      "covered": 19,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 19,
+     "STATE": 2
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 19,
+     "name_state": 1
+    },
+    "firm": 1,
+    "uncertain": 20,
+    "live_covered": 19,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 857,
+    "by_install": {
+     "swap": {
+      "total": 780,
+      "covered": 780
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 18,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 59,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 780,
+      "reached": 780,
+      "covered": 780,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 18,
+      "reached": 18,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 59,
+      "reached": 59,
+      "covered": 0,
+      "firm": 59
+     }
+    },
+    "by_group": {
+     "OP": 780,
+     "STATE": 77
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 780,
+     "module_level": 59,
+     "name_state": 12
+    },
+    "firm": 65,
+    "uncertain": 792,
+    "live_covered": 780,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 77
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/trainer/ppo": {
+   "functions": {
+    "total": 289,
+    "by_install": {
+     "swap": {
+      "total": 250,
+      "covered": 250
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 39,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 250,
+      "reached": 250,
+      "covered": 250,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 5
+     },
+     "rebuild": {
+      "total": 34,
+      "reached": 34,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 250,
+     "RESOURCE": 2,
+     "STATE": 37
+    },
+    "by_rule": {
+     "constructor": 6,
+     "constructor_reinit": 5,
+     "default_op": 208,
+     "name_resource": 2,
+     "name_state": 26,
+     "path": 42
+    },
+    "firm": 11,
+    "uncertain": 278,
+    "live_covered": 250,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 39
+   },
+   "lines": {
+    "total": 8882,
+    "by_install": {
+     "swap": {
+      "total": 7172,
+      "covered": 7172
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1146,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 564,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 7172,
+      "reached": 7172,
+      "covered": 7172,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 94,
+      "reached": 94,
+      "covered": 0,
+      "firm": 94
+     },
+     "rebuild": {
+      "total": 1052,
+      "reached": 1052,
+      "covered": 0,
+      "firm": 115
+     },
+     "respawn": {
+      "total": 564,
+      "reached": 564,
+      "covered": 0,
+      "firm": 564
+     }
+    },
+    "by_group": {
+     "OP": 7172,
+     "RESOURCE": 100,
+     "STATE": 1610
+    },
+    "by_rule": {
+     "constructor": 115,
+     "constructor_reinit": 94,
+     "default_op": 5251,
+     "module_level": 564,
+     "name_resource": 100,
+     "name_state": 837,
+     "path": 1921
+    },
+    "firm": 773,
+    "uncertain": 8109,
+    "live_covered": 7172,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1710
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils": {
+   "functions": {
+    "total": 499,
+    "by_install": {
+     "swap": {
+      "total": 451,
+      "covered": 451
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 41,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 6,
+      "covered": 0
+     },
+     "restart": {
+      "total": 1,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 451,
+      "reached": 451,
+      "covered": 451,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 7,
+      "reached": 7,
+      "covered": 0,
+      "firm": 7
+     },
+     "rebuild": {
+      "total": 34,
+      "reached": 34,
+      "covered": 0,
+      "firm": 16
+     },
+     "respawn": {
+      "total": 6,
+      "reached": 6,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 451,
+     "RANKS": 6,
+     "STATE": 41,
+     "restart": 1
+    },
+    "by_rule": {
+     "constructor": 16,
+     "constructor_reinit": 7,
+     "default_op": 451,
+     "name_state": 18,
+     "path": 7
+    },
+    "firm": 23,
+    "uncertain": 476,
+    "live_covered": 451,
+    "respawn_covered": 0,
+    "restart": 1,
+    "not_covered": 47
+   },
+   "lines": {
+    "total": 9664,
+    "by_install": {
+     "swap": {
+      "total": 8135,
+      "covered": 8135
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 680,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 832,
+      "covered": 0
+     },
+     "restart": {
+      "total": 17,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 8135,
+      "reached": 8135,
+      "covered": 8135,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 151,
+      "reached": 151,
+      "covered": 0,
+      "firm": 151
+     },
+     "rebuild": {
+      "total": 529,
+      "reached": 529,
+      "covered": 0,
+      "firm": 93
+     },
+     "respawn": {
+      "total": 832,
+      "reached": 832,
+      "covered": 0,
+      "firm": 677
+     }
+    },
+    "by_group": {
+     "OP": 8135,
+     "RANKS": 155,
+     "STATE": 1357,
+     "restart": 17
+    },
+    "by_rule": {
+     "constructor": 93,
+     "constructor_reinit": 151,
+     "default_op": 8135,
+     "module_level": 677,
+     "name_state": 436,
+     "path": 172
+    },
+    "firm": 921,
+    "uncertain": 8743,
+    "live_covered": 8135,
+    "respawn_covered": 0,
+    "restart": 17,
+    "not_covered": 1512
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/checkpoint": {
+   "functions": {
+    "total": 74,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 74,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 73,
+      "reached": 73,
+      "covered": 0,
+      "firm": 3
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "RESOURCE": 70,
+     "STATE": 4
+    },
+    "by_rule": {
+     "constructor": 3,
+     "constructor_reinit": 1,
+     "path": 70
+    },
+    "firm": 4,
+    "uncertain": 70,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 74
+   },
+   "lines": {
+    "total": 1815,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1643,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 172,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 25,
+      "reached": 25,
+      "covered": 0,
+      "firm": 25
+     },
+     "rebuild": {
+      "total": 1618,
+      "reached": 1618,
+      "covered": 0,
+      "firm": 136
+     },
+     "respawn": {
+      "total": 172,
+      "reached": 172,
+      "covered": 0,
+      "firm": 172
+     }
+    },
+    "by_group": {
+     "RESOURCE": 1482,
+     "STATE": 333
+    },
+    "by_rule": {
+     "constructor": 136,
+     "constructor_reinit": 25,
+     "module_level": 172,
+     "path": 1482
+    },
+    "firm": 333,
+    "uncertain": 1482,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1815
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/dataset": {
+   "functions": {
+    "total": 39,
+    "by_install": {
+     "swap": {
+      "total": 33,
+      "covered": 33
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 33,
+      "reached": 33,
+      "covered": 33,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 3
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 33,
+     "STATE": 6
+    },
+    "by_rule": {
+     "constructor": 3,
+     "constructor_reinit": 1,
+     "default_op": 33,
+     "name_state": 2
+    },
+    "firm": 4,
+    "uncertain": 35,
+    "live_covered": 33,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 6
+   },
+   "lines": {
+    "total": 1090,
+    "by_install": {
+     "swap": {
+      "total": 717,
+      "covered": 717
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 254,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 119,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 717,
+      "reached": 717,
+      "covered": 717,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 63,
+      "reached": 63,
+      "covered": 0,
+      "firm": 63
+     },
+     "rebuild": {
+      "total": 191,
+      "reached": 191,
+      "covered": 0,
+      "firm": 72
+     },
+     "respawn": {
+      "total": 119,
+      "reached": 119,
+      "covered": 0,
+      "firm": 119
+     }
+    },
+    "by_group": {
+     "OP": 717,
+     "STATE": 373
+    },
+    "by_rule": {
+     "constructor": 72,
+     "constructor_reinit": 63,
+     "default_op": 717,
+     "module_level": 119,
+     "name_state": 119
+    },
+    "firm": 254,
+    "uncertain": 836,
+    "live_covered": 717,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 373
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/debug": {
+   "functions": {
+    "total": 11,
+    "by_install": {
+     "swap": {
+      "total": 10,
+      "covered": 10
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 10,
+      "reached": 10,
+      "covered": 10,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 10,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 10
+    },
+    "firm": 1,
+    "uncertain": 10,
+    "live_covered": 10,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 153,
+    "by_install": {
+     "swap": {
+      "total": 117,
+      "covered": 117
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 31,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 117,
+      "reached": 117,
+      "covered": 117,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 31,
+      "reached": 31,
+      "covered": 0,
+      "firm": 31
+     }
+    },
+    "by_group": {
+     "OP": 117,
+     "STATE": 36
+    },
+    "by_rule": {
+     "constructor": 5,
+     "default_op": 117,
+     "module_level": 31
+    },
+    "firm": 36,
+    "uncertain": 117,
+    "live_covered": 117,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 36
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/experimental": {
+   "functions": {
+    "total": 6,
+    "by_install": {
+     "swap": {
+      "total": 5,
+      "covered": 5
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 5,
+      "reached": 5,
+      "covered": 5,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 5,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "default_op": 5
+    },
+    "firm": 1,
+    "uncertain": 5,
+    "live_covered": 5,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 196,
+    "by_install": {
+     "swap": {
+      "total": 173,
+      "covered": 173
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 17,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 173,
+      "reached": 173,
+      "covered": 173,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 6,
+      "reached": 6,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 17,
+      "reached": 17,
+      "covered": 0,
+      "firm": 17
+     }
+    },
+    "by_group": {
+     "OP": 173,
+     "STATE": 23
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 173,
+     "module_level": 17
+    },
+    "firm": 23,
+    "uncertain": 173,
+    "live_covered": 173,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 23
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/kernel": {
+   "functions": {
+    "total": 42,
+    "by_install": {
+     "swap": {
+      "total": 30,
+      "covered": 30
+     },
+     "swap_recapture": {
+      "total": 10,
+      "covered": 10
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 30,
+      "reached": 30,
+      "covered": 30,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 10,
+      "reached": 10,
+      "covered": 10,
+      "firm": 10
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 10,
+     "OP": 30,
+     "RESOURCE": 1,
+     "STATE": 1
+    },
+    "by_rule": {
+     "default_op": 30,
+     "jit_kernel": 10,
+     "name_resource": 1,
+     "name_state": 1
+    },
+    "firm": 10,
+    "uncertain": 32,
+    "live_covered": 40,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 2261,
+    "by_install": {
+     "swap": {
+      "total": 1115,
+      "covered": 1115
+     },
+     "swap_recapture": {
+      "total": 971,
+      "covered": 971
+     },
+     "rebuild": {
+      "total": 39,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 136,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1115,
+      "reached": 1115,
+      "covered": 1115,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 971,
+      "reached": 971,
+      "covered": 971,
+      "firm": 971
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 39,
+      "reached": 39,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 136,
+      "reached": 136,
+      "covered": 0,
+      "firm": 136
+     }
+    },
+    "by_group": {
+     "NATIVE": 971,
+     "OP": 1115,
+     "RESOURCE": 2,
+     "STATE": 173
+    },
+    "by_rule": {
+     "default_op": 1115,
+     "jit_kernel": 971,
+     "module_level": 136,
+     "name_resource": 2,
+     "name_state": 37
+    },
+    "firm": 1107,
+    "uncertain": 1154,
+    "live_covered": 2086,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 175
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/logger": {
+   "functions": {
+    "total": 11,
+    "by_install": {
+     "swap": {
+      "total": 9,
+      "covered": 9
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 9,
+      "reached": 9,
+      "covered": 9,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 9,
+     "STATE": 2
+    },
+    "by_rule": {
+     "constructor": 2,
+     "default_op": 9
+    },
+    "firm": 2,
+    "uncertain": 9,
+    "live_covered": 9,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 117,
+    "by_install": {
+     "swap": {
+      "total": 64,
+      "covered": 64
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 13,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 40,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 64,
+      "reached": 64,
+      "covered": 64,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 13,
+      "reached": 13,
+      "covered": 0,
+      "firm": 13
+     },
+     "respawn": {
+      "total": 40,
+      "reached": 40,
+      "covered": 0,
+      "firm": 40
+     }
+    },
+    "by_group": {
+     "OP": 64,
+     "STATE": 53
+    },
+    "by_rule": {
+     "constructor": 13,
+     "default_op": 64,
+     "module_level": 40
+    },
+    "firm": 53,
+    "uncertain": 64,
+    "live_covered": 64,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 53
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/megatron": {
+   "functions": {
+    "total": 72,
+    "by_install": {
+     "swap": {
+      "total": 67,
+      "covered": 67
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 67,
+      "reached": 67,
+      "covered": 67,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 4,
+      "reached": 4,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 67,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 1,
+     "constructor_reinit": 1,
+     "default_op": 67,
+     "name_state": 3
+    },
+    "firm": 2,
+    "uncertain": 70,
+    "live_covered": 67,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 1540,
+    "by_install": {
+     "swap": {
+      "total": 1298,
+      "covered": 1298
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 129,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 113,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1298,
+      "reached": 1298,
+      "covered": 1298,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 9
+     },
+     "rebuild": {
+      "total": 120,
+      "reached": 120,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 113,
+      "reached": 113,
+      "covered": 0,
+      "firm": 113
+     }
+    },
+    "by_group": {
+     "OP": 1298,
+     "STATE": 242
+    },
+    "by_rule": {
+     "constructor": 5,
+     "constructor_reinit": 9,
+     "default_op": 1298,
+     "module_level": 113,
+     "name_state": 115
+    },
+    "firm": 127,
+    "uncertain": 1413,
+    "live_covered": 1298,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 242
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/metric": {
+   "functions": {
+    "total": 9,
+    "by_install": {
+     "swap": {
+      "total": 7,
+      "covered": 7
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 7,
+      "reached": 7,
+      "covered": 7,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 7,
+     "STATE": 2
+    },
+    "by_rule": {
+     "constructor_reinit": 1,
+     "default_op": 7,
+     "name_state": 1
+    },
+    "firm": 1,
+    "uncertain": 8,
+    "live_covered": 7,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2
+   },
+   "lines": {
+    "total": 128,
+    "by_install": {
+     "swap": {
+      "total": 84,
+      "covered": 84
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 12,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 32,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 84,
+      "reached": 84,
+      "covered": 84,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 10,
+      "reached": 10,
+      "covered": 0,
+      "firm": 10
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 32,
+      "reached": 32,
+      "covered": 0,
+      "firm": 32
+     }
+    },
+    "by_group": {
+     "OP": 84,
+     "STATE": 44
+    },
+    "by_rule": {
+     "constructor_reinit": 10,
+     "default_op": 84,
+     "module_level": 32,
+     "name_state": 2
+    },
+    "firm": 42,
+    "uncertain": 86,
+    "live_covered": 84,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 44
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/profiler": {
+   "functions": {
+    "total": 114,
+    "by_install": {
+     "swap": {
+      "total": 95,
+      "covered": 95
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 19,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 95,
+      "reached": 95,
+      "covered": 95,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 5
+     },
+     "rebuild": {
+      "total": 14,
+      "reached": 14,
+      "covered": 0,
+      "firm": 10
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 95,
+     "STATE": 19
+    },
+    "by_rule": {
+     "constructor": 10,
+     "constructor_reinit": 5,
+     "default_op": 95,
+     "name_state": 4
+    },
+    "firm": 15,
+    "uncertain": 99,
+    "live_covered": 95,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 19
+   },
+   "lines": {
+    "total": 2226,
+    "by_install": {
+     "swap": {
+      "total": 1496,
+      "covered": 1496
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 380,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 350,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1496,
+      "reached": 1496,
+      "covered": 1496,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 137,
+      "reached": 137,
+      "covered": 0,
+      "firm": 137
+     },
+     "rebuild": {
+      "total": 243,
+      "reached": 243,
+      "covered": 0,
+      "firm": 98
+     },
+     "respawn": {
+      "total": 350,
+      "reached": 350,
+      "covered": 0,
+      "firm": 350
+     }
+    },
+    "by_group": {
+     "OP": 1496,
+     "STATE": 730
+    },
+    "by_rule": {
+     "constructor": 98,
+     "constructor_reinit": 137,
+     "default_op": 1496,
+     "module_level": 350,
+     "name_state": 145
+    },
+    "firm": 585,
+    "uncertain": 1641,
+    "live_covered": 1496,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 730
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/qat": {
+   "functions": {
+    "total": 73,
+    "by_install": {
+     "swap": {
+      "total": 65,
+      "covered": 65
+     },
+     "swap_recapture": {
+      "total": 1,
+      "covered": 1
+     },
+     "rebuild": {
+      "total": 7,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 65,
+      "reached": 65,
+      "covered": 65,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 1,
+      "firm": 1
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 6,
+      "reached": 6,
+      "covered": 0,
+      "firm": 3
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "NATIVE": 1,
+     "OP": 65,
+     "STATE": 7
+    },
+    "by_rule": {
+     "constructor": 3,
+     "constructor_reinit": 1,
+     "default_op": 65,
+     "jit_kernel": 1,
+     "name_state": 3
+    },
+    "firm": 5,
+    "uncertain": 68,
+    "live_covered": 66,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 7
+   },
+   "lines": {
+    "total": 1435,
+    "by_install": {
+     "swap": {
+      "total": 937,
+      "covered": 937
+     },
+     "swap_recapture": {
+      "total": 76,
+      "covered": 76
+     },
+     "rebuild": {
+      "total": 177,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 245,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 937,
+      "reached": 937,
+      "covered": 937,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 76,
+      "reached": 76,
+      "covered": 76,
+      "firm": 76
+     },
+     "constructor_reinit": {
+      "total": 28,
+      "reached": 28,
+      "covered": 0,
+      "firm": 28
+     },
+     "rebuild": {
+      "total": 149,
+      "reached": 149,
+      "covered": 0,
+      "firm": 54
+     },
+     "respawn": {
+      "total": 245,
+      "reached": 245,
+      "covered": 0,
+      "firm": 245
+     }
+    },
+    "by_group": {
+     "NATIVE": 76,
+     "OP": 937,
+     "STATE": 422
+    },
+    "by_rule": {
+     "constructor": 54,
+     "constructor_reinit": 28,
+     "default_op": 937,
+     "jit_kernel": 76,
+     "module_level": 245,
+     "name_state": 95
+    },
+    "firm": 403,
+    "uncertain": 1032,
+    "live_covered": 1013,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 422
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/rendezvous": {
+   "functions": {
+    "total": 5,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 4,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "respawn": {
+      "total": 4,
+      "reached": 4,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "RANKS": 4,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor": 1,
+     "path": 4
+    },
+    "firm": 1,
+    "uncertain": 4,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 61,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 59,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 2
+     },
+     "respawn": {
+      "total": 59,
+      "reached": 59,
+      "covered": 0,
+      "firm": 7
+     }
+    },
+    "by_group": {
+     "RANKS": 52,
+     "STATE": 9
+    },
+    "by_rule": {
+     "constructor": 2,
+     "module_level": 7,
+     "path": 52
+    },
+    "firm": 9,
+    "uncertain": 52,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 61
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/reward_score": {
+   "functions": {
+    "total": 92,
+    "by_install": {
+     "swap": {
+      "total": 92,
+      "covered": 92
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 92,
+      "reached": 92,
+      "covered": 92,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 92
+    },
+    "by_rule": {
+     "path": 92
+    },
+    "firm": 0,
+    "uncertain": 92,
+    "live_covered": 92,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 2624,
+    "by_install": {
+     "swap": {
+      "total": 2422,
+      "covered": 2422
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 202,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 2422,
+      "reached": 2422,
+      "covered": 2422,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 202,
+      "reached": 202,
+      "covered": 0,
+      "firm": 202
+     }
+    },
+    "by_group": {
+     "OP": 2422,
+     "STATE": 202
+    },
+    "by_rule": {
+     "module_level": 202,
+     "path": 2422
+    },
+    "firm": 202,
+    "uncertain": 2422,
+    "live_covered": 2422,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 202
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/sglang": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/skip": {
+   "functions": {
+    "total": 41,
+    "by_install": {
+     "swap": {
+      "total": 30,
+      "covered": 30
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 11,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 30,
+      "reached": 30,
+      "covered": 30,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 11,
+      "reached": 11,
+      "covered": 0,
+      "firm": 6
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 30,
+     "STATE": 11
+    },
+    "by_rule": {
+     "constructor": 6,
+     "default_op": 30,
+     "name_state": 5
+    },
+    "firm": 6,
+    "uncertain": 35,
+    "live_covered": 30,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 11
+   },
+   "lines": {
+    "total": 647,
+    "by_install": {
+     "swap": {
+      "total": 427,
+      "covered": 427
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 113,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 107,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 427,
+      "reached": 427,
+      "covered": 427,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 113,
+      "reached": 113,
+      "covered": 0,
+      "firm": 46
+     },
+     "respawn": {
+      "total": 107,
+      "reached": 107,
+      "covered": 0,
+      "firm": 107
+     }
+    },
+    "by_group": {
+     "OP": 427,
+     "STATE": 220
+    },
+    "by_rule": {
+     "constructor": 46,
+     "default_op": 427,
+     "module_level": 107,
+     "name_state": 67
+    },
+    "firm": 153,
+    "uncertain": 494,
+    "live_covered": 427,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 220
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/tokenizer": {
+   "functions": {
+    "total": 101,
+    "by_install": {
+     "swap": {
+      "total": 83,
+      "covered": 83
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 18,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 83,
+      "reached": 83,
+      "covered": 83,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 18,
+      "reached": 18,
+      "covered": 0,
+      "firm": 10
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 83,
+     "STATE": 18
+    },
+    "by_rule": {
+     "constructor": 10,
+     "default_op": 83,
+     "name_state": 8
+    },
+    "firm": 10,
+    "uncertain": 91,
+    "live_covered": 83,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 18
+   },
+   "lines": {
+    "total": 2217,
+    "by_install": {
+     "swap": {
+      "total": 1522,
+      "covered": 1522
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 342,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 353,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1522,
+      "reached": 1522,
+      "covered": 1522,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 342,
+      "reached": 342,
+      "covered": 0,
+      "firm": 93
+     },
+     "respawn": {
+      "total": 353,
+      "reached": 353,
+      "covered": 0,
+      "firm": 353
+     }
+    },
+    "by_group": {
+     "OP": 1522,
+     "STATE": 695
+    },
+    "by_rule": {
+     "constructor": 93,
+     "default_op": 1522,
+     "module_level": 353,
+     "name_state": 249
+    },
+    "firm": 446,
+    "uncertain": 1771,
+    "live_covered": 1522,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 695
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/trtllm": {
+   "functions": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {},
+    "by_rule": {},
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "lines": {
+    "total": 0,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 0
+    },
+    "by_rule": {
+     "module_level": 0
+    },
+    "firm": 0,
+    "uncertain": 0,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 0
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/veomni": {
+   "functions": {
+    "total": 13,
+    "by_install": {
+     "swap": {
+      "total": 12,
+      "covered": 12
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 12,
+      "reached": 12,
+      "covered": 12,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 1
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 12,
+     "STATE": 1
+    },
+    "by_rule": {
+     "constructor_reinit": 1,
+     "default_op": 12
+    },
+    "firm": 1,
+    "uncertain": 12,
+    "live_covered": 12,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 231,
+    "by_install": {
+     "swap": {
+      "total": 151,
+      "covered": 151
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 7,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 73,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 151,
+      "reached": 151,
+      "covered": 151,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 7,
+      "reached": 7,
+      "covered": 0,
+      "firm": 7
+     },
+     "rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 73,
+      "reached": 73,
+      "covered": 0,
+      "firm": 73
+     }
+    },
+    "by_group": {
+     "OP": 151,
+     "STATE": 80
+    },
+    "by_rule": {
+     "constructor_reinit": 7,
+     "default_op": 151,
+     "module_level": 73
+    },
+    "firm": 80,
+    "uncertain": 151,
+    "live_covered": 151,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 80
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/utils/vllm": {
+   "functions": {
+    "total": 72,
+    "by_install": {
+     "swap": {
+      "total": 67,
+      "covered": 67
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 67,
+      "reached": 67,
+      "covered": 67,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 67,
+     "STATE": 5
+    },
+    "by_rule": {
+     "default_op": 67,
+     "name_state": 5
+    },
+    "firm": 0,
+    "uncertain": 72,
+    "live_covered": 67,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 1848,
+    "by_install": {
+     "swap": {
+      "total": 1520,
+      "covered": 1520
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 108,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 220,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 1520,
+      "reached": 1520,
+      "covered": 1520,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 108,
+      "reached": 108,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 220,
+      "reached": 220,
+      "covered": 0,
+      "firm": 220
+     }
+    },
+    "by_group": {
+     "OP": 1520,
+     "STATE": 328
+    },
+    "by_rule": {
+     "default_op": 1520,
+     "module_level": 220,
+     "name_state": 108
+    },
+    "firm": 220,
+    "uncertain": 1628,
+    "live_covered": 1520,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 328
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers": {
+   "functions": {
+    "total": 31,
+    "by_install": {
+     "swap": {
+      "total": 26,
+      "covered": 18
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 26,
+      "reached": 18,
+      "covered": 18,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 2,
+      "reached": 2,
+      "covered": 0,
+      "firm": 2
+     },
+     "rebuild": {
+      "total": 3,
+      "reached": 3,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 26,
+     "RESOURCE": 2,
+     "STATE": 3
+    },
+    "by_rule": {
+     "constructor_reinit": 2,
+     "default_op": 26,
+     "name_resource": 2,
+     "name_state": 1
+    },
+    "firm": 2,
+    "uncertain": 29,
+    "live_covered": 18,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 13
+   },
+   "lines": {
+    "total": 812,
+    "by_install": {
+     "swap": {
+      "total": 485,
+      "covered": 366
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 235,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 92,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 485,
+      "reached": 366,
+      "covered": 366,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 102,
+      "reached": 102,
+      "covered": 0,
+      "firm": 102
+     },
+     "rebuild": {
+      "total": 133,
+      "reached": 133,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 92,
+      "reached": 92,
+      "covered": 0,
+      "firm": 92
+     }
+    },
+    "by_group": {
+     "OP": 485,
+     "RESOURCE": 7,
+     "STATE": 320
+    },
+    "by_rule": {
+     "constructor_reinit": 102,
+     "default_op": 485,
+     "module_level": 92,
+     "name_resource": 7,
+     "name_state": 126
+    },
+    "firm": 194,
+    "uncertain": 618,
+    "live_covered": 366,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 446
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers/config": {
+   "functions": {
+    "total": 49,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 49,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 49,
+      "reached": 49,
+      "covered": 0,
+      "firm": 29
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "STATE": 49
+    },
+    "by_rule": {
+     "constructor": 29,
+     "path": 20
+    },
+    "firm": 29,
+    "uncertain": 20,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 49
+   },
+   "lines": {
+    "total": 2262,
+    "by_install": {
+     "swap": {
+      "total": 0,
+      "covered": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 669,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 1593,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 669,
+      "reached": 669,
+      "covered": 0,
+      "firm": 407
+     },
+     "respawn": {
+      "total": 1593,
+      "reached": 1593,
+      "covered": 0,
+      "firm": 1593
+     }
+    },
+    "by_group": {
+     "STATE": 2262
+    },
+    "by_rule": {
+     "constructor": 407,
+     "module_level": 1593,
+     "path": 262
+    },
+    "firm": 2000,
+    "uncertain": 262,
+    "live_covered": 0,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2262
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers/engine": {
+   "functions": {
+    "total": 345,
+    "by_install": {
+     "swap": {
+      "total": 261,
+      "covered": 258
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 84,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 261,
+      "reached": 258,
+      "covered": 258,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 4,
+      "reached": 4,
+      "covered": 0,
+      "firm": 4
+     },
+     "rebuild": {
+      "total": 80,
+      "reached": 76,
+      "covered": 0,
+      "firm": 17
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 261,
+     "RESOURCE": 7,
+     "STATE": 77
+    },
+    "by_rule": {
+     "constructor": 17,
+     "constructor_reinit": 4,
+     "default_op": 261,
+     "name_resource": 7,
+     "name_state": 56
+    },
+    "firm": 21,
+    "uncertain": 324,
+    "live_covered": 258,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 87
+   },
+   "lines": {
+    "total": 6656,
+    "by_install": {
+     "swap": {
+      "total": 3484,
+      "covered": 3453
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 2467,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 705,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 3484,
+      "reached": 3453,
+      "covered": 3453,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 202,
+      "reached": 202,
+      "covered": 0,
+      "firm": 202
+     },
+     "rebuild": {
+      "total": 2265,
+      "reached": 2243,
+      "covered": 0,
+      "firm": 168
+     },
+     "respawn": {
+      "total": 705,
+      "reached": 705,
+      "covered": 0,
+      "firm": 705
+     }
+    },
+    "by_group": {
+     "OP": 3484,
+     "RESOURCE": 105,
+     "STATE": 3067
+    },
+    "by_rule": {
+     "constructor": 168,
+     "constructor_reinit": 202,
+     "default_op": 3484,
+     "module_level": 705,
+     "name_resource": 105,
+     "name_state": 1992
+    },
+    "firm": 1075,
+    "uncertain": 5581,
+    "live_covered": 3453,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 3203
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers/reward_manager": {
+   "functions": {
+    "total": 19,
+    "by_install": {
+     "swap": {
+      "total": 14,
+      "covered": 14
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 14,
+      "reached": 14,
+      "covered": 14,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 5,
+      "reached": 5,
+      "covered": 0,
+      "firm": 5
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 14,
+     "STATE": 5
+    },
+    "by_rule": {
+     "constructor": 5,
+     "path": 14
+    },
+    "firm": 5,
+    "uncertain": 14,
+    "live_covered": 14,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 5
+   },
+   "lines": {
+    "total": 559,
+    "by_install": {
+     "swap": {
+      "total": 400,
+      "covered": 400
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 76,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 83,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 400,
+      "reached": 400,
+      "covered": 400,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 76,
+      "reached": 76,
+      "covered": 0,
+      "firm": 76
+     },
+     "respawn": {
+      "total": 83,
+      "reached": 83,
+      "covered": 0,
+      "firm": 83
+     }
+    },
+    "by_group": {
+     "OP": 400,
+     "STATE": 159
+    },
+    "by_rule": {
+     "constructor": 76,
+     "module_level": 83,
+     "path": 400
+    },
+    "firm": 159,
+    "uncertain": 400,
+    "live_covered": 400,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 159
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers/rollout": {
+   "functions": {
+    "total": 378,
+    "by_install": {
+     "swap": {
+      "total": 318,
+      "covered": 318
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 60,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 318,
+      "reached": 318,
+      "covered": 318,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 14,
+      "reached": 14,
+      "covered": 0,
+      "firm": 14
+     },
+     "rebuild": {
+      "total": 46,
+      "reached": 46,
+      "covered": 0,
+      "firm": 15
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 318,
+     "STATE": 60
+    },
+    "by_rule": {
+     "constructor": 15,
+     "constructor_reinit": 14,
+     "default_op": 318,
+     "name_state": 31
+    },
+    "firm": 29,
+    "uncertain": 349,
+    "live_covered": 318,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 60
+   },
+   "lines": {
+    "total": 8698,
+    "by_install": {
+     "swap": {
+      "total": 6157,
+      "covered": 6157
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1600,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 941,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 6157,
+      "reached": 6157,
+      "covered": 6157,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 591,
+      "reached": 591,
+      "covered": 0,
+      "firm": 591
+     },
+     "rebuild": {
+      "total": 1009,
+      "reached": 1009,
+      "covered": 0,
+      "firm": 254
+     },
+     "respawn": {
+      "total": 941,
+      "reached": 941,
+      "covered": 0,
+      "firm": 941
+     }
+    },
+    "by_group": {
+     "OP": 6157,
+     "STATE": 2541
+    },
+    "by_rule": {
+     "constructor": 254,
+     "constructor_reinit": 591,
+     "default_op": 6157,
+     "module_level": 941,
+     "name_state": 755
+    },
+    "firm": 1786,
+    "uncertain": 6912,
+    "live_covered": 6157,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 2541
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  },
+  "verl/workers/utils": {
+   "functions": {
+    "total": 9,
+    "by_install": {
+     "swap": {
+      "total": 8,
+      "covered": 8
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 0,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 8,
+      "reached": 8,
+      "covered": 8,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 1,
+      "reached": 1,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     }
+    },
+    "by_group": {
+     "OP": 8,
+     "STATE": 1
+    },
+    "by_rule": {
+     "default_op": 5,
+     "name_state": 1,
+     "path": 3
+    },
+    "firm": 0,
+    "uncertain": 9,
+    "live_covered": 8,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 1
+   },
+   "lines": {
+    "total": 336,
+    "by_install": {
+     "swap": {
+      "total": 313,
+      "covered": 313
+     },
+     "swap_recapture": {
+      "total": 0,
+      "covered": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "covered": 0
+     },
+     "respawn": {
+      "total": 14,
+      "covered": 0
+     },
+     "restart": {
+      "total": 0,
+      "covered": 0
+     }
+    },
+    "by_cap": {
+     "swap": {
+      "total": 313,
+      "reached": 313,
+      "covered": 313,
+      "firm": 0
+     },
+     "swap_recapture": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "jit_rebuild": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "constructor_reinit": {
+      "total": 0,
+      "reached": 0,
+      "covered": 0,
+      "firm": 0
+     },
+     "rebuild": {
+      "total": 9,
+      "reached": 9,
+      "covered": 0,
+      "firm": 0
+     },
+     "respawn": {
+      "total": 14,
+      "reached": 14,
+      "covered": 0,
+      "firm": 14
+     }
+    },
+    "by_group": {
+     "OP": 313,
+     "STATE": 23
+    },
+    "by_rule": {
+     "default_op": 152,
+     "module_level": 14,
+     "name_state": 9,
+     "path": 161
+    },
+    "firm": 14,
+    "uncertain": 322,
+    "live_covered": 313,
+    "respawn_covered": 0,
+    "restart": 0,
+    "not_covered": 23
+   },
+   "native": {
+    "files": 0,
+    "lines": 0
+   }
+  }
+ },
+ "limits": [
+  "Static: the scan cannot tell which functions a workload reaches. Shares are of the source tree, not of the code a run executes.",
+  "Only rules with basis 'syntax' are firm. 'default_op' (no rule matched) assumes a per-call function body; such a function may run once at start-up or only inside a captured graph.",
+  "'covered' means the lab has the install path and reaches the file. It is not a receipt: no edit was installed and no witness read.",
+  "Nested functions and lambdas count with the function that encloses them. Files that do not parse are counted in 'unparsed' and in no share.",
+  "Native sources are counted by file and line, apart from the Python shares.",
+  "Lines are non-blank lines that are not only a comment; docstrings count."
+ ]
+}
