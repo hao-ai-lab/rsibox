@@ -1,0 +1,103 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "sglang",
+  "rules_version": "sglang-1",
+  "upstream": {
+    "repo": "sgl-project/sglang",
+    "commit": "cf9845f8e3797f59137ef272705b768c6e1dd3c8",
+    "version": "0.5.10.post2.dev438 snapshot (the tree docs/architecture.md cites); scanned as a vendored copy without its git history, so scanned_commit is null"
+  },
+  "lab_path": "repos/sglang/livelab",
+  "source_roots": ["sglang/srt", "sglang"],
+  "native_roots": ["sglang"],
+  "exclude": [
+    "sglang/test/*",
+    "*/tests/*",
+    "*/test/*",
+    "*/test_*.py"
+  ],
+  "decorators": {
+    "dsl_kernel": ["cute.jit", "cute.kernel", "tilelang.jit", "T.prim_func"],
+    "compiled": []
+  },
+  "paths": [
+    {"glob": "sglang/srt/server_args.py", "group": "restart", "why": "launch flags (ServerArgs, add_cli_args)"},
+    {"glob": "sglang/srt/server_args_config_parser.py", "group": "restart", "why": "launch flags from a config file"},
+    {"glob": "sglang/srt/environ.py", "group": "restart", "why": "environment variables read at start"},
+    {"glob": "sglang/launch_server.py", "group": "restart", "why": "server entry point"},
+    {"glob": "sglang/cli/*", "group": "restart", "why": "command line entry points"},
+    {"glob": "sglang/check_env.py", "group": "restart", "why": "environment report tool"},
+    {"glob": "sglang/version.py", "group": "restart", "why": "package version"},
+    {"glob": "sglang/srt/plugins/*", "group": "restart", "why": "load_plugins runs once per process at start (scheduler.py run_scheduler_process)"},
+    {"glob": "sglang/srt/layers/sampler.py", "group": "OP", "why": "sampling runs after graph replay, outside the captured decode graph (tp_worker.py forward_batch_generation)"},
+    {"glob": "sglang/srt/models/*", "group": "GRAPH", "why": "model forward runs inside CudaGraphRunner.capture for decode batch sizes"},
+    {"glob": "sglang/srt/layers/*", "group": "GRAPH", "why": "layers run inside the captured model forward (heuristic: attention backends also hold per-step metadata code that runs outside the graph)"},
+    {"glob": "sglang/srt/distributed/parallel_state.py", "group": "RANKS", "why": "process groups every rank agrees on"},
+    {"glob": "sglang/srt/distributed/device_communicators/*", "group": "RANKS", "why": "NCCL, custom all-reduce IPC handles and symmetric memory span all ranks"},
+    {"glob": "sglang/srt/elastic_ep/*", "group": "RANKS", "why": "expert-parallel group membership"},
+    {"glob": "sglang/srt/model_loader/*", "group": "RESOURCE", "why": "weight loading at start (ModelRunner.load_model)"},
+    {"glob": "sglang/srt/configs/*", "group": "STATE", "why": "model configs read once to build the model and pools"}
+  ],
+  "install_overrides": {},
+  "capabilities": {
+    "swap": {
+      "why": "scheduler-side participant parks every TP rank between batches; it reaches the scheduler process only",
+      "evidence": [[
+        {"path": "repos/sglang/livelab/adapter/lab.py", "contains": "StepGapCoordinator"},
+        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "fastrsi_gap"}
+      ]],
+      "unreached": [
+        "sglang/srt/entrypoints/*",
+        "sglang/srt/managers/tokenizer_manager.py",
+        "sglang/srt/managers/tokenizer_manager_score_mixin.py",
+        "sglang/srt/managers/tokenizer_control_mixin.py",
+        "sglang/srt/managers/multi_tokenizer_mixin.py",
+        "sglang/srt/managers/async_dynamic_batch_tokenizer.py",
+        "sglang/srt/managers/template_manager.py",
+        "sglang/srt/managers/multimodal_processor.py",
+        "sglang/srt/managers/detokenizer_manager.py",
+        "sglang/srt/managers/data_parallel_controller.py",
+        "sglang/srt/multimodal/processors/*",
+        "sglang/srt/function_call/*",
+        "sglang/srt/parser/*",
+        "sglang/srt/tokenizer/*",
+        "sglang/srt/grpc/*",
+        "sglang/srt/ray/*",
+        "sglang/srt/debug_utils/*",
+        "sglang/lang/*",
+        "sglang/multimodal_gen/*",
+        "sglang/benchmark/*",
+        "sglang/bench_*",
+        "sglang/auto_benchmark*",
+        "sglang/eval/*",
+        "sglang/test/*"
+      ]
+    },
+    "swap_recapture": {
+      "why": "after a swap, rebuild the decode CUDA graphs (CudaGraphRunner.capture) on every rank",
+      "evidence": [[
+        {"path": "repos/sglang/livelab/adapter/recapture.py", "contains": "def recapture"}
+      ]],
+      "reach": ["sglang/srt/models/*", "sglang/srt/layers/*"]
+    },
+    "jit_rebuild": {
+      "why": "core kernel jit.py rebuilds a Triton kernel from its new text; reached through the scheduler-side participant",
+      "evidence": [[
+        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "fastrsi_gap"},
+        {"path": "core/livelab/kernel/jit.py"}
+      ]],
+      "unreached": ["sglang/multimodal_gen/*", "sglang/benchmark/*", "sglang/test/*"]
+    },
+    "rebuild": {
+      "why": "no in-place rebuild of objects built at start yet",
+      "evidence": []
+    },
+    "respawn": {
+      "why": "zygote forks a new server with the edited modules imported fresh",
+      "evidence": [[
+        {"path": "repos/sglang/livelab/services/zygote.py"}
+      ]],
+      "unreached": ["sglang/multimodal_gen/*", "sglang/lang/*", "sglang/benchmark/*", "sglang/eval/*", "sglang/test/*"]
+    }
+  }
+}
