@@ -40,10 +40,12 @@ EDITS = {
         "module": "vllm.v1.worker.gpu.sample.sampler", "on": ["worker"],
         "old": "            processed_logits = apply_top_k_top_p("
                "processed_logits, top_k, top_p)\n",
-        "new": "            processed_logits = apply_top_k_top_p("
-               "processed_logits, top_k, top_p)\n"
-               "            processed_logits = processed_logits.scatter("
-               "-1, processed_logits.argmax(-1, keepdim=True), float(\"-inf\"))\n"},
+        "old_alt": ("            processed_logits = apply_top_k_top_p(\n"
+                    "                processed_logits, top_k, top_p, "
+                    "has_topp_only_rows=has_topp_only_rows\n"
+                    "            )\n"),
+        "suffix": ("            processed_logits = processed_logits.scatter("
+                   "-1, processed_logits.argmax(-1, keepdim=True), float(\"-inf\"))\n")},
     # the same idea in the older sampler module, which the V2 runner never calls
     "old_sampler": {
         "module": "vllm.v1.sample.sampler", "on": ["worker"],
@@ -86,8 +88,11 @@ class Run:
             e["path"] = os.path.join(self.src, *e["module"].split(".")) + ".py"
             with open(e["path"]) as f:
                 e["base"] = f.read()
-            assert e["base"].count(e["old"]) == 1, f"{name}: the base line is not unique"
-            e["patched"] = e["base"].replace(e["old"], e["new"])
+            old = (e["old"] if e["base"].count(e["old"]) == 1
+                   else e.get("old_alt", e["old"]))
+            assert e["base"].count(old) == 1, f"{name}: the base line is not unique"
+            new = e["new"] if "new" in e else old + e["suffix"]
+            e["patched"] = e["base"].replace(old, new)
             rel = os.path.relpath(e["path"], self.src)
             e["diff"] = "".join(difflib.unified_diff(
                 e["base"].splitlines(True), e["patched"].splitlines(True),
@@ -128,12 +133,20 @@ class Run:
             time.sleep(0.1)
 
     def stop(self):
+        if self.proc is None:
+            return 0.0
         t0 = time.monotonic()
-        os.killpg(self.proc.pid, signal.SIGINT)
+        try:
+            os.killpg(self.proc.pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass
         try:
             self.proc.wait(60)
         except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid, signal.SIGKILL)
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             self.proc.wait()
         while True:                      # the GPU is free again before the next start
             used = subprocess.run(["nvidia-smi", "--query-gpu=memory.used",
