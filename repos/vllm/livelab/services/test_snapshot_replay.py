@@ -723,3 +723,70 @@ def test_speculative_acceptance_mocker_cannot_touch_a_scored_run(monkeypatch) ->
         mocker.uninstall()
     with snapshot_replay.scored_run():
         snapshot_replay.assert_unmocked()
+
+
+def _one_decode_runner() -> tuple[FakeModelRunner, KVStateSnapshotter]:
+    runner = FakeModelRunner(max_num_reqs=4, max_model_len=1_024, max_num_batched_tokens=256, num_phys_blocks=64)
+    spec = ThrashingRegimeSpec(num_decode_reqs=1, decode_context_len=64, num_prefill_reqs=0, horizon_steps=4)
+    snapshotter = KVStateSnapshotter(kv_mode="tail", horizon_steps=4, max_step_tokens=2, pin_memory=False)
+    snapshotter.synthesize_thrashing_state(runner, spec, fill_tail_kv=True)
+    return runner, snapshotter
+
+
+def _add_request_in_row_1(runner: FakeModelRunner) -> None:
+    runner.requests["new-req"] = SimpleCachedRequest("new-req", [1, 2], 2, [9], ([10],), 0)
+    runner.input_batch._req_ids[1] = "new-req"
+    runner.input_batch.req_id_to_index["new-req"] = 1
+    runner.input_batch.spec_token_ids[1] = [77, 88]
+    runner.input_batch.req_output_token_ids[1] = [99]
+
+
+def test_restore_clears_the_rows_of_requests_added_after_the_snapshot() -> None:
+    """Input: a snapshot of a 1-request batch; then a request joins in row 1 with draft tokens
+    and output tokens. Action: restore. Expect: row 1's spec_token_ids is [] and its
+    req_output_token_ids None, as for a row no request holds. Before: restore wrote rows below
+    num_reqs only and left row 1's tokens for the next request in that row."""
+    runner, snapshotter = _one_decode_runner()
+    snap = snapshotter.capture(runner)
+    _add_request_in_row_1(runner)
+    snapshotter.restore(runner, snap)
+    assert "new-req" not in runner.requests and runner.input_batch.num_reqs == 1
+    assert runner.input_batch.spec_token_ids[1] == []
+    assert runner.input_batch.req_output_token_ids[1] is None
+
+
+def test_restore_checks_the_seeded_rows_before_it_changes_anything() -> None:
+    """Input: (1) a snapshot with a seeded request in row 0, then a seeded request joins in
+    row 1; (2) a snapshot with a seeded row 0 whose generator is gone at restore. Action:
+    restore. Expect: (1) succeeds and drops row 1's generator with its request; (2) raises
+    SnapshotError with the runner untouched (the post-snapshot request still there). Before:
+    (1) raised SnapshotError after it had already deleted the new request and rewritten the
+    batch and the KV blocks."""
+    torch = pytest.importorskip("torch")
+    runner, snapshotter = _one_decode_runner()
+    runner.input_batch.generators = {0: torch.Generator().manual_seed(42)}
+    snap = snapshotter.capture(runner)
+    _add_request_in_row_1(runner)
+    runner.input_batch.generators[1] = torch.Generator().manual_seed(99)
+    snapshotter.restore(runner, snap)
+    assert set(runner.input_batch.generators) == {0} and "new-req" not in runner.requests
+    _add_request_in_row_1(runner)
+    del runner.input_batch.generators[0]
+    with pytest.raises(snapshot_replay.SnapshotError, match="seeded"):
+        snapshotter.restore(runner, snap)
+    assert "new-req" in runner.requests and runner.input_batch.req_id_to_index["new-req"] == 1
+
+
+def test_a_prefill_chunk_advances_by_its_scheduled_tokens() -> None:
+    """Input: one decode request and one 8,192-token prefill chunk. Action: one
+    advance_steady_state_step. Expect: the decode advances by 1 (accepted tokens) and the
+    prefill by 8,192 (its whole chunk). Before: both advanced by min(scheduled, accepted) = 1,
+    so a replay never moved the prefill through its context."""
+    runner = FakeModelRunner(max_num_reqs=4, max_model_len=32_768, max_num_batched_tokens=16_384, num_phys_blocks=512)
+    spec = ThrashingRegimeSpec(num_decode_reqs=1, decode_context_len=64, num_prefill_reqs=1, prefill_chunk_len=8_192, horizon_steps=4)
+    snapshotter = KVStateSnapshotter(kv_mode="tail", horizon_steps=4, max_step_tokens=2, pin_memory=False)
+    snapshotter.synthesize_thrashing_state(runner, spec, fill_tail_kv=True)
+    before = runner.input_batch.num_computed_tokens_cpu[:2].tolist()
+    snapshotter.advance_steady_state_step(runner)
+    after = runner.input_batch.num_computed_tokens_cpu[:2].tolist()
+    assert [after[0] - before[0], after[1] - before[1]] == [1, 8_192]

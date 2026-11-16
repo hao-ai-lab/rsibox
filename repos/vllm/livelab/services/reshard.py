@@ -551,6 +551,35 @@ class ParallelismResharder:
         findings = self.validate_quant_format(
             shard_specs, holder_list, has_canonical_weights=has_canonical
         )
+        # The TP gather below assumes MoE tensors are sharded like the dense ones (moe_tp == tp,
+        # ep == 1). Expert-sharded holders would be concatenated across experts or lose all
+        # experts but rank 0's, so refuse them.
+        if not isinstance(source_weights, dict):
+            src_ep_size = max(1, int(holder_list[0].ep_size))
+            src_moe_tp_size = holder_list[0].effective_moe_tp_size
+            moe_names = [
+                name for name in holder_list[0].tensors
+                if shard_specs.get(name, ShardSpec("replicated")).kind in ("moe_w13", "moe_w2")
+                and not (canonical_weights is not None and name in canonical_weights)
+            ]
+            if moe_names and (src_ep_size != 1 or src_moe_tp_size != src_tp_size):
+                findings.append(
+                    ReshardFinding(
+                        code="reshard_moe_mesh_unsupported",
+                        severity="error",
+                        message=(
+                            f"reshard_tp_dp cannot move MoE tensors held as moe_tp={src_moe_tp_size}, "
+                            f"ep={src_ep_size} (tp={src_tp_size}); transpose them with "
+                            f"reshard_moe_tp_ep to moe_tp={src_tp_size}, ep=1 first."
+                        ),
+                        details={
+                            "source_tp_size": src_tp_size,
+                            "source_ep_size": src_ep_size,
+                            "source_moe_tp_size": src_moe_tp_size,
+                            "moe_tensors": moe_names,
+                        },
+                    )
+                )
         required_bytes = self.estimate_tp_shard_bytes(holder_list[0], shard_specs, target_tp_size=target_tp_size)
         if vram_budget_bytes is not None and required_bytes > vram_budget_bytes:
             findings.append(

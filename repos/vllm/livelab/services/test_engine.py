@@ -5,7 +5,7 @@ torch and vLLM stubbed out. The cases that need vLLM's real parser are in test_v
 
 Run: python3 -m pytest repos/vllm/livelab/services/test_engine.py -v
 """
-import json, os, signal, socket, subprocess, sys, tempfile, time
+import json, os, shutil, signal, socket, subprocess, sys, tempfile, time
 import pytest
 from pathlib import Path
 
@@ -252,10 +252,11 @@ def test_zygote_runs_with_the_engine_env():
     rep = json.loads(r.stdout)
     try:
         assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
-        a, _ = engine.parse(["start", "--cache-root", cache, "--log", "x"])
+        a, _ = engine.parse(["start", "--zygote", sock, "--cache-root", cache, "--log", "x"])
         same = zygote.check(sock, engine.engine_env(a, base))
         assert same["ok"] is True and same["accepted_findings"] == [], same
-        a2, _ = engine.parse(["start", "--cache-root", os.path.join(d, "other"), "--log", "x"])
+        a2, _ = engine.parse(["start", "--zygote", sock, "--cache-root", os.path.join(d, "other"),
+                              "--log", "x"])
         other = zygote.check(sock, engine.engine_env(a2, base))
         assert other["ok"] is False
         assert other["findings"][0]["check"] == "env"
@@ -272,6 +273,113 @@ def test_zygote_runs_with_the_engine_env():
         assert json.loads(chk.stdout)["zygote_check"]["ok"] is True
     finally:
         _stop(rep["pid"])
+
+
+def _stub_parser():
+    """STUB_PARSER's vLLM parser, in this process, plus two flags as vLLM declares them: a
+    boolean with a --no- form and a flag that takes one or more values."""
+    import argparse, vllm_args
+    code = {}
+    exec(STUB_PARSER["vllm/entrypoints/common/cli_args.py"].split("\n", 2)[2], code)
+    parser = code["make_arg_parser"](argparse.ArgumentParser(prog="vllm serve"))
+    parser.add_argument("--trust-remote-code", action=argparse.BooleanOptionalAction)
+    parser.add_argument("--served-model-name", nargs="+")
+    return lambda argv: vllm_args.parse(argv, parser)
+
+
+def test_an_override_that_moves_the_model_is_a_finding():
+    """Input: running argvs whose model the merge cannot keep apart from a flag
+    (`--trust-remote-code M`: a boolean before the positional model; `--served-model-name a b`:
+    two values), and the overrides `--model N`, `--no-trust-remote-code` and
+    `--served-model-name c`. Action: vllm_args.override, both argvs parsed, override_finding.
+    Expect: a `vllm_args_override` finding for each (the merged argv would serve the old
+    model, vLLM's default or "b"), and none for `M --trust-remote-code --port 8000` + `--model
+    N`. Before: reconfigure stopped the engine and restarted it on the wrong model. Does not
+    prove: a merge that keeps the model but moves another flag's values."""
+    import vllm_args
+    parse = _stub_parser()
+    cases = (
+        (["--trust-remote-code", "Qwen/Qwen3-8B", "--port", "8000"], ["--model", "N"]),
+        (["--trust-remote-code", "Qwen/Qwen3-8B", "--port", "8000"], ["--no-trust-remote-code"]),
+        (["--model", "Qwen/Qwen3-8B", "--served-model-name", "a", "b"],
+         ["--served-model-name", "c"]),
+    )
+    for base, patch in cases:
+        old, new = parse(base), parse(vllm_args.override(base, patch))
+        assert old["ok"] and new["ok"], (old, new)
+        finding = vllm_args.override_finding(patch, old, new)
+        assert finding and finding["check"] == "vllm_args_override", (base, patch, new["args"])
+    base, patch = ["Qwen/Qwen3-8B", "--trust-remote-code", "--port", "8000"], ["--model", "N"]
+    new = parse(vllm_args.override(base, patch))
+    assert new["args"]["model"] == "N"
+    assert vllm_args.override_finding(patch, parse(base), new) is None
+
+
+def test_a_reconfigure_value_vllm_cannot_run_is_a_finding():
+    """Input: a merged argv with `--max-num-seqs 0` (vLLM's parser takes any int). Action:
+    engine.value_finding. Expect: a `vllm_value` finding naming max_num_seqs; none for 8.
+    Before: the live agent refused 0, so reconfigure fell back to a restart and stopped the
+    running engine for a server that cannot run with that value."""
+    parse = _stub_parser()
+    finding = engine.value_finding(parse(["M", "--max-num-seqs", "0"]))
+    assert finding["check"] == "vllm_value" and "max_num_seqs" in finding["observed"][0]
+    assert engine.value_finding(parse(["M", "--max-num-seqs", "8"])) is None
+
+
+def test_zygote_env_pins_cute_dsl_arch_without_fork(monkeypatch):
+    """Input: a fake nvidia-smi that reports compute capability 10.0; the launcher arguments of
+    `engine.py zygote --zygote S` and of `engine.py start --zygote S`, both without --fork.
+    Action: engine_env() for each. Expect: both set CUTE_DSL_ARCH=sm_100a, so the zygote's
+    import of CuTe DSL (through FlashInfer) does not call cuInit, and both envs agree (no `env`
+    finding). Before: only --fork set it, and a zygote without --fork on a GPU host initialized
+    the CUDA driver at import and stopped. Does not prove: the import on a real GPU (receipt)."""
+    work_dir = _short_dir()
+    smi_dir = os.path.join(work_dir, "bin")
+    os.makedirs(smi_dir)
+    _script(smi_dir, "nvidia-smi", "#!{py}\nprint('10.0')\n")
+    monkeypatch.setenv("PATH", smi_dir + os.pathsep + os.environ["PATH"])
+    monkeypatch.delenv("CUTE_DSL_ARCH", raising=False)
+    sock = os.path.join(work_dir, "z.sock")
+    zyg, _ = engine.parse(["zygote", "--zygote", sock, "--cache-root", work_dir, "--log", "x"])
+    srv, _ = engine.parse(["start", "--zygote", sock, "--cache-root", work_dir, "--log", "x"])
+    direct, _ = engine.parse(["start", "--cache-root", work_dir, "--log", "x"])
+    arch = [engine.engine_env(launcher_args).get("CUTE_DSL_ARCH") for launcher_args in (zyg, srv, direct)]  # not the env
+    assert arch == ["sm_100a", "sm_100a", None]          # a direct start without --fork: unset
+
+
+def test_zygote_child_applies_an_accepted_env_difference():
+    """Input: a zygote started with KEEP=start, CHANGE=old, GONE=x whose imports then set KEEP
+    (as torch or vLLM set variables at import), and a fork request with CHANGE=new, ADDED=a,
+    GONE unset and KEEP=start, with the `env` finding accepted. Action: zygote._child in a real
+    forked process, with a stand-in `vllm.entrypoints.cli.main` that records those four keys.
+    Expect: the server sees CHANGE=new and ADDED=a, no GONE, and KEEP keeps its import-time
+    value. Before: only VOLATILE keys were copied, so the server ran with CHANGE=old, no ADDED
+    and GONE=x although the finding said accepting it applies them. Does not prove: which
+    variables vLLM reads at import (an accepted one of those keeps the zygote's import)."""
+    import types
+    work_dir = _short_dir()
+    out = os.path.join(work_dir, "env.json")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            cli = types.ModuleType("vllm.entrypoints.cli.main")
+            cli.main = lambda: Path(out).write_text(json.dumps(   # those keys only, not the env
+                {key: os.environ.get(key) for key in ("KEEP", "CHANGE", "ADDED", "GONE")}))
+            sys.modules["vllm.entrypoints.cli.main"] = cli
+            zygote.START_ENV = {"KEEP": "start", "CHANGE": "old", "GONE": "x"}
+            os.environ.update(KEEP="set-by-import", CHANGE="old", GONE="x")
+            req = {"argv": ["vllm", "serve"], "log": os.path.join(work_dir, "child.log"), "cwd": work_dir,
+                   "env": {"KEEP": "start", "CHANGE": "new", "ADDED": "a"}, "accept": ["env"]}
+            zygote._child(req, [])
+        finally:
+            os._exit(3)
+    try:
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0, Path(work_dir, "child.log").read_text()
+        seen = json.loads(Path(out).read_text())
+        assert seen == {"KEEP": "set-by-import", "CHANGE": "new", "ADDED": "a", "GONE": None}
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
@@ -616,6 +724,66 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
         _stop(eng.pid)
 
 
+def test_descendants_include_workers_reparented_out_of_the_engine_tree(tmp_path):
+    """Input: a /proc tree (stat files in the kernel's format) with the engine 1000 (session
+    and group leader), its child 1001, a worker 1002 whose parent died (ppid 1) but that stays
+    in session 1000, and an unrelated process 1003. Action: _descendants(1000). Expect: 1001
+    and 1002, not 1003. Before: only the ppid links were followed, so 1002, which still holds
+    GPU memory, was never signalled. Does not prove: the signals (the Linux case below)."""
+    for pid, ppid, pgrp, sid in ((1000, 1, 1000, 1000), (1001, 1000, 1000, 1000),
+                                 (1002, 1, 1000, 1000), (1003, 1, 1003, 1003)):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(
+            f"{pid} (python3 (vllm)) S {ppid} {pgrp} {sid} " + " ".join(["0"] * 40) + "\n")
+    assert sorted(engine._descendants(1000, proc_root=str(tmp_path))) == [1001, 1002]
+
+
+def test_only_members_with_the_launch_marker_are_verified(tmp_path):
+    """Input: a /proc tree with three session members of an exited leader: one with the
+    launch's marker in its environ, one with another launch's, one with none, and this test's
+    own pid with the marker. Action: verified_members. Expect: only the first; with no marker,
+    none. Before: every group or session member of a pid that may have been reused was
+    signalled. Does not prove: the signals (the Linux case below)."""
+    marker_line = f"{engine.MARKER_ENV}=/cache/engines/live/abc".encode()
+    environs = {2001: b"PATH=/bin\0" + marker_line + b"\0",
+                2002: f"{engine.MARKER_ENV}=/cache/engines/live/other".encode() + b"\0",
+                2003: b"PATH=/bin\0", os.getpid(): marker_line + b"\0"}
+    for member_pid, environ in environs.items():
+        (tmp_path / str(member_pid)).mkdir()
+        (tmp_path / str(member_pid) / "environ").write_bytes(environ)
+    members = list(environs)
+    assert engine.verified_members(members, "/cache/engines/live/abc",
+                                   proc_root=str(tmp_path)) == [2001]
+    assert engine.verified_members(members, None, proc_root=str(tmp_path)) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_the_session_after_its_leader_exited():
+    """Input: an engine leader (own session, launch marker in its env) that started a worker
+    and exited; the worker stays in the leader's session with ppid 1. Action: stop_engine(leader
+    pid) without the marker, then with it. Expect: without it nothing is signalled ("not
+    verified", worker alive: the pid may belong to another session now); with it the worker is
+    killed and stopped is True. Before: stop_engine returned at once with "was not running" and
+    the worker kept running (holding the GPU, in a real engine)."""
+    marker = tempfile.mkdtemp(prefix="live")
+    leader = subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable,"
+         " '-c', 'import time; time.sleep(60)']).pid, flush=True)"],
+        stdout=subprocess.PIPE, text=True, start_new_session=True,
+        env={**os.environ, engine.MARKER_ENV: marker})
+    worker = int(leader.stdout.readline())
+    leader.wait(timeout=10)
+    try:
+        unverified = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+        assert unverified["stopped"] is False and unverified["unverified"] == [worker]
+        assert not zygote._exited(worker)
+        result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
+        assert result["stopped"] is True, result
+        assert zygote._exited(worker), "the leader's session member is still running"
+    finally:
+        _stop(worker)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
     """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:
@@ -662,6 +830,7 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
             (["--bogus-flag"], "vllm_args", None),
             (["-tp", "2"], "weights_reconfig_tier2", "tier2a_reshard"),
             (["--kv-cache-dtype", "fp8"], "weights_reconfig_tier2", "tier2b_weight_format"),
+            (["--max-num-seqs", "0"], "vllm_value", None),
         ):
             refused_proc = subprocess.run(
                 [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),

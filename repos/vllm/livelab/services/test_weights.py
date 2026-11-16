@@ -258,3 +258,51 @@ def test_stop_terminates_surviving_child_after_session_leader_exits(d):
     finally:
         _stop(leader_proc.pid)
         _stop(child_pid)
+
+
+def test_a_socket_dir_too_long_for_af_unix_is_refused_before_the_daemon_loads(d):
+    """Input: `weights.py start --socket-dir D` with D 60 bytes long, so D plus vLLM's 55-byte
+    socket name (`vllm_weight_cache_<md5 of the GPU uuid>.sock`) exceeds AF_UNIX's 107 bytes;
+    the same D for weight_scaling_colocate's Holder.start. Expect: weights.py exits 2 at once
+    with a `weights_socket_path` finding and the fake `vllm preload` never runs; Holder.start
+    raises before it spawns anything. Before: the daemon loaded the weights for minutes and
+    then failed at bind(). Does not prove: vLLM's own name (taken from vLLM's
+    weight_cache/protocol.py get_socket_path, not imported here)."""
+    long_dir = os.path.join(d, "s" * (60 - len(d) - 1))
+    assert len(os.fsencode(os.path.abspath(long_dir))) == 60
+    marker = os.path.join(d, "preload-ran")
+    fake = _script(d, "vllm", "#!{py}\nopen(%r, 'w').write('ran')\n" % marker)
+    started = time.time()
+    result = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
+                        "--socket-dir", long_dir, "--log", os.path.join(d, "preload.log"),
+                        "--vllm", fake, "--timeout", "30"],
+                       capture_output=True, text=True, timeout=60)
+    assert result.returncode == 2, result.stdout + result.stderr
+    rep = json.loads(result.stdout)
+    assert rep["ready"] is False and rep["pid"] is None
+    assert rep["finding"]["check"] == "weights_socket_path" and "107" in rep["finding"]["observed"]
+    assert time.time() - started < 10 and not os.path.exists(marker)
+    import weight_scaling_colocate
+    holder = weight_scaling_colocate.Holder(0, long_dir, os.path.join(d, "holder.log"))
+    with pytest.raises(RuntimeError, match="too long"):
+        holder.start("m", sys.executable)
+    assert holder.proc is None and not os.path.exists(os.path.join(d, "holder.log"))
+
+
+def test_the_socket_path_check_counts_the_fips_and_draft_names(monkeypatch):
+    """Input: a 30-byte socket dir. Action: long_socket_path_finding with md5 available, then
+    with md5 refused as on a FIPS host (vLLM's safe_hash then uses sha256). Expect: None with
+    md5 (30 + 1 + 61-byte draft name = 92), a finding with sha256 (30 + 1 + 93 = 124). Before:
+    the check counted the 55-byte target name only, so a draft daemon's socket could still be
+    too long. Does not prove: vLLM's name on the deployed build (taken from a vLLM checkout)."""
+    import hashlib
+    import weights
+    socket_dir = "/" + "s" * 29
+    assert weights.long_socket_path_finding(socket_dir) is None
+
+    def no_md5(*args, **kwargs):
+        raise ValueError("md5 disabled (FIPS)")
+    monkeypatch.setattr(hashlib, "md5", no_md5)
+    assert len(socket_name("GPU-x")) == 87
+    finding = weights.long_socket_path_finding(socket_dir)
+    assert finding["check"] == "weights_socket_path" and "124 bytes" in finding["observed"]

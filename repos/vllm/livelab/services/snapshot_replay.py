@@ -410,8 +410,10 @@ class KVStateSnapshotter:
 
     def capture(self, runner: Any, *, kv_mode: str | None = None, horizon_steps: int | None = None, max_step_tokens: int | None = None, journal: Any | None = None) -> KVStateSnapshot:
         t0, eff_mode = _now_ms(), kv_mode or self.kv_mode
-        if eff_mode not in self.VALID_KV_MODES or getattr(runner, "input_batch", None) is None:
-            raise ValueError(f"Unsupported kv_mode={eff_mode!r} or missing runner.input_batch")
+        if eff_mode not in self.VALID_KV_MODES:
+            raise ValueError(f"Unsupported kv_mode={eff_mode!r}; expected one of {sorted(self.VALID_KV_MODES)}")
+        if getattr(runner, "input_batch", None) is None:
+            raise ValueError("runner has no input_batch (vLLM V2 GPUModelRunner uses runner.req_states/block_tables; set VLLM_USE_V2_MODEL_RUNNER=0 for V1 snapshot_replay)")
         eff_steps = horizon_steps if horizon_steps is not None else self.horizon_steps
         eff_step_toks = max_step_tokens if max_step_tokens is not None else self.max_step_tokens
         input_batch, num_reqs = runner.input_batch, int(getattr(runner.input_batch, "num_reqs", 0))
@@ -495,15 +497,22 @@ class KVStateSnapshotter:
     def restore(self, runner: Any, snapshot: KVStateSnapshot | None = None) -> float:
         """Restore `snapshot`; returns its wall time in ms (CUDA-synchronized). The per-phase
         times land in `snapshot.timing` (restore_*_ms). A request of the snapshot that left the
-        runner since cannot be restored: SnapshotError, before anything is changed."""
+        runner since, or a seeded row whose generator is gone, cannot be restored: SnapshotError,
+        before anything is changed. Requests that joined since are dropped with their rows."""
         t0, snap = _now_ms(), snapshot or self._last_snapshot
-        if snap is None or getattr(runner, "input_batch", None) is None:
-            raise ValueError("Valid snapshot and runner.input_batch required for restore()")
+        if snap is None:
+            raise ValueError("Valid snapshot required for restore()")
+        if getattr(runner, "input_batch", None) is None:
+            raise ValueError("runner has no input_batch (vLLM V2 GPUModelRunner uses runner.req_states/block_tables; set VLLM_USE_V2_MODEL_RUNNER=0 for V1 snapshot_replay)")
         input_batch, num_reqs, runner_requests = runner.input_batch, snap.num_reqs, getattr(runner, "requests", None)
         if isinstance(runner_requests, dict):
             missing = sorted(req_id for req_id in snap.requests if req_id not in runner_requests)
             if missing:
                 raise SnapshotError(f"requests {missing} left the runner since the snapshot; their state is gone")
+        gens, saved_gens = getattr(input_batch, "generators", None), snap.rng_state.get("generators")
+        if isinstance(gens, dict) and saved_gens is not None and set(saved_gens) - set(gens):
+            raise SnapshotError(f"seeded rows {sorted(set(saved_gens) - set(gens))} of the snapshot have no generator now; their state is gone")
+        if isinstance(runner_requests, dict):
             for key in [key for key in runner_requests if key not in snap.requests]:
                 del runner_requests[key]
             for req_id, rsnap in snap.requests.items():
@@ -528,6 +537,11 @@ class KVStateSnapshotter:
         for row_idx, spec_row in enumerate(slices["spec_token_ids"]):
             if row_idx < len(input_batch.spec_token_ids):
                 input_batch.spec_token_ids[row_idx] = list(spec_row)
+        # rows at and above the snapshot's num_reqs held requests that joined later: empty them
+        for row_idx in range(num_reqs, len(input_batch.spec_token_ids)):
+            input_batch.spec_token_ids[row_idx] = []
+        for row_idx in range(num_reqs, len(input_batch.req_output_token_ids)):
+            input_batch.req_output_token_ids[row_idx] = None
         for row_idx, out_row in enumerate(slices["req_output_token_ids"]):
             if row_idx < len(input_batch.req_output_token_ids):
                 # vLLM aliases this row with requests[req_id].output_token_ids (one list): keep
@@ -697,7 +711,8 @@ class KVStateSnapshotter:
         for idx in range(num_reqs):
             req_id = req_ids[idx] or f"req-{idx}"
             num_spec = len(input_batch.spec_token_ids[idx]) if idx < len(input_batch.spec_token_ids) else 0
-            new_comp = old_comps[idx] + min(prev_sched[idx], acc_list[idx])
+            # a prefill chunk computes all its scheduled tokens; a decode step its accepted ones
+            new_comp = old_comps[idx] + (prev_sched[idx] if "prefill" in str(req_id) else min(prev_sched[idx], acc_list[idx]))
             next_sched = (prefill_chunk_len or prev_sched[idx]) if "prefill" in str(req_id) else (1 + num_spec)
             new_no_spec, new_tot, new_tok = new_comp + (next_sched if "prefill" in str(req_id) else 1), new_comp + next_sched, 100 + ((new_comp + idx) % 30_000)
             new_comps.append(new_comp)
@@ -769,8 +784,10 @@ def restore_rng_state(state: dict[str, Any], input_batch: Any = None) -> None:
         _torch.cuda.set_rng_state_all(state["torch_cuda"])
     gens = getattr(input_batch, "generators", None)
     if "generators" in state and isinstance(gens, dict):
-        if set(gens) != set(state["generators"]):
+        if set(state["generators"]) - set(gens):
             raise SnapshotError(f"seeded requests changed rows: {sorted(state['generators'])} -> {sorted(gens)}")
+        for idx in set(gens) - set(state["generators"]):   # rows of requests that joined later
+            del gens[idx]
         for idx, gen_state in state["generators"].items():
             gens[idx].set_state(gen_state)
 

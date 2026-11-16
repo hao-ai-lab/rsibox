@@ -127,8 +127,12 @@ def _env_diff(env):
 
 def _child(req, conns, refresh=()):
     """In the forked child: become `vllm serve` with the request's argv, cwd, log and volatile
-    env keys (the rest of the env stays the zygote's), after dropping the `refresh` modules so
-    the server imports them again from their new source."""
+    env keys, after dropping the `refresh` modules so the server imports them again from their
+    new source. With the `env` finding accepted, the keys where the request differs from the
+    zygote's start environment take the request's value (or are removed); the other keys keep
+    the zygote's post-import values. Risk of accepting: a key read at import time
+    (CUDA_VISIBLE_DEVICES, HF_*, VLLM_*) shows the request's value in os.environ while the
+    modules the zygote imported already acted on its start value."""
     code = 1
     try:
         for c in conns:
@@ -145,6 +149,12 @@ def _child(req, conns, refresh=()):
         for env_key in [env_key for env_key in os.environ if _volatile(env_key) and env_key not in req["env"]]:
             del os.environ[env_key]
         os.environ.update({env_key: env_val for env_key, env_val in req["env"].items() if _volatile(env_key)})
+        if "env" in req.get("accept", []):
+            for env_key in _env_diff(req["env"]):
+                if env_key in req["env"]:
+                    os.environ[env_key] = req["env"][env_key]
+                else:
+                    os.environ.pop(env_key, None)
         if not req.get("env", {}).get("OMP_NUM_THREADS") and not os.environ.get("OMP_NUM_THREADS"):
             forksafe.clamp_thread_pools(num_threads=1)
         local_rank_str = (
@@ -330,8 +340,10 @@ def serve(sock_path, modules_file):
                                "forked server", "actions": [
                             "restart the zygote with this environment (~25 s of imports, off "
                             "the start path)", "start without the zygote (+~21 s)",
-                            "accept 'env' if these variables are not read at import time"],
-                        "risk": "the server runs with the zygote's values of these variables"})
+                            "accept 'env' if these variables are not read at import time "
+                            "(the server then gets the request's values)"],
+                        "risk": "what the zygote imported keeps the zygote's values of these "
+                                "variables"})
                 fix = _refresh_plan(sources, graph, req.get("refresh", True))
                 if _stale_finding(fix):
                     findings.append(_stale_finding(fix))

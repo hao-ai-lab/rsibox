@@ -229,16 +229,19 @@ def _patch_core(mod):
 
 class _After(importlib.abc.MetaPathFinder):
     """Patch vllm.v1.engine.core right after it is imported, via the finders after this one
-    (an overlay finder first, then the installed package)."""
+    (an overlay finder first, then the installed package). Only the finders after it: a hook
+    before it that asks every finder would otherwise call back into it without end."""
 
     def find_spec(self, name, path, target=None):
         if name != "vllm.v1.engine.core":
             return None
         spec = None
-        for f in list(sys.meta_path):
-            if f is self or isinstance(f, _After) or not hasattr(f, "find_spec"):
+        finders = list(sys.meta_path)
+        later = finders[finders.index(self) + 1:] if self in finders else finders
+        for finder in later:
+            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
                 continue
-            spec = f.find_spec(name, path, target)
+            spec = finder.find_spec(name, path, target)
             if spec is not None:
                 break
         if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):

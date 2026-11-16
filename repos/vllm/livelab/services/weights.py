@@ -11,8 +11,8 @@ Usage:
   python3 weights.py probe [--socket-dir D] [--tp N]   # would an ipc_cache start find a daemon?
 
 Both print one JSON line. `start` prints {"pid", "cmd", "ready", "seconds"} (and "error",
-"stopped" when not ready); pid leads its own session (setsid): stop the daemon by that pid,
-never by the caller's group.
+"stopped" or "finding" when not ready); pid leads its own session (setsid): stop the daemon
+by that pid, never by the caller's group.
 
 Contract:
 - socket_paths() is the socket vLLM's loader dials for each GPU the engine uses: the daemon
@@ -23,6 +23,10 @@ Contract:
   starts nothing when one is missing (a finding instead of a 300 s wait). When it cannot name
   the engine's GPUs (no nvidia-smi, or CUDA_VISIBLE_DEVICES lists fewer GPUs than tp) it
   cannot tell whether a socket is this engine's, so it fails too, saying so.
+- start() refuses (exit 2, a `weights_socket_path` finding, nothing started) a socket dir
+  whose daemon socket path would exceed AF_UNIX's 107 bytes. The name is vLLM's, unchanged:
+  md5 of the uuid gives 55 bytes, the sha256 fallback on FIPS hosts 87, and a draft model's
+  socket 6 more ("_draft"); the check counts the longest.
 - start() stops the daemon it started (its session) when the daemon does not get ready: a
   failed or timed-out daemon never stays behind holding GPU memory.
 - loader_config() turns the disk fallback off: an engine that asked for resident weights
@@ -33,6 +37,7 @@ Writes only --log (and the daemon's sockets in --socket-dir).
 import argparse, hashlib, json, os, re, signal, socket, subprocess, sys, tempfile, time
 
 READY = re.compile(r"Weight cache daemon READY")
+MAX_SOCK_PATH = 107     # Linux sun_path is 108 bytes with the trailing NUL
 FAILED = ("Traceback (most recent call last)", "exited during startup")
 
 
@@ -49,6 +54,25 @@ def socket_name(gpu_uuid):
     except ValueError:      # FIPS: md5 unavailable, vLLM falls back to sha256 too
         h = hashlib.sha256(gpu_uuid.encode())
     return f"vllm_weight_cache_{h.hexdigest()}.sock"
+
+
+def long_socket_path_finding(socket_dir):
+    """A `weights_socket_path` finding when the daemon's sockets in socket_dir would be longer
+    than AF_UNIX allows, else None. Every GPU's socket name has the same length (a hex digest),
+    so this needs no GPU uuid. The longest name counts: a draft model's daemon group adds
+    "_draft" (vLLM's format_socket_role_suffix). The daemon binds only after loading the
+    weights, so a too-long path fails minutes in; this check costs microseconds."""
+    name = socket_name("GPU-length-only").replace(".sock", "_draft.sock")
+    path = os.path.join(os.path.abspath(socket_dir), name)
+    path_bytes = len(os.fsencode(path))
+    if path_bytes <= MAX_SOCK_PATH:
+        return None
+    return {"check": "weights_socket_path",
+            "observed": f"daemon socket path is {path_bytes} bytes > {MAX_SOCK_PATH} (AF_UNIX): {path}",
+            "expected": f"--socket-dir short enough that the socket path fits {MAX_SOCK_PATH} "
+                        "bytes",
+            "why": "the daemon loads the weights, then fails to bind its socket",
+            "actions": ["use a short --socket-dir, such as /dev/shm/<run>/w"]}
 
 
 def gpu_uuids(visible, tp):
@@ -205,8 +229,12 @@ def stop(p, grace=10):
 
 
 def start(a, extra):
-    os.makedirs(os.path.dirname(os.path.abspath(a.log)), exist_ok=True)
     cmd = daemon_cmd(a.model, a.socket_dir, a.tp, a.max_model_len, a.vllm, extra)
+    finding = long_socket_path_finding(a.socket_dir)
+    if finding:
+        return {"pid": None, "cmd": cmd, "ready": False, "error": finding["observed"],
+                "seconds": 0.0, "finding": finding}
+    os.makedirs(os.path.dirname(os.path.abspath(a.log)), exist_ok=True)
     with open(a.log, "w") as log:
         p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     r = {"pid": p.pid, "cmd": cmd, **wait_ready(a.log, p.pid, a.timeout)}
@@ -233,7 +261,7 @@ def main(argv=None):
         return 0 if r["ok"] else 2
     r = start(a, extra)
     print(json.dumps(r))
-    return 0 if r["ready"] else 1
+    return 0 if r["ready"] else (2 if "finding" in r else 1)
 
 
 if __name__ == "__main__":

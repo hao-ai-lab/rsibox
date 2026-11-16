@@ -54,6 +54,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -342,21 +343,38 @@ def _free_port():
 def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.executable,
          log_dir=None):
     """Copy the holder on src_gpu into the holder on dst_gpu over NCCL. Returns the
-    destination rank's report plus wall seconds (process start, vLLM import, IPC map, copy)."""
+    destination rank's report plus wall seconds (process start, vLLM import, IPC map, copy).
+    A rank that fails stops the other one, which would wait for it in NCCL init."""
     t0 = time.monotonic()
     init = f"tcp://127.0.0.1:{_free_port()}"
-    procs = []
-    for rank, gpu in ((0, src_gpu), (1, dst_gpu)):
-        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
-        cmd = [python, str(Path(__file__).resolve()), "copy-rank", "--rank", str(rank),
-               "--init", init, "--model", model, "--socket-dir", socket_dir]
-        if max_model_len:
-            cmd += ["--max-model-len", str(max_model_len)]
-        err = open(os.path.join(log_dir, f"copy_{src_gpu}_{dst_gpu}_r{rank}.log"), "w") \
-            if log_dir else subprocess.DEVNULL
-        procs.append(subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=err,
-                                      text=True))
-    outs = [p.communicate(timeout=900)[0] for p in procs]
+    procs, files = [], []
+    with contextlib.ExitStack() as stack:
+        for rank, gpu in ((0, src_gpu), (1, dst_gpu)):
+            env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu))
+            cmd = [python, str(Path(__file__).resolve()), "copy-rank", "--rank", str(rank),
+                   "--init", init, "--model", model, "--socket-dir", socket_dir]
+            if max_model_len:
+                cmd += ["--max-model-len", str(max_model_len)]
+            err = stack.enter_context(open(os.path.join(
+                log_dir, f"copy_{src_gpu}_{dst_gpu}_r{rank}.log"), "w")) \
+                if log_dir else subprocess.DEVNULL
+            out = stack.enter_context(tempfile.TemporaryFile("w+"))   # no pipe to fill
+            files.append(out)
+            procs.append(subprocess.Popen(cmd, env=env, stdout=out, stderr=err, text=True))
+        deadline = time.monotonic() + 900
+        while time.monotonic() < deadline:
+            codes = [proc.poll() for proc in procs]
+            if None not in codes or any(code not in (None, 0) for code in codes):
+                break
+            time.sleep(0.1)
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        outs = []
+        for out in files:
+            out.seek(0)
+            outs.append(out.read())
     rcs = [p.returncode for p in procs]
     rep = {}
     for line in outs[1].splitlines()[::-1]:
@@ -387,6 +405,10 @@ class Holder:
 
     def start(self, model, python, max_model_len=None, dummy=False):
         import weights
+        finding = weights.long_socket_path_finding(self.socket_dir)
+        if finding:
+            raise RuntimeError(f"holder on GPU {self.gpu}: socket path too long: "
+                               f"{finding['observed']}")
         extra = ["--load-format", "dummy"] if dummy else []
         cmd = weights.daemon_cmd(model, self.socket_dir, 1, max_model_len, vllm_bin(python), extra)
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu))
@@ -689,14 +711,24 @@ class Pool:
       there is no in-process snapshot to be shallow.
     - (c) Failover goes to the other holder, never to an engine on the faulted holder, and the
       faulted holder is re-copied before its engine serves again.
+    - (d) An engine that failed over away, holds an unaccepted patch it no longer serves, is
+      being re-copied, or got an accept replay that did not complete, is tainted until
+      restore_holder, respawn or accept's digest shows it matches the ledger: failover never
+      goes to a tainted engine, restore_holder never copies from one (nor from the engine with
+      the pending patch), and evaluate refuses while any engine is tainted. The pending patch
+      remembers its engine, so rollback repairs that engine and accept refuses once that
+      engine has stopped serving; accept holds the lock across its replay.
     """
 
     def __init__(self, model, python, work, active: Engine, standby: Engine, router_port,
-                 tol=0.05):
+                 tol=0.05, max_model_len=None):
         self.model, self.python, self.work = model, python, work
+        self.max_model_len = max_model_len   # the holders' --max-model-len (their cache key)
         self.active, self.standby = active, standby
         self.ledger = Ledger()
         self.pending: Patch | None = None
+        self.pending_engine: Engine | None = None
+        self.tainted: set[str] = set()       # engine names whose holder may not hold the ledger
         self.tol = tol
         self.lock = threading.RLock()
         self.events = []
@@ -730,7 +762,14 @@ class Pool:
             if failed is not self.active:
                 return None                  # already switched
             t = time.monotonic()
+            if self.standby.name in self.tainted:
+                last = self.events[-1] if self.events else {}
+                if last.get("ev") != "failover_refused":     # the watchdog retries every 50 ms
+                    self.events.append({"t": t, "ev": "failover_refused", "reason": reason,
+                                        "from": failed.name, "tainted": self.standby.name})
+                return None
             self.active, self.standby = self.standby, self.active
+            self.tainted.add(failed.name)
             rec = {"t": t, "ev": "failover", "reason": reason, "from": failed.name,
                    "to": self.active.name}
             self.events.append(rec)
@@ -753,13 +792,22 @@ class Pool:
     # -- repairs (the side that does not serve) --
     def restore_holder(self, broken: Engine, good: Engine):
         """Re-copy broken's holder from good's over NCCL, reset broken's prefix cache, and check
-        it now matches the ledger digest."""
+        it now matches the ledger digest. broken stays tainted until it does."""
+        with self.lock:
+            if broken is good or good.name in self.tainted or good is self.pending_engine:
+                raise RuntimeError(f"restore {broken.name} from {good.name}: the source is "
+                                   "the same engine, holds an unaccepted patch, or does not "
+                                   "hold the ledger")
+            self.tainted.add(broken.name)   # the copy overwrites it, even if it then fails
         rep = copy(self.model, broken.holder.socket_dir, good.holder.gpu, broken.holder.gpu,
-                   log_dir=self.work, python=self.python)
+                   max_model_len=self.max_model_len, log_dir=self.work, python=self.python)
         if not rep["ok"]:
             raise RuntimeError(f"restore copy failed: {rep}")
         broken.reset_prefix_cache()
         agree = self.check_integrity(broken)
+        if agree["ok"]:
+            with self.lock:
+                self.tainted.discard(broken.name)
         rec = {"t": time.monotonic(), "ev": "restore", "engine": broken.name,
                "copy": rep, "digest_ok": agree["ok"]}
         self.events.append(rec)
@@ -773,6 +821,9 @@ class Pool:
         eng.pid = None
         rep = eng.start(self.model, self.python, gmu, max_model_len)
         agree = self.check_integrity(eng)
+        if agree["ok"]:
+            with self.lock:
+                self.tainted.discard(eng.name)
         rec = {"t": time.monotonic(), "ev": "respawn", "engine": eng.name, "start": rep,
                "digest_ok": agree["ok"]}
         self.events.append(rec)
@@ -785,6 +836,11 @@ class Pool:
         out = {"patch": patch.id}
         if self.pending is not None:
             out["rolled_back_pending"] = self.rollback("superseded by " + patch.id)
+        with self.lock:
+            if self.tainted:
+                # a rejected patch could not fail over, nor a pending one be rolled back
+                raise RuntimeError(f"evaluate {patch.id}: {sorted(self.tainted)} not repaired "
+                                   "(restore_holder or respawn first)")
         eng = self.active
         with self.router.drained() as drain_s:
             r = eng.rpc("lease_apply", patch.to_json())
@@ -796,40 +852,76 @@ class Pool:
         out["drain_s"] = drain_s
         out.update({"touched": r["touched"], "apply_s": r["seconds"], "gate": gate})
         if gate["pass"]:
-            self.pending = patch
+            with self.lock:
+                self.pending, self.pending_engine = patch, eng
             out["state"] = "pending"
             return out
         out["state"] = "rejected"
         out["failover"] = self.failover(f"patch {patch.id} rejected", eng)
+        if out["failover"] is None and self.active is eng:
+            raise RuntimeError(f"patch {patch.id} rejected and the standby "
+                               f"{self.standby.name} does not hold the ledger: {eng.name} "
+                               "keeps serving the rejected patch")
         out["restore"] = self.restore_holder(eng, self.active)
         return out
 
     def rollback(self, why):
-        """Undo the pending patch: the standby (ledger state) takes over, the patched holder is
-        re-copied from it."""
-        patch, eng = self.pending, self.active
-        self.pending = None
-        fo = self.failover(f"rollback {patch.id}: {why}", eng)
+        """Undo the pending patch: the standby (ledger state) takes over if the patched engine
+        still serves, and the patched holder is re-copied from the serving one."""
+        with self.lock:
+            patch, eng = self.pending, self.pending_engine
+            if patch is None:
+                raise RuntimeError("nothing pending to roll back")
+            failover_record = None
+            if eng is self.active:
+                failover_record = self.failover(f"rollback {patch.id}: {why}", eng)
+                if failover_record is None:
+                    raise RuntimeError(f"rollback {patch.id}: the standby "
+                                       f"{self.standby.name} does not hold the ledger")
+            self.tainted.add(eng.name)
+            self.pending = self.pending_engine = None
         rs = self.restore_holder(eng, self.active)
-        return {"patch": patch.id, "failover": fo, "restore": rs}
+        return {"patch": patch.id, "failover": failover_record, "restore": rs}
 
     def accept(self):
         """Commit the pending patch: ledger, then replay onto the standby, then the new
-        reference (tokens/logprobs and digest) is the ledger's."""
-        patch = self.pending
-        if patch is None:
-            raise RuntimeError("nothing pending to accept")
-        r = self.standby.rpc("lease_apply", patch.to_json())
-        if not r.get("ok"):
-            raise RuntimeError(f"replay {patch.id} on standby: {r}")
-        self.standby.reset_prefix_cache()
-        self.ledger.append(patch)
-        self.pending = None
+        reference (tokens/logprobs and digest) is the ledger's. The new ledger digest is the
+        active engine's, taken before the replay, so the standby is verified against it even if
+        the active engine dies after the replay; the reference prompts then come from the
+        verified standby."""
+        # The lock is held across the replay, so no failover can swap the engines in between
+        # (a failover waits for it); a standby whose replay did not complete is tainted.
+        with self.lock:
+            patch = self.pending
+            if patch is None:
+                raise RuntimeError("nothing pending to accept")
+            if self.pending_engine is not self.active:
+                raise RuntimeError(f"accept {patch.id}: its engine "
+                                   f"{self.pending_engine.name} no longer serves (failed over); "
+                                   "rollback() instead")
+            active, standby = self.active, self.standby
+            patched_digest = self.digest(active)          # before anything changes
+            self.tainted.add(standby.name)
+            replay = standby.rpc("lease_apply", patch.to_json())
+            if not replay.get("ok"):
+                raise RuntimeError(f"replay {patch.id} on standby {standby.name}: {replay}")
+            standby.reset_prefix_cache()
+            self.ledger.append(patch)
+            self.pending = self.pending_engine = None
+            self.ref_digest = patched_digest
+        standby_agree = digests_agree(patched_digest, self.digest(standby))
+        if standby_agree["ok"]:
+            with self.lock:
+                self.tainted.discard(standby.name)
         with self.router.drained():
-            self.ref = reference(self.active.port, self.model)
-        self.ref_digest = self.digest(self.active)
-        sb = digests_agree(self.ref_digest, self.digest(self.standby))
-        return {"accepted": patch.id, "ledger": self.ledger.ids, "standby_digest_ok": sb["ok"]}
+            try:
+                self.ref = reference(active.port, self.model)
+            except Exception:  # noqa: BLE001 - the active engine died after the replay
+                if not standby_agree["ok"]:
+                    raise
+                self.ref = reference(standby.port, self.model)
+        return {"accepted": patch.id, "ledger": self.ledger.ids,
+                "standby_digest_ok": standby_agree["ok"]}
 
     def close(self):
         self._stop.set()
@@ -966,7 +1058,8 @@ def demo(a):
         colo.stop()
         save()
         # 4. correctness of the lease: leased (H0, H1) == cold disk load
-        pool = Pool(model, python, work, act, sby, a.port_base + 9, tol=a.tol)
+        pool = Pool(model, python, work, act, sby, a.port_base + 9, tol=a.tol,
+                    max_model_len=mml)
         res["lease_vs_cold"] = {"A": gate_compare(res["cold_ref"], pool.ref, 0.0),
                                 "S": gate_compare(res["cold_ref"], reference(sby.port, model),
                                                   0.0),
@@ -1055,10 +1148,13 @@ def parser():
     c = sub.add_parser("copy-rank")
     c.add_argument("--rank", type=int, required=True)
     c.add_argument("--init", required=True)
-    for q in (c, sub.add_parser("copy"), sub.add_parser("demo")):
-        q.add_argument("--model", required=True)
-        q.add_argument("--max-model-len", type=int, default=4096)
-        q.add_argument("--python", default=sys.executable)
+    demo_parser = sub.add_parser("demo")
+    for subparser in (c, sub.add_parser("copy"), demo_parser):
+        subparser.add_argument("--model", required=True)
+        # copy and copy-rank: unset means the holders were started without --max-model-len
+        subparser.add_argument("--max-model-len", type=int,
+                               default=4096 if subparser is demo_parser else None)
+        subparser.add_argument("--python", default=sys.executable)
     cp = sub._name_parser_map["copy"]
     cp.add_argument("--socket-dir", required=True)
     cp.add_argument("--src-gpu", type=int, required=True)

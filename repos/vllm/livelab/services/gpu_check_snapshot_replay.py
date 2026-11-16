@@ -29,6 +29,7 @@ import argparse, copy, importlib.util, json, os, sys, time
 from pathlib import Path
 
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
 HERE = Path(__file__).resolve().parent
 
 

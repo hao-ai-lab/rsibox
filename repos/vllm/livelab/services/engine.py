@@ -137,9 +137,10 @@ def engine_env(a, base=None):
         # CUDA uninitialized in the API server when a library probes the GPU arch at import
         # (FlashInfer at TP>1). TODO(startup boundary): the same for a direct start.
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
+    if a.fork or getattr(a, "zygote", ""):
         # CuTe DSL probes the GPU arch with cuInit at import (from flashinfer), which makes a
-        # forked child's CUDA fail. Give it the arch it would detect, from nvidia-smi, which
-        # does not touch the CUDA driver.
+        # forked child's CUDA fail; the zygote forks every server, so it needs this too. Give
+        # it the arch it would detect, from nvidia-smi, which does not touch the CUDA driver.
         arch = cute_dsl_arch(env.get("CUDA_VISIBLE_DEVICES"))
         if arch:
             env.setdefault("CUTE_DSL_ARCH", arch)
@@ -162,7 +163,7 @@ def cute_dsl_arch(visible):
             "check": "cute_dsl_arch", "observed": why, "expected": "one compute capability",
             "why": "CUTE_DSL_ARCH stays unset, so CuTe DSL probes the GPU with cuInit and "
                    "forked workers cannot use CUDA",
-            "actions": ["set CUTE_DSL_ARCH yourself", "start without --fork"]}}),
+            "actions": ["set CUTE_DSL_ARCH yourself", "start without --fork or --zygote"]}}),
             file=sys.stderr)
         return None
     major, minor = (int(x) for x in caps.pop().split("."))
@@ -224,6 +225,21 @@ def socket_dir(a, v):
     if cfg is not None:
         return cfg.get("socket_dir") or weights.default_socket_dir()
     return a.weights_socket_dir or weights.default_socket_dir()
+
+
+def value_finding(parsed):
+    """A `vllm_value` finding when a live scheduler field (live_reconfig.LIVE_FIELDS) has a
+    value no engine runs with (not a positive integer), else None. vLLM's parser takes any
+    int; a reconfigure refuses such a value before it stops the running engine."""
+    args = parsed.get("args") or {}
+    values = {field_name: args[field_name] for field_name in live_reconfig.LIVE_FIELDS
+              if args.get(field_name) is not None}
+    problems = live_reconfig.check_values(values, {})
+    if not problems:
+        return None
+    return {"check": "vllm_value", "observed": problems, "expected": "positive integers",
+            "why": "the restart would start a server that cannot run, after stopping this one",
+            "actions": ["pass a positive value"]}
 
 
 def argv_findings(a, v):
@@ -485,27 +501,59 @@ def load_engine_state(cache_root, pid):
     }
 
 
-def _descendants(pid):
-    children_by_parent, descendants = {}, []
+def _descendants(pid, proc_root="/proc"):
+    """The processes below pid (ppid links), plus every process in pid's process group or
+    session and theirs: a worker whose parent died is reparented (ppid 1) but stays in the
+    engine's session. A pid equal to a live group or session id is never reused."""
+    children_by_parent, descendants, members = {}, [], []
     try:
-        entries = os.listdir("/proc")
+        entries = os.listdir(proc_root)
     except OSError:
         return descendants
     for entry in entries:
         if entry.isdigit():
             try:
-                parent_pid = int(
-                    open(f"/proc/{entry}/stat").read().rsplit(")", 1)[1].split()[1]
-                )
+                with open(f"{proc_root}/{entry}/stat") as stat_file:
+                    fields = stat_file.read().rsplit(")", 1)[1].split()
+                parent_pid, group_id, session_id = (int(value) for value in fields[1:4])
                 children_by_parent.setdefault(parent_pid, []).append(int(entry))
+                if int(entry) != pid and pid in (group_id, session_id):
+                    members.append(int(entry))
             except Exception:
                 pass
-    stack = [pid]
+    stack = [pid] + members
+    seen = {pid}
     while stack:
-        for child_pid in children_by_parent.get(stack.pop(), []):
-            descendants.append(child_pid)
-            stack.append(child_pid)
+        current = stack.pop()
+        if current != pid and current not in seen:
+            seen.add(current)
+            descendants.append(current)
+        for child_pid in children_by_parent.get(current, []):
+            if child_pid not in seen:
+                stack.append(child_pid)
     return descendants
+
+
+MARKER_ENV = "FASTRSI_LIVE_RECONFIG_DIR"   # engine_env(): one folder per launch, inherited
+
+
+def verified_members(pids, marker, proc_root="/proc"):
+    """The pids whose environment has MARKER_ENV == marker (the processes of one launch),
+    never this process. Empty when marker is None: nothing ties the processes to the engine."""
+    if not marker:
+        return []
+    want = f"{MARKER_ENV}={marker}".encode()
+    verified = []
+    for member_pid in pids:
+        if member_pid == os.getpid():
+            continue
+        try:
+            with open(f"{proc_root}/{member_pid}/environ", "rb") as environ_file:
+                if want in environ_file.read().split(b"\0"):
+                    verified.append(member_pid)
+        except OSError:
+            pass
+    return verified
 
 
 def _start_time(pid):
@@ -533,17 +581,29 @@ def _signal_if_same(pid, start_time, sig):
         return False
 
 
-def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0):
-    """Stop engine `pid` and its descendants: SIGTERM, up to `grace` s, then SIGKILL, up to
+def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None):
+    """Stop engine `pid` and its descendants (_descendants: its process tree, group and
+    session). After `pid` itself exited, only the members that carry the launch's `marker`
+    (its MARKER_ENV value) are stopped: a pid can be reused by another session's leader, and
+    without a marker nothing is signalled. /proc/<pid>/environ is the exec-time environment, so
+    a server forked from the zygote (which sets MARKER_ENV after the fork, without exec) never
+    shows it: for those, a stop after the leader exited signals nothing and says so. SIGTERM, up to `grace` s, then SIGKILL, up to
     `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
     signalled only while it still has that start time, so a reused pid is never hit.
     Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
     recorded process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
     t0 = time.time()
+    below = [member_pid for member_pid in _descendants(pid) if member_pid != os.getpid()]
     if zygote._exited(pid):
-        return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
-                "note": f"pid {pid} was not running"}
-    procs = {p: _start_time(p) for p in [pid] + _descendants(pid)}
+        verified = verified_members(below, marker)
+        if not verified:
+            note = (f"pid {pid} was not running" if not below else
+                    f"pid {pid} exited; {len(below)} member(s) of its group or session not "
+                    "verified as this engine's (no launch marker): none signalled")
+            return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
+                    "note": note, "unverified": below}
+        below = verified
+    procs = {proc_pid: _start_time(proc_pid) for proc_pid in [pid] + below}
     procs = {p: st for p, st in procs.items() if st is not None}
 
     def alive():
@@ -789,6 +849,11 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         old_parsed.get("ok") and new_parsed.get("ok")
     ) else None
     findings, preflight_report = argv_findings(launcher_args, new_parsed), {}
+    if not findings and new_parsed.get("ok"):
+        # the model check needs the running engine's parse; the value check only the new one
+        findings = [finding for finding in (
+            vllm_args.override_finding(patch_vargv, old_parsed, new_parsed)
+            if old_parsed.get("ok") else None, value_finding(new_parsed)) if finding]
     if not findings and reconfig is not None:
         findings = reconfig_findings(launcher_args, new_parsed, reconfig)
     if not findings:
@@ -848,7 +913,7 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                                   "note": "not started; old engine left running"}))
                 sys.exit(2)
     t_stop = time.perf_counter()
-    stop_info = stop_engine(launcher_args.pid, port=old_port)
+    stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"))
     if not stop_info["stopped"]:
         print(json.dumps({"findings": [{
             "check": "stop_engine", "observed": stop_info,
