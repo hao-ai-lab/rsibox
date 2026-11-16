@@ -1,0 +1,156 @@
+"""Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `fastrsi_gap`."""
+import importlib.util, linecache, os, queue, random, sys, threading
+from multiprocessing.connection import Client
+from adapter import recapture as R1
+from kernel import coordinator as C, findings as F
+
+GAP_METHODS = frozenset({"park", "validate", "commit", "undo", "recapture",
+                         "recapture_extend", "recapture_extend_drop", "reset", "release_gap"})
+_STATE = {"participant": None, "recapture": None, "faults": {}, "hooks": [], "plans": {}, "gap_queue": queue.Queue()}
+
+def _origin(name):
+    spec = None if name in sys.modules else importlib.util.find_spec(name)
+    return getattr(sys.modules.get(name), "__file__", None) or (spec.origin if spec else None)
+
+def _sync_lines(local_p, names):
+    for name in names:
+        path, src = _origin(name), local_p._live_source(name)
+        if path:
+            if src is not None: linecache.cache[path] = (len(src), None, src.splitlines(True), path)
+            else:
+                linecache.cache.pop(path, None)
+
+def _rank(scheduler): return scheduler.tp_rank if hasattr(scheduler, "tp_rank") else scheduler.tp_worker.model_runner.tp_rank
+
+def _is_capturing(scheduler):
+    runner, torch_mod = scheduler.tp_worker.model_runner, sys.modules.get("torch")
+    if torch_mod is not None and getattr(torch_mod.cuda, "is_initialized", lambda: False)() and torch_mod.cuda.is_current_stream_capturing(): return True
+    graph_runner = getattr(runner, "graph_runner", None) or getattr(runner, "decode_cuda_graph_runner", None)
+    getter = getattr(sys.modules.get(type(graph_runner).__module__), "get_is_capture_mode", None)
+    return bool(callable(getter) and getter())
+
+def _drain_overlap(scheduler):
+    if getattr(scheduler, "enable_overlap", False) and getattr(scheduler, "last_batch", None):
+        io_name = type(scheduler).__module__.rsplit(".", 1)[0] + ".io_struct"
+        io_mod = sys.modules.get(io_name) or __import__(io_name, fromlist=["*"])
+        scheduler.pause_generation(io_mod.PauseGenerationReqInput(mode="retract"))
+        scheduler.continue_generation(io_mod.ContinueGenerationReqInput())
+
+def _reset_state(scheduler):
+    _drain_overlap(scheduler)
+    if not scheduler.flush_cache(): raise RuntimeError("flush_cache refused: pending requests remain on scheduler")
+    runner = scheduler.tp_worker.model_runner
+    pool = (getattr(scheduler, "mamba_pool", None) or getattr(runner, "mamba_pool", None)
+            or getattr(getattr(scheduler, "req_to_token_pool", None), "mamba_pool", None))
+    if isinstance(getattr(pool, "states", None), list): pool.states[:] = [0] * len(pool.states)
+    for attr in ("conv_state", "ssm_state", "temporal_state"):
+        buf = getattr(pool, attr, None) if pool is not None else None
+        for item in (buf if isinstance(buf, (list, tuple)) else (buf,)):
+            if hasattr(item, "zero_"): item.zero_()
+    seed = int(getattr(runner, "random_seed", 0) or 0)
+    random.seed(seed)
+    if hasattr(getattr(runner, "rng", None), "seed"): runner.rng.seed(seed)
+    torch_mod = sys.modules.get("torch")
+    if torch_mod is not None:
+        torch_mod.manual_seed(seed)
+        if getattr(torch_mod.cuda, "is_initialized", lambda: False)():
+            torch_mod.cuda.manual_seed_all(seed)
+    return ["radix_cache", "kv_pool", "mamba_pool", "rng"]
+
+def participant(scheduler):
+    if _STATE["participant"] is None:
+        runner = scheduler.tp_worker.model_runner
+        scope = {"scheduler": scheduler, "worker": scheduler.tp_worker, "model_runner": runner}
+        resets = {"state": lambda: _reset_state(scheduler), "R3": lambda: _reset_state(scheduler)}
+        _STATE["participant"] = C.LocalParticipant(f"rank{_rank(scheduler)}", scope=scope, resets=resets,
+                                                   capturing=lambda: _is_capturing(scheduler))
+        _STATE["recapture"] = R1.Recapture()
+    return _STATE["participant"]
+
+def rpc(scheduler, method, payload=None):
+    local_p, info, rank_id = participant(scheduler), payload or {}, _rank(scheduler)
+    runner = scheduler.tp_worker.model_runner
+    graph_runner = getattr(runner, "graph_runner", None) or getattr(runner, "decode_cuda_graph_runner", None)
+    if method == "ping": return {"ok": True, "rank": rank_id, "pid": os.getpid()}
+    if method == "inject":
+        from adapter.fixture import faults
+        return faults.inject(scheduler, local_p, _STATE, **info)
+    if method == "graphs":
+        gmap = getattr(graph_runner, "graphs", None) if hasattr(graph_runner, "graphs") else getattr(getattr(graph_runner, "backend", None), "_graphs", None)
+        return {"ok": True, "rank": rank_id, "graphs": len(gmap or {}), "capture_bs": sorted(getattr(graph_runner, "capture_bs", ()) or ())}
+    if method in ("recapture", "recapture_extend"):
+        if _STATE["faults"].pop("fail_recapture", False): return F.not_ok(f"rank{rank_id}: injected failure", [F.finding(
+                "rebuild_failed", "injected OOM during graph capture", "every size captured")], rank=rank_id)
+        reply = (R1.recapture(_STATE["recapture"], graph_runner, info["txn"], local_p.journal, local_p.witness, sizes=info.get("sizes"))
+                 if method == "recapture" else
+                 _STATE["recapture"].extend(graph_runner, info["txn"], local_p.journal, local_p.witness,
+                                            sizes=info.get("sizes"), extend_id=info.get("extend_id")))
+        return {**reply, "rank": rank_id}
+    if method == "recapture_extend_drop": return {**_STATE["recapture"].drop_extend(info["txn"], local_p.journal, info.get("extend_id")), "rank": rank_id}
+    if method == "prepare":
+        specs = info.get("modules", {})
+        for name, spec in specs.items():
+            path, src = _origin(name), spec.get("source")
+            if path and src is not None: linecache.cache[path] = (len(src), None, src.splitlines(True), path)
+        reply = local_p.prepare(payload)
+        _STATE["plans"][reply.get("txn")] = set(specs)
+        if not reply.get("ok"): _sync_lines(local_p, specs)
+        return reply
+    reply = getattr(local_p, method)(payload)
+    if method in ("commit", "abort", "undo"):
+        _sync_lines(local_p, {m for names in _STATE["plans"].values() for m in names})
+    return reply
+
+def fastrsi_gap(scheduler, gap_id=""):
+    _drain_overlap(scheduler)
+    while True:
+        method, payload, box, done = _STATE["gap_queue"].get()
+        try:
+            box["reply"] = ({"ok": True, "gap_id": gap_id, "rank": _rank(scheduler)}
+                            if method in ("park", "release_gap") else rpc(scheduler, method, payload))
+        except Exception as exc:
+            box["reply"] = F.not_ok(f"{method}: {type(exc).__name__}: {exc}")
+        done.set()
+        if method == "release_gap": return
+
+def _control_loop(scheduler, conn):
+    try:
+        while True:
+            req = conn.recv()
+            method, payload = req["method"], req.get("payload")
+            if _STATE["faults"].get("lost"):
+                conn.close()
+                return
+            if method in GAP_METHODS:
+                box, done = {}, threading.Event()
+                _STATE["gap_queue"].put((method, payload, box, done))
+                done.wait()
+                reply = box["reply"]
+            else:
+                try:
+                    reply = rpc(scheduler, method, payload)
+                except Exception as exc:
+                    reply = F.not_ok(f"{method}: {type(exc).__name__}: {exc}")
+            conn.send({"id": req["id"], "reply": reply})
+    except (EOFError, OSError):
+        return
+
+def run_scheduler_entry(sock_path, scheduler_module_name, real_entry, *args, **kwargs):
+    scheduler_cls = __import__(scheduler_module_name, fromlist=["Scheduler"]).Scheduler
+    if not getattr(scheduler_cls, "_fastrsi_hooked", False):
+        orig_init = scheduler_cls.__init__
+        def hooked_init(self, *a, **k):
+            orig_init(self, *a, **k)
+            participant(self)
+            conn = Client(sock_path, "AF_UNIX")
+            conn.send({"rank": int(_rank(self)), "pid": os.getpid()})
+            threading.Thread(target=_control_loop, args=(self, conn), daemon=True).start()
+
+        scheduler_cls.__init__, scheduler_cls.fastrsi_gap, scheduler_cls._fastrsi_hooked = hooked_init, fastrsi_gap, True
+    try:
+        return real_entry(*args, **kwargs)
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        print(f"fastrsi scheduler exited on {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        os._exit(1)
