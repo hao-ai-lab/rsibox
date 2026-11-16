@@ -1,17 +1,4 @@
 {
- "meta": {
-  "generated": "2026-11-11",
-  "repo": "hao-ai-lab/fastrsi",
-  "repo_ref": "origin/main @ 3689728 (2026-11-10)",
-  "naming": "The paper says LiveLab; the public name is FastRSI.",
-  "source_convention": "repo paths are relative to the repo root at origin/main, with line numbers; 'atom:<id>' is a paper atom; 'PR #N' is a hao-ai-lab/fastrsi pull request description.",
-  "status_values": {
-   "merged_gpu_verified": "on main, and a GPU run of it is recorded (kb file or PR description)",
-   "merged_cpu_only": "on main, tested on CPU only; no GPU run recorded",
-   "measured_not_in_repo": "a measurement exists (paper atom or earlier tree) but no module for it is on main",
-   "planned": "named in the docs as not built / not yet"
-  }
- },
  "shared_kernel": {
   "what": "All three labs use one transaction kernel (core/livelab/kernel): locate, swap, journal, witness, findings, two-phase coordinator, session.",
   "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
@@ -235,48 +222,7 @@
      "status": "planned",
      "source": "repos/vllm/docs/architecture.md:112,158"
     }
-   ],
-   "cost_ladders": [
-    {
-     "title": "Restart vs live, one-line scheduler edit, 1 GB200 (earlier measurement, warm on-disk caches)",
-     "source": "repos/vllm/kb/costs.md:5-21",
-     "rows": [
-      [
-       "Restart with caches (baseline)",
-       228
-      ],
-      [
-       "+ reuse autotune config",
-       157
-      ],
-      [
-       "+ keep model weights",
-       100
-      ],
-      [
-       "+ keep CUDA graphs",
-       58
-      ],
-      [
-       "+ keep the live process (hot swap)",
-       23.6
-      ],
-      [
-       "then skip the logprob check",
-       14.1
-      ],
-      [
-       "then test with a small batch",
-       2.4
-      ]
-     ],
-     "unit": "s"
-    }
-   ],
-   "headline": {
-    "text": "Server start 51.85 s -> 7.37 s with zygote, IPC weights and KV plan reuse (Qwen3-8B TP1 eager, 1 GB200).",
-    "source": "repos/vllm/kb/costs.md:104-111"
-   }
+   ]
   },
   {
    "engine": "Megatron-LM",
@@ -381,7 +327,7 @@
       "setup": "Megatron-Bridge 0.6.1, Qwen3-30B-A3B, two 4-GPU GB200 trays, median of 3, container start to first steady step"
      },
      "status": "measured_not_in_repo",
-     "source": "atom:m-ladder-megatron-launch",
+     "source": "earlier measurement run",
      "note": "Measured in a different worktree; not part of repos/megatron on main. Not the race-5 recipe."
     },
     {
@@ -393,40 +339,7 @@
      "source": "repos/megatron/livelab/README.md:59-61",
      "note": "Listed as 'Not yet'. Today they are refused and go to a code restart."
     }
-   ],
-   "cost_ladders": [
-    {
-     "title": "Megatron restart tiers, request to first train step done (4 GB200, one node, 2026-11-07)",
-     "source": "repos/megatron/kb/costs.md:51-61",
-     "unit": "s",
-     "rows": [
-      [
-       "torchrun, environment on network file system",
-       "14B 58.0",
-       "32B 110.1"
-      ],
-      [
-       "torchrun, environment node-local",
-       "14B 29.3",
-       "32B 37.6"
-      ],
-      [
-       "zygote fork",
-       "14B 17.1-19.6",
-       "32B 24.5-27.5"
-      ],
-      [
-       "live swap (no restart)",
-       "install 0.05-0.10",
-       ""
-      ]
-     ]
-    }
-   ],
-   "headline": {
-    "text": "Restart to first train step 58.0 s -> 17.1-19.6 s from the zygote (14B, TP 2); a live swap installs in 0.05-0.10 s.",
-    "source": "repos/megatron/kb/costs.md:51-61,128"
-   }
+   ]
   },
   {
    "engine": "FastVideo",
@@ -459,7 +372,7 @@
      },
      "status": "merged_gpu_verified",
      "source": "repos/fastvideo/kb/costs.md:132-157; PR #87",
-     "note": "PR #146 (open) makes the rebuild atomic and fixes live swaps on the rebuilt base."
+     "note": "PR #146 (open) makes the rebuild all-or-nothing and fixes live swaps on the rebuilt base."
     },
     {
      "name": "Zygote respawn (`services/zygote.py`)",
@@ -520,139 +433,7 @@
      "source": "repos/fastvideo/livelab/README.md ('Not covered'); repos/fastvideo/examples/h3-conformance/README.md:69-72",
      "note": "Listed as not covered / not shown."
     }
-   ],
-   "cost_ladders": [
-    {
-     "title": "FastVideo restart ladder, request to first video (1 GB200 unless noted, 2026-11-07)",
-     "source": "repos/fastvideo/kb/costs.md:132-141",
-     "unit": "s (overhead before the request can run)",
-     "rows": [
-      [
-       "Live swap",
-       "0.06"
-      ],
-      [
-       "In-place rebuild",
-       "0.19-1.27"
-      ],
-      [
-       "Zygote respawn with weights holder",
-       "4.78-5.62"
-      ],
-      [
-       "Zygote respawn",
-       "14.05-15.33"
-      ],
-      [
-       "Plain respawn",
-       "43.0-45.0"
-      ],
-      [
-       "Warm restart, path-stable caches",
-       "51.4"
-      ],
-      [
-       "Cold restart",
-       "289"
-      ]
-     ]
-    },
-    {
-     "title": "Start-up ladder: FastVideo FastH3, 2 GB200s (paper atom, measured 2026-10-20 in an earlier tree)",
-     "source": "atom:m-ladder-fastvideo-h3",
-     "unit": "s total",
-     "rows": [
-      [
-       "Fresh start (baseline)",
-       61.5
-      ],
-      [
-       "+ Skip random init",
-       54.2
-      ],
-      [
-       "+ Cache autotune and prompt embeddings",
-       41.9
-      ],
-      [
-       "+ Keep DiT weights in /dev/shm",
-       37.5
-      ],
-      [
-       "+ No CUDA at import",
-       32.4
-      ],
-      [
-       "+ Keep the driver, pre-imported zygote",
-       17.5
-      ],
-      [
-       "+ Retain the live worker",
-       9.3
-      ]
-     ],
-     "note": "Medians of 2-3 runs; outputs hash-match the baseline. The check itself is 9.3 s."
-    }
-   ],
-   "headline": {
-    "text": "Edit-to-run 0.72 s live against about 72 s for a warm restart and about 500 s for a cold one (MiniMax H3, 1 GB200).",
-    "source": "repos/fastvideo/kb/costs.md:72"
-   }
-  }
- ],
- "prs_135_141": [
-  {
-   "pr": 135,
-   "title": "real weight lease, NCCL seeder and standby pool",
-   "gpu_receipt": true,
-   "gpu": "B200 GPUs on 1 node, Qwen3-8B and Qwen3.5-35B-A3B-FP8",
-   "tests": "6 passed with FASTRSI_GPU_E2E=1 (3 CPU, 3 GPU regressions)",
-   "source": "PR #135"
-  },
-  {
-   "pr": 136,
-   "title": "commit/undo two-phase decision, identity Triton witness, monotonic timing",
-   "gpu_receipt": true,
-   "gpu": "B200, Qwen3-8B, TP=2",
-   "tests": "kernel suite 110 OK; GPU proof covers audit rows #8, #9, #20, #21; rows #10, #18, #19, #23 CPU only",
-   "source": "PR #136"
-  },
-  {
-   "pr": 137,
-   "title": "real live reconfigure, verified engine stop, per-group KV snapshot",
-   "gpu_receipt": true,
-   "gpu": "B200, Qwen3-8B and gemma-3-1b-it",
-   "tests": "72 services tests pass on the GPU host",
-   "source": "PR #137"
-  },
-  {
-   "pr": 138,
-   "title": "Megatron lab survives bad and gone clients, zygote supervises its ranks, reset fails closed",
-   "gpu_receipt": true,
-   "gpu": "2x B200, Qwen3-14B architecture TP 2",
-   "tests": "30-check GPU driver, all pass; 36 CPU cases",
-   "source": "PR #138"
-  },
-  {
-   "pr": 139,
-   "title": "real B200 CI for trusted SHAs",
-   "gpu_receipt": null,
-   "note": "CI infrastructure; its description was fetched but not read in detail for this file.",
-   "source": "PR #139"
-  },
-  {
-   "pr": 140,
-   "title": "results dashboard built from the paper's figure data",
-   "state": "open, not merged",
-   "gpu_receipt": null,
-   "source": "PR #140"
-  },
-  {
-   "pr": 141,
-   "title": "GPU receipts go in the PR description, not the repo",
-   "gpu_receipt": false,
-   "note": "Docs only. Explains why no receipt files are in the repo: receipts live in PR descriptions.",
-   "source": "PR #141"
+   ]
   }
  ],
  "caveats": [
