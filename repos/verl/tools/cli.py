@@ -1,0 +1,143 @@
+"""Gate client, `verl` launcher, and CLI (`python3 -m tools.cli`: `train`, `request`, `stop`, `rescore`, `replay-adv`)."""
+import argparse, importlib.util, json, os, sys, sysconfig, time
+from pathlib import Path
+
+VERL_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+LIVELAB_DIR = os.path.join(VERL_REPO, "livelab")
+for p in (VERL_REPO, LIVELAB_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+class GateError(RuntimeError):
+    """The gated verl job is not answering or has exited."""
+
+
+def _job_died(gate_dir):
+    try:
+        pid = json.loads((gate_dir / "gate.json").read_text(encoding="utf-8")).get("pid")
+        if isinstance(pid, int):
+            os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def request(gate_dir, files=(), steps=1, stop=False, timeout=1800.0, live_settings=None, verb="install", extra=None):
+    gate_path = Path(gate_dir)
+    ready = gate_path / "ready.json"
+    if not ready.exists():
+        raise GateError(f"{gate_path}: no ready.json; is the job running with this gate?")
+    req_num = json.loads(ready.read_text(encoding="utf-8"))["n"]
+    if (gate_path / f"req-{req_num}.json").exists():
+        raise GateError(f"{gate_path}: request {req_num} is already pending")
+    payload = ({"stop": True} if stop else
+               {"verb": verb, "files": [os.path.realpath(f) for f in files], "steps": steps, **(extra or {}),
+                **({"set": {k: str(v) for k, v in live_settings.items()}} if live_settings else {})})
+    payload["t_client"] = time.time()
+    tmp = gate_path / f".req-{req_num}.json"
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.rename(gate_path / f"req-{req_num}.json")
+    resp, deadline = gate_path / f"resp-{req_num}.json", time.monotonic() + timeout
+    while not resp.exists():
+        if (gate_path / "stopped.json").exists() and not stop:
+            raise GateError(f"{gate_path}: job stopped while serving request {req_num}")
+        if _job_died(gate_path) and not stop:
+            raise GateError(f"{gate_path}: job process died while serving request {req_num}")
+        if time.monotonic() > deadline:
+            raise GateError(f"{gate_path}: timed out after {timeout}s")
+        time.sleep(0.05)
+    return json.loads(resp.read_text(encoding="utf-8"))
+
+
+def summary(receipt):
+    keep = ("ok", "outcome", "verdict_s", "install_s", "processes", "proven",
+            "witness", "set", "metrics", "error", "codes", "restart_required")
+    return {k: receipt[k] for k in keep if k in receipt}
+
+
+def launch_command(overrides, gate_dir=None, trace_path=None, roots=None):
+    from adapter import LIVELAB
+    env = dict(os.environ)
+    py_paths = [LIVELAB_DIR, VERL_REPO, LIVELAB] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    env["PYTHONPATH"] = os.pathsep.join(py_paths)
+    argv = [sys.executable, "-m", "verl.trainer.main_ppo", *overrides]
+    if trace_path:
+        env["VERL_STARTUP_TRACE"] = str(Path(trace_path).resolve())
+    if gate_dir:
+        if roots is None:
+            spec = importlib.util.find_spec("verl")
+            vroot = str(Path(spec.origin).parent) if spec and spec.origin else None
+            rdir = next((str(Path(it.partition("=")[2]).resolve().parent) for it in overrides
+                         if it.lstrip("+").startswith("reward.custom_reward_function.path=")), None)
+            roots = [r for r in (vroot, rdir) if r]
+        env["FASTRSI_RL_GATE"], env["FASTRSI_RL_ROOTS"] = str(Path(gate_dir).resolve()), os.pathsep.join(roots)
+        argv += ["trainer.v1.trainer_mode=fastrsi", "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=adapter.hook.setup"]
+    site = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
+    libs = [str(site / lib / "lib") for lib in ("cudnn", "nccl") if (site / lib / "lib").is_dir()]
+    if libs:
+        env["LD_LIBRARY_PATH"] = ":".join(libs + ([env["LD_LIBRARY_PATH"]] if env.get("LD_LIBRARY_PATH") else []))
+    return argv, env
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="python3 -m tools.cli")
+    sub = ap.add_subparsers(dest="command", required=True)
+    req = sub.add_parser("request")
+    req.add_argument("--gate", required=True)
+    req.add_argument("--verb", default="install", choices=("install", "status", "uninstall", "reset"))
+    req.add_argument("--steps", type=int, default=1)
+    req.add_argument("--timeout", type=float, default=1800.0)
+    req.add_argument("--full", action="store_true")
+    req.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    req.add_argument("files", nargs="*")
+    sub.add_parser("stop").add_argument("--gate", required=True)
+    res = sub.add_parser("rescore")
+    res.add_argument("--rollouts", required=True)
+    res.add_argument("--reward", required=True)
+    res.add_argument("--function", default="compute_score")
+    res.add_argument("--data-source", default=None)
+    adv = sub.add_parser("replay-adv")
+    adv.add_argument("--step", required=True)
+    adv.add_argument("--atol", type=float, default=0.0)
+    adv.add_argument("--fn", default=None)
+    trn = sub.add_parser("train")
+    trn.add_argument("--gate", default=None)
+    trn.add_argument("--trace", default=None)
+    trn.add_argument("--roots", default=None)
+    trn.add_argument("overrides", nargs="*")
+    a = ap.parse_args(argv)
+    if a.command == "train":
+        cmd, env = launch_command(a.overrides, a.gate, a.trace, a.roots.split(os.pathsep) if a.roots else None)
+        if a.gate:
+            Path(a.gate).mkdir(parents=True, exist_ok=True)
+            for stale in Path(a.gate).glob("*.json"):
+                stale.unlink()
+        os.execvpe(cmd[0], cmd, env)
+    if a.command == "stop":
+        request(a.gate, stop=True)
+        return 0
+    if a.command == "rescore":
+        from tools import rescore
+        print(json.dumps(rescore.rescore(a.rollouts, a.reward, a.function, a.data_source)))
+        return 0
+    if a.command == "replay-adv":
+        from tools import replay_adv
+        print(json.dumps(replay_adv.replay_advantages(a.step, atol=a.atol, estimator_spec=a.fn)))
+        return 0
+    pairs = [it.partition("=") for it in a.set]
+    if any(not sep for _, sep, _ in pairs):
+        ap.error("--set expects KEY=VALUE")
+    try:
+        rcpt = request(a.gate, files=a.files, steps=a.steps, timeout=a.timeout, live_settings={k: v for k, _, v in pairs}, verb=a.verb)
+    except GateError as err:
+        print(json.dumps({"ok": False, "error": str(err)}))
+        return 2
+    print(json.dumps(rcpt if a.full else summary(rcpt), default=str))
+    return 3 if rcpt.get("restart_required") else (0 if rcpt.get("ok") else 1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
