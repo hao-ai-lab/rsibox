@@ -1,0 +1,234 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "vllm",
+  "rules_version": "vllm-1.1",
+  "upstream": {
+    "repo": "vllm-project/vllm",
+    "commit": "4e0ad572036166a8bdf1782f4a07b4e33016646b",
+    "version": "main at 2026-10-29 (the commit kb/costs.md and examples/dsv41-prefill use)"
+  },
+  "lab_path": "repos/vllm/livelab",
+  "source_roots": [
+    "vllm"
+  ],
+  "native_roots": [
+    "csrc",
+    "vllm"
+  ],
+  "exclude": [],
+  "decorators": {
+    "dsl_kernel": [
+      "cute.jit",
+      "cute.kernel",
+      "gluon.jit",
+      "tilelang_jit",
+      "T.prim_func"
+    ],
+    "compiled": []
+  },
+  "paths": [
+    {
+      "glob": "vllm/entrypoints/cli/*",
+      "group": "restart",
+      "why": "launch commands and flags (INTERFACE.md: launch flags need a restart)"
+    },
+    {
+      "glob": "vllm/entrypoints/openai/cli_args.py",
+      "group": "restart",
+      "why": "launch flags"
+    },
+    {
+      "glob": "vllm/engine/arg_utils.py",
+      "group": "restart",
+      "why": "launch flags; services/vllm_args.py classifies a flag delta as a restart tier"
+    },
+    {
+      "glob": "vllm/utils/argparse_utils.py",
+      "group": "restart",
+      "why": "launch flag parser"
+    },
+    {
+      "glob": "vllm/envs.py",
+      "group": "restart",
+      "why": "environment variables"
+    },
+    {
+      "glob": "vllm/env_override.py",
+      "group": "restart",
+      "why": "environment variables set at import"
+    },
+    {
+      "glob": "vllm/plugins/*",
+      "group": "restart",
+      "why": "plugins load once at start-up"
+    },
+    {
+      "glob": "vllm/model_executor/models/*",
+      "group": "GRAPH",
+      "why": "model code: adapter/side.py CAPTURED_PREFIXES"
+    },
+    {
+      "glob": "vllm/model_executor/layers/*",
+      "group": "GRAPH",
+      "why": "model code: adapter/side.py CAPTURED_PREFIXES"
+    },
+    {
+      "glob": "vllm/models/*",
+      "group": "GRAPH",
+      "why": "model code outside the adapter's captured prefixes"
+    },
+    {
+      "glob": "vllm/compilation/*",
+      "group": "GRAPH",
+      "why": "graph machinery runs at import or capture (adapter/graphs.py, vLLM #59941)"
+    },
+    {
+      "glob": "vllm/model_executor/model_loader/*",
+      "group": "RESOURCE",
+      "why": "weight loading and layout"
+    },
+    {
+      "glob": "vllm/device_allocator/*",
+      "group": "RESOURCE",
+      "why": "device memory pools"
+    },
+    {
+      "glob": "vllm/distributed/parallel_state.py",
+      "group": "RANKS",
+      "why": "process groups every rank agrees on"
+    },
+    {
+      "glob": "vllm/distributed/device_communicators/*",
+      "group": "RANKS",
+      "why": "communicators built once per group"
+    },
+    {
+      "glob": "vllm/v1/executor/*",
+      "group": "RANKS",
+      "why": "creates the worker process group"
+    }
+  ],
+  "capabilities": {
+    "swap": {
+      "evidence": [
+        [
+          {
+            "path": "repos/vllm/livelab/adapter/host.py",
+            "contains": "StepGapCoordinator"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/worker_ext.py"
+          }
+        ]
+      ],
+      "unreached": [
+        "vllm/entrypoints/*",
+        "vllm/benchmarks/*",
+        "vllm/tool_parsers/*",
+        "vllm/parser/*",
+        "vllm/reasoning/*",
+        "vllm/renderers/*",
+        "vllm/tokenizers/*"
+      ],
+      "why": "participants are the worker ranks and the engine core; the API-server participant is not in the kernel (INTERFACE-v1.md, 'Not settled')"
+    },
+    "swap_recapture": {
+      "evidence": [
+        [
+          {
+            "path": "repos/vllm/livelab/adapter/recapture.py"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/host.py",
+            "contains": "RecaptureCoordinator"
+          }
+        ]
+      ],
+      "reach": [
+        "vllm/model_executor/models/*",
+        "vllm/model_executor/layers/*"
+      ],
+      "why": "selective CUDA graph recapture; graph detection covers the two captured prefixes only. V1 runner only; no torch.compile recompile"
+    },
+    "jit_rebuild": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/jit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/host.py",
+            "contains": "StepGapCoordinator"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/worker_ext.py"
+          }
+        ]
+      ],
+      "unreached": [
+        "vllm/entrypoints/*",
+        "vllm/benchmarks/*",
+        "vllm/tool_parsers/*",
+        "vllm/parser/*",
+        "vllm/reasoning/*",
+        "vllm/renderers/*",
+        "vllm/tokenizers/*"
+      ],
+      "why": "kernel/jit.py rebuilds @triton.jit kernels in place across worker ranks (PR #108, PR #136)"
+    },
+    "constructor_reinit": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/reinit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/host.py",
+            "contains": "StepGapCoordinator"
+          },
+          {
+            "path": "repos/vllm/livelab/adapter/worker_ext.py"
+          }
+        ]
+      ],
+      "unreached": [
+        "vllm/entrypoints/*",
+        "vllm/benchmarks/*",
+        "vllm/tool_parsers/*",
+        "vllm/parser/*",
+        "vllm/reasoning/*",
+        "vllm/renderers/*",
+        "vllm/tokenizers/*"
+      ],
+      "why": "kernel/reinit.py re-initializes pure fresh constructor fields on live instances (PR #156)"
+    },
+    "rebuild": {
+      "evidence": [],
+      "unreached": [
+        "vllm/entrypoints/*",
+        "vllm/benchmarks/*",
+        "vllm/tool_parsers/*",
+        "vllm/parser/*",
+        "vllm/reasoning/*",
+        "vllm/renderers/*",
+        "vllm/tokenizers/*"
+      ],
+      "why": "imperative constructor edits block (constructor_edit); full R4/R5 module rebuilds are not in the adapter"
+    },
+    "respawn": {
+      "evidence": [
+        [
+          {
+            "path": "repos/vllm/livelab/services/zygote.py"
+          },
+          {
+            "path": "repos/vllm/livelab/services/zygote_refresh.py"
+          }
+        ]
+      ],
+      "why": "fork from the pre-import zygote, refreshing edited Python modules"
+    }
+  }
+}

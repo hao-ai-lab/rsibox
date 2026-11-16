@@ -1,0 +1,177 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "megatron",
+  "rules_version": "megatron-1.1",
+  "upstream": {
+    "repo": "NVIDIA/Megatron-LM",
+    "commit": "ae76c60e6c35d913867d6dd7bad0f30b128b54e7",
+    "version": "megatron-core 0.20.0 (kb/sources.md; scanned without our local modifications)"
+  },
+  "lab_path": "repos/megatron/livelab",
+  "source_roots": [
+    "megatron",
+    "pretrain_gpt.py",
+    "gpt_builders.py",
+    "model_provider.py"
+  ],
+  "native_roots": [
+    "megatron"
+  ],
+  "exclude": [],
+  "decorators": {
+    "dsl_kernel": [
+      "cute.jit",
+      "cute.kernel",
+      "ct.kernel",
+      "tilelang_jit",
+      "T.prim_func"
+    ],
+    "compiled": [
+      "jit_fuser"
+    ]
+  },
+  "paths": [
+    {
+      "glob": "megatron/training/arguments.py",
+      "group": "restart",
+      "why": "arg parsing, defaults, validation (kb/priors.md, restart classes: R9)"
+    },
+    {
+      "glob": "megatron/training/argument_utils.py",
+      "group": "restart",
+      "why": "arg parsing"
+    },
+    {
+      "glob": "megatron/training/yaml_arguments.py",
+      "group": "restart",
+      "why": "arg parsing"
+    },
+    {
+      "glob": "megatron/training/global_vars.py",
+      "group": "restart",
+      "why": "globals set once from args"
+    },
+    {
+      "glob": "megatron/training/initialize.py",
+      "group": "restart",
+      "why": "start-up logic"
+    },
+    {
+      "glob": "megatron/training/config/*",
+      "group": "restart",
+      "why": "launch configuration"
+    },
+    {
+      "glob": "megatron/core/parallel_state.py",
+      "group": "RANKS",
+      "why": "process-group creation (kb/priors.md)"
+    },
+    {
+      "glob": "megatron/core/process_groups_config.py",
+      "group": "RANKS",
+      "why": "process groups"
+    },
+    {
+      "glob": "megatron/core/hyper_comm_grid.py",
+      "group": "RANKS",
+      "why": "communicator grid"
+    },
+    {
+      "glob": "megatron/core/full_cuda_graph.py",
+      "group": "GRAPH",
+      "why": "CUDA graph regions (kb/priors.md)"
+    },
+    {
+      "glob": "megatron/core/transformer/cuda_graphs.py",
+      "group": "GRAPH",
+      "why": "CUDA graph capture"
+    },
+    {
+      "glob": "megatron/core/fusions/*",
+      "group": "GRAPH",
+      "why": "fused functions under jit_fuser"
+    },
+    {
+      "glob": "megatron/core/distributed/param_and_grad_buffer.py",
+      "group": "RESOURCE",
+      "why": "flat parameter and gradient buffers (kb/priors.md, where state lives)"
+    },
+    {
+      "glob": "megatron/core/nccl_allocator.py",
+      "group": "RESOURCE",
+      "why": "allocator"
+    },
+    {
+      "glob": "megatron/core/allocator/*",
+      "group": "RESOURCE",
+      "why": "allocator"
+    },
+    {
+      "glob": "megatron/core/optimizer/__init__.py",
+      "group": "STATE",
+      "why": "optimizer construction and param groups (kb/priors.md)"
+    }
+  ],
+  "capabilities": {
+    "swap": {
+      "evidence": [
+        [
+          {
+            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "contains": "StepGapCoordinator"
+          }
+        ]
+      ],
+      "why": "kernel host in the train-step gap, every rank through one gloo group"
+    },
+    "swap_recapture": {
+      "evidence": [],
+      "why": "livelab/README.md: jit_fuser functions and CUDA graph regions are not covered yet"
+    },
+    "jit_rebuild": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/jit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "contains": "StepGapCoordinator"
+          }
+        ]
+      ],
+      "why": "kernel/jit.py rebuilds @triton.jit kernels in place through StepGapCoordinator"
+    },
+    "constructor_reinit": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/reinit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "contains": "StepGapCoordinator"
+          }
+        ]
+      ],
+      "why": "kernel/reinit.py re-initializes pure fresh constructor fields on live instances (PR #156)"
+    },
+    "rebuild": {
+      "evidence": [],
+      "why": "livelab/README.md: imperative constructors and optimizer construction are not covered yet"
+    },
+    "respawn": {
+      "evidence": [
+        [
+          {
+            "path": "repos/megatron/livelab/fastrsi_megatron/zygote.py",
+            "contains": "--refresh"
+          }
+        ]
+      ],
+      "why": "ranks forked from the zygote re-import the edited package (code restart)"
+    }
+  }
+}

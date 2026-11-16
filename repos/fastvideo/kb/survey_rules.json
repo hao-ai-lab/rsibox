@@ -1,0 +1,172 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "fastvideo",
+  "rules_version": "fastvideo-1.1",
+  "upstream": {
+    "repo": "hao-ai-lab/FastVideo",
+    "commit": "376e445f0e8d192c2d9a5f28010a6b3a7012667e",
+    "version": "0.2.1 (the pin of kb/priors.md)"
+  },
+  "lab_path": "repos/fastvideo/livelab",
+  "source_roots": [
+    "fastvideo",
+    "fastvideo-kernel/python"
+  ],
+  "native_roots": [
+    "fastvideo-kernel"
+  ],
+  "exclude": [
+    "fastvideo/tests/*",
+    "*/tests/*",
+    "fastvideo-kernel/benchmarks/*"
+  ],
+  "decorators": {
+    "dsl_kernel": [],
+    "compiled": []
+  },
+  "install_overrides": {
+    "module_level": "rebuild"
+  },
+  "paths": [
+    {
+      "glob": "fastvideo/entrypoints/cli/*",
+      "group": "restart",
+      "why": "launch commands and flags"
+    },
+    {
+      "glob": "fastvideo/fastvideo_args.py",
+      "group": "restart",
+      "why": "launch flags"
+    },
+    {
+      "glob": "fastvideo/envs.py",
+      "group": "restart",
+      "why": "environment variables"
+    },
+    {
+      "glob": "fastvideo/distributed/*",
+      "group": "RANKS",
+      "why": "process groups and communicators"
+    },
+    {
+      "glob": "fastvideo/worker/*",
+      "group": "RANKS",
+      "why": "creates the worker process group"
+    },
+    {
+      "glob": "fastvideo/models/vaes/*",
+      "group": "GRAPH",
+      "why": "the VAE is compiled in the workload (livelab/README.md, Not covered)"
+    },
+    {
+      "glob": "fastvideo/models/loader/*",
+      "group": "RESOURCE",
+      "why": "weight loading"
+    }
+  ],
+  "capabilities": {
+    "swap": {
+      "evidence": [
+        [
+          {
+            "path": "repos/fastvideo/livelab/adapter/lab.py",
+            "contains": "Coordinator"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/agent.py"
+          }
+        ]
+      ],
+      "unreached": [
+        "fastvideo/entrypoints/*",
+        "fastvideo/api/*"
+      ],
+      "why": "one participant per worker rank; the driver process is not a participant"
+    },
+    "swap_recapture": {
+      "evidence": [],
+      "why": "livelab/README.md: torch.compile regions and CUDA graphs are not covered"
+    },
+    "jit_rebuild": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/jit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/lab.py",
+            "contains": "Coordinator"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/agent.py"
+          }
+        ]
+      ],
+      "unreached": [
+        "fastvideo/entrypoints/*",
+        "fastvideo/api/*"
+      ],
+      "why": "kernel/jit.py rebuilds @triton.jit kernels in place across worker ranks"
+    },
+    "constructor_reinit": {
+      "evidence": [
+        [
+          {
+            "path": "core/livelab/kernel/reinit.py",
+            "contains": "def plan"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/lab.py",
+            "contains": "Coordinator"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/agent.py"
+          }
+        ],
+        [
+          {
+            "path": "repos/fastvideo/livelab/services/rebuild.py"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/lab.py",
+            "contains": "def rebuild"
+          }
+        ]
+      ],
+      "unreached": [
+        "fastvideo/entrypoints/*",
+        "fastvideo/api/*"
+      ],
+      "why": "covered by kernel/reinit.py (PR #156) and by services/rebuild.py in-place worker rebuild"
+    },
+    "rebuild": {
+      "evidence": [
+        [
+          {
+            "path": "repos/fastvideo/livelab/services/rebuild.py"
+          },
+          {
+            "path": "repos/fastvideo/livelab/adapter/lab.py",
+            "contains": "def rebuild"
+          }
+        ]
+      ],
+      "unreached": [
+        "fastvideo/entrypoints/*",
+        "fastvideo/api/*"
+      ],
+      "why": "in-place rebuild in the warm workers: constructors, new fields, module constants; not new weights"
+    },
+    "respawn": {
+      "evidence": [
+        [
+          {
+            "path": "repos/fastvideo/livelab/services/zygote.py"
+          }
+        ]
+      ],
+      "why": "workers forked from a preloaded forkserver, refreshing edited modules"
+    }
+  }
+}
