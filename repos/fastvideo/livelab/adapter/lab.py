@@ -145,11 +145,13 @@ class FastVideoLab:
             self.golden = np.load(golden)
         self.lock = threading.RLock()
         self.costs = {}
-        self.holder = None
+        self.holder = self.holder_sock = None
         if holder:          # loaded DiT, text encoder and VAE outlive the workers (services/holder.py)
             from services import holder as H
-            sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}.sock")
+            sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}-{id(self):x}.sock")
             self.holder = H.start(sock)
+            self.holder_sock = sock
+            # the workers' loader hook reads it (forked from the zygote, which inherits the env)
             os.environ["FASTRSI_HOLDER_SOCK"] = sock
             zygote = True   # the loader hook is installed by the zygote's worker entry
         if zygote:          # every worker group, respawns included, forks from preloaded imports
@@ -238,12 +240,20 @@ class FastVideoLab:
             if self.holder is not None:
                 from services import holder as H
                 try:
-                    H.call(os.environ["FASTRSI_HOLDER_SOCK"], {"op": "stop"}, timeout=10)
+                    H.call(self.holder_sock, {"op": "stop"}, timeout=10)
                 except Exception:
                     pass
                 self.holder.join(10)
                 if self.holder.is_alive():
                     self.holder.kill()
+                self.holder = None
+                for path in (self.holder_sock, self.holder_sock + ".ready"):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+                if os.environ.get("FASTRSI_HOLDER_SOCK") == self.holder_sock:
+                    del os.environ["FASTRSI_HOLDER_SOCK"]
 
     # -- verbs ---------------------------------------------------------------------------
     def _base(self, m):
@@ -383,10 +393,17 @@ class FastVideoLab:
             ranks = {k: ranks[k] for k in sorted(ranks, key=lambda k: int(k[4:]))}
             oks = [r.get("ok") for r in ranks.values()]
             findings = [f for r in ranks.values() for f in r.get("findings", [])]
+            unknown = [rank for rank, reply in ranks.items()
+                       if not reply.get("ok") and not reply.get("clean")]
             if any(oks) and not all(oks):              # ranks now run different code
                 self.session.fault("participant_failed", "rebuild applied on some ranks only",
                                    "every rank rebuilt, or none")
                 outcome = "partial"
+            elif unknown:                              # a refusal that may have left changes
+                self.session.fault("participant_failed",
+                                   f"{unknown}: rebuild failed without saying nothing changed",
+                                   "every rank refused with nothing changed")
+                outcome = "failed"
             elif all(oks):
                 outcome = "rebuilt"
                 self.rebuilt = {} if revert else {**getattr(self, "rebuilt", {}), **files}
@@ -430,11 +447,12 @@ class FastVideoLab:
     # -- conformance harness -------------------------------------------------------------
     def fresh_check(self, patch, workload=None):
         """The workload in a new process (its own workers) started from base files plus patch:
-        a symlink farm of the engine package with the patched modules written in."""
-        pkg = importlib.import_module(self.package)
-        root = os.path.dirname(os.path.dirname(pkg.__file__))
+        a symlink farm of the engine package with the patched modules written in (a package's
+        `__init__.py`, or a new file). Never raises."""
         tmp = tempfile.mkdtemp(prefix="fvlab-fresh-")
         try:
+            pkg = importlib.import_module(self.package)
+            root = os.path.dirname(os.path.dirname(pkg.__file__))
             for d, dirs, files in os.walk(os.path.join(root, self.package)):
                 dirs[:] = [x for x in dirs if x != "__pycache__"]
                 rel = os.path.relpath(d, root)
@@ -442,9 +460,12 @@ class FastVideoLab:
                 for f in files:
                     os.symlink(os.path.join(d, f), os.path.join(tmp, rel, f))
             for m, text in ((patch or {}).get("files") or {}).items():
-                p = os.path.join(tmp, *m.split(".")) + ".py"
-                os.unlink(p)
-                with open(p, "w") as fh:
+                target = os.path.join(tmp, *m.split("."))
+                target = os.path.join(target, "__init__.py") if os.path.isdir(target) else target + ".py"
+                if os.path.lexists(target):
+                    os.unlink(target)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "w") as fh:
                     fh.write(text)
             spec = os.path.join(tmp, "fresh.json")
             with open(spec, "w") as fh:
@@ -453,6 +474,8 @@ class FastVideoLab:
             r = subprocess.run([sys.executable, "-m", self.fresh_module, spec], env=env,
                                capture_output=True, text=True, timeout=self.check_timeout + 600,
                                cwd=tmp)
+        except Exception as error:
+            return {"ok": False, "error": [f"fresh_check: {type(error).__name__}: {error}"], "output": None}
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         lines = [x for x in r.stdout.splitlines() if x.startswith("FRESH ")]

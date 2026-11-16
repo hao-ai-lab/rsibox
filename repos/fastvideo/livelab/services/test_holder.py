@@ -8,6 +8,7 @@ import importlib
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 try:
@@ -95,6 +96,20 @@ class HolderTest(unittest.TestCase):
         r2 = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
         self.assertEqual(r2["findings"][0]["check"], "holder_empty")
 
+    def test_a_stalled_client_does_not_block_the_next_one(self):
+        """Input: one client connects and never sends a request; then another asks for status.
+        Expect: the status reply arrives (after at most the holder's request timeout). Proves:
+        one wedged rank cannot freeze the holder for every other rank."""
+        from multiprocessing.connection import Client
+        stalled = Client(self.sock, family="AF_UNIX")
+        try:
+            t0 = time.perf_counter()
+            r = H.call(self.sock, {"op": "status"}, timeout=H.REQUEST_TIMEOUT_S + 10)
+            self.assertTrue(r["ok"], r)
+            self.assertLess(time.perf_counter() - t0, H.REQUEST_TIMEOUT_S + 10)
+        finally:
+            stalled.close()
+
     def test_loader_hook_deposits_then_serves_and_reloads_when_stale(self):
         """Input: `install_loader_hook` wraps `PipelineComponentLoader.load_module` (each raw
         disk load increments a counter and seeds new weights); load `transformer` twice, then
@@ -149,6 +164,43 @@ class HolderTest(unittest.TestCase):
         finally:
             for module_name in [name for name in sys.modules if name.split(".")[0] == "fastvideo"]:
                 del sys.modules[module_name]
+
+
+class StampFilesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="stamp-")
+        os.makedirs(os.path.join(self.dir, "spkg", "vaes"))
+        files = {"__init__.py": "", "vaes/__init__.py": "",
+                 "vaes/vae.py": "class VAE:\n    pass\n",
+                 "vaes/decoder_setup.py": "def apply(vae):\n    vae.decode_dtype = 'bf16'\n",
+                 "other.py": "X = 1\n"}
+        for n, t in files.items():
+            with open(os.path.join(self.dir, "spkg", n), "w") as f:
+                f.write(t)
+        sys.path.insert(0, self.dir)
+        importlib.invalidate_caches()
+
+    def tearDown(self):
+        for n in [n for n in sys.modules if n.split(".")[0] == "spkg"]:
+            del sys.modules[n]
+        sys.path.remove(self.dir)
+
+    def test_a_setup_helper_next_to_the_model_class_is_stamped(self):
+        """Input: a VAE whose class lives in spkg.vaes.vae, set up at load by a function of
+        spkg.vaes.decoder_setup (no class of it in the VAE: FastH3's NVFP4 decoder setup);
+        spkg.other is loaded too. Expect: stamp_files names both vaes modules and not
+        spkg.other; with spkg not among the engine's own packages, only the class module. Proves:
+        an edit of a load-time helper beside the model class makes the holder entry stale, and
+        third-party siblings are not stamped. Not: a helper in another package (not stamped)."""
+        import spkg.other  # noqa: F401
+        import spkg.vaes.decoder_setup as setup
+        import spkg.vaes.vae as vae_module
+        vae = vae_module.VAE()
+        setup.apply(vae)
+        files = H.stamp_files(vae, prefixes=("spkg.loader",), own=("spkg",))
+        self.assertEqual(sorted(files), ["spkg.vaes.decoder_setup", "spkg.vaes.vae"])
+        # a package not the engine's own (diffusers, transformers): only the class module
+        self.assertEqual(sorted(H.stamp_files(vae, prefixes=("spkg.loader",), own=())), ["spkg.vaes.vae"])
 
 
 if __name__ == "__main__":

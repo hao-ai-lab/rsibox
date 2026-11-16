@@ -165,8 +165,10 @@ def unbind(modules, n):
             pass
 
 
-def refresh(files, prefixes, modules=None, max_modules=200):
+def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
     """Re-import the edited modules from `files` ({module: new text}) and their importers.
+    `kept`: {module: text} an importer is re-imported from instead of its file (the text an
+    earlier rebuild made its base), so a refresh never reverts it to the disk text.
     Returns {"ok", "refreshed": [names], "old": {name: old module}, "findings", "seconds"}."""
     t0 = time.perf_counter()
     modules = sys.modules if modules is None else modules
@@ -180,7 +182,7 @@ def refresh(files, prefixes, modules=None, max_modules=200):
         except SyntaxError as e:
             return {"ok": False, "refreshed": [], "old": {}, "seconds": 0.0,
                     "findings": [finding("patch_invalid", f"{m}: {e}", "valid Python")]}
-    graph = import_graph(prefixes, modules, texts=files)
+    graph = import_graph(prefixes, modules, texts={**(kept or {}), **files})
     names = dependents(set(files), graph)
     if len(names) > max_modules:
         return {"ok": False, "refreshed": [], "old": {}, "seconds": 0.0, "findings": [finding(
@@ -188,12 +190,13 @@ def refresh(files, prefixes, modules=None, max_modules=200):
             f"at most {max_modules} (an edit in the package core: restart the worker)")]}
     order = [n for n in list(modules) if n in names]          # first-import order
     old = {n: modules[n] for n in order}
-    origins = {n: old[n].__file__ for n in files}
+    texts = {**{n: (kept or {})[n] for n in order if n in (kept or {})}, **files}
+    origins = {n: old[n].__file__ for n in texts}
     for n in order:
         modules.pop(n)
         unbind(modules, n)
     importlib.invalidate_caches()
-    finder = TextFinder(dict(files), origins)
+    finder = TextFinder(texts, origins)
     sys.meta_path.insert(0, finder)
     try:
         for n in order:
@@ -210,7 +213,7 @@ def refresh(files, prefixes, modules=None, max_modules=200):
                                      "the edited modules import")]}
     finally:
         sys.meta_path.remove(finder)
-    for n, text in files.items():                             # what inspect/Triton/Dynamo read
+    for n, text in texts.items():                             # what inspect/Triton/Dynamo read
         f = origins[n]
         linecache.cache[f] = (len(text), None, text.splitlines(True), f)
     return {"ok": True, "refreshed": order, "old": old, "findings": [],
@@ -350,9 +353,14 @@ def release_held(old_modules):
 
 
 # -- 2. class swap ----------------------------------------------------------------------------
-def swap_classes(objs, cmap):
+def _set_class(obj, cls):
+    obj.__class__ = cls
+
+
+def swap_classes(objs, cmap, undo=None):
     """Set the new class on every object in `objs` whose class was refreshed. Returns
-    {"swapped": n, "findings": [...]}."""
+    {"swapped": n, "findings": [...]}. `undo`: a list that gets one callable per swap, which
+    puts the old class back (run them in reverse to roll back)."""
     n, fs = 0, []
     seen = set()
     for o in objs:
@@ -363,7 +371,10 @@ def swap_classes(objs, cmap):
         if new is None:
             continue
         try:
+            old = type(o)
             o.__class__ = new
+            if undo is not None:
+                undo.append(lambda obj=o, old=old: _set_class(obj, old))
             n += 1
         except TypeError as e:
             fs.append(finding("class_swap_failed", f"{type(o).__qualname__}: {e}",
@@ -372,26 +383,30 @@ def swap_classes(objs, cmap):
 
 
 # -- 3. constructor edits ---------------------------------------------------------------------
-def _same(a, b):
+def _same(a, b, depth=0):
     """Is the constructed value unchanged between the old and the new constructor?"""
     if type(a) is not type(b):
         return False
+    if depth > 4:
+        return True
     if isinstance(a, _PRIMITIVE) or type(a).__module__ == "torch" and not _is_tensor(a):
         try:
             return bool(a == b)
         except Exception:
             return False
     if isinstance(a, (tuple, list)):
-        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+        return len(a) == len(b) and all(_same(left, right, depth + 1) for left, right in zip(a, b))
     if isinstance(a, dict):
-        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
-    try:
-        import enum
-        if isinstance(a, enum.Enum):
-            return a is b
-    except Exception:
-        pass
-    return True       # same type of object (a config, an impl): the live one stays
+        return a.keys() == b.keys() and all(_same(a[key], b[key], depth + 1) for key in a)
+    import enum
+    if isinstance(a, enum.Enum):
+        return a is b
+    if _is_tensor(a) or callable(a) or isinstance(a, (type, types.ModuleType)):
+        return True   # tensors cannot come from the meta build; code is swapped, not merged
+    if hasattr(a, "__dict__"):
+        # a plain object (a config): the same when its fields are
+        return _same(vars(a), vars(b), depth + 1)
+    return True       # no fields to compare (an impl without state): the live one stays
 
 
 def _is_tensor(v):
@@ -414,10 +429,12 @@ def _holds_tensors(v):
     return False
 
 
-def merge_fields(live, base, new, dry_run=False):
+def merge_fields(live, base, new, dry_run=False, undo=None):
     """Three-way merge of a constructor edit into the live module tree (see module doc).
     `live`, `base`, `new`: torch modules (base/new on meta). Returns {"ok", "set": [paths],
-    "swapped": n, "findings"}; on a finding nothing is changed. `dry_run`: plan only."""
+    "removed": [paths], "swapped": n, "findings"}; on a finding nothing is changed.
+    `dry_run`: plan only. `undo`: a list that gets one callable per change, which takes it back
+    (run them in reverse to roll back)."""
     plan, fs = [], []
     live_mods = dict(live.named_modules(remove_duplicate=False))
     base_mods = dict(base.named_modules(remove_duplicate=False))
@@ -449,19 +466,47 @@ def merge_fields(live, base, new, dry_run=False):
                     fs.append(finding("new_tensor_field", f"{path}.{k}", "no tensors built by the edit"))
                 else:
                     plan.append(("field", path, (k, v)))
+        for name in bd:
+            # a field the old constructor set and the new one does not: a fresh build lacks it
+            if name not in _SKIP and name not in nm.__dict__ and name in lm.__dict__:
+                plan.append(("delete", path, name))
     if fs or dry_run:
-        return {"ok": not fs, "planned": len(plan), "set": [], "swapped": 0, "findings": fs}
-    done, swapped = [], 0
+        return {"ok": not fs, "planned": len(plan), "set": [], "removed": [], "swapped": 0,
+                "findings": fs}
+    undo = [] if undo is None else undo
+    done, removed, swapped = [], [], 0
     for kind, path, v in plan:
         if kind == "module":
             parent, _, child = path.rpartition(".")
+            children = live.get_submodule(parent)._modules
+            had, prior = child in children, children.get(child)
             live.get_submodule(parent).add_module(child, v)
+            undo.append(lambda table=children, key=child, prior=prior, had=had:
+                        _put_back(table, key, prior, had))
             done.append(path)
         elif kind == "class":
+            old = type(live_mods[path])
             live_mods[path].__class__ = v
+            undo.append(lambda obj=live_mods[path], old=old: _set_class(obj, old))
             swapped += 1
         else:
-            k, val = v
-            object.__setattr__(live_mods[path], k, val)
-            done.append(f"{path}.{k}" if path else k)
-    return {"ok": True, "set": done, "swapped": swapped, "findings": []}
+            fields = live_mods[path].__dict__
+            name = v if kind == "delete" else v[0]
+            had, prior = name in fields, fields.get(name)
+            if kind == "delete":
+                del fields[name]
+                removed.append(f"{path}.{name}" if path else name)
+            else:
+                object.__setattr__(live_mods[path], name, v[1])
+                done.append(f"{path}.{name}" if path else name)
+            undo.append(lambda table=fields, key=name, prior=prior, had=had:
+                        _put_back(table, key, prior, had))
+    return {"ok": True, "set": done, "removed": removed, "swapped": swapped, "findings": []}
+
+
+def _put_back(table, key, prior, had):
+    """Undo of one change to a dict (a module's fields or children): the prior entry, or none."""
+    if had:
+        table[key] = prior
+    else:
+        table.pop(key, None)

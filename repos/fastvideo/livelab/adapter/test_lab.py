@@ -120,6 +120,49 @@ class LabTest(unittest.TestCase):
         self.assertIs(c["proven"], False)
         self.assertEqual(c["proven_by_txn"], {a["id"]: False, b["id"]: True})
 
+    def test_fresh_check_takes_a_package_init_and_a_new_module(self):
+        """Input: fresh_check with a patch of the package `adapter.toyfv` (its `__init__.py`)
+        and of a module that does not exist yet. Expect: an ok-dict with the base output, no
+        exception. Proves: the overlay writes a package's `__init__.py` and new files (an edit
+        that adds a module is checked, not crashed on)."""
+        r = self.lab.fresh_check({"files": {"adapter.toyfv": '"""toy."""\nX = 1\n',
+                                            "adapter.toyfv.new_helper": "Y = 2\n"}})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["output"], BASE)
+
+
+def _have_torch():
+    try:
+        import torch  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_have_torch(), "the holder process needs torch")
+class HolderLabTest(unittest.TestCase):
+    def test_close_takes_back_the_holder_socket_and_its_env(self):
+        """Input: a toy lab with `holder=True`, then close. Expect: while open,
+        FASTRSI_HOLDER_SOCK names this lab's socket; after close the variable is gone and the
+        socket and its ready file are removed. Proves: a lab leaves no holder socket or
+        environment behind for the next lab in the process."""
+        before = {k: os.environ.get(k) for k in ("FASTVIDEO_WORKER_MULTIPROC_METHOD",
+                                                 "PYTORCH_NVML_BASED_CUDA_CHECK", "FASTRSI_ZYGOTE_PRELOAD")}
+        lab = ToyFastVideoLab(ranks=1, holder=True)
+        try:
+            sock = lab.holder_sock
+            self.assertEqual(os.environ.get("FASTRSI_HOLDER_SOCK"), sock)
+        finally:
+            lab.close()
+            for k, v in before.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        self.assertNotIn("FASTRSI_HOLDER_SOCK", os.environ)
+        self.assertFalse(os.path.exists(sock))
+        self.assertFalse(os.path.exists(sock + ".ready"))
+
 
 if __name__ == "__main__":
     unittest.main()
