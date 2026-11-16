@@ -305,6 +305,245 @@ class LabServing(unittest.TestCase):
             self.assertEqual(out.get("ret"), "exit")
 
 
+def _gloo_rank(rank, port, sock, outq):
+    """One rank of a real 2-rank gloo job serving the lab on a CPU model (spawned)."""
+    from fastrsi_megatron import hook
+    from fastrsi_megatron.test_pieces import _MegatronLikeOptimizer, _Sched
+    os.environ.update(GLOO_SOCKET_IFNAME="lo0" if sys.platform == "darwin" else "lo",
+                      MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank),
+                      WORLD_SIZE="2", FASTRSI_SOCK=sock, FASTRSI_WARMUP="1",
+                      FASTRSI_CHECK_STEPS_MAX="2", FASTRSI_CHECK_STEPS="1",
+                      FASTRSI_ROUND_TIMEOUT_S="3", FASTRSI_HANG_S="5")
+    torch.distributed.init_process_group("gloo", rank=rank, world_size=2)
+    torch.manual_seed(0)
+    model = torch.nn.Sequential(torch.nn.Linear(8, 4))
+
+    def train_step(fwd, it, models, opt, sched, *rest, **kw):
+        models[0].zero_grad()
+        loss = models[0](next(it)).square().mean()
+        loss.backward()
+        opt.step()
+        sched.step(1)
+        return ({"lm loss": loss.detach()}, False, False, False, 0, 1.0)
+    try:
+        with mock.patch.object(hook.Lab, "_mb", return_value=1):
+            lab = hook.Lab(train_step, [None, iter([torch.randn(4, 8) for _ in range(8)]),
+                                        [model], _MegatronLikeOptimizer(model), _Sched()],
+                           {"iteration": 0})
+            outq.put((rank, f"served {lab.serve()}"))
+    except BaseException as error:
+        outq.put((rank, f"{type(error).__name__}: {error}"))
+
+
+@unittest.skipUnless(torch is not None and torch.distributed.is_available(), "needs torch")
+class RanksRound(unittest.TestCase):
+    """Real 2-rank gloo job, real lab, real socket (no numpy needed): a rank fault must reach the
+    right rank; a rank that dies in a round must fail it on rank 0 within the round timeout (3 s
+    here, FASTRSI_ROUND_TIMEOUT_S) after rank 0's own part, not block it for the group's 7-day
+    timeout; and a healthy rank that answers long before rank 0 must not fail the round."""
+
+    def setUp(self):
+        import multiprocessing
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        self.folder = tempfile.TemporaryDirectory()
+        self.sock = os.path.join(self.folder.name, "lab.sock")
+        context = multiprocessing.get_context("spawn")
+        self.outq = context.Queue()
+        self.procs = [context.Process(target=_gloo_rank, args=(rank, port, self.sock, self.outq),
+                                      daemon=True) for rank in range(2)]
+        for proc in self.procs:
+            proc.start()
+        self.assertTrue(_wait(lambda: os.path.exists(self.sock), 120), "lab never ready")
+        first = client.call(self.sock, {"verb": "status"}, 30)
+        self.assertEqual(first["state"], "base", first)
+
+    def tearDown(self):
+        for proc in self.procs:
+            if proc.is_alive():
+                proc.kill()
+            proc.join(10)
+        self.folder.cleanup()
+
+    def call(self, request, timeout=30):
+        return client.call(self.sock, request, timeout)
+
+    def assert_poisoned_by_a_failed_round(self):
+        status = self.call({"verb": "status"})
+        self.assertEqual(status["state"], "poisoned", status)
+        # first the failed round; the kernel's Session then adds `tampered` for the fingerprint
+        # that round could not give
+        self.assertEqual(status["poison"][0]["check"], "participant_failed", status["poison"])
+        refused = self.call({"verb": "install", "patch": {"files": {}}})
+        self.assertEqual(refused["codes"], ["session_poisoned"], refused)
+
+    def test_inject_targets_a_named_rank_and_a_lost_rank_fails_the_round(self):
+        """Input: inject fail_commit with target "rank1", then "rank9"; then inject lost on rank 1
+        and a status (a fingerprint round, in which rank 1 exits). Expect: "rank1" armed on rank 1
+        only; "rank9" refused; the status answers within 15 s, poisoned by participant_failed.
+        Before the fix both targets were skipped on every rank with ok True, and the status
+        never came (rank 0 hung in the gather)."""
+        named = self.call({"verb": "inject", "fault": "fail_commit", "target": "rank1"})
+        self.assertTrue(named["ok"], named)
+        self.assertEqual([bool(reply.get("skipped")) for reply in named["ranks"]], [True, False])
+        unknown = self.call({"verb": "inject", "fault": "fail_commit", "target": "rank9"})
+        self.assertFalse(unknown["ok"], unknown)
+        self.assertTrue(self.call({"verb": "inject", "fault": "lost", "target": 1})["ok"])
+        started = time.time()
+        status = self.call({"verb": "status"}, 15)
+        self.assertLess(time.time() - started, 15)
+        self.assertEqual(status["state"], "poisoned", status)
+        self.assert_poisoned_by_a_failed_round()
+        self.procs[1].join(10)
+        self.assertEqual(self.procs[1].exitcode, 18)
+
+    def test_rank_answering_long_before_rank_0_does_not_fail_the_round(self):
+        """Input: rank 0 sleeps 5 s in its check step (hang fault, FASTRSI_HANG_S=5), rank 1
+        answers at once; round timeout 3 s. Expect: the check is ok with the loss of both
+        steps, rank 1 still alive, status base. With replies on a 3 s gloo collective, rank 1
+        raised "Timed out waiting 3000ms" out of serve() and rank 0 then hung."""
+        self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 0})["ok"])
+        started = time.time()
+        check = self.call({"verb": "check", "steps": 1}, 60)
+        self.assertGreaterEqual(time.time() - started, 5)
+        self.assertTrue(check["ok"], check)
+        self.assertEqual(len(check["output"]["loss"]), 1)
+        self.assertTrue(self.procs[1].is_alive())
+        self.assertEqual(self.call({"verb": "status"})["state"], "base")
+
+    def test_reply_after_a_failed_round_does_not_kill_rank_0(self):
+        """Input: rank 1 sleeps 5 s in its check step (hang fault), round timeout 3 s, then its
+        reply arrives about 2 s after rank 0 gave up. Expect: the check answers ok False within
+        5 s, the lab is poisoned, and rank 0 survives the late reply: alive 4 s later and still
+        answering status (poisoned); rank 1 is alive or exited with LOST_ROUND_EXIT, never 0.
+        Before the fix rank 0 died with SIGABRT (gloo: "Cannot lock pointer to unbound buffer")
+        when the reply landed in a receive buffer it had dropped."""
+        self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 1})["ok"])
+        started = time.time()
+        check = self.call({"verb": "check", "steps": 1}, 30)
+        self.assertLess(time.time() - started, 5)
+        self.assertFalse(check["ok"], check)
+        time.sleep(4)                           # rank 1's reply lands meanwhile
+        self.assertTrue(self.procs[0].is_alive(), f"rank 0 exit code {self.procs[0].exitcode}")
+        self.assert_poisoned_by_a_failed_round()
+        # rank 1 either still blocks in its send or receive (gloo's macOS transport) or its
+        # send or receive failed and it left with LOST_ROUND_EXIT (Linux): never a clean 0
+        from fastrsi_megatron import hook
+        exit_code = self.procs[1].exitcode
+        self.assertIn(exit_code, (None, hook.LOST_ROUND_EXIT), f"rank 1 exit code {exit_code}")
+
+    def test_rank_dying_while_rank_0_is_busy_fails_the_round_within_the_bound(self):
+        """Input: rank 1 exits at its check step (crash fault) while rank 0 sleeps 5 s in its own
+        step; round timeout 3 s. Expect: the check answers ok False within 5 + 3 s and some
+        slack (15 s), then the lab is poisoned by participant_failed. On base (replies gathered
+        with gather_object on the 7-day group) the check got no answer in 30 s."""
+        self.assertTrue(self.call({"verb": "inject", "fault": "hang", "target": 0})["ok"])
+        self.assertTrue(self.call({"verb": "inject", "fault": "crash", "target": 1})["ok"])
+        started = time.time()
+        check = self.call({"verb": "check", "steps": 1}, 30)
+        self.assertLess(time.time() - started, 15)
+        self.assertFalse(check["ok"], check)
+        self.assertIn("reply of rank 1", check["error"])
+        self.assert_poisoned_by_a_failed_round()
+        self.procs[1].join(10)
+        self.assertEqual(self.procs[1].exitcode, 17)
+
+
+@unittest.skipUnless(torch is not None, "needs torch")
+class LostRound(unittest.TestCase):
+    def test_rank_that_loses_a_round_exits_non_zero_with_a_reason(self):
+        """A rank other than 0 whose receive or send of a round fails (rank 0 gave up, or is gone)
+        must not leave like a clean finish. Input (in a fresh interpreter): the CPU lab as rank 1
+        of 2, whose next receive raises the error gloo gives for a closed peer. Expect: exit code
+        hook.LOST_ROUND_EXIT and one stderr line naming the error. Before: the exception left
+        serve(), and the test worker on Linux exited 0."""
+        from fastrsi_megatron import hook
+        code = ("import sys\n"
+                "from fastrsi_megatron.test_robustness import LabFixture\n"
+                "class Gone:\n"
+                "    rank, world, group = 1, 2, None\n"
+                "    def bcast(self, msg=None):\n"
+                "        raise RuntimeError('Connection closed by peer')\n"
+                "lab = LabFixture(None).lab\n"
+                "lab.rank, lab.ranks = 1, Gone()\n"
+                "lab.serve()\n"
+                "sys.exit(0)\n")
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE)}
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             env=env, timeout=120)
+        self.assertEqual(out.returncode, hook.LOST_ROUND_EXIT, out.stderr[-2000:])
+        self.assertIn("rank 1: lost the lab's round with rank 0 (RuntimeError: Connection closed",
+                      out.stderr)
+
+
+@unittest.skipUnless(torch is not None, "needs torch")
+class InstallPatchModules(unittest.TestCase):
+    """install on modules outside hook.MODULES: a module the job never imported, or one without a
+    source file, is a refusal in the interface's shape, and an installed module is covered by
+    status and tamper checks."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        sys.path.insert(0, self.folder)
+        for name, factor in (("mg_target_a", 2), ("mg_target_b", 3)):
+            with open(os.path.join(self.folder, name + ".py"), "w") as source:
+                source.write(f"def scale(x):\n    return x * {factor}\n")
+        import mg_target_a
+        import mg_target_b
+        self.first, self.second = mg_target_a, mg_target_b
+
+    def tearDown(self):
+        sys.path.remove(self.folder)
+        for name in ("mg_target_a", "mg_target_b"):
+            sys.modules.pop(name, None)
+
+    def test_unloaded_or_sourceless_module_is_refused_as_patch_invalid(self):
+        """Input: a patch for `no.such.module`, then one for `sys` (loaded, no __file__).
+        Expect: each ok False, outcome refused, codes [patch_invalid], every key the interface
+        names, the module in the finding. Before the fix: KeyError, then AttributeError, out of
+        verb(), and a reply without outcome, codes, id, mechanisms or findings."""
+        lab = LabFixture(self).lab
+        for name in ("no.such.module", "sys"):
+            reply = lab.verb("install", {"verb": "install", "patch": {"files": {name: "x = 1\n"}}})
+            self.assertEqual((reply["ok"], reply["outcome"], reply["codes"], reply["id"],
+                              reply["mechanisms"]), (False, "refused", ["patch_invalid"], None, []))
+            self.assertIn(repr(name), reply["findings"][0]["observed"])
+
+    def test_inject_target_names_one_rank_or_is_refused(self):
+        """Input: targets None, 1, "1", "rank1", then "rank01", "rank2", "x", True, -1 on two
+        ranks. Expect: None, 1, 1, 1, then a plain ValueError naming the valid targets."""
+        from fastrsi_megatron import hook
+        for target, rank in ((None, None), (1, 1), ("1", 1), ("rank1", 1)):
+            self.assertEqual(hook.target_rank(target, 2), rank)
+        for target in ("rank01", "rank2", "x", True, -1):
+            with self.assertRaisesRegex(ValueError,
+                                        r"names no rank: give 0\.\.1 or rank0\.\.rank1"):
+                hook.target_rank(target, 2)
+
+    def test_installed_module_is_covered_by_tamper_checks_at_every_depth(self):
+        """Input: install an edit of mg_target_a, then one of mg_target_b (tracked one level
+        up the stack), uninstall both, then change mg_target_a.scale's code outside the journal.
+        Expect: status edited, then base with no poison after the uninstalls (no false tamper at
+        depth 0), then poisoned by tampered. Before the fix the tamper went unseen (status
+        stayed base): only hook.MODULES were fingerprinted."""
+        lab = LabFixture(self).lab
+        for name, factor in (("mg_target_a", 10), ("mg_target_b", 30)):
+            reply = lab.verb("install", {"verb": "install", "patch": {"files": {
+                name: f"def scale(x):\n    return x * {factor}\n"}}})
+            self.assertTrue(reply["ok"], reply)
+        self.assertEqual((self.first.scale(1), self.second.scale(1)), (10, 30))
+        self.assertEqual(lab.verb("status", {"verb": "status"})["state"], "edited")
+        for _ in range(2):
+            self.assertTrue(lab.verb("uninstall", {"verb": "uninstall"})["ok"])
+        status = lab.verb("status", {"verb": "status"})
+        self.assertEqual((status["state"], status["poison"]), ("base", []))
+        self.first.scale.__code__ = (lambda x: x * 999).__code__
+        status = lab.verb("status", {"verb": "status"})
+        self.assertEqual((status["state"], [found["check"] for found in status["poison"]]),
+                         ("poisoned", ["tampered"]))
+
+
 @unittest.skipUnless(torch is not None, "needs torch")
 class ResetFailsClosed(unittest.TestCase):
     """Row 25: reset restores every piece of state a step changes, proves it bit for bit, and
@@ -449,6 +688,50 @@ class ResetFailsClosed(unittest.TestCase):
         losses = [fx.train_step(None, it, [fx.model], fx.opt, fx.sched)[0]["lm loss"].item()
                   for _ in range(2)]
         self.assertEqual(losses, c["output"]["loss"])
+
+    def test_digest_hashes_the_same_bytes_without_numpy(self):
+        """numpy is optional for the lab, but tensor bytes were read through Tensor.numpy():
+        without numpy every digest failed. Input: a lab's state, digested with numpy and with
+        state.np set to None (the no-numpy path). Expect: both succeed and the tensor pieces are
+        equal (rng differs: without numpy there is no numpy RNG state). Fails without the fix only
+        where numpy is missing (torch-only), where the first digest is already the no-numpy one."""
+        from fastrsi_megatron import state as ST
+        fixture = LabFixture(self)
+        with_numpy = ST.digest([fixture.model], fixture.opt, fixture.sched)
+        with mock.patch.object(ST, "np", None):
+            without = ST.digest([fixture.model], fixture.opt, fixture.sched)
+        pieces = ("weights", "master_weights", "buffers", "optimizer", "scheduler")
+        self.assertEqual({piece: without[piece] for piece in pieces},
+                         {piece: with_numpy[piece] for piece in pieces})
+
+    def test_no_numpy_bytes_are_read_in_bounded_pieces(self):
+        """Without numpy the bytes are read with ctypes.string_at, whose size is a C int: one
+        read of 2**32 + 5 bytes would hash 5 bytes. Input: 10 bytes read 3 at a time (the read
+        size is a parameter, so no 4 GiB tensor is needed), and in one read. Expect: both equal
+        sha256 of the same 10 bytes."""
+        import hashlib
+        from fastrsi_megatron import state as ST
+        data = torch.arange(10, dtype=torch.uint8)
+        want = hashlib.sha256(bytes(data.tolist())).hexdigest()
+        with mock.patch.object(ST, "np", None):
+            for bytes_per_read in (3, ST.BYTES_PER_READ):
+                digest_state = hashlib.sha256()
+                ST._feed(digest_state, data, bytes_per_read)
+                self.assertEqual(digest_state.hexdigest(), want, bytes_per_read)
+
+    def test_failed_digest_gives_no_hash(self):
+        """A digest that fails on a rank must not return a hash: before the fix the verb hashed
+        the ranks' [None] into a valid-looking sha256, so two failed digests (before and after a
+        step) compared equal, the same as a bitwise round trip. Input: an optimizer state tensor
+        on the meta device (no data, its digest raises). Expect: ok False, digest None, the
+        rank's error."""
+        fixture = LabFixture(self)
+        master = fixture.opt.shard_fp32_from_float16_groups[0][0]
+        fixture.opt.optimizer.state[master]["exp_avg"] = torch.zeros(3, device="meta")
+        reply = fixture.lab.verb("digest", {"verb": "digest"})
+        self.assertFalse(reply["ok"], reply)
+        self.assertIsNone(reply["digest"])
+        self.assertIn("meta", reply["error"])
 
 
 if __name__ == "__main__":

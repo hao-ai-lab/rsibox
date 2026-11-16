@@ -23,6 +23,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import time
@@ -41,7 +42,7 @@ def _edit(src, old, new):
 def _descendants(root):
     """PIDs of every live descendant of root, parents before children (from /proc)."""
     kids = {}
-    for d in os.listdir("/proc"):
+    for d in os.listdir("/proc") if os.path.isdir("/proc") else []:
         if not d.isdigit():
             continue
         try:
@@ -58,8 +59,17 @@ def _descendants(root):
     return out
 
 
+def _free_port():
+    """A TCP port free right now (the kernel's pick), so a respawn or a second lab never reuses a
+    port still held by the job before it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
 class _Job:
-    """One launched torchrun job in its own process group."""
+    """One launched torchrun job in its own process group. Its folder (ready file, job.log) and
+    socket are removed by kill()."""
 
     def __init__(self, cmd, env, tag, timeout=900):
         self.dir = tempfile.mkdtemp(prefix=f"fastrsi-mg-{tag}-")
@@ -115,6 +125,11 @@ class _Job:
             time.sleep(0.2)
         if not self.log.closed:
             self.log.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+        try:
+            os.unlink(self.sock)
+        except OSError:
+            pass
 
     def tail(self, n=30):
         try:
@@ -154,7 +169,7 @@ class MegatronLab:
         return env
 
     def _spawn(self):
-        job = _Job(self.cmd, self._env(29600 + os.getpid() % 200), "lab")
+        job = _Job(self.cmd, self._env(_free_port()), "lab")
         if not job.wait_ready():
             tail = job.tail()
             job.kill()
@@ -273,14 +288,15 @@ class MegatronLab:
             for m, text in ((patch or {}).get("files") or {}).items():
                 with open(os.path.join(d, m + ".py"), "w") as f:
                     f.write(text)
-            env = {**self._env(29400 + os.getpid() % 200), "FASTRSI_FRESH": out,
+            env = {**self._env(_free_port()), "FASTRSI_FRESH": out,
                    "FASTRSI_OVERLAY": d}
             env.pop("FASTRSI_LAB")
             job = _Job(self.cmd, env, "fresh")
             rc = job.wait_exit()
+            tail = job.tail(8)
             job.kill()
             if not os.path.exists(out):
-                return {"ok": False, "error": f"fresh run rc={rc}: " + " | ".join(job.tail(8)),
+                return {"ok": False, "error": f"fresh run rc={rc}: " + " | ".join(tail),
                         "output": None}
             with open(out) as f:
                 r = json.load(f)

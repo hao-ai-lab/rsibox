@@ -39,8 +39,21 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   and step counters zero, scheduler at its start, RNG fixed, batches frozen. So a fresh process
   started with an edit reaches the same S (conformance c3). State keys the lab does not know
   how to reset are a finding at start (`optimizer_state_unknown`), never zeroed silently.
-- **Poison:** the lab cannot answer for a hung or dead rank; the client's timeout or a closed
-  connection poisons it, and `reset("respawn")` restarts the job (the harness does it).
+- **Poison:** a round is point-to-point messages between rank 0 and each rank; rank 0 waits for
+  each with a deadline, never in a collective. It waits at most `FASTRSI_ROUND_TIMEOUT_S` (default
+  900 s) for its sends, and at most that long after its own part for the replies. A rank that has
+  not answered by then (it exited, was killed, hangs, or is slower than rank 0 by more than the
+  timeout) or a send or receive that fails fails the round and poisons the session
+  (`participant_failed`); no round runs after it. Rank 0 keeps the failed round's buffers, so a
+  reply that comes late lands there harmlessly. What a rank other than 0 does next depends on the
+  transport: it stays blocked in its send or receive on the long-timeout group (seen with gloo's
+  macOS transport) until the harness respawns the job, or its send or receive fails (seen on
+  Linux) and it exits with code 19 and a one-line reason on stderr, never 0. A rank that answers
+  before a slower rank 0 just waits. Not bounded: rank 0's own part (a hang in rank 0's own train
+  step). The client's timeout or a closed connection may poison it on the client's side first, and
+  `reset("respawn")` restarts the job (the harness does it).
+- **Faults reach the rank they name:** `inject` takes a rank number or a participant name
+  (`rank1`); a target that names no rank is refused, never skipped on every rank.
 - **Clients cannot break the lab.** A request that is not a JSON object with a string `verb`
   gets an error reply. A client that times out or disconnects before its reply costs only that
   reply: rank 0 logs `client gone before the reply` and serves the next request; the other ranks
@@ -48,13 +61,18 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
 - **Reset fails closed.** S covers weights, fp32 masters, buffers, Adam state, param-group
   scalars, scheduler, grad scaler, and torch CPU/CUDA, TP-tracker, Python and numpy RNG. If the
   live state has a tensor S lacks, lacks one S has, or one changed shape or dtype, `reset` (and
-  `check`) answer ok false and write nothing. `digest` returns each rank's sha256 of every piece,
-  so a round trip is shown bit for bit. `resume` puts S back (`state: "keep"` skips that) and feeds
+  `check`) answer ok false and write nothing. `digest` returns each rank's sha256 of every piece
+  (numpy not needed), so a round trip is shown bit for bit; a digest that fails on a rank returns
+  no hash. `resume` puts S back (`state: "keep"` skips that) and feeds
   the job's next steps the frozen batches first: the job continues as if the lab had not run.
 - **Respawn kills by PID tree.** torchrun starts workers in sessions of their own: a kill of the
   launcher's process group leaves them holding GPU memory.
 
 ## What install covers here
+
+A patch may edit any module the job has imported; each one it names joins the session's code
+fingerprint (status, tamper checks). A module the job has not imported is refused
+(`patch_invalid`).
 
 The kernel's live code swap (function bodies, every rank) and repair cells. Not yet: edits of
 `jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (which require a model

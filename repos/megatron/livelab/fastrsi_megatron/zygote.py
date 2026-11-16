@@ -400,7 +400,7 @@ def bind(req, local_rank):
         return cpus
     if os.environ.get("FASTRSI_ZYGOTE_AUTO_NUMA") == "1":
         res = forksafe.bind_rank_numa_and_cpus(local_rank)
-        return res.get("cpus") if res.get("bound") else None
+        return res.get("bound_cpus") or None
     return None
 
 
@@ -462,6 +462,24 @@ def _supervised(zygote_pid):
         _guard(rank)
 
 
+def drop_modules(req, here=None):
+    """Code restart: forget the refreshed modules (and those under `here`, the script's folder)
+    so the next import loads them again, from the overlay where it has them. Each is also unbound
+    from its parent package when the parent stays loaded: `from pkg import sub` returns the
+    parent's attribute when it has one, which would be the old module. Returns the names."""
+    drop = [name for name, module in list(sys.modules.items()) if refreshed(req, name)
+            or (here and not name.startswith(KEEP_LOADED)
+                and os.path.abspath(getattr(module, "__file__", None) or "/").startswith(here))]
+    old = {name: sys.modules.pop(name, None) for name in drop}
+    for name, module in old.items():
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name)
+        if parent is not None and module is not None and getattr(parent, child, None) is module:
+            delattr(parent, child)
+    importlib.invalidate_caches()
+    return drop
+
+
 def _child(req, local_rank, lsock, conn, zygote_pid=None):
     """In the forked rank: never returns."""
     code = 1
@@ -484,6 +502,8 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
         fd = os.open(os.path.join(d, f"rank{local_rank}.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         os.dup2(fd, 1)
         os.dup2(fd, 2)
+        if fd > 2:
+            os.close(fd)
         if req.get("cwd"):
             os.chdir(req["cwd"])
         sys.argv = ["fastrsi_megatron.run"] + list(req["argv"])
@@ -491,12 +511,7 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
             # code restart: forget the refreshed packages (and the script's own modules next to it), so the
             # ranks import them again, from the overlay where it has them; torch, TE and the rest stay loaded
             here = os.path.dirname(os.path.abspath(req["argv"][0])) + os.sep if req.get("argv") else None
-            drop = [n for n, m in list(sys.modules.items()) if refreshed(req, n)
-                    or (here and not n.startswith(KEEP_LOADED)
-                        and os.path.abspath(getattr(m, "__file__", None) or "/").startswith(here))]
-            for n in drop:
-                sys.modules.pop(n, None)
-            importlib.invalidate_caches()
+            drop = drop_modules(req, here)
             from fastrsi_megatron import overlay
             overlay.install()
             print(json.dumps({"zygote_refresh": {"dropped": len(drop), "overlay": os.environ.get("FASTRSI_OVERLAY")}}),
@@ -521,17 +536,30 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
             os._exit(code)
 
 
-def _tree(pid):
-    """pid and its descendants, from /proc."""
-    kids = {}
-    for p in os.listdir("/proc"):
-        if p.isdigit():
+def stat_ppid(text):
+    """The parent pid in the text of /proc/<pid>/stat: `pid (comm) state ppid pgrp ...`. comm may
+    hold spaces and parentheses, so the fields are counted after its last ')'."""
+    return int(text.rsplit(")", 1)[1].split()[1])
+
+
+def _ppids(proc="/proc"):
+    """{pid: ppid} of every process listed under `proc`."""
+    out = {}
+    for entry in os.listdir(proc) if os.path.isdir(proc) else []:
+        if entry.isdigit():
             try:
-                with open(f"/proc/{p}/stat") as f:
-                    ppid = int(f.read().rsplit(")", 1)[1].split()[1])
-                kids.setdefault(ppid, []).append(int(p))
+                with open(os.path.join(proc, entry, "stat")) as stat_file:
+                    out[int(entry)] = stat_ppid(stat_file.read())
             except (OSError, IndexError, ValueError):
                 pass
+    return out
+
+
+def _tree(pid, proc="/proc"):
+    """pid and its descendants, from /proc."""
+    kids = {}
+    for child, parent in _ppids(proc).items():
+        kids.setdefault(parent, []).append(child)
     out, todo = [], [pid]
     while todo:
         q = todo.pop()
@@ -575,38 +603,35 @@ def _client_gone(conn):
         return True
 
 
-def _children():
-    me = os.getpid()
-    out = []
-    for p in os.listdir("/proc") if os.path.isdir("/proc") else []:
-        if p.isdigit():
-            try:
-                with open(f"/proc/{p}/stat") as f:
-                    if int(f.read().rsplit(")", 1)[1].split()[2]) == me:
-                        out.append(int(p))
-            except (OSError, IndexError, ValueError):
-                pass
-    return out
+def _children(parent_pid=None, proc="/proc"):
+    """Our direct children (ranks, guards, orphans the subreaper took in), by parent pid. Each
+    rank leads a session of its own, so its process group is never ours."""
+    parent_pid = os.getpid() if parent_pid is None else parent_pid
+    return [child for child, parent in _ppids(proc).items() if parent == parent_pid]
 
 
-def reap_all(timeout=10.0):
-    """Kill whatever is still our child (ranks, or orphans the subreaper took in) and reap
-    until none is left. Returns the pids reaped."""
+def reap_all(timeout=10.0, keep=()):
+    """Kill whatever is still our child (ranks, guards, or orphans the subreaper took in), except
+    the children in `keep` (the zygote's own, alive before the job), and reap until none is left.
+    Returns the pids reaped."""
     reaped, deadline, killed = [], time.time() + timeout, set()
     while time.time() < deadline:
-        for p in _children():
-            if p not in killed:
-                kill_tree(p, signal.SIGKILL)
-                killed.add(p)
+        left = [child for child in _children() if child not in keep]
+        for child in left:
+            if child not in killed:
+                kill_tree(child, signal.SIGKILL)
+                killed.add(child)
         try:
             pid, _ = os.waitpid(-1, os.WNOHANG)
         except ChildProcessError:
             return reaped
         if pid:
             reaped.append(pid)
+        elif not left:
+            return reaped
         else:
             time.sleep(0.02)
-    log("reap_timeout", left=_children())
+    log("reap_timeout", left=[child for child in _children() if child not in keep])
     return reaped
 
 
@@ -636,6 +661,7 @@ def handle(req, lsock, conn, src):
         _send(conn, {"event": "refused", "findings": block})
         return
     me, pids = os.getpid(), []
+    before = set(_children())                   # the zygote's own helpers: never reaped
     t0 = req.get("t0", time.time())
     try:
         for r in range(int(req["nproc"])):
@@ -678,7 +704,7 @@ def handle(req, lsock, conn, src):
         _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
                      "s": round(time.time() - t0, 3)})
     finally:
-        reaped = reap_all()                     # ranks left by an exception, guards, orphans
+        reaped = reap_all(keep=before)          # ranks left by an exception, guards, orphans
         if pids:
             log("job_reaped", ranks=pids, reaped=len(reaped))
 
@@ -695,7 +721,7 @@ def serve(sock, mods, script=None, forksafe=True):
         # Freeze preloaded modules (~900K objects) in the permanent GC generation so cyclic GC
         # traversals in forked ranks do not dirty shared Copy-on-Write pages.
         gc_info = freeze_gc_before_fork()
-        gc_frozen = gc_info.get("frozen_objects", gc.get_freeze_count())
+        gc_frozen = gc_info.get("frozen_count", gc.get_freeze_count())
     if os.path.exists(sock):
         os.unlink(sock)
     listen_sock = socket.socket(socket.AF_UNIX)
@@ -737,15 +763,15 @@ def serve(sock, mods, script=None, forksafe=True):
 
 def request(sock, req, out=sys.stdout):
     """Send one request; yield each reply event."""
-    c = socket.socket(socket.AF_UNIX)
-    c.connect(sock)
-    c.sendall((json.dumps(req) + "\n").encode())
-    for line in c.makefile():
-        ev = json.loads(line)
-        yield ev
-        if ev["event"] in ("exited", "refused", "error", "stopped", "pong"):
-            break
-    c.close()
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(sock)
+        connection.sendall((json.dumps(req) + "\n").encode())
+        with connection.makefile() as lines:
+            for line in lines:
+                event = json.loads(line)
+                yield event
+                if event["event"] in ("exited", "refused", "error", "stopped", "pong"):
+                    break
 
 
 def main(argv=None):

@@ -33,6 +33,7 @@ Copies live in pinned host memory: about 14 bytes per parameter per rank with bf
 fp32 master weights and two fp32 moments.
 """
 import copy
+import ctypes
 import hashlib
 import json
 import random
@@ -282,19 +283,34 @@ def _category(name):
 CHUNK = 256 << 20
 
 
+BYTES_PER_READ = 1 << 30                        # one ctypes read; its size is a C int
+
+
+def _feed(digest_state, host_bytes, bytes_per_read=BYTES_PER_READ):
+    """Feed the bytes of a contiguous uint8 CPU tensor to a hash, without numpy when it is not
+    installed (then in reads of at most `bytes_per_read` bytes)."""
+    if np is not None:
+        digest_state.update(memoryview(host_bytes.numpy()))
+        return
+    address, length = host_bytes.data_ptr(), host_bytes.numel()
+    for offset in range(0, length, bytes_per_read):
+        digest_state.update(ctypes.string_at(address + offset,
+                                             min(bytes_per_read, length - offset)))
+
+
 def _hash_tensor(h, t, buf):
     """Feed t's dtype, shape and exact bytes to h; GPU tensors through the pinned buffer."""
     h.update(f"{t.dtype}{tuple(t.shape)}".encode())
     u8 = t.detach().contiguous().reshape(-1).view(torch.uint8)
     if u8.device.type == "cpu":
-        h.update(memoryview(u8.numpy()))
+        _feed(h, u8)
         return buf
     if buf is None:
         buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
     for i in range(0, u8.numel(), CHUNK):
         m = min(CHUNK, u8.numel() - i)
         buf[:m].copy_(u8[i:i + m])
-        h.update(memoryview(buf[:m].numpy()))
+        _feed(h, buf[:m])
     return buf
 
 
