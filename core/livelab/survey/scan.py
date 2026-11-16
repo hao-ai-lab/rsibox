@@ -90,6 +90,24 @@ def _top(path, roots):
     return path.split("/")[0]
 
 
+def _subsystem(path, roots):
+    """Two-level subsystem directory under its source or native root."""
+    for root in sorted(roots, key=len, reverse=True):
+        prefix = root.rstrip("/")
+        if path == root:
+            return root
+        if path.startswith(prefix + "/"):
+            rest = path[len(prefix) + 1:]
+            dir_parts = rest.split("/")[:-1]
+            if len(dir_parts) >= 2:
+                return f"{prefix}/{dir_parts[0]}/{dir_parts[1]}"
+            if len(dir_parts) == 1:
+                return f"{prefix}/{dir_parts[0]}"
+            return prefix
+    parts = path.split("/")[:-1]
+    return "/".join(parts[:2]) if parts else path
+
+
 def _walk(source, roots, exclude):
     for root in roots:
         top = os.path.join(source, root)
@@ -109,6 +127,7 @@ def classify_tree(source, rules):
     native file. Depends on the upstream tree and the rules only, not on any lab."""
     records, unparsed, seen = [], [], set()
     roots = rules["source_roots"]
+    all_roots = list(dict.fromkeys(list(roots) + list(rules["native_roots"])))
     for rel in list(_walk(source, roots, rules["exclude"])) + list(
             _walk(source, rules["native_roots"], rules["exclude"])):
         if rel in seen:
@@ -121,7 +140,7 @@ def classify_tree(source, rules):
             text = f.read()
         code = [bool(l.strip()) and not l.lstrip().startswith("#") for l in text.splitlines()]
         nlines = sum(code)
-        base = {"path": rel, "module": _top(rel, roots)}
+        base = {"path": rel, "module": _top(rel, roots), "subsystem": _subsystem(rel, all_roots)}
         if ext != ".py":
             records.append({**base, "kind": "native", "qualname": "<native>", "line": 1,
                             "lines": nlines, "group": "NATIVE", "install": "restart",
@@ -138,7 +157,8 @@ def classify_tree(source, rules):
             span = sum(code[first - 1:fn.end_lineno])
             inside += span
             group, install, cap, rule = R.classify(
-                rules, rel, fn.name, [_dotted(d) for d in fn.decorator_list], _calls(fn))
+                rules, rel, fn.name, [_dotted(d) for d in fn.decorator_list], _calls(fn),
+                reinit_eligible=R.has_reinit_fields(fn))
             records.append({**base, "kind": "function", "qualname": qual, "line": first,
                             "lines": span, "group": group, "install": install,
                             "capability": cap, "rule": rule})
@@ -149,14 +169,27 @@ def classify_tree(source, rules):
     for r in records:
         r["basis"] = R.BASIS[r["rule"]]
         r["firm"] = r["basis"] == "syntax"
-        r["reach"] = r["capability"] is not None and R.reached(rules, r["capability"], r["path"])
+        cap = r["capability"]
+        if cap == "constructor_reinit":
+            r["reinit_reach"] = R.reached(rules, "constructor_reinit", r["path"])
+            r["rebuild_reach"] = R.reached(rules, "rebuild", r["path"])
+            r["reach"] = (r["reinit_reach"] if "constructor_reinit" in rules["capabilities"]
+                          else r["rebuild_reach"])
+        else:
+            r["reach"] = cap is not None and R.reached(rules, cap, r["path"])
     return records, unparsed
 
 
 def cover(records, caps):
     """Set `covered` on each record: the lab has the capability and reaches the file."""
     for r in records:
-        r["covered"] = bool(r["reach"] and caps.get(r["capability"], False))
+        if r["capability"] == "constructor_reinit":
+            r["covered"] = bool(
+                (r.get("reinit_reach") and caps.get("constructor_reinit", False))
+                or (r.get("rebuild_reach") and caps.get("rebuild", False))
+            )
+        else:
+            r["covered"] = bool(r["reach"] and caps.get(r["capability"], False))
     return records
 
 
@@ -164,18 +197,30 @@ def _cell():
     return {i: {"total": 0, "covered": 0} for i in R.INSTALLS}
 
 
+def _cap_cell():
+    return {cap_key: {"total": 0, "reached": 0, "covered": 0, "firm": 0}
+            for cap_key in R.CAPABILITIES}
+
+
 def _sum(rows, weight):
-    by_install, by_group, by_rule, firm, total = _cell(), {}, {}, 0, 0
+    by_install, by_cap, by_group, by_rule, firm, total = _cell(), _cap_cell(), {}, {}, 0, 0
     for r in rows:
         w = weight(r)
         total += w
         by_install[r["install"]]["total"] += w
         by_install[r["install"]]["covered"] += w if r["covered"] else 0
+        if r["capability"] is not None:
+            bucket = by_cap[r["capability"]]
+            bucket["total"] += w
+            bucket["reached"] += w if r["reach"] else 0
+            bucket["covered"] += w if r["covered"] else 0
+            bucket["firm"] += w if r["firm"] else 0
         by_group[r["group"]] = by_group.get(r["group"], 0) + w
         by_rule[r["rule"]] = by_rule.get(r["rule"], 0) + w
         firm += w if r["firm"] else 0
     live = sum(by_install[i]["covered"] for i in R.LIVE)
-    return {"total": total, "by_install": by_install, "by_group": dict(sorted(by_group.items())),
+    return {"total": total, "by_install": by_install, "by_cap": by_cap,
+            "by_group": dict(sorted(by_group.items())),
             "by_rule": dict(sorted(by_rule.items())), "firm": firm, "uncertain": total - firm,
             "live_covered": live, "respawn_covered": by_install["respawn"]["covered"],
             "restart": by_install["restart"]["total"],
@@ -183,8 +228,23 @@ def _sum(rows, weight):
                            - by_install["restart"]["total"]}
 
 
+def _bucket_tree(records, field):
+    grouped = {}
+    for item in records:
+        grouped.setdefault(item[field], []).append(item)
+    out = {}
+    for name in sorted(grouped):
+        mine = grouped[name]
+        out[name] = {
+            "functions": _sum([r for r in mine if r["kind"] == "function"], lambda r: 1),
+            "lines": _sum([r for r in mine if r["kind"] != "native"], lambda r: r["lines"]),
+            "native": {"files": sum(r["kind"] == "native" for r in mine),
+                       "lines": sum(r["lines"] for r in mine if r["kind"] == "native")}}
+    return out
+
+
 def summarize(records):
-    """Totals and per-module counts, in functions and in Python lines; native files apart."""
+    """Totals, per-module counts, and two-level subsystem counts, in functions and in Python lines."""
     py = [r for r in records if r["kind"] != "native"]
     fns = [r for r in py if r["kind"] == "function"]
     native = [r for r in records if r["kind"] == "native"]
@@ -194,18 +254,11 @@ def summarize(records):
         c = by_ext.setdefault(e, {"files": 0, "lines": 0})
         c["files"] += 1
         c["lines"] += r["lines"]
-    modules = {}
-    for name in sorted({r["module"] for r in records}):
-        mine = [r for r in records if r["module"] == name]
-        modules[name] = {
-            "functions": _sum([r for r in mine if r["kind"] == "function"], lambda r: 1),
-            "lines": _sum([r for r in mine if r["kind"] != "native"], lambda r: r["lines"]),
-            "native": {"files": sum(r["kind"] == "native" for r in mine),
-                       "lines": sum(r["lines"] for r in mine if r["kind"] == "native")}}
     return {"functions": _sum(fns, lambda r: 1), "lines": _sum(py, lambda r: r["lines"]),
             "native": {"files": len(native), "lines": sum(r["lines"] for r in native),
                        "install": "restart", "by_ext": dict(sorted(by_ext.items()))},
-            "modules": modules}
+            "modules": _bucket_tree(records, "module"),
+            "by_subsystem": _bucket_tree(records, "subsystem")}
 
 
 def git_head(path):

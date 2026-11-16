@@ -155,9 +155,84 @@ class HistoryTest(unittest.TestCase):
             with open(fns) as f:
                 rows = [json.loads(line) for line in f]
         self.assertEqual((d["schema"], d["ruleset_version"], d["engine_rules_version"], d["scan_date"]),
-                         ("fastrsi-survey/1", "1", "toy-1", "2026-01-01"))
+                         ("fastrsi-survey/1", "1.1", "toy-1", "2026-01-01"))
         self.assertEqual(sum(r["kind"] == "function" for r in rows), d["functions"]["total"])
         self.assertNotIn(tmp, json.dumps(d))
+
+
+class ReinitAndSubsystemTest(unittest.TestCase):
+    def test_pure_field_constructor_is_reinit_while_imperative_constructor_is_rebuild(self):
+        """Pain point: PR #156 re-initializes constructors whose edit only touches pure fresh
+        fields (`self.cache = {}`), while imperative constructors (`self.weight = [1.0] * dim`),
+        `__new__`, and constructors that read the field again still block without full rebuild."""
+        with tempfile.TemporaryDirectory() as tmp:
+            upstream = os.path.join(tmp, "upstream")
+            lab = os.path.join(tmp, "lab")
+            shutil.copytree(SOURCE, upstream)
+            shutil.copytree(os.path.join(HERE, "lab"), lab)
+            with open(os.path.join(upstream, "toyengine", "ops.py"), "a") as handle:
+                handle.write(
+                    "\n\nclass Scheduler:\n"
+                    "    def __init__(self, limit):\n"
+                    "        self.limit = limit\n"
+                    "        self.pending = set()\n"
+                    "\n\nclass Imperative:\n"
+                    "    def __init__(self, items):\n"
+                    "        self.seen = set()\n"
+                    "        self.count = len(self.seen)\n"
+                )
+            rules = R.load(os.path.join(HERE, "rules.json"))
+            rules["capabilities"]["constructor_reinit"] = {
+                "evidence": [[{"path": "lab/adapter/reinit.py"}]],
+                "unreached": ["toyengine/tools.py"],
+            }
+            out_before, by_before = S.report(rules, upstream, S.Files(tmp), None, "2026-01-01")
+            index_before = {(r["path"].split("/", 1)[1], r["qualname"]): r for r in by_before}
+            sched = index_before["ops.py", "Scheduler.__init__"]
+            imp = index_before["ops.py", "Imperative.__init__"]
+            norm = index_before["model/layers.py", "Norm.__init__"]
+            self.assertEqual((sched["group"], sched["install"], sched["capability"],
+                              sched["rule"], sched["firm"], sched["covered"]),
+                             ("STATE", "rebuild", "constructor_reinit",
+                              "constructor_reinit", True, False))
+            self.assertEqual((imp["rule"], imp["capability"], imp["covered"]),
+                             ("constructor", "rebuild", False))
+            self.assertEqual((norm["rule"], norm["capability"], norm["covered"]),
+                             ("constructor", "rebuild", False))
+
+            with open(os.path.join(lab, "adapter", "reinit.py"), "w") as handle:
+                handle.write("reinit\n")
+            out_after, by_after = S.report(rules, upstream, S.Files(tmp), None, "2026-01-01")
+            index_after = {(r["path"].split("/", 1)[1], r["qualname"]): r for r in by_after}
+            self.assertTrue(out_after["lab"]["capabilities"]["constructor_reinit"])
+            self.assertTrue(index_after["ops.py", "Scheduler.__init__"]["covered"])
+            self.assertFalse(index_after["ops.py", "Imperative.__init__"]["covered"])
+            self.assertFalse(index_after["model/layers.py", "Norm.__init__"]["covered"])
+            self.assertEqual(out_after["functions"]["by_install"]["rebuild"],
+                             {"total": 5, "covered": 1})
+
+    def test_two_level_subsystems_and_capability_breakdown_sum_to_totals(self):
+        """Pain point: top-level modules (`vllm/v1`, `sglang/srt`) hide which subsystem holds
+        uncovered functions, and capability simulators drift if capability buckets do not sum
+        back to exact whole-tree totals."""
+        out, _ = survey()
+        subsystems = out["by_subsystem"]
+        self.assertIn("toyengine/model", subsystems)
+        self.assertIn("toyengine/csrc", subsystems)
+        for unit in ("functions", "lines"):
+            whole = out[unit]
+            self.assertEqual(
+                sum(sub[unit]["total"] for sub in subsystems.values()),
+                whole["total"],
+            )
+            self.assertEqual(
+                sum(bucket["total"] for bucket in whole["by_cap"].values()) + whole["restart"],
+                whole["total"],
+            )
+        self.assertEqual(
+            sum(sub["native"]["lines"] for sub in subsystems.values()),
+            out["native"]["lines"],
+        )
 
 
 if __name__ == "__main__":

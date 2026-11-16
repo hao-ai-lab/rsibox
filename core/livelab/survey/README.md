@@ -19,8 +19,9 @@ It answers "how much of the tree has a live install path in this lab". It does n
   the Python shares.
 - **Per record:** `group`, `install` (the install class), `capability` (the lab path that
   would install it), `covered`, `rule`, `basis` and `firm`.
-- **Output:** one JSON report per engine (`schema: fastrsi-survey/1`): totals and
-  per-top-level-module counts, in functions and in lines, per install class, with the
+- **Output:** one JSON report per engine (`schema: fastrsi-survey/1`): totals,
+  per-top-level-module counts (`modules`), and two-level subsystem counts (`by_subsystem`),
+  in functions and in lines, per install class and per capability (`by_cap`), with the
   upstream commit scanned, the scan date, the rule set's version and the rules file's digest.
   `--functions` adds one JSON line per record.
 - **Owns:** the framework rules below and the report format. Not the engine's declarations:
@@ -44,20 +45,21 @@ From `core/agents/livelab_overview.md` and `INTERFACE.md` ("How install refreshe
 `swap`, `swap_recapture` and `rebuild` are **live** (same process). `respawn` is a warm
 restart. `restart` is never "covered".
 
-### Rules (rule set version 1), first match wins
+### Rules (rule set version 1.1), first match wins
 
 | # | Rule | Reads | Group | Basis | Source |
 |---|---|---|---|---|---|
 | 1 | `path` (restart) | the engine's rules file | restart | declared | `INTERFACE.md`: startup, flags, env need a restart |
 | 2 | `jit_kernel` | `@triton.jit`, `autotune`, `heuristics` | NATIVE | syntax | `kernel/jit.py`: the swap changes Python the launches never run |
 | 3 | `dsl_kernel` | decorators the engine names | NATIVE | syntax | kernel finding `jit_target` |
-| 4 | `constructor` | `__init__`, `__new__`, `__post_init__` | STATE | syntax | kernel finding `constructor_edit` |
-| 5 | `compiled` | `@torch.compile`, `@torch.jit.script`, engine names | GRAPH | syntax | overview: code in a compiled region |
-| 6 | `path` (other) | the engine's rules file | as declared | declared | the engine's adapter and `kb/` |
-| 7 | `launch_flags` | a function `main`, or a body that calls `add_argument` | restart | name | `INTERFACE.md` |
-| 8 | `name_resource` | names like `allocate_*`, `load_weights` | RESOURCE | name | overview: load-time allocation |
-| 9 | `name_state` | names like `build_*`, `setup_*`, `create_*` | STATE | name | overview: objects built once at start |
-| 10 | `default_op` | nothing matched | OP | default | overview: body of a per-call function |
+| 4 | `constructor_reinit` | `__init__`, `__post_init__` with pure fresh `self.F = E` | STATE | syntax | `kernel/reinit.py`: fresh field values re-initialized in place |
+| 5 | `constructor` | other `__init__`, `__new__`, `__post_init__` | STATE | syntax | kernel finding `constructor_edit` |
+| 6 | `compiled` | `@torch.compile`, `@torch.jit.script`, engine names | GRAPH | syntax | overview: code in a compiled region |
+| 7 | `path` (other) | the engine's rules file | as declared | declared | the engine's adapter and `kb/` |
+| 8 | `launch_flags` | a function `main`, or a body that calls `add_argument` | restart | name | `INTERFACE.md` |
+| 9 | `name_resource` | names like `allocate_*`, `load_weights` | RESOURCE | name | overview: load-time allocation |
+| 10 | `name_state` | names like `build_*`, `setup_*`, `create_*` | STATE | name | overview: objects built once at start |
+| 11 | `default_op` | nothing matched | OP | default | overview: body of a per-call function |
 | - | `module_level` | code outside every function | STATE, install `respawn` | syntax | kernel finding `outside_changes` |
 | - | `native_file` | the file's extension | NATIVE | syntax | overview |
 
@@ -157,3 +159,5 @@ python3 -m unittest discover -s survey -t . -v     # CPU, under 1 s; the history
 | `test_a_file_the_lab_does_not_reach_is_not_covered` | code of a process with no participant counted as covered |
 | `test_coverage_steps_at_the_commit_that_adds_the_lab_file` | a history that moves for another reason than the lab's files |
 | `test_the_command_line_writes_the_report_and_one_line_per_record` | a report that carries a local path |
+| `test_pure_field_constructor_is_reinit_while_imperative_constructor_is_rebuild` | pure-field constructors blocked as imperative, or imperative ones marked reinit-eligible |
+| `test_two_level_subsystems_and_capability_breakdown_sum_to_totals` | subsystem or capability buckets that drop or double-count functions or lines |
