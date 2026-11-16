@@ -13,6 +13,7 @@ Standard library only. Needs `gh` (authenticated) to read and update the PR.
   review.py --pr 3 --engine service --url <review-service-url> --apply
 """
 import argparse, json, os, re, subprocess, sys, time, urllib.request
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -22,6 +23,12 @@ ATTRIBUTION_RE = re.compile(
     r"|generated with \[?(claude|codex|gemini|antigravity)", re.I)
 LOOP_FIELDS = ["Engine", "Upstream PRs", "Function groups", "Rule added",
                "Overheads measured", "Receipts", "Not verified"]
+# Mandatory in pr-rules.yml when repos/<engine>/ or core/livelab/ changes; kept when present.
+GPU_FIELDS = ["Ideal full GPU test", "Actual tests run", "Why unrun GPU paths were skipped"]
+# A number with the sign or comparator written right before it: +5.1 and -5.1, < 0.05 and
+# > 0.05 are different facts. A hyphen after a word character (2026-11-08, 0.13-1.0, x-2)
+# or before a space (a "- 5 GPUs" bullet) is not a sign.
+NUMBER_RE = re.compile(r"(?<![\w#])((?:[<>≤≥]=?[ \t]?|[+\-−±~])?)(\d[\d,]*(?:\.\d+)?)")
 
 
 def sh(*args, stdin=None):
@@ -33,7 +40,8 @@ def strip_comments(text):
 
 
 def facts(text):
-    """What a rewrite must keep: numbers, references, hashes and code spans.
+    """What a rewrite must keep: numbers (with their sign or comparator, and how often each
+    appears), references, hashes and code spans.
 
     Backticks are formatting, not facts: numbers and references are read from the whole text,
     and a code span only counts as new or lost if its text is new or lost (see check)."""
@@ -41,8 +49,8 @@ def facts(text):
     code = {c[1:-1] for c in re.findall(r"`[^`\n]+`", text)}
     flat = text.replace("`", "")
     refs = re.findall(r"[\w.-]+/[\w.-]+#\d+|#\d+|\b[0-9a-f]{7,40}\b", flat)
-    nums = re.findall(r"(?<![\w#])\d[\d,]*(?:\.\d+)?", flat)
-    return {"code": code, "refs": set(refs), "numbers": set(nums),
+    nums = [sign.strip() + num for sign, num in NUMBER_RE.findall(flat)]
+    return {"code": code, "refs": Counter(refs), "numbers": Counter(nums),
             "plain": re.sub(r"\s+", " ", flat)}
 
 
@@ -73,6 +81,9 @@ def check(old_title, old_body, new_title, new_body):
         for field in LOOP_FIELDS:
             if f"{field}:" not in new_body:
                 problems.append(f"Loop record field missing: {field}")
+    for field in GPU_FIELDS:
+        if f"{field}:" in old_body and f"{field}:" not in new_body:
+            problems.append(f"Loop record field missing: {field}")
     if ATTRIBUTION_RE.search(new_title + "\n" + new_body):
         problems.append("adds AI attribution")
     return problems

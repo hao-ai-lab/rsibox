@@ -3,7 +3,7 @@
 
 Each case names the pain point it guards. Run: python3 .github/review/test_code_review.py -v
 """
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, socket, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -132,6 +132,45 @@ class Service(unittest.TestCase):
         self.assertIn("engine", server.validate(dict(ok, kind="pr-description")))  # codex: code review only
         self.assertIn("model", server.validate(dict(ok, model="gpt-x")))
         self.assertIn("prompt", server.validate(dict(ok, prompt="y" * (server.MAX_PROMPT + 1))))
+
+    def test_prohibited_model_is_not_allowed(self):
+        """AGENTS.md and docs/process/developer_workflow.md prohibit Gemini 3.8."""
+        req = {"kind": "pr-description", "engine": "agy", "model": "gemini-3.8-flash-high", "prompt": "x"}
+        self.assertIn("model", server.validate(req))
+        allowed = [model for models in server.MODELS.values() for model in models]
+        self.assertFalse([model for model in allowed if "3.8" in model], allowed)
+
+    def test_short_or_empty_token_file_refuses_to_start(self):
+        """Pain point: an empty token file made `Authorization: Bearer ` (empty token) valid."""
+        with tempfile.TemporaryDirectory() as folder:
+            token_file = Path(folder, "token")
+            for text in ("", "\n", "short\n"):
+                token_file.write_text(text)
+                with self.assertRaises(SystemExit):
+                    server.load_token(str(token_file))
+            token_file.write_text("t" * 32 + "\n")
+            self.assertEqual(server.load_token(str(token_file)), "t" * 32)
+
+    def test_bad_content_length_is_a_clean_4xx(self):
+        """Pain point: Content-Length -1 made the handler read the body to EOF (no size cap),
+        and Content-Length abc killed the handler thread with ValueError (no response)."""
+        srv = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        srv.token, srv.bins, srv.secret_files = "t" * 32, {}, []
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        try:
+            for length, code in (("-1", 400), ("abc", 400), ("", 400),
+                                 (str(2 * server.MAX_PROMPT + 1), 413)):
+                with socket.create_connection(srv.server_address, timeout=5) as conn:
+                    conn.sendall((f"POST /v1/review HTTP/1.1\r\nHost: x\r\n"
+                                  f"Authorization: Bearer {'t' * 32}\r\n"
+                                  f"Content-Length: {length}\r\n\r\n{{}}").encode())
+                    # A server reading to EOF would block here until the 5 s socket timeout.
+                    status = conn.recv(200).decode().split("\r\n")[0]
+                self.assertIn(f" {code} ", status, length)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_reply_quoting_a_secret_file_is_withheld(self):
         """Pain point: an injected 'print ~/.config/.../token' must never reach a public review."""
