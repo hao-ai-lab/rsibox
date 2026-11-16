@@ -23,8 +23,8 @@
      "warm_plain_restart_s": "43-231"
     },
     "after_fixes": {
-     "live_in_place": 7,
-     "note": "#62872 moved from in place to a forked restart once constructor edits always block; 'the 7 other in-place PRs were unchanged'."
+     "live_in_place": 8,
+     "note": "With kernel/reinit.py (PR #156), #62872 (Scheduler.__init__ pure-field addition set() -> {}) installs in place at live-T0 (1.410 s with CUDA graphs [30.4x vs 42.93 s forked restart] and 1.806 s eager [9.5x vs 17.17 s forked restart], undo 1.58 ms [23,440x], on 1x B200 Qwen3-8B TP1, N=3); 'the 7 other in-place PRs were unchanged'."
     },
     "forked_restart_s": {
      "Qwen3-8B": "9.2-68.8",
@@ -45,19 +45,19 @@
       "STATE"
      ],
      "diff": {
-      "files": null,
-      "added": null,
-      "removed": null,
-      "note": "not recorded"
+      "files": 2,
+      "added": 17,
+      "removed": 8,
+      "note": "vllm/v1/core/sched/scheduler.py + tests"
      },
-     "installed_live": false,
-     "install_time": "first pass: 0.38 s in place; after the constructor rule (PR #53): forked restart 16.6 s eager / 51.2 s graph",
+     "installed_live": true,
+     "install_time": "1.410 s graph (30.4x vs 42.93 s forked restart) / 1.806 s eager (9.5x vs 17.17 s forked restart) via constructor_reinit (live-T0, PR #156); undo 1.58 ms (23,440x); first pass: 0.38 s in place; PR #53 forked restart: 16.6 s eager / 51.2 s graph",
      "check_time": null,
      "restart_time_replaced": "warm plain restart 43-231 s (range over the replay)",
      "measured_effect": "none recorded",
-     "source": "docs/lessons.md:75-76; repos/vllm/kb/lessons.md:12,27",
-     "note": "First pass installed live in 0.38 s. Constructor edits now always route to a forked restart, so today it does not install live. Undo returns to base after PR #55.",
-     "route": "forked restart (constructor_edit)"
+     "source": "docs/lessons.md:75-76; repos/vllm/kb/lessons.md:12,27; PR #156",
+     "note": "Scheduler.__init__ pure-field addition (set() -> {}) installs in place at live-T0 via constructor_reinit (kernel/reinit.py, PR #156): 1.410 s with CUDA graphs (30.4x vs 42.93 s forked restart) and 1.806 s eager (9.5x vs 17.17 s forked restart), undo 1.58 ms (23,440x) on 1x B200 Qwen3-8B TP1, N=3.",
+     "route": "in place (constructor_reinit, PR #156)"
     },
     {
      "upstream_repo": "vllm-project/vllm",
