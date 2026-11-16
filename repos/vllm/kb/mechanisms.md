@@ -1,14 +1,14 @@
 # vLLM: which edits install live
 
-Source: our survey of vLLM performance PRs. 959 performance PRs found; 80 inspected by hand.
+Source: our survey of vLLM performance PRs (`2026-07-24` to `2026-10-24`: 487 performance PRs found, 80 sampled and inspected by hand; 63/80 = 79% install in place in this repo, plus 8/80 = 10% C++/CUDA native edits demonstrated only in a pre-repo prototype).
 
 | Mechanism | Share of 80 | Group | Example |
 |---|---:|---|---|
 | Swap Python methods or objects in place | 20% | OP, STATE | Scheduler hot patch + drain request/prefix queues (#57951): 66.3 s → 0.6 s |
 | Swap code inside compiled graphs, recapture graphs, re-JIT kernels | 51% | GRAPH | GDN spec outputs into caller buffer (#57140): 70.6 s → 2.4 s |
-| Swap code and rebuild pre-allocated buffers or runners | 9% | STATE, RESOURCE | |
-| Compile C++/CUDA into a versioned shared library, recapture | 9% | NATIVE | fused add RMSNorm (#49750): installed in 28 s by a pre-repo prototype (paper draft); this repo has no NATIVE route yet |
-| Needs a restart (startup logic, environment variables) | 11% | | |
+| Swap code and rebuild pre-allocated buffers or runners | 8% | STATE, RESOURCE | |
+| Compile C++/CUDA into a versioned shared library, recapture | 10% | NATIVE | fused add RMSNorm (#49750): installed in 28 s by a pre-repo prototype; this repo has no NATIVE route yet |
+| Needs a restart (Rust rebuild, weights, startup logic, launch flags) | 11% | | |
 
 ## Reset rules (known so far)
 

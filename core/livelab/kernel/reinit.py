@@ -198,6 +198,20 @@ def _subclasses(cls):
     return out
 
 
+def _calls_super_top(stmts, meth):
+    """True when a top-level statement of `stmts` calls `super(...).<meth>(...)`."""
+    for stmt in stmts:
+        call = stmt.value if isinstance(stmt, ast.Expr) else None
+        if (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == meth
+                and isinstance(call.func.value, ast.Call)
+                and isinstance(call.func.value.func, ast.Name)
+                and call.func.value.func.id == "super"):
+            return True
+    return False
+
+
 def _subclass_why(c, meth, names):
     """None when the subclass's own constructor cannot touch the fields; else why."""
     fn = vars(c)[meth]
@@ -208,6 +222,8 @@ def _subclass_why(c, meth, names):
     node = tree.body[0]
     if not isinstance(node, _DEF):
         return f"{c.__qualname__}.{meth} is not a plain function"
+    if not _calls_super_top(node.body, meth):
+        return f"{c.__qualname__}.{meth} does not unconditionally call super().{meth}"
     args = node.args.posonlyargs + node.args.args
     me = args[0].arg if args else None
     if {"setattr", "__dict__", "vars"} & ({n.id for n in ast.walk(node)

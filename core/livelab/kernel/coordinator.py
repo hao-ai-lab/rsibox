@@ -638,19 +638,19 @@ class LocalParticipant(Participant):
         constructor_reinit when every live instance can take the new fresh values; else it
         stays a blocking constructor_edit that says why."""
         plan = f["reinit"]
-        mod = sys.modules.get(self._actual(m))
-        cls = mod
+        module = sys.modules.get(self._actual(m))
+        cls = module
         for part in plan["cls"].split("."):
             cls = getattr(cls, part, None)
         if not isinstance(cls, type):
             return {**f, "observed": f["observed"] + f" (not re-initializable in place: "
                     f"{plan['cls']} is not a live class)"}
-        r = RI.resolve(cls, plan["meth"], plan["fields"], vars(mod))
+        r = RI.resolve(cls, plan["meth"], plan["fields"], vars(module))
         if not r["ok"]:
             return {**f, "observed": f["observed"] + f" (not re-initializable in place: "
                     f"{r['why']})"}
         reinits.append({"key": f["subject"], "cls": cls, "meth": plan["meth"],
-                        "fields": plan["fields"], "glb": vars(mod), "found": None,
+                        "fields": plan["fields"], "glb": vars(module), "found": None,
                         "label": f"{plan['cls']}.{plan['meth']}"})
         what = ", ".join(f"{x['field']}: {x['old']} -> {x['new']}" for x in plan["fields"])
         nf = F.finding("constructor_reinit", f"{plan['cls']}.{plan['meth']} changes only fresh "

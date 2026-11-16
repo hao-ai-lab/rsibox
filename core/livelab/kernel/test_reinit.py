@@ -52,8 +52,8 @@ _ids = itertools.count()
 
 def setup(test, text=SCHED):
     name = f"reinit_sched_{next(_ids)}"
-    (mod,) = temp_modules(test, {name: text})
-    return name, mod, C.LocalParticipant("core")
+    (module,) = temp_modules(test, {name: text})
+    return name, module, C.LocalParticipant("core")
 
 
 def plan(name, txn="t", source=SCHED_NEW, **kw):
@@ -76,8 +76,8 @@ class ReinitTest(unittest.TestCase):
         (constructor_edit) and went to a forked restart (16.6 s eager, 51.2 s graph); a plain
         accept would have left the live set, and the new `[...] =` raises TypeError on it.
         Not: other processes' instances (each participant scans its own heap)."""
-        name, mod, p = setup(self)
-        core = mod.EngineCore()
+        name, module, p = setup(self)
+        core = module.EngineCore()
         before = core.scheduler.grammar_compile_error_reqs
         r = p.prepare(plan(name))
         self.assertTrue(r["ok"], r)
@@ -107,8 +107,8 @@ class ReinitTest(unittest.TestCase):
         """Input: the same edit while the live scheduler's set holds a request id (a grammar
         error not yet reported). Expected: constructor_edit blocks and says the field holds
         state; nothing changes. Replacing it with {} would drop the request."""
-        name, mod, p = setup(self)
-        core = mod.EngineCore()
+        name, module, p = setup(self)
+        core = module.EngineCore()
         core.scheduler.grammar_compile_error_reqs.add("r9")
         r = p.prepare(plan(name))
         self.assertFalse(r["ok"])
@@ -120,8 +120,8 @@ class ReinitTest(unittest.TestCase):
         """Input: prepare passes, then the live set takes a request id before the gap.
         Expected: validate votes no with a blocking constructor_edit; abort leaves the set and
         the base code. Proves the gap re-checks, not only prepare."""
-        name, mod, p = setup(self)
-        core = mod.EngineCore()
+        name, module, p = setup(self)
+        core = module.EngineCore()
         self.assertTrue(p.prepare(plan(name))["ok"])
         core.scheduler.promote("r3", ValueError("x"))
         v = p.validate("t")
@@ -134,14 +134,14 @@ class ReinitTest(unittest.TestCase):
         """Input: one Scheduler built, then gc.freeze() (vLLM freezes its start-up heap),
         prepare, then a second Scheduler built before the gap. Expected: prepare finds the
         frozen one (1), validate's scan finds both, commit re-initializes 2."""
-        name, mod, p = setup(self)
-        a = mod.Scheduler(1)
+        name, module, p = setup(self)
+        a = module.Scheduler(1)
         gc.collect()
         gc.freeze()
         self.addCleanup(gc.unfreeze)
         r = p.prepare(plan(name))
         self.assertEqual(r["findings"][0]["reinit"]["instances"], 1)
-        b = mod.Scheduler(2)
+        b = module.Scheduler(2)
         self.assertTrue(p.validate("t")["ok"])
         c = p.commit("t")
         self.assertEqual(list(c["reinit"].values())[0]["instances"], 2)
@@ -153,8 +153,8 @@ class ReinitTest(unittest.TestCase):
         """Input: commit, then the new code records an error and the step never drains it;
         undo. Expected: the field is restored to the base set anyway, and undo reports
         undo_incomplete naming the field, so the transaction reads partial, not at base."""
-        name, mod, p = setup(self)
-        core = mod.EngineCore()
+        name, module, p = setup(self)
+        core = module.EngineCore()
         p.prepare(plan(name))
         p.validate("t")
         self.assertTrue(p.commit("t")["ok"])
@@ -174,8 +174,8 @@ class ReinitTest(unittest.TestCase):
                "    def __init__(self, *args, **kwargs):\n"
                "        super().__init__(*args, **kwargs)\n"
                "        self.decode_stagger = 1\n")
-        name, mod, p = setup(self, SCHED + sub)
-        live = mod.AsyncScheduler(8)
+        name, module, p = setup(self, SCHED + sub)
+        live = module.AsyncScheduler(8)
         r = p.prepare(plan(name, source=SCHED_NEW + sub))
         self.assertEqual((r["ok"], checks(r)), (True, [("constructor_reinit", True)]))
         p.validate("t")
@@ -183,22 +183,43 @@ class ReinitTest(unittest.TestCase):
         self.assertEqual(type(live.grammar_compile_error_reqs), dict)
         self.assertTrue(p.undo("t")["ok"])
         bad = sub.replace("self.decode_stagger = 1", "self.grammar_compile_error_reqs = set()")
-        name2, mod2, p2 = setup(self, SCHED + bad)
-        live2 = mod2.AsyncScheduler(8)
+        name2, module2, p2 = setup(self, SCHED + bad)
+        live2 = module2.AsyncScheduler(8)
         r2 = p2.prepare(plan(name2, source=SCHED_NEW + bad))
         self.assertEqual((r2["ok"], checks(r2)), (False, [("constructor_edit", False)]))
         self.assertIn("AsyncScheduler.__init__ sets or reads", r2["findings"][0]["observed"])
         self.assertEqual(type(live2.grammar_compile_error_reqs), set)
 
+    def test_subclass_without_super_init_refuses_added_field(self):
+        """Input: a subclass defining its own __init__ without calling super().__init__(), and
+        an edit to Scheduler.__init__ that adds a new pure field `self.extra_cache = []`.
+        Expected: prepare blocks as constructor_edit naming the missing super().__init__ call,
+        so live instances of the subclass never receive an attribute a fresh construction would
+        not have (c3_fresh_equivalence)."""
+        sub = ("\n\nclass StandaloneScheduler(Scheduler):\n"
+               "    def __init__(self):\n"
+               "        self.own_state = 1\n")
+        added_field = SCHED.replace(
+            "        self.encoder_cache_mismatch_reqs: set[str] = set()",
+            "        self.encoder_cache_mismatch_reqs: set[str] = set()\n"
+            "        self.extra_cache: list = []")
+        name, module, p = setup(self, SCHED + sub)
+        live = module.StandaloneScheduler()
+        r = p.prepare(plan(name, source=added_field + sub))
+        self.assertEqual((r["ok"], checks(r)), (False, [("constructor_edit", False)]))
+        self.assertIn("StandaloneScheduler.__init__ does not unconditionally call super().__init__",
+                      r["findings"][0]["observed"])
+        self.assertFalse(hasattr(live, "extra_cache"))
+
     def test_no_live_instance_needs_only_the_swap(self):
         """Input: the edit with no Scheduler alive. Expected: advisory constructor_reinit with
         0 instances; commit installs; a Scheduler built after it gets a dict."""
-        name, mod, p = setup(self)
+        name, module, p = setup(self)
         r = p.prepare(plan(name))
         self.assertEqual((r["ok"], r["findings"][0]["reinit"]["instances"]), (True, 0))
         p.validate("t")
         self.assertTrue(p.commit("t")["ok"])
-        self.assertEqual(type(mod.Scheduler(1).grammar_compile_error_reqs), dict)
+        self.assertEqual(type(module.Scheduler(1).grammar_compile_error_reqs), dict)
         self.assertTrue(p.undo("t")["ok"])
 
 
