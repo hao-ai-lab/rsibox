@@ -1539,17 +1539,20 @@ class Coordinator:
         now = self.clock
         res = {p.name: _call(p, "witness_check", txn) for p in self.participants}
         fs = [{**f, "participant": n} for n, r in res.items() for f in r.get("findings", [])]
-        witness, capture = {}, {}
+        witness, capture, abstained = {}, {}, []
         for n, r in res.items():
             if r.get("ranks"):
                 ranks = {str(x.get("rank")): x.get("counts", {}) for x in r["ranks"]}
                 witness.update({f"{n}/rank{k}": c for k, c in ranks.items()})
                 capture.update({f"{n}/rank{x.get('rank')}": x.get("capture_counts", {})
                                 for x in r["ranks"]})
+                abstained += [f"{n}/rank{x.get('rank')}" for x in r["ranks"] if x.get("abstain")]
                 fs += witness_uneven(n, ranks, tolerance)
             else:
                 witness[n] = r.get("counts", {})
                 capture[n] = r.get("capture_counts", {})
+                if r.get("abstain"):
+                    abstained.append(n)
         edit = self.txns.get(txn, {}).get("edit")
         edit_mono = self.txns.get(txn, {}).get("edit_mono")
         t = now()
@@ -1560,6 +1563,8 @@ class Coordinator:
         firsts = {}
         for n, r in res.items():
             for x in (r.get("ranks") or [r]):
+                if x.get("abstain") or r.get("abstain"):
+                    continue
                 label = f"{n}/rank{x.get('rank')}" if r.get("ranks") else n
                 hits = list((x.get("first_hit") or {}).values())
                 firsts[label] = min(hits) if hits else None
@@ -1567,6 +1572,7 @@ class Coordinator:
                   else None)
         rec = {"schema": R.SCHEMA, "kind": "proof", "id": txn,
                "witness": witness,
+               **({"abstained": abstained} if abstained else {}),
                # calls made while graphs were captured, apart from the live ones above: a
                # replay runs no Python, so only live calls (or a device probe) prove a run
                "witness_capture": capture,

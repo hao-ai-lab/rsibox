@@ -96,18 +96,36 @@ def c1_noop(lab):
     return [f"installed by {r['mechanisms']}; calls {_calls(c['witness'])}; output unchanged"]
 
 
+def _role_group(label):
+    text = str(label)
+    if "/" in text:
+        return text.split("/", 1)[0]
+    stripped = text.rstrip("0123456789")
+    return f"_{stripped}" if stripped and stripped != text else text
+
+
+def _involved_witnesses(witness, abstained=()):
+    abstained_set = set(abstained or ())
+    active_groups = {_role_group(label) for label, calls in witness.items()
+                     if calls and label not in abstained_set}
+    return {label: calls for label, calls in witness.items()
+            if label not in abstained_set
+            and not (not calls and active_groups and _role_group(label) not in active_groups)}
+
+
 def c2_visible(lab):
     """Passes only if: a visible edit changes the output and its witness fires on every
-    participant. Proves: install reaches the running code. Not: that the new output is
-    the one the edit intended (c3 does)."""
+    involved participant (an uninvolved role on a multi-role engine may abstain, while a
+    silent sibling rank in an involved group fails). Proves: install reaches the running code.
+    Not: that the new output is the one the edit intended (c3 does)."""
     out0, _ = _base(lab)
     _installed(lab, lab.patches()["visible"], "visible edit")
     c = lab.check()
     expect(c["output"] != out0, "output differs from base", _short(c["output"]))
     expect(c["proven"] is True, "proven: every live edit ran", c["findings"])
-    witness = c["witness"] or {}
+    witness = _involved_witnesses(c["witness"] or {}, c.get("abstained"))
     expect(witness and all(calls and min(calls.values()) > 0 for calls in witness.values()),
-           "witness > 0 on every participant", witness)
+           "witness > 0 on every participant", c["witness"])
     expect(lab.uninstall()["ok"], "uninstall succeeds")
     return [f"output {_short(out0)} -> {_short(c['output'])}",
             f"calls per participant {_calls(c['witness'])}"]

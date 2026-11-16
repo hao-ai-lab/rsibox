@@ -493,16 +493,16 @@ def detect_gpu_cpu_affinity(
             vendor_file = os.path.join(entry_dir, "vendor")
             class_file = os.path.join(entry_dir, "class")
             try:
-                vendor_val = (
-                    open(vendor_file, encoding="utf-8").read().strip().lower()
-                    if os.path.isfile(vendor_file)
-                    else ""
-                )
-                class_val = (
-                    open(class_file, encoding="utf-8").read().strip().lower()
-                    if os.path.isfile(class_file)
-                    else ""
-                )
+                if os.path.isfile(vendor_file):
+                    with open(vendor_file, encoding="utf-8") as handle:
+                        vendor_val = handle.read().strip().lower()
+                else:
+                    vendor_val = ""
+                if os.path.isfile(class_file):
+                    with open(class_file, encoding="utf-8") as handle:
+                        class_val = handle.read().strip().lower()
+                else:
+                    class_val = ""
             except OSError:
                 vendor_val, class_val = "", ""
             if vendor_val == "0x10de" and (not class_val or class_val.startswith("0x03")):

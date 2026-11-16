@@ -150,6 +150,9 @@ class CrossCheckBypassTest(unittest.TestCase):
             record = {**base, "witness": witness, **({"proven": proven} if proven else {})}
             self.assertEqual(_checks(record), ["zero_witness_pass"], witness)
         self.assertEqual(_checks({**base, "witness": {"rank0": {"k": 8}, "rank1": {"k": 2}}}), [])
+        self.assertEqual(_checks({**base, "witness": {"workers/rank0": {"k": 8}, "core": {}}}), [])
+        self.assertEqual(_checks({**base, "witness": {
+            "workers/rank0": {"k": 8}, "workers/rank1": {}, "core": {}}}), ["zero_witness_pass"])
 
     def test_accept_all_and_not_overridable_findings(self):
         """Input: (a) accept="all" with an overridable constructor_edit finding; (b) a

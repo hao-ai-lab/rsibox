@@ -82,14 +82,29 @@ def _route_tier_weight(route_name: Any) -> int | None:
     return None
 
 
+def _role_group(label: str) -> str:
+    """Group key for witness participant labels: ranks of one pool share a group so a silent
+    rank (`rank1: {}` beside `rank0: {k: 8}`, or `workers/rank1: {}` beside `workers/rank0`)
+    still fails, while an uninvolved role (`core: {}` beside `workers/rank0`) can abstain."""
+    text = str(label)
+    if "/" in text:
+        return text.split("/", 1)[0]
+    stripped = text.rstrip("0123456789")
+    if stripped and stripped != text:
+        return f"_{stripped}"
+    return text
+
+
 def _extract_witness_info(record: dict[str, Any]) -> tuple[int, bool]:
     """Return `(total_hits, is_proven)` from a step record."""
     explicit_proven = record.get("proven")
     witness_data = record.get("witness")
+    abstained = set(record.get("abstained") or ())
 
     if isinstance(witness_data, dict) and "witness" in witness_data and "proven" in witness_data:
         if explicit_proven is None:
             explicit_proven = bool(witness_data.get("proven"))
+        abstained.update(witness_data.get("abstained") or ())
         witness_data = witness_data.get("witness")
 
     total_hits = 0
@@ -102,8 +117,16 @@ def _extract_witness_info(record: dict[str, Any]) -> tuple[int, bool]:
         if not witness_data:
             total_hits = 0
         elif all(isinstance(val, dict) for val in witness_data.values()):
-            # per rank: every rank must run every target (a sum hides a rank that ran none)
-            for rank_map in witness_data.values():
+            # per rank: every involved rank must run every target (a sum hides a rank that ran
+            # none); an uninvolved role on a multi-role engine (`core: {}` on a worker edit)
+            # abstains when no sibling rank of its role group staged anything.
+            active_groups = {_role_group(label) for label, rank_map in witness_data.items()
+                             if rank_map and label not in abstained}
+            for label, rank_map in witness_data.items():
+                if label in abstained:
+                    continue
+                if not rank_map and active_groups and _role_group(label) not in active_groups:
+                    continue
                 counts = [int(hit_count) for hit_count in rank_map.values()]
                 total_hits += sum(counts)
                 has_zero_target = has_zero_target or not counts or min(counts) <= 0
