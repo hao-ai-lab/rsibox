@@ -148,11 +148,10 @@ def _resolve(node, scope):
     return None
 
 
-def calls(caller, callee):
-    """Does the caller's text name the callee (through its globals or closure)?"""
-    name = callee.fn.__name__
-    if name not in caller._src:              # cheap text filter before the parse
-        return False
+def named(caller):
+    """The ids of the objects the caller's text names, through its globals and closure, and
+    of the JIT callables they wrap. No text filter on the callee's name: a kernel may call a
+    helper under an alias (`from a import helper as act`) or through a module attribute."""
     scope = dict(caller.__globals__)
     fn = caller.fn
     for n, c in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
@@ -160,21 +159,45 @@ def calls(caller, callee):
             scope[n] = c.cell_contents
         except ValueError:
             pass
+    out = set()
     for n in ast.walk(caller.parse()):
         if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load):
             v = _resolve(n, scope)
-            if v is callee or (v is not None and unwrap(v)[0] is callee):
-                return True
-    return False
+            if v is not None:
+                out.add(id(v))
+                inner = unwrap(v)[0]
+                if inner is not None:
+                    out.add(id(inner))
+    return out
+
+
+def calls(caller, callee):
+    """Does the caller's text name the callee (through its globals or closure)?"""
+    return id(callee) in named(caller)
+
+
+class UnreadableKernel(RuntimeError):
+    """A loaded JIT kernel whose text cannot be parsed while its callers are searched."""
 
 
 def callers_of(jit_fn, jits):
-    """The JIT callables that call jit_fn, at any depth (breadth first, no repeats)."""
-    out, seen, todo = [], {id(jit_fn)}, [jit_fn]
+    """The JIT callables that call jit_fn, at any depth (breadth first, no repeats). Each
+    candidate's text is parsed once per call (`named`). Raises UnreadableKernel naming a
+    candidate whose text does not parse."""
+    out, seen, todo, names = [], {id(jit_fn)}, [jit_fn], {}
     while todo:
         current = todo.pop(0)
         for candidate in jits.values():
-            if id(candidate) not in seen and calls(candidate, current):
+            if id(candidate) in seen:
+                continue
+            if id(candidate) not in names:
+                try:
+                    names[id(candidate)] = named(candidate)
+                except Exception as exc:      # fail closed: it may call the edited kernel
+                    raise UnreadableKernel(f"the loaded JIT kernel {label(candidate)} cannot "
+                                           f"be parsed ({type(exc).__name__}: {exc}), so "
+                                           "whether it calls the edited kernel is unknown") from exc
+            if id(current) in names[id(candidate)]:
                 seen.add(id(candidate))
                 out.append(candidate)
                 todo.append(candidate)
@@ -263,7 +286,10 @@ def plan(mod, qualname, text):
         return {"ok": False, "why": text["guard"] if text else "no text of the kernel"}
     jits, tuners = scan()
     jits[id(jit_fn)] = jit_fn
-    callers = callers_of(jit_fn, jits)       # by identity only (audit #9)
+    try:
+        callers = callers_of(jit_fn, jits)   # by identity only (audit #9)
+    except UnreadableKernel as exc:
+        return {"ok": False, "why": str(exc)}
     affected = [jit_fn] + callers
     ids = {id(fn_item) for fn_item in affected}
     tuners = [wrapper for wrapper, fn_item in tuners if id(fn_item) in ids]
@@ -459,9 +485,10 @@ def invalidate_compiled_frames(target_functions, journal=None):
     }
 
 
-def arm_added(obj, key, plans, journal, witness):
-    """A JIT kernel the edit adds: count its launches and those of the rebuilt kernels whose
-    new text names it (they inline it). Returns how many JIT functions carry the hook."""
+def arm_added(obj, key, plans, journal, witness, added=()):
+    """A JIT kernel the edit adds: count its launches, those of the rebuilt kernels whose
+    new text names it, and those of the other added JIT kernels (`added`) that call it at any
+    depth (they inline it). Returns how many JIT functions carry the hook."""
     jf, _ = unwrap(obj)
     if jf is None or missing(jf):
         return 0
@@ -473,6 +500,12 @@ def arm_added(obj, key, plans, journal, witness):
                 if id(f) not in seen:
                     seen.add(id(f))
                     fns.append(f)
+    others = {id(other): other for other in (unwrap(obj_added)[0] for obj_added in added)
+              if other is not None and not missing(other)}
+    for caller in callers_of(jf, others):
+        if id(caller) not in seen:
+            seen.add(id(caller))
+            fns.append(caller)
     _hook_into(fns, witness, journal, key)
     return len(fns)
 

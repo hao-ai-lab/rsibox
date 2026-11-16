@@ -12,7 +12,7 @@ from . import coordinator as C
 from . import locate as L
 from . import swap as S
 from .test_detectors import ESTIMATOR, ESTIMATOR_NEW, _n, temp_modules
-from .test_locate import ENG, OPS, at, edit, fresh
+from .test_locate import ENG, OPS, at, edit, fresh, loads_constant
 from .test_witness import wait_for
 
 
@@ -147,10 +147,10 @@ class LineMapChainTest(unittest.TestCase):
                       t["line_map_aliases"])
         self.assertEqual(list(r2["staged"]), [f"toy.ops:make_shift:{line_v1}"])
         self.assertTrue(p.commit("e2")["ok"])
-        self.assertIn(5, ops.make_shift.__code__.co_consts)
+        self.assertTrue(loads_constant(ops.make_shift.__code__, 5))
         self.assertEqual((ops.scale(3), ops.make_shift(10)(1)), (6, 11))
         self.assertTrue(p.undo("e2")["ok"])                 # make_shift back, scale still v1
-        self.assertNotIn(5, ops.make_shift.__code__.co_consts)
+        self.assertFalse(loads_constant(ops.make_shift.__code__, 5))
         self.assertIn("y = y + 0", p._live_source("toy.ops"))
         self.assertTrue(p.undo("e1")["ok"])                 # back at the file
         self.assertIsNone(p._live_source("toy.ops"))
@@ -299,6 +299,46 @@ class EditAddedDefinitionTest(unittest.TestCase):
             (mod_obj.CrossEntropyOp.apply_op(2), mod_obj.embed_op(3), part.at_base()["ok"]),
             (4, 4, True),
         )
+
+    def test_undo_keeps_base_globals_and_class_attributes_the_engine_set(self):
+        """Input: a module with `make_shift(k)` (returns `shift`, x + k), a base global
+        `DEFAULT_SHIFT = make_shift(1)` and an empty `class Config`. The edit makes shift
+        x + 10 * k. While it is installed the engine rebinds `DEFAULT_SHIFT = make_shift(2)`
+        and sets `Config.port = 8080` (a plain value). Expected: undo is ok; DEFAULT_SHIFT is
+        still bound and runs base code (5 + 2 = 7); Config.port stays; at_base is ok. Then a
+        base global deleted by hand makes at_base false and names it in `missing_names`. Pain
+        point: undo deleted every module global holding a new nested code, even one the base
+        defined, and every class attribute added since apply on any class of the module; and
+        at_base did not look for base names that were gone. A name `engine_names` accepts is
+        listed there instead. Not: a base global rebound to a closure that cannot go back
+        (closure_not_restored)."""
+        mod_name = f"kt_keep_globals{next(_n)}"
+        base_src = ("class Config:\n    pass\n\n\n"
+                    "def make_shift(k):\n    def shift(x):\n        return x + k\n"
+                    "    return shift\n\n\nDEFAULT_SHIFT = make_shift(1)\n")
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        patched = base_src.replace("x + k", "x + 10 * k")
+        self.assertTrue(part.prepare({"id": "g1", "modules": {mod_name: {"source": patched}}})["ok"])
+        self.assertTrue(part.commit("g1")["ok"])
+        mod_obj.DEFAULT_SHIFT = mod_obj.make_shift(2)
+        mod_obj.Config.port = 8080
+        self.assertEqual(mod_obj.DEFAULT_SHIFT(5), 25)
+        undo_res = part.undo("g1")
+        self.assertEqual((undo_res["ok"], undo_res["findings"]), (True, []))
+        self.assertEqual((hasattr(mod_obj, "DEFAULT_SHIFT"), getattr(mod_obj.Config, "port", None)),
+                         (True, 8080))
+        self.assertEqual(mod_obj.DEFAULT_SHIFT(5), 7)
+        del mod_obj.Config.port
+        self.assertTrue(part.at_base()["ok"], part.at_base())
+        del mod_obj.DEFAULT_SHIFT
+        base_res = part.at_base()
+        self.assertEqual((base_res["ok"], base_res["missing_names"]), (False, {mod_name: ["DEFAULT_SHIFT"]}))
+        part.engine_names = lambda name: name == "DEFAULT_SHIFT"    # one the engine deletes
+        base_res = part.at_base()
+        # (at_base stays false here: the module's code digest lost DEFAULT_SHIFT's function)
+        self.assertEqual((base_res["missing_names"], base_res["engine_names"]),
+                         ({}, {mod_name: ["DEFAULT_SHIFT"]}))
 
 
 LAZY = '''import importlib

@@ -6,6 +6,7 @@ Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t 
 (or python3 -m pytest -q core/livelab/kernel)
 """
 import ast
+import sys
 import unittest
 
 from . import locate as L
@@ -124,11 +125,14 @@ class TargetEdgeCaseTest(unittest.TestCase):
 
     def test_a_signature_annotation_edit_is_not_outside_the_target(self):
         """Input: scale gains a return annotation (`-> int`), or type parameters
-        (`def scale[T](x: T)`), with a body edit. Expected: scale is the one target and
+        (`def scale[T](x: T)`, on 3.12 and later), with a body edit. Expected: scale is the one target and
         outside_changes is False, as for a parameter annotation (a code swap installs
         neither). Pain point: the edit was refused as outside_changes. Not: annotations on
         the live function (they stay the old ones)."""
-        for sig in ("def scale(x) -> int:", "def scale[T](x: T):"):
+        sigs = ["def scale(x) -> int:"]
+        if sys.version_info >= (3, 12):            # type parameters are 3.12 syntax (PEP 695)
+            sigs.append("def scale[T](x: T):")
+        for sig in sigs:
             a = analyze(edit(OPS, ("def scale(x):", sig), ("x * STEP_SCALE", "x * 3")))
             self.assertEqual((a["resolved"], a["outside_changes"]),
                              ([["scale", SCALE]], False), sig)

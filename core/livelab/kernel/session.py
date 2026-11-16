@@ -12,7 +12,8 @@ the interface's `status()` needs:
 - poison: findings that put the session in a state the host cannot prove. Set by a
   fingerprint that differs from the expected one (`tampered`: code changed outside the
   journal, or a participant that does not answer), by an undo that failed, by a transaction
-  left in doubt, by a participant that missed the phase-2 deadline (the coordinator's
+  left in doubt, by a commit after which participants or ranks run different code
+  (`ranks_disagree`), by a participant that missed the phase-2 deadline (the coordinator's
   `poison`), or by the lab itself (`fault`: a crash or a hang it saw). A poisoned session
   refuses `install` with `session_poisoned` and allows only `uninstall` (undo; the session
   stays poisoned) and `recovered()` (after the lab respawned its worker group).
@@ -23,6 +24,39 @@ from . import coordinator as C
 from . import findings as F
 from . import locate as L
 import json
+
+
+def _split_commit(receipt):
+    """Why a committed transaction cannot be recorded as the code every participant runs, or
+    None. Never excused by an accept: a rank that did not switch must not become the expected
+    state. Reasons: no receipt to read; commit_hashes.agree False (participants or ranks
+    differ, or a proof did not answer); or a participant (a rank, in a group) that staged
+    items at prepare and whose proof names none of them (no code hash of a swapped function,
+    no witness key of an item, added definitions included). A role that abstained, or
+    staged nothing (a plan of repair cells only), may show none."""
+    if not receipt:
+        return "no txn receipt to read the commit hashes from"
+    if (receipt.get("commit_hashes") or {}).get("agree") is False:
+        splits = [finding.get("observed", "") for finding in receipt.get("findings", [])
+                  if finding.get("check") == "ranks_disagree"]
+        why = "; ".join(splits) or "a proof did not answer"
+        return f"code hashes differ after commit: {why}"[:500]
+    for name, reply in (receipt.get("participants") or {}).items():
+        prepared, proof = reply.get("prepare") or {}, reply.get("proof") or {}
+        proof_by_rank = {str(unit.get("rank")): unit for unit in proof.get("ranks") or ()}
+        for unit in prepared.get("ranks") or [prepared]:
+            if unit.get("abstain") or not unit.get("staged"):
+                continue
+            rank = unit.get("rank") if prepared.get("ranks") else None
+            shown = proof if rank is None else proof_by_rank.get(str(rank), {})
+            # the proof names what the participant committed: code hashes of the swapped
+            # functions, and witness keys of every staged item (added definitions too)
+            committed_keys = set(shown.get("hashes") or {}) | set(shown.get("witness") or {})
+            if not committed_keys & set(unit["staged"]):
+                where = name if rank is None else f"{name} rank {rank}"
+                return (f"{where} staged {len(unit['staged'])} item(s) but its proof names "
+                        "none of them (no code hash, no witness key): it did not switch")
+    return None
 
 
 class Session:
@@ -119,6 +153,19 @@ class Session:
             if fp is None:
                 self.fault("tampered", "a participant did not answer after commit",
                            "every participant answers")
+            # an in-doubt result carries no receipt, nor does one whose receipt another
+            # thread (a status call) is finishing: wait for that finisher, then read the
+            # receipt the coordinator kept
+            receipt = res.get("receipt")
+            record = getattr(self.co, "txns", {}).get(res["txn"]) or {}
+            finisher = record.get("fin")
+            if receipt is None and finisher is not None and finisher.acquire(timeout=30):
+                finisher.release()
+            receipt = receipt or record.get("rec")
+            split = _split_commit(receipt)
+            if split:
+                self.fault("ranks_disagree", split, "every participant and every rank runs "
+                           "the code the commit installed", subject=res["txn"])
             self.stack.append(res["txn"])
             self.expected.append(fp)
         else:                                    # aborted or rolled back: base must hold

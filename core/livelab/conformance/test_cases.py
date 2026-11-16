@@ -89,6 +89,41 @@ class LeakyUninstall(FakeLab):
         return {"ok": True, "undone": [tid], "state": "base", "cost_s": 0.0}
 
 
+class OneRankSilent(FakeLab):
+    """One participant reports no witness calls at all (an empty map)."""
+    def check(self, workload=None):
+        reply = super().check(workload)
+        if reply["witness"]:
+            reply["witness"]["p1"] = {}
+        return reply
+
+
+class MultiRoleAbstain(FakeLab):
+    """A worker-only edit on a multi-role engine: workers/rank0 fires while core abstains."""
+    def check(self, workload=None):
+        reply = super().check(workload)
+        if reply["witness"]:
+            reply["witness"] = {"workers/rank0": {"m": 3}, "core": {}}
+        return reply
+
+
+class MultiRoleOneWorkerSilent(FakeLab):
+    """A worker edit where workers/rank1 is silent beside workers/rank0."""
+    def check(self, workload=None):
+        reply = super().check(workload)
+        if reply["witness"]:
+            reply["witness"] = {"workers/rank0": {"m": 3}, "workers/rank1": {}, "core": {}}
+        return reply
+
+
+class OneParticipant(FakeLab):
+    """An honest lab with a single participant."""
+    def check(self, workload=None):
+        reply = super().check(workload)
+        reply["witness"] = {"p0": reply["witness"]["p0"]} if reply["witness"] else {}
+        return reply
+
+
 class CasesCatchMissingProperties(unittest.TestCase):
     def assertCase(self, case, lab, expected):
         r = cases.run(case, lab)
@@ -104,6 +139,17 @@ class CasesCatchMissingProperties(unittest.TestCase):
     def test_c2_visible_catches_an_install_that_changes_nothing(self):
         self.assertCase("c2_visible", FakeLab, "pass")
         self.assertCase("c2_visible", SilentInstall, "FAIL")
+
+    def test_c2_visible_needs_calls_on_every_participant_however_many(self):
+        """Input: a 2-participant lab where p1's witness map is empty, and an honest lab with
+        one participant. Expected: FAIL, then pass. Pain point: c2 took the minimum over the
+        calls it found, so an empty map passed, and it asked for at least 2 participants, so
+        an honest single-participant lab failed. Not: a lab that leaves a participant out of
+        the witness entirely (the lab's own `proven` covers that)."""
+        self.assertCase("c2_visible", OneRankSilent, "FAIL")
+        self.assertCase("c2_visible", MultiRoleOneWorkerSilent, "FAIL")
+        self.assertCase("c2_visible", MultiRoleAbstain, "pass")
+        self.assertCase("c2_visible", OneParticipant, "pass")
 
     def test_c4_uninstall_catches_an_undo_that_leaves_the_edit(self):
         self.assertCase("c4_uninstall", FakeLab, "pass")

@@ -39,6 +39,9 @@ ROUTE_TIER_WEIGHTS = {
     "cold_restart": 4,
     "full_restart": 4,
     "container_restart": 4,
+    # the kernel's own names (INTERFACE-v1.md mechanisms, swap.py routes)
+    "r10": 0,          # hand repair cell: in process, ms per call
+    "t1": 1,           # rebuild the objects in place (constructor edits, new fields)
 }
 
 
@@ -70,6 +73,8 @@ def _route_tier_weight(route_name: Any) -> int | None:
     if route_name is None:
         return None
     normalized = str(route_name).strip().lower()
+    if normalized not in ROUTE_TIER_WEIGHTS and normalized.split():
+        normalized = normalized.split()[0]       # "R0 swap", "R10 repair": the protocol key
     if normalized in ROUTE_TIER_WEIGHTS:
         return ROUTE_TIER_WEIGHTS[normalized]
     if normalized.startswith("r") and normalized[1:].isdigit():
@@ -77,14 +82,29 @@ def _route_tier_weight(route_name: Any) -> int | None:
     return None
 
 
+def _role_group(label: str) -> str:
+    """Group key for witness participant labels: ranks of one pool share a group so a silent
+    rank (`rank1: {}` beside `rank0: {k: 8}`, or `workers/rank1: {}` beside `workers/rank0`)
+    still fails, while an uninvolved role (`core: {}` beside `workers/rank0`) can abstain."""
+    text = str(label)
+    if "/" in text:
+        return text.split("/", 1)[0]
+    stripped = text.rstrip("0123456789")
+    if stripped and stripped != text:
+        return f"_{stripped}"
+    return text
+
+
 def _extract_witness_info(record: dict[str, Any]) -> tuple[int, bool]:
     """Return `(total_hits, is_proven)` from a step record."""
     explicit_proven = record.get("proven")
     witness_data = record.get("witness")
+    abstained = set(record.get("abstained") or ())
 
     if isinstance(witness_data, dict) and "witness" in witness_data and "proven" in witness_data:
         if explicit_proven is None:
             explicit_proven = bool(witness_data.get("proven"))
+        abstained.update(witness_data.get("abstained") or ())
         witness_data = witness_data.get("witness")
 
     total_hits = 0
@@ -97,12 +117,19 @@ def _extract_witness_info(record: dict[str, Any]) -> tuple[int, bool]:
         if not witness_data:
             total_hits = 0
         elif all(isinstance(val, dict) for val in witness_data.values()):
-            target_totals: dict[str, int] = {}
-            for rank_map in witness_data.values():
-                for target_key, hit_count in rank_map.items():
-                    target_totals[target_key] = target_totals.get(target_key, 0) + int(hit_count)
-            total_hits = sum(target_totals.values())
-            has_zero_target = any(count <= 0 for count in target_totals.values())
+            # per rank: every involved rank must run every target (a sum hides a rank that ran
+            # none); an uninvolved role on a multi-role engine (`core: {}` on a worker edit)
+            # abstains when no sibling rank of its role group staged anything.
+            active_groups = {_role_group(label) for label, rank_map in witness_data.items()
+                             if rank_map and label not in abstained}
+            for label, rank_map in witness_data.items():
+                if label in abstained:
+                    continue
+                if not rank_map and active_groups and _role_group(label) not in active_groups:
+                    continue
+                counts = [int(hit_count) for hit_count in rank_map.values()]
+                total_hits += sum(counts)
+                has_zero_target = has_zero_target or not counts or min(counts) <= 0
         else:
             counts = [int(val) for val in witness_data.values() if isinstance(val, (int, float))]
             total_hits = sum(counts)
@@ -110,8 +137,6 @@ def _extract_witness_info(record: dict[str, Any]) -> tuple[int, bool]:
 
     if explicit_proven is False:
         return total_hits, False
-    if explicit_proven is True:
-        return total_hits, total_hits > 0
     return total_hits, (total_hits > 0 and not has_zero_target)
 
 
@@ -122,7 +147,13 @@ def _extract_unaccepted_findings(record: dict[str, Any]) -> list[str]:
         if record.get("accepted_findings") is not None
         else record.get("accept")
     )
-    accepted_set = {str(item) for item in (accepted_raw or ())}
+    # as kernel.findings.decide: "all" accepts every overridable finding; a name or an accept
+    # record accepts that check; a finding that is not overridable is never accepted
+    accept_all = accepted_raw == "all"
+    if isinstance(accepted_raw, str):
+        accepted_raw = () if accept_all else (accepted_raw,)
+    accepted_set = {str(item.get("check")) if isinstance(item, dict) else str(item)
+                    for item in (accepted_raw or ())}
 
     unaccepted: list[str] = []
     for item in raw_findings:
@@ -130,9 +161,15 @@ def _extract_unaccepted_findings(record: dict[str, Any]) -> list[str]:
             if item.get("advisory") is True:
                 continue
             check_name = str(item.get("check") or item.get("finding") or "")
+            if item.get("overridable") is False:
+                if check_name:
+                    unaccepted.append(check_name)
+                continue
+            if item.get("accepted") is True:     # annotated by decide
+                continue
         else:
             check_name = str(item)
-        if check_name and check_name not in accepted_set:
+        if check_name and not accept_all and check_name not in accepted_set:
             unaccepted.append(check_name)
     return unaccepted
 
@@ -145,9 +182,10 @@ def cross_check_step_record(
 
     Detects:
     1. `zero_witness_pass`: `verdict == "pass"` or `kept == True` when `witness` has 0
-       total hits or `proven is False`.
-    2. `unaccepted_finding_ignored`: open `findings` present that are not listed in
-       `accepted_findings`.
+       total hits, a rank or target with 0 hits, or `proven is False`.
+    2. `unaccepted_finding_ignored`: open `findings` present that are not accepted
+       (`accepted_findings` or `accept`, as `kernel.findings.decide`: "all" or the check's
+       name; a finding with `overridable: False` never is).
     3. `silent_tier_escalation`: actual execution route/tier is heavier than
        `brief.predicted_route` without an explicit escalation reason.
     4. `unpaired_fork_throughput_claim`: a throughput gain is claimed (`kept == True`)
@@ -342,7 +380,7 @@ def build_dashboard_summary(
             kept_candidates.append(candidate_id)
             cumulative_delta_pct = round(cumulative_delta_pct + delta_pct, 6)
 
-        if bool(record.get("standing_replay")) or record.get("kind") == "replay" or verdict in ("pass", "fail"):
+        if bool(record.get("standing_replay")) or record.get("kind") == "replay":
             total_replays += 1
             if verdict == "pass" and not cross_checks:
                 passed_replays += 1

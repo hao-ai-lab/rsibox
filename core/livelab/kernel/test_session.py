@@ -11,7 +11,7 @@ import unittest
 from . import coordinator as C
 from . import session as SS
 from . import test_coordinator as TC
-from .test_locate import ENG, at, edit, fresh
+from .test_locate import ENG, OPS, at, edit, fresh
 from .test_witness import wait_for
 
 
@@ -178,6 +178,156 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(lps[1].journal.entries, [])     # the late commit applied nothing
         self.assertTrue(sess.uninstall()["ok"])          # undo stays allowed while poisoned
         self.assertEqual(sess.state(), "poisoned")
+
+    def test_ranks_that_disagree_after_commit_poison_the_session(self):
+        """Input: a session over a group of 2 ranks; rank 1's client changes its own
+        Engine.step code right after its commit returns ok (a rank that did not switch
+        cleanly). Expected: the install commits, the receipt says commit_hashes.agree False
+        with a ranks_disagree finding, and the session is poisoned (status() says so) and a
+        second install is refused with session_poisoned. Pain point: the session recorded the
+        split fingerprint as the expected one, so verify() passed and the lab reported
+        "edited" while its ranks ran different code. Not: an accept, which never excuses it
+        (test_a_rank_that_never_switched_poisons_even_with_accept_all)."""
+        n0, _, _ = fresh("split0")
+        n1, eng1, _ = fresh("split1")
+        lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+        lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+
+        def rank1(method, payload):
+            res = getattr(lp1, method)(payload)
+            if method == "commit":
+                step = eng1.Engine.step
+                step.__code__ = step.__code__.replace(co_consts=step.__code__.co_consts + ("x",))
+            return res
+        group = C.GroupParticipant("workers", [lp0, C.CallParticipant("r1", rank1)])
+        sess = SS.Session(C.Coordinator([group], phase2_deadline_s=None), ["toy.engine"])
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        res = sess.install(plan)
+        rec = res["receipt"]
+        self.assertEqual((res["outcome"], rec["commit_hashes"]["agree"]), ("committed", False))
+        self.assertIn("ranks_disagree", [finding["check"] for finding in rec["findings"]])
+        self.assertEqual((res["state"], sess.status()["state"]), ("poisoned", "poisoned"))
+        self.assertEqual(sess.install(plan)["findings"][0]["check"], "session_poisoned")
+
+    def test_a_rank_that_never_switched_poisons_even_with_accept_all(self):
+        """Input: (a) a group of 2 ranks where rank 1's client answers commit ok without
+        committing and answers proof with no code hashes; (b) 2 separate participants, the
+        second doing the same. Each plan has accept "all". Expected: the install commits,
+        the session is poisoned (ranks_disagree) and the silent rank still runs base code
+        (step(3) = 17 vs 1700). Pain point: in (a) an overridable ranks_disagree was excused
+        by the accept, and in (b) commit_hashes.agree was None (no target shared), so the
+        session recorded the split as its expected state, "edited", verify() ok. Not: a role
+        that abstains or stages nothing (a plan of repair cells only), which may show no
+        hash."""
+        plan = {"accept": "all", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        for grouped in (True, False):
+            n0, eng0, _ = fresh("silent0")
+            n1, eng1, _ = fresh("silent1")
+            lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+            lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+
+            def silent(method, payload, lp1=lp1):
+                if method == "commit":
+                    return {"ok": True, "findings": []}         # says ok, installs nothing
+                if method == "proof":
+                    return {"ok": True, "findings": [], "hashes": {}, "witness": {}}
+                return getattr(lp1, method)(payload)
+            second = C.CallParticipant("r1", silent)
+            parts = [C.GroupParticipant("workers", [lp0, second])] if grouped else [lp0, second]
+            sess = SS.Session(C.Coordinator(parts, phase2_deadline_s=None), ["toy.engine"])
+            res = sess.install(plan)
+            self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"), grouped)
+            self.assertIn("ranks_disagree", [finding["check"] for finding in sess.poisoned()])
+            self.assertEqual((eng0.Engine().step(3), eng1.Engine().step(3)), (1700, 17))
+
+    def test_a_commit_with_no_receipt_to_read_poisons(self):
+        """Input: a coordinator whose run reports committed with receipt None and keeps no
+        record of the transaction. Expected: the session is poisoned. Pain point: no receipt
+        read as "no split", so code nobody checked became the expected state. Not: the real
+        coordinator, which keeps the receipt it built (`txns[txn]["rec"]`) and the session
+        reads it from there."""
+        name, _, _ = fresh("norec")
+        coordinator = C.Coordinator([C.LocalParticipant("r0", alias={"toy": name})],
+                                    phase2_deadline_s=None)
+        real_run = coordinator.run
+
+        def run_without_receipt(plan, **kw):
+            res = real_run(plan, **kw)
+            coordinator.txns.pop(res["txn"], None)
+            return {**res, "receipt": None}
+        coordinator.run = run_without_receipt
+        sess = SS.Session(coordinator, ["toy.engine"])
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"))
+
+    def test_add_only_mixed_and_removal_only_edits_end_edited(self):
+        """Input: one participant on toy.ops. (a) A plan that only adds a top-level
+        `def added_helper(x): return x + 5`, then on top (c) a plan that only removes it
+        again (removed_definition accepted); separately from base, (b) a plan that adds it
+        and edits scale (x * 3). Expected: each commits and the session is "edited", never
+        poisoned; after (a) added_helper(1) = 6; after (c) it is gone; after (b)
+        added_helper(1) = 6 and scale(3) = 9. Pain point: the switch check read only the
+        proof's code hashes, which cover swapped functions, so an add-only edit that did
+        switch read as a rank that did not (poisoned). Not: a rank that lies about its
+        witness keys."""
+        added = OPS + "\n\ndef added_helper(x):\n    return x + 5\n"
+
+        def session(tag):
+            name, _, ops = fresh(tag)
+            part = C.LocalParticipant("r0", alias={"toy": name})
+            return SS.Session(C.Coordinator([part], phase2_deadline_s=None), ["toy.ops"]), ops
+
+        def install(sess, source, accept=()):
+            res = sess.install({"accept": list(accept), "modules": {"toy.ops": {"source": source}}})
+            self.assertEqual((res["outcome"], res["state"]), ("committed", "edited"),
+                             sess.poisoned() or res.get("findings"))
+        sess, ops = session("addonly")
+        install(sess, added)
+        self.assertEqual(ops.added_helper(1), 6)
+        install(sess, OPS, accept=["removed_definition"])
+        self.assertFalse(hasattr(ops, "added_helper"))
+        sess, ops = session("addswap")
+        install(sess, added.replace("x * STEP_SCALE", "x * 3"))
+        self.assertEqual((ops.added_helper(1), ops.scale(3)), (6, 9))
+    def test_a_receipt_another_thread_is_finishing_is_waited_for(self):
+        """Input: run() reports committed with receipt None because a status() call in
+        another thread holds the finisher lock and is still building the receipt (emulated:
+        a thread holds `fin` and puts `rec` back after 0.2 s). Expected: the session waits
+        for it, reads the receipt and ends "edited". Pain point: the session poisoned a
+        healthy commit when it lost the finisher race. Not: a finisher that never ends
+        (after 30 s the session poisons: no receipt)."""
+        import threading
+        name, eng, _ = fresh("finrace")
+        coordinator = C.Coordinator([C.LocalParticipant("r0", alias={"toy": name})],
+                                    phase2_deadline_s=None)
+        real_run = coordinator.run
+
+        def run_losing_the_race(plan, **kw):
+            res = real_run(plan, **kw)
+            record = coordinator.txns[res["txn"]]
+            rec, held = record.pop("rec"), threading.Event()
+
+            def other_finisher():
+                with record["fin"]:
+                    held.set()
+                    time.sleep(0.2)
+                    record["rec"] = rec
+            threading.Thread(target=other_finisher).start()
+            held.wait()
+            return {**res, "receipt": None}
+        coordinator.run = run_losing_the_race
+        sess = SS.Session(coordinator, ["toy.engine"])
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], res["state"], eng.Engine().step(3)),
+                         ("committed", "edited", 1700))
 
 
 if __name__ == "__main__":

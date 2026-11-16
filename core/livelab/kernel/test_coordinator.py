@@ -299,6 +299,108 @@ class HostTest(unittest.TestCase):
         _ = gate_Release
 
 
+class UndoCascadeTest(unittest.TestCase):
+    """Undo of an older transaction under a newer one: the journal undoes both."""
+
+    def _two(self, tag, resets, *kinds_per_txn, coordinator_cls=C.Coordinator):
+        """Commit t1, t2, ... (one per entry of kinds_per_txn, its undo_resets), each edit on
+        top of the previous: Engine.step returns y * 10, then y * 100, ..."""
+        name, eng, _ = fresh(tag)
+        part = C.LocalParticipant("rank0", alias={"toy": name}, resets=resets)
+        coordinator = coordinator_cls([part], phase2_deadline_s=None)
+        src, factor = ENG, ""
+        for index, kinds in enumerate(kinds_per_txn, 1):
+            new_factor = " * 1" + "0" * index
+            src = edit(src, (f"return y{factor}", f"return y{new_factor}"))
+            factor = new_factor
+            res = coordinator.run({"id": f"t{index}", "undo_resets": kinds, "modules": {
+                "toy.engine": {"source": src, "targets": [["Engine.step", at(ENG, "def step")]]}}})
+            self.assertEqual(res["outcome"], "committed", res)
+        return coordinator, part, eng
+
+    def test_a_cascade_in_doubt_leaves_no_later_transaction_committed(self):
+        """Input: t1, t2, t3 committed; undo t1 in a gap that does the work and then raises
+        (as a gap timeout after the undo ran). Expected: every participant undid all three
+        (base code, step(3) = 17); the host gives t1, t2 and t3 the same not-ok state
+        ("partial": the work finished but no reply came back), never committed. Pain point: later transactions took their state only from the
+        participants' replies, which an undo in doubt never returns, so t2 and t3 stayed
+        "committed" for code that was gone. Not: which undo reply was lost."""
+        class GapDiesAfterWork(C.Coordinator):
+            die = False
+
+            def _in_gap(self, fn):
+                out = fn()
+                if self.die:
+                    raise RuntimeError("gap timed out")
+                return out
+        coordinator, part, eng = self._two("casc_doubt", {}, [], [], [],
+                                           coordinator_cls=GapDiesAfterWork)
+        coordinator.die = True
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["status"], eng.Engine().step(3)), ("partial", 17))
+        self.assertEqual([part.status(txn)["state"] for txn in ("t1", "t2", "t3")],
+                         ["undone"] * 3)
+        self.assertEqual([coordinator.status(txn)["state"] for txn in ("t1", "t2", "t3")],
+                         ["partial"] * 3)
+
+    def test_a_later_transaction_left_in_doubt_still_gets_its_resets(self):
+        """Input: t1 (undo_resets ["state"]) and t2 (["cache"]); an undo of t2 that dies
+        after it started and before any participant ran (t2 in-doubt on the host, still
+        installed); then undo t1. Expected: base code; both resets ran, t2's first; t2 is
+        "undone". Pain point: the cascade took resets only from later transactions the host
+        held "committed", so t2 (in-doubt) was marked undone without its cache reset. Not:
+        a participant that half-undid t2."""
+        ran = []
+
+        class FirstUndoDies(C.Coordinator):
+            dies = 1
+
+            def _undo_phases(self, txn, resets, tl):
+                if self.dies:
+                    self.dies -= 1
+                    raise RuntimeError("gap died")
+                return super()._undo_phases(txn, resets, tl)
+        coordinator, part, eng = self._two("casc_partial", {
+            "cache": lambda: ran.append("cache"), "state": lambda: ran.append("state")},
+            ["state"], ["cache"], coordinator_cls=FirstUndoDies)
+        self.assertEqual(coordinator.undo("t2")["status"], "in-doubt")
+        self.assertEqual((coordinator.status("t2")["state"], eng.Engine().step(3)),
+                         ("in-doubt", 1700))
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
+        self.assertEqual(coordinator.status("t2")["state"], "undone")
+
+    def test_cascade_runs_the_later_transactions_resets_too(self):
+        """Input: t1 (undo_resets ["state"]) then t2 on top (undo_resets ["cache"]); undo t1.
+        Expected: base code (step(3) = 17); both resets ran, t2's first (newest first); the
+        undo receipt lists both; t2 is "undone" on the host. Pain point: only t1's resets
+        ran, t2 was marked undone, so its cache reset could never run (a second undo of t2
+        is refused). Not: resets that depend on each other's order beyond newest first."""
+        ran = []
+        coordinator, part, eng = self._two("casc_resets", {
+            "cache": lambda: ran.append("cache"), "state": lambda: ran.append("state")},
+            ["state"], ["cache"])
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
+        self.assertEqual(undo_res["receipt"]["resets"], ["cache", "state"])
+        self.assertEqual(coordinator.status("t2")["state"], "undone")
+
+    def test_a_failed_cascade_never_leaves_the_later_transaction_committed(self):
+        """Input: t1 (undo_resets ["bad"], a reset that raises) then t2 on top; undo t1.
+        Expected: undo not ok, the code is at base on the participant (step(3) = 17) and t2
+        is "undone" there, and the host says t2 is "partial", the same as t1. Pain point:
+        the host kept t2 "committed" for code that was gone. Not: an undo that never started
+        (cancelled), where both keep their state."""
+        def bad():
+            raise RuntimeError("reset failed")
+        coordinator, part, eng = self._two("casc_fail", {"bad": bad}, ["bad"], [])
+        undo_res = coordinator.undo("t1")
+        self.assertEqual((undo_res["ok"], eng.Engine().step(3), part.status("t2")["state"]),
+                         (False, 17, "undone"))
+        self.assertEqual((coordinator.status("t1")["state"], coordinator.status("t2")["state"]),
+                         ("partial", "partial"))
+
+
 class ParticipantMissingTest(unittest.TestCase):
     def test_a_dp_client_that_drops_replies_blocks_the_transaction(self):
         """Input: a worker group of 2 data-parallel groups x 2 ranks (each rank its own copy of

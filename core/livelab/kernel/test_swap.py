@@ -277,6 +277,30 @@ class SwapEdgeCaseTest(unittest.TestCase):
         base_lines, _ = inspect.getsourcelines(module_obj.compute)
         self.assertIn("return val + 1", "".join(base_lines))
 
+    def test_a_method_added_to_or_removed_from_a_nested_class_is_refused(self):
+        """Input: `class Outer: class Inner: def f(self, x): return x + 1`; edits that (a) add
+        `Inner.helper` and make f call it, (b) remove a second method `Inner.g`. Expected:
+        stage blocks with an outside_changes finding that is not overridable and names the
+        method, so even accept="all" does not proceed; nothing is applied. Pain point: with
+        outside_changes accepted, the swap installed f calling self.helper, which the live
+        Inner never got: AttributeError on the next call. Not: editing an existing nested
+        method's body (a normal target)."""
+        base = ("class Outer:\n    class Inner:\n        def f(self, x):\n"
+                "            return x + 1\n\n        def g(self):\n            return 0\n")
+        added = base.replace("return x + 1", "return self.helper(x)\n\n"
+                             "        def helper(self, x):\n            return x + 10")
+        removed = base.replace("\n\n        def g(self):\n            return 0", "")
+        for new, member in ((added, "Outer.Inner.helper"), (removed, "Outer.Inner.g")):
+            name = f"kt_sw{next(_n)}"
+            (mod_obj,) = temp_modules(self, {name: base})
+            res = S.stage(name, new, "auto")
+            blocking = [finding for finding in res["findings"] if finding["check"] == "outside_changes"
+                        and not finding["overridable"]]
+            self.assertEqual(len(blocking), 1, res["findings"])
+            self.assertIn(member, blocking[0]["observed"])
+            self.assertFalse(F.decide(res["findings"], "all")["proceed"])
+            self.assertEqual(mod_obj.Outer.Inner().f(1), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

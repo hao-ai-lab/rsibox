@@ -394,6 +394,72 @@ class JitRebuildTest(unittest.TestCase):
         self.assertEqual(kern_mod.outer_kernel.pre_run_hooks, [])
         self.assertTrue(participant.at_base()["ok"])
 
+    def test_helper_imported_under_an_alias_resets_its_caller(self):
+        """Input: module A defines `@triton.jit act_fn` (v * SCALE); module B imports it as
+        `from A import act_fn as act` and its autotuned `mlp_kernel` calls `act(v)`; launched
+        once. The edit (module A only) makes act_fn `v + 10`. Expected: jit_rebuild names
+        B.mlp_kernel as a reset caller, the next launch runs the new helper (v + 11) and
+        proves act_fn's witness; undo gives the base result. Pain point: the caller search
+        filtered callers by the helper's own name in their text, so an alias was never
+        searched: mlp_kernel kept its old compiled kernel and the proof read zero_witness.
+        Not: a caller held only in a class or a closure."""
+        aliased = MLP.replace("import {act} as acts", "from {act} import act_fn as act")
+        names, texts, mods, part, sess = lab(self, {"act": ACT, "mlp": aliased.replace(
+            "acts.act_fn(v)", "act(v)")})
+        mlp = mods["mlp"]
+        self.assertEqual(mlp.launch([1, 2]), [3, 5])
+        res = install(sess, names["act"], texts["act"].replace("v * SCALE", "v + 10"))
+        self.assertEqual(res["outcome"], "committed", res)
+        rebuild = [finding for finding in findings(res) if finding["check"] == "jit_rebuild"][0]
+        self.assertIn(f"{names['mlp']}.mlp_kernel", rebuild["observed"])
+        self.assertEqual(mlp.launch([1, 2]), [12, 13])
+        key = L.key_of(names["act"], "act_fn", at(texts["act"], "@triton.jit"))
+        proof = sess.co.prove(res["txn"])
+        self.assertEqual((proof["ok"], proof["receipt"]["witness"]["rank0"]), (True, {key: 1}))
+        self.assertTrue(sess.uninstall()["ok"])
+        self.assertEqual((mlp.launch([1, 2]), sess.state()), ([3, 5], "base"))
+
+    def test_an_unparseable_loaded_kernel_blocks_by_name(self):
+        """Input: the leaf module plus an unrelated module holding a JIT kernel whose text no
+        longer parses (`_src` set to "def broken(:"); an edit of scale_kernel. Expected: the
+        install aborts with a jit_target finding that names the unrelated kernel, not a
+        patch_invalid SyntaxError of the edit; scale_kernel's text is unchanged. Pain point:
+        every loaded kernel is now parsed for the caller search (no name filter), and one
+        broken text read as "the patch is invalid". Not: which kernels Triton can parse."""
+        other = "import {t} as triton\n\n\n@triton.jit\ndef other_kernel(v):\n    return v\n"
+        names, texts, mods, part, sess = lab(self, {"leaf": LEAF, "other": other})
+        mods["other"].other_kernel._src = "def broken(:\n"
+        src = mods["leaf"].scale_kernel.fn._src
+        res = install(sess, names["leaf"], texts["leaf"].replace("v * 2", "v * 3"))
+        blocking = [finding for finding in findings(res) if finding["check"] == "jit_target"]
+        self.assertEqual((res["outcome"], len(blocking)), ("aborted", 1), findings(res))
+        self.assertIn(f"{names['other']}.other_kernel cannot be parsed", blocking[0]["observed"])
+        self.assertNotIn("patch_invalid", checks(res))
+        self.assertEqual(mods["leaf"].scale_kernel.fn._src, src)
+
+    def test_added_kernel_calling_an_added_helper_proves_the_helper(self):
+        """Input: a module with only `launch(x)`; one edit adds `@triton.jit added_helper`
+        (v * 3), `@triton.jit added_kernel` calling it, and makes launch call added_kernel.
+        Expected: commit; launch([2, 4]) = [6, 12]; the proof is ok with every witness key
+        (helper, kernel, launch) at 1. Pain point: an added helper was hooked only into the
+        rebuilt kernels whose text names it, never into another added kernel, so its witness
+        read 0 (zero_witness) though every launch ran it inlined. Not: a real GPU."""
+        base = "import {t} as triton\n\n\ndef launch(x):\n    return x\n"
+        names, texts, mods, part, sess = lab(self, {"add": base})
+        new = texts["add"].replace(
+            "\n\n\ndef launch(x):\n    return x\n",
+            "\n\n\n@triton.jit\ndef added_helper(v):\n    return v * 3\n\n\n"
+            "@triton.jit\ndef added_kernel(x, n):\n    return [added_helper(v) for v in x[:n]]\n"
+            "\n\ndef launch(x):\n    return added_kernel[(1,)](x, len(x))\n")
+        res = install(sess, names["add"], new)
+        self.assertEqual(res["outcome"], "committed", res)
+        self.assertEqual(mods["add"].launch([2, 4]), [6, 12])
+        proof = sess.co.prove(res["txn"])
+        self.assertEqual((proof["ok"], sorted(proof["receipt"]["witness"]["rank0"].values())),
+                         (True, [1, 1, 1]), proof["receipt"]["findings"])
+        self.assertTrue(sess.uninstall()["ok"])
+        self.assertEqual((mods["add"].launch([2, 4]), sess.state()), ([2, 4], "base"))
+
     def test_selective_compiled_frame_invalidation_and_restore(self):
         """Input: a target callable carrying per-callable TorchDynamo cache attributes
         (`_torchdynamo_orig_callable`, `_torchdynamo_cache`, `_dynamo_cache_entries`).

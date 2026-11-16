@@ -17,7 +17,7 @@ from . import findings as F
 from . import journal as J
 from . import swap as S
 from . import witness as W
-from .test_locate import OPS, at, edit, fresh
+from .test_locate import OPS, at, edit, fresh, loads_constant
 
 _n = itertools.count()
 
@@ -362,7 +362,7 @@ class LineShiftTest(unittest.TestCase):
             self.assertIn(["make_shift", line_v1, at(OPS, "def make_shift")],
                           r2["timings"]["line_map_aliases"])
             self.assertTrue(S.apply(r2["staged"], j, w)["ok"])
-            self.assertIn(5, ops.make_shift.__code__.co_consts)
+            self.assertTrue(loads_constant(ops.make_shift.__code__, 5))
             self.assertEqual((ops.scale(3), ops.make_shift(10)(1)), (6, 11))
 
     def test_without_a_line_map_the_one_live_qualname_is_an_advisory_alias(self):

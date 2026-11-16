@@ -342,8 +342,9 @@ class LocalParticipant(Participant):
     def at_base(self, _=None):
         """Is this participant back at its start state? {ok, pending_txns, journal_len,
         modules: {module: [base digest, live digest]}, extra_names (module names added and
-        left), extra_attrs (scope attributes added and left), poisoned (an undo that could
-        not restore all)}. The witness global stays by design (a no-op stub after undo) and
+        left), missing_names (base module names that are gone; names `engine_names` accepts
+        are listed there instead, added or gone), extra_attrs (scope attributes added and
+        left), poisoned (an undo that could not restore all)}. The witness global stays by design (a no-op stub after undo) and
         is not an extra. A name the engine added since base by importing a module lazily (a
         module value that is the imported module, under a name no transaction or cell of
         this participant added: vLLM's LazyLoader binds `llguidance.hf` at first use) is
@@ -351,7 +352,7 @@ class LocalParticipant(Participant):
         pool: apply, undo, then check before the next job."""
         pending = sorted(t for t, st in self._state.items()
                          if st in ("prepared", "committed", "partial"))
-        mods, extra_names, engine, lazy = {}, {}, {}, {}
+        mods, extra_names, engine, lazy, missing = {}, {}, {}, {}, {}
         for m, (digest, names) in self._base.items():
             fp = self.fingerprint([m])
             live = L.text_hash(json.dumps(fp["code"], sort_keys=True)) if fp["ok"] else None
@@ -370,6 +371,14 @@ class LocalParticipant(Participant):
             extra = [n for n in extra if n not in imp]
             if extra:
                 extra_names[m] = extra
+            gone = sorted(names - set(vars(mod))) if mod is not None else []
+            # a name the engine deletes itself is listed with engine_names, as an added one
+            engine_gone = [name for name in gone if self.engine_names and self.engine_names(name)]
+            if engine_gone:
+                engine[m] = engine.get(m, []) + engine_gone
+            gone = [name for name in gone if name not in engine_gone]
+            if gone:
+                missing[m] = gone
         extra_attrs = {}
         if self._scope_keys is not None:
             now = _attr_names(self.scope)
@@ -378,10 +387,11 @@ class LocalParticipant(Participant):
                 if new:
                     extra_attrs[path] = new
         poisoned = bool(self._partial)
-        ok = (not pending and not self.journal.entries and not extra_names
+        ok = (not pending and not self.journal.entries and not extra_names and not missing
               and not extra_attrs and not poisoned and all(a == b for a, b in mods.values()))
         return F.ok(**{"ok": ok}, pending_txns=pending, journal_len=len(self.journal.entries),
-                    modules=mods, extra_names=extra_names, extra_attrs=extra_attrs,
+                    modules=mods, extra_names=extra_names, missing_names=missing,
+                    extra_attrs=extra_attrs,
                     engine_names=engine, lazy_imports=lazy, poisoned=poisoned)
 
     def prepare(self, plan):
@@ -1529,17 +1539,20 @@ class Coordinator:
         now = self.clock
         res = {p.name: _call(p, "witness_check", txn) for p in self.participants}
         fs = [{**f, "participant": n} for n, r in res.items() for f in r.get("findings", [])]
-        witness, capture = {}, {}
+        witness, capture, abstained = {}, {}, []
         for n, r in res.items():
             if r.get("ranks"):
                 ranks = {str(x.get("rank")): x.get("counts", {}) for x in r["ranks"]}
                 witness.update({f"{n}/rank{k}": c for k, c in ranks.items()})
                 capture.update({f"{n}/rank{x.get('rank')}": x.get("capture_counts", {})
                                 for x in r["ranks"]})
+                abstained += [f"{n}/rank{x.get('rank')}" for x in r["ranks"] if x.get("abstain")]
                 fs += witness_uneven(n, ranks, tolerance)
             else:
                 witness[n] = r.get("counts", {})
                 capture[n] = r.get("capture_counts", {})
+                if r.get("abstain"):
+                    abstained.append(n)
         edit = self.txns.get(txn, {}).get("edit")
         edit_mono = self.txns.get(txn, {}).get("edit_mono")
         t = now()
@@ -1550,6 +1563,8 @@ class Coordinator:
         firsts = {}
         for n, r in res.items():
             for x in (r.get("ranks") or [r]):
+                if x.get("abstain") or r.get("abstain"):
+                    continue
                 label = f"{n}/rank{x.get('rank')}" if r.get("ranks") else n
                 hits = list((x.get("first_hit") or {}).values())
                 firsts[label] = min(hits) if hits else None
@@ -1557,6 +1572,7 @@ class Coordinator:
                   else None)
         rec = {"schema": R.SCHEMA, "kind": "proof", "id": txn,
                "witness": witness,
+               **({"abstained": abstained} if abstained else {}),
                # calls made while graphs were captured, apart from the live ones above: a
                # replay runs no Python, so only live calls (or a device probe) prove a run
                "witness_capture": capture,
@@ -1608,7 +1624,9 @@ class Coordinator:
     def undo(self, txn):
         """Undo a committed transaction on every participant (newest first), then run the
         plan's `undo_resets` (R2, R3, ...) on each: code undo cannot un-write data the new code
-        produced. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
+        produced. The journal also undoes every later committed transaction (the cascade), so
+        their `undo_resets` run too (newest first, each kind once), and the host records them
+        in the same state as this one. In the gap. Appends an `undo` receipt (its `rebuild` stays None in v1)."""
         now = self.clock
         t = self.txns.get(txn, {})
         with self._lock:
@@ -1622,7 +1640,18 @@ class Coordinator:
         if why:
             return {"ok": False, "status": "refused", "error": why, "participants": {},
                     "receipt": None, "written": {"ok": False, "error": "refused: no receipt"}}
-        resets = t.get("plan", {}).get("undo_resets", [])
+        # the participants' journals also undo every transaction committed after this one
+        # and still held there (the cascade): run their undo_resets too, newest first, each
+        # kind once, and give them this undo's state below
+        with self._lock:
+            order = list(self.txns)
+            later = [other for other in order[order.index(txn) + 1:]
+                     if self.txns[other].get("state") in _HELD]
+        resets = []
+        for undone_txn in list(reversed(later)) + [txn]:
+            for kind in self.txns[undone_txn].get("plan", {}).get("undo_resets", []):
+                if kind not in resets:
+                    resets.append(kind)
         tl = Timeline(queued=now())
         rb = {}
         undo_state = {"started": False, "cancelled": False, "done": False}
@@ -1679,14 +1708,21 @@ class Coordinator:
                     "in-doubt" if status_label == "in-doubt" else "partial"
                 )
                 # transactions the participants undid with it (journal cascade): the host
-                # says so too, never "committed" for code that is gone
+                # says so too, never "committed" for code that is gone. The host's own list
+                # counts even when no reply came back (an undo in doubt).
+                cascaded = set(later)
                 for x in calls:
                     for r in (x.get("ranks") or [x]):
-                        for later in r.get("also_undone") or ():
-                            if later in self.txns and ok:
-                                self.txns[later]["state"] = "undone"
+                        cascaded.update(r.get("also_undone") or ())
+                for later_txn in cascaded:
+                    if later_txn in self.txns:
+                        self.txns[later_txn]["state"] = t["state"]
         return {"ok": ok, "status": status_label, "participants": res, "receipt": rec,
                 "written": self._write(rec)}
+
+
+# host states of a transaction whose code the participants may still hold
+_HELD = ("committed", "partial", "in-doubt")
 
 
 class StepGapCoordinator(Coordinator):

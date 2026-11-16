@@ -187,16 +187,36 @@ def _props_index(device):
     return _index(device)
 
 
+def _probed_index(device_index, probed_visible):
+    """The probe's index for CUDA device `device_index` of this process: the same index while
+    CUDA_VISIBLE_DEVICES is what the probe saw, else the probe's index of the same physical
+    GPU (a forked child that set it to "1"); None when this process's GPU cannot be matched
+    by index (hidden, or named by UUID)."""
+    if device_index is None or os.environ.get("CUDA_VISIBLE_DEVICES") == probed_visible:
+        return device_index
+    physical = _resolve_physical_gpu_index(device_index)
+    if not isinstance(physical, int):
+        return None
+    if probed_visible is None:
+        return physical
+    probed = [token.strip() for token in probed_visible.split(",") if token.strip()]
+    return probed.index(str(physical)) if str(physical) in probed else None
+
+
 def install_properties(cuda, probe=None):
     """Make cuda.get_device_properties(i) answer, while CUDA is not initialized here, with the
     values CUDA itself reported for device i in a short helper process (probe: a callable
     returning the list of dicts; default a subprocess running PROPS_CODE with this
     environment). Some imports read a value at module level (flashinfer's gdn kernels:
     get_device_properties(0).multi_processor_count) and would otherwise initialize CUDA.
-    Indices outside the probed devices, or calls after CUDA is initialized, run the original."""
+    A process that changed CUDA_VISIBLE_DEVICES since the probe (a forked child) gets the
+    properties of its own physical GPU. Indices outside the probed devices, a GPU that cannot
+    be matched (hidden, or named by UUID), or calls after CUDA is initialized run the
+    original."""
     orig = cuda.get_device_properties
     if getattr(orig, "_fastrsi_props", False):
         return {"installed": False, "why": "already installed"}
+    probed_visible = os.environ.get("CUDA_VISIBLE_DEVICES")    # what the probe saw
     try:
         t = time.time()
         props = probe() if probe else json.loads(subprocess.run(
@@ -207,7 +227,7 @@ def install_properties(cuda, probe=None):
 
     def get_device_properties(device=None):
         if not cuda.is_initialized():
-            i = _props_index(device)
+            i = _probed_index(_props_index(device), probed_visible)
             if i is not None and 0 <= i < len(props):
                 return Properties(props[i])
         return orig(device)
@@ -241,30 +261,53 @@ def unpatch(cuda=None, clear_env=False):
     return out
 
 
+def _parse_capability(text):
+    """(major, minor) from FASTRSI_ZYGOTE_CC: "10.0", "100" or "sm_100" (an arch suffix such
+    as "sm_90a" is dropped)."""
+    value = text.strip().lower()
+    value = value[3:] if value.startswith("sm_") else value
+    value = value.rstrip("af")
+    if value.count(".") == 1 and all(part.isdigit() for part in value.split(".")):
+        major, minor = value.split(".")
+    elif value.isdigit() and len(value) >= 2:
+        major, minor = value[:-1], value[-1]
+    else:
+        raise ValueError(f"FASTRSI_ZYGOTE_CC={text!r}: expected a capability such as "
+                         "10.0, 100 or sm_100")
+    return int(major), int(minor)
+
+
 def triton_capability(capability=None, nvml=None):
     """The (major, minor) Triton should target: `capability` if given, else FASTRSI_ZYGOTE_CC
-    ("10.0"), else NVML: the capability every visible GPU shares, else the first visible GPU's
-    (physical GPU 0's when they are named by UUID). Raises RuntimeError when NVML cannot answer."""
+    ("10.0", "100", "sm_100"), else NVML: the capability every visible GPU shares, else the
+    first visible GPU's (found by UUID when CUDA_VISIBLE_DEVICES names GPUs so). Raises
+    RuntimeError when CUDA_VISIBLE_DEVICES hides every GPU or NVML cannot answer."""
     if capability is not None:
         major, minor = capability
         return int(major), int(minor)
     cc = os.environ.get("FASTRSI_ZYGOTE_CC")
     if cc:
-        major, minor = cc.split(".")
-        return int(major), int(minor)
+        return _parse_capability(cc)
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if vis is not None and not vis.strip(", "):
+        raise RuntimeError("CUDA_VISIBLE_DEVICES is empty: this process sees no GPU to "
+                           "target; set FASTRSI_ZYGOTE_CC")
     nvml = nvml or _nvml()
-    cap = nvml_capability(os.environ.get("CUDA_VISIBLE_DEVICES"), nvml)
+    cap = nvml_capability(vis, nvml)
     if cap is not None:
         return tuple(cap)
     if nvml is None:
         raise RuntimeError("no NVML (pynvml) to read the GPU's capability; set FASTRSI_ZYGOTE_CC")
-    # mixed GPUs: the first visible one is CUDA device 0 in the child; UUIDs fall back to GPU 0
-    vis = os.environ.get("CUDA_VISIBLE_DEVICES") or ""
-    first = [int(x.strip()) for x in vis.split(",") if x.strip().isdigit()]
+    # mixed GPUs, or GPUs named by UUID: the first visible one is CUDA device 0 in the child
+    first = _resolve_physical_gpu_index(0)
+    if first is None:
+        raise RuntimeError(f"CUDA_VISIBLE_DEVICES={vis!r} names no GPU; set FASTRSI_ZYGOTE_CC")
     nvml.nvmlInit()
     try:
-        return tuple(nvml.nvmlDeviceGetCudaComputeCapability(
-            nvml.nvmlDeviceGetHandleByIndex(first[0] if first else 0)))
+        return tuple(nvml.nvmlDeviceGetCudaComputeCapability(_nvml_handle(nvml, first)))
+    except Exception as exc:
+        raise RuntimeError(f"NVML could not read the capability of GPU {first!r}: "
+                           f"{type(exc).__name__}: {exc}; set FASTRSI_ZYGOTE_CC") from exc
     finally:
         nvml.nvmlShutdown()
 
@@ -273,12 +316,24 @@ def pin_triton_target(capability=None, nvml=None):
     """Answer Triton's "current GPU target" from `capability` (see triton_capability) instead of
     the CUDA driver, which a module-level query would initialize. Call it before the imports
     and the returned restore() after them. Without Triton nothing is patched and restore()
-    does nothing."""
+    does nothing. With CUDA_VISIBLE_DEVICES empty (every GPU hidden) and no capability or
+    FASTRSI_ZYGOTE_CC given, nothing is patched either: the returned restore() has a
+    `skipped` reason, also printed to stderr (triton_capability itself refuses that case)."""
     try:
         from triton.backends.compiler import GPUTarget
         from triton.backends.nvidia.driver import CudaDriver
     except Exception:
         return lambda: None
+    if capability is None and not os.environ.get("FASTRSI_ZYGOTE_CC") and \
+            os.environ.get("CUDA_VISIBLE_DEVICES") is not None and \
+            not os.environ["CUDA_VISIBLE_DEVICES"].strip(", "):
+        # every GPU hidden (a CPU-only process): no target to pin, and nothing to protect
+        # (CUDA has no device to initialize); the process goes on unpinned
+        def skipped():
+            return None
+        skipped.skipped = "CUDA_VISIBLE_DEVICES is empty: Triton's target is not pinned"
+        print(f"forksafe: {skipped.skipped}", file=sys.stderr)
+        return skipped
     major, minor = triton_capability(capability, nvml)
     had = "get_current_target" in CudaDriver.__dict__
     orig = CudaDriver.__dict__.get("get_current_target")
@@ -311,17 +366,25 @@ def parse_cpulist(cpulist_text: str) -> list[int]:
     return sorted(cpus)
 
 
-def _resolve_physical_gpu_index(device_index: int) -> int:
+def _resolve_physical_gpu_index(device_index: int) -> int | str | None:
+    """The physical GPU that CUDA device `device_index` of this process is: its NVML index,
+    the UUID string ("GPU-...", "MIG-...") when CUDA_VISIBLE_DEVICES names GPUs so (Slurm
+    does), or None when CUDA_VISIBLE_DEVICES does not list that many GPUs."""
     visible_raw = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible_raw is not None:
-        visible_ids = [
-            int(token.strip())
-            for token in visible_raw.split(",")
-            if token.strip().isdigit()
-        ]
-        if 0 <= device_index < len(visible_ids):
-            return visible_ids[device_index]
-    return device_index
+    if visible_raw is None:
+        return device_index
+    tokens = [token.strip() for token in visible_raw.split(",") if token.strip()]
+    if not 0 <= device_index < len(tokens):
+        return None
+    token = tokens[device_index]
+    return int(token) if token.isdigit() else token
+
+
+def _nvml_handle(nvml_module, physical):
+    """NVML's handle for a physical GPU given as an index or a UUID string."""
+    if isinstance(physical, str):
+        return nvml_module.nvmlDeviceGetHandleByUUID(physical)
+    return nvml_module.nvmlDeviceGetHandleByIndex(physical)
 
 
 def _read_sysfs_pci_node(device_dir: str, source_label: str) -> dict | None:
@@ -357,13 +420,15 @@ def detect_gpu_cpu_affinity(
     if device_index < 0:
         return {"cpus": [], "numa_node": None, "source": "none"}
     physical_index = _resolve_physical_gpu_index(device_index)
+    if physical_index is None:          # CUDA_VISIBLE_DEVICES does not list this device
+        return {"cpus": [], "numa_node": None, "source": "none"}
     if sysfs_root == "/sys/bus/pci/devices":
         nvml_module = _nvml()
         if nvml_module is not None:
             try:
                 nvml_module.nvmlInit()
                 try:
-                    handle = nvml_module.nvmlDeviceGetHandleByIndex(physical_index)
+                    handle = _nvml_handle(nvml_module, physical_index)
                     sysfs_info = None
                     if hasattr(nvml_module, "nvmlDeviceGetPciInfo") and os.path.isdir(sysfs_root):
                         pci_info = nvml_module.nvmlDeviceGetPciInfo(handle)
@@ -405,6 +470,8 @@ def detect_gpu_cpu_affinity(
                         pass
             except Exception:
                 pass
+    if isinstance(physical_index, str):  # a UUID: only NVML maps it to a PCI device
+        return {"cpus": [], "numa_node": None, "source": "none"}
     if sysfs_root and os.path.isdir(sysfs_root):
         all_candidates: list[str] = []
         nvidia_candidates: list[str] = []
@@ -426,16 +493,16 @@ def detect_gpu_cpu_affinity(
             vendor_file = os.path.join(entry_dir, "vendor")
             class_file = os.path.join(entry_dir, "class")
             try:
-                vendor_val = (
-                    open(vendor_file, encoding="utf-8").read().strip().lower()
-                    if os.path.isfile(vendor_file)
-                    else ""
-                )
-                class_val = (
-                    open(class_file, encoding="utf-8").read().strip().lower()
-                    if os.path.isfile(class_file)
-                    else ""
-                )
+                if os.path.isfile(vendor_file):
+                    with open(vendor_file, encoding="utf-8") as handle:
+                        vendor_val = handle.read().strip().lower()
+                else:
+                    vendor_val = ""
+                if os.path.isfile(class_file):
+                    with open(class_file, encoding="utf-8") as handle:
+                        class_val = handle.read().strip().lower()
+                else:
+                    class_val = ""
             except OSError:
                 vendor_val, class_val = "", ""
             if vendor_val == "0x10de" and (not class_val or class_val.startswith("0x03")):
@@ -458,7 +525,11 @@ def bind_rank_numa_and_cpus(
     explicit_cpus: list[int] | None = None,
     sysfs_root: str = "/sys/bus/pci/devices",
 ) -> dict:
-    """Bind the calling process to `explicit_cpus` or to the CPUs local to `local_rank`'s GPU."""
+    """Bind the calling process to `explicit_cpus` or to the CPUs local to `local_rank`'s GPU,
+    within the CPUs it may run on. As Linux does, a set partly outside the process's cpuset
+    binds to the part inside it (this can widen a narrower pin the process inherited); a set
+    wholly outside it (EINVAL) falls back to the CPUs of the current mask among them. Returns {bound, bound_cpus (what it
+    is bound to now; empty when not bound), numa_node, source, why (None when bound)}."""
     if explicit_cpus is not None:
         target_cpus = sorted(set(int(cpu_id) for cpu_id in explicit_cpus))
         numa_node = None
@@ -468,12 +539,30 @@ def bind_rank_numa_and_cpus(
         target_cpus = list(affinity["cpus"])
         numa_node = affinity["numa_node"]
         source = affinity["source"]
-    if target_cpus and hasattr(os, "sched_setaffinity"):
+    bound, why = False, None
+    if not target_cpus:
+        why = "no CPUs found for this GPU"
+    elif not hasattr(os, "sched_setaffinity"):
+        why = "this platform has no sched_setaffinity"
+    else:
         try:
             os.sched_setaffinity(0, target_cpus)
-        except OSError:
-            pass
-    return {"bound_cpus": target_cpus, "numa_node": numa_node, "source": source}
+            bound = True
+        except OSError as exc:
+            # a Slurm or container cpuset excludes every one of them (EINVAL): try the
+            # GPU's CPUs within the current mask
+            usable = sorted(set(target_cpus) & os.sched_getaffinity(0))
+            why = f"sched_setaffinity({target_cpus[:16]}): {exc}"
+            if usable:
+                try:
+                    os.sched_setaffinity(0, usable)
+                    bound, why = True, None
+                except OSError as retry_exc:
+                    why += f"; within the current mask: {retry_exc}"
+        if bound:                        # what the kernel bound (the cpuset may cut it)
+            target_cpus = sorted(os.sched_getaffinity(0))
+    return {"bound": bound, "bound_cpus": target_cpus if bound else [], "numa_node": numa_node,
+            "source": source, "why": why}
 
 
 def clamp_thread_pools(num_threads: int = 1, clamp_compile_threads: bool = False) -> dict:

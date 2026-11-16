@@ -334,6 +334,128 @@ class CacheAndDeviceIndexFixes(unittest.TestCase):
             self.assertEqual(forksafe.COUNTS["fallback"], before_fallbacks + 1)
 
 
+def fake_nvml_uuids(caps, uuids, cpus=None):
+    """fake_nvml plus GPUs named by UUID (uuids[i] is GPU i's) and, when `cpus` is given,
+    each GPU's CPU affinity mask (cpus[i]: the CPU ids local to GPU i)."""
+    nvml = fake_nvml(caps)
+    nvml.nvmlDeviceGetHandleByUUID = lambda uuid: uuids.index(uuid)
+    if cpus is not None:
+        nvml.nvmlDeviceGetCpuAffinity = lambda handle, words: [
+            sum(1 << cpu for cpu in cpus[handle] if cpu // 64 == word) for word in range(words)]
+    return nvml
+
+
+class VisibleDevicesAfterFork(unittest.TestCase):
+    """A forked child sets CUDA_VISIBLE_DEVICES before CUDA initializes; Slurm names GPUs by
+    UUID."""
+
+    def test_properties_follow_the_childs_visible_devices(self):
+        """Input: properties probed with CUDA_VISIBLE_DEVICES="0,1" (152 and 148 SMs); the
+        child then sets "1", then "", then a UUID. Expected: get_device_properties(0) answers
+        148 for "1"; for "" and the UUID the original runs (it raises or initializes CUDA as
+        without forksafe). Pain point: the child read physical GPU 0's properties for its
+        device 0 (it is physical GPU 1). Not: a probe run under UUIDs."""
+        cuda = fake_cuda()
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}):
+            forksafe.install_properties(cuda, probe=lambda: [
+                {"multi_processor_count": 152}, {"multi_processor_count": 148}])
+            os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+            self.assertEqual(cuda.get_device_properties(0).multi_processor_count, 148)
+            self.assertIs(cuda.is_initialized(), False)
+            for hidden in ("", "GPU-aaaa"):
+                cuda.initialized = False
+                os.environ["CUDA_VISIBLE_DEVICES"] = hidden
+                self.assertEqual(cuda.get_device_properties(0), "original properties", hidden)
+
+    def test_triton_capability_with_no_visible_gpu_uuids_and_cc_forms(self):
+        """Input: CUDA_VISIBLE_DEVICES="" (every GPU hidden); "GPU-b,GPU-a" on mixed GPUs
+        (GPU 0 is 9.0, GPU 1 is 10.0, GPU-b is GPU 1); FASTRSI_ZYGOTE_CC "100", "sm_90a",
+        "10.3" and "ten". Expected: RuntimeError for ""; (10, 0) for the UUIDs (the first
+        visible GPU); (10, 0), (9, 0), (10, 3); ValueError naming the variable for "ten".
+        Pain point: "" answered GPU 0's capability for a process with no GPU, a UUID list
+        answered physical GPU 0's, and "100" raised an unpacking error. Not: MIG names."""
+        nvml = fake_nvml_uuids([(9, 0), (10, 0)], ["GPU-a", "GPU-b"])
+        env = {key: val for key, val in os.environ.items()
+               if key not in ("FASTRSI_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            with self.assertRaises(RuntimeError):
+                forksafe.triton_capability(nvml=nvml)
+            os.environ["CUDA_VISIBLE_DEVICES"] = "GPU-b,GPU-a"
+            self.assertEqual(forksafe.triton_capability(nvml=nvml), (10, 0))
+            for text, cap in (("100", (10, 0)), ("sm_90a", (9, 0)), ("10.3", (10, 3))):
+                os.environ["FASTRSI_ZYGOTE_CC"] = text
+                self.assertEqual(forksafe.triton_capability(nvml=nvml), cap, text)
+            os.environ["FASTRSI_ZYGOTE_CC"] = "ten"
+            with self.assertRaisesRegex(ValueError, "FASTRSI_ZYGOTE_CC"):
+                forksafe.triton_capability(nvml=nvml)
+
+    def test_pin_skips_when_every_gpu_is_hidden(self):
+        """Input: the stand-in Triton, CUDA_VISIBLE_DEVICES="" and no FASTRSI_ZYGOTE_CC (a
+        CPU-only forkserver). Expected: pin_triton_target does not raise; nothing is patched
+        (the driver's own get_current_target still answers), and restore() is a no-op that
+        carries the reason in `skipped`. Pain point: triton_capability refuses "" (no GPU to
+        target) and the FastVideo zygote calls the pin unguarded at preload, so the
+        forkserver would die. Not: a process that sees a GPU but has no NVML (still raises)."""
+        mods, CudaDriver, calls = fake_triton()
+        env = {key: val for key, val in os.environ.items() if key != "FASTRSI_ZYGOTE_CC"}
+        with mock.patch.dict(sys.modules, mods), \
+                mock.patch.dict(os.environ, {**env, "CUDA_VISIBLE_DEVICES": ""}, clear=True):
+            restore = forksafe.pin_triton_target(nvml=fake_nvml([(10, 0)]))
+            self.assertIn("CUDA_VISIBLE_DEVICES", restore.skipped)
+            self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 80, 32))
+            self.assertEqual((restore(), calls), (None, ["driver"]))
+
+    def test_affinity_of_a_gpu_named_by_uuid(self):
+        """Input: NVML with 2 GPUs (GPU-a local to CPUs 0-1, GPU-b to CPUs 2-3) and
+        CUDA_VISIBLE_DEVICES="GPU-b" (Slurm's form); then the same without NVML, over a fake
+        sysfs. Expected: device 0 resolves to GPU-b's CPUs [2, 3] through NVML; without NVML
+        no CPUs (source "none"), never GPU 0's. Pain point: UUIDs were skipped by an
+        isdigit() filter, so every rank bound to GPU 0's NUMA node. Not: real NVML or sysfs
+        (owed on a GPU node)."""
+        nvml = fake_nvml_uuids([(10, 0)] * 2, ["GPU-a", "GPU-b"], cpus=[[0, 1], [2, 3]])
+        sysfs = tempfile.mkdtemp(prefix="forksafe-uuid-")
+        self.addCleanup(shutil.rmtree, sysfs, True)
+        for addr, cpus in (("0000:01:00.0", "0-1"), ("0000:02:00.0", "2-3")):
+            os.makedirs(os.path.join(sysfs, addr))
+            for name, text in (("local_cpulist", cpus), ("numa_node", "0"), ("vendor", "0x10de")):
+                with open(os.path.join(sysfs, addr, name), "w", encoding="utf-8") as handle:
+                    handle.write(text + "\n")
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "GPU-b"}):
+            with mock.patch.object(forksafe, "_nvml", return_value=nvml), \
+                    mock.patch.object(forksafe.os.path, "isdir", return_value=False):
+                self.assertEqual(forksafe.detect_gpu_cpu_affinity(0)["cpus"], [2, 3])
+            with mock.patch.object(forksafe, "_nvml", return_value=None):
+                self.assertEqual(forksafe.detect_gpu_cpu_affinity(0, sysfs_root=sysfs),
+                                 {"cpus": [], "numa_node": None, "source": "none"})
+
+    def test_bind_uses_only_cpus_this_process_may_run_on(self):
+        """Input: a cpuset of CPUs {2, 3, 4} and stand-in sched_getaffinity /
+        sched_setaffinity that behave as Linux does under it (a set is cut to the cpuset;
+        EINVAL when nothing of it is in the cpuset). The process starts pinned to {2}; the
+        GPU's CPUs are [0, 1, 2, 3], then [0, 1]. Expected: bound True on [2, 3] (widened
+        from the inherited pin, cut to the cpuset); then bound False, no CPUs, the mask
+        unchanged and a reason. Pain point: Slurm's cpuset made sched_setaffinity fail, the
+        error was swallowed and the reply still listed bound_cpus. Not: a real Slurm
+        allocation (owed on a GPU node)."""
+        cpuset, current = {2, 3, 4}, [{2}]
+
+        def setaffinity(pid, cpus):
+            if not set(cpus) & cpuset:
+                raise OSError(22, "Invalid argument")
+            current[0] = set(cpus) & cpuset
+        with mock.patch.object(forksafe.os, "sched_getaffinity", lambda pid: set(current[0]),
+                               create=True), \
+                mock.patch.object(forksafe.os, "sched_setaffinity", setaffinity, create=True):
+            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1, 2, 3])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0], reply["why"]),
+                             (True, [2, 3], {2, 3}, None))
+            reply = forksafe.bind_rank_numa_and_cpus(0, explicit_cpus=[0, 1])
+            self.assertEqual((reply["bound"], reply["bound_cpus"], current[0]),
+                             (False, [], {2, 3}))
+            self.assertIn("Invalid argument", reply["why"])
+
+
 class NumaThreadsAndCowHygiene(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp(prefix="forksafe-sysfs-")
@@ -385,7 +507,8 @@ class NumaThreadsAndCowHygiene(unittest.TestCase):
     def test_bind_rank_numa_and_cpus_sets_process_affinity(self):
         """Input: `bind_rank_numa_and_cpus` called with `explicit_cpus` and with a fake sysfs root
         pointing to an online CPU of the current machine. Expected: `os.sched_setaffinity` binds
-        the process to that CPU and returns `bound_cpus`, `numa_node`, and `source`."""
+        the process to that CPU and returns `bound` True, `bound_cpus`, `numa_node`, `source` and
+        `why` None (where the platform has no sched_setaffinity: bound False and the reason)."""
         if hasattr(os, "sched_getaffinity"):
             original_affinity = os.sched_getaffinity(0)
             self.addCleanup(os.sched_setaffinity, 0, original_affinity)
@@ -395,20 +518,17 @@ class NumaThreadsAndCowHygiene(unittest.TestCase):
         self._write_pci_entry("0000:01:00.0", str(first_online_cpu), 0)
         clean_env = {key: val for key, val in os.environ.items() if key != "CUDA_VISIBLE_DEVICES"}
         with mock.patch.dict(os.environ, clean_env, clear=True):
+            can_bind = hasattr(os, "sched_setaffinity")
+            done = {"bound": True, "bound_cpus": [first_online_cpu], "why": None} if can_bind \
+                else {"bound": False, "bound_cpus": [], "why": "this platform has no sched_setaffinity"}
             bound = forksafe.bind_rank_numa_and_cpus(0, sysfs_root=self.temp_dir)
-            self.assertEqual(
-                bound,
-                {"bound_cpus": [first_online_cpu], "numa_node": 0, "source": "sysfs"},
-            )
+            self.assertEqual(bound, {**done, "numa_node": 0, "source": "sysfs"})
             if hasattr(os, "sched_getaffinity"):
                 self.assertEqual(os.sched_getaffinity(0), {first_online_cpu})
             explicit = forksafe.bind_rank_numa_and_cpus(
                 0, explicit_cpus=[first_online_cpu], sysfs_root=self.temp_dir
             )
-            self.assertEqual(
-                explicit,
-                {"bound_cpus": [first_online_cpu], "numa_node": None, "source": "explicit"},
-            )
+            self.assertEqual(explicit, {**done, "numa_node": None, "source": "explicit"})
 
     def test_clamp_thread_pools_updates_env_and_loaded_torch(self):
         """Input: `clamp_thread_pools(num_threads=2, clamp_compile_threads=True)` with a stand-in
