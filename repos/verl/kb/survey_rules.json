@@ -1,0 +1,81 @@
+{
+  "schema": "fastrsi-survey-rules/1",
+  "engine": "verl",
+  "rules_version": "verl-1",
+  "upstream": {
+    "repo": "volcengine/verl",
+    "commit": "975f063ba3d1b2b895462a77f5b917eeb6a7eeee",
+    "version": "0.10.0.dev (cd58f550 + VERL_STARTUP_TRACE pin)"
+  },
+  "lab_path": "repos/verl/livelab",
+  "source_roots": ["verl"],
+  "native_roots": ["verl"],
+  "exclude": [
+    "*/tests/*",
+    "*/test/*",
+    "*/test_*.py"
+  ],
+  "decorators": {
+    "dsl_kernel": ["cute.jit", "cute.kernel", "tilelang.jit"],
+    "compiled": []
+  },
+  "paths": [
+    {"glob": "verl/trainer/main_*.py", "group": "restart", "why": "Hydra / CLI entrypoints and Ray cluster startup"},
+    {"glob": "verl/trainer/constants_ppo.py", "group": "restart", "why": "Ray runtime_env constants read once at ray.init"},
+    {"glob": "verl/version/*", "group": "restart", "why": "package version metadata"},
+    {"glob": "verl/utils/startup_trace.py", "group": "restart", "why": "startup phase trace instrumentation"},
+    {"glob": "verl/single_controller/ray/*", "group": "RANKS", "why": "Ray worker group construction, placement groups, and WorkerDict wrapping"},
+    {"glob": "verl/utils/distributed.py", "group": "RANKS", "why": "torch.distributed process-group initialization across Ray workers"},
+    {"glob": "verl/utils/rendezvous/*", "group": "RANKS", "why": "multi-node rendezvous setup"},
+    {"glob": "verl/trainer/config/*", "group": "STATE", "why": "dataclass configs instantiated at trainer startup"},
+    {"glob": "verl/workers/config/*", "group": "STATE", "why": "worker and engine config dataclasses built at startup"},
+    {"glob": "verl/base_config.py", "group": "STATE", "why": "base configuration schema"},
+    {"glob": "verl/model_merger/*", "group": "RESOURCE", "why": "offline checkpoint shard merging"},
+    {"glob": "verl/utils/checkpoint/*", "group": "RESOURCE", "why": "checkpoint loading and saving managers"},
+    {"glob": "verl/trainer/ppo/core_algos.py", "group": "OP", "why": "advantage estimators, KL penalties, and policy losses called every RL step"},
+    {"glob": "verl/utils/reward_score/*", "group": "OP", "why": "rule-based reward scoring functions called every batch in RewardLoopWorker"},
+    {"glob": "verl/workers/reward_manager/*", "group": "OP", "why": "reward dispatch managers called per batch"},
+    {"glob": "verl/workers/utils/losses.py", "group": "OP", "why": "actor PPO/GRPO loss called per micro-batch in TrainingWorker"}
+  ],
+  "install_overrides": {},
+  "capabilities": {
+    "swap": {
+      "why": "PPOTrainerSync step-gap gate reaches TaskRunner, RewardLoopWorker, AgentLoopWorkerTQ (@ray.remote actor_view), and WorkerDict trainer actors via RayActorParticipant",
+      "evidence": [[
+        {"path": "repos/verl/livelab/adapter/gate.py", "contains": "StepGapCoordinator"},
+        {"path": "core/livelab/ray_participants.py", "contains": "class RayActorParticipant"}
+      ]],
+      "unreached": [
+        "verl/experimental/fully_async_policy/*",
+        "verl/experimental/separation/*",
+        "verl/experimental/one_step_off_policy/*",
+        "verl/workers/engine_workers_tinker.py",
+        "verl/workers/engine/mindspeed/*",
+        "verl/utils/trtllm/*"
+      ]
+    },
+    "swap_recapture": {
+      "why": "colocated rollout CUDA graphs inside vLLM/SGLang are not recaptured by the verl step-gap gate yet",
+      "evidence": []
+    },
+    "jit_rebuild": {
+      "why": "core/livelab/kernel/jit.py rebuilds @triton.jit kernels in verl/utils/kernel/* across warm Ray actors",
+      "evidence": [[
+        {"path": "repos/verl/livelab/adapter/gate.py", "contains": "StepGapCoordinator"},
+        {"path": "core/livelab/kernel/jit.py"}
+      ]],
+      "unreached": [
+        "verl/experimental/fully_async_policy/*",
+        "verl/experimental/separation/*"
+      ]
+    },
+    "rebuild": {
+      "why": "no in-place module/constructor rebuild wired in verl adapter yet",
+      "evidence": []
+    },
+    "respawn": {
+      "why": "no Ray actor forkserver zygote wired in repos/verl/ yet",
+      "evidence": []
+    }
+  }
+}
