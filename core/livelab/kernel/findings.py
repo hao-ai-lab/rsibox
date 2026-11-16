@@ -312,12 +312,22 @@ CATALOG = {
         "long-lived objects (model layers, scheduler, managers) at start-up, so they keep "
         "what the old constructor set; the swap reaches only instances built after it, and "
         "the commit reads as done while the running objects never see the edit (witness 0). "
-        "The kernel does not look for live instances: every constructor edit blocks",
+        "Every constructor edit blocks, except one that only changes fresh field values "
+        "(`self.x = set()` -> `self.x = {}`) on live instances that still hold the old fresh "
+        "value: that one is re-initialized in place (constructor_reinit, kernel/reinit.py)",
         [REBUILD, RESTART,
          {"action": "accept when the class is built per request or per step (its new "
                     "instances run the edit) or the edit changes nothing live objects hold",
           "cost": "none"}],
         "the edit reads as committed while the objects the engine holds keep the old state",
+        ["Keeping state across edits"], True),
+    "constructor_reinit": (
+        "the constructor edit only changes the fresh value some fields start with, and every "
+        "live instance (one heap scan, again in the gap) still holds the old fresh value: the "
+        "commit gives each the new value through the journal, exactly what the new "
+        "constructor would set, so live and new objects agree; undo puts the old objects back",
+        [ACCEPT],
+        "none: advisory; a live field that took state since prepare blocks at validate",
         ["Keeping state across edits"], True),
     "participant_missing": (
         "a participant the host expects (a rank of a worker group, a data-parallel engine) "

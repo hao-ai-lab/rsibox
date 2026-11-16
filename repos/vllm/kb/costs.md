@@ -122,6 +122,32 @@ Source: our TP4 runs on GB200 with vLLM `4e0ad57` (`vllm preload` and `vllm serv
 - FlashInfer's MNNVL all-reduce workspace fails to initialize and vLLM falls back to a slower all-reduce path. Any multi-GPU throughput or latency measurement recorded in such a container must state that IMEX was unavailable.
 - Cross-process sharing built on NVLink fabric handles cannot run without IMEX channels, whereas intra-node POSIX file-descriptor CUDA IPC handles (`livelab/services/weights.py`) continue to work normally.
 
+## Native compile: one translation unit (`layernorm_kernels.cu`, vLLM #49750's only `csrc/` file)
+
+Source: our 2026-11-14 probe on one GB200 node (CPU only; nvcc 13.0, sm_100a only), the build
+tree's own nvcc command for `csrc/libtorch_stable/layernorm_kernels.cu`, with the sources,
+headers and venv on the lab's network file system, which was slow that day (other processes on
+the node sat in NFS waits). n=3 each, seconds.
+
+| Command | Runs | Median |
+|---|---|---:|
+| build tree's command | 115.4, 100.1, 114.5 | 114.5 |
+| + `-split-compile=0` | 129.4, 81.6, 97.0 | 97.0 |
+| + `-split-compile=8` | 68.3, 57.8, 74.4 | 68.3 |
+
+Phases (`nvcc -time`, one run): host preprocessing 47.7, `cudafe++` 2.4, device preprocessing
+44.8, `cicc` 6.9, `ptxas` 3.1, `fatbinary` 0.4, host compile 11.5. With `-split-compile=0`:
+`cicc` 4.3, `ptxas` 0.8. `nvcc --version` takes 13 ms; `-E` alone 26.2 s.
+
+Reading: the compute of the unit (cicc + ptxas + host compile, about 21 s) is close to the 21.4 s
+incremental rebuild of the same file on local disk (our pre-repo prototype's notes) and consistent with the
+28 s install of #49750 (that prototype's side library: whole-unit compile, link, rebind). The
+rest here is the two preprocessing passes reading thousands of torch and CUDA headers over the
+network file system. So: keep the build tree and headers on node-local disk; pass
+`-split-compile` (it parallelizes cicc and ptxas across the unit's kernels); the unit, not the
+edited kernel, stays the floor, since #49750 changes a kernel's signature and its host launcher.
+This repo has no native route yet (`mechanisms.md`).
+
 ## Not measured yet
 
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each

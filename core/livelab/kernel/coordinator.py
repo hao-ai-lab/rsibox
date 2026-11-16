@@ -92,6 +92,7 @@ from . import jit as JIT
 from . import journal as J
 from . import locate as L
 from . import receipt as R
+from . import reinit as RI
 from . import swap as S
 from . import witness as W
 
@@ -244,6 +245,7 @@ class LocalParticipant(Participant):
         self._next_seq = 0
         self._lock = threading.Lock()  # the commit/undo decision of an in-flight job
         self._inflight = {}           # txn -> {"done": Event, "gone": bool} while it commits
+        self._reinit = {}             # prepared txn -> [constructor field reinit (reinit.py)]
 
     def _live_source(self, module):
         """The text the live module runs: the latest committed transaction's, else None."""
@@ -294,6 +296,7 @@ class LocalParticipant(Participant):
         # through the plan's accept, as it did at stage before
         frames = F.decide([f for f in fs if f["check"] == "running_frame"], accept)
         rest = [f for f in fs if f["check"] != "running_frame"]
+        rest += self._recheck_reinit(self._reinit.get(txn, ()))
         if not rest and frames["proceed"]:
             return F.ok(checked=sum(len(st.expect) for st in staged), findings=frames["findings"])
         return F.not_ok("changed since prepare" if rest else "running frame at the gap",
@@ -426,9 +429,11 @@ class LocalParticipant(Participant):
         fs, staged, items, ok, timings, targets = [], [], {}, True, {}, {}
         own = [c for cs in self._codes.values() for c in cs]
         res = {m: self._stage(m, spec, own) for m, spec in plan.get("modules", {}).items()}
+        reinits = []
         for m in plan.get("modules", {}):
             r = res[m]
-            fs += r["findings"]
+            fs += [self._resolve_reinit(m, f, reinits) if f.get("reinit") else f
+                   for f in r["findings"]]
             ok = ok and r["ok"]
             if r["staged"] is not None:
                 staged.append(r["staged"])
@@ -469,6 +474,8 @@ class LocalParticipant(Participant):
             self._state[txn] = "aborted"
             return F.not_ok(f"vote no: {d['blocking'] or 'stage failed'}", out_fs, staged=items)
         self._staged[txn] = (staged, cells, accept)
+        if reinits:
+            self._reinit[txn] = reinits
         self._pending[txn] = {m: spec["source"] for m, spec in plan.get("modules", {}).items()}
         self._pending_maps[txn] = {m: r["staged"].line_map for m, r in res.items()
                                    if r["staged"] is not None}
@@ -527,6 +534,12 @@ class LocalParticipant(Participant):
                     u = self.journal.undo_to(mark)
                     self._rolled_back(txn, u, [])
                     return {**r, "findings": r.get("findings", []) + u["findings"]}
+            reinit_fs, reinit_done = self._apply_reinit(txn)
+            if reinit_fs:
+                self._note_added(mark)
+                u = self.journal.undo_to(mark)
+                self._rolled_back(txn, u, [])
+                return F.not_ok("commit refused: constructor_edit", reinit_fs + u["findings"])
             t_applied = time.monotonic()
             fs = []
             armed, n_routes = [], len(self.journal.routes)
@@ -606,7 +619,8 @@ class LocalParticipant(Participant):
                                  "cells_s": round(t_end - t_applied, 6),
                                  "commit_s": round(t_end - t_start, 6),
                                  "committed_mono": t_end},
-                        **({"rebuild_routes": rebuild_routes} if rebuild_routes else {}))
+                        **({"rebuild_routes": rebuild_routes} if rebuild_routes else {}),
+                        **({"reinit": reinit_done} if reinit_done else {}))
 
         try:
             r = self.quiesce(do)
@@ -628,6 +642,67 @@ class LocalParticipant(Participant):
             # before it leaves the quiesce point (see above); undo waits for it
             return F.not_ok(f"commit: {type(e).__name__}: {e}", in_flight=running)
 
+    # -- constructor field reinit (reinit.py) ---------------------------------------------
+    def _resolve_reinit(self, m, f, reinits):
+        """Prepare: a constructor_edit with a reinit plan becomes an advisory
+        constructor_reinit when every live instance can take the new fresh values; else it
+        stays a blocking constructor_edit that says why."""
+        plan = f["reinit"]
+        module = sys.modules.get(self._actual(m))
+        cls = module
+        for part in plan["cls"].split("."):
+            cls = getattr(cls, part, None)
+        if not isinstance(cls, type):
+            return {**f, "observed": f["observed"] + f" (not re-initializable in place: "
+                    f"{plan['cls']} is not a live class)"}
+        r = RI.resolve(cls, plan["meth"], plan["fields"], vars(module))
+        if not r["ok"]:
+            return {**f, "observed": f["observed"] + f" (not re-initializable in place: "
+                    f"{r['why']})"}
+        reinits.append({"key": f["subject"], "cls": cls, "meth": plan["meth"],
+                        "fields": plan["fields"], "glb": vars(module), "found": None,
+                        "label": f"{plan['cls']}.{plan['meth']}"})
+        what = ", ".join(f"{x['field']}: {x['old']} -> {x['new']}" for x in plan["fields"])
+        nf = F.finding("constructor_reinit", f"{plan['cls']}.{plan['meth']} changes only fresh "
+                       f"field values ({what}); {r['count']} live instance(s) hold the old "
+                       f"fresh values and get the new ones in the commit's gap "
+                       f"(heap scan {r['scan_s']} s)",
+                       "every live instance re-initialized, or none live",
+                       subject=f["subject"])
+        return {**nf, "advisory": True, "reinit": {**plan, "instances": r["count"],
+                                                   "scan_s": r["scan_s"]}}
+
+    def _recheck_reinit(self, entries):
+        """Validate (in the gap): scan again, so an instance built since prepare is covered
+        and an instance whose field took state since is refused."""
+        out = []
+        for e in entries:
+            r = RI.resolve(e["cls"], e["meth"], e["fields"], e["glb"])
+            e["found"] = r["instances"] if r["ok"] else None
+            e["scan_s"] = r["scan_s"]
+            if not r["ok"]:
+                out.append({**F.finding(
+                    "constructor_edit", f"{e['label']}: re-initialization in place refused at "
+                    f"the gap: {r['why']}", "every live instance holds the old fresh value",
+                    subject=e["key"]), "route": "T1", "participant": self.name})
+        return out
+
+    def _apply_reinit(self, txn):
+        """Commit, after the swaps (journaled). Returns (blocking findings, summary)."""
+        entries = self._reinit.pop(txn, ())
+        if entries and any(e["found"] is None for e in entries):
+            fs = self._recheck_reinit(entries)     # a commit without a validate first
+            if fs:
+                return fs, None
+        done = {}
+        for e in entries:
+            n = RI.apply(self.journal, e["found"], e["fields"], e["glb"], e["label"])
+            for _ in range(n):
+                self.witness.hit(e["key"])
+            done[e["key"]] = {"instances": n, "fields": [x["field"] for x in e["fields"]],
+                              "scan_s": e.get("scan_s")}
+        return [], done
+
     def _rolled_back(self, txn, u, cell_findings):
         """A commit rolled back (journal.undo_to its mark). When that could not restore
         everything (an inverse failed, or a repair cell changed what the journal cannot
@@ -644,6 +719,7 @@ class LocalParticipant(Participant):
     def abort(self, txn):
         txn, _ = txn_ref(txn)
         self._pending.pop(txn, None)
+        self._reinit.pop(txn, None)
         self._pending_maps.pop(txn, None)
         if self._staged.pop(txn, None) is not None or self._state.get(txn) == "prepared":
             self._state[txn] = "aborted"
@@ -675,6 +751,7 @@ class LocalParticipant(Participant):
             with self._lock:
                 if txn in self._state:
                     self._staged.pop(txn, None)
+                    self._reinit.pop(txn, None)
                     self._pending.pop(txn, None)
                     self._pending_maps.pop(txn, None)
                     self._state[txn] = "undone"
