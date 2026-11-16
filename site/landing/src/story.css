@@ -508,7 +508,8 @@
 .alt-cases .alt-item[aria-pressed="true"] b { font-weight: 500; }
 .alt-im { display: flex; justify-content: space-between; font-size: 12px; color: var(--fr-muted); }
 .alt-ix { color: var(--fr-fast); } .alt-ix.na { color: var(--fr-muted); }
-.alt-view { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; align-items: start; min-width: 0; }
+.alt-view { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; min-width: 0; }
+.alt-view .alt-why, .alt-view .alt-saw { max-width: 78ch; }
 .alt-dlg .alt-diff { max-height: min(62vh, 620px); }
 .alt-na { font-size: 15px !important; color: var(--fr-muted) !important; font-weight: 400 !important; }
 .alt-saw { margin: 0; font-size: 13px; line-height: 1.5; color: var(--fr-ink); max-width: 46ch; }
