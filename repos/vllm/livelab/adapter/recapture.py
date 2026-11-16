@@ -229,11 +229,13 @@ class Recapture:
                            for mode, descriptors in left.items() if descriptors},
                     memory={"before": mem0, "after": engine.memory()})
 
-    def extend(self, engine, txn, journal, witness, sizes=None):
-        """Capture more of the descriptors R1 left out for txn (default: all of them)."""
+    def extend(self, engine, txn, journal, witness, sizes=None, extend_id=None):
+        """Capture more of the descriptors R1 left out for txn (default: all of them).
+        extend_id names this extend so `drop_extend` can take it back (another rank's failed)."""
         state = self.live.get(txn)
         if state is None:
             return F.not_ok(f"no R1 for {txn} on this rank")
+        state.pop("extend", None)      # only the newest extend can be dropped
         if not journal.marks or journal.marks[-1][0] != txn:
             return F.not_ok(f"{txn} is not this rank's newest committed transaction")
         want = None if sizes is None else {int(s) for s in sizes}
@@ -253,10 +255,29 @@ class Recapture:
                     for wrapper, attr in wrappers:
                         if getattr(wrapper, "runtime_mode", None) in (None, mode):
                             getattr(wrapper, attr).pop(desc, None)
-            state["left"][mode] = [desc for desc in state["old_keys"][mode] if desc not in engine.keys[mode]]
+                state["left"][mode] = [desc for desc in state["old_keys"][mode]
+                                       if desc not in engine.keys[mode]]
 
         journal.record_call(unextend, f"R1 extend of {txn}")
+        if extend_id is not None:
+            state["extend"] = (extend_id, journal.entries[-1], unextend)
         return F.ok(**result["report"])
+
+    def drop_extend(self, txn, journal, extend_id):
+        """Take back the extend `extend_id` of txn on this rank: its graphs and keys go, its
+        descriptors are left out again and its journal entry is removed. Only the newest
+        extend, while its entry is still the journal's newest. A rank where that extend did
+        not capture anything (it failed, or never ran) has nothing to drop: ok, dropped False."""
+        state = self.live.get(txn) or {}
+        last = state.get("extend")
+        if last is None or last[0] != extend_id:
+            return F.ok(dropped=False)
+        _, entry, unextend = state.pop("extend")
+        if not journal.entries or journal.entries[-1] is not entry:
+            return F.not_ok(f"extend {extend_id} of {txn} is no longer this rank's newest change")
+        journal.entries.pop()
+        unextend()
+        return F.ok(dropped=True)
 
     def _capture(self, engine, chosen, witness):
         """Capture `chosen` ({mode: [desc]}); every key goes in just before its capture (the

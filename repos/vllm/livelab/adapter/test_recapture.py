@@ -11,11 +11,15 @@ The stand-in runner keeps vLLM's semantics where R1 depends on them, and nothing
 - the dispatcher's keys: FULL first, then PIECEWISE, else eager.
 Host, WorkerGroup, Side, recapture.py and the kernel (journal, witness) are the real code.
 """
+import queue
 import sys
+import threading
+import time
 import unittest
 import weakref
 from types import SimpleNamespace as NS
 
+from . import host as H
 from . import recapture as RC
 from .test_host import STEP_LINE, make_host, plan
 from .test_side import worker
@@ -183,6 +187,159 @@ class RecaptureTest(unittest.TestCase):
         self.assertEqual([r.step(8) for r in rs], [("base", "FULL")] * 2)
         self.assertEqual(len(LIVE), graphs0)
         self.assertFalse(h.handle({"op": "recapture_extend", "txn": "r1ext"})["ok"])
+
+    def test_an_extend_that_fails_on_one_rank_is_dropped_on_every_rank(self):
+        """Input: 2 ranks, FULL graphs for 8/4/2/1; recapture of size 1, then
+        `recapture_extend` of size 4 where rank 1's capture of 4 raises. Expected: the extend
+        is not ok and says what it dropped; in the same gap rank 0 drops the 4-token graph it
+        captured, so both ranks run a 4-token step eager on "v1" (same keys, same entries);
+        a second extend captures 4 on both ranks and undo puts the base graphs back. Pain
+        point: rank 0 replaying a FULL graph while rank 1 runs the same step eager (TP ranks
+        out of step). Fails before the fix: rank 0 keeps keys {1, 4}. Not: real NCCL ranks."""
+        lab, runners, _ = host(self, "extfail")
+        lab.handle({"op": "txn", "plan": plan("r1xf", rebuild=["recapture"], recapture={"sizes": [1]})})
+        runners[1].fail_at = ("FULL", 4)
+        reply = lab.handle({"op": "recapture_extend", "txn": "r1xf", "sizes": [4]})
+        runners[1].fail_at = None
+        self.assertFalse(reply["ok"])
+        self.assertEqual([runner.keys for runner in runners], [{"FULL": {1}}] * 2)
+        self.assertEqual([set(runner.full.concrete_cudagraph_entries) for runner in runners],
+                         [{1}] * 2)
+        self.assertEqual([runner.step(4) for runner in runners], [("v1", "NONE")] * 2)
+        self.assertEqual([rank["dropped"] for rank in reply["dropped"]["ranks"]], [True, False])
+        self.assertFalse(lab.co.poison)
+        self.assertTrue(lab.handle({"op": "recapture_extend", "txn": "r1xf", "sizes": [4]})["ok"])
+        self.assertEqual([runner.step(4) for runner in runners], [("v1", "FULL")] * 2)
+        self.assertTrue(lab.handle({"op": "undo", "txn": "r1xf"})["ok"])
+        self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
+
+    def test_a_drop_that_fails_poisons_the_host(self):
+        """Input: 2 ranks; recapture of size 1, then `recapture_extend` of size 4 where rank
+        1's capture raises and rank 0 cannot drop its captured 4 (its drop replies not ok).
+        Expected: the extend is not ok with a `rebuild_failed` finding, the host is poisoned
+        (rank 0 replays FULL 4, rank 1 runs it eager), the next `txn` and the next
+        `recapture_extend` are refused, and undo still puts both ranks back on the base
+        graphs. Pain point: ranks left replaying different graphs with the host still taking
+        transactions. Fails without the poison branch: no poison, the next txn commits.
+        Not: why a real drop fails (the drop is made to fail here)."""
+        lab, runners, sides = host(self, "dropfail")
+        lab.handle({"op": "txn", "plan": plan("r1df", rebuild=["recapture"], recapture={"sizes": [1]})})
+        runners[1].fail_at = ("FULL", 4)
+        sides[0].recapture.drop_extend = lambda txn, journal, extend_id: {
+            "ok": False, "error": "drop refused on rank 0", "findings": []}
+        reply = lab.handle({"op": "recapture_extend", "txn": "r1df", "sizes": [4]})
+        runners[1].fail_at = None
+        self.assertFalse(reply["ok"])
+        self.assertIn("rebuild_failed", [finding["check"] for finding in reply["findings"]])
+        self.assertEqual([finding["participant"] for finding in lab.co.poison], ["workers"])
+        self.assertEqual([runner.step(4) for runner in runners], [("v1", "FULL"), ("v1", "NONE")])
+        self.assertEqual(lab.handle({"op": "txn", "plan": plan("r1df2")})["outcome"], "refused")
+        again = lab.handle({"op": "recapture_extend", "txn": "r1df", "sizes": [4]})
+        self.assertIn("poisoned", again["error"])
+        self.assertTrue(lab.handle({"op": "undo", "txn": "r1df"})["ok"])
+        for runner in runners:
+            self.assertEqual(runner.keys, {"FULL": {8, 4, 2, 1}})
+            self.assertEqual([runner.step(size) for size in (8, 4, 2, 1)], [("base", "FULL")] * 4)
+
+    def test_a_dropped_extend_gives_every_mode_its_left_out_buckets_back(self):
+        """Input: FULL_AND_PIECEWISE, sizes 4/2/1; recapture of size 1; an extend of 4 that
+        fails on rank 1 at FULL 4 (after its PIECEWISE 4), so rank 0 drops both of its new
+        graphs; then the same extend again. Expected: the second extend captures PIECEWISE 4
+        and FULL 4 on both ranks (keys {1, 4} in both modes on both ranks). Pain point: the
+        drop restored the left-out list of the last mode only, so rank 0 never captured
+        PIECEWISE 4 again. Fails before the fix: rank 0's PIECEWISE keys stay {1}."""
+        lab, runners, _ = host(self, "extmm", modes=("PIECEWISE", "FULL"), sizes=(4, 2, 1))
+        lab.handle({"op": "txn", "plan": plan("r1mm", rebuild=["recapture"], recapture={"sizes": [1]})})
+        runners[1].fail_at = ("FULL", 4)
+        self.assertFalse(lab.handle({"op": "recapture_extend", "txn": "r1mm", "sizes": [4]})["ok"])
+        runners[1].fail_at = None
+        reply = lab.handle({"op": "recapture_extend", "txn": "r1mm", "sizes": [4]})
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual([runner.keys for runner in runners],
+                         [{"PIECEWISE": {1, 4}, "FULL": {1, 4}}] * 2)
+
+    def test_undo_after_an_extend_with_nothing_to_capture(self):
+        """Input: FULL-only ranks; a recapture plan with modes ["PIECEWISE"] (no such graphs:
+        nothing chosen), then `recapture_extend`, then undo. Expected: the extend is ok with
+        nothing captured and undo is ok, both ranks back on "base". Pain point: the extend's
+        undo entry read a loop variable that was never set (UnboundLocalError), so undo of the
+        transaction was `undo_incomplete`. Fails before the fix: undo ok False."""
+        lab, runners, _ = host(self, "extnone", sizes=(4, 2, 1))
+        reply = lab.handle({"op": "txn", "plan": plan("r1none", rebuild=["recapture"],
+                                                       recapture={"modes": ["PIECEWISE"]})})
+        self.assertEqual(reply["outcome"], "committed")
+        self.assertTrue(lab.handle({"op": "recapture_extend", "txn": "r1none"})["ok"])
+        undo = lab.handle({"op": "undo", "txn": "r1none"})
+        self.assertTrue(undo["ok"], undo.get("findings") or undo)
+        self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
+
+    def test_an_extend_that_outlives_the_gap_poisons_the_host(self):
+        """Input: the host driven from this thread with a stand-in busy loop on its own
+        thread; `recapture_extend` whose collective_rpc takes 0.5 s, gap_timeout_s 0.2.
+        Expected: the op is not ok, the host is poisoned (workers), the worker group refuses
+        later calls, and a later extend is refused. Pain point: an extend still capturing in
+        the loop after its caller gave up, with the host still taking transactions. Fails
+        before the fix: no poison, the group stays usable. Not: vLLM's real busy loop."""
+        lab, _, _ = host(self, "extlate")
+        lab.handle({"op": "txn", "plan": plan("r1late", rebuild=["recapture"], recapture={"sizes": [4]})})
+        jobs = queue.SimpleQueue()
+        lab.core.input_queue = jobs
+
+        def loop():
+            while True:
+                _, job = jobs.get()
+                if job is None:
+                    return
+                job.run()
+        loop_thread = threading.Thread(target=loop, daemon=True)
+        loop_thread.start()
+        lab.loop_thread = loop_thread
+        self.addCleanup(loop_thread.join, 5)
+        self.addCleanup(jobs.put, (H.TAG, None))
+        executor = lab.core.model_executor
+        full_rpc = executor.collective_rpc
+
+        def slow_extend_rpc(name, timeout=None, args=()):
+            if args[0] == "recapture_extend":
+                time.sleep(0.5)
+            return full_rpc(name, timeout, args)
+        executor.collective_rpc = slow_extend_rpc
+        reply = lab.handle({"op": "recapture_extend", "txn": "r1late", "sizes": [8],
+                            "gap_timeout_s": 0.2})
+        self.assertFalse(reply["ok"])
+        self.assertEqual([finding["participant"] for finding in lab.co.poison], ["workers"])
+        self.assertTrue(lab.workers.broken)
+        time.sleep(0.5)                          # the late extend finishes in the loop
+        again = lab.handle({"op": "recapture_extend", "txn": "r1late", "sizes": [2]})
+        self.assertFalse(again["ok"])
+        self.assertIn("poisoned", again["error"])
+
+    def test_an_undo_after_a_failed_recapture_has_the_phase2_deadline(self):
+        """Input: 2 ranks; rank 1's capture raises, and rank 0's undo of the rolled-back edit
+        takes 0.6 s; phase-2 deadline 0.4 s. Expected: rollback status partial, rank 0 named
+        `deadline_missed`, the host poisoned and a pending rollback held; once rank 0's late
+        undo lands, both ranks run "base", the pending rollback clears and the next
+        transaction is still refused until `recovered`. Pain point: that undo ran with no
+        deadline, so one slow rank held the gap as long as it liked and a late rank never
+        poisoned the host. Fails before the fix: status undone, no poison."""
+        lab, runners, _ = host(self, "rbdl")
+        runners[1].fail_at = ("FULL", 2)
+        slow_undo = plan("r1dl", rebuild=["R1"], faults={
+            "worker:0": {"method": "undo", "delay_s": 0.6, "fail": False}})
+        reply = lab.handle({"op": "txn", "plan": slow_undo, "phase2_deadline_s": 0.4})
+        receipt = reply["receipt"]
+        self.assertEqual((reply["outcome"], receipt["rollback"]["status"]),
+                         ("rolled_back", "partial"))
+        undo = receipt["participants"]["workers"]["undo"]
+        self.assertEqual([finding["check"] for finding in undo["ranks"][0]["findings"]],
+                         ["deadline_missed"])
+        self.assertEqual([finding["participant"] for finding in lab.co.poison], ["workers"])
+        self.assertTrue(lab.co.has_pending_rollback())
+        time.sleep(0.6)                          # rank 0's late undo lands
+        self.assertFalse(lab.co.has_pending_rollback())
+        for runner in runners:
+            self.assertEqual([runner.step(size) for size in (8, 4, 2, 1)], [("base", "FULL")] * 4)
+        self.assertEqual(lab.handle({"op": "txn", "plan": plan("r1dl2")})["outcome"], "refused")
 
     def test_pieces_of_a_bucket_are_recaptured_together_and_other_modes_are_untouched(self):
         """Input: FULL_AND_PIECEWISE (a FULL wrapper and 3 piecewise wrappers, graphs for
