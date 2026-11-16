@@ -1,19 +1,20 @@
 <div class="fr pg">
   <nav class="pg-nav" aria-label="Site">
     <a class="pg-mark" href="#top">FastRSI</a>
-    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a href="audit/#prs" data-tab="prs">Supported PRs</a><a href="audit/#coverage" data-tab="coverage">Coverage</a><a href="audit/#conventions" data-tab="conventions">Conventions</a><a href="audit/#faults" data-tab="faults">Faults</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
+    <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a class="pg-ext" href="https://github.com/hao-ai-lab/fastrsi">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
   <header class="pg-hero" id="top">
     <div class="hero-grid">
       <div class="hero-copy">
         <h1 class="fr-title pg-title">{{TITLE}}</h1>
-        <p class="fr-lede pg-lede">FastRSI is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets its answer in seconds, not minutes.</p>
+        <p class="fr-lede pg-lede">FastRSI is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets an answer it can trust in seconds, not minutes.</p>
         <p class="hero-cta"><button type="button" class="fr-btn hero-try" id="try-open">Try it</button></p>
       </div>
       <div class="hero-figs">
-        <a class="fr-card hero-fig" href="#eval-time" data-pop="eval-time" aria-label="FastRSI cuts system and measurement overhead: time for one evaluation on vLLM. Open the full figure.">
-          <p class="hero-cap"><b>FastRSI cuts system and measurement overhead</b><span class="hero-sub">Time for one evaluation, vLLM</span></p>
+        <div class="hero-pick" id="hero-pick" role="group" aria-label="Engine shown in the two figures"></div>
+        <a class="fr-card hero-fig" href="#eval-time" data-pop="eval-time" aria-label="FastRSI cuts system and measurement overhead: time for one evaluation. Open the full figure.">
+          <p class="hero-cap"><b>Skip the cold start and the full benchmark suite</b><span class="hero-sub" id="hero-ladder-sub"></span></p>
           <div id="hero-ladder"></div>
           <span class="hero-zoom">Open the full figure</span>
         </a>
@@ -29,7 +30,7 @@
       <div id="fig-slot"></div>
     </dialog>
     <dialog class="try-dlg" id="try-dlg" aria-labelledby="try-h">
-      <h2 class="fr-h2" id="try-h">Try FastRSI</h2>
+      <h2 class="fr-h2" id="try-h">Run the loop on your laptop</h2>
       <p class="fr-sub" id="try-status">Paste this prompt into your coding agent. It needs Python 3.11, no GPU and no dependencies.</p>
       <pre class="install-p" id="install-text">Clone https://github.com/hao-ai-lab/fastrsi and read AGENTS.md and core/agents/livelab_overview.md.
 Run the toy live lab's conformance suite (about 3 s on CPU):
@@ -41,7 +42,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <!-- The loop -->
   <section class="fr-sec pg-loop" id="loop" aria-labelledby="loop-h">
-    <h2 class="fr-h2" id="loop-h">Self-improvement is a loop, and evaluation is its slowest step</h2>
+    <h2 class="fr-h2" id="loop-h">Why coding agents get stuck waiting on the GPU</h2>
     <p class="fr-sub">An agent edits the system, evaluates the edit, keeps it if it helped, and goes again. Every turn of the loop waits on the evaluation. That wait has two parts, and FastRSI goes after both.</p>
     <div class="fr-card lp">
       <div class="lp-track" id="lp" role="img" aria-label="The loop: edit, start the system, run the evaluation, keep or revert, repeat. Starting the system and running the evaluation are the long steps.">
@@ -60,37 +61,46 @@ Show me the result, then walk me through one install, check and uninstall on the
         <div class="lp-back" data-lp="7" aria-hidden="true"><span>repeat, hundreds of times</span></div>
       </div>
     </div>
+    <div class="fr-card sw">
+      <div class="sw-head">
+        <p class="hero-cap"><b>As models write code faster, evaluation takes over the clock</b><span class="hero-sub">One 6-hour vLLM optimization run, replayed with the model generating faster</span></p>
+        <div class="hero-pick" id="sweep-pick" role="group" aria-label="Model generation speed"></div>
+      </div>
+      <div id="loop-sweep" role="img"></div>
+      <p class="sw-keys"><span><i class="fr-sh-gen"></i>Model generating</span><span><i class="fr-sh-ovl"></i>Model generating while an evaluation runs</span><span><i class="fr-sh-eval"></i>Evaluation alone</span></p>
+    </div>
+    <p class="pg-next">To see why evaluation dominates the clock, look at what actually happens inside a single turn of that loop.</p>
   </section>
 
   <!-- The story -->
   <section class="pg-story" id="story" aria-labelledby="story-h">
-    <h2 class="fr-h2" id="story-h">Wait, where does the overhead come from?</h2>
-    <p class="fr-sub">Think about how you would debug one line in a model server yourself. Scroll to try it three ways.</p>
+    <h2 class="fr-h2" id="story-h">What happens when you change one line of code?</h2>
+    <p class="fr-sub">Suppose you are tuning a model server by hand and want to test a one-line change. Here are the three ways you can run it.</p>
     <div class="st">
       <div class="st-steps">
         <article class="st-step" data-scene="restart">
-          <p class="st-kicker">From a terminal</p>
-          <h3>Edit one line. Restart everything.</h3>
+          <p class="st-kicker">The standard way</p>
+          <h3>Change one line, restart the whole server</h3>
           <p>This is how most agents check an edit today. The engine reloads its weights, recaptures CUDA graphs and re-tunes kernels before it runs a single benchmark step.</p>
           <p>On vLLM that is <b class="fr-num" data-st="restart_s">228</b>&nbsp;s per try, and <b class="fr-num" data-st="startup_pct">88</b>% of it is start-up. If the idea was wrong, you pay it all again.</p>
           <p class="st-aside">Yeah, I know. Super slow, right?</p>
         </article>
         <article class="st-step" data-scene="notebook">
-          <p class="st-kicker">From a notebook</p>
-          <h3>Keep the engine alive.</h3>
-          <p>One hacky way to preserve the state: move everything into a Jupyter notebook, if that is possible at all. Load the engine once, edit the file, reload the one module you changed, and run just a few steps, enough to tell whether the idea works.</p>
+          <p class="st-kicker">The human shortcut</p>
+          <h3>Keep the process warm in a notebook</h3>
+          <p>An impatient engineer will keep the engine loaded in a Jupyter notebook, edit the file, reload just the changed module, and run a few steps to see if the idea works.</p>
           <p>A try now takes <b class="fr-num" data-st="probe_s">2.4</b>&nbsp;s. This is the best case: nothing is cheaper than editing an engine that is already warm.</p>
           <div class="st-mini" id="mini-best" aria-hidden="true"></div>
         </article>
         <article class="st-step" data-scene="catch">
-          <p class="st-kicker">The catch</p>
-          <h3>Until a reload lies to you.</h3>
-          <p>Hot reload by hand is fragile, and it does not last. Sooner or later a number looks great and you can't trust it.</p>
+          <p class="st-kicker">Where the shortcut breaks</p>
+          <h3>Stale state silently corrupts your numbers</h3>
+          <p>Manual hot reloading leaves old references, cached graphs, and dirty buffers behind. Sooner or later a benchmark looks great, and you cannot trust it.</p>
           <div class="st-mini st-frag"><span>stale objects</span><span>stale graphs</span><span>dirty state</span><b>&#x2717; fragile: restart to be sure</b></div>
         </article>
         <article class="st-step" data-scene="fastrsi">
-          <p class="st-kicker">FastRSI, part one</p>
-          <h3>Make the notebook trick safe.</h3>
+          <p class="st-kicker">How FastRSI fixes startup</p>
+          <h3>Patch the live engine, or fall back cleanly</h3>
           <p>FastRSI keeps the notebook's speed and adds a safety net. Each edit is a transaction that takes the cheapest path that is still safe, and falls back to the next one when it has to.</p>
           <ol class="st-mini st-fall">
             <li><b>Install into the live engine</b><span>cheapest</span></li>
@@ -98,10 +108,10 @@ Show me the result, then walk me through one install, check and uninstall on the
             <li><b>Respawn from a warm copy</b></li>
             <li><b>Full restart</b><span>last resort</span></li>
           </ol>
-          <p>A bad edit fails its check and is reverted. The engine survives it.</p>
+          <p>If an edit crashes or fails its check, FastRSI rolls it back and the warm engine keeps running.</p>
         </article>
         <article class="st-step" data-scene="probe">
-          <p class="st-kicker">FastRSI, part two</p>
+          <p class="st-kicker">How FastRSI fixes measurement</p>
           <h3>Probe to steer. Evaluate in full to confirm.</h3>
           <p>While developing, you rarely need the whole benchmark. The agent writes a targeted probe: a few steps on the code path it just changed.</p>
           <p>The full evaluation still runs on the edits worth keeping. It can run in the background, so the agent is never blocked on it.</p>
@@ -125,47 +135,15 @@ Show me the result, then walk me through one install, check and uninstall on the
   </section>
 
   <!-- Architecture -->
-  <section class="pg-story" id="arch" aria-labelledby="arch-h">
-    <h2 class="fr-h2" id="arch-h">FastRSI prepares an engine once, then improves it live</h2>
-    <p class="fr-sub">Two stages. An offline toolsmith turns the engine into a live lab once. Then a developer agent improves the engine inside that lab, with an online toolsmith extending the lab whenever the agent outgrows it.</p>
-    <div class="st">
-      <div class="st-steps">
-        <article class="st-step" data-at="1">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Sort every function by what an edit to it disturbs.</h3>
-          <p>The offline toolsmith reads the codebase, its past PRs, issues and tests. It sorts functions into six groups. Each group has its own way to install an edit without a restart.</p>
-          <p>Only start-up logic, launch flags and environment variables still need one.</p>
-        </article>
-        <article class="st-step" data-at="2">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Build what the engine lacks.</h3>
-          <p>Each engine needs different machinery to stay warm: a process to fork from, weights held outside the worker, a saved start state to return to. The toolsmith builds these per engine and records what each one costs.</p>
-        </article>
-        <article class="st-step" data-at="3">
-          <p class="st-kicker">Stage 1 · offline</p>
-          <h3>Prove each tool against a fresh process.</h3>
-          <p>Every tool is checked the same way: base, edit, injected fault, reverted base, each compared with a cold start. A lab's results count only after it passes all <b>11</b> conformance cases.</p>
-          <p>The guarantees are settled here, offline, so the checks that run on every edit can stay small.</p>
-        </article>
-        <article class="st-step" data-at="4">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>Every edit is a transaction.</h3>
-          <p>The developer agent thinks, edits, installs, checks and decides. An install is prepared while the engine keeps stepping, then committed in the gap between two steps, on every GPU rank or on none.</p>
-          <p>A check counts only if it shows the edited code actually ran.</p>
-        </article>
-        <article class="st-step" data-at="5">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>When the lab falls short, the toolsmith extends it.</h3>
-          <p>A check is too slow, an install fails, the lab falls back to a restart, or the agent enters code the lab does not cover. The online toolsmith prices the new kind of experiment, builds the missing piece and verifies it against a fresh process.</p>
-          <p>The engine gets more live-editable the longer the agent works on it.</p>
-        </article>
-        <article class="st-step" data-at="6">
-          <p class="st-kicker">Stage 2 · online</p>
-          <h3>If the engine dies, the lab survives.</h3>
-          <p>A bad edit can hang a rank or leave a sticky CUDA error. The lab marks itself poisoned, refuses further installs, and respawns only the worker group from warm host and GPU caches.</p>
-        </article>
+  <section class="fr-sec" id="arch" aria-labelledby="arch-h">
+    <h2 class="fr-h2" id="arch-h">How do you hot-patch a distributed GPU engine without lying to yourself?</h2>
+    <p class="fr-sub">Before the developer agent writes a single optimization, an offline toolsmith inspects the engine once and builds verified reload hooks. Then the agent iterates live across six steps.</p>
+    <div class="fr-card ar" id="ar">
+      <div class="ar-top">
+        <div class="hero-pick ar-pick" id="ar-pick" role="group" aria-label="Step"><button type="button" class="hero-dot" data-go="1">1 Sort</button><button type="button" class="hero-dot" data-go="2">2 Build</button><button type="button" class="hero-dot" data-go="3">3 Prove</button><button type="button" class="hero-dot" data-go="4">4 Edit live</button><button type="button" class="hero-dot" data-go="5">5 Extend</button><button type="button" class="hero-dot" data-go="6">6 Recover</button></div>
+        <button type="button" class="st-replay ar-play" id="ar-play" aria-label="Play the six steps from the start" title="Play from the start"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 2.5a5.5 5.5 0 1 1-5.2 3.7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M2 2.2v4.2h4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
-      <div class="st-stage ar" id="ar">
+      <div class="ar-diagram">
         <div class="ar-row">
           <p class="ar-lab">Stage 1 · offline · once per engine</p>
           <div class="ar-flow">
@@ -186,7 +164,17 @@ Show me the result, then walk me through one install, check and uninstall on the
             <div class="ar-box ar-ts" data-on="5"><b>Online toolsmith</b><span>extends the lab</span></div>
           </div>
         </div>
-        <div class="fr-card ar-panels">
+      </div>
+      <div class="ar-detail">
+        <div class="ar-texts">
+          <div class="ar-text" data-p="1"><p class="st-kicker">Step 1 · Offline setup</p> <h3>Map which state each function touches</h3> <p>The offline toolsmith reads the codebase, past PRs, issues, and tests, then sorts functions into six groups based on what state they mutate and how safely they can be swapped live.</p> <p>Only start-up logic, launch flags and environment variables still need one.</p></div>
+          <div class="ar-text" data-p="2" hidden><p class="st-kicker">Step 2 · Offline setup</p> <h3>Build the warm-reload hooks for that engine</h3> <p>Every engine needs different plumbing to stay warm, such as a pre-initialized process to fork from, weights pinned outside the worker, or a saved state snapshot. The toolsmith builds these hooks once and logs their latency.</p></div>
+          <div class="ar-text" data-p="3" hidden><p class="st-kicker">Step 3 · Offline setup</p> <h3>Verify that live reloads match a cold start</h3> <p>Every tool is checked the same way: base, edit, injected fault, reverted base, each compared with a cold start. A lab's results count only after it passes all <b>11</b> conformance cases.</p> <p>The guarantees are settled here, offline, so the checks that run on every edit can stay small.</p></div>
+          <div class="ar-text" data-p="4" hidden><p class="st-kicker">Step 4 · Live loop</p> <h3>Swap code between steps across every GPU rank at once</h3> <p>While the engine keeps stepping, FastRSI prepares the agent's edit and commits it in the barrier between two steps across every GPU rank, or aborts everywhere if any rank fails.</p> <p>A check counts only if it shows the edited code actually ran.</p></div>
+          <div class="ar-text" data-p="5" hidden><p class="st-kicker">Step 5 · Live loop</p> <h3>Build new reload hooks on the fly when the agent hits new code</h3> <p>A check is too slow, an install fails, the lab falls back to a restart, or the agent enters code the lab does not cover. The online toolsmith prices the new kind of experiment, builds the missing piece and verifies it against a fresh process.</p> <p>The engine gets more live-editable the longer the agent works on it.</p></div>
+          <div class="ar-text" data-p="6" hidden><p class="st-kicker">Step 6 · Live loop</p> <h3>Recover from hung ranks and CUDA faults without reloading weights</h3> <p>When a bad kernel hangs a rank or leaves a sticky CUDA error, FastRSI marks the workers poisoned, blocks new edits, and respawns the worker group from warm host and GPU caches.</p></div>
+        </div>
+        <div class="ar-panels">
           <div class="ar-panel" data-p="1">
             <table class="fr-table ar-groups"><thead><tr><th>Group</th><th>What it is</th><th>Installing an edit</th></tr></thead><tbody>
               <tr><td>Operator</td><td>body of a per-call Python function</td><td>swap in place</td></tr>
@@ -221,38 +209,61 @@ Show me the result, then walk me through one install, check and uninstall on the
         </div>
       </div>
     </div>
+    <p class="pg-next">To see which reload paths get triggered on real systems code, we replayed actual optimization patches from three production engines.</p>
   </section>
 
   <!-- What the toolsmith built -->
-  <section class="fr-sec" id="built" aria-labelledby="built-h">
-    <h2 class="fr-h2" id="built-h">What it built for each engine</h2>
-    <p class="fr-sub">Each row is one mechanism the toolsmith added to keep part of the engine warm, with the time it took before and after. All are merged and measured on GPUs. Rows are separate measurements, so they do not add up.</p>
-    <div class="fr-card" id="built-card">
-      <div class="fr-picker" role="group" aria-label="Engine" id="built-pick"></div>
-      <div class="bl" id="built-list"></div>
-      <p class="fr-note">Bars are drawn to each row's own scale: the full width is the time before, the filled part is the time after. The full list, with what is CPU-tested only or still planned, is on the <a href="audit/#coverage">audit page</a>.</p>
+  <section class="fr-sec" id="built" aria-labelledby="alt-h">
+    <h2 class="fr-h2" id="alt-h">Case studies</h2>
+    <p class="fr-sub">{{CASE_SUB}}</p>
+    <div class="fr-card" id="alt-card">
+      <div class="alt-top"><div class="fr-picker" role="group" aria-label="Engine" id="alt-pick"></div><button type="button" class="fr-chip" id="alt-more"></button></div>
+      <div class="alt-grid">
+        <div class="alt-info" id="alt-info"></div>
+        <div class="alt-diff" id="alt-diff" tabindex="0" aria-label="Code change"></div>
+      </div>
     </div>
+    <dialog class="try-dlg alt-dlg" id="alt-dlg" aria-labelledby="alt-dh">
+      <div class="alt-dtop"><h2 class="alt-sr" id="alt-dh">Upstream changes replayed on each engine</h2><div class="fr-picker alt-dpick" role="group" aria-label="Engine" id="alt-dpick"></div><button type="button" class="fr-btn fr-btn-quiet" id="alt-close">Close</button></div>
+      <div class="alt-pop">
+        <div class="alt-cases" id="alt-list" role="group" aria-label="Case"></div>
+        <div class="alt-view"><div class="alt-info" id="alt-pinfo"></div><div class="alt-diff" id="alt-pdiff" tabindex="0" aria-label="Code change"></div></div>
+      </div>
+    </dialog>
+    <p class="pg-next">Replaying individual patches shows the mechanics work, so next we put an autonomous agent on the clock against Baseline.</p>
   </section>
 
 
   <div class="pg-bridge" id="results">
-    <h2 class="fr-h2">What it buys the agent</h2>
-    <p class="fr-sub">Three measurements from real runs on vLLM, Megatron-LM and FastVideo: how much sooner the agent gets there, where the time per check went, and why the gap widens as models get faster.</p>
+    <h2 class="fr-h2">Evaluation</h2>
+    <p class="fr-sub">We ran FastRSI and Baseline on vLLM, Megatron-LM, and FastVideo to measure three things: end-to-end time to reach the same speedup, time spent per check, and how the gap scales as models get faster.</p>
   </div>
 
 {{RESULTS}}
 
   <section class="fr-sec" id="use" aria-labelledby="use-h">
-    <h2 class="fr-h2" id="use-h">Try it on your machine</h2>
-    <p class="fr-sub">The live-lab kernel is pure Python with no dependencies. The toy lab runs on a laptop.</p>
+    <h2 class="fr-h2" id="use-h">Try the live loop on your own code</h2>
+    <p class="fr-sub">The core reload harness is pure Python with zero dependencies, and includes a toy engine you can run on a laptop right now.</p>
     <div class="fr-card use">
       <ol class="use-steps">
         <li><b>Run the toy lab.</b> Or let your coding agent do it: <button type="button" class="fr-btn try-open">Try it</button><pre>git clone https://github.com/hao-ai-lab/fastrsi && cd fastrsi
 PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre></li>
         <li><b>Read a recorded walkthrough.</b> Each engine keeps its replayed edits, with real output, under <code>repos/&lt;engine&gt;/examples/</code>.</li>
         <li><b>Bring your own engine.</b> Copy <code>template/livelab/</code>, wire it to the gap between two steps, pass conformance, then follow the offline toolsmith's prompt in <code>core/agents/</code>.</li>
-        <li><b>Check our work.</b> The <a href="audit/">audit page</a> lists the replayed upstream PRs, what is and is not measured about coverage, the interface and rules in full, and the fault tests.</li>
       </ol>
+    </div>
+  </section>
+
+  <section class="fr-sec cite" id="cite" aria-labelledby="cite-h">
+    <h2 class="fr-h2 cite-h" id="cite-h">Cite</h2>
+    <div class="fr-card cite-card">
+      <button type="button" class="fr-chip cite-copy" id="cite-copy">Copy</button>
+      <pre id="cite-bib">@misc{fastrsi,
+  title        = {FastRSI},
+  author       = {{FastRSI contributors}},
+  year         = {2026},
+  howpublished = {\url{https://github.com/hao-ai-lab/fastrsi}}
+}</pre>
     </div>
   </section>
 

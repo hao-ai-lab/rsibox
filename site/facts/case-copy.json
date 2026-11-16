@@ -1,0 +1,192 @@
+{
+ "subtitle": "Merged pull requests from vLLM, Megatron-LM, and FastVideo, plus edits written by our own agents, replayed against running engines to compare traditional full-restart evaluation against live surgical patching and warm pre-forked recovery.",
+ "blocks": [
+  {
+   "key": "b1",
+   "label": "What the change does"
+  },
+  {
+   "key": "b2",
+   "label": "The cost of a plain restart"
+  },
+  {
+   "key": "b3",
+   "label": "How FastRSI evaluates it"
+  },
+  {
+   "key": "b4",
+   "label": "How we verify the result"
+  }
+ ],
+ "cases": [
+  {
+   "pr": 62872,
+   "b1": "This change is a partial, adapted port of merged pull request `vllm-project/vllm #62872` for `vLLM` 0.31.0. Because the Rust frontend is not served and `RequestError` and `EngineCoreOutput.error` are absent in this version, only the Python changes in `scheduler.py` were applied. It reports structured-output grammar compilation failures cleanly as validation errors.",
+   "b2": "Normally, testing a change to scheduler error handling requires restarting `vllm serve`. On one GB200 GPU serving `Qwen3.6-27B`, the plain restart took 103.9 seconds. The three largest phases were 32.0 seconds for CUDA graph capture, 23.9 seconds for process start-up and imports, and 14.8 seconds for engine and model start-up.",
+   "b3": "FastRSI refused the live install because the edit changes a constructor that already ran, then restarted from a warm pre-forked copy in 67.7 seconds (1.5x faster). Starting from the warm copy cut weight loading to 3.2 seconds and CUDA graph capture to about 18 seconds. With a fix that is not merged yet, this warm restart takes 53.4 seconds.",
+   "b4": "Once the fresh server was up, it ran the same 14-request check including JSON-schema and invalid-grammar structured output requests in 3.8 seconds. FastRSI counted 154 calls into the edited scheduler code during the check, proving that the updated error-handling path ran."
+  },
+  {
+   "pr": 61323,
+   "b1": "This change is a partial port of merged pull request `vllm-project/vllm #61323`, applying three of its four hunks to `layernorm.py` because one normalization class is absent in `vLLM` 0.31.0. It keeps normalization layers neutral when initialized with dummy weights. The pull request title says this keeps norm layers neutral under dummy weight init.",
+   "b2": "Testing a model loader or layer initialization change normally requires restarting `vllm serve`. On one GB200 GPU serving `Qwen3.6-27B`, the plain restart took 105.2 seconds. The three longest phases were 33.6 seconds for CUDA graph capture, 24.0 seconds for process start-up and imports, and 14.9 seconds for engine and model start-up.",
+   "b3": "FastRSI refused the live install because the edit changes a constructor that already ran and touches code baked into a CUDA graph, then restarted from a warm pre-forked copy. This took 169.0 seconds, which was slower than the 105.2-second plain restart because recompiling with `torch.compile` in the pre-forked copy took 99.9 seconds. With a fix that is not merged yet, the warm restart takes 52.4 seconds.",
+   "b4": "The fresh server ran the same check of 14 greedy, sampling, and structured output requests in 3.8 seconds. FastRSI counted 216 calls into the edited constructors while the model was being built during startup, and 0 calls during the request check itself, as expected for constructor code."
+  },
+  {
+   "pr": 59941,
+   "b1": "This change is merged pull request `vllm-project/vllm #59941` applied as written to `breakable_cudagraph.py`. It fixes a bug by resolving `eager_break_during_capture` when a function is called rather than when the module is first imported. This ensures CUDA graph capture respects runtime settings instead of stale import-time state.",
+   "b2": "Evaluating an edit to compilation helpers normally requires restarting `vllm serve` from scratch. On one GB200 GPU serving `Qwen3.6-27B`, the plain restart took 105.8 seconds. The longest phases were 33.2 seconds for CUDA graph capture, 24.3 seconds for process start-up and imports, and 14.9 seconds for warm-up.",
+   "b3": "FastRSI refused the live install because the edit touches code already baked into a CUDA graph, then restarted from a warm pre-forked copy in 65.7 seconds (1.6x faster). That warm restart lowered weight loading to 3.0 seconds and CUDA graph capture to 18.1 seconds. With a fix that is not merged yet, this warm restart takes 49.7 seconds.",
+   "b4": "The fresh server ran the same 14-request check covering greedy, sampling, and structured output prompts in 3.7 seconds. However, FastRSI recorded 0 calls to the edited code on this GPU, so the check could not prove the edit ran. The decorator executes at import time, and its capture path is only used by other accelerators like XPU and ROCm."
+  },
+  {
+   "pr": 58231,
+   "b1": "This change is merged pull request `vllm-project/vllm #58231` applied as written. It fixes a sampler bug in `topk_topp_triton.py` where split top-p filtering masked out every token when logits were huge. That bug caused speculative decoding with a thinking token budget to erroneously emit token 0.",
+   "b2": "Testing a kernel fix the standard way means restarting `vllm serve` and waiting for the engine to initialize again. Here, a plain restart took 104.8 seconds on one GB200 GPU serving `Qwen3.6-27B`. The three biggest phases were 32.1 seconds for CUDA graph capture, 24.9 seconds for process start-up and imports, and 15.1 seconds for engine and model start-up.",
+   "b3": "FastRSI rebuilt the edited Triton kernel live inside the running server and completed the evaluation in 2.7 seconds, which is 38.2x faster than a plain restart. Installing the edit live took 0.3 seconds and running the check took 1.8 seconds. By patching in place, it skipped process start-up, engine initialization, weight loading, CUDA graph capture, and warm-up.",
+   "b4": "FastRSI verified the live update by sending the 14 check requests for greedy, sampling, and structured output generation to the running server. It recorded 43 calls into the edited Triton sampling kernel during the check, confirming that the live-rebuilt code actually ran."
+  },
+  {
+   "pr": 61213,
+   "b1": "This change is merged pull request `vllm-project/vllm #61213` applied as written. It refactors `_topk_topp_kernel()` in `topk_topp_triton.py` and updates `benchmark_topk_topp.py` to speed up top-k and top-p sampling when logits are masked. The change adds 169 lines and removes 161 across the two files.",
+   "b2": "Normally, checking a Triton kernel optimization in the full server requires restarting `vllm serve`. On one GB200 GPU serving `Qwen3.6-27B`, that plain restart took 105.8 seconds. Its three largest phases were 33.1 seconds for CUDA graph capture, 24.9 seconds for process start-up and imports, and 15.1 seconds for engine and model start-up.",
+   "b3": "FastRSI installed and rebuilt the Triton kernel live inside the running server, finishing the whole evaluation in 2.7 seconds for a 38.8x speedup. Live installation took 0.3 seconds and the check itself took 1.8 seconds. This skipped process start-up, engine initialization, weight loading, CUDA graph capture, and warm-up.",
+   "b4": "To confirm the live kernel swap worked, FastRSI ran the 14 check requests covering greedy, sampling, and structured output tasks. It counted 43 calls into the edited `_topk_topp_kernel()` code during the check, proving that the newly compiled kernel ran in the live server."
+  },
+  {
+   "pr": 62046,
+   "b1": "This change is merged pull request `vllm-project/vllm #62046` applied as written. It adds 31 lines to `topk_topp_triton.py` to carry the boundary tie count across thread blocks in the split top-p mask kernel. This fixes a sampling bug when multiple tokens share the exact cutoff probability across block boundaries.",
+   "b2": "Under a normal workflow, verifying this sampler fix requires restarting `vllm serve` from scratch. On one GB200 GPU serving `Qwen3.6-27B`, a plain restart took 105.0 seconds. The three biggest contributors were 32.2 seconds for CUDA graph capture, 24.7 seconds for process start-up and imports, and 15.1 seconds for engine and model start-up.",
+   "b3": "FastRSI installed the updated Triton kernel live into the running server and finished in 2.7 seconds, achieving a 38.6x speedup over a plain restart. Live installation took 0.3 seconds and running the check took 1.8 seconds. It completely skipped process start-up, weight loading, CUDA graph capture, and warm-up.",
+   "b4": "FastRSI verified the live patch by running the 14 check requests covering greedy, sampling, and structured output generation. During those requests, FastRSI counted 43 calls into the edited Triton kernel, proving that the live-installed code actually executed."
+  },
+  {
+   "pr": 57951,
+   "b1": "This change is a partial port of merged pull request `vllm-project/vllm #57951`, omitting a single-request condition that had moved in `vLLM` 0.31.0 and a documentation line. It edits `scheduler.py` in the config and core scheduler modules to soften the long prefill token threshold. The pull request title says it softens the long prefill token threshold.",
+   "b2": "Without live patching, testing this scheduler change requires a full restart of `vllm serve`. On one GB200 GPU serving `Qwen3.6-27B`, the plain restart took 107.6 seconds in total. Most of that wait went to 34.0 seconds for CUDA graph capture, 24.9 seconds for process start-up and imports, and 15.1 seconds for warm-up.",
+   "b3": "FastRSI refused the live install because the edit touches code outside what can be swapped in place, then restarted from a warm pre-forked copy in 67.5 seconds (1.6x faster). The warm copy reduced weight loading to 3.7 seconds and CUDA graph capture to 18.2 seconds. With a fix that is not merged yet, FastRSI installs this edit live in 2.8 seconds.",
+   "b4": "After restarting, the fresh server ran the same 14-request check across greedy, sampling, and structured output workloads in 3.8 seconds. FastRSI tracked execution and counted 139 calls into the edited scheduler code, proving that the check actively ran the modified threshold logic."
+  },
+  {
+   "pr": 57140,
+   "b1": "This change is merged pull request `vllm-project/vllm #57140` applied in full. It edits `qwen_gdn_linear_attn.py` to scatter mixed speculative decoding outputs directly into the caller buffer. The change is small, with 3 lines added and 7 removed.",
+   "b2": "Evaluating this edit normally requires stopping and restarting `vllm serve` from scratch. On one GB200 GPU serving `Qwen3.6-27B`, a plain restart took 105.9 seconds before the check finished. The three longest phases were 34.1 seconds for CUDA graph capture, 24.1 seconds for process start-up and imports, and 14.8 seconds for engine and model start-up.",
+   "b3": "FastRSI installed the edit live into the running server and finished the evaluation in 2.6 seconds, a 41.2x speedup over a plain restart. Swapping the updated function in place took 0.2 seconds and running the check took 1.8 seconds. It completely skipped process start-up, weight loading, CUDA graph capture, and warm-up.",
+   "b4": "To verify the live change, FastRSI ran the 14-request check covering greedy, sampling, and structured output queries against the running server. It counted 336 calls into the edited code during those requests, proving that the check actually exercised the new buffer-scattering logic."
+  },
+  {
+   "pr": 49750,
+   "b1": "This change is an adapted port of merged pull request `vllm-project/vllm #49750`, omitting `hunyuan_v1.py` because that file is absent in `vLLM` 0.31.0. It updates `layernorm_kernels.cu` and seven model files so root-mean-square normalization can process non-contiguous tensor layouts directly. The pull request title claims a 1.2x to 3.1x kernel speedup.",
+   "b2": "Normally, you edit the code and restart `vllm serve` from scratch before sending test requests. On one GB200 GPU serving `Qwen3.6-27B`, that plain restart took 125.2 seconds, including 20.3 seconds to compile the native CUDA kernel. The other largest phases were 32.8 seconds for CUDA graph capture and 24.1 seconds for process start-up and imports.",
+   "b3": "FastRSI refused the live install because the edit touches code already baked into a CUDA graph, then restarted from a warm pre-forked copy in 94.6 seconds (1.3x faster). It cut weight loading to 3.1 seconds and CUDA graph capture to 18.3 seconds, though compiling still took 20.4 seconds. With a fix that is not merged yet, this warm restart takes 82.4 seconds.",
+   "b4": "The fresh server ran the same check of 14 requests covering greedy, sampling, and structured output generation in 3.8 seconds. FastRSI recorded 0 calls to the edited code, so the check could not prove the edit ran. The edited Python models were not the served model, and `vLLM` likely chose a different normalization kernel."
+  },
+  {
+   "pr": "te-layernorm-linear-gather-before-norm",
+   "b1": "A FastRSI agent wrote this edit in `TELayerNormColumnParallelLinear.forward` while optimizing training speed. When sequence parallelism is active, each GPU holds only a slice of the token sequence. The edit calls `gather_from_sequence_parallel_region` before layer normalization so the forward pass saves full-sequence activations and the backward pass avoids a second all-gather across GPUs.",
+   "b2": "Normally you edit the file and restart the training job from scratch. Here a full restart took 43.4 seconds before returning a result. The three largest phases were process start-up and imports at 22.3 seconds, distributed initialization, kernel loading, and model build at 8.0 seconds, and the first step and warm-up steps at 7.6 seconds.",
+   "b3": "FastRSI paused the running job between steps, swapped the updated `TELayerNormColumnParallelLinear.forward` method into memory in 0.2 seconds, and ran the check in 4.9 seconds. Because the edit was installed live, FastRSI skipped process start-up, distributed initialization, model build, and warm-up. Total evaluation time dropped from 43.4 seconds to 5.1 seconds, an 8.6x speedup.",
+   "b4": "FastRSI ran a 10-step check from the same saved start state and counted calls into `TELayerNormColumnParallelLinear.forward` to prove the edited code actually ran. The edit made each step about 4% faster in the paired same-process check and about 2% faster across separate fresh jobs."
+  },
+  {
+   "pr": "lmhead-sp-allgather-before-cast",
+   "b1": "A FastRSI agent wrote this edit in `LinearWithGradAccumulationAndAsyncCommunication.backward` while optimizing training speed. In the backward pass, output gradients are cast with `grad_output.to(ctx.input_dtype)` before multiplying by the weights. The edit starts the sequence-parallel input all-gather before that type conversion so GPU communication can overlap with the cast.",
+   "b2": "In a standard workflow, testing this change means editing `megatron/core/tensor_parallel/layers.py` and restarting the training job. That plain restart took 44.4 seconds in total. Process start-up and imports took 23.2 seconds, the first step and warm-up steps took 8.0 seconds, and distributed initialization, kernels, and model build took 7.3 seconds.",
+   "b3": "FastRSI installed the updated `LinearWithGradAccumulationAndAsyncCommunication` backward pass live into the running process in 0.1 seconds and ran the check in 5.4 seconds. Installing the edit live skipped process start-up, distributed setup, model construction, and warm-up steps. The entire check finished in 5.4 seconds instead of 44.4 seconds, giving an 8.2x speedup.",
+   "b4": "FastRSI ran 10 training steps from the same saved start state and counted calls into `LinearWithGradAccumulationAndAsyncCommunication` so the check only counted once the edited code ran. Step time showed no measurable change at this model size, in both the paired same-process check and separate fresh jobs."
+  },
+  {
+   "pr": "residual-plain-add-without-bias-dropout",
+   "b1": "A FastRSI agent wrote this edit in `TransformerLayer` while optimizing training speed. When `hidden_dropout` is zero, the bias is `None`, and tensor data types match, the fused bias-dropout-add helper does unnecessary work after attention and the MLP. The edit replaces `self_attn_bda` and `mlp_bda` with a plain `residual + output` addition on that path.",
+   "b2": "Normally, evaluating this change requires editing `megatron/core/transformer/transformer_layer.py` and launching a fresh training run. A plain restart took 44.4 seconds end to end. Process start-up and imports took 23.5 seconds, the first step and warm-up steps took 8.0 seconds, and distributed initialization, kernels, and model build took 7.5 seconds.",
+   "b3": "FastRSI patched `TransformerLayer` live between training steps in 0.1 seconds and ran the check in 5.0 seconds. Live installation skipped process start-up, distributed initialization, model build, and warm-up steps completely. That cut total evaluation time from 44.4 seconds to 5.2 seconds, an 8.6x speedup.",
+   "b4": "FastRSI ran 10 training steps from the same saved start state and counted calls into the updated `TransformerLayer` methods to verify the edited code ran. The edit made each step about 6% faster in the paired same-process check and about 4% faster across separate fresh jobs."
+  },
+  {
+   "pr": 8532,
+   "b1": "This change is merged upstream pull request #8532 across `data_parallel_base.py`, `distributed_data_parallel.py`, and `param_and_grad_buffer.py`. It changes `scale_gradients` to accept a `torch.Tensor` for `scaling_factor` and reshapes zero-dimensional CUDA tensors with `buffer_scale.reshape(1)`. That preserves 32-bit floating-point precision during gradient multiplication before rounding into low-precision `grad_data` buffers.",
+   "b2": "Testing this change normally requires editing the three files and restarting the training job from scratch. Here a plain restart took 43.3 seconds. Process start-up and imports took 23.5 seconds, the first step and warm-up steps took 10.7 seconds, and distributed initialization, kernels, and model build took 7.6 seconds.",
+   "b3": "FastRSI installed `scale_gradients` live, but the 10-step check never called the edited code, so after 3.5 seconds FastRSI stopped the old job and fell back to a cold restart with `torchrun`. Total time was 45.6 seconds, which was no faster than a 43.3-second plain restart. With a fix that is not merged yet, FastRSI evaluates it live in 1.3 seconds (33x faster).",
+   "b4": "Because the live check saw zero calls to `scale_gradients`, FastRSI did not accept the live run as proof and launched a fresh job instead. The fresh job then ran the same 10-step check in 1.2 seconds after completing standard start-up and warm-up."
+  },
+  {
+   "pr": 8844,
+   "b1": "This change is merged upstream pull request #8844 in `megatron/training/training.py`. It moves the file-reading logic of `get_start_time_from_progress_log` into a helper `_get_start_time_from_progress_log` decorated with `@functools.cache` keyed on `save_dir` and `world_size`. Because the job start time does not change during a run, caching avoids repeatedly reading `progress.txt`.",
+   "b2": "Without FastRSI, testing this edit means modifying `megatron/training/training.py` and restarting the training job. That plain restart took 42.0 seconds in total. Process start-up and imports took 22.2 seconds, the first step and warm-up steps took 10.0 seconds, and distributed initialization, kernels, and model build took 8.5 seconds.",
+   "b3": "FastRSI installed `get_start_time_from_progress_log` and `_get_start_time_from_progress_log` live in 0.3 seconds and ran the check in 1.1 seconds, finishing in 1.4 seconds for a speedup of about 30x. Live installation skipped process start-up, distributed initialization, model build, and warm-up. Without an explicit progress-log call in the check, the edited function never runs and FastRSI falls back to a restart (45.4 seconds vs. 42.4 seconds).",
+   "b4": "FastRSI ran the 10-step check from the same saved start state, including one call to `get_start_time_from_progress_log` because that function only runs during checkpoint logging. FastRSI counted calls into the edited code to confirm it actually executed during the 1.1-second check."
+  },
+  {
+   "pr": 8579,
+   "b1": "This change is merged upstream pull request #8579 in `megatron/core/distributed/distributed_data_parallel.py`. Inside `__init__`, exact floating-point equality checks like `scaling_factor == target_gradient_scaling_factor` could fail because of rounding noise. The edit replaces those exact comparisons with `math.isclose` using `rel_tol=1e-9`.",
+   "b2": "In a standard workflow, you edit `distributed_data_parallel.py` and restart the training job from scratch. Here a plain restart took 41.4 seconds. Process start-up and imports took 23.7 seconds, the first step and warm-up steps took 9.9 seconds, and distributed initialization, kernels, and model build took 6.3 seconds.",
+   "b3": "FastRSI refused the live install because the edit changes `__init__`, a class constructor that only runs when the model is first built, and then fell back to a cold restart with `torchrun`. That took 43.9 seconds, no faster than a 41.4-second plain restart. With a fix that is not merged yet, a warm restart from a pre-imported process takes 25.0 seconds (1.7x faster).",
+   "b4": "Because constructor changes in `__init__` cannot be proven on already-created objects between steps, FastRSI restarted the job from scratch. The fresh job constructed the model with the new `__init__` assertions and ran the same 10-step check in 1.2 seconds."
+  },
+  {
+   "pr": 7575,
+   "b1": "This change is merged upstream pull request #7575 in `fine_grained_activation_offload.py` and `attention.py`. It updates `__init__`, `offload`, and `update_offload_info` to track `is_offload_margin` and `activation_offload_fraction`, moves view checks into `_get_offload_view_meta`, and raises a `ValueError` in `forward_pre_attn_and_core_attn` when offloaded `query`, `key`, and `value` views share storage.",
+   "b2": "Normally you edit the source files and restart the training job from the beginning. That plain restart took 43.1 seconds in total. Process start-up and imports took 22.0 seconds, the first step and warm-up steps took 11.0 seconds, and distributed initialization, kernels, and model build took 8.3 seconds.",
+   "b3": "FastRSI tried to install the edit live, the install failed with an error, and it fell back to a cold restart with `torchrun`. Total time was 44.8 seconds, no faster than the 43.1-second plain restart. With a fix that is not merged yet, FastRSI refuses upfront, because the patch edits `__init__` constructors and adds new fields on existing objects, and warm-restarts from a pre-imported process in 26.1 seconds (1.7x faster).",
+   "b4": "After falling back to a full restart, the fresh job built the offload handlers with the updated `__init__` methods and ran the same 10-step check in 1.1 seconds. That verified the edit cleanly without risking corrupted state in the already-running process."
+  },
+  {
+   "pr": 1882,
+   "b1": "This merged pull request updates `_encode_fl2va_conditions` and `_encode_ref2va_conditions` in `minimax_h3_latent_preparation.py` to move the video and audio VAE models between CPU and GPU using `pinned_offload.load` and `pinned_offload.unload` instead of `.to()`. This reuses cached host weights when encoding keyframe and reference conditions.",
+   "b2": "Normally, testing this edit requires saving the file and starting a fresh engine process, which took 81.1 seconds. Most of that time went into 50.7 seconds for distributed initialization, kernels, and model building, 18.1 seconds for process start-up and imports, and 6.4 seconds to run the check after a 5.7-second warm-up.",
+   "b3": "FastRSI installed the edited functions directly into the running engine in 0.04 seconds and ran the check in 6.3 seconds. By swapping the code in place between requests, it skipped process start-up, model loading, and warm-up completely. Total evaluation time dropped to 6.3 seconds, a 12.9x speedup.",
+   "b4": "FastRSI counts calls into edited functions to verify the swap: `_encode_fl2va_conditions` ran 1 to 3 times per check, while `_encode_ref2va_conditions` was installed but never called by this workload (0 calls), so the install is only partly proven. The output video and audio were identical to the unedited engine, with no measurable change in video generation time (-0.3%, from 6.3s to 6.3s)."
+  },
+  {
+   "pr": 1900,
+   "b1": "This merged pull request adds a fused Triton kernel `tile_to_bhsd` in `vsa_tile_layout.py` and wires it into `video_sparse_attn.py` along with a benchmark script. In `VideoSparseAttentionImpl`, it fuses tile scattering and tensor layout transposition into one step for 64-token tiles during SM100 BF16 inference.",
+   "b2": "Evaluating this edit with a plain restart meant starting a fresh engine process, taking 80.8 seconds in total. That included 48.5 seconds for distributed initialization, kernels, and model building, 17.8 seconds for process start-up and imports, and 7.8 seconds for the first and warm-up steps before the 6.2-second check.",
+   "b3": "FastRSI refused a live swap because the edit changes code outside functions and removes a definition, and refused an in-place module rebuild because it would refresh too many modules. Instead, it restarted the engine warm from a pre-started process with imports already loaded, taking 56.4 seconds (a 1.4x speedup over the 80.8-second plain restart). With a fix that is not merged yet, this same warm restart path takes 34.3 seconds, a 2.4x speedup.",
+   "b4": "A probe confirmed the warm-restarted engine had loaded the edited code, with output video and audio identical to the unedited engine. Video generation time showed no measurable change (-0.9%, 6.4s vs 6.4s). An earlier record notes the H3 model does not use the generic sparse attention path changed by this pull request, so this workload is unaffected."
+  },
+  {
+   "pr": 2040,
+   "b1": "This merged pull request changes the default `FASTVIDEO_H3_VAE_TILE_BATCH` setting in `envs.py` from 1 to 8 so the MiniMax H3 video VAE decoder processes eight spatial tiles per call. It also updates `_tile_batch_size` in `minimax_h3_video.py` and `minimax_h3_parallel.py` to keep single-tile decoding when dynamic NVFP4 activation scales are used.",
+   "b2": "Running a plain restart after editing these files took 74.8 seconds from start to finish. Distributed initialization, kernels, and model building took 45.6 seconds, process start-up and imports took 18.4 seconds, and running the check took 6.9 seconds after 3.2 seconds of warm-up.",
+   "b3": "FastRSI refused a live swap because the edit modifies module-level code and a default in `envs.py`, and refused an in-place module rebuild because it would refresh too many modules. It fell back to a warm restart from a pre-started process with imports already done, finishing in 65.2 seconds for a 1.1x speedup over the 74.8-second plain restart. With a fix that is not merged yet, this warm restart path takes 33.9 seconds (2.2x speedup).",
+   "b4": "A probe confirmed that the warm-restarted engine loaded the edited code, and the generated video and audio hashes were identical to the base engine. Video generation time changed by +1.2% (from 6.4s to 6.5s). However, an earlier record notes that this workload already sets the VAE tile batch size to 12 on its own, so changing the default has no real effect here."
+  },
+  {
+   "pr": "01-vsa-heads-first-tile",
+   "b1": "A FastRSI agent wrote this edit in `video_sparse_attn_h3.py` while optimizing video generation speed. In `MiniMaxH3VSAImpl.tile`, it removes the `FASTVIDEO_H3_VSA_HEADS_FIRST_TILE` environment flag gate so the heads-first Triton scatter path runs by default instead of indexed assignment and transpose copies.",
+   "b2": "Testing this change with a plain engine restart took 67.9 seconds in total. The fresh process spent 34.6 seconds on distributed initialization, kernels, and model building, 18.6 seconds on process start-up and imports, and 9.1 seconds on warm-up steps before running the 5.5-second check.",
+   "b3": "FastRSI installed the edited method directly into the running engine in 0.7 seconds and ran the check in 5.4 seconds. Because it updated the running process in place, it skipped process start-up, model loading, and warm-up entirely. The full evaluation finished in 6.1 seconds, an 11.2x speedup.",
+   "b4": "FastRSI verified that `MiniMaxH3VSAImpl.tile` ran on every check, proving the live install was exercised. The output video and audio were identical to the unedited engine. This edit reduced video generation time by 16.7%, dropping from 6.3 seconds to 5.3 seconds."
+  },
+  {
+   "pr": "02-qknorm-rope-16-heads",
+   "b1": "A FastRSI agent wrote this edit in `qknorm_rope.py` while optimizing video generation speed. It adds `_qknorm_partial_rope_rows_kernel` and updates `_fused_qknorm_rope_impl` so each Triton program processes multiple attention heads at once while preserving the exact pairwise reduction order of the single-head kernel.",
+   "b2": "With a plain restart, evaluating this edit took 72.6 seconds. Starting the fresh engine required 44.4 seconds for distributed initialization, kernels, and model building, 17.5 seconds for process start-up and imports, and 6.8 seconds to run the check after a 3.8-second warm-up.",
+   "b3": "FastRSI installed the edit live into the running engine in 0.03 seconds, spent 0.5 seconds on kernel setup, and ran the check in 6.0 seconds. By patching the live process, it skipped process start-up, model loading, and warm-up steps. Total evaluation took 6.5 seconds, an 11.1x speedup.",
+   "b4": "FastRSI confirmed that both `_fused_qknorm_rope_impl` and `_qknorm_partial_rope_rows_kernel` ran on every check. The output video and audio hashes matched the unedited engine identically. Video generation time improved by 3.4%, dropping from 6.3 seconds to 6.1 seconds."
+  },
+  {
+   "pr": "03-fused-gated-merge",
+   "b1": "A FastRSI agent wrote this edit while optimizing video generation speed. In `video_sparse_attn_h3.py`, it adds `_h3_gated_merge_kernel` and `_h3_gated_merge` to fuse the attention output transpose with the gated compression merge in one Triton pass, and in `layer.py` it skips calling `torch.nn.functional.pad` when `pad_seq_len` is zero.",
+   "b2": "A plain restart to test this edit took 78.7 seconds. Most of that time was spent on 53.5 seconds of distributed initialization, kernels, and model building, plus 18.6 seconds of process start-up and imports, before running the 6.4-second check.",
+   "b3": "FastRSI installed the edited functions live in 0.6 seconds, spent 2.1 seconds compiling the new Triton kernel, and ran the check in 6.0 seconds. Swapping the code into the running engine skipped process start-up and full model reloading. The check completed in 8.7 seconds total, a 9.1x speedup.",
+   "b4": "FastRSI verified that all four edited functions (`_h3_gated_merge_kernel`, `_h3_gated_merge`, `MiniMaxH3VSAImpl.forward`, and `DistributedAttention_VSA.forward`) ran on every check. The output video and audio were identical to the unedited engine, and video generation time dropped by 4.8%, from 6.3 seconds to 6.0 seconds."
+  },
+  {
+   "pr": "08-compact-video-topk",
+   "b1": "A FastRSI agent wrote this edit in `video_sparse_attn_h3.py` while optimizing video generation speed. In `_build_block_mask`, it adds a fast path that slices out only the video tile scores into a contiguous tensor and runs an unsorted CUDA `topk` before scattering the selected indices into the boolean attention mask.",
+   "b2": "Running a plain restart for this change took 69.2 seconds. The fresh engine spent 41.7 seconds on distributed initialization, kernels, and model building, 20.5 seconds on process start-up and imports, and 7.0 seconds running the check.",
+   "b3": "FastRSI installed the updated `_build_block_mask` function live in 0.6 seconds and ran the check in 6.3 seconds. Because the edit went straight into the running engine, process start-up and model loading were completely skipped. Total evaluation time was 6.8 seconds, a 10.1x speedup.",
+   "b4": "Call counting confirmed that `_build_block_mask` ran on every check. The resulting video and audio hashes were identical to the unedited engine. This optimization cut video generation time by 1.9%, from 6.3 seconds to 6.2 seconds."
+  },
+  {
+   "pr": "15-ffn-cuda-graph-replay",
+   "b1": "A FastRSI agent wrote this edit in `minimax_h3.py` while optimizing video generation speed. It adds `_h3_ff_graph_signature` and `_h3_ff_graph_forward` to check that feed-forward network weights and tensor shapes are unchanged and replay `MiniMaxH3FeedForward` with a CUDA graph during inference.",
+   "b2": "Evaluating this edit via a plain restart took 75.2 seconds. That required 44.1 seconds for distributed initialization, kernels, and model building, 19.2 seconds for process start-up and imports, and 4.8 seconds for warm-up steps before the 6.7-second check.",
+   "b3": "FastRSI installed the edit live in 0.3 seconds, spent 0.1 seconds capturing the new CUDA graph, and ran the check in 6.8 seconds. By updating the running engine in place, it skipped process start-up, full model loading, and warm-up steps. The entire evaluation took 7.2 seconds, a 10.4x speedup.",
+   "b4": "FastRSI verified that `_h3_ff_graph_signature`, `_h3_ff_graph_forward`, and `MiniMaxH3FeedForward.forward` all ran on every check. The output video and audio were identical to the unedited engine, and there was no measurable change in video generation time (+0.5%, from 6.3s to 6.4s)."
+  }
+ ],
+ "_about": "Case-study wording written by Gemini (gemini-4-argon-medium) on 2026-11-14 from prs.json records and the upstream diffs; pasted as returned, with phase ids spelled as words."
+}

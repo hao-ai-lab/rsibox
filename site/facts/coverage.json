@@ -77,8 +77,8 @@
    "engine": "vLLM",
    "what": "Which mechanism a real performance PR needs",
    "unit": "upstream performance PRs",
-   "method": "959 performance PRs found; 80 inspected by hand and assigned a mechanism and function group. A classification of what each PR would need, not a test that each installs.",
-   "when": "not dated in the repo (the survey predates 2026-11-04)",
+   "method": "487 performance PRs found (2026-07-24 to 2026-10-24); 80 sampled and inspected by hand (63/80 = 79% install in place in this repo, 8/80 = 10% C++/CUDA native edits demonstrated only in a pre-repo prototype, 9/80 = 11% restart). A classification of what each PR would need, not a test that each installs.",
+   "when": "2026-07-24 to 2026-10-24",
    "rows": [
     {
      "mechanism": "Swap Python methods or objects in place",
@@ -99,7 +99,7 @@
     },
     {
      "mechanism": "Swap code and rebuild pre-allocated buffers or runners",
-     "share_of_80_pct": 9,
+     "share_of_80_pct": 8,
      "groups": [
       "STATE",
       "RESOURCE"
@@ -107,15 +107,15 @@
      "class": "partial reset"
     },
     {
-     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture",
-     "share_of_80_pct": 9,
+     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture (pre-repo prototype only; restart in this repo)",
+     "share_of_80_pct": 10,
      "groups": [
       "NATIVE"
      ],
-     "class": "partial reset"
+     "class": "restart"
     },
     {
-     "mechanism": "Needs a restart (startup logic, environment variables)",
+     "mechanism": "Needs a restart (Rust rebuild, weights, startup logic, launch flags)",
      "share_of_80_pct": 11,
      "groups": [],
      "class": "restart"

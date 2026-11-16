@@ -40,8 +40,8 @@
 
   <!-- Section 2: evaluation ladder -->
   <section class="fr-sec" id="eval-time" aria-labelledby="eval-time-h">
-    <h2 class="fr-h2" id="eval-time-h">Each evaluation takes less time</h2>
-    <p class="fr-sub">The race is won here: FastRSI trims the overhead around every check. Each row removes one cost; the dashed box is the row above, and the blue number is the speedup over the first row.</p>
+    <h2 class="fr-h2" id="eval-time-h">Where the minutes per check actually go</h2>
+    <p class="fr-sub">FastRSI wins the race by stripping away the setup and measurement tax on every turn. Each row peels off one layer of overhead from the bar above it, and the blue label shows total speedup over Baseline.</p>
     <div class="fr-card" id="ladder-card">
       <div class="fr-ladder-top">
         <div class="fr-picker" role="group" aria-label="Engine" data-draw="ladder-picker" data-source="race_workloads"></div>
@@ -60,7 +60,7 @@
 
   <!-- Section 3: model speed -->
   <section class="fr-sec" id="model-speed" aria-labelledby="model-speed-h">
-    <h2 class="fr-h2" id="model-speed-h">The faster the model thinks, the more this matters</h2>
+    <h2 class="fr-h2" id="model-speed-h">Why faster models make FastRSI's lead even larger</h2>
     <p class="fr-sub">How many times faster FastRSI finishes the same work: Baseline's hours divided by FastRSI's hours to replay each logged run with the model generating faster and everything else fixed. Restarting per check soon hits a floor, so FastRSI's lead grows as the model gets faster.</p>
     <div class="fr-card" id="speed-card">
       <div class="fr-speed-ctl">

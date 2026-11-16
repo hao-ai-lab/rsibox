@@ -1,0 +1,25 @@
+{
+"repo": "vllm-project/vllm",
+"pr": 59941,
+"additions": 97,
+"changedFiles": 2,
+"deletions": 7,
+"title": "[Bugfix] Resolve eager_break_during_capture at call time, not import time",
+"url": "https://github.com/vllm-project/vllm/pull/59941",
+"files": [
+{
+"path": "vllm/compilation/breakable_cudagraph.py",
+"lines": [
+"@@ -95,8 +95,6 @@ def eager_break_during_capture(fn: F) -> F:",
+"         def unified_attention_with_output(...):",
+"             ...",
+"     \"\"\"",
+"-    if not is_breakable_cudagraph_enabled():",
+"-        return fn",
+" ",
+"     @functools.wraps(fn)",
+"     def wrapper(*args: Any, **kwargs: Any) -> Any:"
+]
+}
+]
+}
