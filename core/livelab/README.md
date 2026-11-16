@@ -13,6 +13,9 @@ engine: `template/`.
 - `kernel/`: the transaction kernel (locate, journal, swap, witness, findings, two-phase
   coordinator, session, receipts), pure Python and importing no engine, with a toy engine and
   the toy lab (`kernel.toy_lab:ToyLab`) that passes c0-c10. See `kernel/README.md`.
+- `survey/`: the static live-editability survey: classifies every function of an engine's
+  upstream tree by function group and install class, and reads from the lab's files which of
+  those paths the lab has; a history mode gives coverage per lab commit. See `survey/README.md`.
 - `forksafe.py`: the pre-fork guards an engine zygote installs before its imports, so the
   processes it forks can still use CUDA: capability and current device from NVML
   (`install`), device properties from a probe process (`install_properties`), Triton's GPU
@@ -25,5 +28,6 @@ From here (CPU, standard library only; torch cases skip without torch):
 python3 -m unittest discover -s conformance -t . -v     # the cases fail labs that lack their property
 python3 -m unittest discover -s kernel -t . -v          # kernel golden tests on the toy engine
 python3 -m unittest discover -s . -p 'test_forksafe.py' -v
+python3 -m unittest discover -s survey -t . -v          # survey golden tests on the fixture tree
 python3 -m conformance --lab kernel.toy_lab:ToyLab      # c0-c10 on the toy lab
 ```

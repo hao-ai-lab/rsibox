@@ -14,7 +14,8 @@ core/
 │   ├── test_forksafe.py         CPU golden tests for forksafe.py.
 │   ├── kernel/                  Transaction kernel (locate, journal, swap, jit, witness,
 │   │                            findings, coordinator, session, receipts) + CPU toy lab.
-│   └── conformance/             Conformance test harness (cases c0–c10).
+│   ├── conformance/             Conformance test harness (cases c0–c10).
+│   └── survey/                  Static live-editability survey of an engine's source tree.
 └── agents/                    Agent personas, protocols, and role specifications:
     ├── orchestrator.md          Orchestrator prompt: live streamer and human interface.
     ├── developer.md             Developer prompt: edit, stage, verify, commit, and undo.

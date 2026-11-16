@@ -1,0 +1,21 @@
+{
+  "engine": "toyengine",
+  "rules_version": "toy-1",
+  "upstream": {"repo": "fixture", "commit": null, "version": "0.1"},
+  "lab_path": "lab",
+  "source_roots": ["toyengine"],
+  "exclude": ["*/tests/*"],
+  "decorators": {"dsl_kernel": ["cute.kernel"], "compiled": []},
+  "paths": [
+    {"glob": "toyengine/cli.py", "group": "restart", "why": "launch flags"},
+    {"glob": "toyengine/model/*", "group": "GRAPH", "why": "the lab captures model code in graphs"}
+  ],
+  "capabilities": {
+    "swap": {"evidence": [[{"path": "lab/adapter/host.py", "contains": "StepGapCoordinator"}]],
+             "unreached": ["toyengine/tools.py"]},
+    "swap_recapture": {"evidence": [[{"path": "lab/adapter/recapture.py"}]],
+                       "reach": ["toyengine/model/*"]},
+    "rebuild": {"evidence": [[{"path": "lab/services/rebuild.py"}]]},
+    "respawn": {"evidence": [[{"path": "lab/services/zygote.py"}]]}
+  }
+}
