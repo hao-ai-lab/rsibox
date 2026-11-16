@@ -275,6 +275,156 @@
     "The added/deleted totals are inflated by PR #68, which copied the kernel into the FastVideo lab (+7,210 lines) before PR #107 moved it to a shared folder.",
     "3,345 of the current lines are the 19 hill-climb patch files, not lab code."
    ]
+  },
+  {
+   "engine": "SGLang",
+   "folder": "repos/sglang",
+   "recorded_facts": [
+    {
+     "fact": "Onboarding required 534 non-test adapter LOC plus 250 zygote LOC (784 non-test Python lines total), reusing the shared transaction kernel unchanged.",
+     "source": "PR #163; PR #164; repos/sglang"
+    },
+    {
+     "fact": "Passed 11/11 conformance on CPU and on 2x GB200 (TP=2, Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load [29.8x], SglangZygote 11.75 s).",
+     "source": "PR #163; PR #164"
+    }
+   ],
+   "derived_from_git": {
+    "commits_touching_folder": 2,
+    "first_commit": "2026-11-15",
+    "last_commit": "2026-11-16",
+    "lines_added_all_history": 1412,
+    "lines_deleted_all_history": 18,
+    "current_tree_by_folder": {
+     "livelab": {
+      "files": 9,
+      "lines": 1394
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 5,
+     "non_test_lines": 784,
+     "test_files": 3,
+     "test_lines": 610
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 2,
+     "additions": 1412,
+     "deletions": 18,
+     "first_merged_utc": "2026-11-15T00:00Z",
+     "last_merged_utc": "2026-11-16T00:00Z"
+    },
+    "source": "PR #163; PR #164; repos/sglang"
+   },
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Runs against unmodified SGLang 0.5.10.post2 by wrapping Scheduler event-loop batch gaps and CudaGraphRunner decode graph recapture at runtime.",
+    "source": "PR #163; PR #164"
+   },
+   "notes": [
+    "534 non-test adapter LOC + 250 zygote LOC (784 non-test LOC total); 11/11 conformance on CPU and 2x GB200."
+   ]
+  },
+  {
+   "engine": "verl",
+   "folder": "repos/verl",
+   "recorded_facts": [
+    {
+     "fact": "Onboarding required 595 non-test adapter LOC plus 232 probe CLI LOC (827 non-test Python lines), reusing shared core/livelab/ray_participants.py (182 LOC).",
+     "source": "PR #160; PR #161; repos/verl"
+    },
+    {
+     "fact": "Passed 11/11 conformance and verified on 4x GB200 Qwen3-0.6B GSM8K GRPO across 13 warm processes: live reward swap 24.91 s (9.0x vs 224.05 s boot), live advantage swap 9.22 s (24.3x), coupled 4-GPU S0 restore 2.46 s, offline rescore 42.15 ms.",
+     "source": "PR #160; PR #161"
+    }
+   ],
+   "derived_from_git": {
+    "commits_touching_folder": 2,
+    "first_commit": "2026-11-15",
+    "last_commit": "2026-11-16",
+    "lines_added_all_history": 1385,
+    "lines_deleted_all_history": 12,
+    "current_tree_by_folder": {
+     "livelab": {
+      "files": 8,
+      "lines": 1373
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 5,
+     "non_test_lines": 827,
+     "test_files": 3,
+     "test_lines": 546
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 2,
+     "additions": 1385,
+     "deletions": 12,
+     "first_merged_utc": "2026-11-15T00:00Z",
+     "last_merged_utc": "2026-11-16T00:00Z"
+    },
+    "source": "PR #160; PR #161; repos/verl"
+   },
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Hooks into Ray workers and RayPPOTrainer via core/livelab/ray_participants.py without patching upstream verl.",
+    "source": "PR #160; PR #161"
+   },
+   "notes": [
+    "595 non-test adapter LOC + 232 probe CLI LOC reusing core/livelab/ray_participants.py (182 LOC); 11/11 conformance + 4x GB200 GRPO."
+   ]
+  },
+  {
+   "engine": "miles",
+   "folder": "repos/miles",
+   "recorded_facts": [
+    {
+     "fact": "Onboarding required 337 non-test production adapter LOC reusing core/livelab/ray_participants.py (182 LOC), proving derived-engine onboarding under 400 prod LOC.",
+     "source": "PR #162; repos/miles"
+    },
+    {
+     "fact": "Passed 11/11 conformance and verified on 2x GB200 (miles 0.2.0): multi-actor live swap in 0.069 s, EpochDataBuffer code_epoch drain, and coupled S0 weight sync.",
+     "source": "PR #162"
+    }
+   ],
+   "derived_from_git": {
+    "commits_touching_folder": 1,
+    "first_commit": "2026-11-15",
+    "last_commit": "2026-11-16",
+    "lines_added_all_history": 692,
+    "lines_deleted_all_history": 0,
+    "current_tree_by_folder": {
+     "livelab": {
+      "files": 6,
+      "lines": 692
+     }
+    },
+    "livelab_python": {
+     "non_test_files": 4,
+     "non_test_lines": 337,
+     "test_files": 2,
+     "test_lines": 355
+    },
+    "merged_prs_titled_for_engine": {
+     "count": 1,
+     "additions": 692,
+     "deletions": 0,
+     "first_merged_utc": "2026-11-15T00:00Z",
+     "last_merged_utc": "2026-11-16T00:00Z"
+    },
+    "source": "PR #162; repos/miles"
+   },
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Attaches to miles 0.2.0 Ray actors via core/livelab/ray_participants.py with zero upstream patches.",
+    "source": "PR #162"
+   },
+   "notes": [
+    "337 non-test prod adapter LOC reusing ray_participants.py, proving derived-engine onboarding under 400 prod LOC; 11/11 conformance + 2x GB200 smoke."
+   ]
   }
  ]
 }

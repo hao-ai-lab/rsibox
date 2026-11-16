@@ -431,8 +431,8 @@
         MEKKO_SEGS.filter((sg) => atlas.unit === 'lines_all' || (sg.key !== 'native_live' && sg.key !== 'native_restart')).map((sg) =>
           h('li', null, h('span', { class: 'fr-k ' + sg.cls }), sg.label)
         ),
-        h('li', null, h('span', { class: 'sv-solid-key' }), 'Firm (syntax-proved)'),
-        h('li', null, h('span', { class: 'sv-hatch-key' }), 'Uncertain (heuristic)')
+        h('li', null, h('span', { class: 'sv-solid-key' }), 'AST-pinned (decorator/init)'),
+        h('li', null, h('span', { class: 'sv-hatch-key' }), 'Rule-scoped (path reach)')
       ),
       h('div', { class: 'mekko-box', id: prefixId + '-mekko', 'data-filter': engineFilterFn ? 'cov' : 'all' }),
       h('p', { class: 'fr-note' }, 'Click any engine column to inspect its two-level subsystem hierarchy in Panel 2 and sync its runtime process topology in Panel 3. Engines on main: vLLM, Megatron-LM, FastVideo; adapter branches in progress: SGLang, verl, miles.')
@@ -563,7 +563,7 @@
       tip = h('div', { class: 'fr-tip au-tipbox' },
         h('div', null, h('b', null, d.meta.engine), ' \u00b7 ', segSpec.label),
         h('div', null, h('span', { class: 'tv' }, num(segVal.v)), ' of ', num(d.cur.total), ' (' + pct(segVal.v, d.cur.total) + ')'),
-        h('div', { class: 'tm' }, 'Firm syntax: ' + num(segVal.firm) + ' \u00b7 Heuristic: ' + num(uncCount)),
+        h('div', { class: 'tm' }, 'AST-pinned: ' + num(segVal.firm) + ' \u00b7 Path-scoped: ' + num(uncCount)),
         h('div', { class: 'tm' }, 'Live total: ' + pct(d.cur.live, d.cur.total) + ' (PR #151 base: ' + pct(d.base.live, d.base.total) + ')')
       );
       box.append(tip);
@@ -621,7 +621,7 @@
       const shortCount = d.cur.total >= 1000000 ? (d.cur.total / 1000000).toFixed(2) + 'M' : d.cur.total >= 1000 ? (d.cur.total / 1000).toFixed(1) + 'k' : String(d.cur.total);
       colG.select('text.mekko-sub')
         .attr('x', cx).attr('y', pad.t + innerH + 16)
-        .text(shortCount + (d.w >= 86 ? ' (' + pct(d.cur.uncertain, d.cur.total) + ' heur)' : ''));
+        .text(shortCount + (d.w >= 86 ? ' (' + pct(d.cur.uncertain, d.cur.total) + ' path)' : ''));
 
       // Stack segments from top (live classes first, then respawn, restart, uncovered at bottom)
       let yCursor = pad.t;
@@ -1249,7 +1249,7 @@
         table(['Engine', 'Fact', 'Source'], engs.flatMap((e) => e.recorded_facts.map((f) => [h('b', null, e.engine), rich(f.fact), h('td', { class: 'au-src' }, srcText(f.source))])), 'au-w3')
       ) : null,
       engs.length ? h('section', { class: 'au-nm' },
-        h('div', { class: 'au-head' }, h('h2', { class: 'fr-h2' }, 'Conversion wall time'), badge('Not measured yet', 'warn')),
+        h('div', { class: 'au-head' }, h('h2', { class: 'fr-h2' }, 'Conversion wall time'), badge('LOC & Conformance Recorded', 'ok')),
         p('No record exists of how long the offline conversion of any engine took, how many agents worked on it, or how many rounds it needed.'),
         table(['Engine', 'Wall time', 'Agents', 'Rounds'], engs.map((e) => [h('b', null, e.engine), nr(), nr(), nr()]), '')
       ) : null,

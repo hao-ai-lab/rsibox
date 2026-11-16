@@ -35,6 +35,20 @@
      ]
     },
     {
+     "name": "Constructor fresh-field re-initialization (kernel/reinit.py, PR #156)",
+     "what": "Re-initializes pure fresh-field additions in `__init__` and `__post_init__` on existing heap instances at `live-T0` without restarting or forking the engine.",
+     "startup_cost_removed": "Forked or warm engine restart for pure-field constructor additions (`#62872`).",
+     "measured_saving": {
+      "before": "42.93 s (forked restart, CUDA graphs) / 17.17 s (eager)",
+      "after": "1.41 s (CUDA graphs, 30.4x) / 1.81 s (eager, 9.5x); undo 1.58 ms",
+      "unit": "s",
+      "setup": "1x B200, Qwen3-8B TP1, N=3"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #156; core/livelab/kernel/reinit.py",
+     "note": "Verified on upstream vLLM PR #62872 (`Scheduler.__init__` pure-field addition `set() -> {}`): 1.410 s with CUDA graphs (30.4x vs 42.93 s forked restart) and 1.806 s eager (9.5x vs 17.17 s forked restart), undo 1.58 ms (23,440x)."
+    },
+    {
      "name": "Triton kernel rebuild in place",
      "what": "Rebuilds an edited @triton.jit kernel inside the running process and counts its launches as the witness, instead of restarting to recompile it.",
      "startup_cost_removed": "Process restart for a GPU-kernel edit.",
@@ -240,22 +254,22 @@
       "setup": "GB200, TP 2, megatron-core 0.20 dev, 2026-11-07"
      },
      "status": "merged_gpu_verified",
-     "source": "repos/megatron/kb/costs.md:24,128-131; PR #74; PR #78",
-     "note": "Covers function bodies and repair cells. Not yet: torch.compile (`jit_fuser`) functions, CUDA graph regions, constructors, optimizer construction, Transformer Engine C++ (repos/megatron/livelab/README.md:59-61)."
+     "source": "repos/megatron/kb/costs.md:24,128-131; PR #74; PR #78; PR #156",
+     "note": "Covers function bodies, repair cells, and pure-field constructors via `kernel/reinit.py` (PR #156). Not yet: torch.compile (`jit_fuser`) functions, CUDA graph regions, imperative buffer/submodule constructors, optimizer construction, Transformer Engine C++ (repos/megatron/livelab/README.md:59-61)."
     },
     {
      "name": "Start-state snapshot and restore",
      "what": "Keeps a code-independent start state (weights, Adam state, scheduler, RNG, frozen batches) in pinned host memory and restores it before every check.",
      "startup_cost_removed": "Re-initializing the job to get a comparable starting point.",
      "measured_saving": {
-      "before": null,
-      "after": "0.25-0.27",
+      "before": "13.69 (4x GB200 Qwen3-30B-A3B 24-layer MXFP8 EP4 rebuild)",
+      "after": "0.21-0.27 (50.7x byte-identical restore; 2.07 s snapshot of 23.5 GiB/rank)",
       "unit": "s",
-      "setup": "restore of 96.3 GiB per rank, Qwen3-14B architecture TP 2, GB200; 1.9 s on 2x B200 (PR #138); 0.79 s for 106.8 GiB at 32B TP 4"
+      "setup": "4x GB200, Qwen3-30B-A3B 24-layer MXFP8 EP4 (23.5 GiB/rank, PR #155); also 0.25-0.27 s restore of 96.3 GiB per rank at Qwen3-14B TP 2 on GB200, 1.9 s on 2x B200 (PR #138), and 0.79 s for 106.8 GiB at 32B TP 4"
      },
      "status": "merged_gpu_verified",
-     "source": "repos/megatron/kb/costs.md:138-142; PR #138",
-     "note": "No 'before' number is recorded for this step alone; the alternative is a restart."
+     "source": "repos/megatron/kb/costs.md:138-142; PR #138; PR #155",
+     "note": "PR #155 measured 4x GB200 Qwen3-30B-A3B 24-layer MXFP8 EP4 (23.5 GiB/rank): 2.07 s snapshot and 0.21-0.27 s byte-identical restore vs 13.69 s rebuild (50.7x)."
     },
     {
      "name": "Zygote (rank fork server)",
@@ -432,6 +446,97 @@
      "status": "planned",
      "source": "repos/fastvideo/livelab/README.md ('Not covered'); repos/fastvideo/examples/h3-conformance/README.md:69-72",
      "note": "Listed as not covered / not shown."
+    }
+   ]
+  },
+  {
+   "engine": "SGLang",
+   "upstream": "sgl-project/sglang",
+   "folder": "repos/sglang",
+   "mechanisms": [
+    {
+     "name": "Multi-rank live swap and decode CUDA graph recapture (`SglangConformanceLab`)",
+     "what": "Two-phase coordinator across TP Scheduler processes in the inter-batch gap, with selective `R1` decode CUDA graph recapture on `@captured_target` commits and rollback.",
+     "startup_cost_removed": "Full engine cold load and CUDA graph capture across TP ranks.",
+     "measured_saving": {
+      "before": "24.97 (cold load)",
+      "after": "0.091 (c9 live install median; uninstall 0.008 s) / 0.839 (R1 decode graph recapture, 29.8x)",
+      "unit": "s",
+      "setup": "2x GB200, TP=2, Qwen3-0.6B; SglangConformanceLab 11/11 conformance"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #163; PR #164; repos/sglang",
+     "note": "SglangConformanceLab passed 11/11 conformance on 2x GB200 TP=2 Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load (29.8x)."
+    },
+    {
+     "name": "Zygote fork server (`SglangZygote`)",
+     "what": "Pre-imports SGLang and dependencies before CUDA init and forks TP worker groups on respawn.",
+     "startup_cost_removed": "Interpreter start and library imports on warm respawn.",
+     "measured_saving": {
+      "before": 24.97,
+      "after": 11.75,
+      "unit": "s",
+      "setup": "2x GB200, TP=2, Qwen3-0.6B"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #163; PR #164; repos/sglang",
+     "note": "Warm respawn via SglangZygote measured at 11.75 s on 2x GB200 TP=2 Qwen3-0.6B."
+    }
+   ]
+  },
+  {
+   "engine": "verl",
+   "upstream": "volcengine/verl",
+   "folder": "repos/verl",
+   "mechanisms": [
+    {
+     "name": "Multi-actor Ray GRPO live swap and offline `rescore`",
+     "what": "Coordinates two-phase swaps across 13 warm Ray actors/processes (`RayActorParticipant` over `core/livelab/ray_participants.py`) at step-gap barriers, plus cached-batch offline reward/advantage `rescore`.",
+     "startup_cost_removed": "Full multi-actor RL job boot (Ray cluster, FSDP trainer, rollout engine, reward actors).",
+     "measured_saving": {
+      "before": "224.05 (4-GPU GRPO cold boot)",
+      "after": "24.91 (live reward swap, 9.0x) / 9.22 (live advantage swap, 24.3x); offline rescore 0.04215 s (42.15 ms)",
+      "unit": "s",
+      "setup": "4x GB200, Qwen3-0.6B GSM8K GRPO across 13 warm processes"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #160; PR #161; repos/verl",
+     "note": "11/11 conformance; on 4x GB200 Qwen3-0.6B GSM8K GRPO across 13 warm processes: live reward swap 24.91 s (9.0x vs 224.05 s boot), live advantage swap 9.22 s (24.3x), offline rescore 42.15 ms."
+    },
+    {
+     "name": "Coupled 4-GPU `S0` checkpoint restore",
+     "what": "Restores coupled trainer, optimizer, RNG, and rollout weights to a clean starting state `S0` across all 4 GPUs between RL candidate evaluations.",
+     "startup_cost_removed": "Re-initializing FSDP trainer and rollout actors to compare RL edits from an identical start state.",
+     "measured_saving": {
+      "before": 224.05,
+      "after": 2.46,
+      "unit": "s",
+      "setup": "4x GB200, Qwen3-0.6B GSM8K GRPO, coupled 4-GPU S0 restore"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #160; PR #161; repos/verl",
+     "note": "Coupled 4-GPU S0 restore measured at 2.46 s on 4x GB200."
+    }
+   ]
+  },
+  {
+   "engine": "miles",
+   "upstream": "radixark/miles",
+   "folder": "repos/miles",
+   "mechanisms": [
+    {
+     "name": "Multi-actor Ray live swap with `EpochDataBuffer` `code_epoch` drain and coupled `S0` weight sync",
+     "what": "Swaps rollout/trainer/reward functions across Ray actors via shared `core/livelab/ray_participants.py`, drains stale in-flight samples tagged with an older `code_epoch` in `EpochDataBuffer`, and runs coupled `S0` weight sync.",
+     "startup_cost_removed": "Full Ray RL job restart and stale rollout buffer flush.",
+     "measured_saving": {
+      "before": null,
+      "after": 0.069,
+      "unit": "s",
+      "setup": "2x GB200, miles 0.2.0, multi-actor live swap + EpochDataBuffer code_epoch drain + coupled S0 weight sync"
+     },
+     "status": "merged_gpu_verified",
+     "source": "PR #162; repos/miles",
+     "note": "11/11 conformance; on 2x GB200 miles 0.2.0: multi-actor live swap in 0.069 s with EpochDataBuffer code_epoch drain and coupled S0 weight sync."
     }
    ]
   }

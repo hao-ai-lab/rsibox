@@ -44,7 +44,7 @@ td.au-src { min-width: 150px; max-width: 230px; }
 
 /* status marks */
 .au-b { display: inline-block; font-size: 11.5px; line-height: 1.5; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--fr-rule); color: var(--fr-ink); white-space: nowrap; font-family: var(--font-anthropic-sans); font-style: normal; }
-.au-b.good { border-color: color-mix(in oklab, var(--good) 65%, var(--fr-rule)); background: color-mix(in oklab, var(--good) 14%, transparent); }
+.au-b.good, .au-b.ok { border-color: color-mix(in oklab, var(--good) 65%, var(--fr-rule)); background: color-mix(in oklab, var(--good) 14%, transparent); }
 .au-b.warn { border-color: color-mix(in oklab, var(--warn) 70%, var(--fr-rule)); background: color-mix(in oklab, var(--warn) 13%, transparent); }
 .au-b.bad { border-color: color-mix(in oklab, var(--bad) 70%, var(--fr-rule)); background: color-mix(in oklab, var(--bad) 13%, transparent); }
 .au-b.mute { color: var(--fr-muted); }
