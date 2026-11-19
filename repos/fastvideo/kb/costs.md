@@ -140,6 +140,19 @@ measured per-process first-video work plus a 6.1 s video.
 | Restart after the JIT cache root moved | page cache | 58-60 s to ready (measured) | moved, unfixed: 223.4 s (first video 174.0 s; FlashInfer rebuild 153-159 s), also through a re-pointed symlink (first video 170.0 s); staged back at its real path: first video 37.9 s on the cold copy (FlashInfer 11.8 s, no ninja step re-ran), 17.1 s on the next start (FlashInfer 0.60 s) | about 66 s once staged | moved-cache and staged-back runs (2026-11-07) |
 | Cold restart | nothing | 289 s to ready (93.5 + 195.6, measured earlier) | about 507 s (first video 217.9 s) | | ladder above |
 
+**Re-measured on 2026-11-19** (one GB200 tray, newer environment: torch 2.12, CUDA 13; weights
+on a node-local memory filesystem, so loads are 20-26 s instead of 60-150 s; other H3 runs on
+the tray's other GPUs; `tools/h3_climb.py`, every video bit-exact to base):
+
+| Action | 1 GPU | 2 ranks | First video after it |
+|---|---|---|---|
+| Live swap of one hill-climb patch from its file (`install({"diff": ...})`) | 0.02-0.13 s | 0.05-0.26 s | a warm video (a patch that captures CUDA graphs: +0.5-1.4 s once) |
+| In-place rebuild of `minimax_h3.py` with patches 15, 16, 17, 20 | 1.12 s | | 6.09 s |
+| Zygote respawn with weights holder | 3.05-3.51 s (six respawns) | 6.23-7.27 s | 12.3-13.7 s |
+| Zygote respawn | 13.8-14.5 s | | 11.3-11.6 s |
+| Plain respawn (`reset("respawn")`) | 21.2-23.7 s | 29.7 s | 10.9-11.4 s |
+| Respawn after a poisoning fault (conformance c8) | 22.2-53.5 s | 29.7-59.2 s | |
+
 - **In-place rebuild** covers the edits the live swap refuses (a constructor, a new field, a
   module constant) on the H3 stages and the H3 DiT: a stage constructor edit (4 modules
   re-imported), a DiT block constructor edit that adds a field (merged into 50 live blocks), a

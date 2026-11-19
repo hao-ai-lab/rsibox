@@ -36,7 +36,7 @@ from kernel import findings as F
 from kernel import locate as L
 from kernel import receipt as R
 from kernel import session as SS
-from adapter import agent
+from adapter import agent, diffs
 
 H3 = "fastvideo.pipelines.basic.minimax_h3"
 DEC = f"{H3}.stages.minimax_h3_decoding"
@@ -261,13 +261,33 @@ class FastVideoLab:
             self.base_text[m] = read_module(m)
         return self.base_text[m]
 
+    def _exists(self, m):
+        try:
+            return m in self.base_text or module_file(m) is not None
+        except ImportError:
+            return False
+
+    def files(self, patch, against="live"):
+        """{module: new text} of a patch: its `files`, or its `diff` (a unified diff, such as a
+        `patches/` file) applied to the live text (base plus every live edit and rebuild), or to
+        the files on disk with `against="disk"` (what a fresh process starts from). ValueError
+        when the diff does not apply."""
+        if patch.get("diff") is None:
+            return dict(patch.get("files") or {})
+        if against == "disk":
+            return diffs.apply(patch["diff"], lambda m: read_module(m) if self._exists(m) else None)
+        live = self.live_text[-1]
+        return diffs.apply(patch["diff"], lambda m: live.get(m) or (
+            self._base(m) if self._exists(m) else None))
+
     def install(self, patch):
         t0 = time.perf_counter()
         with self.lock:
             live = self.live_text[-1]
             modules = {}
             try:
-                for m, new in patch["files"].items():
+                files = self.files(patch)
+                for m, new in files.items():
                     modules[m] = {"source": new, "base_hash": L.text_hash(live.get(m) or self._base(m))}
             except Exception as e:
                 f = F.finding("patch_invalid", f"{type(e).__name__}: {e}", "importable modules")
@@ -278,7 +298,7 @@ class FastVideoLab:
             res = self.session.install(plan, edit_time=patch.get("edit_time"))
             outcome, rec = res.get("outcome") or "refused", res.get("receipt")
             if outcome == "committed":
-                self.live_text.append({**live, **patch["files"]})
+                self.live_text.append({**live, **files})
             codes = (rec["decisions"]["blocking"] if rec else
                      sorted({f["check"] for f in res.get("findings", [])}))
             return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
@@ -370,8 +390,15 @@ class FastVideoLab:
                 refuse = finding("live_edits_installed", f"{len(self.session.stack)} transaction(s)",
                                    "uninstall the live edits before a rebuild")
             revert = bool(patch.get("revert"))
-            files = ({m: read_module(m) for m in getattr(self, "rebuilt", {})} if revert
-                     else dict(patch.get("files") or {}))
+            files = {}
+            if revert:
+                files = {m: read_module(m) for m in getattr(self, "rebuilt", {})}
+            elif refuse is None:
+                try:
+                    files = self.files(patch)
+                except Exception as e:                  # a verb never raises
+                    refuse = finding("patch_invalid", f"{type(e).__name__}: {e}",
+                                     "a diff that applies to the live text")
             if not files and refuse is None:
                 refuse = finding("patch_invalid", "no files", "at least one edited module")
             if refuse is not None:
@@ -459,7 +486,7 @@ class FastVideoLab:
                 os.makedirs(os.path.join(tmp, rel), exist_ok=True)
                 for f in files:
                     os.symlink(os.path.join(d, f), os.path.join(tmp, rel, f))
-            for m, text in ((patch or {}).get("files") or {}).items():
+            for m, text in self.files(patch or {}, against="disk").items():
                 target = os.path.join(tmp, *m.split("."))
                 target = os.path.join(target, "__init__.py") if os.path.isdir(target) else target + ".py"
                 if os.path.lexists(target):

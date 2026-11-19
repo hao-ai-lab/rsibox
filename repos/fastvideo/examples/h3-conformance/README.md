@@ -36,25 +36,31 @@ c10_not_proven        pass    115.1    proven False, findings ['zero_witness', '
 
 ## 1 GPU (1 rank)
 
+Our 2026-11-19 run (newer environment: torch 2.12, CUDA 13; base audio hash `ee49674663eae6e2`,
+not the 11-07 golden's, `kb/lessons.md`), `python3 -m conformance --lab adapter.h3:H3Lab`:
+
 ```
 case                  result  seconds  evidence
-c0_repeatable         pass     27.8    3 checks (one after reset ['cuda cache']) gave {'video': 'd0e55e892690e260', 'audio': '29b690c8ac7ae3be'}
-c1_noop               pass     12.7    installed by ['R0 swap']; calls {...: [1]}; output unchanged
-c2_visible            FAIL     12.6    witness > 0 on every participant; got {'rank0': {...: 1}}   (needs >= 2 participants)
-c3_fresh_equivalence  pass    265.8    visible and chain of 3: live == fresh
-c4_uninstall          pass     25.2    uninstall in 0.014036 s; identity restored
-c5_failed_install     pass     25.3    fail_apply and fail_commit: rolled_back, base proven; control committed 3 targets
-c6_refusal            pass     31.8    patch_invalid / closure_changed / outside_changes / empty_change
-c7_chain              pass     50.7    undone one by one to base
-c8_crash_and_hang     pass    419.6    crash: poisoned by ['participant_failed'], respawn 42.8 s
-                                       hang: poisoned by ['participant_failed'], respawn 98.6 s
-                                       lost: poisoned by ['participant_failed'], respawn 36.8 s
-                                       tamper: poisoned by ['tampered'], respawn 41.2 s
-c9_soak               pass    266.8    20 cycles; install median 0.0523 s, uninstall median 0.0155 s
-c10_not_proven        pass     89.2    proven False, findings ['zero_witness']; fresh video c7db7f61a884d310
+c0_repeatable         pass    186.7    3 checks (one after reset ['cuda cache']) gave {'video': 'd0e55e892690e260', 'audio': 'ee49674663eae6e2'}
+c1_noop               pass     12.4    installed by ['R0 swap']; calls {'...MiniMaxH3VideoDecodingStage.forward:109': [1]}; output unchanged
+c2_visible            pass     12.4    output {'video': 'd0e55e892690e260', ...} -> {'video': 'cd32f50b70d9479f', ...}
+c3_fresh_equivalence  pass    154.3    visible: live == fresh == {'video': 'cd32f50b70d9479f', 'audio': 'ee49674663eae6e2'}
+c4_uninstall          pass     24.7    uninstall in 0.01123 s; identity restored
+c5_failed_install     pass     24.9    fail_apply and fail_commit: rolled_back, base proven; control committed 3 targets
+c6_refusal            pass     31.2    patch_invalid / closure_changed / outside_changes / empty_change
+c7_chain              pass     49.5    undone one by one to base
+c8_crash_and_hang     pass    779.3    crash: poisoned by ['participant_failed'], respawn 22.2 s
+                                       hang: poisoned by ['participant_failed'], respawn 53.5 s
+                                       lost: poisoned by ['participant_failed'], respawn 23.0 s
+                                       tamper: poisoned by ['tampered'], respawn 23.0 s
+c9_soak               pass    259.4    20 cycles; install median 0.0335 s, uninstall median 0.0111 s
+c10_not_proven        pass     56.9    proven False, findings ['zero_witness']
 ```
 
-c2 needs two participants by design (a witness on every rank); a 1-rank lab cannot show it.
+11/11 on 1 rank: c2 asks for a witness on every involved participant, and one rank is all of
+them (it failed on 11-07, when c2 wanted at least two). c0's 186.7 s includes the first video's
+FlashInfer build. The same day on 2 ranks: 11/11 again (c3 chain of 3 live == fresh
+`23bd4a78af68a546`; c8 respawns 29.7-59.2 s; c9 install median 0.0624 s).
 
 ## What these runs found (and the fixes they needed)
 
