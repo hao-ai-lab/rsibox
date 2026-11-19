@@ -469,6 +469,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(sorted(doc["engines"]), expected_engines)
         self.assertEqual(doc["summary"]["engines_ok"], len(expected_engines))
         self.assertEqual(doc["summary"]["gpu_import_violations"], 0)
+        by_name = {item["name"]: item for item in doc["labs"]}
+        self.assertIsNone(by_name["miles"]["real_spec"])
+        self.assertIsNone(by_name["miles"]["cli_launch"])
+        self.assertTrue(by_name["sglang"]["cli_launch"])
 
         buf_txt = io.StringIO()
         with contextlib.redirect_stdout(buf_txt):
@@ -477,6 +481,7 @@ class CliTests(unittest.TestCase):
         text = buf_txt.getvalue()
         self.assertIn("core:", text)
         self.assertIn("conformance 11/11", text)
+        self.assertIn("cli_launch", text)
         for eng in expected_engines:
             self.assertIn(eng, text)
 
@@ -536,6 +541,95 @@ class CliTests(unittest.TestCase):
         self.assertFalse(by_name["orphan_eng"]["ok"])
         self.assertIn("missing livelab/ directory", by_name["orphan_eng"]["errors"])
         self.assertEqual(doc["summary"]["gpu_import_violations"], 1)
+
+    def test_conformance_toy_alias_and_mutual_exclusion_with_real(self):
+        """Input: `fastrsi conformance toy --toy --only c0_repeatable` vs `--toy --real`.
+        Expected: `--toy` runs the toy lab (exit 0); `--toy --real` exits 2 via argparse."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["conformance", "toy", "--toy", "--only", "c0_repeatable"])
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertIn("1/1 as expected", buf.getvalue())
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            cli.main(["conformance", "toy", "--toy", "--real"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("not allowed with argument --toy", err.getvalue())
+
+    def test_livelab_json_schema_validation_and_doctor_cli_launch_reporting(self):
+        """Input: synthetic repo with valid `real: null` manifest, valid real labs with and
+        without `launch_environment`, and 4 invalid `livelab.json` manifests (bad JSON, list,
+        unknown key, invalid spec). Expected: `real: null` is healthy with `cli_launch=None`
+        and `--real` refuses cleanly; `cli_launch` reports True/False accurately; invalid
+        manifests fail `doctor` and `conformance` without falling back to AST discovery."""
+        tmp = tempfile.mkdtemp(prefix="fastrsi-manifest-schema-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "core", "livelab"))
+        valid_body = (
+            "class GoodLab:\n"
+            "    def install(self, p): pass\n"
+            "    def check(self, w=None): pass\n"
+            "    def reset(self): pass\n"
+            "    def uninstall(self, tid=None): pass\n"
+            "    def status(self): pass\n"
+            "    def patches(self): pass\n"
+            "    def fresh_check(self, p, w=None): pass\n"
+            "    def inject(self, f, **k): pass\n"
+            "    def close(self): pass\n"
+        )
+        launch_body = valid_body + "    @staticmethod\n    def launch_environment(argv): return {}\n"
+
+        def make_pkg(eng_name, mod_name, body, manifest_text=None):
+            ldir = Path(tmp, "repos", eng_name, "livelab")
+            pkg = ldir / "adapter"
+            pkg.mkdir(parents=True)
+            (pkg / "__init__.py").write_text("")
+            (pkg / f"{mod_name}.py").write_text(body)
+            if manifest_text is not None:
+                (ldir / "livelab.json").write_text(manifest_text)
+
+        make_pkg("toy_null_real", "toy_lab", valid_body,
+                 json.dumps({"toy": "adapter.toy_lab:GoodLab", "real": None}))
+        make_pkg("real_cli", "lab", launch_body,
+                 json.dumps({"toy": None, "real": "adapter.lab:GoodLab"}))
+        make_pkg("real_nocli", "lab", valid_body,
+                 json.dumps({"toy": None, "real": "adapter.lab:GoodLab"}))
+        make_pkg("bad_json", "toy_lab", valid_body, "{not valid json")
+        make_pkg("bad_type", "toy_lab", valid_body, '["adapter.toy_lab:GoodLab"]')
+        make_pkg("bad_key", "toy_lab", valid_body,
+                 json.dumps({"toyy": "adapter.toy_lab:GoodLab"}))
+        make_pkg("bad_spec", "toy_lab", valid_body,
+                 json.dumps({"toy": "adapter.toy_lab:GoodLab", "real": "no_colon"}))
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc_real = cli.main(["conformance", "toy_null_real", "--real", "--repo-root", tmp])
+        self.assertEqual(rc_real, 2)
+        self.assertIn("no real conformance class", err.getvalue())
+
+        for broken in ("bad_json", "bad_type", "bad_key", "bad_spec"):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc_bad = cli.main(["conformance", broken, "--repo-root", tmp])
+            self.assertEqual(rc_bad, 2)
+            self.assertIn("invalid livelab.json", err.getvalue())
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_doc = cli.main(["doctor", "--repo-root", tmp, "--json"])
+        self.assertEqual(rc_doc, 1)
+        by_name = {item["name"]: item for item in json.loads(buf.getvalue())["labs"]}
+        self.assertTrue(by_name["toy_null_real"]["ok"])
+        self.assertIsNone(by_name["toy_null_real"]["cli_launch"])
+        self.assertTrue(by_name["real_cli"]["ok"])
+        self.assertTrue(by_name["real_cli"]["cli_launch"])
+        self.assertTrue(by_name["real_nocli"]["ok"])
+        self.assertFalse(by_name["real_nocli"]["cli_launch"])
+        for broken in ("bad_json", "bad_type", "bad_key", "bad_spec"):
+            self.assertFalse(by_name[broken]["ok"])
+            self.assertTrue(any("invalid livelab.json" in e for e in by_name[broken]["errors"]),
+                            by_name[broken])
 
 
 if __name__ == "__main__":

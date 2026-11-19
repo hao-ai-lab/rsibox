@@ -1,7 +1,14 @@
 """Golden CPU tests for the SGLang live-lab adapter, decode-graph recapture, and TP rollback."""
+import contextlib
+import io
+import json
+import os
+import sys
 import unittest
+from unittest import mock
 
-from adapter.fixture.harness import edit_once
+from adapter.conformance_lab import SglangConformanceLab
+from adapter.fixture.harness import edit_once, sglang_env_config
 from adapter.toy_lab import LAYERNORM, ToySglangLab
 
 
@@ -120,6 +127,49 @@ class SglangAdapterTests(unittest.TestCase):
         finally:
             normal_lab.close()
             overlap_lab.close()
+
+    def test_conformance_lab_launch_environment_and_lazy_imports(self):
+        """`SglangConformanceLab.launch_environment` maps CLI flags cleanly without GPU imports."""
+        self.assertFalse(any(m.split(".")[0] in ("torch", "sglang") for m in sys.modules))
+        env = SglangConformanceLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B",
+            "--tp", "2",
+            "--mem-fraction", "0.4",
+            "--max-bs", "8",
+            "--port", "31000",
+            "--work", "rel-sgl-work",
+            "--disable-cuda-graph",
+            "--extra", '{"context_length": 2048}',
+            "--check-timeout", "30",
+            "--rpc-timeout", "240",
+        ])
+        self.assertEqual(env["FASTRSI_SGLANG_MODEL"], "Qwen/Qwen3-8B")
+        self.assertEqual(env["FASTRSI_SGLANG_TP"], "2")
+        self.assertEqual(env["FASTRSI_SGLANG_MEM_FRACTION"], "0.4")
+        self.assertEqual(env["FASTRSI_SGLANG_MAX_BS"], "8")
+        self.assertEqual(env["TMPDIR"], os.path.abspath("rel-sgl-work"))
+        self.assertEqual(env["FASTRSI_SGLANG_CHECK_TIMEOUT"], "30.0")
+        self.assertEqual(env["FASTRSI_SGLANG_RPC_TIMEOUT"], "240.0")
+        self.assertEqual(
+            json.loads(env["FASTRSI_SGLANG_EXTRA_ARGS"]),
+            {"context_length": 2048, "port": 31000, "disable_cuda_graph": True},
+        )
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = sglang_env_config()
+        self.assertEqual(cfg["model_path"], "Qwen/Qwen3-8B")
+        self.assertEqual(cfg["tp_size"], 2)
+        self.assertEqual(cfg["mem_fraction_static"], 0.4)
+        self.assertEqual(cfg["port"], 31000)
+        self.assertTrue(cfg["disable_cuda_graph"])
+        self.assertEqual(cfg["context_length"], 2048)
+
+        minimal = SglangConformanceLab.launch_environment(["--", "--model", "/models/qwen"])
+        self.assertEqual(minimal, {"FASTRSI_SGLANG_MODEL": "/models/qwen"})
+        self.assertNotIn("FASTRSI_SGLANG_EXTRA_ARGS", minimal)
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            SglangConformanceLab.launch_environment(["--extra", "[1, 2]"])
+        self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

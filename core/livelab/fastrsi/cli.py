@@ -4,8 +4,8 @@ Commands:
 - `fastrsi list [--repo-root PATH] [--json]`
     Dynamically discovers the built-in `toy` lab, `template`, and every engine under
     `<repo_root>/repos/<engine>/livelab/` without hardcoding engine names or importing them.
-- `fastrsi conformance <target> [--real] [--only ...] [--receipts ...] [--json]`
-    Runs `core/livelab/conformance` against a discovered engine name (toy by default,
+- `fastrsi conformance <target> [--toy | --real] [--only ...] [--receipts ...] [--json]`
+    Runs `core/livelab/conformance` against a discovered engine name (`--toy` by default,
     `--real` for the real-engine conformance class) or any explicit `module:Class` spec.
 - `fastrsi survey ...`
     Delegates to `core/livelab/survey`.
@@ -63,6 +63,7 @@ _GPU_RUNTIME_LIBS = (
     "jax",
     "tensorflow",
 )
+_MANIFEST_KEYS = frozenset(("toy", "real"))
 _PROBE_SCRIPT = (
     "import importlib, json, sys\n"
     "spec, req_csv, gpu_csv = sys.argv[1], sys.argv[2], sys.argv[3]\n"
@@ -70,7 +71,7 @@ _PROBE_SCRIPT = (
     "req = [m for m in req_csv.split(',') if m]\n"
     "gpu_set = set(g for g in gpu_csv.split(',') if g)\n"
     "before = set(sys.modules)\n"
-    "out = {'ok': False, 'spec': spec, 'gpu_imports': [], 'missing_methods': [], 'error': None}\n"
+    "out = {'ok': False, 'spec': spec, 'gpu_imports': [], 'missing_methods': [], 'has_launch_environment': False, 'error': None}\n"
     "try:\n"
     "    mod = importlib.import_module(mod_name)\n"
     "    loaded = sorted({m.split('.')[0] for m in (set(sys.modules) - before) if m.split('.')[0] in gpu_set})\n"
@@ -79,6 +80,7 @@ _PROBE_SCRIPT = (
     "    if cls is None:\n"
     "        out['error'] = f'class {cls_name!r} not found in {mod_name}'\n"
     "    else:\n"
+    "        out['has_launch_environment'] = callable(getattr(cls, 'launch_environment', None))\n"
     "        missing = [m for m in req if not callable(getattr(cls, m, None))]\n"
     "        out['missing_methods'] = missing\n"
     "        if missing:\n"
@@ -129,17 +131,54 @@ def _lab_classes_in_file(path: str) -> list[str]:
     ]
 
 
+def _is_valid_lab_spec(value: object) -> bool:
+    if not isinstance(value, str) or ":" not in value:
+        return False
+    mod_name, sep, cls_name = value.partition(":")
+    if not sep or ":" in cls_name or not mod_name or not cls_name:
+        return False
+    return all(part.isidentifier() for part in mod_name.split(".")) and cls_name.isidentifier()
+
+
+def _load_livelab_manifest(manifest_path: str) -> tuple[dict | None, list[str]]:
+    """Read and validate `<livelab_dir>/livelab.json` (`{\"toy\": spec|null, \"real\": spec|null}`)."""
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, [f"invalid livelab.json: {type(exc).__name__}: {exc}"]
+    if not isinstance(raw, dict):
+        return None, [f"invalid livelab.json: expected JSON object, got {type(raw).__name__}"]
+    errors: list[str] = []
+    unknown = sorted(set(raw) - _MANIFEST_KEYS)
+    if unknown:
+        errors.append(f"invalid livelab.json: unknown key(s) {unknown} (allowed: {sorted(_MANIFEST_KEYS)})")
+    parsed: dict[str, str | None] = {"toy": None, "real": None}
+    for key in ("toy", "real"):
+        val = raw.get(key)
+        if val is None:
+            parsed[key] = None
+        elif _is_valid_lab_spec(val):
+            parsed[key] = val
+        else:
+            errors.append(f"invalid livelab.json: {key!r} must be null or 'module:Class', got {val!r}")
+    return (None, errors) if errors else (parsed, [])
+
+
 def _discover_livelab_dir(name: str, livelab_dir: str) -> dict:
     """Inspect one `<repo>/repos/<name>/livelab` folder via optional `livelab.json` or AST."""
     manifest_path = os.path.join(livelab_dir, "livelab.json")
-    manifest = ipc.read_json(manifest_path) if os.path.isfile(manifest_path) else None
-    if isinstance(manifest, dict):
-        return {
+    if os.path.isfile(manifest_path):
+        manifest, errors = _load_livelab_manifest(manifest_path)
+        entry = {
             "name": name,
             "livelab_dir": livelab_dir,
-            "toy_spec": manifest.get("toy"),
-            "real_spec": manifest.get("real"),
+            "toy_spec": manifest["toy"] if manifest else None,
+            "real_spec": manifest["real"] if manifest else None,
         }
+        if errors:
+            entry["manifest_errors"] = errors
+        return entry
 
     toy_spec = None
     real_spec = None
@@ -212,6 +251,8 @@ def resolve_lab(target: str, *, real: bool = False, repo_root: str | None = None
     if entry is None:
         known = ", ".join(sorted(by_name))
         raise ValueError(f"unknown lab {target!r} (known: {known}; or pass module:Class)")
+    if entry.get("manifest_errors"):
+        raise ValueError(f"lab {target!r}: {'; '.join(entry['manifest_errors'])}")
     spec = entry["real_spec"] if real else entry["toy_spec"]
     if not spec:
         if not real and entry["real_spec"]:
@@ -387,6 +428,7 @@ def _probe_lab_spec(livelab_dir: str, spec: str, livelab_core: str, *, timeout: 
             "spec": spec,
             "gpu_imports": [],
             "missing_methods": [],
+            "has_launch_environment": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
     prefix = "FASTRSI_DOCTOR_PROBE:"
@@ -403,6 +445,7 @@ def _probe_lab_spec(livelab_dir: str, spec: str, livelab_core: str, *, timeout: 
         "spec": spec,
         "gpu_imports": [],
         "missing_methods": [],
+        "has_launch_environment": False,
         "error": msg,
     }
 
@@ -459,7 +502,9 @@ def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dic
         real_res = probe_results.get((idx, "real"))
         errors: list[str] = []
         gpu_imports: list[str] = []
-        if not entry["registered"]:
+        if entry.get("manifest_errors"):
+            errors.extend(entry["manifest_errors"])
+        elif not entry["registered"]:
             errors.append("missing livelab/ directory")
         elif not entry["toy_spec"] and not entry["real_spec"]:
             errors.append("no toy or real Lab class discovered")
@@ -469,6 +514,7 @@ def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dic
             gpu_imports.extend(res.get("gpu_imports") or [])
             if not res.get("ok"):
                 errors.append(f"{slot}: {res.get('error')}")
+        cli_launch = None if real_res is None else bool(real_res.get("has_launch_environment"))
         lab_reports.append({
             "name": entry["name"],
             "kind": entry["kind"],
@@ -477,6 +523,7 @@ def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dic
             "real_spec": entry["real_spec"],
             "toy": toy_res,
             "real": real_res,
+            "cli_launch": cli_launch,
             "gpu_imports": sorted(set(gpu_imports)),
             "ok": not errors,
             "errors": errors,
@@ -503,6 +550,7 @@ def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dic
             "labs_ok": sum(1 for x in lab_reports if x["ok"]),
             "engines_total": len(engine_reports),
             "engines_ok": sum(1 for x in engine_reports if x["ok"]),
+            "real_cli_launch": sum(1 for x in engine_reports if x["cli_launch"]),
             "gpu_import_violations": sum(1 for x in lab_reports if x["gpu_imports"]),
         },
     }
@@ -525,13 +573,14 @@ def _cmd_doctor(args) -> int:
     print(f"env_findings:  {len(report['env_findings'])}")
     print()
     w_name = max((len(x["name"]) for x in report["labs"]), default=4)
-    print(f"{'lab':<{w_name}}  {'kind':<8}  {'toy':<5}  {'real':<5}  {'gpu_imports':<11}  status")
+    print(f"{'lab':<{w_name}}  {'kind':<8}  {'toy':<5}  {'real':<5}  {'cli_launch':<10}  {'gpu_imports':<11}  status")
     for item in report["labs"]:
         toy_s = "-" if item["toy"] is None else ("ok" if item["toy"]["ok"] else "FAIL")
         real_s = "-" if item["real"] is None else ("ok" if item["real"]["ok"] else "FAIL")
+        cli_s = "-" if item["cli_launch"] is None else ("yes" if item["cli_launch"] else "no")
         gpu_s = ",".join(item["gpu_imports"]) if item["gpu_imports"] else "none"
         st_s = "ok" if item["ok"] else "FAIL: " + "; ".join(item["errors"])
-        print(f"{item['name']:<{w_name}}  {item['kind']:<8}  {toy_s:<5}  {real_s:<5}  {gpu_s:<11}  {st_s}")
+        print(f"{item['name']:<{w_name}}  {item['kind']:<8}  {toy_s:<5}  {real_s:<5}  {cli_s:<10}  {gpu_s:<11}  {st_s}")
     s = report["summary"]
     print(f"\nsummary: {s['labs_ok']}/{s['labs_total']} labs ok ({s['engines_ok']}/{s['engines_total']} engines), "
           f"{s['gpu_import_violations']} GPU import violation(s)")
@@ -559,7 +608,9 @@ def main(argv: list[str] | None = None) -> int:
         epilog="For real labs with launch options, append the engine options followed by -- and its workload arguments.",
     )
     p_conf.add_argument("target", help="discovered lab name (e.g. toy) or module:Class")
-    p_conf.add_argument("--real", action="store_true", help="select the real-engine lab class")
+    mode_grp = p_conf.add_mutually_exclusive_group()
+    mode_grp.add_argument("--toy", action="store_true", help="select the CPU toy conformance class (default)")
+    mode_grp.add_argument("--real", action="store_true", help="select the real-engine lab class")
     p_conf.add_argument("--path", default=None, help="extra directory to prepend to sys.path")
     p_conf.add_argument("--repo-root", default=None)
     p_conf.add_argument("--only", default="", help="comma-separated case names")
