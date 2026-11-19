@@ -36,6 +36,11 @@ class VerlActorParticipant(RP.RayActorParticipant):
         C.CallParticipant.__init__(self, name, lambda m, p: fetch(handle.__ray_call__.remote(_serve_verl, name, m, p), timeout_s), bounded)
 
 
+def _inject_in_actor(host, name, fault, kw):
+    """Runs inside the actor through `__ray_call__`, which passes the actor instance first."""
+    return faults.inject(name, fault, **kw)
+
+
 def _write_json(path, data):
     tmp = path.with_name("." + path.name)
     tmp.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
@@ -250,8 +255,7 @@ class GateMixin:
         handles = dict(self._actor_handles())
         if name not in handles:
             return {"ok": False, "error": f"no participant {name}; have {['driver'] + sorted(handles)}"}
-        return self._ray_call([handles[name]], faults.inject, name, fault, **kw)[0] if kw == {} else \
-            self._ray_call([handles[name]], lambda host, n, f, k: faults.inject(n, f, **k), name, fault, kw)[0]
+        return self._ray_call([handles[name]], _inject_in_actor, name, fault, kw)[0]
 
     def _serve_request(self, req_num, req):
         self._ensure_session()

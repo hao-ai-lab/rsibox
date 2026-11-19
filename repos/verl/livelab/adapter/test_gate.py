@@ -51,6 +51,33 @@ class ActorDiscoveryTest(unittest.TestCase):
         self.assertEqual(dict(after)["rollout2"], "a2")
 
 
+class InjectIntoActorTest(unittest.TestCase):
+    def test_inject_reaches_a_remote_participant_through_ray_call(self):
+        """Input: a trainer whose `reward0` handle is a Ray actor; `__ray_call__.remote(fn, *args)`
+        calls `fn(actor_instance, *args)`. Action: inject `lost` into reward0 and `fail_apply`
+        into the driver. Expected: both report ok and the fault lands (`faults.STATE['lost']`);
+        on 4x GB200 the first shape of this call raised TypeError inside the RewardLoopWorker."""
+        from adapter import faults
+        calls = []
+
+        def ray_call(handles, fn, *args):
+            calls.append(handles)
+            return [fn(object(), *args)]          # the actor instance comes first
+        t = types.SimpleNamespace(
+            _actor_handles=lambda: [("reward0", "handle-r0")], _ray_call=ray_call, _coordinator=None)
+        self.addCleanup(faults.STATE.clear)
+        r = gate.GateMixin._inject(t, {"fault": "lost", "participant": "reward0"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["participant"], "reward0")
+        self.assertEqual(calls, [["handle-r0"]])
+        self.assertTrue(faults.STATE.get("lost"))
+        faults.STATE.clear()
+        d = gate.GateMixin._inject(t, {"fault": "hang", "participant": "driver", "kwargs": {"hang_s": 1.5}})
+        self.assertTrue(d["ok"] and faults.STATE.get("hang_s") == 1.5, d)
+        bad = gate.GateMixin._inject(t, {"fault": "lost", "participant": "trainer9"})
+        self.assertFalse(bad["ok"])
+
+
 class FsdpBatchSizesTest(unittest.TestCase):
     def test_batch_sizes_on_fsdp_config_without_megatron_section(self):
         """Input: an FSDP config (no `actor.megatron` key), 4 trainer ranks, mini batch 64,
