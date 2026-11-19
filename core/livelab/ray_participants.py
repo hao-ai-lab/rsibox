@@ -201,6 +201,25 @@ def _fingerprint_modules(local, host, modules):
     return present
 
 
+def _seed_base_sources(local, modules):
+    """Seed pre-edit `base_source` snapshots (if supplied in plan module specs) at the oldest
+    position of `local._sources` so edits made on disk before `prepare` diff against the
+    in-memory base without shadowing committed transactions."""
+    seeded = {}
+    for mkey, spec in (modules or {}).items():
+        if isinstance(spec, dict) and "base_source" in spec:
+            seeded[mkey] = spec["base_source"]
+            seeded[mkey + ACTOR] = spec["base_source"]
+    if not seeded:
+        return
+    base_map = local._sources.get("__base__")
+    if base_map is None:
+        base_map = {}
+        local._sources = {"__base__": base_map, **local._sources}
+    for key, text in seeded.items():
+        base_map.setdefault(key, text)
+
+
 def serve(host, name, method, payload):
     """One participant call in this process; `host` is the actor (None outside one)."""
     actor_view(host)  # ensure a pure-class @ray.remote actor imports its defining module
@@ -211,6 +230,8 @@ def serve(host, name, method, payload):
     local = _LOCAL.get(name) or _LOCAL.setdefault(name, C.LocalParticipant(name))
     absent = _ABSENT.setdefault(name, {})
     if method == "prepare":
+        if isinstance(payload, dict):
+            _seed_base_sources(local, payload.get("modules"))
         plan = actor_plan(local, host, payload)
         if not plan["modules"] and not plan.get("repairs"):
             txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"

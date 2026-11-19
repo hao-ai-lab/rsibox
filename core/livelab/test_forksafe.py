@@ -613,5 +613,115 @@ class NumaThreadsAndCowHygiene(unittest.TestCase):
             self.assertEqual(clean_findings, [])
 
 
+class DriverCuTeAndAllGuards(unittest.TestCase):
+    def test_driver_initialized_and_poison_reasons_fail_closed(self):
+        """Input: stand-in libcuda returning CUDA_ERROR_NOT_INITIALIZED (3), CUDA_SUCCESS (0),
+        missing libcuda (OSError), and broken symbol lookup; plus stand-in torch bad-fork probe.
+        Expected: `driver_initialized` returns False/True/False respectively; `poison_reasons`
+        reports every hazard and fails closed when libcuda cannot be queried."""
+        uninit = types.SimpleNamespace(cuDeviceGetCount=lambda _ref: 3)
+        inited = types.SimpleNamespace(cuDeviceGetCount=lambda _ref: 0)
+        broken = types.SimpleNamespace()  # missing cuDeviceGetCount
+        with mock.patch.object(forksafe.ctypes, "CDLL", return_value=uninit):
+            self.assertFalse(forksafe.driver_initialized())
+            with mock.patch.object(forksafe, "fork_poisoned", return_value=False):
+                self.assertEqual(forksafe.poison_reasons(), [])
+        with mock.patch.object(forksafe.ctypes, "CDLL", return_value=inited):
+            self.assertTrue(forksafe.driver_initialized())
+            with mock.patch.object(forksafe, "fork_poisoned", return_value=True):
+                reasons = forksafe.poison_reasons()
+                self.assertEqual(len(reasons), 2)
+                self.assertTrue(any("cuInit" in r for r in reasons))
+                self.assertTrue(any("bad fork" in r for r in reasons))
+        with mock.patch.object(forksafe.ctypes, "CDLL", side_effect=OSError("no libcuda")):
+            self.assertFalse(forksafe.driver_initialized())
+        with mock.patch.object(forksafe.ctypes, "CDLL", return_value=broken):
+            with mock.patch.object(forksafe, "fork_poisoned", return_value=False):
+                reasons = forksafe.poison_reasons()
+                self.assertEqual(len(reasons), 1)
+                self.assertIn("unreadable", reasons[0])
+
+    def test_fork_poisoned_runs_in_real_probe_child(self):
+        """Input: a stand-in `torch._C._cuda_isInBadFork` returning True, then False.
+        Expected: `fork_poisoned()` forks a real child process and reports True then False."""
+        bad_torch = types.SimpleNamespace(_C=types.SimpleNamespace(_cuda_isInBadFork=lambda: True))
+        ok_torch = types.SimpleNamespace(_C=types.SimpleNamespace(_cuda_isInBadFork=lambda: False))
+        with mock.patch.dict(sys.modules, {"torch": bad_torch}):
+            self.assertTrue(forksafe.fork_poisoned())
+        with mock.patch.dict(sys.modules, {"torch": ok_torch}):
+            self.assertFalse(forksafe.fork_poisoned())
+
+    def test_pin_cute_dsl_arch_formats_sm_tags_and_preserves_existing(self):
+        """Input: compute capabilities (10, 0), (9, 0), (8, 0). Expected: 'sm_100a', 'sm_90a',
+        'sm_80', and an already-set CUTE_DSL_ARCH is never overwritten."""
+        self.assertEqual(forksafe.cute_dsl_arch((10, 0)), "sm_100a")
+        self.assertEqual(forksafe.cute_dsl_arch((9, 0)), "sm_90a")
+        self.assertEqual(forksafe.cute_dsl_arch((8, 0)), "sm_80")
+        env = {k: v for k, v in os.environ.items() if k != "CUTE_DSL_ARCH"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(forksafe.pin_cute_dsl_arch((10, 0)), "sm_100a")
+            self.assertEqual(os.environ["CUTE_DSL_ARCH"], "sm_100a")
+            self.assertEqual(forksafe.pin_cute_dsl_arch((8, 0)), "sm_100a")
+
+    def test_install_all_guards_and_unpatch_child_round_trip(self):
+        """Input: stand-in cuda-python driver, torch.cuda, and Triton driver.
+        Action: `install_all_guards`, query every guarded entrypoint, call `restore()` after
+        imports, then `unpatch_child` in the simulated child.
+        Expected: CUDA stays uninitialized across all import-time probes; `cuInit` returns
+        CUDA_ERROR_NOT_INITIALIZED until `unpatch_child` restores the real driver and torch.cuda."""
+        cuinit_calls = []
+
+        def real_cuinit(flags=0):
+            cuinit_calls.append(flags)
+            return (0,)
+
+        drv_mod = types.ModuleType("cuda.bindings.driver")
+        drv_mod.CUresult = types.SimpleNamespace(CUDA_ERROR_NOT_INITIALIZED=3)
+        drv_mod.cuInit = real_cuinit
+        cuda_pkg = types.ModuleType("cuda")
+        bindings_pkg = types.ModuleType("cuda.bindings")
+        cuda_pkg.bindings = bindings_pkg
+        bindings_pkg.driver = drv_mod
+
+        cuda = fake_cuda()
+        triton_mods, CudaDriver, triton_calls = fake_triton()
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH")}
+        mods = {**triton_mods, "cuda": cuda_pkg, "cuda.bindings": bindings_pkg,
+                "cuda.bindings.driver": drv_mod}
+        self.addCleanup(forksafe.unguard_cuda_python)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.dict(sys.modules, mods):
+            report, restore = forksafe.install_all_guards(
+                cuda,
+                capability=(10, 0),
+                probe=lambda: [{"multi_processor_count": 148}],
+            )
+            self.assertTrue(report["nvml_env_set"])
+            self.assertEqual(report["cute_dsl_arch"], "sm_100a")
+            self.assertTrue(report["cuda_python"]["installed"])
+            self.assertTrue(report["torch_cuda"]["installed"])
+            self.assertTrue(report["properties"]["installed"])
+            self.assertTrue(report["triton"]["installed"])
+
+            # Import-time probes must stay off CUDA.
+            self.assertEqual(drv_mod.cuInit(0), (3,))
+            self.assertEqual(cuinit_calls, [])
+            self.assertEqual(cuda.get_device_capability(0), (10, 0))
+            self.assertEqual(cuda.get_device_properties(0).multi_processor_count, 148)
+            self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 100, 32))
+            self.assertFalse(cuda.is_initialized())
+            self.assertEqual(triton_calls, [])
+
+            restore()
+            self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 80, 32))
+
+            restored = forksafe.unpatch_child(cuda, clear_env=report["nvml_env_set"])
+            self.assertTrue(restored["cuda_python"])
+            self.assertEqual(sorted(restored["torch_cuda"]), sorted(forksafe.PATCHED))
+            self.assertNotIn("PYTORCH_NVML_BASED_CUDA_CHECK", os.environ)
+            self.assertEqual(drv_mod.cuInit(0), (0,))
+            self.assertEqual(cuinit_calls, [0])
+
+
 if __name__ == "__main__":
     unittest.main()
