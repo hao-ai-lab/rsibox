@@ -218,6 +218,26 @@ map 1.8). It reads 0 bytes of checkpoint where a disk load reads 67 GiB, and tha
 hosts without the page cache (not measured here). The next lever is the engine start itself:
 kvplan and the zygote (the Qwen3-8B rows above), untested on this model.
 
+## Live scheduling policy
+
+Source: our 2026-11-19 Qwen3-8B test on one B200, vLLM 0.33.0 in eager mode,
+one running sequence, greedy decoding, prefix caching disabled. Each row is one
+switch on the same API server and engine core. The core applied the change between
+steps. The launcher timed the control request and acknowledgement. CLI wall time
+includes starting the launcher and its preflight checks.
+
+| Switch | Core apply | Launcher apply and acknowledgement | CLI wall |
+|---|---:|---:|---:|
+| FCFS to priority | 0.218 ms | 2.266 ms | 6.311 s |
+| Priority to FCFS | 0.374 ms | 6.487 ms | 6.023 s |
+
+Under FCFS a completion with priority −1 returned HTTP 400 both before and after the
+round trip. Under priority scheduling the core reported one running and three waiting.
+The waiting requests arrived with priorities 10, 5, −1. All returned HTTP 200 and
+completed in the order −1, 5, 10. Under restored FCFS the three equal-priority
+requests completed in arrival order. In each mode all four token sequences matched
+those from a separately started server with the corresponding scheduling policy.
+
 ## Not measured yet
 
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each
