@@ -35,7 +35,7 @@ Contract:
   `repos/vllm/kb/reconfiguration_matrix.md`), then applies it one of two ways and reports which
   (`reconfig.path`):
   - `in_process_live`: every changed flag has a live consumer (live_reconfig.LIVE_FIELDS:
-    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value). The launcher
+    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value, and `--scheduling-policy`). The launcher
     sends it to the engine core's live agent (started by engine.py in every engine it starts),
     which sets the scheduler's limits between two steps and reads them back. PID keeps
     running; only an acknowledged change updates the recorded state.
@@ -45,9 +45,25 @@ Contract:
     report's `restart_reason` says why it was not live. With `--weights`, resident CUDA IPC
     weights make the restart warm (zero disk reload).
   Tier-2 deltas (`WeightCacheKey` sharding, `subtier='tier2a_reshard'`, or weight format,
-  `'tier2b_weight_format'`) are refused before stopping PID unless `--weights-accept-reconfig`.
+  `'tier2b_weight_format'`) are refused before stopping PID unless `--weights-accept-reconfig`,
+  with one exception, `path: reshard`: on an engine with resident weights (ipc_cache), a delta
+  whose only weight-key change is the MoE expert sharding (`--enable-expert-parallel`,
+  `--expert-placement-strategy`: TP <-> EP on the same GPUs) is made live. Before PID stops,
+  `reshard_live.py ensure` makes the target engine's holder group exist (socket folder
+  `reshard_live.group_dir`: `<dir>.ep` for EP, `<dir>` without; a group already there with the
+  target flags is reused, e.g. the way back) or starts it without reading the checkpoint
+  (`--load-format dummy`) and fills it GPU to GPU from the running engine's group. Only then is
+  PID stopped and the engine restarted on the target group; any failure is a finding (exit 2)
+  with PID running and the half-started group stopped. The source group is left resident (the
+  way back costs no reshard).
   Every preflight check runs BEFORE mutating or stopping PID; a refusal exits 2 and leaves PID
   running untouched.
+- Stopping PID (stop_engine) is drain-aware: SIGTERM goes to the API server only, which aborts
+  its in-flight requests (answering them), stops its engine core and workers, and closes the
+  port; only what it leaves behind is signalled by the launcher, and SIGKILL comes after the
+  grace. The report's `reconfig.stop` has the phases (leader exit, tree exit, port closed).
+  The engine's state file records the API server's start time, so a stop after it died still
+  finds the members of its session, zygote-forked ones included, and never a reused pid.
 - engine_env() is the one environment of every engine process. The zygote is started with it
   too, so a start that matches the zygote's settings passes the zygote's "env" check.
 - Weights load with vLLM's default load format (`auto`: from disk) unless the argv asks for
@@ -85,11 +101,14 @@ adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune 
 mode are not built. Pass their vLLM flags in the argv or set their variables in the
 environment.
 """
-import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request, uuid
+import argparse, json, os, signal, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
+import forksafe  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402  (stdlib only)
 
 LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
@@ -167,20 +186,10 @@ def cute_dsl_arch(visible):
             file=sys.stderr)
         return None
     major, minor = (int(x) for x in caps.pop().split("."))
-    return f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+    return forksafe.cute_dsl_arch((major, minor))
 
 
-def port_in_use(port, host="127.0.0.1"):
-    """True when something already listens on host:port (a connect succeeds). Not a bind test:
-    a bind also fails on a privileged port or a TIME_WAIT socket, where nothing answers."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        return s.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-    finally:
-        s.close()
+port_in_use = proc.port_in_use
 
 
 def read_vllm_args(a, vargv, env):
@@ -229,7 +238,7 @@ def socket_dir(a, v):
 
 def value_finding(parsed):
     """A `vllm_value` finding when a live scheduler field (live_reconfig.LIVE_FIELDS) has a
-    value no engine runs with (not a positive integer), else None. vLLM's parser takes any
+    value no engine runs with, else None. vLLM's parser takes any
     int; a reconfigure refuses such a value before it stops the running engine."""
     args = parsed.get("args") or {}
     values = {field_name: args[field_name] for field_name in live_reconfig.LIVE_FIELDS
@@ -237,9 +246,9 @@ def value_finding(parsed):
     problems = live_reconfig.check_values(values, {})
     if not problems:
         return None
-    return {"check": "vllm_value", "observed": problems, "expected": "positive integers",
+    return {"check": "vllm_value", "observed": problems, "expected": "valid scheduler limits and policy",
             "why": "the restart would start a server that cannot run, after stopping this one",
-            "actions": ["pass a positive value"]}
+            "actions": ["correct the reported scheduler value"]}
 
 
 def argv_findings(a, v):
@@ -369,20 +378,21 @@ def preflight(a, v, env):
 def kvplan_report(log):
     """The KV plan's log lines (one per rank per start): counts, seconds and findings."""
     rep = {"reused": 0, "measured": 0, "profiled": 0, "seconds": [], "findings": []}
-    for line in open(log, errors="replace"):
-        i = line.find(kvplan.TAG)
-        j = line.find("{", i)
-        if i < 0 or j < 0:
-            continue
-        try:
-            ev = json.loads(line[j:])
-        except ValueError:
-            continue
-        if line[i:j].startswith(kvplan.TAG + " finding"):
-            rep["findings"].append(ev)
-        elif ev.get("event") in ("reused", "measured", "profiled"):
-            rep[ev["event"]] += 1
-            rep["seconds"].append(ev.get("seconds"))
+    with open(log, errors="replace") as fh:
+        for line in fh:
+            i = line.find(kvplan.TAG)
+            j = line.find("{", i)
+            if i < 0 or j < 0:
+                continue
+            try:
+                ev = json.loads(line[j:])
+            except ValueError:
+                continue
+            if line[i:j].startswith(kvplan.TAG + " finding"):
+                rep["findings"].append(ev)
+            elif ev.get("event") in ("reused", "measured", "profiled"):
+                rep[ev["event"]] += 1
+                rep["seconds"].append(ev.get("seconds"))
     return rep
 
 
@@ -399,14 +409,15 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
     `engine.py reconfigure --pid <pid>` can inspect and override it (including zygote forks whose
     `/proc/<pid>/cmdline` stays the zygote's)."""
     state_path = _engine_state_path(launcher_args.cache_root, pid)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "pid": pid,
+        "start_time": _start_time(pid),     # tells this process from a later one with its pid
         "port": port,
         "vargv": list(vllm_argv),
         "cmd": list(command),
         "vllm_args": parsed_vllm,
         "live_dir": getattr(launcher_args, "live_dir", None),
+        "log": os.path.abspath(launcher_args.log),
         "launcher": {
             "vllm": launcher_args.vllm,
             "weights": bool(launcher_args.weights),
@@ -416,9 +427,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
             "zygote": launcher_args.zygote,
         },
     }
-    temp_path = state_path.with_suffix(f".{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(record))
-    temp_path.replace(state_path)
+    ipc.atomic_write_json(state_path, record)
 
 
 def _strip_injected_flags(argv):
@@ -447,12 +456,9 @@ def _strip_injected_flags(argv):
 def load_engine_state(cache_root, pid):
     """Load the state of engine `pid` from `<cache-root>/engines/<pid>.json`, falling back to
     `/proc/<pid>/cmdline` when started directly without a state file."""
-    state_path = _engine_state_path(cache_root, pid)
-    if state_path.exists():
-        try:
-            return json.loads(state_path.read_text())
-        except (OSError, ValueError):
-            pass
+    state = ipc.read_json(_engine_state_path(cache_root, pid))
+    if state is not None:
+        return state
     try:
         raw_tokens = [
             token for token in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
@@ -501,6 +507,17 @@ def load_engine_state(cache_root, pid):
     }
 
 
+def _stat(pid, proc_root="/proc"):
+    """(ppid, pgid, sid, start time) from /proc/<pid>/stat, or None when pid is gone. The start
+    time (clock ticks since boot, field 22) tells a reused pid from the process first seen."""
+    try:
+        with open(f"{proc_root}/{pid}/stat") as stat_file:
+            fields = stat_file.read().rsplit(")", 1)[1].split()
+        return int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _descendants(pid, proc_root="/proc"):
     """The processes below pid (ppid links), plus every process in pid's process group or
     session and theirs: a worker whose parent died is reparented (ppid 1) but stays in the
@@ -512,15 +529,13 @@ def _descendants(pid, proc_root="/proc"):
         return descendants
     for entry in entries:
         if entry.isdigit():
-            try:
-                with open(f"{proc_root}/{entry}/stat") as stat_file:
-                    fields = stat_file.read().rsplit(")", 1)[1].split()
-                parent_pid, group_id, session_id = (int(value) for value in fields[1:4])
-                children_by_parent.setdefault(parent_pid, []).append(int(entry))
-                if int(entry) != pid and pid in (group_id, session_id):
-                    members.append(int(entry))
-            except Exception:
-                pass
+            st = _stat(entry, proc_root)
+            if st is None:
+                continue
+            parent_pid, group_id, session_id, _ = st
+            children_by_parent.setdefault(parent_pid, []).append(int(entry))
+            if int(entry) != pid and pid in (group_id, session_id):
+                members.append(int(entry))
     stack = [pid] + members
     seen = {pid}
     while stack:
@@ -537,33 +552,40 @@ def _descendants(pid, proc_root="/proc"):
 MARKER_ENV = "FASTRSI_LIVE_RECONFIG_DIR"   # engine_env(): one folder per launch, inherited
 
 
-def verified_members(pids, marker, proc_root="/proc"):
-    """The pids whose environment has MARKER_ENV == marker (the processes of one launch),
-    never this process. Empty when marker is None: nothing ties the processes to the engine."""
-    if not marker:
-        return []
-    want = f"{MARKER_ENV}={marker}".encode()
+def verified_members(pids, marker, proc_root="/proc", session=None, since=None):
+    """The pids that belong to one launch, never this process: those whose exec-time
+    environment has MARKER_ENV == marker, and, when the launch recorded its leader's start
+    time `since`, the members of the leader's session `session` that started at or after it.
+    The second rule covers a server forked from the zygote: it sets MARKER_ENV after the fork,
+    without exec, so /proc/<pid>/environ (the exec-time environment) never shows it. It is
+    sound because Linux never reuses a pid while a live process has it as its session id: a
+    member of that session started after the leader is the leader's. Empty when neither is
+    given: nothing ties the processes to the engine."""
+    want = f"{MARKER_ENV}={marker}".encode() if marker else None
     verified = []
     for member_pid in pids:
         if member_pid == os.getpid():
             continue
-        try:
-            with open(f"{proc_root}/{member_pid}/environ", "rb") as environ_file:
-                if want in environ_file.read().split(b"\0"):
-                    verified.append(member_pid)
-        except OSError:
-            pass
+        if want is not None:
+            try:
+                with open(f"{proc_root}/{member_pid}/environ", "rb") as environ_file:
+                    if want in environ_file.read().split(b"\0"):
+                        verified.append(member_pid)
+                        continue
+            except OSError:
+                pass
+        if session is not None and since is not None:
+            st = _stat(member_pid, proc_root)
+            if st is not None and st[2] == session and st[3] >= since:
+                verified.append(member_pid)
     return verified
 
 
 def _start_time(pid):
     """The process start time (clock ticks since boot, /proc/<pid>/stat field 22), or None when
     pid is gone. A pid with another start time is another process (pid reuse)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return int(f.read().rsplit(")", 1)[1].split()[19])
-    except (OSError, ValueError, IndexError):
-        return None
+    st = _stat(pid)
+    return None if st is None else st[3]
 
 
 def _same_process(pid, start_time):
@@ -581,57 +603,87 @@ def _signal_if_same(pid, start_time, sig):
         return False
 
 
-def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None):
-    """Stop engine `pid` and its descendants (_descendants: its process tree, group and
-    session). After `pid` itself exited, only the members that carry the launch's `marker`
-    (its MARKER_ENV value) are stopped: a pid can be reused by another session's leader, and
-    without a marker nothing is signalled. /proc/<pid>/environ is the exec-time environment, so
-    a server forked from the zygote (which sets MARKER_ENV after the fork, without exec) never
-    shows it: for those, a stop after the leader exited signals nothing and says so. SIGTERM, up to `grace` s, then SIGKILL, up to
-    `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
-    signalled only while it still has that start time, so a reused pid is never hit.
-    Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
-    recorded process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
+def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None, start_time=None):
+    """Stop engine `pid` (the `vllm serve` API server, leader of its session) and every process
+    below it (_descendants: its process tree, group and session), drain-aware: SIGTERM goes to
+    the leader only, and vLLM's own shutdown stops the rest in order (the API server aborts
+    its in-flight requests, answering them, stops the engine core and its workers, then closes
+    the port). Signalling every process at once, as before, races that order: the engine core
+    and workers died before the aborts reached the API server, whose request handlers then
+    waited forever, so uvicorn never closed its connections and only the SIGKILL after
+    `grace` ended it (10.1 s under client load on B200, against 1.0 s leader-only).
+    - When the leader exits and leaves members behind, those get SIGTERM at once (nothing
+      will stop them now); anything alive after `grace` s gets SIGKILL, up to `kill_wait` s.
+    - When `pid` exited before the stop, or another process has it now (its start time is not
+      `start_time`, the leader's recorded at launch), only verified members are stopped
+      (verified_members: the launch `marker`, or the leader's session and start time). Without
+      either, nothing is signalled, and the report says so.
+    Each process is identified by (pid, start time) when first seen and is signalled only
+    while it still has that start time, so a reused pid is never hit.
+    Returns {"stopped", "seconds", "alive", "port_open", "how", "escalated", "tree",
+    "leader_exit_s", "tree_exit_s", "port_closed_s"}: stopped is True only when every recorded
+    process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
     t0 = time.time()
     below = [member_pid for member_pid in _descendants(pid) if member_pid != os.getpid()]
-    if zygote._exited(pid):
-        verified = verified_members(below, marker)
+    leader_start = _start_time(pid) if not zygote._exited(pid) else None
+    reused = leader_start is not None and start_time is not None and leader_start != start_time
+    if leader_start is None or reused:
+        verified = verified_members(below, marker, session=None if reused else pid,
+                                    since=start_time)
         if not verified:
-            note = (f"pid {pid} was not running" if not below else
+            note = (f"pid {pid} is another process now (start time {leader_start}, recorded "
+                    f"{start_time})" if reused else
+                    f"pid {pid} was not running" if not below else
                     f"pid {pid} exited; {len(below)} member(s) of its group or session not "
-                    "verified as this engine's (no launch marker): none signalled")
+                    "verified as this engine's (no launch marker or start time): none signalled")
             return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
                     "note": note, "unverified": below}
-        below = verified
-    procs = {proc_pid: _start_time(proc_pid) for proc_pid in [pid] + below}
+        below, leader = verified, None
+    else:
+        leader = pid
+    procs = {proc_pid: _start_time(proc_pid) for proc_pid in ([leader] if leader else []) + below}
     procs = {p: st for p, st in procs.items() if st is not None}
+    marks = {"leader_exit_s": None, "tree_exit_s": None, "port_closed_s": None}
 
     def alive():
         return sorted(p for p, st in procs.items() if _same_process(p, st) and not zygote._exited(p))
 
     def done():
-        return not alive() and (port is None or not port_in_use(port))
+        now, left = round(time.time() - t0, 3), alive()
+        if leader and marks["leader_exit_s"] is None and leader not in left:
+            marks["leader_exit_s"] = now
+        if marks["tree_exit_s"] is None and not left:
+            marks["tree_exit_s"] = now
+        if port is not None and marks["port_closed_s"] is None and not port_in_use(port):
+            marks["port_closed_s"] = now
+        return not left and (port is None or marks["port_closed_s"] is not None)
 
-    try:
-        if os.getpgid(pid) == pid and _same_process(pid, procs.get(pid)):
-            os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    for p, st in procs.items():
-        _signal_if_same(p, st, signal.SIGTERM)
+    orphans_signalled = False
+    if leader:
+        _signal_if_same(leader, procs.get(leader), signal.SIGTERM)
+    else:                        # no API server left to stop them in order
+        for p, st in procs.items():
+            _signal_if_same(p, st, signal.SIGTERM)
+        orphans_signalled = True
     deadline = t0 + grace
     while time.time() < deadline and not done():
-        time.sleep(0.05)
-    if not done():
+        if not orphans_signalled and marks["leader_exit_s"] is not None:
+            for p in alive():    # the leader exited without them
+                _signal_if_same(p, procs[p], signal.SIGTERM)
+            orphans_signalled = True
+        time.sleep(0.02)
+    escalated = not done()
+    if escalated:
         for p in alive():
             _signal_if_same(p, procs[p], signal.SIGKILL)
         deadline = time.time() + kill_wait
         while time.time() < deadline and not done():
-            time.sleep(0.05)
+            time.sleep(0.02)
     left = alive()
     port_open = port_in_use(port) if port is not None else None
     return {"stopped": not left and not port_open, "seconds": round(time.time() - t0, 3),
-            "alive": left, "port_open": port_open}
+            "alive": left, "port_open": port_open, "how": "leader" if leader else "members",
+            "escalated": escalated, "tree": len(procs), **marks}
 
 
 def _launch_process(launcher_args, vllm_argv, parsed_vllm, env, preflight_report,
@@ -786,6 +838,8 @@ def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, prefl
                   or after.get("target_max_num_seqs") == values["max_num_seqs"])
                  and ("max_num_batched_tokens" not in values
                       or after.get("max_num_scheduled_tokens") == values["max_num_batched_tokens"]))
+    if "scheduling_policy" in values:
+        confirmed = confirmed and after.get("scheduling_policy") == values["scheduling_policy"]
     if not confirmed:
         return None, f"live agent answered but the scheduler reads back {after}"
     command = serve_cmd(launcher_args, new_vargv, new_parsed)
@@ -798,6 +852,62 @@ def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, prefl
         "reconfig": {**reconfig, "path": "in_process_live", "restarted": False,
                      "replaced_pid": None, "apply_seconds": apply_s, "live_ack": ack},
     }, None
+
+
+def reshard_route(launcher_args, new_parsed, reconfig):
+    """True when this reconfiguration goes through a holder-to-holder reshard: resident weights
+    (ipc_cache), the weight key changes only in MoE expert sharding, and no
+    --weights-accept-reconfig (which means: the caller restarted the daemons itself)."""
+    import reshard_live     # no torch, no vLLM at import
+    return bool(reconfig and not reconfig["weights_compatible"]
+                and new_parsed.get("ok")
+                and load_format(launcher_args, new_parsed) == "ipc_cache"
+                and explicit_loader_config(new_parsed) is None
+                and not getattr(launcher_args, "weights_accept_reconfig", False)
+                and reshard_live.reshardable(reconfig))
+
+
+def vllm_python(launcher_args):
+    """The python next to --vllm (the venv the engine runs in), else this one."""
+    candidate = Path(launcher_args.vllm).with_name("python")
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+def reshard_target(launcher_args, state, old_vargv, new_vargv, old_parsed, new_parsed, env,
+                   reconfig):
+    """Run `reshard_live.py ensure` for the target engine (see the module contract); on success
+    point the launcher at the target group and return its report, else exit 2 with PID up."""
+    import reshard_live
+    src_dir = socket_dir(launcher_args, old_parsed)
+    dst_dir = reshard_live.group_dir(src_dir, new_parsed["args"])
+    cmd = [vllm_python(launcher_args), str(Path(__file__).resolve().parent / "reshard_live.py"),
+           "ensure", "--src-socket-dir", src_dir, "--src-vargv", json.dumps(old_vargv),
+           "--src-log", state.get("log") or "", "--dst-socket-dir", dst_dir,
+           "--dst-vargv", json.dumps(new_vargv), "--vllm", launcher_args.vllm,
+           "--state-dir", str(Path(launcher_args.cache_root).resolve() / "holders")]
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                           timeout=launcher_args.timeout)
+        out, err, code = r.stdout, r.stderr, r.returncode
+    except subprocess.TimeoutExpired as e:
+        out, err, code = e.stdout or "", f"timeout after {launcher_args.timeout} s", -1
+    line = next((x for x in (out or "").splitlines()[::-1] if x.startswith("{")), None)
+    report = json.loads(line) if line else {}
+    report["seconds"] = round(time.perf_counter() - t0, 3)
+    if code != 0 or not report.get("target"):
+        print(json.dumps({"findings": report.get("findings") or [{
+            "check": "weights_reshard",
+            "observed": f"reshard_live.py ensure exited {code}: {(err or '')[-1500:]}",
+            "expected": f"the target group at {dst_dir} holding the engine's weights",
+            "why": "the reconfigured engine maps that group; without it nothing can start",
+            "actions": ["read the report and the group log", "--weights-accept-reconfig "
+                        "after starting the target group yourself"]}],
+            "reshard": report, "reconfig": reconfig,
+            "note": "not started; old engine left running"}))
+        sys.exit(2)
+    launcher_args.weights_socket_dir = dst_dir
+    return report
 
 
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
@@ -854,7 +964,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         findings = [finding for finding in (
             vllm_args.override_finding(patch_vargv, old_parsed, new_parsed)
             if old_parsed.get("ok") else None, value_finding(new_parsed)) if finding]
-    if not findings and reconfig is not None:
+    reshard = reshard_route(launcher_args, new_parsed, reconfig)
+    if not findings and reconfig is not None and not reshard:
         findings = reconfig_findings(launcher_args, new_parsed, reconfig)
     if not findings:
         findings, preflight_report = preflight(launcher_args, new_parsed, env)
@@ -869,7 +980,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         print(json.dumps({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                           "pid": launcher_args.pid, "note": "nothing changed"}))
         sys.exit(0)
-    live_values, live_reason = (None, "--reconfigure-restart given") if getattr(
+    live_values, live_reason = (None, "the weight key changes (holder reshard)") if reshard \
+        else (None, "--reconfigure-restart given") if getattr(
         launcher_args, "reconfigure_restart", False) else (
         (None, "the port changes") if new_port != old_port else
         live_reconfig_plan(state, reconfig))
@@ -912,8 +1024,19 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                                   "live_fallback_reason": live_reason,
                                   "note": "not started; old engine left running"}))
                 sys.exit(2)
+    reshard_report = None
+    if reshard:     # the target group must hold the weights before PID stops
+        reshard_report = reshard_target(launcher_args, state, old_vargv, new_vargv,
+                                        old_parsed, new_parsed, env, reconfig)
+        if load_format(launcher_args, new_parsed) == "ipc_cache":
+            preflight_report["weights_probe"] = weights.probe(
+                socket_dir(launcher_args, new_parsed),
+                env.get("CUDA_VISIBLE_DEVICES"),
+                new_parsed["args"]["tensor_parallel_size"],
+            )
     t_stop = time.perf_counter()
-    stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"))
+    stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"),
+                            start_time=state.get("start_time"))
     if not stop_info["stopped"]:
         print(json.dumps({"findings": [{
             "check": "stop_engine", "observed": stop_info,
@@ -922,10 +1045,14 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             "actions": ["stop the listed pids yourself, then start the engine"]}],
             "reconfig": reconfig, "note": "not started; old engine may still be running"}))
         sys.exit(2)
-    reconfig_report = {**(reconfig or {}), "path": "restart", "restarted": True,
+    reconfig_report = {**(reconfig or {}), "path": "reshard" if reshard else "restart",
+                       "restarted": True,
                        "replaced_pid": launcher_args.pid,
                        "restart_reason": live_reason,
-                       "stop_seconds": round(time.perf_counter() - t_stop, 6)}
+                       "stop_seconds": round(time.perf_counter() - t_stop, 6),
+                       "stop": stop_info}
+    if reshard_report is not None:
+        reconfig_report["reshard"] = reshard_report
     return _launch_process(
         launcher_args,
         new_vargv,
@@ -964,7 +1091,11 @@ def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
     while time.time() - t0 < timeout:
         if zygote._exited(pid):
             return None
-        text = open(log, errors="replace").read() if log and os.path.exists(log) else ""
+        if log and os.path.exists(log):
+            with open(log, errors="replace") as fh:
+                text = fh.read()
+        else:
+            text = ""
         if any(s in text for s in FAILED):
             return None
         try:
@@ -983,7 +1114,8 @@ SPAWN_FORCED = "We must use the `spawn` multiprocessing start method"
 def fork_check(log):
     """With --fork, every process after the API server must be forked. vLLM logs SPAWN_FORCED
     (with its reason) when it falls back to spawn; that line is the only spawn signal read."""
-    text = open(log, errors="replace").read()
+    with open(log, errors="replace") as fh:
+        text = fh.read()
     return {"spawn_forced": SPAWN_FORCED in text}
 
 

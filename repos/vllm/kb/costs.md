@@ -42,7 +42,7 @@ pinned host memory per rank. No torch.compile for this model in this image.
 Source: our 2026-11-10 run of [`../examples/live-edit-qwen3`](../examples/live-edit-qwen3/README.md):
 vLLM 0.31.0, TP 1, CUDA graphs on (defaults), `--no-enable-prefix-caching`, warm on-disk caches,
 weights on a memory disk. Check: 8 requests, greedy, 32 tokens each (1.03 s). Each number is one
-measurement. The lab has not run conformance on vLLM, so these are measurements, not receipts.
+measurement from a run that preceded vLLM conformance verification.
 
 | Edit | Restart, edit to result | Live, edit to result | Install (edit to commit) | Engine loop stalled | Undo | Witness calls |
 |---|---:|---:|---:|---:|---:|---:|
@@ -55,6 +55,22 @@ measurement. The lab has not run conformance on vLLM, so these are measurements,
 - Live output equals the fresh process's output for all three edits.
 - This 63 s restart is not the 228 s baseline of the ladder above (a different measurement,
   not reproduced here).
+
+## Live edit and undo on one B200
+
+Source: our 2026-11-19 Qwen3-8B walkthrough on vLLM 0.33.0, V2 runner, eager execution,
+prefix caching disabled, 8 greedy 32-token prompts. The independent fresh and live
+completions agreed for all three edits. The same B200 lab passed conformance c0–c10.
+
+| Edit | Native edit to commit | First edited check | Native undo | Undo client round trip | Witness calls |
+|---|---:|---:|---:|---:|---:|
+| Scheduler | 0.163079 s | 5.320 s | 1.682 ms | 15.4 ms | 816 |
+| Active sampler | 0.039252 s | 5.563 s | 1.270 ms | 10.4 ms | 768 |
+| Legacy sampler | 0.030376 s | 6.102 s | 1.272 ms | 15.5 ms | 0 |
+
+The legacy sampler produced `zero_witness`. All three undos restored the original
+code fingerprint and completion text. The full walkthrough took 390.128 s including
+six server launches, repeated checks and teardown.
 
 ## Restart after one edit (Qwen3-8B, warm caches otherwise)
 
@@ -166,6 +182,122 @@ network file system. So: keep the build tree and headers on node-local disk; pas
 `-split-compile` (it parallelizes cicc and ptxas across the unit's kernels); the unit, not the
 edited kernel, stays the floor, since #49750 changes a kernel's signature and its host launcher.
 This repo has no native route yet (`mechanisms.md`).
+
+## Live TP2 <-> EP2 by holder reshard (Qwen3.5-35B-A3B BF16, 2× B200, 2026-11-19)
+
+Source: our 2026-11-19 runs on 2 idle B200 GPUs (vLLM 0.33.0, torch 2.14), `--max-model-len 8192
+--language-model-only --gpu-memory-utilization 0.30`, CUDA graphs on. Checkpoint 66.97 GiB,
+already in the host page cache (1.5 TiB RAM), so a "disk" load reads RAM at memory speed here.
+All rows are warm-cache starts (FlashInfer JIT, torch.compile) unless marked.
+
+| Step | Seconds | Note |
+|---|---:|---|
+| Reshard write, TP2 -> EP2 (80 expert tensors 64.4 GB, 32.2 GB of it GPU to GPU; 493 dense tensors 4.9 GB copied rank-locally) | 1.0–2.8 | 1.0–1.7 in the first 3 runs, 2.4–2.8 in the 6 fills of the later end-to-end runs (both directions; cause not investigated); plus map 0.7–1.3 s, plan < 0.01 s |
+| Reshard write, EP2 -> TP2 | 1.1 | 1 run |
+| `reshard_live.py ensure` total (vLLM import + config 7.4, dummy EP2 group start 23.0, map, write) | 34.2 | runs while the old engine serves; off the downtime |
+| `ensure` on the way back (TP2 group still resident: reused, nothing written) | 9.3–10.5 | |
+| EP2 holder group from disk (page cache warm) | 31.0 | the alternative to the dummy start (23.0) |
+| Stop engine (`stop_engine`), drain-aware (SIGTERM to the API server only) | 0.36–1.18 under load | 12 stops, never escalated to SIGKILL; port closed in 0.24–0.30. Before (SIGTERM to every process): 10.1 under load, see the stop table below |
+| EP2 engine on the resharded group (ipc_cache), launch to /health | 73.7 | weight map 1.8; vLLM's init-engine span 43.1 (profile, KV alloc, warmup, incl. graph capture 19); the other ~29 s are process spawn, imports, distributed init and the API server |
+| EP2 engine cold from disk, launch to /health | 82.5 | weight load 10.0 (32.35 GiB/rank) |
+| Client-observed unavailability, `engine.py reconfigure` TP2 -> EP2 | 77.5 | 1-token requests every 50 ms throughout |
+| Same, EP2 -> TP2 (reused group) | 82.7 | 10.1 s of it was the old stop under load; with the drain-aware stop see the table below |
+| First engine in a fresh cache root (cold JIT), for scale | 697 | 654 s of it FlashInfer JIT builds |
+
+Correctness (same runs): the resharded EP2 group equals a disk-loaded EP2 group byte for byte
+(1308 tensors, buffers included), and the EP2 -> TP2 group equals the disk-loaded TP2 group
+(1228 tensors). Greedy completions (4 prompts × 32 tokens, logprobs) of the live EP2 engine
+equal a cold EP2 server's exactly, and TP2 after the round trip equals the original exactly.
+References must run without concurrent traffic: run next to a 1-token client, the same engine
+gave different greedy tokens (batch-dependent BF16 MoE numerics, not weights).
+
+Reading: the reshard is not the bottleneck (about 2 s of GPU time, off the critical path). The
+downtime is the engine start. With the checkpoint in page cache, resident weights alone save
+about 9 s per switch over a cold restart (weight load 10.0 vs map 1.8), and read 0 bytes of
+checkpoint where a disk load reads 67 GiB (that gap grows without the page cache, not measured
+here). The zygote, the KV plan and the drain-aware stop take the next 20–25 s (below).
+
+### Stop under client load (same model, TP2 ipc_cache, 3 clients with requests in flight)
+
+Source: our 2026-11-19 stop probe, one engine start per row, on 2 idle B200.
+
+| How the engine is stopped | Whole tree gone (s) | Port closed (s) | In-flight requests |
+|---|---:|---:|---|
+| SIGTERM to every process at once (the old `stop_engine`) | 10.10 (SIGKILL at the grace) | 10.1 | hung 10 s, then connection reset |
+| SIGTERM to the API server only (`stop_engine` now) | 1.03 | 0.18 | answered at once (HTTP 500) |
+| API server only, `VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS=5` | 5.59 | 5.29 | HTTP 500 |
+| API server only, `--shutdown-timeout 5` (vLLM drain mode) | 5.56 | 5.31 | HTTP 500 |
+
+Why: vLLM's API server shuts down in order (abort requests, stop the engine core and workers,
+close the HTTP server). A SIGTERM that also reaches the engine core and workers kills them
+before the aborts reach the API server, whose request handlers then wait forever; uvicorn waits
+for them ("Waiting for connections to close") until the SIGKILL. GPU memory was back to the
+holder's 34.2 GiB per GPU within 0.5 s of the leader-only SIGTERM. vLLM's graceful worker exit
+costs the 5 s of the last two rows.
+
+### Reshard switches with `--zygote --kvplan` vs plain (2× B200, 2026-11-19)
+
+Source: our 2026-11-19 end-to-end runs through `engine.py reconfigure`, one per mode, same code
+and flags as above, drain-aware stop in both. Per mode: TP2 start, then A TP2 -> EP2 (EP2 group
+filled from TP2), B EP2 -> TP2 (original TP2 group reused), C TP2 -> EP2 (EP2 group filled
+again), D EP2 -> TP2 (a dummy TP2 group filled from EP2). Clients: 1-token requests every 50 ms
+and a 128-token streamer, throughout. Unavailability: first failed 1-token request to the end of
+the first one that succeeds after it. Log offsets have 1 s resolution.
+
+| Per switch (s) | plain | `--zygote --kvplan`, plan measured (A) | `--zygote --kvplan`, plan reused (B, C, D) |
+|---|---:|---:|---:|
+| `ensure` while the old engine serves: filled (vLLM import + config 7.1–7.7, dummy group start 23.0–24.5, map 0.9–1.3, write 2.4–2.8) / reused | 36.5–37.4 / 10.1 | 36.0 | 35.9–37.3 / 9.7 |
+| Stop (drain-aware) | 0.73–1.12 | 0.41 | 0.36–0.41 |
+| Launch to `vllm serve` args parsed (imports) | 5.2–5.9 | 0.2 | 0.2–0.5 |
+| Launch to engine core init | 14.9–15.7 | 9.2 | 8.5–9.3 |
+| Launch to weights mapped (map itself 1.6–2.0) | 25.9–27.7 | 21.2 | 19.5–21.2 |
+| vLLM init-engine span: profile run + CUDA graph memory profile, KV alloc, warmup, graph capture | 40.7–44.4 | 41.2 | 21.2–22.6 |
+| — of it CUDA graph capture | 16–17 | 17 | 17–18 |
+| Launch to /health | 71.7–76.4 | 65.6 | 44.9–48.1 |
+| First request after /health (CuTe DSL GDN prefill kernels JIT at the first prefill) | 0.04–0.06 | 0.03 | 4.3–4.7 |
+| **Client-observed unavailability** | **72.7–77.1** | **65.9** | **49.4–52.8** |
+
+Zygote: ready in 8.7 s (8.2 s of imports, 6,610 modules), off the switch path; its check before
+each fork 0.18–0.24 s; `fork_check` found no spawn fallback. The KV plan's measured step takes
+21.3–22.5 s (profile run 8 s, CUDA graph memory profile 11–12 s); a reused plan returns in
+0.005 s, but kernels the profile run would have compiled (the GDN prefill kernels, CuTe DSL)
+compile at the first live prefill: the 4.3–4.7 s first request. So the KV plan moves that
+part rather than removing it.
+
+Correctness, both modes: the filled EP2 group equals a disk-loaded EP2 group byte for byte
+(1308/1308 tensors, buffers included), and the filled TP2 group equals a disk-loaded TP2 group
+(1228/1228). Greedy completions (4 prompts × 32 tokens, logprobs): EP2 after A and after C
+equal a cold EP2 server's exactly (max |Δlogprob| 0.0), TP2 after B and after D equal the
+initial TP2's exactly, and the two modes agree exactly. The references need the clients
+quiet: in a first run they started while a streamer request, slowed by the first-request
+JIT, was still running, and greedy tokens differed (batch-dependent BF16 MoE numerics). After
+the explicit stops, GPU memory went back to 0 MiB with no leftover process.
+
+Where the remaining ~45 s go (plan reused): ~9 s from the forked API server to the engine core
+(config, tokenizer, engine core start), ~11 s from there to mapped weights (worker fork,
+distributed and all-reduce workspace init, model build), 17–18 s of CUDA graph capture, ~3–4 s
+of API server start after the engine, and the 4.5 s first-request JIT. The reshard itself and
+the stop are no longer on that list.
+
+## Live scheduling policy
+
+Source: our 2026-11-19 Qwen3-8B test on one B200, vLLM 0.33.0 in eager mode,
+one running sequence, greedy decoding, prefix caching disabled. Each row is one
+switch on the same API server and engine core. The core applied the change between
+steps. The launcher timed the control request and acknowledgement. CLI wall time
+includes starting the launcher and its preflight checks.
+
+| Switch | Core apply | Launcher apply and acknowledgement | CLI wall |
+|---|---:|---:|---:|
+| FCFS to priority | 0.218 ms | 2.266 ms | 6.311 s |
+| Priority to FCFS | 0.374 ms | 6.487 ms | 6.023 s |
+
+Under FCFS a completion with priority −1 returned HTTP 400 both before and after the
+round trip. Under priority scheduling the core reported one running and three waiting.
+The waiting requests arrived with priorities 10, 5, −1. All returned HTTP 200 and
+completed in the order −1, 5, 10. Under restored FCFS the three equal-priority
+requests completed in arrival order. In each mode all four token sequences matched
+those from a separately started server with the corresponding scheduling policy.
 
 ## Not measured yet
 
