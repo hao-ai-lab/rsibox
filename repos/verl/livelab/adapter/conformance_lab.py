@@ -15,7 +15,7 @@ Environment (or constructor arguments):
 
 Output of a check: `{"steps": [{"score_mean", "adv_max", "adv_min", "pg_loss", "rollouts"}]}` per
 RL step after a coupled S0 reset; `rollouts` is a digest of the step's dumped (prompt, response,
-score, ground truth) rows. Bit-exact repeats need `rollout.full_determinism=True` and the
+score, ground truth) rows; `pg_loss` is rounded to 1e-6 (see `ROUND`). Bit-exact repeats need `rollout.full_determinism=True` and the
 per-sample seeds of `determinism.py` (`FASTRSI_RL_SEED_PER_SAMPLE=1`).
 Run from `core/livelab`:
     python3 -m conformance --lab adapter.conformance_lab:VerlConformanceLab
@@ -28,6 +28,9 @@ from adapter import gate as G
 
 CORE = "verl.trainer.ppo.core_algos"
 METRICS = {"score_mean": "critic/score/mean", "adv_max": "critic/advantages/max", "adv_min": "critic/advantages/min", "pg_loss": "actor/pg_loss"}
+# pg_loss is bit-exact across resets inside one job but differs at 1e-9 between two processes (FSDP loss
+# reduction order), so it is compared at 1e-6; scores, advantages and the rollout digest are exact.
+ROUND = {"pg_loss": 6}
 _JOBS = {}      # gate dir -> Popen of the launcher this process started
 
 
@@ -207,7 +210,8 @@ class VerlConformanceLab:
         steps = []
         for st in resp.get("steps_run") or []:
             m = st.get("metrics") or {}
-            steps.append({**{k: m.get(v) for k, v in METRICS.items()}, "rollouts": _digest_rollouts(st.get("rollouts"))})
+            vals = {k: m.get(v) for k, v in METRICS.items()}
+            steps.append({**{k: (round(x, ROUND[k]) if k in ROUND and isinstance(x, float) else x) for k, x in vals.items()}, "rollouts": _digest_rollouts(st.get("rollouts"))})
         return {"steps": steps}
 
     # -- the five verbs -------------------------------------------------------------------

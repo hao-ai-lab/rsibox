@@ -92,8 +92,11 @@ class ConformanceHarnessTest(unittest.TestCase):
         self.assertEqual(d1, d2)
         self.assertNotEqual(d1, d3)
         lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
-        out = lab._output({"steps_run": [{"metrics": {"critic/score/mean": 0.5, "actor/pg_loss": 0.01}, "rollouts": str(tmp / "1.jsonl")}]})
-        self.assertEqual(out, {"steps": [{"score_mean": 0.5, "adv_max": None, "adv_min": None, "pg_loss": 0.01, "rollouts": d1}]})
+        out = lab._output({"steps_run": [{"metrics": {"critic/score/mean": 0.5, "actor/pg_loss": 0.008408406749367714}, "rollouts": str(tmp / "1.jsonl")}]})
+        self.assertEqual(out, {"steps": [{"score_mean": 0.5, "adv_max": None, "adv_min": None, "pg_loss": 0.008408, "rollouts": d1}]})
+        # the two pg_loss values a fresh and a live process gave for the same step on 4x GB200 compare equal
+        live = lab._output({"steps_run": [{"metrics": {"critic/score/mean": 0.5, "actor/pg_loss": 0.008408404886722565}, "rollouts": str(tmp / "1.jsonl")}]})
+        self.assertEqual(live, out)
 
 
 
