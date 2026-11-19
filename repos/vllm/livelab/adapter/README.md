@@ -94,7 +94,7 @@ needs one is a finding, not a silent swap.
 | `recapture.py` | Selective CUDA graph recapture on one rank: `Engine` (what recapture needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
 | `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
-| `conformance_lab.py` | `VllmLab` (`core/livelab/conformance` `LabUnderTest`): drives a live 1-GPU `vllm serve` (launched via `services/engine.py start`) through the file channel across all 11 conformance cases (`c0`-`c10`). |
+| `conformance_lab.py` | `VllmLab` (`core/livelab/conformance` `LabUnderTest`): drives a live tensor-parallel `vllm serve` (launched via `services/engine.py start`) through the file channel across all 11 conformance cases (`c0`-`c10`). |
 
 ## Run it
 
@@ -120,7 +120,7 @@ FASTRSI_VLLM_MODEL=<model-path> FASTRSI_VLLM_VENV=<venv> FASTRSI_VLLM_WORK=<scra
   PYTHONPATH=../../repos/vllm/livelab python3 -m conformance --lab adapter.conformance_lab:VllmLab
 ```
 
-`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp 1`, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
+`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp FASTRSI_VLLM_TP`, default 1, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
 
 ## Golden tests
 

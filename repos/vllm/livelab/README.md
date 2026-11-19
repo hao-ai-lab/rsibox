@@ -1,5 +1,19 @@
 # vLLM live lab
 
+Run from the repository root with the vLLM environment's Python and the GPUs assigned
+to the run. Each command starts its own servers and keeps scratch files under `--work`.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab live-edit --model "$MODEL" --work "$WORK/edit"
+CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/eager"
+CUDA_VISIBLE_DEVICES=0,1 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/tp2" --tp 2
+```
+
+Conformance defaults to eager execution. To enable graphs, set `FASTRSI_VLLM_EXTRA` to
+`--seed 0 --gpu-memory-utilization 0.35 --max-model-len 2048 --disable-flashinfer-autotune`.
+Use `--receipts FILE` to keep transaction receipts and `--only c2_visible` for a single case.
+
+
 vLLM live-lab integration built on the shared transaction kernel in `core/livelab/`.
 
 - The transaction kernel (`core/livelab/kernel/`, engine-agnostic, standard library only) handles

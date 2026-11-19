@@ -10,6 +10,7 @@ Environment variables (no hostnames or paths in code):
 - `FASTRSI_VLLM_VENV`: venv root (`bin/python`, `bin/vllm`, site-packages; default `sys.prefix`).
 - `FASTRSI_VLLM_WORK`: scratch dir for logs, caches, channels and source farm (default tempdir).
 - `FASTRSI_VLLM_PORT`: live port (default `18500`; `fresh_check` uses `port + 1`).
+- `FASTRSI_VLLM_TP`: tensor-parallel worker count (default 1).
 - `FASTRSI_VLLM_EXTRA`: extra `vllm serve` flags (default `--seed 0 --gpu-memory-utilization 0.35
   --enforce-eager --max-model-len 2048 --disable-flashinfer-autotune`).
 - `FASTRSI_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
@@ -133,6 +134,15 @@ def _module_relpath(site, module_name):
     return os.path.join(*parts, "__init__.py") if os.path.isfile(pkg_init) else os.path.join(*parts) + ".py"
 
 
+def _check_topology(ping, tp):
+    if not ping.get("ok"):
+        raise RuntimeError(f"adapter host did not answer ping: {ping}")
+    parallel = ping.get("parallel") or {}
+    if tp is not None and (parallel.get("world") != tp
+                           or parallel.get("expected") != list(range(tp))):
+        raise RuntimeError(f"requested TP={tp}, adapter host reports {parallel}")
+
+
 def _http_post(port, path, body, timeout):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", json.dumps(body).encode(),
@@ -227,6 +237,7 @@ class VllmLab:
         self.python_bin, self.vllm_bin = os.path.join(self.venv, "bin", "python"), os.path.join(self.venv, "bin", "vllm")
         self.site = _site_packages(self.venv)
         self.port = int(os.environ.get("FASTRSI_VLLM_PORT", "18500"))
+        self.tp = int(os.environ.get("FASTRSI_VLLM_TP", "1"))
         self.extra = shlex.split(os.environ.get("FASTRSI_VLLM_EXTRA", DEFAULT_EXTRA))
         self.share_gpu = os.environ.get("FASTRSI_VLLM_SHARE_GPU", "1") != "0"
         work_env = os.environ.get("FASTRSI_VLLM_WORK")
@@ -243,8 +254,13 @@ class VllmLab:
             build_farm(os.path.join(self.site, "vllm"), os.path.join(self.farm_dir, "vllm"))
         self._farm_dirty = set()
         self.base_text = {m: Path(self.site, _module_relpath(self.site, m)).read_text() for m in MODULES}
+        self.server_key = (self.model, self.venv, self.port, self.work_dir, self.tp,
+                           tuple(self.extra), os.environ.get("CUDA_VISIBLE_DEVICES"),
+                           os.environ.get("VLLM_USE_V2_MODEL_RUNNER"),
+                           os.environ.get("VLLM_BATCH_INVARIANT"))
         shared = VllmLab._shared
-        if shared is not None and shared.alive() and self._server_at_base(shared):
+        if (shared is not None and shared.key == self.server_key and shared.alive()
+                and self._server_at_base(shared)):
             self.server = shared
         else:
             if shared is not None:
@@ -277,7 +293,7 @@ class VllmLab:
             self.python_bin, self.engine_py, "start", "--cache-root", self.cache_root,
             "--log", log_path, "--vllm", self.vllm_bin,
             f"--kvplan={os.path.join(self.work_dir, 'kvplan')}", "--timeout", "900", "--",
-            self.model, "--port", str(port), "--served-model-name", "m", "-tp", "1",
+            self.model, "--port", str(port), "--served-model-name", "m", "-tp", str(self.tp),
             "--distributed-executor-backend", "mp",
             "--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension", *self.extra,
         ]
@@ -292,13 +308,17 @@ class VllmLab:
             raise RuntimeError(f"vllm start ({tag}) failed rc={proc.returncode}: "
                                f"{report.get('findings') or report.get('error')} {tail}")
         srv = _ServerHandle(int(report["pid"]), port, kernel_dir, round(time.perf_counter() - t0, 3), log_path)
-        _http_post(port, "/v1/completions",
-                   {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
-                   timeout=120.0)
-        ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
-        if not ping.get("ok"):
+        srv.key = self.server_key
+        try:
+            _http_post(port, "/v1/completions",
+                       {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
+                       timeout=120.0)
+            ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
+            # Older callers can still select TP through arbitrary extra serve flags.
+            _check_topology(ping, self.tp if "FASTRSI_VLLM_TP" in os.environ else None)
+        except BaseException:
             srv.stop()
-            raise RuntimeError(f"adapter host did not answer ping: {ping}")
+            raise
         return srv
 
     def _ctl(self, cmd, timeout=None):

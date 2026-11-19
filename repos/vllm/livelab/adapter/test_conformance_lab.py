@@ -206,6 +206,7 @@ class FakeBackend:
         self.worker_obj = worker_obj
         self.worker_side = Side("worker", scope={"worker": worker_obj}, rank=0, alias={"vllm": self.w_prefix})
         core_obj = NS(
+            vllm_config=NS(parallel_config=NS(world_size=1)),
             model_executor=FakeExecutor([self.worker_side], self.lost),
             reset_prefix_cache=self._reset_cache,
         )
@@ -293,6 +294,14 @@ def make_cpu_lab(check_timeout=0.4):
 
 class ConformanceOnFakeVllmTest(unittest.TestCase):
     """Every conformance case (c0-c10) passes on `VllmLab` over `Host` + `Side`."""
+
+    def test_single_worker_host_cannot_satisfy_tp2(self):
+        lab = make_cpu_lab()
+        self.addCleanup(lab.close)
+        ping = lab._ctl({"op": "ping"})
+        CL._check_topology(ping, 1)
+        with self.assertRaisesRegex(RuntimeError, "requested TP=2"):
+            CL._check_topology(ping, 2)
 
     def test_all_11_conformance_cases_pass(self):
         for name in cases.CASES:
