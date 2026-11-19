@@ -59,6 +59,18 @@ MODULES = ("megatron.core.transformer.mlp", "megatron.core.transformer.attention
            "megatron.core.models.gpt.gpt_model", "megatron.training.training")
 
 
+def _has_real(values):
+    return isinstance(values, (list, tuple)) and any(v is not None for v in values)
+
+
+def _merge_check_output(rs):
+    """Merge per-rank check outputs so `PP > 1` takes loss/grad_norm from a stage that computed them."""
+    first = next((r for r in rs if r), {})
+    loss = next((r["loss"] for r in rs if r and _has_real(r.get("loss"))), first.get("loss"))
+    gn = next((r["grad_norm"] for r in rs if r and _has_real(r.get("grad_norm"))), first.get("grad_norm"))
+    return {"loss": loss, "grad_norm": gn}
+
+
 def _now():
     return time.perf_counter()
 
@@ -422,7 +434,7 @@ class Lab:
                 s.fault("participant_failed", f"check: {err}", "every rank finishes the check")
                 return {"ok": False, "error": err, "output": None, "proven": None,
                         "witness": {}, "findings": list(s.poison)}
-            out = {"loss": rs[0]["loss"], "grad_norm": rs[0]["grad_norm"]}
+            out = _merge_check_output(rs)
             golden = {"output_hash": L.text_hash(json.dumps(out, sort_keys=True))}
             proofs = [s.co.prove(t, golden=golden) for t in s.stack]
             witness = {}
@@ -504,10 +516,21 @@ class Lab:
         if self.batches.items is None or getattr(self, "resumed", "start") != "start":
             return it
         if self.replayed is None or self.replayed[0] is not it:
-            base = _Replay(self.batches.items, it)
-            w = self.batches.wrapper
-            self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
-                             else base)
+            if isinstance(it, list) and isinstance(self.batches.items, list):
+                out = []
+                for sub_items, sub_it in zip(self.batches.items, it):
+                    if sub_items is None or sub_it is None:
+                        out.append(sub_it)
+                    else:
+                        base = _Replay(sub_items, sub_it)
+                        w = type(sub_it)
+                        out.append(w(base) if w.__name__ == "RerunDataIterator" else base)
+                self.replayed = (it, out)
+            else:
+                base = _Replay(self.batches.items, it)
+                w = self.batches.wrapper
+                self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
+                                 else base)
         return self.replayed[1]
 
 
@@ -568,13 +591,19 @@ def install_hook(tr):
             fresh = os.environ.get("FASTRSI_FRESH")
             if fresh:
                 out = lab.handle({"op": "check", "steps": lab.default_steps})
+                rs = [None] * lab.ranks.world if lab.rank == 0 else None
+                dist.gather_object(out, rs, dst=0, group=lab.ranks.group)
                 if lab.rank == 0:
+                    merged = _merge_check_output(rs)
+                    errs = "; ".join(
+                        f"rank {r.get('rank')}: {r.get('error')}"
+                        for r in rs
+                        if not (r and r.get("ok"))
+                    )
                     with open(fresh, "w") as f:
-                        json.dump({"output": {"loss": out.get("loss"),
-                                              "grad_norm": out.get("grad_norm")},
-                                   "ok": out.get("ok"), "error": out.get("error"),
-                                   "timings": lab.timings}, f)
-                dist.barrier()
+                        json.dump({"output": merged, "ok": all(r and r.get("ok") for r in rs),
+                                   "error": errs or None, "timings": lab.timings}, f)
+                dist.barrier(group=lab.ranks.group)
                 os._exit(0)
             if lab.serve() == "exit":
                 dist.barrier(group=lab.ranks.group)

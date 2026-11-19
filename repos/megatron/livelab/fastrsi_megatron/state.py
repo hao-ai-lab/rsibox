@@ -382,13 +382,22 @@ def zero_new_state(optimizer, before):
 
 class FrozenBatches:
     """The first n items of the training iterator, kept to feed every check the same data.
-    Ranks without an iterator (Megatron gives tensor-parallel ranks > 0 None) keep None."""
+    Ranks without an iterator (Megatron gives tensor-parallel ranks > 0 and middle PP stages
+    None, and VPP passes a list of per-chunk iterators) keep None."""
 
     def __init__(self, it, n):
+        if isinstance(it, list):
+            self._sub = [FrozenBatches(sub, n) for sub in it]
+            self.items = [sub.items for sub in self._sub]
+            self.wrapper = None
+            return
+        self._sub = None
         self.items = None if it is None else [next(it) for _ in range(n)]
         self.wrapper = None if it is None else type(it)
 
     def iterator(self):
+        if self._sub is not None:
+            return [sub.iterator() for sub in self._sub]
         if self.items is None:
             return None
         base = iter(list(self.items))

@@ -297,6 +297,7 @@ class VllmRunner:
             sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", self.args.model,
             "--served-model-name", "model",
             "--port", str(self.args.port),
+            "-tp", str(self.args.tp),
             "--distributed-executor-backend", "mp",
             "--no-enable-prefix-caching",
             "--seed", "0",
@@ -406,6 +407,36 @@ def max_abs_logprob_diff(a: dict, b: dict) -> float:
     return worst
 
 
+def _validate_multi_rank(rec: dict, prove_rec: dict, undo_res: dict, wkey: str, tp: int) -> dict:
+    ranks = rec["participants"]["workers"]["prepare"]["ranks"]
+    require(len(ranks) == tp, f"expected {tp} worker prepare entries, got {len(ranks)}")
+    entries = [r["native"] for r in ranks]
+    if tp >= 2:
+        require(sum(not e.get("cached") for e in entries) == 1, f"expected 1 uncached nvcc build: {entries}")
+        require(sum(bool(e.get("cached")) for e in entries) == tp - 1, f"expected {tp - 1} flock-cached builds: {entries}")
+        require(all(e["build_s"] == 0.0 for e in entries if e.get("cached")), f"cached rank build_s != 0: {entries}")
+    live_ws = [prove_rec["witness"][f"workers/rank{i}"][wkey] for i in range(tp)]
+    cap_ws = [prove_rec["witness_capture"][f"workers/rank{i}"][wkey] for i in range(tp)]
+    require(all(w > 0 for w in live_ws) and all(w > 0 for w in cap_ws), f"expected positive witness on all {tp} ranks: live={live_ws} cap={cap_ws}")
+    undo_ranks = undo_res["receipt"]["participants"]["workers"]["undo"]["ranks"]
+    require(len(undo_ranks) == tp, f"expected {tp} worker undo entries, got {len(undo_ranks)}")
+    return {
+        "so": entries[0]["so"],
+        "key": entries[0]["key"],
+        "build_s": max(e["build_s"] for e in entries),
+        "load_s": max(e["load_s"] for e in entries),
+        "witness_live": live_ws[0],
+        "witness_capture": cap_ws[0],
+        "worker_undo_s": max(r["side_s"] for r in undo_ranks),
+        "rank_build_s": [e["build_s"] for e in entries],
+        "rank_load_s": [e["load_s"] for e in entries],
+        "rank_cached": [bool(e.get("cached")) for e in entries],
+        "rank_witness_live": live_ws,
+        "rank_witness_capture": cap_ws,
+        "rank_worker_undo_s": [r["side_s"] for r in undo_ranks],
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -413,6 +444,7 @@ def main():
     ap.add_argument("--csrc-root", required=True)
     ap.add_argument("--vllm-git", required=True)
     ap.add_argument("--port", type=int, default=29495)
+    ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -425,7 +457,7 @@ def main():
 
     pr_text, pre_pr_text = extract_pre_pr_source(args.csrc_root, args.vllm_git)
     perturbed_text = make_visible_perturbed_source(pr_text)
-    summary = {"pr": PR_NUMBER, "steps": {}}
+    summary = {"pr": PR_NUMBER, "tp": args.tp, "steps": {}}
 
     # 1. Direct GPU non-contiguous tensor proof (pre-PR vs PR #49750)
     direct = direct_noncontiguous_check(args.csrc_root, pre_pr_text, pr_text, work)
@@ -461,8 +493,8 @@ def main():
         summary["steps"]["graph_refusal"] = {"outcome": refused["outcome"], "findings": refused_checks}
 
         # 2b. Visible perturbation + R1 recapture + witness + <1ms undo + base restore
-        vis_nonce = f"visible-{int(time.time())}"
-        vis_plan = native_plan_spec(args.csrc_root, perturbed_text, vis_nonce, rebuild_r1=True, cache=False)
+        vis_nonce = f"visible-{os.getpid()}-{int(time.time())}"
+        vis_plan = native_plan_spec(args.csrc_root, perturbed_text, vis_nonce, rebuild_r1=True, cache=True)
         t_edit = time.time()
         vis_ins = runner.op(op="txn", plan=vis_plan, edit_time=t_edit, gap_timeout_s=120.0, phase2_deadline_s=60.0)
         require(vis_ins.get("ok") and vis_ins.get("outcome") == "committed", f"visible install failed: {vis_ins}")
@@ -477,12 +509,10 @@ def main():
         vis_prove = runner.op(op="prove", txn=vis_ins["txn"], golden={"output": vis_check["output"]})
         require(vis_prove.get("ok") is True, f"visible prove failed: {vis_prove}")
         vis_prec = vis_prove["receipt"]
-        live_w = vis_prec["witness"]["workers/rank0"][wkey_vis]
-        cap_w = vis_prec["witness_capture"]["workers/rank0"][wkey_vis]
-        require(live_w > 0 and cap_w > 0, f"expected positive live & capture witness, got live={live_w} cap={cap_w}")
 
         vis_undo = runner.op(op="undo", txn=vis_ins["txn"], gap_timeout_s=120.0)
         require(vis_undo.get("ok") and vis_undo["receipt"]["status"] == "undone", f"visible undo failed: {vis_undo}")
+        vis_stats = _validate_multi_rank(vis_rec, vis_prec, vis_undo, wkey_vis, args.tp)
         ab_vis = runner.op(op="at_base")
         require(ab_vis.get("ok") is True, f"at_base failed after visible undo: {ab_vis}")
         after_vis_undo = runner.check()
@@ -490,9 +520,9 @@ def main():
         require(max_abs_logprob_diff(after_vis_undo, base1) == 0.0, "undo did not restore exact base logprobs")
 
         summary["steps"]["visible_perturbation"] = {
-            "key": perturbed_key,
-            "build_s": vis_prep_native["build_s"],
-            "load_s": vis_prep_native["load_s"],
+            "key": vis_stats["key"],
+            "build_s": vis_stats["build_s"],
+            "load_s": vis_stats["load_s"],
             "prepare_s": vis_rec["prepare_s"],
             "gap_s": vis_rec["gap_s"],
             "recapture_s": vis_rec["recapture_s"],
@@ -500,10 +530,15 @@ def main():
             "edit_to_rebuilt_s": vis_rec["edit_to_rebuilt_s"],
             "output_changed": vis_check["output"] != base1["output"],
             "live_output": vis_check["output"],
-            "witness_live": live_w,
-            "witness_capture": cap_w,
+            "witness_live": vis_stats["witness_live"],
+            "witness_capture": vis_stats["witness_capture"],
             "undo_s": vis_undo["receipt"]["undo_s"],
-            "worker_undo_s": vis_undo["receipt"]["participants"]["workers"]["undo"]["ranks"][0]["side_s"],
+            "worker_undo_s": vis_stats["worker_undo_s"],
+            "rank_build_s": vis_stats["rank_build_s"],
+            "rank_cached": vis_stats["rank_cached"],
+            "rank_witness_live": vis_stats["rank_witness_live"],
+            "rank_witness_capture": vis_stats["rank_witness_capture"],
+            "rank_worker_undo_s": vis_stats["rank_worker_undo_s"],
             "at_base": ab_vis["ok"],
             "undo_restored_exact": True,
             "check_s": vis_check["seconds"],
@@ -511,16 +546,16 @@ def main():
         say("visible_perturbation", **summary["steps"]["visible_perturbation"])
 
         # 2c. Upstream PR #49750: install pre-PR -> install PR #49750 live + R1 -> prove -> undo
-        pre_nonce = f"pre-pr49750-{int(time.time())}"
-        pre_plan = native_plan_spec(args.csrc_root, pre_pr_text, pre_nonce, rebuild_r1=True, cache=False)
+        pre_nonce = f"pre-pr49750-{os.getpid()}-{int(time.time())}"
+        pre_plan = native_plan_spec(args.csrc_root, pre_pr_text, pre_nonce, rebuild_r1=True, cache=True)
         pre_ins = runner.op(op="txn", plan=pre_plan, gap_timeout_s=120.0, phase2_deadline_s=60.0)
         require(pre_ins.get("ok") and pre_ins.get("outcome") == "committed", f"pre-pr install failed: {pre_ins}")
         pre_check = runner.check()
         pre_prove = runner.op(op="prove", txn=pre_ins["txn"], golden={"output": pre_check["output"]})
         require(pre_prove.get("ok") is True, f"pre-pr prove failed: {pre_prove}")
 
-        pr_nonce = f"pr49750-{int(time.time())}"
-        pr_plan = native_plan_spec(args.csrc_root, pr_text, pr_nonce, rebuild_r1=True, cache=False)
+        pr_nonce = f"pr49750-{os.getpid()}-{int(time.time())}"
+        pr_plan = native_plan_spec(args.csrc_root, pr_text, pr_nonce, rebuild_r1=True, cache=True)
         t_edit_pr = time.time()
         pr_ins = runner.op(op="txn", plan=pr_plan, edit_time=t_edit_pr, gap_timeout_s=120.0, phase2_deadline_s=60.0)
         require(pr_ins.get("ok") and pr_ins.get("outcome") == "committed", f"PR #49750 install failed: {pr_ins}")
@@ -534,13 +569,11 @@ def main():
         pr_prove = runner.op(op="prove", txn=pr_ins["txn"], golden={"output": pr_check["output"]})
         require(pr_prove.get("ok") is True, f"PR prove failed: {pr_prove}")
         pr_prec = pr_prove["receipt"]
-        pr_live_w = pr_prec["witness"]["workers/rank0"][wkey_pr]
-        pr_cap_w = pr_prec["witness_capture"]["workers/rank0"][wkey_pr]
-        require(pr_live_w > 0 and pr_cap_w > 0, f"expected positive PR witness, got {pr_live_w}, {pr_cap_w}")
 
         # Cascade undo from pre-PR transaction restores clean base cleanly
         pr_undo = runner.op(op="undo", txn=pre_ins["txn"], gap_timeout_s=120.0)
         require(pr_undo.get("ok") and pr_undo["receipt"]["status"] == "undone", f"PR cascade undo failed: {pr_undo}")
+        pr_stats = _validate_multi_rank(pr_rec, pr_prec, pr_undo, wkey_pr, args.tp)
         ab_pr = runner.op(op="at_base")
         require(ab_pr.get("ok") is True, f"at_base failed after PR undo: {ab_pr}")
         after_pr_undo = runner.check()
@@ -548,19 +581,24 @@ def main():
         require(max_abs_logprob_diff(after_pr_undo, base1) == 0.0, "PR undo did not restore exact logprobs")
 
         summary["steps"]["pr49750_live"] = {
-            "key": pr_key,
-            "build_s": pr_prep_native["build_s"],
-            "load_s": pr_prep_native["load_s"],
+            "key": pr_stats["key"],
+            "build_s": pr_stats["build_s"],
+            "load_s": pr_stats["load_s"],
             "prepare_s": pr_rec["prepare_s"],
             "gap_s": pr_rec["gap_s"],
             "recapture_s": pr_rec["recapture_s"],
             "edit_to_commit_s": pr_rec["edit_to_commit_s"],
             "edit_to_rebuilt_s": pr_rec["edit_to_rebuilt_s"],
             "live_output": pr_check["output"],
-            "witness_live": pr_live_w,
-            "witness_capture": pr_cap_w,
+            "witness_live": pr_stats["witness_live"],
+            "witness_capture": pr_stats["witness_capture"],
             "cascade_undo_s": pr_undo["receipt"]["undo_s"],
-            "worker_undo_s": pr_undo["receipt"]["participants"]["workers"]["undo"]["ranks"][0]["side_s"],
+            "worker_undo_s": pr_stats["worker_undo_s"],
+            "rank_build_s": pr_stats["rank_build_s"],
+            "rank_cached": pr_stats["rank_cached"],
+            "rank_witness_live": pr_stats["rank_witness_live"],
+            "rank_witness_capture": pr_stats["rank_witness_capture"],
+            "rank_worker_undo_s": pr_stats["rank_worker_undo_s"],
             "at_base": ab_pr["ok"],
             "undo_restored_exact": True,
             "check_s": pr_check["seconds"],
@@ -607,7 +645,14 @@ def main():
     }
     say("pr49750_fresh", **summary["steps"]["pr49750_fresh"])
 
-    summary["gpu_mem_after_mib"] = gpu_mem_mib(os.environ.get("CUDA_VISIBLE_DEVICES"))
+    dev_list = os.environ.get("CUDA_VISIBLE_DEVICES")
+    deadline_mem = time.monotonic() + 15.0
+    mems = gpu_mem_mib(dev_list)
+    while any(m > 0 for m in mems) and time.monotonic() < deadline_mem:
+        time.sleep(0.5)
+        mems = gpu_mem_mib(dev_list)
+    require(all(m == 0 for m in mems), f"non-zero GPU memory left after exit: {mems}")
+    summary["gpu_mem_after_mib"] = mems
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, indent=1)
     say("ALL_PASSED", out=args.out, gpu_mem_after_mib=summary["gpu_mem_after_mib"])

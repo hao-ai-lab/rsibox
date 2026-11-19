@@ -584,5 +584,35 @@ class ConformanceLabDiffsTest(unittest.TestCase):
         self.assertNotIn("startup_line_0", res_box_err["error"])
 
 
+@unittest.skipUnless(torch is not None, "needs torch")
+class PipelineAndVppTest(unittest.TestCase):
+    def test_merge_check_output_prefers_non_none_stage_and_frozen_batches_vpp(self):
+        """PP > 1 takes loss/grad_norm from the stage that computed them; VPP lists replay cleanly."""
+        from fastrsi_megatron import hook, state
+
+        merged = hook._merge_check_output([
+            {"ok": True, "rank": 0, "loss": [None, None], "grad_norm": [1.5, 1.4]},
+            {"ok": True, "rank": 1, "loss": [None, None], "grad_norm": [None, None]},
+            {"ok": True, "rank": 2, "loss": [9.1, 9.0], "grad_norm": [1.5, 1.4]},
+        ])
+        self.assertEqual(merged, {"loss": [9.1, 9.0], "grad_norm": [1.5, 1.4]})
+
+        fallback = hook._merge_check_output([
+            {"ok": True, "rank": 0, "loss": [None], "grad_norm": [None]},
+        ])
+        self.assertEqual(fallback, {"loss": [None], "grad_norm": [None]})
+
+        self.assertIsNone(state.FrozenBatches(None, 2).iterator())
+        fb_single = state.FrozenBatches(iter([10, 20, 30]), 2)
+        self.assertEqual(list(fb_single.iterator()), [10, 20])
+
+        fb_vpp = state.FrozenBatches([iter([1, 2, 3]), None, iter(["a", "b", "c"])], 2)
+        it_vpp = fb_vpp.iterator()
+        self.assertEqual(len(it_vpp), 3)
+        self.assertEqual(list(it_vpp[0]), [1, 2])
+        self.assertIsNone(it_vpp[1])
+        self.assertEqual(list(it_vpp[2]), ["a", "b"])
+
+
 if __name__ == "__main__":
     unittest.main()
