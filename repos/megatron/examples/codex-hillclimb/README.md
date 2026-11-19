@@ -24,13 +24,27 @@ the confirmation.
 
 Iteration 12 is not a code edit. It sets `fuse_wgrad_accumulation` on the live TE modules through
 the journal, so weight gradients accumulate into `main_grad` inside the GEMM instead of a separate
-`add_` (about 10% of CUDA time before). It ran only in a private harness and is **not** part of the
-lab: changing long-lived state in place is what the vLLM lab moved to restart tiers. Proof that it
+`add_` (about 10% of CUDA time before). The November 7 performance measurement used a private harness: changing long-lived state in place is what the vLLM lab moved to restart tiers. Proof that it
 ran: after a check, all 160 TE weights on both ranks carried `grad_added_to_main_grad` (set only by
 TE's fused path). The flag `--gradient-accumulation-fusion` would be the supported way, but on this build it fails
 at the first step: with the flag on, the LM head's non-TE `ColumnParallelLinear` needs apex's
 `fused_weight_gradient_mlp_cuda`, which is not installed (our 2026-11-07 flag restart, 58 s to the
-error). Until that path works without apex, the TE-only change is reachable only as this cell.
+error). The public lab now accepts this TE-only change as a journaled repair.
+
+### Replay iteration 12
+
+Start a deterministic eager bf16 job with fp32 main gradients, TE linear layers and
+`--no-gradient-accumulation-fusion`. Once the lab is at base, run:
+
+```sh
+python repos/megatron/examples/codex-hillclimb/te_wgrad.py --sock "$FASTRSI_SOCK"
+```
+
+The script installs the flag and a backward witness on each target weight. Each witness counts
+post-accumulation calls where TE marked the gradient as added to `main_grad`. It checks loss and
+gradient norm, undoes the flag and hooks, and compares another check with the original baseline.
+Our two-layer, eight-step TP2 replay on two GB200s counted 32 fused backward calls on each of
+eight TE linears per rank. Undo reproduced the original losses and gradient norms exactly.
 
 ## The kept set on the Qwen3-32B architecture (TP 4, 4 GB200)
 

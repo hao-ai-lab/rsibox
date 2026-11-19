@@ -417,26 +417,29 @@ class Lab:
         if verb == "install":
             patch = req.get("patch")
             files = patch.get("files") if isinstance(patch, dict) else None
+            repairs = patch.get("repairs", []) if isinstance(patch, dict) else []
             why, modules = None, {}
+            missing = sorted(name for name in files if name not in sys.modules) if isinstance(files, dict) else []
             if not isinstance(files, dict):
                 why = "a patch is an object with `files`: {module: source}"
-            for name, new in (files or {}).items():
-                if name not in sys.modules:
-                    why = f"module {name!r} is not loaded in the job"
-                    break
-                try:
-                    modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
-                except (AttributeError, OSError, TypeError, ValueError) as error:
-                    why = f"module {name!r} has no readable source file ({type(error).__name__})"
-                    break
+            elif missing:
+                why = f"modules not loaded in the job: {missing!r}"
+            else:
+                for name, new in files.items():
+                    try:
+                        modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
+                    except (AttributeError, OSError, TypeError, ValueError) as error:
+                        why = f"module {name!r} has no readable source file ({type(error).__name__})"
+                        break
             if why:
                 return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "receipt": None, "findings": [F.finding(
+                        "mechanisms": [], "receipt": None, "not_loaded": missing, "findings": [F.finding(
                             "patch_invalid", why, "modules the running job imported from source")]}
             if not s.poisoned():
                 self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
-                    "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
+                    "undo_resets": patch.get("undo_resets", []), "repairs": repairs,
+                    "recipes": (["R0 swap"] if files else []) + (["R10 repair"] if repairs else [])}
             res = s.install(plan, edit_time=patch.get("edit_time"))
             outcome, rec = res.get("outcome", "refused"), res.get("receipt")
             if outcome == "committed":

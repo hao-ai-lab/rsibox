@@ -72,9 +72,16 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
 
 A patch may edit any module the job has imported; each one it names joins the session's code
 fingerprint (status, tamper checks). A module the job has not imported is refused
-(`patch_invalid`).
+(`patch_invalid`). The reply lists every missing module under `not_loaded`; all files stay at base.
 
-The kernel's live code swap (function bodies, every rank) and repair cells. Not yet: edits of
+For a journaled attribute change, pass `{"files": {}, "repairs": [{"cell": code, "declares": []}]}`
+to `install`. The cell runs on each rank with `model` (local chunks), `optimizer`, `journal`
+and `arm` in scope. Use `journal.set_attr(module, name, value)` for nested modules.
+`uninstall` restores their original values. A training check and a workload-specific witness
+must establish that the changed setting affected execution. Fresh-process overlays take source
+files only.
+
+The kernel also swaps function bodies on every rank. Unsupported paths include edits of
 `jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (which require a model
 rebuild), optimizer construction, TE C++ code.
 
@@ -93,10 +100,24 @@ rank's process exit, hang makes a rank sleep inside a train step, tamper rebinds
 code outside the journal.
 
 ```sh
-FASTRSI_MG_CMD='<a command that runs torchrun -m fastrsi_megatron.run pretrain_gpt.py ...>' \
-FASTRSI_MG_ROOT=<Megatron-LM tree> FASTRSI_CHECK_STEPS=3 FASTRSI_CHECK_TIMEOUT=60 \
-python3 -m conformance --lab fastrsi_megatron.conformance_lab:MegatronLab   # from core/livelab
+# From the FastRSI checkout, in an allocated worker environment with Megatron installed:
+export FASTRSI_RUN="$(mktemp -d)"
+export PYTHONPATH="$PWD/repos/megatron/livelab${PYTHONPATH:+:$PYTHONPATH}"
+python -m fastrsi_megatron.conformance_lab --root "$MEGATRON_ROOT" --nproc 2 \
+  --receipts "$FASTRSI_RUN/transactions.jsonl" -- \
+  --num-layers 2 --hidden-size 512 --num-attention-heads 8 --ffn-hidden-size 1536 \
+  --tensor-model-parallel-size 2 --sequence-parallel --seq-length 128 \
+  --max-position-embeddings 128 --normalization RMSNorm --swiglu --disable-bias-linear \
+  --hidden-dropout 0 --attention-dropout 0 --micro-batch-size 1 --global-batch-size 4 \
+  --bf16 --lr 1e-4 --train-iters 1000 --eval-iters 0 --mock-data \
+  --tokenizer-type NullTokenizer --vocab-size 8192 --use-distributed-optimizer \
+  --transformer-impl transformer_engine --deterministic-mode
 ```
+
+In a container with the Python environment already on local storage, stage just the engine
+tree from the checkout with `bash repos/megatron/tools/stage_local.sh --tree-only "$MEGATRON_ROOT" "$LOCAL_SCRATCH"`.
+Use `"$LOCAL_SCRATCH/$(basename "$MEGATRON_ROOT")"` for `--root`. Mount the checkout and a writable output and cache directory.
+The existing `FASTRSI_MG_CMD` and `FASTRSI_MG_ROOT` entry point remains available to custom launchers.
 
 Our 2026-11-07 run: 2 layers, hidden 512, TP 2 on 2 GB200, `--deterministic-mode`, 3-step
 checks, 11/11 as expected:

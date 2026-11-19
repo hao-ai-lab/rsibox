@@ -21,10 +21,12 @@ poisoned or edited job is respawned instead.
 import atexit
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -41,22 +43,8 @@ def _edit(src, old, new):
 
 def _descendants(root):
     """PIDs of every live descendant of root, parents before children (from /proc)."""
-    kids = {}
-    for d in os.listdir("/proc") if os.path.isdir("/proc") else []:
-        if not d.isdigit():
-            continue
-        try:
-            with open(f"/proc/{d}/stat") as f:
-                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        kids.setdefault(ppid, []).append(int(d))
-    out, todo = [], [root]
-    while todo:
-        for c in kids.get(todo.pop(0), []):
-            out.append(c)
-            todo.append(c)
-    return out
+    from .zygote import _tree
+    return _tree(root)[1:]
 
 
 def _free_port():
@@ -186,8 +174,6 @@ class MegatronLab:
             return False
 
     def _call(self, req, timeout=None):
-        if self.poison:
-            pass
         try:
             return client.call(self.job.sock, req, timeout or self.check_timeout)
         except (TimeoutError, ConnectionError, FileNotFoundError, OSError) as e:
@@ -230,8 +216,7 @@ class MegatronLab:
         return {**r, "cost_s": round(time.perf_counter() - t0, 3)}
 
     def uninstall(self, id=None):
-        r = self._call({"verb": "uninstall", **({"id": id} if id else {})})
-        return r
+        return self._call({"verb": "uninstall", **({"id": id} if id else {})})
 
     def status(self):
         if self.poison:
@@ -282,6 +267,8 @@ class MegatronLab:
         }
 
     def fresh_check(self, patch, workload=None):
+        if (patch or {}).get("repairs"):
+            return {"ok": False, "output": None, "error": "fresh overlays apply source files only"}
         d = tempfile.mkdtemp(prefix="fastrsi-mg-overlay-")
         out = os.path.join(d, "out.json")
         try:
@@ -323,3 +310,31 @@ class MegatronLab:
 def _stop_shared():
     if MegatronLab._shared is not None:
         MegatronLab._shared.kill()
+
+if __name__ == "__main__":
+    import argparse
+    from conformance.__main__ import main
+
+    parser = argparse.ArgumentParser(description="Run conformance on a local Megatron checkout")
+    parser.add_argument("--root", required=True, help="Megatron-LM checkout")
+    parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
+    parser.add_argument("--only", default="", help="comma-separated conformance case names")
+    parser.add_argument("--receipts", help="append transaction receipts here")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
+    args = parser.parse_args()
+    root = os.path.abspath(args.root)
+    training = args.training_args
+    if training[:1] == ["--"]:
+        training = training[1:]
+    launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
+    worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
+    os.environ["FASTRSI_MG_CMD"] = f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}'
+    os.environ["FASTRSI_MG_ROOT"] = root
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH"))))
+    options = ["--only", args.only]
+    if args.receipts:
+        options += ["--receipts", args.receipts]
+    if args.json:
+        options.append("--json")
+    sys.exit(main(["--lab", "fastrsi_megatron.conformance_lab:MegatronLab", *options]))

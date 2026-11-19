@@ -510,6 +510,29 @@ class InstallPatchModules(unittest.TestCase):
                               reply["mechanisms"]), (False, "refused", ["patch_invalid"], None, []))
             self.assertIn(repr(name), reply["findings"][0]["observed"])
 
+    def test_mixed_patch_names_every_unloaded_module_and_writes_nothing(self):
+        fx = LabFixture(self)
+        files = {"mg_target_a": "def scale(x): return 99", "no.second": "", "no.first": ""}
+        reply = fx.lab.verb("install", {"patch": {"files": files}})
+        self.assertEqual(reply["codes"], ["patch_invalid"])
+        self.assertEqual(reply["not_loaded"], ["no.first", "no.second"])
+        self.assertEqual(self.first.scale(2), 4)
+
+    def test_journaled_module_attribute_install_and_undo(self):
+        fx = LabFixture(self)
+        cell = "journal.set_attr(model[0][0], 'training', False)"
+        patch = {"files": {}, "repairs": [{"cell": cell, "declares": []}]}
+        installed = fx.lab.verb("install", {"patch": patch})
+        self.assertEqual(installed["mechanisms"], ["R10 repair"], installed)
+        self.assertFalse(fx.model[0].training)
+        self.assertTrue(fx.lab.verb("uninstall", {})["ok"])
+        self.assertTrue(fx.model[0].training)
+
+    def test_invalid_files_type_is_a_structured_refusal(self):
+        lab = LabFixture(self).lab
+        reply = lab.verb("install", {"patch": {"files": ["not a mapping"]}})
+        self.assertEqual(reply["codes"], ["patch_invalid"])
+
     def test_inject_target_names_one_rank_or_is_refused(self):
         """Input: targets None, 1, "1", "rank1", then "rank01", "rank2", "x", True, -1 on two
         ranks. Expect: None, 1, 1, 1, then a plain ValueError naming the valid targets."""
