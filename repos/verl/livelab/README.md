@@ -68,7 +68,8 @@ python3 -m tools.cli conformance --gate /tmp/verl-gate --reward examples/grpo-gs
   --receipts receipts.jsonl --json
 ```
 
-A check is one RL step after a coupled `S0` reset; its output is `critic/score/mean`,
+On 4x GB200 (Qwen3-0.6B GSM8K, 32 prompts x 8 samples) the eleven cases pass in 1 h 54 min; `../kb/costs.md`
+section 0.1 has the per-case time. A check is one RL step after a coupled `S0` reset; its output is `critic/score/mean`,
 `critic/advantages/{max,min}`, `actor/pg_loss` and a digest of the dumped rollouts (prompt, response,
 score, ground truth), so `c0` really asks the same prompts to be sampled, scored and trained the same
 way twice. `fresh_check` stops the live job, boots a fresh one from the edited files, reads its first

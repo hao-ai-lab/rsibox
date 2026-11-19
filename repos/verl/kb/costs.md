@@ -47,6 +47,32 @@ So in batch A a live verdict costs one step (plus 0.6-5.8 s of install): **2.2-2
 the first verdict, and the offline probes are 5-6 orders of magnitude cheaper than either. The restart floor
 here is eager vLLM; with CUDA graphs (batch B) the step is 4x shorter and the ratio grows to 6-7x.
 
+### 0.1 Batch A: the eleven conformance cases on the live job
+
+`VerlConformanceLab` (c0-c10, `core/livelab/conformance/`) against one gated job with 21 participants (driver,
+8 reward, 8 agent-loop, 4 trainer ranks), `train_batch_size=32`, `rollout.n=8` (256 responses per step, a step of
+~45 s), per-sample seeds on. Source: the pass table and `receipts.jsonl` of our 2026-11-19 run (11/11).
+
+| Case | Seconds | What the time is made of |
+|---|---:|---|
+| c0_repeatable | 188 | 3 steps and 2 coupled `S0` resets; all three gave the same metrics and rollout digest |
+| c1_noop, c2_visible | 127, 119 | 2 steps each plus one inline `core_algos` install (6.9-8.1 s) and uninstall (5.9-6.5 s) |
+| c3_fresh_equivalence | 1072 | 5 fresh boots of the job from edited files (about 2 min each) plus their first steps; live == fresh for the visible edit and for a chain of 3 |
+| c4_uninstall | 209 | uninstall 5.96 s; the rest is steps |
+| c5_failed_install, c6_refusal | 255, 297 | fault injections and refused installs; each refusal is cheap (< 1 s), the base checks between them are steps |
+| c7_chain | 421 | 3 stacked installs, 4 steps |
+| c8_crash_and_hang | 1295 | 4 poisonings, each followed by a respawn (relaunch) of 112-162 s and a base step |
+| c9_soak | 2349 | 20 install/uninstall cycles with a step each; install median 8.09 s, uninstall median 6.52 s |
+| c10_not_proven | 511 | one unreached edit (`proven False`, 8 `zero_witness` findings), one fresh boot |
+| **Total** | **6844** | 1 h 54 min; 12 job launches in all |
+
+Only the driver computes GRPO advantages, so an edit of `compute_grpo_outcome_advantage` is witnessed with 1 call
+on the driver; the agent-loop actors and trainer ranks import `core_algos` (the swap reaches them, 0 calls) and the
+reward actors do not (they abstain). The reward edit of c3's chain is witnessed with 256 calls on the 8 reward actors.
+An inline edit of `SingleTurnAgentLoop.run` (the agent-loop module, loaded only by the 8 agent-loop actors) installs
+in 7.5 s and is witnessed with 32 calls on each of the 8 actors (one per sample), with the step's metrics and
+rollouts unchanged by the no-op (our 2026-11-19 probe on the same job configuration).
+
 ## 1. Batch B: Verdict Cost Ladder (2026-10-21, Megatron-Core, CUDA graphs)
 
 | Verdict Path | Total Cost | Breakdown | Speedup vs. Fast-Storage Restart |
