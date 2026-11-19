@@ -26,6 +26,12 @@ $ CUDA_VISIBLE_DEVICES=0 python repos/vllm/examples/live-edit-qwen3/walkthrough.
 It copies the installed `vllm` package to `<work>/src` and serves from the copy, so the installed
 package is never edited. JSON lines are wrapped here for reading; nothing else is changed.
 
+The current CLI compares the full completion text across repeats and fresh and live engines.
+It verifies the edited method on each owning rank, the inactive sampler’s zero witness,
+and the restored code identity and text after undo. With `--out FILE`, the JSON also
+includes client-observed time to first token and elapsed time for each streamed request.
+The output below comes from the dated run above.
+
 ## 1. The edits
 
 ```diff
