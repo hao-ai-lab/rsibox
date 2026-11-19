@@ -264,16 +264,30 @@ class Run:
     def check(self):
         """The workload: 8 prompts, one request at a time, greedy, 32 tokens each. One at a
         time, because the output of a batch depends on which requests share a step."""
-        t0, texts = time.monotonic(), []
+        t0, texts, ttft = time.monotonic(), [], []
         for prompt in PROMPTS:
             body = json.dumps({"model": "model", "prompt": prompt, "max_tokens": 32,
-                               "temperature": 0, "seed": 0}).encode()
+                               "temperature": 0, "seed": 0, "stream": True, "return_token_ids": True}).encode()
             req = urllib.request.Request(
                 f"http://127.0.0.1:{self.a.port}/v1/completions", body,
                 {"Content-Type": "application/json"})
-            texts.append(json.load(urllib.request.urlopen(req, timeout=600))
-                         ["choices"][0]["text"])
-        return {"seconds": round(time.monotonic() - t0, 3), "texts": texts,
+            started = time.monotonic()
+            pieces, first = [], None
+            with urllib.request.urlopen(req, timeout=600) as response:
+                for line in response:
+                    if line.strip() == b"data: [DONE]":
+                        break
+                    if line.startswith(b"data: "):
+                        for choice in json.loads(line[6:])["choices"]:
+                            if first is None and choice.get("token_ids"):
+                                first = time.monotonic() - started
+                            pieces.append(choice["text"])
+                else:
+                    raise VerificationError("completion stream ended before [DONE]")
+            require(first is not None, "completion returned no token IDs")
+            texts.append("".join(pieces))
+            ttft.append(first)
+        return {"seconds": round(time.monotonic() - t0, 3), "texts": texts, "ttft_s": ttft,
                 "output": hashlib.sha256(json.dumps(texts).encode()).hexdigest()[:16]}
 
     def checks(self, n):
@@ -423,6 +437,7 @@ def main():
         ap.error("--phases must list distinct phases from warm,fresh,live")
     sys.path.insert(0, LIVELAB)
     import adapter  # noqa: F401  (puts core/livelab on sys.path)
+    started = time.monotonic()
     run = Run(a)
     run.setup()
     for e in run.edits.values():
@@ -454,6 +469,7 @@ def main():
             run.stop()
         for name in run.edits:
             run.write(name, "base")
+        run.full["total_s"] = time.monotonic() - started
         if a.out:
             with open(a.out, "w") as f:
                 json.dump(run.full, f, indent=1, default=str)

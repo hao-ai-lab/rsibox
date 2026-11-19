@@ -53,7 +53,10 @@ class ScriptTest(unittest.TestCase):
                 text = " "
             if fault == "restoration" and current == "live" and fingerprint_reads >= 1 and edit is None and undone:
                 text = " stale"
-            return io.StringIO(json.dumps({"choices": [{"text": text}]}))
+            parts = [json.dumps({"choices": [{"text": s, "token_ids": [i]}]})
+                     for i, s in enumerate((text[:1], text[1:]))]
+            return io.BytesIO(("".join(f"data: {part}\n\n" for part in parts)
+                               + "data: [DONE]\n\n").encode())
 
         def send(_, command):
             nonlocal edit, fingerprint_reads, undone
