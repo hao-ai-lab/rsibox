@@ -45,7 +45,7 @@ live install, as the lab's receipt records it.
 | # | Edit | Agent | s/video in the lab | Edit-to-run | Antigravity | Review notes and upstream needs |
 |---|---|---|---|---|---|---|
 | 01 | VSA-H3 `tile()`: take FastVideo's existing heads-first Triton scatter by default (it was behind `FASTVIDEO_H3_VSA_HEADS_FIRST_TILE`), replacing an `index_put` and three transpose copies | Claude | 6.031 -> 5.112 | 0.96 s | correct | Upstream: flip the default instead of deleting the flag check; setting the variable to 0 no longer disables the route |
-| 02 | qknorm + partial RoPE: one program per 16 heads (was one per head row), reduction tree in the same order as `tl.sum` | Claude | 5.112 -> 4.691 | 0.72 s | correct | Built lazily in a cached function (the live lab's witness needs a Python call); upstream can be a plain top-level `@triton.jit` |
+| 02 | qknorm + partial RoPE: one program per 16 heads (was one per head row), reduction tree in the same order as `tl.sum` | Claude | 5.112 -> 4.691 | 0.72 s | correct | Built lazily in a cached function originally; top-level `@triton.jit` kernels now also get live launch-witness proof via `core/livelab/kernel/jit.py` `R1` (verified on `_qknorm_partial_rope_kernel` on 1× GB200: `800` witnesses, `0.342 ms` zero-recompile undo) |
 | 03 | Fused attention-output copy + gated `addcmul_` in one Triton pass; skip the zero-width `F.pad` | Claude | 4.691 -> 4.520 | 5.69 s, 3.67 s (queued behind another lab call; 0.12 s, 0.05 s in the lab) | **correct for this workload only** | Antigravity: the fused path drops the autograd path when only `gate_compress` needs grad (training); the `triton` import is unguarded; no `torch.cuda.device` guard. Fix all three before upstreaming |
 | 04 | One rank: scatter q/k/v/gate straight into the tile buffer, no stacked `torch.cat` copy | Claude | 4.520 -> 4.381 | 1.04 s | correct | Single-rank only by design |
 | 05 | Vectorized bool-mask -> (q2k_idx, q2k_num) kernel; calls `block_sparse_attn_from_indices` directly | Claude | 4.381 -> 4.329 | 1.09 s | correct | Better upstreamed into `fastvideo-kernel`'s `map_to_index` |
@@ -84,7 +84,12 @@ twice, other H3 runs on the tray's other GPUs:
 Live, in one warm base engine (`tools/h3_climb.py`: each patch installed from its file by the
 live swap, one video after each, every video bit-identical to base): 1 GPU 6.04 -> 4.22 s
 (**1.43x**) with 01-20, 6.03 -> 4.19 s (1.44x) with 01-19; 2 GPUs 4.55 -> 2.99 s (**1.52x**)
-with 01-20. Each install took 0.02-0.26 s.
+with 01-20. Each install took 0.02-0.26 s. Stacking patches 02-08 live with no intermediate
+video between installs also runs bit-exact (1 GB200: 4.14 s vs 6.01 s base, 0 `StopIteration`,
+per-version nested `linecache` keys in `core/livelab/kernel/swap.py`) and undoes all 7/7
+transactions cleanly in 9-11 ms RPC each (0 `closure_not_restored`, restored video 6.09 s
+bit-exact; `core/livelab/kernel/journal.py` evicts Triton 3.5+ `_triton_jit_function_registry`
+entries and breaks `defaultdict` cycles on undo).
 
 | # | Edit | s/video in the lab | Edit-to-run (in the lab) | Antigravity | Review notes and upstream needs |
 |---|---|---|---|---|---|

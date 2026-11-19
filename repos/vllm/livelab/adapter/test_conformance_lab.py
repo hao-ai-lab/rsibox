@@ -5,6 +5,7 @@ by a real `adapter.host.Host` over in-process `Side` endpoints (one worker rank 
 core, each with its own synthetic copies of the 4 vLLM modules `VllmLab` edits), plus unit
 tests for farm construction and fault/timeout handling.
 """
+import difflib
 import importlib.util
 import itertools
 import os
@@ -444,6 +445,50 @@ class FarmAndHelpersTest(unittest.TestCase):
         # Preset FASTRSI_VLLM_MODEL + raw serve flags behind a single leading "--".
         raw_tail_only = CL.VllmLab.launch_environment(["--", "--enforce-eager", "--max-model-len", "1024"])
         self.assertEqual(raw_tail_only, {"FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024"})
+
+    def test_install_and_fresh_check_accept_stacked_unified_diffs_and_refuse_stale_diff(self):
+        lab = make_cpu_lab()
+        self.addCleanup(lab.close)
+        base_out = lab.check()["output"]
+        sampler_path = CL.SAMPLER.replace(".", "/") + ".py"
+        anchor = "        sampled, processed_logits = self.sample(\n"
+        v1 = CL._edit(FAKE_SAMPLER, anchor, "        logits = -logits\n" + anchor)
+        v2 = CL._edit(v1, "        logits = -logits\n", "        logits = logits.roll(1, dims=-1)\n")
+
+        def make_diff(old_src, new_src):
+            return "".join(difflib.unified_diff(
+                old_src.splitlines(True), new_src.splitlines(True),
+                fromfile=f"a/{sampler_path}", tofile=f"b/{sampler_path}",
+            ))
+
+        diff1 = make_diff(FAKE_SAMPLER, v1)
+        diff2 = make_diff(v1, v2)
+        combined_diff = make_diff(FAKE_SAMPLER, v2)
+
+        r1 = lab.install({"diff": diff1})
+        self.assertTrue(r1["ok"], r1)
+        out1 = lab.check()["output"]
+        self.assertNotEqual(out1, base_out)
+
+        # Stacking diff2 applies against live v1 text; re-applying diff1 is refused cleanly.
+        stale = lab.install({"diff": diff1})
+        self.assertEqual((stale["ok"], stale["outcome"], stale["codes"]), (False, "refused", ["patch_invalid"]))
+        r2 = lab.install({"diff": diff2})
+        self.assertTrue(r2["ok"], r2)
+        out2 = lab.check()["output"]
+        self.assertNotEqual(out2, out1)
+
+        # fresh_check resolves unified diff against base/disk text and matches live stacked output.
+        fresh = lab.fresh_check({"diff": combined_diff})
+        self.assertTrue(fresh["ok"], fresh)
+        self.assertEqual(fresh["output"], out2)
+        bad_fresh = lab.fresh_check({"diff": diff2})
+        self.assertFalse(bad_fresh["ok"])
+
+        self.assertTrue(lab.uninstall()["ok"])
+        self.assertEqual((lab.check()["output"], lab.status()["state"]), (out1, "edited"))
+        self.assertTrue(lab.uninstall()["ok"])
+        self.assertEqual((lab.check()["output"], lab.status()["state"]), (base_out, "base"))
 
 
 if __name__ == "__main__":

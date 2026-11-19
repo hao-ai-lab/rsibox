@@ -17,12 +17,16 @@ class ConformanceHarness:
 
     def fresh_check(self, patch, workload=None):
         livelab_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        try:
+            files = self.files(patch, against="disk") if hasattr(self, "files") else (patch or {}).get("files")
+        except ValueError as err:
+            return {"ok": False, "output": None, "error": str(err)}
         spec = {
             "mode": self.fresh_mode,
             "config": self.config,
             "workload": workload or self.default_workload(),
         }
-        with H.PackageOverlay(self.package, (patch or {}).get("files")) as overlay:
+        with H.PackageOverlay(self.package, files) as overlay:
             return H.run_fresh_subprocess(
                 self.fresh_module,
                 spec,

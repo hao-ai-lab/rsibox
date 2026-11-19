@@ -39,7 +39,7 @@ import traceback
 import torch
 import torch.distributed as dist
 
-from fastrsi import harness, ipc
+from fastrsi import diffs, harness, ipc
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -365,19 +365,34 @@ class Lab:
             patch = req.get("patch")
             files = patch.get("files") if isinstance(patch, dict) else None
             repairs = patch.get("repairs", []) if isinstance(patch, dict) else []
-            why, modules = None, {}
-            missing = sorted(name for name in files if name not in sys.modules) if isinstance(files, dict) else []
-            if not isinstance(files, dict):
-                why = "a patch is an object with `files`: {module: source}"
-            elif missing:
-                why = f"modules not loaded in the job: {missing!r}"
-            else:
-                for name, new in files.items():
-                    try:
-                        modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
-                    except (AttributeError, OSError, TypeError, ValueError) as error:
-                        why = f"module {name!r} has no readable source file ({type(error).__name__})"
-                        break
+            why, modules, missing = None, {}, []
+            if isinstance(patch, dict) and patch.get("diff") is not None:
+                diff_text = patch["diff"]
+                if not isinstance(diff_text, str):
+                    why = "patch `diff` must be a unified diff string"
+                else:
+                    diff_targets = [diffs.module_of(p) for p in diffs.paths(diff_text)]
+                    missing = sorted(name for name in diff_targets if name not in sys.modules)
+                    if missing:
+                        why = f"modules not loaded in the job: {missing!r}"
+                    else:
+                        try:
+                            files = diffs.apply(diff_text, self._text)
+                        except ValueError as error:
+                            why = str(error)
+            if not why:
+                missing = sorted(name for name in files if name not in sys.modules) if isinstance(files, dict) else []
+                if not isinstance(files, dict):
+                    why = "a patch is an object with `files`: {module: source} or `diff`: unified diff"
+                elif missing:
+                    why = f"modules not loaded in the job: {missing!r}"
+                else:
+                    for name, new in files.items():
+                        try:
+                            modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
+                        except (AttributeError, OSError, TypeError, ValueError) as error:
+                            why = f"module {name!r} has no readable source file ({type(error).__name__})"
+                            break
             if why:
                 return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
                         "mechanisms": [], "receipt": None, "not_loaded": missing, "findings": [F.finding(
@@ -390,7 +405,7 @@ class Lab:
             res = s.install(plan, edit_time=patch.get("edit_time"))
             outcome, rec = res.get("outcome", "refused"), res.get("receipt")
             if outcome == "committed":
-                self.live_text.append(dict(patch["files"]))
+                self.live_text.append(dict(files))
             codes = (rec["decisions"]["blocking"] if rec else
                      sorted({f["check"] for f in res.get("findings", [])}))
             return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,

@@ -29,7 +29,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from fastrsi import harness
+from fastrsi import diffs, harness
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -367,6 +367,16 @@ class VllmLab:
             with open(self.receipts, "a") as fh:
                 fh.write(json.dumps(record, default=str) + "\n")
 
+    def _disk_source(self, module_name):
+        if module_name in self.base_text:
+            return self.base_text[module_name]
+        if self.site:
+            try:
+                return Path(self.site, _module_relpath(self.site, module_name)).read_text()
+            except (FileNotFoundError, OSError):
+                return None
+        return None
+
     def _live_source(self, module_name):
         for entry in reversed(self._stack_files):
             if module_name in entry["files"]:
@@ -374,6 +384,21 @@ class VllmLab:
         if module_name not in self.base_text:
             self.base_text[module_name] = Path(self.site, _module_relpath(self.site, module_name)).read_text()
         return self.base_text[module_name]
+
+    def files(self, patch, against="live"):
+        """Resolve `{module: new_text}` from `patch["files"]` or unified `patch["diff"]`."""
+        if not patch or patch.get("diff") is None:
+            return dict((patch or {}).get("files") or {})
+        if against == "disk":
+            return diffs.apply(patch["diff"], self._disk_source)
+
+        def current_live(mod):
+            try:
+                return self._live_source(mod)
+            except (FileNotFoundError, OSError, TypeError):
+                return None
+
+        return diffs.apply(patch["diff"], current_live)
 
     def _role_of(self, module_name):
         return "core" if (module_name in CORE_MODULES or module_name.startswith("vllm.v1.core.")) else "worker"
@@ -390,10 +415,13 @@ class VllmLab:
     def _install(self, patch, plan_id):
         t0 = time.perf_counter()
         try:
+            if not isinstance(patch, dict) or ("diff" not in patch and "files" not in patch):
+                raise ValueError("patch must define 'files' or 'diff'")
+            resolved_files = self.files(patch, against="live")
             modules = {
                 m: {"source": src, "base_hash": L.text_hash(self._live_source(m)),
                     "targets": "auto", "on": [self._role_of(m)]}
-                for m, src in patch["files"].items()
+                for m, src in resolved_files.items()
             }
         except Exception as err:
             finding = F.finding("patch_invalid", f"{type(err).__name__}: {err}", "valid module")
@@ -412,7 +440,7 @@ class VllmLab:
         outcome, rec = res.get("outcome") or "refused", res.get("receipt")
         self._append_receipt(rec)
         if outcome == "committed":
-            self._stack_files.append({"id": res["txn"], "files": dict(patch["files"]), "accept": list(patch.get("accept", [])),
+            self._stack_files.append({"id": res["txn"], "files": dict(resolved_files), "accept": list(patch.get("accept", [])),
                                       "undo_resets": list(patch.get("undo_resets", []))})
         codes = rec["decisions"]["blocking"] if rec else sorted({f["check"] for f in res.get("findings", [])})
         return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
@@ -557,15 +585,19 @@ class VllmLab:
             self._farm_dirty.add(name)
 
     def fresh_check(self, patch, workload=None):
+        try:
+            resolved_files = self.files(patch, against="disk")
+        except Exception as err:
+            return {"ok": False, "error": f"{type(err).__name__}: {err}", "output": None}
         if self._backend is not None:
-            return self._backend.fresh_check(patch, workload)
+            return self._backend.fresh_check({**(patch or {}), "files": resolved_files}, workload)
         paused_live, saved_stack = False, [dict(x) for x in self._stack_files]
         if self.share_gpu and self.server is not None and self.server.alive():
             self.server.stop()
             VllmLab._shared, paused_live = None, True
         fresh_srv = None
         try:
-            self._write_farm((patch or {}).get("files") or {})
+            self._write_farm(resolved_files)
             fresh_srv = self._start_server(self.port + 1, "fresh", use_farm=True)
             return {"ok": True, "output": self._run_http(fresh_srv.port, workload, max(self.check_timeout, 60.0))}
         except Exception as err:

@@ -11,15 +11,18 @@ The engine on PYTHONPATH must be the base FastVideo (no patch applied). Steps, o
    When the swap refuses a patch (new module globals, a class, a constructor), the live edits
    so far and that patch are folded into one in-place `rebuild` (uninstall, then rebuild the
    touched modules from the live text plus the patch); later patches install on top of it.
-   One video follows every patch (`seconds`, `equal_to_base`, `proven`): it also builds the
-   patch's lazily-built Triton kernels while their source lines are current. Built later, a
-   kernel's function may carry line numbers of an older text of its module (a later patch
-   shifted lines above it, and the live swap leaves unchanged functions alone), and Triton
-   reads the wrong lines (`CompilationError ... StopIteration`, our 2026-11-19 run).
-   With `--rebuild`, all patches up to `--upto` go live in one in-place `rebuild` instead (the
-   text of every touched module with the patches applied in order), with no live swap: the
-   way to take patches the swap refuses (patch 20 adds a class and a module global) once
-   undo is unreliable (undoing a lazily-built Triton kernel builder fails: `undo_incomplete`).
+   One video follows every patch (`seconds`, `equal_to_base`, `proven`) to measure per-patch
+   speedup. Historically (earlier 2026-11-19 run), stacking patches without intermediate videos
+   hit `CompilationError ... StopIteration` on lazily-built Triton kernels when later swaps
+   shifted lines above an earlier builder, and undoing a cached Triton 3.5+ builder hit
+   `closure_not_restored` (`undo_incomplete`). Both are now fixed in `core/livelab/kernel/`:
+   `swap.py` pins per-version `<fastrsi-live:...>` `linecache` keys on nested code objects, and
+   `journal.py` evicts/restores `triton.runtime.jit._triton_jit_function_registry` entries and
+   clears `defaultdict.default_factory = None` cycles on undo (verified on 1x GB200: 02-08
+   stacked with no intermediate video ran bit-exact in 4.14 s vs 6.01 s base and undid 7/7 in
+   9-11 ms RPC each). With `--rebuild`, all patches up to `--upto` go live in one in-place
+   `rebuild` instead (the text of every touched module with the patches applied in order),
+   which remains useful for applying constructor/global patches in one pass.
 3. `patched`: `--videos` videos on the patched engine. Each output must equal base's (the
    patches are bit-exact; `equal_to_base`). `proven` is False when an installed edit never
    ran: on one GPU the sequence-parallel-only patches (09-14, 18, 19) are not reached.

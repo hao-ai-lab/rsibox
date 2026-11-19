@@ -32,7 +32,8 @@ import sys
 import tempfile
 import time
 
-from fastrsi import harness, ipc, proc
+from fastrsi import diffs, harness, ipc, proc
+from kernel import findings as F
 
 from . import client
 
@@ -135,6 +136,7 @@ class MegatronLab:
                                                                    "120"))
         self.receipts = receipts
         self.poison = []
+        self._live_stack = [{}]
         self.base = {m: Path(self.root, *m.split(".")).with_suffix(".py").read_text()
                      for m in (MLP, ATT)}
         sh = MegatronLab._shared
@@ -160,6 +162,7 @@ class MegatronLab:
             raise RuntimeError("lab did not start: " + "\n".join(tail))
         self.job = MegatronLab._shared = job
         self.poison = []
+        self._live_stack = [{}]
 
     @staticmethod
     def _at_base(job):
@@ -181,15 +184,56 @@ class MegatronLab:
     def close(self):
         pass
 
+    def _disk_source(self, module_name):
+        if module_name in self.base:
+            return self.base[module_name]
+        base_path = Path(self.root, *module_name.split("."))
+        for cand in (base_path.with_suffix(".py"), base_path / "__init__.py"):
+            if cand.is_file():
+                return cand.read_text(encoding="utf-8")
+        return None
+
+    def _live_source(self, module_name):
+        for frame in reversed(self._live_stack):
+            if module_name in frame:
+                return frame[module_name]
+        return self._disk_source(module_name)
+
+    def files(self, patch, against="live"):
+        """Resolve `{module: new_text}` from `patch["files"]` or unified `patch["diff"]`."""
+        if not patch or patch.get("diff") is None:
+            return dict((patch or {}).get("files") or {})
+        if against == "disk":
+            return diffs.apply(patch["diff"], self._disk_source)
+        return diffs.apply(patch["diff"], self._live_source)
+
     # -- verbs ---------------------------------------------------------------------------
     def install(self, patch):
+        t0 = time.perf_counter()
         if self.poison:
             return {"ok": False, "outcome": "refused", "codes": ["session_poisoned"],
                     "id": None, "mechanisms": [], "findings": list(self.poison), "cost_s": 0}
-        r = self._call({"verb": "install", "patch": patch})
+        wire_patch = patch
+        resolved_files = None
+        if isinstance(patch, dict) and patch.get("diff") is not None:
+            try:
+                resolved_files = self.files(patch, against="live")
+            except ValueError as err:
+                finding = F.finding("patch_invalid", str(err),
+                                    "a unified diff that applies cleanly to the live source")
+                return {"ok": False, "outcome": "refused", "codes": ["patch_invalid"],
+                        "id": None, "mechanisms": [], "findings": [finding],
+                        "cost_s": round(time.perf_counter() - t0, 6)}
+            wire_patch = {k: v for k, v in patch.items() if k != "diff"}
+            wire_patch["files"] = resolved_files
+        elif isinstance(patch, dict) and isinstance(patch.get("files"), dict):
+            resolved_files = dict(patch["files"])
+        r = self._call({"verb": "install", "patch": wire_patch})
         if r.get("lost"):
             return {"ok": False, "outcome": "refused", "codes": ["participant_failed"],
                     "id": None, "mechanisms": [], "findings": list(self.poison), "cost_s": 0}
+        if r.get("ok"):
+            self._live_stack.append(dict(resolved_files or {}))
         return r
 
     def check(self, workload=None):
@@ -212,7 +256,13 @@ class MegatronLab:
         return {**r, "cost_s": round(time.perf_counter() - t0, 3)}
 
     def uninstall(self, id=None):
-        return self._call({"verb": "uninstall", **({"id": id} if id else {})})
+        r = self._call({"verb": "uninstall", **({"id": id} if id else {})})
+        undone = r.get("undone") or []
+        if undone:
+            drop = min(len(undone), len(self._live_stack) - 1)
+            if drop:
+                del self._live_stack[-drop:]
+        return r
 
     def status(self):
         if self.poison:
@@ -265,11 +315,15 @@ class MegatronLab:
     def fresh_check(self, patch, workload=None):
         if (patch or {}).get("repairs"):
             return {"ok": False, "output": None, "error": "fresh overlays apply source files only"}
+        try:
+            resolved_files = self.files(patch, against="disk")
+        except ValueError as err:
+            return {"ok": False, "output": None, "error": str(err)}
         d = tempfile.mkdtemp(prefix="fastrsi-mg-overlay-")
         out = os.path.join(d, "out.json")
         try:
-            for m, text in ((patch or {}).get("files") or {}).items():
-                with open(os.path.join(d, m + ".py"), "w") as f:
+            for m, text in resolved_files.items():
+                with open(os.path.join(d, m + ".py"), "w", encoding="utf-8") as f:
                     f.write(text)
             env = {**self._env(_free_port()), "FASTRSI_FRESH": out,
                    "FASTRSI_OVERLAY": d}
