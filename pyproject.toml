@@ -5,13 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fastrsi-livelab"
 version = "0.1.0"
-description = "Shared engine-agnostic live-lab transaction kernel, conformance suite, and pre-fork CUDA guards for FastRSI."
+description = "Shared engine-agnostic live-lab transaction kernel, stdlib runtime kit, conformance suite, and pre-fork CUDA guards for FastRSI."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 dependencies = []
 
+[project.scripts]
+fastrsi = "fastrsi.cli:main"
+
 [tool.setuptools]
 package-dir = { "" = "core/livelab" }
-packages = ["kernel", "kernel.toy", "conformance", "survey"]
-py-modules = ["forksafe", "livestream"]
+packages = ["kernel", "kernel.toy", "conformance", "survey", "fastrsi"]
+py-modules = ["forksafe", "livestream", "ray_participants"]

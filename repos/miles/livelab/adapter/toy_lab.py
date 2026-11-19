@@ -1,13 +1,15 @@
 """ToyMilesLab: CPU conformance driver over spawned Ray-shaped rollout and trainer actors."""
-import importlib.util, json, multiprocessing as mp, os, shutil, subprocess, sys, tempfile, threading, types
+import json, multiprocessing as mp, os, subprocess, sys, threading, types
 import adapter
 from adapter.lab import MilesLab
 from adapter.state import CoupledWeightReset, EpochDataBuffer
+from fastrsi import harness as H
 import ray_participants as RP
 
 OPS, ROLLOUT, TRAINER = "adapter.toymiles.ops", "adapter.toymiles.rollout", "adapter.toymiles.trainer"
 PROMPTS, RPC_ERR = [1, 2, 4], "__miles_rpc_error__"
 PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+_edit = H.edit_once
 FRESH_SCRIPT = """import json, sys
 livelab_dir, overlay_root, prompts, names = sys.argv[1], sys.argv[2], json.loads(sys.argv[3]), json.loads(sys.argv[4])
 sys.path[:0] = [overlay_root, livelab_dir]
@@ -19,11 +21,6 @@ print(json.dumps({n: actor.train_step(groups) for n, actor in t_actors.items()})
 """
 
 
-def _read_file(path):
-    with open(path, encoding="utf-8") as fh: return fh.read()
-def _edit(source_text, old, new):
-    assert source_text.count(old) == 1, f"expected 1 match for {old!r}"
-    return source_text.replace(old, new)
 def _actor_loop(pipe, livelab_dir, pkg_root, module_name, class_name, kwargs):
     sys.path[:0] = [p for p in (pkg_root, livelab_dir) if p not in sys.path]
     from adapter.toymiles import instantiate_actor
@@ -38,19 +35,10 @@ def _actor_loop(pipe, livelab_dir, pkg_root, module_name, class_name, kwargs):
 
 
 def _inject_fault(host, fault, name, after):
-    if fault == "fail_apply":
-        journal, count, original = RP._LOCAL[name].journal, [0], RP._LOCAL[name].journal.set_code
-        def set_code(*args, **kwargs):
-            count[0] += 1
-            if count[0] > after: del journal.set_code; raise RuntimeError(f"{name}: fault after {after}")
-            return original(*args, **kwargs)
-        journal.set_code = set_code
-    elif fault == "fail_commit":
-        local, original = RP._LOCAL[name], RP._LOCAL[name].quiesce
-        def fail_once(_fn): local.quiesce = original; raise RuntimeError(f"{name}: commit fault")
-        local.quiesce = fail_once
-    elif fault == "tamper": sys.modules[OPS].score_prompt.__code__ = (lambda a, b: a + b + 99).__code__
-    else: host.next_fault = fault
+    if fault in ("fail_apply", "fail_commit", "tamper"):
+        kw = {"after": after} if fault == "fail_apply" else ({"module": OPS, "function": "score_prompt"} if fault == "tamper" else {})
+        return H.inject_participant_fault(RP._LOCAL[name], fault, **kw)["ok"]
+    host.next_fault = fault
     return True
 
 
@@ -114,8 +102,7 @@ class ToyMilesLab(MilesLab):
             continue_generation=lambda: (pause_log.append("resume"), r_actor.invoke("continue_generation", timeout_s=step_t)),
             flush_cache=lambda: (pause_log.append("flush"), r_actor.invoke("flush_cache", timeout_s=step_t)))
         modules = [OPS, ROLLOUT, TRAINER] + ([self.reward_file] if self.reward_file else [])
-        base = {m: _read_file(importlib.util.find_spec(m).origin) for m in (OPS, ROLLOUT, TRAINER)}
-        if self.reward_file: base[self.reward_file] = _read_file(self.reward_file)
+        base = {m: H.read_module(m) for m in modules}
 
         def execute_step(workload=None):
             prompts = (workload or {}).get("prompts", PROMPTS)
@@ -150,22 +137,11 @@ class ToyMilesLab(MilesLab):
             }}
 
     def fresh_check(self, patch, workload=None):
-        prompts, temp_root = (workload or {}).get("prompts", PROMPTS), tempfile.mkdtemp(prefix="miles-fresh-")
-        try:
-            dest_pkg = os.path.join(temp_root, "adapter", "toymiles")
-            os.makedirs(os.path.dirname(dest_pkg), exist_ok=True)
-            with open(os.path.join(temp_root, "adapter", "__init__.py"), "w", encoding="utf-8"): pass
-            shutil.copytree(os.path.join(PACKAGE_ROOT, "adapter", "toymiles"), dest_pkg)
-            for mod_name, text in ((patch or {}).get("files") or {}).items():
-                if mod_name.startswith("adapter.toymiles."):
-                    with open(os.path.join(dest_pkg, mod_name.rsplit(".", 1)[1] + ".py"), "w", encoding="utf-8") as fh:
-                        fh.write(text)
-            names = [f"trainer{i}" for i in range(self.num_trainers)]
+        prompts, names = (workload or {}).get("prompts", PROMPTS), [f"trainer{i}" for i in range(self.num_trainers)]
+        with H.PackageOverlay("adapter", (patch or {}).get("files")) as overlay:
             proc = subprocess.run([sys.executable, "-I", "-c", FRESH_SCRIPT, adapter.LIVELAB,
-                                   temp_root, json.dumps(prompts), json.dumps(names)],
+                                   overlay.root, json.dumps(prompts), json.dumps(names)],
                                   capture_output=True, text=True, timeout=30)
-        finally:
-            shutil.rmtree(temp_root, ignore_errors=True)
         if proc.returncode:
             lines = proc.stderr.strip().splitlines()
             return {"ok": False, "error": lines[-1] if lines else "fresh_check failed", "output": None}
