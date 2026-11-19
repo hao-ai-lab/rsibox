@@ -130,3 +130,7 @@ cd core/livelab && python3 -m survey scan \
 | **Uncovered `respawn` (`RANKS` / module-level)** | **54 (1.5%)** | `11,236` lines (Ray placement groups, distributed init, module globals) |
 | **Restart-only (`main_*`, launch flags)** | **31 (0.9%)** | `609` lines |
 | **Firm (syntax-proved) vs. heuristic** | `276` (`7.7%`) firm | `3,295` (`92.3%`) heuristic (`default_op`, `path`, `name_*`) |
+
+### 0.2 Batch A re-verification after adapter refactor (4x GB200, 2026-11-19)
+
+Post-refactor `VerlConformanceLab` (`fastrsi conformance verl --real`, 21 participants: driver, 8 reward, 8 agent-loop, 4 FSDP trainer ranks, `train_batch_size=32`, `rollout.n=8`, per-sample seeds) re-ran `11/11` cases in **6879.773 s** total case time with **113** receipts (`43` txn, `38` proof, `32` undo; median `edit_to_commit_s` **1.216 s**, median `undo_s` **44.77 ms**, `c9_soak` install median **8.1093 s**, uninstall median **6.6840 s**, `0` `ResourceWarning`s, immediate `@atexit` `0 MiB × 4`).

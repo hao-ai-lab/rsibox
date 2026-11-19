@@ -818,6 +818,58 @@ class CliTests(unittest.TestCase):
             self.assertEqual(rc_ctl, 2)
             self.assertIn("invalid JSON", err_ctl.getvalue())
 
+    def test_real_engines_support_real_help_without_gpu_imports(self):
+        """Input: `fastrsi conformance <engine> --real -- --help` for all 5 real GPU engines.
+        Expected: exits 0, prints engine-specific help text, and leaves GPU runtime libraries
+        (`torch`, etc.) unimported."""
+        repo_root = os.path.dirname(os.path.dirname(LIVELAB))
+        probe = (
+            "import sys\n"
+            "from fastrsi import cli\n"
+            "engine, root, gpu_csv = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+            "before = set(sys.modules)\n"
+            "try:\n"
+            "    rc = cli.main(['conformance', engine, '--real', '--repo-root', root, '--', '--help'])\n"
+            "except SystemExit as exc:\n"
+            "    rc = exc.code\n"
+            "loaded = sorted({m.split('.')[0] for m in (set(sys.modules) - before) if m.split('.')[0] in set(gpu_csv.split(','))})\n"
+            "assert not loaded, f'eager GPU import(s) for {engine}: {loaded}'\n"
+            "raise SystemExit(rc)\n"
+        )
+        env = {**os.environ, "PYTHONPATH": LIVELAB}
+        for engine in ("vllm", "fastvideo", "megatron", "verl", "sglang"):
+            with self.subTest(engine=engine):
+                proc = subprocess.run(
+                    [sys.executable, "-c", probe, engine, repo_root, ",".join(cli._GPU_RUNTIME_LIBS)],
+                    capture_output=True, text=True, env=env, timeout=30,
+                )
+                self.assertEqual(proc.returncode, 0, f"{engine}: stdout={proc.stdout} stderr={proc.stderr}")
+                self.assertIn(f"fastrsi conformance {engine} --real", proc.stdout)
+
+    def test_megatron_launch_environment_strips_leading_separator_and_maps_opts(self):
+        """Input: `MegatronLab.launch_environment` with leading `--`, `--steps`, `--check-timeout`,
+        and trailing `-- --foo`. Expected: strips single leading `--`, sets `FASTRSI_CHECK_STEPS`
+        and `FASTRSI_CHECK_TIMEOUT`, and forwards `--foo` to `pretrain_gpt.py`."""
+        megatron_livelab = os.path.join(
+            os.path.dirname(os.path.dirname(LIVELAB)), "repos", "megatron", "livelab"
+        )
+        sys.path.insert(0, megatron_livelab)
+        try:
+            from fastrsi_megatron.conformance_lab import MegatronLab
+
+            env = MegatronLab.launch_environment([
+                "--", "--root", "/tmp/mg", "--nproc", "4", "--steps", "3",
+                "--check-timeout", "180", "--", "--foo",
+            ])
+        finally:
+            if megatron_livelab in sys.path:
+                sys.path.remove(megatron_livelab)
+        self.assertEqual(env["FASTRSI_MG_ROOT"], os.path.abspath("/tmp/mg"))
+        self.assertEqual(env["FASTRSI_CHECK_STEPS"], "3")
+        self.assertEqual(env["FASTRSI_CHECK_TIMEOUT"], "180.0")
+        self.assertIn("--nproc-per-node 4", env["FASTRSI_MG_CMD"])
+        self.assertTrue(env["FASTRSI_MG_CMD"].endswith("--foo"))
+
 
 if __name__ == "__main__":
     unittest.main()

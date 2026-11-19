@@ -108,22 +108,41 @@ class _Job:
 class MegatronLab:
     @staticmethod
     def launch_environment(argv):
-        parser = argparse.ArgumentParser(description="Run conformance on a local Megatron checkout")
+        clean = list(argv)
+        if clean[:1] == ["--"]:
+            clean = clean[1:]
+        parser = argparse.ArgumentParser(
+            prog="fastrsi conformance megatron --real",
+            description="Run conformance on a local Megatron checkout",
+            allow_abbrev=False,
+        )
         parser.add_argument("--root", required=True, help="Megatron-LM checkout")
         parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
+        parser.add_argument("--steps", type=int, default=None, help="steps per check (FASTRSI_CHECK_STEPS)")
+        parser.add_argument(
+            "--check-timeout",
+            type=float,
+            default=None,
+            help="seconds one check call may take (FASTRSI_CHECK_TIMEOUT)",
+        )
         parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
-        args = parser.parse_args(argv)
+        args = parser.parse_args(clean)
         root = os.path.abspath(args.root)
         training = args.training_args
         if training[:1] == ["--"]:
             training = training[1:]
         launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
         worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
-        return {
+        env = {
             "FASTRSI_MG_CMD": f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}',
             "FASTRSI_MG_ROOT": root,
             "PYTHONPATH": os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH")))),
         }
+        if args.steps is not None:
+            env["FASTRSI_CHECK_STEPS"] = str(args.steps)
+        if args.check_timeout is not None:
+            env["FASTRSI_CHECK_TIMEOUT"] = str(args.check_timeout)
+        return env
 
     name = "megatron"
     _shared = None

@@ -181,7 +181,7 @@ class H3Lab(Shared):
         clean = list(argv)
         if clean[:1] == ["--"]:
             clean = clean[1:]
-        ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", add_help=False)
+        ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", allow_abbrev=False)
         ap.add_argument("--model", default=None)
         ap.add_argument("--vae", default=None)
         ap.add_argument("--config", default=None)
