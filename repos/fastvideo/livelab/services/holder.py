@@ -117,9 +117,28 @@ def _own(module):
     return owned
 
 
+def _private_tracker_fd():
+    """Keep multiprocessing's resource-tracker pipe out of programs this process executes.
+
+    A spawned process receives the pipe as an inheritable fd. torch's `file_system` sharing
+    starts the `torch_shm_manager` daemon by fork and exec, so the daemon inherited it and
+    outlived the lab: the tracker never saw the pipe close, and the lab host, which waits for
+    the tracker at exit, hung after its last video (our 2026-11-19 runs with the holder).
+    multiprocessing passes the pipe to its own children explicitly, so this costs them nothing.
+    """
+    from multiprocessing import resource_tracker
+    fd = getattr(resource_tracker._resource_tracker, "_fd", None)
+    if fd is not None:
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            pass
+
+
 def _ipc():
     """CUDA tensors travel as IPC handles; CPU tensors through named shared memory (no fd
     passing between processes that do not share a parent's resource sharer)."""
+    _private_tracker_fd()
     import torch.multiprocessing as tmp
     tmp.set_sharing_strategy("file_system")
 
