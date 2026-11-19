@@ -49,6 +49,20 @@
      "note": "Verified on upstream vLLM PR #62872 (`Scheduler.__init__` pure-field addition `set() -> {}`): 1.410 s with CUDA graphs (30.4x vs 42.93 s forked restart) and 1.806 s eager (9.5x vs 17.17 s forked restart), undo 1.58 ms (23,440x)."
     },
     {
+     "name": "C++/CUDA native side library (NATIVE route, adapter/native.py)",
+     "what": "Compiles edited .cu translation units plus a versioned registration unit under node-local flock, loads without dlclose, rebinds torch.ops._C via torch.library.Library in the step gap with R1 CUDA graph recapture, and undoes via lib._destroy().",
+     "startup_cost_removed": "Full extension rebuild and cold engine restart for single-unit C++/CUDA kernel edits (#49750).",
+     "measured_saving": {
+      "before": "48.97-49.47 (fresh cold restart + nvcc build + check)",
+      "after": "18.87-19.22 (17.12 s commit incl. 17.09-17.10 s nvcc build + 0.47-0.83 s R1 recapture + 1.27-1.28 s check; undo 2.85-6.55 ms)",
+      "unit": "s",
+      "setup": "1x B200, vLLM 0.33.0 V1 FULL_DECODE_ONLY graphs, Qwen3-8B TP1, layernorm_kernels.cu (#49750 and eps=0.25f perturbation), 2026-11-19"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/vllm/kb/mechanisms.md:10; repos/vllm/kb/costs.md; repos/vllm/livelab/adapter/native.py",
+     "note": "Both PR #49750 (17.12 s commit, 0.83 s R1 recapture, 576 live / 432 capture witness calls, max |delta logprob| == 0.0 vs fresh, 6.55 ms cascade undo) and a visible epsilon perturbation (18.87 s total, 2.85 ms undo, 1.96 ms worker unbind) match fresh restarts bit-for-bit on 1x B200, while refusing plans without R1 in 0.022 s."
+    },
+    {
      "name": "Triton kernel rebuild in place",
      "what": "Rebuilds an edited @triton.jit kernel inside the running process and counts its launches as the witness, instead of restarting to recompile it.",
      "startup_cost_removed": "Process restart for a GPU-kernel edit.",

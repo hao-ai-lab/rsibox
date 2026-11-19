@@ -57,8 +57,8 @@
      "source": "docs/lessons.md:28-34"
     },
     {
-     "fact": "VllmLab passed 11/11 conformance on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (including via the unified fastrsi CLI); holder-to-holder TP2 <-> EP2 resharding (reshard_live.py) measured 49.4-52.8 s with --zygote --kvplan reuse and 0.36-1.18 s drain-aware stop (byte-equal 1308/1308 EP2 and 1228/1228 TP2, max |delta logprob| == 0.0); live --scheduling-policy switching measured 0.218-0.374 ms core apply with HTTP 400 FCFS priority validation.",
-     "source": "repos/vllm/kb/costs.md:190-300; repos/vllm/livelab/adapter/README.md:114-128"
+     "fact": "VllmLab passed 11/11 conformance on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (including via the unified fastrsi CLI); holder-to-holder TP2 <-> EP2 resharding (reshard_live.py) measured 49.4-52.8 s with --zygote --kvplan reuse and 0.36-1.18 s drain-aware stop (byte-equal 1308/1308 EP2 and 1228/1228 TP2, max |delta logprob| == 0.0); live --scheduling-policy switching measured 0.218-0.374 ms core apply with HTTP 400 FCFS priority validation; C++/CUDA NATIVE hot-reload (native.py) verified PR #49750 live in 17.12 s + 0.83 s R1 recapture vs 49.47 s restart (6.55 ms cascade undo, max |delta logprob| == 0.0, lifting vLLM PR coverage from 79% to 89%).",
+     "source": "repos/vllm/kb/costs.md:187-321; repos/vllm/kb/mechanisms.md; repos/vllm/livelab/adapter/README.md:115-129"
     }
    ],
    "derived_from_git": {

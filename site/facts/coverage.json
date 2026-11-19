@@ -77,7 +77,7 @@
    "engine": "vLLM",
    "what": "Which mechanism a real performance PR needs",
    "unit": "upstream performance PRs",
-   "method": "487 performance PRs found (2026-07-24 to 2026-10-24); 80 sampled and inspected by hand (63/80 = 79% install in place in this repo, 8/80 = 10% C++/CUDA native edits demonstrated only in a pre-repo prototype, 9/80 = 11% restart). A classification of what each PR would need, not a test that each installs.",
+   "method": "487 performance PRs found (2026-07-24 to 2026-10-24); 80 sampled and inspected by hand (71/80 = 89% install in place in this repo: 63/80 via Python, graph, and resource paths plus 8/80 = 10% C++/CUDA native edits via repos/vllm/livelab/adapter/native.py; 9/80 = 11% restart). A classification of what each PR would need, not a test that each installs.",
    "when": "2026-07-24 to 2026-10-24",
    "rows": [
     {
@@ -107,12 +107,12 @@
      "class": "partial reset"
     },
     {
-     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture (pre-repo prototype only; restart in this repo)",
+     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture (repos/vllm/livelab/adapter/native.py + Library rebind + R1)",
      "share_of_80_pct": 10,
      "groups": [
       "NATIVE"
      ],
-     "class": "restart"
+     "class": "partial reset"
     },
     {
      "mechanism": "Needs a restart (Rust rebuild, weights, startup logic, launch flags)",

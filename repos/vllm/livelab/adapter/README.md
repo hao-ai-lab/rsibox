@@ -92,6 +92,7 @@ needs one is a finding, not a silent swap.
 | `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`; serves a `Side` and wraps the step calls). |
 | `side.py` | `Side(Endpoint)`: background prepare, per-rank phase-2 lane and deadline, graph detection and routing, version log, a fault hook for tests. |
 | `recapture.py` | Selective CUDA graph recapture on one rank: `Engine` (what recapture needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
+| `native.py` | C++/CUDA side-library hot-reload (`NATIVE`): compiles `.cu` + `_Cv<key>` `reg.cu` under node-local `flock`, loads via `RTLD_NOW \| RTLD_LOCAL` without `dlclose`, overrides `torch.ops._C` via `torch.library.Library` in the gap (paired with `R1` when graphs are active), and undoes via `lib._destroy()`. |
 | `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
 | `conformance_lab.py` | `VllmLab` (`core/livelab/conformance` `LabUnderTest`): drives a live tensor-parallel `vllm serve` (launched via `services/engine.py start`) through the file channel across all 11 conformance cases (`c0`-`c10`). |

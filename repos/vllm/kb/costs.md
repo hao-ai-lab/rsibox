@@ -181,7 +181,27 @@ rest here is the two preprocessing passes reading thousands of torch and CUDA he
 network file system. So: keep the build tree and headers on node-local disk; pass
 `-split-compile` (it parallelizes cicc and ptxas across the unit's kernels); the unit, not the
 edited kernel, stays the floor, since #49750 changes a kernel's signature and its host launcher.
-This repo has no native route yet (`mechanisms.md`).
+The repo's `NATIVE` route is now implemented in `repos/vllm/livelab/adapter/native.py` and
+verified on B200 below.
+
+## Live C++/CUDA native hot-reload (PR #49750, 1× B200, 2026-11-19)
+
+Source: our 2026-11-19 `verify_native_pr49750.py` run on 1 idle B200 GPU (vLLM 0.33.0, torch
+2.14.0+cu130, nvcc 13.3, Qwen3-8B TP1, V1 `GPUModelRunner` with `FULL_DECODE_ONLY` CUDA graphs
+`[1, 2, 4]`, `--kernel-config` routing RMSNorm through `vllm_c` / `torch.ops._C`, 8 greedy
+prompts × 32 tokens, prefix caching disabled). Cold server boot took 31.80 s (live), 30.30 s
+(fresh visible perturbation), and 30.80 s (fresh PR #49750).
+
+| Case | nvcc build (s) | CDLL load (ms) | Gap + commit (ms) | R1 recapture (s) | Check (s) | Live vs fresh | Undo (ms) |
+|---|---:|---:|---:|---:|---:|---|---:|
+| Graph refusal (no `rebuild: ["R1"]`) | skipped (0.022 s prepare) | – | – | – | – | aborted (`captured_target`) | – |
+| Visible `.cu` perturbation (`epsilon = 0.25f;`) | 17.10 | 0.88 | 2.30 | 0.473 (432 cap / 576 live calls) | 1.28 vs 1.57 fresh | exact (`max \|Δlogprob\| = 0.0`); total 18.87 s vs 48.97 s restart | 2.85 (1.96 worker) |
+| Upstream PR #49750 (`pre-PR` -> PR #49750 `layernorm_kernels.cu`) | 17.09 | 1.17 | 2.17 | 0.826 (432 cap / 576 live calls) | 1.27 vs 1.58 fresh | exact (`max \|Δlogprob\| = 0.0`); total 19.22 s vs 49.47 s restart | 6.55 cascade (5.60 worker) |
+
+Standalone `nvcc 13.3` compile/load/dispatch/undo probe on GPU 0 measured `16.83 s` build,
+`0.68 ms` load, `0.028 ms` `lib._destroy()` unbind, and direct tensor verification confirmed the
+pre-PR kernel rejects non-contiguous `residual` (`stride(-1) == 1, is_contiguous() == False`)
+with `RuntimeError`, while the live-compiled PR #49750 kernel matches PyTorch FP32 reference (`max abs err = 0.015625`).
 
 ## Live TP2 <-> EP2 by holder reshard (Qwen3.5-35B-A3B BF16, 2× B200, 2026-11-19)
 
