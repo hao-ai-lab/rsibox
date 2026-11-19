@@ -725,6 +725,99 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any("invalid livelab.json" in e for e in by_name[broken]["errors"]),
                             by_name[broken])
 
+    def test_conformance_subprocess_enables_unbuffered_streaming(self):
+        """Input: `fastrsi conformance <real-lab> --real -- --model M`.
+        Expected: `_cmd_conformance` flushes stdout/stderr, invokes `[sys.executable, '-u',
+        '-m', 'conformance', ...]`, and sets `PYTHONUNBUFFERED='1'` via `setdefault`."""
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "stream_lab.py").write_text(
+                "from kernel.toy_lab import ToyLab\n"
+                "class StreamLab(ToyLab):\n"
+                "    @staticmethod\n"
+                "    def launch_environment(argv):\n"
+                "        return {'STREAM_SEEN': ' '.join(argv)}\n",
+                encoding="utf-8",
+            )
+            calls = []
+            flushed = []
+
+            class _TrackStream(io.StringIO):
+                def __init__(self, tag):
+                    super().__init__()
+                    self._tag = tag
+
+                def flush(self):
+                    flushed.append(self._tag)
+                    super().flush()
+
+            def fake_run(cmd, env=None, **_kw):
+                calls.append((list(cmd), dict(env or {})))
+                return subprocess.CompletedProcess(cmd, 0)
+
+            clean_env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+            with (
+                mock.patch.dict(os.environ, clean_env, clear=True),
+                mock.patch.object(cli.subprocess, "run", side_effect=fake_run),
+                contextlib.redirect_stdout(_TrackStream("out")),
+                contextlib.redirect_stderr(_TrackStream("err")),
+            ):
+                rc = cli.main([
+                    "conformance", "stream_lab:StreamLab", "--real", "--path", tmp,
+                    "--only", "c0_repeatable", "--", "--model", "M",
+                ])
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1)
+            cmd, env = calls[0]
+            self.assertEqual(cmd[:4], [sys.executable, "-u", "-m", "conformance"])
+            self.assertIn("--lab", cmd)
+            self.assertEqual(env.get("PYTHONUNBUFFERED"), "1")
+            self.assertEqual(env.get("STREAM_SEEN"), "--model M")
+            self.assertIn("out", flushed)
+            self.assertIn("err", flushed)
+
+    def test_conformance_rejects_unknown_only_case_invalid_spec_and_bad_ctl_json(self):
+        """Input: unknown `--only` case name (and valid whitespace-separated `--only`),
+        malformed `module:Class` target, and invalid JSON in `fastrsi ctl`.
+        Expected: crisp exit-2 errors before booting any lab; valid spaced `--only` runs."""
+        from conformance import __main__ as conf_main
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli.main(["conformance", "toy", "--only", "c0_repeatable,c2_typo"])
+        self.assertEqual(rc, 2)
+        self.assertIn("c2_typo", err.getvalue())
+        self.assertIn("valid:", err.getvalue())
+
+        err2 = io.StringIO()
+        with contextlib.redirect_stderr(err2):
+            rc2 = conf_main.main(["--lab", "nonexistent_mod:NoLab", "--only", "bogus_case"])
+        self.assertEqual(rc2, 2)
+        self.assertIn("bogus_case", err2.getvalue())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc_ws = cli.main(["conformance", "toy", "--only", "c0_repeatable, c1_noop"])
+        self.assertEqual(rc_ws, 0, out.getvalue())
+        self.assertIn("2/2 as expected", out.getvalue())
+
+        err_spec = io.StringIO()
+        with contextlib.redirect_stderr(err_spec):
+            rc_spec = cli.main(["conformance", "bad:"])
+        self.assertEqual(rc_spec, 2)
+        self.assertIn("invalid lab spec", err_spec.getvalue())
+
+        for bad_ctl in (
+            ["ctl", "--sock", "/tmp/unused.sock", "--payload", "{bad"],
+            ["ctl", "--sock", "/tmp/unused.sock", "status", "--json-arg", "steps=notjson"],
+        ):
+            err_ctl = io.StringIO()
+            with contextlib.redirect_stderr(err_ctl):
+                rc_ctl = cli.main(bad_ctl)
+            self.assertEqual(rc_ctl, 2)
+            self.assertIn("invalid JSON", err_ctl.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -245,6 +245,8 @@ def discover_labs(repo_root: str | None = None) -> list[dict]:
 def resolve_lab(target: str, *, real: bool = False, repo_root: str | None = None) -> tuple[str, str | None]:
     """Resolve `<target>` to `(module:Class, extra_sys_path_or_None)`."""
     if ":" in target:
+        if not _is_valid_lab_spec(target):
+            raise ValueError(f"invalid lab spec {target!r} (expected 'module:Class')")
         return target, None
     by_name = {entry["name"]: entry for entry in discover_labs(repo_root)}
     entry = by_name.get(target)
@@ -300,6 +302,11 @@ def _cmd_conformance(args, engine_args) -> int:
 
         conf_argv = ["--lab", spec]
         if args.only:
+            try:
+                conf_main.select_cases(args.only)
+            except ValueError as exc:
+                print(f"fastrsi conformance: {exc}", file=sys.stderr)
+                return 2
             conf_argv += ["--only", args.only]
         if args.receipts:
             conf_argv += ["--receipts", args.receipts]
@@ -314,7 +321,13 @@ def _cmd_conformance(args, engine_args) -> int:
                 print(f"fastrsi conformance: {spec} does not accept launch arguments", file=sys.stderr)
                 return 2
             env = {**os.environ, **configure(engine_args)}
-            return subprocess.run([sys.executable, "-m", "conformance", *conf_argv], env=env).returncode
+            env.setdefault("PYTHONUNBUFFERED", "1")
+            sys.stdout.flush()
+            sys.stderr.flush()
+            return subprocess.run(
+                [sys.executable, "-u", "-m", "conformance", *conf_argv],
+                env=env,
+            ).returncode
         return conf_main.main(conf_argv)
     finally:
         if prev_py is None:
@@ -332,7 +345,11 @@ def _cmd_survey(rest: list[str]) -> int:
 
 
 def _cmd_ctl(args) -> int:
-    req = json.loads(args.payload) if args.payload else {}
+    try:
+        req = json.loads(args.payload) if args.payload else {}
+    except ValueError as exc:
+        print(f"fastrsi ctl: invalid JSON for --payload: {exc}", file=sys.stderr)
+        return 2
     if not isinstance(req, dict):
         print("fastrsi ctl: --payload must be a JSON object", file=sys.stderr)
         return 2
@@ -349,7 +366,11 @@ def _cmd_ctl(args) -> int:
         if not sep:
             print(f"fastrsi ctl: --json-arg expects KEY=JSON, got {pair!r}", file=sys.stderr)
             return 2
-        req[key] = json.loads(val)
+        try:
+            req[key] = json.loads(val)
+        except ValueError as exc:
+            print(f"fastrsi ctl: invalid JSON for --json-arg {key!r}: {exc}", file=sys.stderr)
+            return 2
     try:
         if args.sock:
             reply = ipc.unix_json_call(args.sock, req, timeout=args.timeout)
@@ -607,7 +628,7 @@ def main(argv: list[str] | None = None) -> int:
 
     p_conf = sub.add_parser(
         "conformance", allow_abbrev=False, help="run c0-c10 conformance on a lab",
-        epilog="For real labs with launch options, append the engine options followed by -- and its workload arguments.",
+        epilog="For real labs with launch options, append [--] <engine-options> [-- <workload-args>].",
     )
     p_conf.add_argument("target", help="discovered lab name (e.g. toy) or module:Class")
     mode_grp = p_conf.add_mutually_exclusive_group()
@@ -615,7 +636,7 @@ def main(argv: list[str] | None = None) -> int:
     mode_grp.add_argument("--real", action="store_true", help="select the real-engine lab class")
     p_conf.add_argument("--path", default=None, help="extra directory to prepend to sys.path")
     p_conf.add_argument("--repo-root", default=None)
-    p_conf.add_argument("--only", default="", help="comma-separated case names")
+    p_conf.add_argument("--only", default="", help="comma-separated case names (e.g. c0_repeatable,c2_visible)")
     p_conf.add_argument("--receipts", default=None, help="JSONL path for transaction receipts")
     p_conf.add_argument("--json", action="store_true")
 

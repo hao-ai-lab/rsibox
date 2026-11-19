@@ -58,17 +58,23 @@ def ppid_map(*, proc_root: str = "/proc") -> dict[int, int]:
                 pass
         return out
     try:
-        proc = subprocess.Popen(
+        with subprocess.Popen(
             ["ps", "-A", "-o", "pid=,ppid="], stdout=subprocess.PIPE, text=True
-        )
-        stdout, _ = proc.communicate(timeout=10)
+        ) as proc:
+            try:
+                stdout, _ = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                return out
+            ps_pid = proc.pid
     except (OSError, subprocess.SubprocessError):
         return out
     for line in stdout.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
             pid_val = int(parts[0])
-            if pid_val != proc.pid:
+            if pid_val != ps_pid:
                 out[pid_val] = int(parts[1])
     return out
 

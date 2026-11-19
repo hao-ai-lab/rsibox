@@ -24,6 +24,24 @@ def load(spec):
     return getattr(importlib.import_module(mod), cls)
 
 
+def select_cases(only=""):
+    """Return canonical conformance case names selected by comma-separated `only`.
+
+    Raises `ValueError` when any requested name is unknown instead of silently dropping it.
+    """
+    if not only:
+        return list(cases.CASES)
+    requested = [part.strip() for part in only.split(",") if part.strip()]
+    unknown = [name for name in requested if name not in cases.CASES]
+    if unknown:
+        valid = ", ".join(cases.CASES)
+        raise ValueError(f"unknown conformance case(s): {', '.join(unknown)} (valid: {valid})")
+    if not requested:
+        return list(cases.CASES)
+    req_set = set(requested)
+    return [name for name in cases.CASES if name in req_set]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python3 -m conformance")
     ap.add_argument("--lab", required=True, help="the lab to test, as module:Class")
@@ -31,8 +49,12 @@ def main(argv=None):
     ap.add_argument("--receipts", default=None, help="file that keeps the receipts the cases write")
     ap.add_argument("--json", action="store_true", help="print the results as JSON too")
     a = ap.parse_args(argv)
+    try:
+        names = select_cases(a.only)
+    except ValueError as exc:
+        print(f"conformance: {exc}", file=sys.stderr)
+        return 2
     Lab = load(a.lab)
-    names = [n for n in cases.CASES if not a.only or n in a.only.split(",")]
     rows = [cases.run(n, lambda: Lab(receipts=a.receipts)) for n in names]
     w = max(len(n) for n in names)
     print(f"{'case':<{w}}  result  seconds  evidence")
