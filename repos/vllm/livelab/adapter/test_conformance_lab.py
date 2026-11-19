@@ -309,26 +309,27 @@ class ConformanceOnFakeVllmTest(unittest.TestCase):
     @unittest.skipUnless(os.path.isdir("/proc"), "requires Linux process identity")
     def test_stop_reclaims_marked_worker_after_server_exit(self):
         with tempfile.TemporaryDirectory() as marker:
-            leader = subprocess.Popen(
-                [sys.executable, "-c", "import subprocess, sys; "
+            with subprocess.Popen(
+                [sys.executable, "-c", "import os, subprocess, sys; "
                  "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
-                 "stdout=subprocess.DEVNULL); print(p.pid, flush=True); input()"],
+                 "stdout=subprocess.DEVNULL); print(p.pid, flush=True); input(); os._exit(0)"],
                 env={**os.environ, "FASTRSI_LIVE_RECONFIG_DIR": marker},
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
-            worker = int(leader.stdout.readline())
-            try:
-                srv = CL._ServerHandle(leader.pid, 0, marker, 0, "", marker=marker)
-                leader.communicate("\n", timeout=5)
-                self.assertFalse(srv.alive())
-                self.assertTrue(CL._alive(worker))
-                srv.stop()
-                self.assertFalse(CL._alive(worker))
-            finally:
-                if CL._alive(worker):
-                    os.kill(worker, signal.SIGKILL)
-                if leader.poll() is None:
-                    leader.kill()
-                leader.communicate()
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
+            ) as leader:
+                worker = int(leader.stdout.readline())
+                try:
+                    srv = CL._ServerHandle(leader.pid, 0, marker, 0, "", marker=marker)
+                    leader.communicate("\n", timeout=5)
+                    self.assertFalse(srv.alive())
+                    self.assertTrue(CL._alive(worker))
+                    srv.stop()
+                    self.assertFalse(CL._alive(worker))
+                finally:
+                    if CL._alive(worker):
+                        os.kill(worker, signal.SIGKILL)
+                    if leader.poll() is None:
+                        leader.kill()
+                        leader.communicate()
 
     def test_original_edit_id_can_undo_after_fresh_check_pauses_live_server(self):
         lab = make_cpu_lab()

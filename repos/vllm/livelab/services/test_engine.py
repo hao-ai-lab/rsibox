@@ -1121,3 +1121,62 @@ def test_kvplan_report_closes_log_file_without_resource_warning(tmp_path):
         gc.collect()
     assert rep["reused"] == 1 and rep["seconds"] == [0.12]
     assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+
+
+def test_wait_healthy_ignores_exception_ignored_finalizer_traceback(tmp_path, monkeypatch):
+    """Input: a startup log containing a non-fatal finalizer warning (`Exception ignored in:`
+    followed by `Traceback (most recent call last):` from third-party `zmq.Context.__del__`),
+    with `/health` answering HTTP 200. Expect: `wait_healthy` does NOT treat it as fatal and
+    returns healthy seconds."""
+    log = tmp_path / "serve.log"
+    log.write_text(
+        "INFO Application startup complete.\n"
+        "Exception ignored in: <function Context.__del__ at 0x7f0000>\n"
+        "Traceback (most recent call last):\n"
+        '  File "/venv/lib/python3.12/site-packages/zmq/sugar/context.py", line 183, in __del__\n'
+        "    warn(f'Unclosed context {self}', ResourceWarning)\n"
+        "ResourceWarning: Unclosed context <zmq.Context() at 0x7f0000>\n"
+        "Exception ignored while finalizing file <_io.FileIO name='x' mode='rb'>:\n"
+        "Traceback (most recent call last):\n"
+        "ResourceWarning: unclosed file\n"
+    )
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda url, timeout=3: _Resp())
+    elapsed = engine.wait_healthy(18999, os.getpid(), str(log), timeout=5, poll=0.01)
+    assert elapsed is not None and elapsed >= 0.0
+
+
+def test_wait_healthy_fails_on_unhandled_traceback_and_engine_core_init_failure(tmp_path, monkeypatch):
+    """Input: logs containing (a) a real unhandled `Traceback (most recent call last):` (even
+    after an earlier `Exception ignored in:` block) and (b) `Engine core initialization failed`.
+    Expect: `wait_healthy` returns `None` immediately without probing `/health`."""
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+    probed = []
+    monkeypatch.setattr(
+        engine.urllib.request,
+        "urlopen",
+        lambda url, timeout=3: probed.append(url),
+    )
+
+    tb_log = tmp_path / "fatal_tb.log"
+    tb_log.write_text(
+        "Exception ignored in: <function Context.__del__ at 0x1>\n"
+        "Traceback (most recent call last):\n"
+        "ResourceWarning: Unclosed context\n"
+        "ERROR startup failed\n"
+        "Traceback (most recent call last):\n"
+        '  File "vllm/entrypoints/cli/serve.py", line 10, in main\n'
+        "RuntimeError: boom\n"
+    )
+    assert engine.wait_healthy(18999, os.getpid(), str(tb_log), timeout=5, poll=0.01) is None
+
+    core_log = tmp_path / "core_fail.log"
+    core_log.write_text("RuntimeError: Engine core initialization failed. See root cause above.\n")
+    assert engine.wait_healthy(18999, os.getpid(), str(core_log), timeout=5, poll=0.01) is None
+    assert probed == []

@@ -1080,7 +1080,32 @@ def start_zygote(a):
     return {"pid": p.pid, "cmd": cmd, **zygote.wait_ready(a.zygote, p.pid)}
 
 
-FAILED = ("Engine core initialization failed", "Traceback (most recent call last)")
+_TRACEBACK = "Traceback (most recent call last)"
+_EXCEPTION_IGNORED = "Exception ignored "
+FAILED = ("Engine core initialization failed", _TRACEBACK)
+
+
+def _log_shows_failure(text):
+    """True when a vLLM startup log contains a fatal failure marker.
+
+    Ignores non-fatal finalizer tracebacks (`Exception ignored ...` on the immediately
+    preceding line, e.g. Python 3.11-3.13 `Exception ignored in:` or Python 3.14+
+    `Exception ignored while finalizing` from third-party `zmq.Context.__del__`), while
+    still failing immediately on any unhandled `Traceback (most recent call last)` or
+    `Engine core initialization failed`.
+    """
+    if not text:
+        return False
+    if "Engine core initialization failed" in text:
+        return True
+    if _TRACEBACK not in text:
+        return False
+    prev = ""
+    for line in text.splitlines():
+        if _TRACEBACK in line and _EXCEPTION_IGNORED not in prev:
+            return True
+        prev = line
+    return False
 
 
 def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
@@ -1096,7 +1121,7 @@ def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
                 text = fh.read()
         else:
             text = ""
-        if any(s in text for s in FAILED):
+        if _log_shows_failure(text):
             return None
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=3) as r:
