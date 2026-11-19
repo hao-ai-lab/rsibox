@@ -62,6 +62,29 @@ them (it failed on 11-07, when c2 wanted at least two). c0's 186.7 s includes th
 FlashInfer build. The same day on 2 ranks: 11/11 again (c3 chain of 3 live == fresh
 `23bd4a78af68a546`; c8 respawns 29.7-59.2 s; c9 install median 0.0624 s).
 
+## 4 GPUs (4 ranks, SP4)
+
+Our 2026-11-19 run via `python3 -m fastrsi conformance fastvideo --real -- --gpus 4` (108 receipts,
+1989.1 s case sum, all 4 ranks witnessing every edit):
+
+```
+case                  result  seconds  evidence
+c0_repeatable         pass     23.4    3 checks (one after reset ['cuda cache']) gave {'video': '0134242de77c3f4c', 'audio': '69356c2116d3c58a'}
+c1_noop               pass      6.3    installed by ['R0 swap']; calls {'...MiniMaxH3VideoDecodingStage.forward:109': [1, 1, 1, 1]}; output unchanged
+c2_visible            pass      6.3    output {'video': '0134242de77c3f4c', ...} -> {'video': '94849c72941908c3', ...}; calls [1, 1, 1, 1]
+c3_fresh_equivalence  pass    176.0    visible: live == fresh == {'video': '94849c72941908c3', 'audio': '69356c2116d3c58a'}
+                                       chain of 3: live == fresh == {'video': '837c08243df1ce30', 'audio': '35cbe7e342bfbbe0'}
+c4_uninstall          pass     12.7    uninstall ['txn-6f3a9142'] in 0.032245 s; identity 163f6503796c0a2b restored
+c5_failed_install     pass     12.9    fail_apply and fail_commit: rolled_back, base proven; control committed 3 targets
+c6_refusal            pass     17.2    patch_invalid / closure_changed / outside_changes / empty_change
+c7_chain              pass     25.0    01... -> 94... -> 83... -> 83... -> undone one by one to base
+c8_crash_and_hang     pass   1514.9    crash: respawn 92.8 s; hang: respawn 89.0 s; lost: respawn 36.3 s; tamper: respawn 35.2 s
+c9_soak               pass    131.4    20 cycles; install median 0.1140 s, uninstall median 0.0326 s
+c10_not_proven        pass     63.0    proven False, findings ['zero_witness', 'zero_witness', 'zero_witness', 'zero_witness']
+```
+
+11/11 on 4 ranks (SP4), exiting cleanly to `0 MiB` on all 4 GPUs.
+
 ## What these runs found (and the fixes they needed)
 
 - **c8, hang:** the injected hang must outlast the check's deadline; the lab now sets it from
@@ -75,4 +98,4 @@ FlashInfer build. The same day on 2 ranks: 11/11 again (c3 chain of 3 live == fr
 ## Not shown
 
 Edits inside compiled or graph-captured code (the VAE is compiled), Triton kernel bodies edited
-in place, 4 ranks, and any respawn of a hung CUDA context (c8's hang sleeps in Python).
+in place, and any respawn of a hung CUDA context (c8's hang sleeps in Python).

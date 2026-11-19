@@ -23,7 +23,7 @@ class ToyFastVideoLab(FastVideoLab):
     fresh_module = "adapter.toyfv.fresh"
 
     def __init__(self, ranks=2, receipts=None, **kw):
-        kw.setdefault("rpc_timeout", 5.0)
+        kw.setdefault("rpc_timeout", 30.0)
         kw.setdefault("check_timeout", 2.0)
         super().__init__({"ranks": ranks}, receipts=receipts, modules=[OPS, STAGES], **kw)
 
