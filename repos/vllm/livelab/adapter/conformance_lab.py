@@ -15,6 +15,7 @@ Environment variables (no hostnames or paths in code):
   --enforce-eager --max-model-len 2048 --disable-flashinfer-autotune`).
 - `FASTRSI_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
 """
+import argparse
 import atexit
 import itertools
 import json
@@ -180,6 +181,55 @@ class VllmLab:
     """`LabUnderTest` driving a live vLLM server through `adapter.host`."""
     name = "vllm"
     _shared = None
+
+    @staticmethod
+    def launch_environment(argv):
+        """Translate `fastrsi conformance vllm --real ...` flags into `FASTRSI_VLLM_*` env vars."""
+        argv = list(argv)
+        if "--" in argv:
+            idx = argv.index("--")
+            own, tail = argv[:idx], argv[idx + 1:]
+        else:
+            own, tail = argv, []
+        known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
+                      "--check-timeout", "--no-share-gpu", "-h", "--help"}
+        norm, i = [], 0
+        while i < len(own):
+            if own[i] == "--extra" and i + 1 < len(own) and own[i + 1] not in known_opts:
+                norm.append(f"--extra={own[i + 1]}")
+                i += 2
+            else:
+                norm.append(own[i])
+                i += 1
+        ap = argparse.ArgumentParser(prog="fastrsi conformance vllm --real", allow_abbrev=False)
+        ap.add_argument("--model", default=None, help="model path or HuggingFace repo id")
+        ap.add_argument("--venv", default=None, help="vLLM virtualenv root")
+        ap.add_argument("--work", default=None, help="scratch directory for logs, caches and farm")
+        ap.add_argument("--port", type=int, default=None, help="live server port")
+        ap.add_argument("--tp", type=int, default=None, help="tensor-parallel worker count")
+        ap.add_argument("--extra", default=None, help="extra `vllm serve` flags string")
+        ap.add_argument("--check-timeout", type=float, default=None, help="HTTP / control timeout in seconds")
+        ap.add_argument("--no-share-gpu", action="store_true", help="keep live server running during fresh_check")
+        ns = ap.parse_args(norm)
+        env = {}
+        if ns.model:
+            env["FASTRSI_VLLM_MODEL"] = ns.model
+        if ns.venv:
+            env["FASTRSI_VLLM_VENV"] = os.path.abspath(ns.venv)
+        if ns.work:
+            env["FASTRSI_VLLM_WORK"] = os.path.abspath(ns.work)
+        if ns.port is not None:
+            env["FASTRSI_VLLM_PORT"] = str(ns.port)
+        if ns.tp is not None:
+            env["FASTRSI_VLLM_TP"] = str(ns.tp)
+        if ns.check_timeout is not None:
+            env["FASTRSI_VLLM_CHECK_TIMEOUT"] = str(ns.check_timeout)
+        if ns.no_share_gpu:
+            env["FASTRSI_VLLM_SHARE_GPU"] = "0"
+        if ns.extra is not None or tail:
+            tokens = (shlex.split(ns.extra) if ns.extra is not None else []) + tail
+            env["FASTRSI_VLLM_EXTRA"] = shlex.join(tokens)
+        return env
 
     def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None):
         self.receipts = receipts

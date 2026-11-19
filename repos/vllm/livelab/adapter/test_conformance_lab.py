@@ -400,6 +400,35 @@ class FarmAndHelpersTest(unittest.TestCase):
             self.assertTrue(lab.install(entry)["ok"])
         self.assertTrue(lab.uninstall()["ok"])
 
+    def test_launch_environment_maps_flags_and_trailing_serve_args(self):
+        env = CL.VllmLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B",
+            "--venv", "rel-venv",
+            "--work", "rel-work",
+            "--port", "19000",
+            "--tp", "2",
+            "--check-timeout", "45.5",
+            "--no-share-gpu",
+            "--extra", "--seed 0 --enforce-eager",
+            "--", "--max-model-len", "1024",
+        ])
+        self.assertEqual(env, {
+            "FASTRSI_VLLM_MODEL": "Qwen/Qwen3-8B",
+            "FASTRSI_VLLM_VENV": os.path.abspath("rel-venv"),
+            "FASTRSI_VLLM_WORK": os.path.abspath("rel-work"),
+            "FASTRSI_VLLM_PORT": "19000",
+            "FASTRSI_VLLM_TP": "2",
+            "FASTRSI_VLLM_CHECK_TIMEOUT": "45.5",
+            "FASTRSI_VLLM_SHARE_GPU": "0",
+            "FASTRSI_VLLM_EXTRA": "--seed 0 --enforce-eager --max-model-len 1024",
+        })
+        minimal = CL.VllmLab.launch_environment(["--model", "/models/qwen"])
+        self.assertEqual(minimal, {"FASTRSI_VLLM_MODEL": "/models/qwen"})
+        self.assertNotIn("FASTRSI_VLLM_TP", minimal)
+        self.assertNotIn("FASTRSI_VLLM_EXTRA", minimal)
+        only_tail = CL.VllmLab.launch_environment(["--model", "/models/qwen", "--", "--enforce-eager"])
+        self.assertEqual(only_tail["FASTRSI_VLLM_EXTRA"], "--enforce-eager")
+
 
 if __name__ == "__main__":
     unittest.main()

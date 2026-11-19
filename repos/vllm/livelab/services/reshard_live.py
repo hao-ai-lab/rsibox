@@ -357,7 +357,8 @@ def moe_transpose(src, kind, src_ep, dst_ep, devices=None, placement="linear", *
 
 def moe_layout_from_log(path):
     """The unquantized MoE backend a holder's log says it picked (its last such line)."""
-    found = BACKEND_LOG.findall(open(path, errors="replace").read())
+    with open(path, errors="replace") as fh:
+        found = BACKEND_LOG.findall(fh.read())
     if not found:
         raise ValueError(f"{path}: no 'Using <backend> Unquantized MoE backend' line")
     if found[-1] not in LOG_NAMES:

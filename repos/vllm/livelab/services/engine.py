@@ -1090,7 +1090,11 @@ def wait_healthy(port, pid, log, timeout=3600, t0=None, poll=0.25):
     while time.time() - t0 < timeout:
         if zygote._exited(pid):
             return None
-        text = open(log, errors="replace").read() if log and os.path.exists(log) else ""
+        if log and os.path.exists(log):
+            with open(log, errors="replace") as fh:
+                text = fh.read()
+        else:
+            text = ""
         if any(s in text for s in FAILED):
             return None
         try:
@@ -1109,7 +1113,8 @@ SPAWN_FORCED = "We must use the `spawn` multiprocessing start method"
 def fork_check(log):
     """With --fork, every process after the API server must be forked. vLLM logs SPAWN_FORCED
     (with its reason) when it falls back to spawn; that line is the only spawn signal read."""
-    text = open(log, errors="replace").read()
+    with open(log, errors="replace") as fh:
+        text = fh.read()
     return {"spawn_forced": SPAWN_FORCED in text}
 
 

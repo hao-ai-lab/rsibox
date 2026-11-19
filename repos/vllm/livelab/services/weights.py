@@ -171,7 +171,11 @@ def wait_ready(log, pid, timeout=1800, poll=0.5):
     as it exits or logs a failure, or at the timeout."""
     t0 = time.time()
     while time.time() - t0 < timeout:
-        text = open(log, errors="replace").read() if os.path.exists(log) else ""
+        if os.path.exists(log):
+            with open(log, errors="replace") as fh:
+                text = fh.read()
+        else:
+            text = ""
         if READY.search(text):
             return {"ready": True, "seconds": round(time.time() - t0, 2)}
         if any(s in text for s in FAILED) or _exited(pid):

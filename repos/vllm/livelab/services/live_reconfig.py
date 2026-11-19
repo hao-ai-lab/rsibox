@@ -36,11 +36,10 @@ import threading
 import time
 import traceback
 
-LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
-if LIVELAB not in sys.path:
-    sys.path.insert(1, LIVELAB)
-
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 from fastrsi import hooks, ipc  # noqa: E402
 
 TAG = "FASTRSI_LIVE_RECONFIG"
