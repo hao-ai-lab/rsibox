@@ -420,7 +420,7 @@ class CliTests(unittest.TestCase):
                 "    def launch_environment(argv):\n"
                 "        return {'EXT_LAUNCH_ARGS': json.dumps(argv)}\n"
                 "    def __init__(self, receipts=None):\n"
-                "        assert json.loads(os.environ['EXT_LAUNCH_ARGS']) == ['--', '--flag', '1']\n"
+                "        assert json.loads(os.environ['EXT_LAUNCH_ARGS']) == ['--flag', '1']\n"
                 "        super().__init__(receipts=receipts)\n"
                 "if __name__ == '__main__':\n"
                 "    from fastrsi import cli\n"
@@ -447,6 +447,67 @@ class CliTests(unittest.TestCase):
             rc = cli.main(["conformance", "toy", "--only", "c0_repeatable", "--", "--extra", "1"])
         self.assertEqual(rc, 2)
         self.assertIn("does not accept launch arguments", err.getvalue())
+
+    def test_conformance_strips_at_most_one_leading_delimiter(self):
+        """Input: `fastrsi conformance <real-lab> --real` with (a) `--model M --tp 2`,
+        (b) `-- --model M --tp 2`, (c) `--root /r --nproc 2 -- --only train`,
+        (d) `-- --root /r --nproc 2 -- --only train`, and (e) bare trailing `--` on `toy`.
+        Expected: `_cmd_conformance` strips at most one leading `--`, keeping any inner `--`
+        delimiter intact for adapter `launch_environment(argv)` implementations."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "delim_lab.py").write_text(
+                "import json\n"
+                "from kernel.toy_lab import ToyLab\n"
+                "class DelimLab(ToyLab):\n"
+                "    seen = []\n"
+                "    @staticmethod\n"
+                "    def launch_environment(argv):\n"
+                "        DelimLab.seen.append(list(argv))\n"
+                "        return {'CAPTURED_ARGV': json.dumps(argv)}\n",
+                encoding="utf-8",
+            )
+            cases = [
+                (
+                    ["conformance", "delim_lab:DelimLab", "--real", "--path", tmp,
+                     "--model", "M", "--tp", "2"],
+                    ["--model", "M", "--tp", "2"],
+                ),
+                (
+                    ["conformance", "delim_lab:DelimLab", "--real", "--path", tmp,
+                     "--", "--model", "M", "--tp", "2"],
+                    ["--model", "M", "--tp", "2"],
+                ),
+                (
+                    ["conformance", "delim_lab:DelimLab", "--real", "--path", tmp,
+                     "--root", "/r", "--nproc", "2", "--", "--only", "train"],
+                    ["--root", "/r", "--nproc", "2", "--", "--only", "train"],
+                ),
+                (
+                    ["conformance", "delim_lab:DelimLab", "--real", "--path", tmp,
+                     "--", "--root", "/r", "--nproc", "2", "--", "--only", "train"],
+                    ["--root", "/r", "--nproc", "2", "--", "--only", "train"],
+                ),
+            ]
+            from unittest import mock
+
+            captured_envs = []
+
+            def fake_run(cmd, env=None, **_kw):
+                captured_envs.append(json.loads(env["CAPTURED_ARGV"]))
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(cli.subprocess, "run", side_effect=fake_run):
+                for argv, expected in cases:
+                    with self.subTest(argv=argv):
+                        rc = cli.main(argv)
+                        self.assertEqual(rc, 0)
+            self.assertEqual(captured_envs, [exp for _, exp in cases])
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_empty = cli.main(["conformance", "toy", "--only", "c0_repeatable", "--"])
+        self.assertEqual(rc_empty, 0, buf.getvalue())
+        self.assertIn("1/1 as expected", buf.getvalue())
 
     def test_doctor_checks_core_health_all_repo_engines_and_human_table(self):
         """Input: `fastrsi doctor` (both `--json` and human table) against the real repository.

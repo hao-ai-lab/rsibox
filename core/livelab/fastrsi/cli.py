@@ -305,6 +305,8 @@ def _cmd_conformance(args, engine_args) -> int:
             conf_argv += ["--receipts", args.receipts]
         if args.json:
             conf_argv.append("--json")
+        if engine_args[:1] == ["--"]:
+            engine_args = engine_args[1:]
         if engine_args:
             lab = conf_main.load(spec)
             configure = getattr(lab, "launch_environment", None)
