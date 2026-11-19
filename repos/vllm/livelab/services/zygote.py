@@ -35,12 +35,9 @@ instead of spawning them.
 import argparse, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# forksafe.py is the framework's (core/livelab; FASTRSI_LIVELAB overrides the folder)
-LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
-if LIVELAB not in sys.path:
-    sys.path.insert(1, LIVELAB)
-import forksafe, vllm_args, zygote_refresh
+import corelab  # noqa: F401,E402  (core/livelab on sys.path: forksafe, fastrsi)
+import forksafe, vllm_args, zygote_refresh  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.
 REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
@@ -72,17 +69,9 @@ BASE_MODULES = [
 ]
 
 
-def driver_initialized():
-    """Whether this process has initialized the CUDA driver (cuInit). cuDeviceGetCount does not
-    initialize it and fails with CUDA_ERROR_NOT_INITIALIZED (3) until something has. A forked
-    child of a process that initialized the driver cannot use CUDA."""
-    import ctypes
-    try:
-        cu = ctypes.CDLL("libcuda.so.1")
-    except OSError:
-        return False
-    n = ctypes.c_int()
-    return cu.cuDeviceGetCount(ctypes.byref(n)) != 3
+# Whether this process has initialized the CUDA driver (cuInit): a forked child of a process
+# that did cannot use CUDA (forksafe: cuDeviceGetCount answers NOT_INITIALIZED until then).
+driver_initialized = forksafe.driver_initialized
 
 
 def _volatile(k):
@@ -382,13 +371,8 @@ def serve(sock_path, modules_file):
 
 
 def _call(sock_path, msg, timeout=60):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    s.connect(sock_path)
-    s.sendall((json.dumps(msg) + "\n").encode())
-    reply = json.loads(s.makefile().readline())
-    s.close()
-    return reply
+    """One JSON line to the zygote, its JSON reply back (OSError when it does not answer)."""
+    return ipc.unix_json_call(sock_path, msg, timeout=timeout)
 
 
 def request(sock_path, argv, env, log, cwd=None, accept=()):
@@ -415,26 +399,13 @@ def check(sock_path, env, accept=()):
     return _call(sock_path, {"cmd": "check", "env": env, "accept": list(accept)})
 
 
-# sun_path holds 108 bytes on Linux, including the terminating NUL.
-MAX_SOCK_PATH = 107
-
-
-def sock_path_error(sock_path):
-    """Why a Unix socket cannot be bound at this path, or None."""
-    n = len(os.fsencode(os.path.abspath(sock_path)))
-    if n > MAX_SOCK_PATH:
-        return (f"socket path too long for AF_UNIX ({n} bytes > {MAX_SOCK_PATH}): {sock_path}; "
-                "use a short path such as /dev/shm/<run>/zyg.sock")
-    return None
+# Why a Unix socket cannot be bound at this path (sun_path: 107 bytes on Linux), or None.
+sock_path_error = ipc.sock_path_error
 
 
 def _exited(pid):
     """True when pid is gone or a zombie (a dead child its parent has not reaped yet)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except OSError:
-        return True
+    return not proc.pid_alive(pid)
 
 
 def wait_ready(sock_path, pid, timeout=600):

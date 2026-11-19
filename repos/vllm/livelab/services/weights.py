@@ -36,6 +36,10 @@ Writes only --log (and the daemon's sockets in --socket-dir).
 """
 import argparse, hashlib, json, os, re, signal, socket, subprocess, sys, tempfile, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
+from fastrsi import proc  # noqa: E402
+
 READY = re.compile(r"Weight cache daemon READY")
 MAX_SOCK_PATH = 107     # Linux sun_path is 108 bytes with the trailing NUL
 FAILED = ("Traceback (most recent call last)", "exited during startup")
@@ -179,11 +183,7 @@ def wait_ready(log, pid, timeout=1800, poll=0.5):
 
 def _exited(pid):
     """True when pid is gone or a zombie (our unreaped child)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return f.read().rsplit(")", 1)[1].split()[0] == "Z"
-    except OSError:
-        return True
+    return not proc.pid_alive(pid)
 
 
 def _pg_alive(pgid):
@@ -196,36 +196,37 @@ def _pg_alive(pgid):
         return True
 
 
-def _wait_pg(proc, pgid, timeout):
-    deadline = time.time() + timeout
-    if proc.poll() is None:
-        remaining = max(0.0, deadline - time.time())
-        proc.wait(remaining)
-    while _pg_alive(pgid):
-        if time.time() >= deadline:
-            raise subprocess.TimeoutExpired(proc.args, timeout)
-        time.sleep(0.02)
+def stop_session(pid, grace=10.0, reap=None):
+    """Stop the process group `pid` leads (a daemon started with start_new_session, here or by
+    reshard_live.py) and the processes below it: SIGTERM, then SIGKILL after `grace` s, each
+    followed by a wait of up to `grace` s for the group to empty. `reap` (the caller's
+    Popen.poll) collects a zombie leader, which would keep the group alive. Returns True when
+    something of it was running. A live pid that leads no group of its own is another process
+    and is never signalled; a leader that exited keeps its group id reserved while members
+    remain (Linux reuses no live group id), so the group is still stopped by it."""
+    try:
+        if not _exited(pid) and os.getpgid(pid) != pid:
+            return False
+    except ProcessLookupError:
+        pass
+    if not _pg_alive(pid):
+        return False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        proc.kill_tree(pid, sig, include_pg=True)
+        deadline = time.time() + grace
+        while time.time() < deadline:
+            if reap is not None:
+                reap()
+            if not _pg_alive(pid):
+                return True
+            time.sleep(0.02)
+    return True
 
 
 def stop(p, grace=10):
     """Stop the daemon's session (SIGTERM, SIGKILL after `grace` s); True if it was running.
     Only a session this module started: its pid leads it (start_new_session)."""
-    leader_running = p.poll() is None
-    try:
-        if leader_running and os.getpgid(p.pid) != p.pid:
-            return False
-        os.killpg(p.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return leader_running
-    try:
-        try:
-            _wait_pg(p, p.pid, grace)
-        except subprocess.TimeoutExpired:
-            os.killpg(p.pid, signal.SIGKILL)
-            _wait_pg(p, p.pid, grace)
-    except ProcessLookupError:
-        pass
-    return True
+    return stop_session(p.pid, grace, reap=p.poll)
 
 
 def start(a, extra):

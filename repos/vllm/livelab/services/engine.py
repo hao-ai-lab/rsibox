@@ -95,11 +95,13 @@ adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune 
 mode are not built. Pass their vLLM flags in the argv or set their variables in the
 environment.
 """
-import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request, uuid
+import argparse, json, os, signal, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402  (stdlib only)
 
 LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
@@ -183,14 +185,7 @@ def cute_dsl_arch(visible):
 def port_in_use(port, host="127.0.0.1"):
     """True when something already listens on host:port (a connect succeeds). Not a bind test:
     a bind also fails on a privileged port or a TIME_WAIT socket, where nothing answers."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        return s.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-    finally:
-        s.close()
+    return proc.port_in_use(port, host)
 
 
 def read_vllm_args(a, vargv, env):
@@ -409,7 +404,6 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
     `engine.py reconfigure --pid <pid>` can inspect and override it (including zygote forks whose
     `/proc/<pid>/cmdline` stays the zygote's)."""
     state_path = _engine_state_path(launcher_args.cache_root, pid)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "pid": pid,
         "port": port,
@@ -427,9 +421,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
             "zygote": launcher_args.zygote,
         },
     }
-    temp_path = state_path.with_suffix(f".{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(record))
-    temp_path.replace(state_path)
+    ipc.atomic_write_json(state_path, record)
 
 
 def _strip_injected_flags(argv):
@@ -458,12 +450,9 @@ def _strip_injected_flags(argv):
 def load_engine_state(cache_root, pid):
     """Load the state of engine `pid` from `<cache-root>/engines/<pid>.json`, falling back to
     `/proc/<pid>/cmdline` when started directly without a state file."""
-    state_path = _engine_state_path(cache_root, pid)
-    if state_path.exists():
-        try:
-            return json.loads(state_path.read_text())
-        except (OSError, ValueError):
-            pass
+    state = ipc.read_json(_engine_state_path(cache_root, pid))
+    if state is not None:
+        return state
     try:
         raw_tokens = [
             token for token in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
