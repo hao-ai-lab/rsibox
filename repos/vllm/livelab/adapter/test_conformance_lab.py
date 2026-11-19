@@ -329,6 +329,31 @@ class ConformanceOnFakeVllmTest(unittest.TestCase):
                     leader.kill()
                 leader.communicate()
 
+    def test_original_edit_id_can_undo_after_fresh_check_pauses_live_server(self):
+        lab = make_cpu_lab()
+        backend = lab._backend
+        self.addCleanup(backend.close)
+        edit = lab.patches()["visible"]
+        original = lab.install(edit)["id"]
+        # Keep the real session, replacement host and participants. Only process startup
+        # and HTTP are replaced with the fixture's independently loaded modules.
+        srv = NS(alive=lambda: True, stop=lambda: None, port=8111)
+        def start_server(port, tag, use_farm):
+            if tag == "live":
+                backend.respawn()
+            return srv
+        lab.server, lab.port, lab.share_gpu = srv, srv.port, True
+        with (mock.patch.object(lab, "_backend", None),
+              mock.patch.object(lab, "_ctl", backend.ctl),
+              mock.patch.object(lab, "_start_server", start_server),
+              mock.patch.object(lab, "_write_farm"),
+              mock.patch.object(lab, "_run_http", return_value=backend.fresh_check(edit)["output"]),
+              mock.patch.object(CL.VllmLab, "_shared", srv)):
+            self.assertTrue(lab.fresh_check(edit)["ok"])
+            self.assertEqual(lab.status()["txns"], [original])
+            self.assertTrue(lab.uninstall(original)["ok"])
+            self.assertEqual(lab.status()["state"], "base")
+
     def test_all_11_conformance_cases_pass(self):
         for name in cases.CASES:
             with self.subTest(case=name):

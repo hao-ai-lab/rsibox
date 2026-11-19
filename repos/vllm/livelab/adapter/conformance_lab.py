@@ -331,8 +331,11 @@ class VllmLab:
         self.session.expected[0] = self.session._fingerprint()
 
     def install(self, patch):
-        t0 = time.perf_counter()
         plan_id = f"txn-{next(_seq):04d}-{int(time.time() * 1000) % 1000000}"
+        return self._install(patch, plan_id)
+
+    def _install(self, patch, plan_id):
+        t0 = time.perf_counter()
         try:
             modules = {
                 m: {"source": src, "base_hash": L.text_hash(self._live_source(m)),
@@ -356,7 +359,7 @@ class VllmLab:
         outcome, rec = res.get("outcome") or "refused", res.get("receipt")
         self._append_receipt(rec)
         if outcome == "committed":
-            self._stack_files.append({"files": dict(patch["files"]), "accept": list(patch.get("accept", [])),
+            self._stack_files.append({"id": res["txn"], "files": dict(patch["files"]), "accept": list(patch.get("accept", [])),
                                       "undo_resets": list(patch.get("undo_resets", []))})
         codes = rec["decisions"]["blocking"] if rec else sorted({f["check"] for f in res.get("findings", [])})
         return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
@@ -524,7 +527,9 @@ class VllmLab:
                 self.session = SS.Session(self.bridge, MODULES)
                 self._stack_files.clear()
                 for saved_patch in saved_stack:
-                    if not self.install(saved_patch)["ok"]:
+                    if not self._install(saved_patch, saved_patch["id"])["ok"]:
+                        self.session.fault("participant_failed", "incomplete edit replay",
+                                           "restore the live stack after fresh_check")
                         raise RuntimeError("failed to restore live stack after fresh_check")
 
     def inject(self, fault, **kw):
