@@ -18,53 +18,29 @@ kills the lab's process group and starts the job again.
 One job is shared across cases while it stays at base (a start costs about a minute); a
 poisoned or edited job is respawned instead.
 """
+import argparse
 import atexit
+import contextlib
 import json
 import os
+from pathlib import Path
+import shlex
 import shutil
 import signal
-import socket
 import subprocess
+import sys
 import tempfile
 import time
+
+from fastrsi import harness, ipc, proc
 
 from . import client
 
 MLP = "megatron.core.transformer.mlp"
 ATT = "megatron.core.transformer.attention"
-
-
-def _edit(src, old, new):
-    assert src.count(old) == 1, f"anchor not unique ({src.count(old)}): {old!r}"
-    return src.replace(old, new)
-
-
-def _descendants(root):
-    """PIDs of every live descendant of root, parents before children (from /proc)."""
-    kids = {}
-    for d in os.listdir("/proc") if os.path.isdir("/proc") else []:
-        if not d.isdigit():
-            continue
-        try:
-            with open(f"/proc/{d}/stat") as f:
-                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        kids.setdefault(ppid, []).append(int(d))
-    out, todo = [], [root]
-    while todo:
-        for c in kids.get(todo.pop(0), []):
-            out.append(c)
-            todo.append(c)
-    return out
-
-
-def _free_port():
-    """A TCP port free right now (the kernel's pick), so a respawn or a second lab never reuses a
-    port still held by the job before it."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+_edit = harness.edit_once
+_descendants = proc.descendants
+_free_port = proc.free_port
 
 
 class _Job:
@@ -74,7 +50,7 @@ class _Job:
     def __init__(self, cmd, env, tag, timeout=900):
         self.dir = tempfile.mkdtemp(prefix=f"fastrsi-mg-{tag}-")
         self.ready = os.path.join(self.dir, "ready.json")
-        self.sock = os.path.join("/tmp", f"fmg-{os.getpid()}-{tag}.sock")
+        self.sock = ipc.short_sock_path(f"fmg-{tag}")
         env = {**os.environ, **env, "FASTRSI_READY": self.ready, "FASTRSI_SOCK": self.sock}
         self.log = open(os.path.join(self.dir, "job.log"), "w")
         self.t0 = time.time()
@@ -106,30 +82,19 @@ class _Job:
         sessions of their own, so a kill of the launcher's process group leaves them running
         (and holding GPU memory); walk the process tree instead, children first."""
         pids = _descendants(self.p.pid)
-        for pid in reversed(pids):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if self.p.poll() is None:
-            try:
-                os.kill(self.p.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        proc.kill_tree(self.p.pid, signal.SIGKILL, include_pg=False)
         try:
             self.p.wait(60)
         except subprocess.TimeoutExpired:
             pass
-        t0 = time.time()
-        while any(os.path.exists(f"/proc/{p}") for p in pids) and time.time() - t0 < 60:
+        deadline = time.monotonic() + 60
+        while any(proc.pid_alive(p) for p in pids) and time.monotonic() < deadline:
             time.sleep(0.2)
         if not self.log.closed:
             self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(self.sock)
-        except OSError:
-            pass
 
     def tail(self, n=30):
         try:
@@ -140,6 +105,25 @@ class _Job:
 
 
 class MegatronLab:
+    @staticmethod
+    def launch_environment(argv):
+        parser = argparse.ArgumentParser(description="Run conformance on a local Megatron checkout")
+        parser.add_argument("--root", required=True, help="Megatron-LM checkout")
+        parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
+        parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
+        args = parser.parse_args(argv)
+        root = os.path.abspath(args.root)
+        training = args.training_args
+        if training[:1] == ["--"]:
+            training = training[1:]
+        launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
+        worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
+        return {
+            "FASTRSI_MG_CMD": f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}',
+            "FASTRSI_MG_ROOT": root,
+            "PYTHONPATH": os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH")))),
+        }
+
     name = "megatron"
     _shared = None
 
@@ -151,7 +135,7 @@ class MegatronLab:
                                                                    "120"))
         self.receipts = receipts
         self.poison = []
-        self.base = {m: open(os.path.join(self.root, *m.split(".")) + ".py").read()
+        self.base = {m: Path(self.root, *m.split(".")).with_suffix(".py").read_text()
                      for m in (MLP, ATT)}
         sh = MegatronLab._shared
         if sh is not None and sh.p.poll() is None and self._at_base(sh):
@@ -186,8 +170,6 @@ class MegatronLab:
             return False
 
     def _call(self, req, timeout=None):
-        if self.poison:
-            pass
         try:
             return client.call(self.job.sock, req, timeout or self.check_timeout)
         except (TimeoutError, ConnectionError, FileNotFoundError, OSError) as e:
@@ -230,8 +212,7 @@ class MegatronLab:
         return {**r, "cost_s": round(time.perf_counter() - t0, 3)}
 
     def uninstall(self, id=None):
-        r = self._call({"verb": "uninstall", **({"id": id} if id else {})})
-        return r
+        return self._call({"verb": "uninstall", **({"id": id} if id else {})})
 
     def status(self):
         if self.poison:
@@ -282,6 +263,8 @@ class MegatronLab:
         }
 
     def fresh_check(self, patch, workload=None):
+        if (patch or {}).get("repairs"):
+            return {"ok": False, "output": None, "error": "fresh overlays apply source files only"}
         d = tempfile.mkdtemp(prefix="fastrsi-mg-overlay-")
         out = os.path.join(d, "out.json")
         try:
@@ -323,3 +306,9 @@ class MegatronLab:
 def _stop_shared():
     if MegatronLab._shared is not None:
         MegatronLab._shared.kill()
+
+
+if __name__ == "__main__":
+    from fastrsi.cli import main
+
+    sys.exit(main(["conformance", "fastrsi_megatron.conformance_lab:MegatronLab", "--real", *sys.argv[1:]]))

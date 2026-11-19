@@ -31,9 +31,11 @@ class Opt:
     def step(self):
         time.sleep(0.05)
 opt = Opt()
+original = opt.step
+opt.step = original
 for _ in range(3):
     tr.train_step(lambda i: time.sleep(0.01), None, None, opt)
-print(json.dumps({"restored": "step" not in vars(opt)}))
+print(json.dumps({"restored": opt.step is original}))
 """
 
 
@@ -62,7 +64,8 @@ class StepDetail(unittest.TestCase):
                                  capture_output=True, text=True, timeout=120)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue(json.loads(out.stdout.strip().splitlines()[-1])["restored"])
-            steps = json.load(open(os.path.join(d, "phases.rank0.json")))["steps"]
+            with open(os.path.join(d, "phases.rank0.json")) as phases:
+                steps = json.load(phases)["steps"]
             self.assertEqual(len(steps), 3)
             for s in steps[:2]:
                 mb, det = s["detail"]["mb"], s["detail"]

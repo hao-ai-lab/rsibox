@@ -38,8 +38,8 @@ LINUX = sys.platform.startswith("linux")
 # both pids and sleeps
 TRAIN = """import json, os, subprocess, sys, time
 kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
-json.dump({"pid": os.getpid(), "kid": kid.pid},
-          open(os.path.join(os.environ["OUT"], "p%s.json" % os.environ["RANK"]), "w"))
+with open(os.path.join(os.environ["OUT"], "p%s.json" % os.environ["RANK"]), "w") as f:
+    json.dump({"pid": os.getpid(), "kid": kid.pid}, f)
 time.sleep(float(os.environ.get("SLEEP", "300")))
 """
 
@@ -97,6 +97,7 @@ class ZygoteSupervision(unittest.TestCase):
                                    "--sock", self.sock, "--preload", "heavy"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                   env=env)
+        self.addCleanup(self.z.stdout.close)
         self.ready = json.loads(self.z.stdout.readline())
         self.pids = []
 
@@ -510,6 +511,29 @@ class InstallPatchModules(unittest.TestCase):
                               reply["mechanisms"]), (False, "refused", ["patch_invalid"], None, []))
             self.assertIn(repr(name), reply["findings"][0]["observed"])
 
+    def test_mixed_patch_names_every_unloaded_module_and_writes_nothing(self):
+        fx = LabFixture(self)
+        files = {"mg_target_a": "def scale(x): return 99", "no.second": "", "no.first": ""}
+        reply = fx.lab.verb("install", {"patch": {"files": files}})
+        self.assertEqual(reply["codes"], ["patch_invalid"])
+        self.assertEqual(reply["not_loaded"], ["no.first", "no.second"])
+        self.assertEqual(self.first.scale(2), 4)
+
+    def test_journaled_module_attribute_install_and_undo(self):
+        fx = LabFixture(self)
+        cell = "journal.set_attr(model[0][0], 'training', False)"
+        patch = {"files": {}, "repairs": [{"cell": cell, "declares": []}]}
+        installed = fx.lab.verb("install", {"patch": patch})
+        self.assertEqual(installed["mechanisms"], ["R10 repair"], installed)
+        self.assertFalse(fx.model[0].training)
+        self.assertTrue(fx.lab.verb("uninstall", {})["ok"])
+        self.assertTrue(fx.model[0].training)
+
+    def test_invalid_files_type_is_a_structured_refusal(self):
+        lab = LabFixture(self).lab
+        reply = lab.verb("install", {"patch": {"files": ["not a mapping"]}})
+        self.assertEqual(reply["codes"], ["patch_invalid"])
+
     def test_inject_target_names_one_rank_or_is_refused(self):
         """Input: targets None, 1, "1", "rank1", then "rank01", "rank2", "x", True, -1 on two
         ranks. Expect: None, 1, 1, 1, then a plain ValueError naming the valid targets."""
@@ -567,6 +591,12 @@ class ResetFailsClosed(unittest.TestCase):
                 self._scale, self.growth = sd["scale"].clone(), sd["growth_tracker"]
         fx.opt.grad_scaler = Scaler()
         s = ST.Snapshot([fx.model], fx.opt, fx.sched)
+        scaler = fx.opt.grad_scaler
+        fx.opt.grad_scaler = None
+        refused = s.restore()
+        self.assertFalse(refused["ok"])
+        self.assertIn("optimizer 0: grad scaler presence changed", refused["groups"])
+        fx.opt.grad_scaler = scaler
         d0 = ST.digest([fx.model], fx.opt, fx.sched)
         self.assertIn("buffers", s.restored)
         self.assertIn("grad_scaler", s.restored)

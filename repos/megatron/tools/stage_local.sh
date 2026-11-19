@@ -4,6 +4,7 @@
 # 29-38 s to the first step instead of 58-110 s in our runs; the copy itself 161-247 s once).
 #
 #   stage_local.sh VENV TREE DEST [JOBS]   ->  DEST/venv, DEST/<tree name>, DEST/cache, DEST/env.sh
+#   stage_local.sh --tree-only TREE DEST [JOBS]   ->  DEST/<tree name> (container environment)
 #
 # DEST/cache holds the compile caches a restart reads: inductor (FX graphs), triton, and the
 # CUDA driver's JIT cache (PTX compiled for this GPU; cuDNN fused attention and TE norm kernels
@@ -16,24 +17,34 @@
 # after the job's own environment. Every entry is copied with `cp -a`, JOBS at a time
 # (default 32): a network file system serves many small files faster in parallel.
 # Prints the seconds of each copy. Run it once per node; it does not check freshness.
-set -eu
+set -euo pipefail
 VENV=$1; TREE=$2; DEST=$3; JOBS=${4:-32}
+now() { date +%s.%N; }
+stage_tree() {
+  local target="$DEST/$(basename "$TREE")" start
+  mkdir -p "$target"
+  start=$(now)
+  find "$TREE" -mindepth 1 -maxdepth 1 ! -name .git -print0 |
+    xargs -0 -r -P "$JOBS" -n 1 cp -at "$target" --
+  echo "tree $(awk -v a=$start -v b=$(now) 'BEGIN{printf "%.1f", b-a}') s"
+}
+if [ "$VENV" = --tree-only ]; then
+  stage_tree
+  exit
+fi
 PY=$(ls -d "$VENV"/lib/python3.* | head -1); PYV=$(basename "$PY")
 SP=$PY/site-packages; LSP=$DEST/venv/lib/$PYV/site-packages
-now() { date +%s.%N; }
-mkdir -p "$LSP" "$DEST/$(basename "$TREE")"
+mkdir -p "$LSP"
 t=$(now)
 cp -a "$VENV/bin" "$VENV/pyvenv.cfg" "$DEST/venv/"
-ls -A "$SP" | xargs -P "$JOBS" -I{} cp -a "$SP/{}" "$LSP/"
+find "$SP" -mindepth 1 -maxdepth 1 -print0 | xargs -0 -r -P "$JOBS" -n 1 cp -at "$LSP" --
 # console scripts (torchrun, ...) name the source venv's python in their shebang: repoint them,
 # or their processes import from the network file system again
 for f in "$DEST"/venv/bin/*; do
   [ -f "$f" ] && [ ! -L "$f" ] && head -c 2 "$f" | grep -q '#!' && sed -i "1s|^#!$VENV/bin/python|#!$DEST/venv/bin/python|" "$f"
 done
 echo "venv $(awk -v a=$t -v b=$(now) 'BEGIN{printf "%.1f", b-a}') s"
-t=$(now)
-( cd "$TREE" && ls -A | grep -vx .git | xargs -P "$JOBS" -I{} cp -a {} "$DEST/$(basename "$TREE")/" )
-echo "tree $(awk -v a=$t -v b=$(now) 'BEGIN{printf "%.1f", b-a}') s"
+stage_tree
 mkdir -p "$DEST/cache/inductor" "$DEST/cache/triton" "$DEST/cache/cuda"
 for c in inductor triton; do
   if [ -n "${CACHE_FROM:-}" ] && [ -d "$CACHE_FROM/$c" ]; then cp -a "$CACHE_FROM/$c/." "$DEST/cache/$c/"; fi

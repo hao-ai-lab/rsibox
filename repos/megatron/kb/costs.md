@@ -5,6 +5,44 @@ Measured on 4× GB200 (aarch64), torch 2.13 + CUDA 13, Transformer Engine 2.18, 
 (startup phases from `fastrsi_megatron/run.py`, lab calls from the lab's own `cost_s`). Every
 row names its run.
 
+## Live and fresh checks on eight Qwen3-14B-shaped layers
+
+Our 2026-11-19 NeMo 26.08.01 runs on four GB200s used TP 2 with sequence parallelism and
+DP 2, 4,096 tokens per sequence, global batch 16, BF16 and FP32 output logits. Each of five
+repetitions paired a base check and a live install with a separate torchrun of the same
+edited source. Both paths used four warm-up steps per new process group and ten steps per
+check. The client timed install through check completion on the live path and
+process launch through check completion on the fresh path. Source preparation and teardown
+were outside the timers. Filesystem and compilation caches were shared across repetitions.
+
+| Edit | Live install and check (s) | Fresh launch and check (s) | Fresh launch to ready (s) |
+|---|---:|---:|---:|
+| `lmhead-sp-allgather-before-cast` | 5.52 [5.52, 5.52] | 42.27 [42.22, 42.43] | 36.82 [36.73, 36.96] |
+| `residual-plain-add-without-bias-dropout` | 5.55 [5.55, 5.56] | 42.15 [41.75, 42.23] | 36.71 [36.32, 36.81] |
+| `te-layernorm-linear-gather-before-norm` | 5.61 [5.60, 5.61] | 41.83 [41.79, 41.92] | 36.41 [36.35, 36.49] |
+
+Values are the median [25th, 75th percentile] of five per-edit client measurements.
+Fresh and live edited checks agreed on every reported loss and gradient norm. Relative to
+base, the TE edit changed loss by at most 0.02221% and gradient norm by at most 0.35367%.
+The other two edits matched base on both metrics at every step. The live
+path amortizes model setup and warm-up across checks. These timings measure the wait for
+ten-step feedback on the eight-layer model.
+
+### Ten warm forks and the EP 4 walkthrough
+
+In a separate two-layer TP 2 soak in the same environment, one zygote served ten
+consecutive pairs of ranks with a different executed source overlay each time. Client
+fork times ranged from 0.064 to 0.095 s.
+The server held 25 open file descriptors after each pair exited. Both rank exit
+codes were zero throughout, and GPU memory returned to zero after every cycle. These measurements come from
+the same day's fork events, training phase timestamps, process snapshots and GPU queries.
+
+On a four-layer BF16 MoE with eight experts, top-2 routing and EP 4, installing
+the grouped MLP forward edit took 0.119 s round-trip and a four-step edited check
+took 0.385 s. Each rank recorded 32 calls to the edited forward. Step-one
+loss and the restored state digest matched base in the eight-gate EP 4 walkthrough. Its transaction,
+proof and undo records come from the same day.
+
 ## Restart ladder: from process start to the first train step
 
 `run.py` stamps each phase boundary. "Tiny" is 2 layers, hidden 512 (TP 2, 2 GPUs): it shows the
@@ -130,6 +168,34 @@ From the lab smoke (tiny, TP 2, 2026-11-07) and the conformance run.
 | `uninstall` | 0.017 | |
 | Restart to the same point (tiny) | 57.5 | the warm restart a live edit replaces |
 | Respawn after a crash, hang or lost rank (tiny, conformance c8) | 37.6-51.6 | kill the job's process tree, start again |
+
+For the two-layer, hidden-512 deterministic lab on two GB200s (TP2, sequence length 128,
+global batch 4, eight-step checks), our 2026-11-19 NeMo 26.08 measurements were:
+
+| Phase | Fresh torchrun | Request to a preloaded zygote |
+|---|---:|---:|
+| Launch to lab ready | 31.01 s | 10.42 s |
+| Freeze batches | 0.045 s | 0.035 s |
+| Take S0 | 0.007 s | 0.006 s |
+| Two warmup steps | 3.821 s | 3.267 s |
+| Restore S0, zero Adam state, take S | 0.006 s | 0.006 s |
+
+The warm request includes 0.058 s to fork. Starting the parent separately took 21.62 s.
+The two jobs returned identical loss and gradient norm over all eight steps. These are
+single startup measurements with node-local engine sources and warm disk caches.
+
+The four-GB200 dense replay on 2026-11-19 used eight Qwen3-14B-shaped layers, TP2/DP2,
+sequence length 4096, global batch 16 and ten steps per check on mock data.
+
+| Edit | Base check | Edited check |
+|---|---:|---:|
+| LM-head gather before cast, FP32 logits | 4.501 s | 4.503 s |
+| Residual plain add | 4.532 s | 4.505 s |
+| TE gather before norm | 5.019 s | 5.430 s |
+
+Each row is one pair. All four ranks witnessed each edit and undo restored the base
+fingerprint. Across the three edits, the maximum per-step relative differences were 0.2525%
+in loss and 1.9140% in gradient norm.
 
 At 14B (Qwen3-14B architecture, TP 2, hill-climb lab, 2026-11-07):
 

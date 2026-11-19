@@ -231,8 +231,9 @@ class Snapshot:
             n = len(getattr(getattr(opt, "optimizer", None), "param_groups", []))
             if n != len(gs):
                 groups.append(f"optimizer {i}: {n} param groups, snapshot has {len(gs)}")
-        if len(scaler_states(self.optimizer)) != len(self.scalers):
-            groups.append("grad scaler count changed")
+            scaler = getattr(opt, "grad_scaler", None)
+            if hasattr(scaler, "state_dict") != (self.scalers[i] is not None):
+                groups.append(f"optimizer {i}: grad scaler presence changed")
         return live, {"missing": missing, "extra": [] if allow_extra else extra,
                       "mismatch": mismatch, "groups": groups, "n_extra_allowed":
                       len(extra) if allow_extra else 0}
@@ -305,6 +306,8 @@ def _hash_tensor(h, t, buf):
     if u8.device.type == "cpu":
         _feed(h, u8)
         return buf
+    if u8.is_meta:
+        raise ValueError("cannot hash a meta tensor without storage")
     if buf is None:
         buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
     for i in range(0, u8.numel(), CHUNK):
