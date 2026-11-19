@@ -28,14 +28,29 @@ def _job_died(gate_dir):
     return False
 
 
+def _next_request(gate_path, settle_s=10.0):
+    """The request number `ready.json` names. Right after a response the gate may not have
+    advanced `ready.json` yet (two files on a shared file system), so a `req-<n>.json` that
+    already exists is waited out for `settle_s` before it counts as another client's request."""
+    deadline = time.monotonic() + settle_s
+    while True:
+        try:
+            req_num = json.loads((gate_path / "ready.json").read_text(encoding="utf-8"))["n"]
+        except (OSError, ValueError, KeyError):
+            req_num = None
+        if req_num is not None and not (gate_path / f"req-{req_num}.json").exists():
+            return req_num
+        if time.monotonic() > deadline:
+            raise GateError(f"{gate_path}: request {req_num} is already pending")
+        time.sleep(0.05)
+
+
 def request(gate_dir, files=(), steps=1, stop=False, timeout=1800.0, live_settings=None, verb="install", extra=None):
     gate_path = Path(gate_dir)
     ready = gate_path / "ready.json"
     if not ready.exists():
         raise GateError(f"{gate_path}: no ready.json; is the job running with this gate?")
-    req_num = json.loads(ready.read_text(encoding="utf-8"))["n"]
-    if (gate_path / f"req-{req_num}.json").exists():
-        raise GateError(f"{gate_path}: request {req_num} is already pending")
+    req_num = _next_request(gate_path)
     payload = ({"stop": True} if stop else
                {"verb": verb, "files": [os.path.realpath(f) for f in files], "steps": steps, **(extra or {}),
                 **({"set": {k: str(v) for k, v in live_settings.items()}} if live_settings else {})})

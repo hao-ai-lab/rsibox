@@ -208,8 +208,9 @@ class GateMixin:
                 self._steps_left -= 1
             return super().on_step_begin()
         while True:
-            self._flush()
+            # ready first, then the previous response: a client that sees the response never reads a stale request number
             _write_json(self._gate / "ready.json", {"n": self._req_index, "step": self.global_steps, "t": time.time()})
+            self._flush()
             req_path = self._gate / f"req-{self._req_index}.json"
             while not req_path.exists():
                 time.sleep(0.05)
