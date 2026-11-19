@@ -219,3 +219,49 @@ def test_trtllm_layout_reshard_is_byte_exact_and_naive_is_not():
         pytest.skip(got["skip"])
     assert got == {"stored_is_checkpoint_layout": False, "tp2_to_ep2": True, "ep2_to_tp2": True,
                    "naive_w13_ok": False, "naive_w2_ok": False}
+
+
+# -- the launcher's route (engine.py reconfigure -> reshard_live.py ensure) ------------------
+
+def test_reshardable_and_group_dir_round_trip():
+    """Only an expert-sharding change of the weight key is reshardable (TP size, dtype, model
+    are not); the target folder is deterministic, so EP2 -> TP2 lands on the TP2 group it came
+    from (which still holds its weights: no reshard on the way back)."""
+    assert RL.reshardable({"weight_key_changed": ["enable_expert_parallel"]})
+    assert RL.reshardable({"weight_key_changed": ["enable_expert_parallel",
+                                                  "expert_placement_strategy"]})
+    assert not RL.reshardable({"weight_key_changed": ["enable_expert_parallel",
+                                                      "tensor_parallel_size"]})
+    assert not RL.reshardable({"weight_key_changed": []}) and not RL.reshardable(None)
+    ep = RL.group_dir("/s/w", {"enable_expert_parallel": True,
+                               "expert_placement_strategy": "linear"})
+    assert ep == "/s/w.ep"
+    assert RL.group_dir(ep, {"enable_expert_parallel": False}) == "/s/w"
+    assert RL.group_dir("/s/w/", {"enable_expert_parallel": True,
+                                  "expert_placement_strategy": "round_robin"}) == "/s/w.eprr"
+
+
+HOLDER_ARGV_CASE = textwrap.dedent("""
+    import json, sys
+    sys.path.insert(0, sys.argv[1])
+    import reshard_live as RL
+    print(json.dumps(RL.holder_argv(json.loads(sys.argv[2]))))
+""")
+
+
+@pytest.mark.skipif(not VLLM_PY, reason="needs vLLM (FASTRSI_VLLM_PYTHON)")
+def test_holder_argv_keeps_engine_args_only():
+    """The target holder gets the engine's weight-relevant flags (by vLLM's EngineArgs parser),
+    never its loader, worker class, memory budget or server flags: a holder started with
+    --load-format ipc_cache would dial itself; --port is not an EngineArgs flag at all."""
+    vargv = ["/m/Q", "--port", "8302", "--tensor-parallel-size", "2", "--enable-expert-parallel",
+             "--gpu-memory-utilization", "0.3", "--max-model-len", "8192",
+             "--language-model-only", "--load-format", "ipc_cache", "--worker-cls", "a.B"]
+    r = subprocess.run([VLLM_PY, "-c", HOLDER_ARGV_CASE, str(HERE), json.dumps(vargv)],
+                       capture_output=True, text=True, timeout=300, cwd=str(HERE),
+                       env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
+    line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("[")), None)
+    assert line, r.stderr[-3000:]
+    assert json.loads(line) == ["--model", "/m/Q", "--tensor-parallel-size", "2",
+                                "--enable-expert-parallel", "--max-model-len", "8192",
+                                "--language-model-only"]

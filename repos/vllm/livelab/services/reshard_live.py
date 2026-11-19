@@ -47,9 +47,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -57,7 +59,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-from reshard import map_global_expert_to_ep  # noqa: E402
+
+
+def map_global_expert_to_ep(*args, **kwargs):
+    """reshard.py's expert placement (imported on use: reshard.py imports torch, and engine.py
+    imports this module on its launcher path)."""
+    from reshard import map_global_expert_to_ep as place
+    return place(*args, **kwargs)
 
 MOE_SUFFIXES = {".w13_weight": "w13", ".w2_weight": "w2"}
 BACKEND_LOG = re.compile(r"Using (.+?) Unquantized MoE backend")
@@ -334,12 +342,18 @@ def moe_layout_from_log(path):
 # Holder groups over CUDA IPC (vLLM's own key and protocol, as an engine dials them)
 # ---------------------------------------------------------------------------------------------
 
-def engine_config(model, args):
+def engine_config(argv):
+    """vLLM's VllmConfig for a `vllm serve` argv (model positional or --model), parsed with the
+    parser `vllm serve` uses (vllm_args.build) and built as `vllm serve` builds it."""
+    import contextlib
+    import vllm_args
     from vllm.engine.arg_utils import EngineArgs
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    return EngineArgs.from_cli_args(parser.parse_args(["--model", model, *args])) \
-        .create_engine_config()
+    parser, _ = vllm_args.build()
+    with contextlib.redirect_stdout(sys.stderr):
+        ns = parser.parse_args(list(argv))
+        if getattr(ns, "model_tag", None):
+            ns.model = ns.model_tag
+        return EngineArgs.from_cli_args(ns).create_engine_config()
 
 
 def group_keys(cfg):
@@ -462,29 +476,29 @@ def verify(dst, ref):
             "differ": differ[:20], "missing": missing[:20]}
 
 
-def run(a):
-    import torch
-    rep, t = {"phases_s": {}}, time.perf_counter()
+class Phases:
+    def __init__(self):
+        self.seconds, self.t = {}, time.perf_counter()
 
-    def phase(name):
-        nonlocal t
+    def __call__(self, name):
         now = time.perf_counter()
-        rep["phases_s"][name] = round(now - t, 3)
-        t = now
-    common = shlex.split(a.vllm_args)
-    src_cfg = engine_config(a.model, shlex.split(a.src_args) + common)
-    dst_cfg = engine_config(a.model, shlex.split(a.dst_args) + common)
-    src_keys, dst_keys = group_keys(src_cfg), group_keys(dst_cfg)
-    src_layout = MoeLayout(a.src_moe_layout or moe_layout_from_log(a.src_log))
-    dst_layout = MoeLayout(a.dst_moe_layout or moe_layout_from_log(a.dst_log))
-    rep["layouts"] = {"src": src_layout.backend, "dst": dst_layout.backend}
-    phase("config")
+        self.seconds[name] = round(now - self.t, 3)
+        self.t = now
+
+
+def reshard_groups(src_dir, src_keys, dst_dir, dst_keys, src_layout, dst_layout,
+                   verify_dir=None, phase=None):
+    """Map both groups, plan, write the target in place, optionally verify. (code, report):
+    code 0 ok, 2 refused before writing (report["findings"]), 1 verification failed."""
+    import torch
+    phase = phase or Phases()
+    rep = {"layouts": {"src": src_layout.backend, "dst": dst_layout.backend}}
     if len(src_keys) != len(dst_keys) or len(src_keys) > torch.cuda.device_count():
         rep["findings"] = [{"check": "reshard_live_world", "observed": f"{len(src_keys)} -> "
-                            f"{len(dst_keys)} ranks on {torch.cuda.device_count()} GPUs"}]
-        print(json.dumps(rep))
-        return 2
-    src, dst = map_group(a.src_socket_dir, src_keys), map_group(a.dst_socket_dir, dst_keys)
+                            f"{len(dst_keys)} ranks on {torch.cuda.device_count()} GPUs",
+                            "expected": "the same GPUs, one rank each"}]
+        return 2, rep
+    src, dst = map_group(src_dir, src_keys), map_group(dst_dir, dst_keys)
     phase("map")
     p = plan(metadata(src), metadata(dst))
     rep["plan"] = {k: len(v) for k, v in p.items() if k != "findings"}
@@ -493,26 +507,215 @@ def run(a):
     if p["findings"]:
         rep["findings"] = p["findings"][:20]
         rep["note"] = "refused before writing; target group unchanged"
-        print(json.dumps(rep))
-        return 2
+        return 2, rep
     rep.update(execute(src, dst, p, src_layout, dst_layout))
     phase("write")
-    rep["reshard_s"] = round(rep["phases_s"]["map"] + rep["phases_s"]["plan"]
-                             + rep["phases_s"]["write"], 3)
     rep["buffers_differ_from_src"] = buffers_differ(src, dst, p["keep"])[:20]
-    code = 0
-    if a.verify_socket_dir:
-        rep["verify"] = verify(dst, map_group(a.verify_socket_dir, dst_keys))
+    if verify_dir:
+        rep["verify"] = verify(dst, map_group(verify_dir, dst_keys))
         phase("verify")
-        code = 0 if rep["verify"]["ok"] else 1
+        if not rep["verify"]["ok"]:
+            return 1, rep
+    return 0, rep
+
+
+def run(a):
+    """`run`: both groups already up (the lab path; flags given per group)."""
+    phase = Phases()
+    common = shlex.split(a.vllm_args)
+    src_keys = group_keys(engine_config(["--model", a.model, *shlex.split(a.src_args), *common]))
+    dst_keys = group_keys(engine_config(["--model", a.model, *shlex.split(a.dst_args), *common]))
+    src_layout = MoeLayout(a.src_moe_layout or moe_layout_from_log(a.src_log))
+    dst_layout = MoeLayout(a.dst_moe_layout or moe_layout_from_log(a.dst_log))
+    phase("config")
+    code, rep = reshard_groups(a.src_socket_dir, src_keys, a.dst_socket_dir, dst_keys, src_layout,
+                               dst_layout, a.verify_socket_dir, phase)
+    rep["phases_s"] = phase.seconds
+    if code != 2:
+        rep["reshard_s"] = round(sum(phase.seconds[k] for k in ("map", "plan", "write")), 3)
     print(json.dumps(rep))
     return code
+
+
+# ---------------------------------------------------------------------------------------------
+# ensure: the launcher's entry point (engine.py reconfigure). Make the holder group for a target
+# `vllm serve` argv exist and hold the running engine's weights, without reading the checkpoint.
+# ---------------------------------------------------------------------------------------------
+
+# The weight-key fields a holder-to-holder reshard can change (vllm_args.RESHARD_FIELDS subset).
+RESHARDABLE_FIELDS = ("enable_expert_parallel", "expert_placement_strategy")
+# `vllm serve` flags a holder (`vllm preload`) must not get: the engine's loader, worker and
+# memory budget, and the server's own flags (EngineArgs does not know the latter anyway).
+NOT_HOLDER_FLAGS = {"--model", "--load-format", "--model-loader-extra-config", "--worker-cls",
+                    "--worker-extension-cls", "--gpu-memory-utilization", "--kv-cache-memory-bytes",
+                    "--weight-cache-socket-dir"}
+EP_DIR = re.compile(r"\.ep(rr)?$")
+
+
+def reshardable(reconfig):
+    """True when the only WeightCacheKey fields a reconfiguration changes are the MoE expert
+    sharding ones (TP <-> EP on the same GPUs); vllm_args.classify_reconfig's report."""
+    changed = (reconfig or {}).get("weight_key_changed") or []
+    return bool(changed) and set(changed) <= set(RESHARDABLE_FIELDS)
+
+
+def group_dir(socket_dir, args):
+    """Socket folder of the holder group for an engine with parsed `args`, next to a group of
+    the same model: `<base>` without EP, `<base>.ep` (linear) or `<base>.eprr` (round robin)
+    with it. Deterministic, so the way back finds the group it came from."""
+    base = EP_DIR.sub("", socket_dir.rstrip("/"))
+    if not args.get("enable_expert_parallel"):
+        return base
+    return base + (".eprr" if args.get("expert_placement_strategy") == "round_robin" else ".ep")
+
+
+def holder_argv(vargv):
+    """`vllm preload` flags for the engine argv `vargv`: the model and every EngineArgs flag the
+    argv sets, minus NOT_HOLDER_FLAGS. vLLM's own parser decides what EngineArgs knows."""
+    import vllm_args
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    known = set(EngineArgs.add_cli_args(FlexibleArgumentParser())._option_string_actions)
+    model, items = vllm_args._tokenize_argv(vargv)
+    out = ["--model", model]
+    for opt, chunk in items:
+        if opt is None or opt in NOT_HOLDER_FLAGS:
+            continue
+        raw = chunk[0].split("=", 1)[0]
+        raw = ("--" + raw[2:].replace("_", "-")) if raw.startswith("--") else raw
+        if raw in known:
+            out += chunk
+    return out
+
+
+def _record_path(state_dir, socket_dir):
+    import hashlib
+    h = hashlib.sha1(os.path.abspath(socket_dir).encode()).hexdigest()[:12]
+    return Path(state_dir) / f"group_{h}.json"
+
+
+def _read_record(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_record(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record))
+    tmp.replace(path)
+
+
+def stop_group(pid, grace=15.0):
+    """Stop a holder group this module started (its pid leads its session)."""
+    import signal
+    try:
+        if os.getpgid(pid) != pid:
+            return False
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False
+    deadline = time.time() + grace
+    while time.time() < deadline:
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return True
+
+
+def _probe_group(socket_dir, keys):
+    """"ok" when every rank's daemon answers with these keys, "absent" when a socket does not
+    answer, else the daemon's refusal (a group with other flags at that folder)."""
+    try:
+        map_group(socket_dir, keys)
+        return "ok"
+    except (FileNotFoundError, ConnectionRefusedError):
+        return "absent"
+    except RuntimeError as e:
+        return str(e)
+
+
+def ensure(a):
+    import weights
+    phase = Phases()
+    rep = {"socket_dir": a.dst_socket_dir}
+    src_vargv, dst_vargv = json.loads(a.src_vargv), json.loads(a.dst_vargv)
+    src_keys = group_keys(engine_config(src_vargv))
+    dst_keys = group_keys(engine_config(dst_vargv))
+    phase("config")
+    rec_path = _record_path(a.state_dir, a.dst_socket_dir)
+    rec_path.parent.mkdir(parents=True, exist_ok=True)
+    rec = _read_record(rec_path)
+    state = _probe_group(a.dst_socket_dir, dst_keys)
+    phase("probe_target")
+
+    def done(code, **extra):
+        rep.update(extra, phases_s=phase.seconds)
+        print(json.dumps(rep))
+        return code
+    if state == "ok" and (rec is None or rec.get("filled")):
+        # a group loaded from disk (not ours), or one we filled: it holds these weights
+        return done(0, target="reused", pid=(rec or {}).get("pid"),
+                    filled_from=(rec or {}).get("filled_from"))
+    if state not in ("ok", "absent") and rec is None:
+        return done(2, findings=[{"check": "weights_reshard_target", "observed": state,
+                                  "expected": f"no group at {a.dst_socket_dir}, or one with the "
+                                              "target flags",
+                                  "why": "another group owns that folder; it is not ours to stop"}])
+    if rec is not None and rec.get("pid"):
+        stop_group(rec["pid"])                          # ours, never filled (or wrong): replace
+    finding = weights.long_socket_path_finding(a.dst_socket_dir)
+    if finding:
+        return done(2, findings=[finding])
+    os.makedirs(a.dst_socket_dir, exist_ok=True)
+    log = str(rec_path.with_suffix(".log"))
+    cmd = [a.vllm, "preload", *holder_argv(dst_vargv), "--weight-cache-socket-dir",
+           a.dst_socket_dir, "--load-format", "dummy"]
+    with open(log, "w") as f:
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    rec = {"pid": proc.pid, "socket_dir": a.dst_socket_dir, "cmd": cmd, "log": log,
+           "filled": False, "started": time.time()}
+    _write_record(rec_path, rec)
+    ready = weights.wait_ready(log, proc.pid, timeout=a.timeout)
+    phase("start_target")
+    rep.update(pid=proc.pid, log=log, cmd=cmd)
+
+    def fail(**extra):
+        stop_group(proc.pid)
+        rec_path.unlink(missing_ok=True)
+        return done(2, stopped_target=True, **extra)
+    if not ready["ready"]:
+        return fail(findings=[{"check": "weights_reshard_target", "observed": ready,
+                               "expected": "the target group READY", "why": "see its log"}])
+    try:
+        src_layout = MoeLayout(moe_layout_from_log(a.src_log))
+        dst_layout = MoeLayout(moe_layout_from_log(log))
+        code, res = reshard_groups(a.src_socket_dir, src_keys, a.dst_socket_dir, dst_keys,
+                                   src_layout, dst_layout, a.verify_socket_dir, phase)
+    except Exception as e:                       # noqa: BLE001 - reported, old engine untouched
+        return fail(findings=[{"check": "weights_reshard", "observed": f"{type(e).__name__}: "
+                               f"{e}", "expected": "the target group filled"}])
+    rep["reshard"] = res
+    if code != 0:
+        return fail(findings=res.get("findings") or [{"check": "weights_reshard_verify",
+                                                      "observed": res.get("verify")}])
+    rec.update(filled=True, filled_from=a.src_socket_dir)
+    _write_record(rec_path, rec)
+    return done(0, target="filled")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run")
+    r = sub.add_parser("run", help="reshard between two running groups (flags per group)")
     r.add_argument("--model", required=True)
     r.add_argument("--src-socket-dir", required=True)
     r.add_argument("--dst-socket-dir", required=True)
@@ -524,8 +727,19 @@ def main(argv=None):
         g.add_argument(f"--{side}-moe-layout", choices=LAYOUTS)
         g.add_argument(f"--{side}-log", help="the group's log, to read its MoE backend")
     r.add_argument("--verify-socket-dir", help="a group loaded from disk with --dst-args")
+    e = sub.add_parser("ensure", help="make the target engine's group exist and hold the "
+                                      "source engine's weights (engine.py reconfigure)")
+    e.add_argument("--src-socket-dir", required=True)
+    e.add_argument("--src-vargv", required=True, help="JSON list: the running engine's argv")
+    e.add_argument("--src-log", required=True, help="the running engine's log (MoE backend)")
+    e.add_argument("--dst-socket-dir", required=True)
+    e.add_argument("--dst-vargv", required=True, help="JSON list: the target engine's argv")
+    e.add_argument("--state-dir", required=True, help="where group records and logs go")
+    e.add_argument("--vllm", default="vllm")
+    e.add_argument("--timeout", type=float, default=1800)
+    e.add_argument("--verify-socket-dir")
     a = ap.parse_args(argv)
-    return run(a)
+    return run(a) if a.cmd == "run" else ensure(a)
 
 
 if __name__ == "__main__":
