@@ -7,9 +7,13 @@ The real H3 lab takes 60-150 s to load, so `python3 -m conformance --lab adapter
 every case the same warm lab. These tests show that sharing it does not leak one case's state
 into the next. `h3_config` itself needs FastVideo and the weights: it runs only on GPU.
 """
+import inspect
+import os
 import unittest
+from unittest import mock
 
-from adapter.h3 import shared_factory
+from adapter import h3
+from adapter.h3 import H3Lab, shared_factory
 from adapter.toy_lab import ToyFastVideoLab
 from conformance import cases
 
@@ -52,6 +56,50 @@ class SharedLabTest(unittest.TestCase):
         self.assertEqual([(r["case"], r["result"]) for r in rows],
                          [(n, "pass") for n in cases.CASES], [r["error"] for r in rows])
         self.assertEqual(len(self.built), 1)
+
+
+class H3LabClassTest(unittest.TestCase):
+    def test_h3lab_is_concrete_class_with_all_lab_methods_and_launch_env(self):
+        """Input: `adapter.h3:H3Lab` inspected directly and driven with a monkeypatched `_make_h3`.
+        Expected: `H3Lab` is a concrete class exposing all 9 `LabUnderTest` methods directly,
+        reuses one warm lab across instantiations, and maps CLI launch options to env vars."""
+        self.assertTrue(inspect.isclass(H3Lab))
+        for method in ("install", "check", "reset", "uninstall", "status",
+                       "patches", "fresh_check", "inject", "close"):
+            self.assertTrue(callable(getattr(H3Lab, method, None)), method)
+
+        env = H3Lab.launch_environment([
+            "--model", "/tmp/m", "--vae", "/tmp/v.safetensors", "--gpus", "2",
+            "--check-timeout", "900",
+        ])
+        self.assertEqual(env["FASTH3_MODEL"], os.path.abspath("/tmp/m"))
+        self.assertEqual(env["FASTVIDEO_H3_VAE_NVFP4_DECODER"], os.path.abspath("/tmp/v.safetensors"))
+        self.assertEqual(env["FASTRSI_H3_GPUS"], "2")
+        self.assertEqual(env["FASTRSI_H3_CHECK_TIMEOUT"], "900.0")
+
+        built = []
+
+        def fake_make(receipts):
+            lab = ToyFastVideoLab(ranks=2, receipts=receipts)
+            built.append(lab)
+            return lab
+
+        saved = dict(H3Lab._shared)
+        H3Lab._shared.clear()
+        try:
+            with mock.patch.object(h3, "_make_h3", side_effect=fake_make), \
+                 mock.patch.object(h3.atexit, "register"):
+                a = H3Lab()
+                b = H3Lab()
+                self.assertIs(a.lab, b.lab)
+                self.assertEqual(len(built), 1)
+                self.assertEqual(a.check()["output"], BASE)
+                a.close()
+        finally:
+            for lab in built:
+                lab.close()
+            H3Lab._shared.clear()
+            H3Lab._shared.update(saved)
 
 
 if __name__ == "__main__":

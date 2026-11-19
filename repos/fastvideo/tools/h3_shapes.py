@@ -60,11 +60,12 @@ def main(argv=None):
     from adapter.lab import FastVideoLab
     ref = {}
     if a.reference:
-        for line in open(a.reference):
-            row = json.loads(line)
-            if row.get("output"):
-                ref.setdefault(row["frames"], row["output"])
-    out = open(a.out, "a") if a.out else None
+        with open(a.reference, encoding="utf-8") as fh:
+            for line in fh:
+                row = json.loads(line)
+                if row.get("output"):
+                    ref.setdefault(row["frames"], row["output"])
+    out = open(a.out, "a", encoding="utf-8") if a.out else None
     t0 = time.perf_counter()
     lab = FastVideoLab(h3_config(a.gpus), check_timeout=1800.0)
     bad = 0
@@ -86,6 +87,8 @@ def main(argv=None):
                 break
     finally:
         lab.close()
+        if out:
+            out.close()
     print(json.dumps({"total_s": round(time.perf_counter() - t0, 1), "failed": bad}), flush=True)
     return 1 if bad else 0
 

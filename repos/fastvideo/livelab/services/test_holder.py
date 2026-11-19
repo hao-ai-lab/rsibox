@@ -214,6 +214,7 @@ def child(fix):
     # what torch's file_system sharing does: fork and exec a daemon that inherits open fds
     p = subprocess.Popen(["sleep", "20"], close_fds=False, start_new_session=True)
     print(p.pid, flush=True)
+    p.returncode = 0  # intentionally detached; parent test kills it in finally
 
 
 if __name__ == "__main__":
@@ -231,21 +232,31 @@ class HostExitTest(unittest.TestCase):
         import subprocess
         livelab = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         env = {**os.environ, "PYTHONPATH": livelab}
-        script = os.path.join(tempfile.mkdtemp(prefix="holder-exit-"), "host.py")
-        with open(script, "w") as fh:
-            fh.write(EXIT_DRIVER)                     # spawn re-imports the main module
-        t0 = time.time()
-        p = subprocess.Popen([sys.executable, script, mode], env=env,
-                             stdout=subprocess.PIPE, text=True)
-        daemon = int(p.stdout.readline())
-        try:
-            p.wait(timeout=10)
-            return round(time.time() - t0, 1)
-        except subprocess.TimeoutExpired:
-            return None
-        finally:
-            os.kill(daemon, 9)
-            p.wait()
+        with tempfile.TemporaryDirectory(prefix="holder-exit-") as tmp:
+            script = os.path.join(tmp, "host.py")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write(EXIT_DRIVER)                 # spawn re-imports the main module
+            t0 = time.time()
+            p = subprocess.Popen([sys.executable, script, mode], env=env,
+                                 stdout=subprocess.PIPE, text=True)
+            daemon = None
+            try:
+                line = p.stdout.readline()
+                daemon = int(line) if line.strip() else None
+                try:
+                    p.wait(timeout=10)
+                    return round(time.time() - t0, 1)
+                except subprocess.TimeoutExpired:
+                    return None
+            finally:
+                if daemon is not None:
+                    try:
+                        os.kill(daemon, 9)
+                    except ProcessLookupError:
+                        pass
+                if p.stdout is not None:
+                    p.stdout.close()
+                p.wait()
 
     def test_a_daemon_a_spawned_child_executes_does_not_hang_the_host_at_exit(self):
         """Input: a host that runs multiprocessing's resource tracker spawns a child (as the lab

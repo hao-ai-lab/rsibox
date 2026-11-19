@@ -97,7 +97,9 @@ def rebuild_all(lab, paths):
     from adapter import diffs
     files = {}
     for path in paths:
-        files.update(diffs.apply(open(path).read(), lambda m: files.get(m) or (
+        with open(path, encoding="utf-8") as fh:
+            diff_text = fh.read()
+        files.update(diffs.apply(diff_text, lambda m: files.get(m) or (
             lab._base(m) if lab._exists(m) else None)))
     t0 = time.time()
     t1 = time.perf_counter()
@@ -144,7 +146,9 @@ def main(argv=None):
             bad += not row["ok"]
             files = []
         for path in files:
-            row = go_live(lab, os.path.basename(path), open(path).read())
+            with open(path, encoding="utf-8") as fh:
+                diff_text = fh.read()
+            row = go_live(lab, os.path.basename(path), diff_text)
             if row["ok"]:
                 c = lab.check()
                 row.update(seconds=c.get("seconds"), proven=c.get("proven"),
@@ -164,10 +168,12 @@ def main(argv=None):
             memory=memory(lab) if patched["ok"] else None, **patched)
         bad += not patched["ok"] or not patched["equal_to_base"]
         ref = {}
-        for line in open(a.reference) if a.reference else ():
-            r = json.loads(line)
-            if r.get("output"):
-                ref.setdefault(r["frames"], r["output"])
+        if a.reference:
+            with open(a.reference, encoding="utf-8") as fh:
+                for line in fh:
+                    r = json.loads(line)
+                    if r.get("output"):
+                        ref.setdefault(r["frames"], r["output"])
         for n in [int(x) for x in a.frames.split(",") if x]:
             c = lab.check({"sampling": {"num_frames": n}})
             same = c.get("output") == ref.get(n) if n in ref else None
@@ -183,7 +189,10 @@ def main(argv=None):
             bad += not r["ok"] or after["outputs"] != base["outputs"]
     finally:
         lab.close()
-    say(step="end", total_s=round(time.perf_counter() - t0, 1), failed=bad)
+        say(step="end", total_s=round(time.perf_counter() - t0, 1), failed=bad)
+        if OUT:
+            OUT.close()
+            OUT = None
     return 1 if bad else 0
 
 

@@ -23,6 +23,7 @@ The machine-specific inputs come from the environment, nothing else:
 `workload_env()` sets the workload's FastVideo flags (kb/workload.md) unless already set. Every
 worker inherits them, so they must be set before the lab starts.
 """
+import argparse
 import atexit
 import os
 
@@ -95,6 +96,30 @@ class Shared:
     def __init__(self, lab):
         self.lab = lab
 
+    def install(self, patch):
+        return self.lab.install(patch)
+
+    def check(self, workload=None):
+        return self.lab.check(workload)
+
+    def reset(self, kind="state"):
+        return self.lab.reset(kind)
+
+    def uninstall(self, id=None):
+        return self.lab.uninstall(id)
+
+    def status(self):
+        return self.lab.status()
+
+    def patches(self):
+        return self.lab.patches()
+
+    def fresh_check(self, patch, workload=None):
+        return self.lab.fresh_check(patch, workload)
+
+    def inject(self, fault, **kw):
+        return self.lab.inject(fault, **kw)
+
     def __getattr__(self, k):
         return getattr(self.lab, k)
 
@@ -124,4 +149,41 @@ def _make_h3(receipts):
                         check_timeout=float(os.environ.get("FASTRSI_H3_CHECK_TIMEOUT", "600")))
 
 
-H3Lab = shared_factory(_make_h3)
+class H3Lab(Shared):
+    """Concrete `LabUnderTest` class sharing one warm H3 `FastVideoLab` across conformance cases."""
+
+    _shared = {}
+
+    def __init__(self, receipts=None):
+        if "lab" not in self._shared:
+            lab = _make_h3(receipts)
+            self._shared["lab"] = lab
+            atexit.register(lab.close)
+        super().__init__(self._shared["lab"])
+
+    @staticmethod
+    def launch_environment(argv):
+        """Translate `fastrsi conformance fastvideo --real ...` flags into H3 environment vars."""
+        clean = [tok for tok in argv if tok != "--"]
+        ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", add_help=False)
+        ap.add_argument("--model", default=None)
+        ap.add_argument("--vae", default=None)
+        ap.add_argument("--config", default=None)
+        ap.add_argument("--gpus", type=int, default=None)
+        ap.add_argument("--golden", default=None)
+        ap.add_argument("--check-timeout", type=float, default=None)
+        ns = ap.parse_args(clean)
+        env = {}
+        if ns.model:
+            env["FASTH3_MODEL"] = os.path.abspath(ns.model)
+        if ns.vae:
+            env["FASTVIDEO_H3_VAE_NVFP4_DECODER"] = os.path.abspath(ns.vae)
+        if ns.config:
+            env["H3_CONFIG"] = os.path.abspath(ns.config)
+        if ns.gpus is not None:
+            env["FASTRSI_H3_GPUS"] = str(ns.gpus)
+        if ns.golden:
+            env["FASTRSI_H3_GOLDEN"] = os.path.abspath(ns.golden)
+        if ns.check_timeout is not None:
+            env["FASTRSI_H3_CHECK_TIMEOUT"] = str(ns.check_timeout)
+        return env
