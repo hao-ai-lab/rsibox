@@ -12,6 +12,7 @@ import io
 import itertools
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -294,6 +295,31 @@ class BaseLabConformanceTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_real_launch_args_keep_training_flags_after_delimiter(self):
+        """The worker receives its launch options even when training reuses a CLI flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "launch_lab.py").write_text(
+                "import json, os\n"
+                "from kernel.toy_lab import ToyLab\n"
+                "class LaunchLab(ToyLab):\n"
+                "    @staticmethod\n"
+                "    def launch_environment(argv):\n"
+                "        return {'TRAINING_ARGS': json.dumps(argv)}\n"
+                "    def __init__(self, receipts=None):\n"
+                "        assert json.loads(os.environ['TRAINING_ARGS']) == "
+                "['--root', 'tree with spaces', '--nproc', '2', '--', '--only', 'train']\n"
+                "        super().__init__(receipts=receipts)\n"
+            )
+            result = subprocess.run(
+                [sys.executable, "-m", "fastrsi", "conformance", "launch_lab:LaunchLab",
+                 "--real", "--path", tmp, "--root", "tree with spaces", "--nproc", "2",
+                 "--only", "c0_repeatable", "--json", "--", "--only", "train"],
+                cwd=LIVELAB, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("1/1 as expected", result.stdout)
+            self.assertIn('"lab": "launch_lab:LaunchLab"', result.stdout)
+
     def test_cli_list_doctor_conformance_and_ctl_end_to_end(self):
         """Input: invoke `fastrsi.cli.main` for `list --json`, `doctor --json`,
         `conformance toy --only c0_repeatable,c2_visible`, and `ctl` over a real Unix socket.
