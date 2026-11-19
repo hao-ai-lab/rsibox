@@ -30,13 +30,18 @@ no live consumer: engine.py restarts the engine for it and says so.
 
 Lab use only. No vLLM files are edited; the patch is applied at import.
 """
-import importlib.abc
-import json
 import os
 import sys
 import threading
 import time
 import traceback
+
+LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
+if LIVELAB not in sys.path:
+    sys.path.insert(1, LIVELAB)
+
+from fastrsi import hooks, ipc  # noqa: E402
 
 TAG = "FASTRSI_LIVE_RECONFIG"
 ENV = "FASTRSI_LIVE_RECONFIG_DIR"
@@ -44,21 +49,8 @@ POLICY_FILE = "policy.json"
 LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy")
 _AGENT = []
 _POLICY_CACHE = {"path": None, "mtime_ns": None, "policy": None}
-
-
-def _write_json(path, payload):
-    tmp = f"{path}.{os.getpid()}.tmp"
-    with open(tmp, "w") as f:
-        json.dump(payload, f, default=str)
-    os.replace(tmp, path)
-
-
-def _read_json(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+_write_json = ipc.atomic_write_json
+_read_json = ipc.read_json
 
 
 # -- validation (shared by agent and client) ----------------------------------------------
@@ -136,7 +128,8 @@ def _sync_api_policy(obj):
             return
         _POLICY_CACHE.update(path=path, mtime_ns=sig, policy=data["scheduling_policy"])
     policy = _POLICY_CACHE["policy"]
-    for holder in (obj, getattr(obj, "vllm_config", None), getattr(obj, "input_processor", None)):
+    sub = (obj, getattr(obj, "input_processor", None), getattr(obj, "processor", None))
+    for holder in (*sub, *(getattr(x, "vllm_config", None) for x in sub)):
         sc = getattr(holder, "scheduler_config", None)
         if sc is not None and getattr(sc, "policy", None) != policy:
             sc.policy = policy
@@ -237,20 +230,7 @@ class Agent:
         return r
 
     def control(self):
-        ctl = os.path.join(self.root, "ctl.json")
-        reply_dir = os.path.join(self.root, "reply")
-        os.makedirs(reply_dir, exist_ok=True)
-        last = 0
-        while True:
-            try:
-                with open(ctl) as f:
-                    cmd = json.load(f)
-            except (OSError, ValueError):
-                cmd = None
-            if cmd and int(cmd.get("seq", 0)) > last:
-                last = int(cmd["seq"])
-                _write_json(os.path.join(reply_dir, f"{last}.json"), self.handle(cmd))
-            time.sleep(0.005)
+        ipc.FileChannelServer(self.root, self.handle, poll_s=0.005, start=False)._run()
 
 
 def _patch_core(mod):
@@ -323,77 +303,31 @@ def _patch_async_llm(mod):
     _patch_api_entry(mod, ("AsyncLLM",), "add_request")
 
 
-class _After(importlib.abc.MetaPathFinder):
-    """Patch target vLLM modules right after they are imported, via the finders after this one
-    (an overlay finder first, then the installed package). Only the finders after it: a hook
-    before it that asks every finder would otherwise call back into it without end."""
-
-    TARGETS = {
-        "vllm.v1.engine.core": _patch_core,
-        "vllm.v1.engine.input_processor": _patch_input_processor,
-        "vllm.v1.engine.processor": _patch_input_processor,
-        "vllm.v1.engine.async_llm": _patch_async_llm,
-    }
-
-    def find_spec(self, name, path, target=None):
-        patcher = self.TARGETS.get(name)
-        if patcher is None:
-            return None
-        spec = None
-        finders = list(sys.meta_path)
-        later = finders[finders.index(self) + 1:] if self in finders else finders
-        for finder in later:
-            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
-                continue
-            spec = finder.find_spec(name, path, target)
-            if spec is not None:
-                break
-        if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
-            return None
-        orig = spec.loader.exec_module
-
-        def exec_module(module):
-            orig(module)
-            patcher(module)
-        spec.loader.exec_module = exec_module
-        return spec
+_IMPORT_HOOKS = (
+    ("vllm.v1.engine.core", _patch_core),
+    ("vllm.v1.engine.input_processor", _patch_input_processor),
+    ("vllm.v1.engine.processor", _patch_input_processor),
+    ("vllm.v1.engine.async_llm", _patch_async_llm),
+)
 
 
 def install():
     """Called by live_site/sitecustomize.py when ENV is set."""
-    for mod_name, patcher in _After.TARGETS.items():
-        if mod_name in sys.modules:
-            patcher(sys.modules[mod_name])
-    if not any(isinstance(f, _After) for f in sys.meta_path):
-        sys.meta_path.insert(0, _After())
+    for mod_name, patcher in _IMPORT_HOOKS:
+        hooks.install_import_hook(mod_name, patcher, once=False)
 
 
 # -- client (engine.py) --------------------------------------------------------------------
 
 def read_ready(root):
-    try:
-        with open(os.path.join(root, "ready.json")) as f:
-            return json.load(f)
-    except (OSError, ValueError, TypeError):
-        return None
+    return ipc.read_json(os.path.join(root, "ready.json"))
 
 
 def request(root, op, timeout=15.0, **payload):
     """Send one command; return the agent's reply, or {"ok": False, "error"} on timeout."""
-    reply_dir = os.path.join(root, "reply")
-    seq = max([int(n.split(".")[0]) for n in os.listdir(reply_dir) if n.endswith(".json")]
-              + [0]) + 1 if os.path.isdir(reply_dir) else 1
-    seq = max(seq, int(time.time() * 1000))        # monotonic across clients
-    t0 = time.perf_counter()
-    _write_json(os.path.join(root, "ctl.json"), {"seq": seq, "op": op, **payload})
-    path = os.path.join(reply_dir, f"{seq}.json")
-    while time.perf_counter() - t0 < timeout:
-        try:
-            with open(path) as f:
-                r = json.load(f)
-            r["client_roundtrip_s"] = round(time.perf_counter() - t0, 6)
-            return r
-        except (OSError, ValueError):
-            time.sleep(0.002)
-    return {"ok": False, "error": f"no reply from the live agent in {timeout} s",
-            "client_roundtrip_s": round(time.perf_counter() - t0, 6)}
+    r = ipc.file_channel_call(root, {"op": op, **payload}, timeout=timeout, poll_s=0.002)
+    r["client_roundtrip_s"] = r.get("client_round_trip_s", 0.0)
+    if r.get("lost"):
+        return {"ok": False, "error": f"no reply from the live agent in {timeout} s",
+                "client_roundtrip_s": r["client_roundtrip_s"]}
+    return r

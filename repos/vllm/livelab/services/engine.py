@@ -95,11 +95,13 @@ adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune 
 mode are not built. Pass their vLLM flags in the argv or set their variables in the
 environment.
 """
-import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request, uuid
+import argparse, json, os, signal, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
+import forksafe  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402
 
 LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
@@ -177,20 +179,10 @@ def cute_dsl_arch(visible):
             file=sys.stderr)
         return None
     major, minor = (int(x) for x in caps.pop().split("."))
-    return f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+    return forksafe.cute_dsl_arch((major, minor))
 
 
-def port_in_use(port, host="127.0.0.1"):
-    """True when something already listens on host:port (a connect succeeds). Not a bind test:
-    a bind also fails on a privileged port or a TIME_WAIT socket, where nothing answers."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        return s.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-    finally:
-        s.close()
+port_in_use = proc.port_in_use
 
 
 def read_vllm_args(a, vargv, env):
@@ -427,9 +419,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
             "zygote": launcher_args.zygote,
         },
     }
-    temp_path = state_path.with_suffix(f".{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(record))
-    temp_path.replace(state_path)
+    ipc.atomic_write_json(state_path, record)
 
 
 def _strip_injected_flags(argv):

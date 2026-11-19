@@ -57,9 +57,7 @@ How a transaction runs (kernel `StepGapCoordinator`):
 The host records every step's duration, so a reply says how long steps stalled.
 """
 import collections
-import importlib.abc
 import itertools
-import json
 import os
 import statistics
 import sys
@@ -67,6 +65,7 @@ import threading
 import time
 import traceback
 
+from fastrsi import hooks, ipc, lab as lab_base
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import receipt as R
@@ -248,58 +247,8 @@ def parallel(core):
     return {"world": world, "dp": dp, "dp_rank": rank, "expected": expected, "note": note}
 
 
-class RecaptureCoordinator(C.StepGapCoordinator):
-    """StepGapCoordinator plus selective CUDA graph recapture after a commit, in the same gap
-    (see the module doc). `rebuild(txn, spec)` reaches the worker ranks."""
-
-    def __init__(self, *a, rebuild=None, **k):
-        super().__init__(*a, **k)
-        self.rebuild = rebuild
-
-    def _phase2(self, txn, tl):
-        out = super()._phase2(txn, tl)
-        plan = self.txns[txn]["plan"]
-        rebuild_keys = plan.get("rebuild") or ()
-        if out["outcome"] != "committed" or not ("recapture" in rebuild_keys or "R1" in rebuild_keys):
-            return out
-        spec = dict(plan.get("recapture") or plan.get("r1") or {})
-        t0 = self.clock()
-        r = self.rebuild(txn, spec)
-        tl["rebuilt"] = self.clock()
-        ranks = r.get("ranks") or []
-        dur = round(tl["rebuilt"] - t0, 6)
-        route_name = "recapture" if "recapture" in rebuild_keys else "R1"
-        out["rebuild"] = {"ok": bool(r.get("ok")), "routes": [route_name],
-                          "seconds": {route_name: dur, "R1": dur, "recapture": dur}, "spec": spec,
-                          "ranks": {str(x.get("rank")): {k: x.get(k) for k in (
-                              "ok", "error", "seconds", "captured", "modes", "wrappers",
-                              "eager", "memory", "skipped")} for x in ranks}}
-        if r.get("ok"):
-            self.txns[txn]["rebuilt"] = [route_name]
-            return out
-        fs = [f for x in ranks for f in x.get("findings", [])] or [F.finding(
-            "rebuild_failed", str(r.get("error")), "recapture on every rank")]
-        out["extra"] += [{**f, "participant": "workers"} for f in fs]
-        rb = out["rollback"] = {"status": "undone", "participants": {}}
-        res = self.txns[txn]["res"]
-        # the undo gets the phase-2 deadline afresh (a participant that misses it poisons
-        # the host in _bounded, and pending_rollback then holds steps until it lands)
-        undo_deadline = time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
-        missed = set()
-        for p in reversed(self.participants):
-            rb["participants"][p.name] = res[p.name]["undo"] = self._bounded(
-                p, "undo", txn, undo_deadline, missed)
-        if not all(u["ok"] for u in rb["participants"].values()):
-            rb["status"] = "partial"
-            with self._lock:
-                self.txns[txn]["pending_rollback"] = [
-                    participant for participant in reversed(self.participants)
-                    if not rb["participants"][participant.name]["ok"]
-                ]
-        out["outcome"] = "rolled_back"
-        tl.pop("committed", None)
-        tl["gap_end"] = self.clock()
-        return out
+class RecaptureCoordinator(lab_base.RecaptureCoordinator):
+    """`fastrsi.lab.RecaptureCoordinator` plus vLLM's in-loop pending-rollback gate."""
 
     def _queue_rollback_gate(self):
         gap_owner = getattr(self.gap, "__self__", None)
@@ -482,23 +431,7 @@ class Host:
         return r
 
     def control(self):
-        ctl = os.path.join(self.root, "ctl.json")
-        os.makedirs(os.path.join(self.root, "reply"), exist_ok=True)
-        last = 0
-        while True:
-            try:
-                with open(ctl) as f:
-                    cmd = json.load(f)
-            except (OSError, ValueError):
-                cmd = None
-            if cmd and cmd.get("seq", 0) > last:
-                last = cmd["seq"]
-                r = self.handle(cmd)
-                tmp = os.path.join(self.root, "reply", f".{last}.tmp")
-                with open(tmp, "w") as f:
-                    json.dump(r, f, default=str)
-                os.replace(tmp, os.path.join(self.root, "reply", f"{last}.json"))
-            time.sleep(0.01)
+        ipc.FileChannelServer(self.root, self.handle, poll_s=0.01, start=False)._run()
 
 
 def _patch_core(mod):
@@ -569,36 +502,11 @@ def _patch_core(mod):
     P.run_busy_loop = run_busy_loop
 
 
-class _After(importlib.abc.MetaPathFinder):
-    """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
-    finders load it: it asks only the finders after it on sys.meta_path, in order (an overlay
-    finder first, then the installed package), instead of PathFinder directly, which would
-    bypass the overlay and report a false base_mismatch. Never the finders in front of it:
-    one of those may be asking it right now."""
+class _After(hooks.AfterImportHook):
+    """Stack-safe import hook patching `vllm.v1.engine.core` via downstream finders only."""
 
-    def find_spec(self, name, path, target=None):
-        if name != "vllm.v1.engine.core":
-            return None
-        spec = None
-        finders = list(sys.meta_path)
-        # only the finders after this one: a finder in front of it that asks every other
-        # finder (live_reconfig's does) would otherwise be asked again, forever
-        later = finders[finders.index(self) + 1:] if self in finders else finders
-        for finder in later:
-            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
-                continue
-            spec = finder.find_spec(name, path, target)
-            if spec is not None:
-                break
-        if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
-            return None
-        orig = spec.loader.exec_module
-
-        def exec_module(module):
-            orig(module)
-            _patch_core(module)
-        spec.loader.exec_module = exec_module
-        return spec
+    def __init__(self):
+        super().__init__("vllm.v1.engine.core", _patch_core, once=False)
 
 
 if DIR and not any(isinstance(f, _After) for f in sys.meta_path):

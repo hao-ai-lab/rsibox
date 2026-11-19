@@ -28,6 +28,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from fastrsi import harness
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -50,9 +51,8 @@ HOOK_SITE = "import os\nif os.environ.get('FASTRSI_KERNEL_DIR'):\n    import ada
 _seq = itertools.count(1)
 
 
-def _edit(source, old, new):
-    assert source.count(old) == 1, f"anchor not unique ({source.count(old)}): {old!r}"
-    return source.replace(old, new)
+_edit = harness.edit_once
+_module_relpath = harness.module_relpath
 
 
 def _alive(pid):
@@ -88,12 +88,6 @@ def _site_packages(venv):
     if spec and spec.submodule_search_locations:
         return os.path.dirname(list(spec.submodule_search_locations)[0])
     raise RuntimeError(f"vllm package not found under {venv}")
-
-
-def _module_relpath(site, module_name):
-    parts = module_name.split(".")
-    pkg_init = os.path.join(site, *parts, "__init__.py")
-    return os.path.join(*parts, "__init__.py") if os.path.isfile(pkg_init) else os.path.join(*parts) + ".py"
 
 
 def _check_topology(ping, tp):

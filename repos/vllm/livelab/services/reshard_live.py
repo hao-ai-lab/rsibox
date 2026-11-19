@@ -59,6 +59,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
+if LIVELAB not in sys.path:
+    sys.path.insert(1, LIVELAB)
+
+from fastrsi import ipc  # noqa: E402
 
 
 def map_global_expert_to_ep(*args, **kwargs):
@@ -630,18 +636,8 @@ def _record_path(state_dir, socket_dir):
     return Path(state_dir) / f"group_{h}.json"
 
 
-def _read_record(path):
-    try:
-        return json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-
-
-def _write_record(path, record):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(record))
-    tmp.replace(path)
+_read_record = ipc.read_json
+_write_record = ipc.atomic_write_json
 
 
 def stop_group(pid, grace=15.0):

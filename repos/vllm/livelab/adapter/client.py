@@ -8,30 +8,18 @@ took in the engine core, steps held for pause keep, and step durations during th
 import json
 import os
 import sys
-import time
+
+if not __package__:
+    _livelab = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+        os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
+    if _livelab not in sys.path:
+        sys.path.insert(0, _livelab)
+
+from fastrsi import ipc  # noqa: E402
 
 
 def send(root, cmd, timeout=300.0):
-    ctl = os.path.join(root, "ctl.json")
-    try:
-        with open(ctl) as f:
-            seq = json.load(f)["seq"] + 1
-    except (OSError, ValueError, KeyError):
-        seq = 1
-    cmd = {**cmd, "seq": seq}
-    t = time.time()
-    with open(ctl + ".tmp", "w") as f:
-        json.dump(cmd, f)
-    os.replace(ctl + ".tmp", ctl)
-    rp = os.path.join(root, "reply", f"{seq}.json")
-    while not os.path.exists(rp):
-        if time.time() - t > timeout:
-            return {"ok": False, "error": f"no reply in {timeout} s", "seq": seq}
-        time.sleep(0.005)
-    with open(rp) as f:
-        r = json.load(f)
-    r["client_round_trip_s"] = round(time.time() - t, 4)
-    return r
+    return ipc.file_channel_call(root, cmd, timeout=timeout, poll_s=0.005)
 
 
 if __name__ == "__main__":
