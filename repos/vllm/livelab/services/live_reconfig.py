@@ -34,13 +34,16 @@ import os
 import sys
 import threading
 import time
-import traceback
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_HERE)
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+if _ROOT not in sys.path:
+    sys.path.append(_ROOT)
 import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 from fastrsi import hooks, ipc  # noqa: E402
+from services import core_hook  # noqa: E402
 
 TAG = "FASTRSI_LIVE_RECONFIG"
 ENV = "FASTRSI_LIVE_RECONFIG_DIR"
@@ -134,17 +137,7 @@ def _sync_api_policy(obj):
             sc.policy = policy
 
 
-class _Job:
-    def __init__(self, fn):
-        self.fn, self.done, self.value, self.error = fn, threading.Event(), None, None
-
-    def run(self):
-        try:
-            self.value = self.fn()
-        except BaseException as e:      # noqa: BLE001 - reported to the client, loop survives
-            self.error = f"{type(e).__name__}: {e}\n{traceback.format_exc()[-1500:]}"
-        finally:
-            self.done.set()
+_Job = core_hook.LoopJob
 
 
 class Agent:
@@ -205,13 +198,7 @@ class Agent:
                 "pid": os.getpid()}
 
     def in_loop(self, fn, timeout=30.0):
-        job = _Job(fn)
-        self.core.input_queue.put_nowait((TAG, job))
-        if not job.done.wait(timeout):
-            raise TimeoutError(f"engine loop did not run the job within {timeout} s")
-        if job.error:
-            raise RuntimeError(job.error)
-        return job.value
+        return core_hook.in_loop(self.core, TAG, fn, gap=False, timeout=timeout)
 
     def handle(self, cmd):
         op = cmd.get("op")
@@ -228,52 +215,50 @@ class Agent:
         r["seq"], r["roundtrip_in_engine_s"] = cmd.get("seq"), round(time.perf_counter() - t0, 6)
         return r
 
-    def control(self):
-        ipc.FileChannelServer(self.root, self.handle, poll_s=0.005, start=False)._run()
+
+def _before_step(core, hold):
+    if not hold and _AGENT and _AGENT[0].core is core:
+        _AGENT[0].tick()
+
+
+def _on_loop_start(core):
+    root = os.environ.get(ENV)
+    pc = getattr(getattr(core, "vllm_config", None), "parallel_config", None)
+    dp_size = int(getattr(pc, "data_parallel_size", 1) or 1)
+    if root and not _AGENT and dp_size == 1:
+        try:
+            agent = Agent(core, root)
+            os.makedirs(root, exist_ok=True)
+            _AGENT.append(agent)
+            _write_json(os.path.join(root, "ready.json"), {
+                "pid": os.getpid(), "api_pid": os.getppid(), "boot": agent.boot,
+                "live_fields": list(LIVE_FIELDS), "dp_size": dp_size, "t": time.time()})
+            return (root, agent.handle, 0.005)
+        except Exception as e:          # noqa: BLE001 - the engine runs without the agent
+            print(f"{TAG}: agent not started: {e!r}", file=sys.stderr, flush=True)
+    elif root and dp_size != 1:
+        print(f"{TAG}: data_parallel_size={dp_size}: no live agent (DP=1 only)",
+              file=sys.stderr, flush=True)
+    return None
+
+
+def _on_patch(proc_cls):
+    proc_cls._fastrsi_live_reconfig = True
+
+
+def _register_core_plugin():
+    core_hook.register(core_hook.CorePlugin(
+        name="live_reconfig",
+        tag=TAG,
+        on_loop_start=_on_loop_start,
+        before_step=_before_step,
+        on_patch=_on_patch,
+    ))
 
 
 def _patch_core(mod):
-    P = mod.EngineCoreProc
-    if getattr(P, "_fastrsi_live_reconfig", False):
-        return
-    orig_handle, orig_step, orig_loop = (P._handle_client_request, P._process_engine_step,
-                                         P.run_busy_loop)
-
-    def _handle_client_request(self, request_type, request):
-        if request_type == TAG:
-            return request.run()
-        return orig_handle(self, request_type, request)
-
-    def _process_engine_step(self):
-        if _AGENT and _AGENT[0].core is self:
-            _AGENT[0].tick()
-        return orig_step(self)
-
-    def run_busy_loop(self):
-        root = os.environ.get(ENV)
-        pc = getattr(getattr(self, "vllm_config", None), "parallel_config", None)
-        dp_size = int(getattr(pc, "data_parallel_size", 1) or 1)
-        if root and not _AGENT and dp_size == 1:
-            try:
-                agent = Agent(self, root)
-                os.makedirs(root, exist_ok=True)
-                _AGENT.append(agent)
-                threading.Thread(target=agent.control, daemon=True,
-                                 name="fastrsi-live-reconfig").start()
-                _write_json(os.path.join(root, "ready.json"), {
-                    "pid": os.getpid(), "api_pid": os.getppid(), "boot": agent.boot,
-                    "live_fields": list(LIVE_FIELDS), "dp_size": dp_size, "t": time.time()})
-            except Exception as e:      # noqa: BLE001 - the engine runs without the agent
-                print(f"{TAG}: agent not started: {e!r}", file=sys.stderr, flush=True)
-        elif root and dp_size != 1:
-            print(f"{TAG}: data_parallel_size={dp_size}: no live agent (DP=1 only)",
-                  file=sys.stderr, flush=True)
-        return orig_loop(self)
-
-    P._handle_client_request = _handle_client_request
-    P._process_engine_step = _process_engine_step
-    P.run_busy_loop = run_busy_loop
-    P._fastrsi_live_reconfig = True
+    _register_core_plugin()
+    core_hook._patch_core(mod)
 
 
 def _patch_api_entry(mod, cls_names, method_name):
@@ -326,7 +311,7 @@ def _patch_http_priority(mod):
 
 _IMPORT_HOOKS = (
     ("vllm.entrypoints.generate.base.serving", _patch_http_priority),
-    ("vllm.v1.engine.core", _patch_core),
+    (core_hook.TARGET_MODULE, core_hook._patch_core),
     ("vllm.v1.engine.input_processor", _patch_input_processor),
     ("vllm.v1.engine.processor", _patch_input_processor),
     ("vllm.v1.engine.async_llm", _patch_async_llm),
@@ -335,6 +320,7 @@ _IMPORT_HOOKS = (
 
 def install():
     """Called by live_site/sitecustomize.py when ENV is set."""
+    _register_core_plugin()
     for mod_name, patcher in _IMPORT_HOOKS:
         hooks.install_import_hook(mod_name, patcher, once=False)
 

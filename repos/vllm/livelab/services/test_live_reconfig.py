@@ -230,3 +230,269 @@ def test_serving_priority_uses_effective_header_and_live_policy(tmp_path, monkey
         else:
             with pytest.raises(VLLMValidationError, match="priority"):
                 handler._get_priority(request, None)
+
+
+_COMPOSED_CHILD = r'''
+import json, os, queue, sys, threading, types
+
+sys.path[:0] = [{livelab!r}, {services!r}, {pkgs!r}]
+vllm_stub = types.ModuleType("vllm")
+vllm_stub.__version__ = "0.0-test"
+vllm_stub.__path__ = [os.path.join({pkgs!r}, "vllm")]
+sys.modules["vllm"] = vllm_stub
+
+mode = {mode!r}
+order = {order!r}
+if mode == "kernel_only":
+    import adapter.host as host_mod
+    lr_mod = None
+elif mode == "reconfig_only":
+    import live_reconfig as lr_mod
+    lr_mod.install()
+    host_mod = None
+elif order == "reconfig_first":
+    import live_reconfig as lr_mod
+    lr_mod.install()
+    import adapter.host as host_mod
+else:
+    import adapter.host as host_mod
+    import live_reconfig as lr_mod
+    lr_mod.install()
+
+from fastrsi import hooks
+core_hooks = [f for f in sys.meta_path
+              if isinstance(f, hooks.AfterImportHook) and f.module_name == "vllm.v1.engine.core"]
+assert len(core_hooks) == 1, f"expected 1 core import hook, got {{len(core_hooks)}}"
+
+import vllm.v1.engine.core as core_mod
+P = core_mod.EngineCoreProc
+before_ids = (id(P._handle_client_request), id(P._process_engine_step), id(P.run_busy_loop))
+if lr_mod is not None:
+    lr_mod._patch_core(core_mod)
+if host_mod is not None:
+    host_mod._patch_core(core_mod)
+after_ids = (id(P._handle_client_request), id(P._process_engine_step), id(P.run_busy_loop))
+assert before_ids == after_ids, f"double patched: {{before_ids}} != {{after_ids}}"
+
+stop = threading.Event()
+core = P(stop)
+loop_thread = threading.Thread(target=core.run_busy_loop, daemon=True)
+loop_thread.start()
+assert core.started.wait(5.0), "busy loop did not start"
+
+ctl_threads = [t.name for t in threading.enumerate()
+               if t.name in ("fastrsi-vllm-core-ctl", "fastrsi-kernel-host", "fastrsi-live-reconfig")]
+assert ctl_threads == ["fastrsi-vllm-core-ctl"], f"unexpected ctl threads: {{ctl_threads}}"
+
+out = {{"channels": len(core._fastrsi_channel_mux._channels),
+       "patched_core": getattr(P, "_fastrsi_core_hook", False),
+       "patched_lr": getattr(P, "_fastrsi_live_reconfig", False)}}
+
+if os.environ.get("FASTRSI_KERNEL_DIR"):
+    from adapter import client
+    ping = client.send(os.environ["FASTRSI_KERNEL_DIR"], {{"op": "ping"}}, timeout=5.0)
+    assert ping.get("ok"), ping
+    out["ping_ok"] = True
+if os.environ.get("FASTRSI_LIVE_RECONFIG_DIR"):
+    import live_reconfig
+    r_set = live_reconfig.request(os.environ["FASTRSI_LIVE_RECONFIG_DIR"], "set",
+                                  timeout=5.0, values={{"max_num_seqs": 4}})
+    assert r_set.get("ok") and r_set["after"]["target_max_num_seqs"] == 4, r_set
+    r_st = live_reconfig.request(os.environ["FASTRSI_LIVE_RECONFIG_DIR"], "status", timeout=5.0)
+    assert r_st.get("ok") and r_st["target_max_num_seqs"] == 4, r_st
+    assert live_reconfig.read_ready(os.environ["FASTRSI_LIVE_RECONFIG_DIR"]) is not None
+    out["reconfig_ok"] = True
+
+stop.set()
+core.input_queue.put_nowait(("STOP", None))
+loop_thread.join(timeout=5.0)
+assert not loop_thread.is_alive()
+print(json.dumps(out))
+'''
+
+
+def test_core_hook_all_env_modes_and_import_orders(tmp_path):
+    """Input: real `vllm.v1.engine.core` import + `run_busy_loop` across kernel-only,
+    reconfig-only, and BOTH-active (in both import orders). Expected: strictly 1 import hook,
+    strictly 1 patch of `EngineCoreProc` (method identity invariant), strictly 1 control thread
+    (`fastrsi-vllm-core-ctl`), and every active channel answers."""
+    import json
+    import os
+
+    pkgs = tmp_path / "pkgs"
+    eng = pkgs / "vllm" / "v1" / "engine"
+    eng.mkdir(parents=True)
+    for pkg in (pkgs / "vllm", pkgs / "vllm" / "v1", eng):
+        (pkg / "__init__.py").write_text("")
+    (eng / "core.py").write_text(
+        "import queue, threading, types\n"
+        "class EngineCoreProc:\n"
+        "    def __init__(self, stop):\n"
+        "        self._stop = stop\n"
+        "        self.started = threading.Event()\n"
+        "        self.input_queue = queue.Queue()\n"
+        "        self.batch_queue = []\n"
+        "        self.model_executor = types.SimpleNamespace(collective_rpc=lambda *a, **k: [])\n"
+        "        self.scheduler = types.SimpleNamespace(\n"
+        "            max_num_running_reqs=8, max_num_scheduled_tokens=64,\n"
+        "            running=[], waiting=[], policy=types.SimpleNamespace(value='fcfs'),\n"
+        "            has_requests=lambda: True)\n"
+        "        self.vllm_config = types.SimpleNamespace(\n"
+        "            scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),\n"
+        "            model_config=types.SimpleNamespace(max_model_len=64),\n"
+        "            parallel_config=types.SimpleNamespace(\n"
+        "                world_size=1, data_parallel_size=1, data_parallel_rank=0))\n"
+        "    def _handle_client_request(self, t, r): pass\n"
+        "    def _process_engine_step(self): return False\n"
+        "    def run_busy_loop(self):\n"
+        "        self.started.set()\n"
+        "        while not self._stop.is_set():\n"
+        "            t, r = self.input_queue.get()\n"
+        "            if t == 'STOP':\n"
+        "                break\n"
+        "            self._handle_client_request(t, r)\n"
+        "            self._process_engine_step()\n"
+    )
+    livelab = str(HERE.parent)
+    cases = [
+        ("kernel_only", None, 1, False),
+        ("reconfig_only", None, 1, True),
+        ("both", "reconfig_first", 2, True),
+        ("both", "host_first", 2, True),
+    ]
+    for idx, (mode, order, expected_channels, expect_lr) in enumerate(cases):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("FASTRSI_KERNEL_DIR", "FASTRSI_LIVE_RECONFIG_DIR")}
+        if mode in ("kernel_only", "both"):
+            kdir = tmp_path / f"k-{idx}"
+            kdir.mkdir()
+            env["FASTRSI_KERNEL_DIR"] = str(kdir)
+        if mode in ("reconfig_only", "both"):
+            ldir = tmp_path / f"l-{idx}"
+            ldir.mkdir()
+            env["FASTRSI_LIVE_RECONFIG_DIR"] = str(ldir)
+        code = _COMPOSED_CHILD.format(
+            livelab=livelab, services=str(HERE), pkgs=str(pkgs), mode=mode, order=order
+        )
+        res = subprocess.run(
+            [sys.executable, "-W", "error::ResourceWarning", "-c", code],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert res.returncode == 0, f"{mode}/{order}: {res.stderr[-2000:]}"
+        data = json.loads(res.stdout.strip().splitlines()[-1])
+        assert data["channels"] == expected_channels, (mode, order, data)
+        assert data["patched_core"] is True
+        assert data["patched_lr"] is expect_lr
+        if mode in ("kernel_only", "both"):
+            assert data.get("ping_ok") is True
+        if mode in ("reconfig_only", "both"):
+            assert data.get("reconfig_ok") is True
+
+
+def test_core_hook_pause_keep_and_rollback_hold_isolate_live_reconfig(monkeypatch):
+    """When host holds a step (pause-keep or pending rollback), live_reconfig's tick is skipped
+    so scheduler limits and step counters are not mutated mid-gap; normal steps run both."""
+    import types
+    livelab = str(HERE.parent)
+    if livelab not in sys.path:
+        sys.path.insert(0, livelab)
+    import adapter.host as host_mod
+    import live_reconfig
+
+    events = []
+
+    class Scheduler:
+        def __init__(self):
+            self.max_num_running_reqs = 8
+            self.max_num_scheduled_tokens = 64
+            self.running = []
+            self.waiting = []
+            self.policy = types.SimpleNamespace(value="fcfs")
+
+        def has_requests(self):
+            return True
+
+    class EngineCoreProc:
+        def __init__(self):
+            self.batch_queue = ["b0"]
+            self.scheduler = Scheduler()
+            self.vllm_config = types.SimpleNamespace(
+                scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),
+                model_config=types.SimpleNamespace(max_model_len=64),
+            )
+
+        def _handle_client_request(self, t, r):
+            pass
+
+        def _process_engine_step(self):
+            events.append(("step", self.scheduler.has_requests(),
+                           self.scheduler.max_num_running_reqs))
+            self.batch_queue.clear()
+            return True
+
+        def run_busy_loop(self):
+            pass
+
+    mod = types.SimpleNamespace(EngineCoreProc=EngineCoreProc)
+    live_reconfig._patch_core(mod)
+    host_mod._patch_core(mod)
+
+    core = EngineCoreProc()
+    agent = live_reconfig.Agent(core, None)
+    agent.target_seqs = 4
+    rollback_flag = [False]
+    fake_co = types.SimpleNamespace(
+        poll_rollback=lambda: rollback_flag[0],
+        has_pending_rollback=lambda: rollback_flag[0],
+    )
+    ticks = []
+    fake_host = types.SimpleNamespace(
+        pending=[host_mod._Job(lambda: events.append("gap_job"), gap=True)],
+        held_steps=0, steps=[], co=fake_co, loop_thread=None,
+        core_side=types.SimpleNamespace(tick=lambda entering: ticks.append(entering)),
+    )
+    monkeypatch.setattr(host_mod, "_HOST", [fake_host])
+    monkeypatch.setattr(live_reconfig, "_AGENT", [agent])
+
+    # 1. Pause-keep while batch_queue drains: agent.tick() is skipped, then gap_job runs.
+    assert core._process_engine_step() is True
+    assert events == [("step", False, 8), "gap_job"]
+    assert agent.steps == 0 and core.scheduler.max_num_running_reqs == 8
+    assert fake_host.held_steps == 1
+
+    # 2. Pending rollback with empty batch_queue: step short-circuits, agent.tick() skipped.
+    rollback_flag[0] = True
+    assert core._process_engine_step() is False
+    assert agent.steps == 0 and core.scheduler.max_num_running_reqs == 8
+    assert fake_host.held_steps == 2
+
+    # 3. Normal step: both live_reconfig.tick() and host hooks run.
+    rollback_flag[0] = False
+    assert core._process_engine_step() is True
+    assert agent.steps == 1 and core.scheduler.max_num_running_reqs == 4
+    assert len(fake_host.steps) == 2 and ticks == [True, False, True, False]
+
+
+def test_core_hook_refuses_duplicate_control_dir(tmp_path, capsys):
+    """Two plugins pointing at the same control dir: second is refused with a stderr diagnostic."""
+    livelab = str(HERE.parent)
+    if livelab not in sys.path:
+        sys.path.insert(0, livelab)
+    from fastrsi import ipc
+    from services import core_hook
+
+    seen = []
+    same = str(tmp_path / "shared")
+    mux = core_hook._ChannelMux([
+        ("live_reconfig", same, lambda cmd: seen.append(("lr", cmd)) or {"ok": True, "who": "lr"}, 0.005),
+        ("kernel_host", same, lambda cmd: seen.append(("kh", cmd)) or {"ok": True, "who": "kh"}, 0.01),
+    ])
+    err = capsys.readouterr().err
+    assert "refusing duplicate control dir" in err
+    assert len(mux._channels) == 1
+    assert mux._channels[0]["name"] == "live_reconfig"
+    ipc.atomic_write_json(tmp_path / "shared" / "ctl.json", {"seq": 1, "op": "status"})
+    mux.poll_once()
+    reply = ipc.read_json(tmp_path / "shared" / "reply" / "1.json")
+    assert reply == {"ok": True, "who": "lr"}
+    assert len(seen) == 1

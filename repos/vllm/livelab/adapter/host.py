@@ -65,10 +65,11 @@ import threading
 import time
 import traceback
 
-from fastrsi import hooks, ipc, lab as lab_base
+from fastrsi import hooks, lab as lab_base
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import receipt as R
+from services import core_hook
 
 from .side import Side
 
@@ -79,33 +80,8 @@ PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5"))
 RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
-
-
-class _Job:
-    """A callable for the busy loop. gap=True: run only with no batch in flight."""
-
-    def __init__(self, fn, gap):
-        self.fn, self.gap = fn, gap
-        self.done, self.started = threading.Event(), threading.Event()
-        self.lock = threading.Lock()
-        self.cancelled = False         # the caller stopped waiting before it started
-        self.value = self.error = None
-
-    def run(self):
-        with self.lock:
-            if self.cancelled:
-                self.done.set()
-                return
-            self.started.set()
-        try:
-            self.value = self.fn()
-        except BaseException as e:            # handed back to the waiting caller
-            self.error = e
-        self.done.set()
-
-
-class LateJob(TimeoutError):
-    """The loop started the job but it did not finish in time: it may still be running."""
+_Job = core_hook.LoopJob
+LateJob = core_hook.LateJob
 
 
 class WorkerGroup(C.Participant):
@@ -344,21 +320,9 @@ class Host:
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
         in flight) and return its result. The loop must start the job within `timeout` (else
         it is cancelled and never runs); once started it may run `timeout` more seconds."""
-        if threading.current_thread() is self.loop_thread:
-            return fn()
-        job = _Job(fn, gap)
-        self.core.input_queue.put_nowait((TAG, job))
-        if not job.started.wait(timeout):
-            with job.lock:
-                if not job.started.is_set():
-                    job.cancelled = True
-                    raise TimeoutError(f"the engine loop did not run the job within {timeout} s")
-        if not job.done.wait(timeout):
-            raise LateJob(f"the engine loop started the job but it did not finish within "
-                          f"{timeout} s")
-        if job.error is not None:
-            raise job.error
-        return job.value
+        return core_hook.in_loop(
+            self.core, TAG, fn, gap=gap, timeout=timeout, loop_thread=self.loop_thread
+        )
 
     def step_stats(self, t0, t1):
         d = [s for start, s in list(self.steps) if t0 <= start <= t1]
@@ -430,87 +394,89 @@ class Host:
                                                     if a <= st <= b)
         return r
 
-    def control(self):
-        ipc.FileChannelServer(self.root, self.handle, poll_s=0.01, start=False)._run()
+def _cur():
+    return _HOST[0] if _HOST else None
 
 
-def _patch_core(mod):
-    P = mod.EngineCoreProc
-    orig_handle, orig_step, orig_loop = (P._handle_client_request, P._process_engine_step,
-                                         P.run_busy_loop)
+def _drain(host, core):
+    host.pending = [j for j in host.pending if not getattr(j, "cancelled", False)]
+    while host.pending and not core.batch_queue:
+        host.pending.pop(0).run()
 
-    def _handle_client_request(self, request_type, request):
-        if request_type != TAG:
-            return orig_handle(self, request_type, request)
-        if request.gap and self.batch_queue:     # a batch is in flight: after it lands
-            _HOST[0].pending.append(request)
-        else:
-            request.run()
 
-    def _process_engine_step(self):
-        host = _HOST[0] if _HOST else None
-        coordinator = getattr(host, "co", None)
-        core_side = getattr(host, "core_side", None)
-        if host is not None:
-            host.loop_thread = threading.current_thread()
-            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
-            while host.pending and not self.batch_queue:
-                host.pending.pop(0).run()
-            if not self.batch_queue and coordinator is not None and coordinator.poll_rollback():
-                host.held_steps += 1
-                time.sleep(0.005)
-                return False
-        hold = bool(
-            host and (
-                host.pending or (coordinator is not None and coordinator.has_pending_rollback())
-            ) and self.batch_queue
-        )
-        if hold:                                 # pause keep: schedule nothing new
-            self.scheduler.has_requests = lambda: False
-            host.held_steps += 1
-        if core_side is not None:
-            core_side.tick(True)
-        step_start = time.perf_counter()
-        try:
-            result = orig_step(self)
-        finally:
-            if hold:
-                del self.scheduler.has_requests
-        if host is not None:
-            if core_side is not None:
-                core_side.tick(False)
-            host.steps.append((step_start, time.perf_counter() - step_start))
-            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
-            while host.pending and not self.batch_queue:
-                host.pending.pop(0).run()
-        return result
+def _on_request(core, request):
+    if request.gap and core.batch_queue:         # a batch is in flight: after it lands
+        _HOST[0].pending.append(request)
+    else:
+        request.run()
 
-    def run_busy_loop(self):
-        pc = getattr(getattr(self, "vllm_config", None), "parallel_config", None)
-        if DIR and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
-            print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "
-                  "channel)", file=sys.stderr, flush=True)
-            return orig_loop(self)
-        if DIR and not _HOST:
-            h = Host(self, DIR)
-            _HOST.append(h)
-            threading.Thread(target=h.control, daemon=True, name="fastrsi-kernel-host").start()
-        return orig_loop(self)
 
-    P._handle_client_request = _handle_client_request
-    P._process_engine_step = _process_engine_step
-    P.run_busy_loop = run_busy_loop
+def _pre_step(core):
+    host = _cur()
+    if host is None:
+        return True
+    co = getattr(host, "co", None)
+    host.loop_thread = threading.current_thread()
+    _drain(host, core)
+    if not core.batch_queue and co is not None and co.poll_rollback():
+        host.held_steps += 1
+        time.sleep(0.005)
+        return False
+    return True
+
+
+def _should_hold(core):
+    host = _cur()
+    co = getattr(host, "co", None)
+    return bool(host and (host.pending or (co is not None and co.has_pending_rollback()))
+                and core.batch_queue)
+
+
+def _before_step(_core, _hold):
+    side = getattr(_cur(), "core_side", None)
+    if side is not None:
+        side.tick(True)
+
+
+def _after_step(core, step_start, _result):
+    host = _cur()
+    if host is None:
+        return
+    if getattr(host, "core_side", None) is not None:
+        host.core_side.tick(False)
+    host.steps.append((step_start, time.perf_counter() - step_start))
+    _drain(host, core)
+
+
+def _on_loop_start(core):
+    root = DIR or os.environ.get("FASTRSI_KERNEL_DIR")
+    pc = getattr(getattr(core, "vllm_config", None), "parallel_config", None)
+    if root and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
+        print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "
+              "channel)", file=sys.stderr, flush=True)
+        return None
+    if root and not _HOST:
+        h = Host(core, root)
+        _HOST.append(h)
+        return (h.root, h.handle, 0.01)
+    return None
+
+
+core_hook.register(core_hook.CorePlugin(
+    name="kernel_host", tag=TAG, on_loop_start=_on_loop_start, on_request=_on_request,
+    pre_step=_pre_step, should_hold=_should_hold, on_hold=lambda _: setattr(_HOST[0], "held_steps", _HOST[0].held_steps + 1),
+    before_step=_before_step, after_step=_after_step,
+))
+
+_patch_core = core_hook._patch_core
 
 
 class _After(hooks.AfterImportHook):
     """Stack-safe import hook patching `vllm.v1.engine.core` via downstream finders only."""
 
     def __init__(self):
-        super().__init__("vllm.v1.engine.core", _patch_core, once=False)
+        super().__init__(core_hook.TARGET_MODULE, _patch_core, once=False)
 
 
-if DIR and not any(isinstance(f, _After) for f in sys.meta_path):
-    if "vllm.v1.engine.core" in sys.modules:     # imported before this module: patch it now
-        _patch_core(sys.modules["vllm.v1.engine.core"])
-    else:
-        sys.meta_path.insert(0, _After())
+if DIR:
+    core_hook.install()
