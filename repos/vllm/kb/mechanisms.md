@@ -7,7 +7,7 @@ Source: our survey of vLLM performance PRs (`2026-07-24` to `2026-10-24`: 487 pe
 | Swap Python methods or objects in place | 20% | OP, STATE | Scheduler hot patch + drain request/prefix queues (#57951): 66.3 s → 0.6 s |
 | Swap code inside compiled graphs, recapture graphs, re-JIT kernels | 51% | GRAPH | GDN spec outputs into caller buffer (#57140): 70.6 s → 2.4 s |
 | Swap code and rebuild pre-allocated buffers or runners | 8% | STATE, RESOURCE | |
-| Compile C++/CUDA into a versioned shared library, recapture | 10% | NATIVE | fused add RMSNorm (#49750): live 17.12 s (17.09 s nvcc build, 1.17 ms load) + 0.83 s R1 recapture vs 49.47 s restart, undo 6.55 ms (`native.py`) |
+| Compile C++/CUDA into a versioned shared library, recapture | 10% | NATIVE | fused add RMSNorm (#49750): live 19.22 s total incl. check (17.12 s commit [17.09 s nvcc build, 1.17 ms load] + 0.83 s R1 recapture + 1.27 s check) vs 49.47 s restart, undo 6.55 ms (`native.py`) |
 | Needs a restart (Rust rebuild, weights, startup logic, launch flags) | 11% | | |
 
 ## Reset rules (known so far)

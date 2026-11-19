@@ -236,7 +236,7 @@
       "note": "not recorded"
      },
      "installed_live": true,
-     "install_time": "17.12 s (17.09 s nvcc build, 1.17 ms load, 0.83 s R1 graph recapture; 0.0065 s cascade undo) on 1x B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
+     "install_time": "19.22 s total incl. check (17.12 s commit incl. 17.09 s nvcc build and 1.17 ms load + 0.83 s R1 graph recapture + 1.27 s check; 0.0065 s cascade undo) on 1x B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
      "check_time": "1.27 s (live) vs 1.58 s (fresh)",
      "restart_time_replaced": "49.47 s (fresh restart + nvcc build + check on 1x B200 vLLM 0.33.0 Qwen3-8B)",
      "measured_effect": "non-contiguous residual accepted in live GPU check (max abs err 0.0156 vs reference)",

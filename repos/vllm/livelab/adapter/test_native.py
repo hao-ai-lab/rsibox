@@ -444,6 +444,49 @@ class NativeUnitTests(unittest.TestCase):
                 self.assertEqual(fake_torch.ops._C.fused_add_rms_norm(4), 5)
                 self.assertEqual(sys.modules[f"{pkg}.ops"].activate(4), 5)
 
+    def test_spec_key_tracks_env_arch_and_rejects_path_traversal(self):
+        """`FASTRSI_NATIVE_ARCH` participates in `spec_key`, and `/`/`.`/`..` escapes raise ValueError."""
+        fake_torch, _, _ = _make_fake_torch()
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc = _make_csrc(tmp, body="// base\nvoid f() {}\n")
+            build_root = os.path.join(tmp, "build")
+            spec_auto = _native_spec(csrc, build_root)
+            spec_auto["arch"] = "auto"
+
+            with mock.patch.dict(os.environ, {"FASTRSI_NATIVE_ARCH": "90a"}):
+                k_90a = N.spec_key(spec_auto)
+            with mock.patch.dict(os.environ, {"FASTRSI_NATIVE_ARCH": "100a"}):
+                k_100a = N.spec_key(spec_auto)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("FASTRSI_NATIVE_ARCH", None)
+                k_none = N.spec_key(spec_auto)
+            self.assertEqual(len({k_90a, k_100a, k_none}), 3)
+
+            stage_parent = os.path.join(tmp, "sandbox")
+            csrc_stage = os.path.join(stage_parent, "csrc")
+            os.makedirs(csrc_stage, exist_ok=True)
+            escape_name = os.path.join(stage_parent, "escape.cu")
+            for bad_rel in ("../escape.cu", "sub/../../escape.cu", "/etc/passwd", "a//b.cu", "a\\b.cu"):
+                with self.assertRaises(ValueError):
+                    N._apply_source_changes(csrc_stage, {"sources": {bad_rel: "// pwn\n"}})
+                with self.assertRaises(ValueError):
+                    N._apply_source_changes(csrc_stage, {"edits": [[bad_rel, "a", "b"]]})
+                bad_file_spec = _native_spec(csrc, build_root, filename=bad_rel)
+                with (
+                    mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                    mock.patch.object(N, "find_nvcc", return_value="/usr/local/cuda/bin/nvcc"),
+                    mock.patch.object(N.subprocess, "run", side_effect=_fake_nvcc_factory([])),
+                ):
+                    with self.assertRaises(ValueError):
+                        N.build_native(bad_file_spec)
+                    bad_src_spec = _native_spec(csrc, build_root, sources={bad_rel: "// pwn\n"})
+                    with self.assertRaises(ValueError):
+                        N.build_native(bad_src_spec)
+                    bad_edit_spec = _native_spec(csrc, build_root, edits=[[bad_rel, "a", "b"]])
+                    with self.assertRaises(ValueError):
+                        N.build_native(bad_edit_spec)
+            self.assertFalse(os.path.exists(escape_name))
+
 
 if __name__ == "__main__":
     unittest.main()

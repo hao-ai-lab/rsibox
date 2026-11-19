@@ -72,30 +72,52 @@ def detect_arch(arch: str | None = "auto") -> list[str]:
     return ["-gencode", f"arch=compute_{clean},code=sm_{clean}"]
 
 
+def _validate_rel_path(rel: str) -> str:
+    """Validate that `rel` is a normalized relative subpath with no `/` or `..` escape."""
+    if not isinstance(rel, str) or not rel or "\\" in rel or os.path.isabs(rel):
+        raise ValueError(f"invalid relative path in native spec: {rel!r}")
+    parts = rel.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"invalid relative path in native spec: {rel!r}")
+    return rel
+
+
+def _safe_stage_path(root: str, rel: str) -> str:
+    """Resolve `rel` under `root`, rejecting any lexical or symlink escape."""
+    clean = _validate_rel_path(rel)
+    root_real = os.path.realpath(root)
+    dst_real = os.path.realpath(os.path.join(root_real, *clean.split("/")))
+    if dst_real == root_real or not dst_real.startswith(root_real + os.sep):
+        raise ValueError(f"path escapes csrc root: {rel!r}")
+    return os.path.join(root, *clean.split("/"))
+
+
 def spec_key(spec: dict) -> str:
     """Stable content-addressed hash key for a normalized native build spec."""
-    files = list(spec.get("files") or ())
-    sources = dict(spec.get("sources") or {})
+    files = [_validate_rel_path(rel) for rel in (spec.get("files") or ())]
+    sources = {_validate_rel_path(rel): text for rel, text in (spec.get("sources") or {}).items()}
+    edits = [[_validate_rel_path(e[0]), *e[1:]] for e in (spec.get("edits") or ())]
     csrc_root = spec.get("csrc_root")
     disk_hashes = {}
     if csrc_root:
         for rel in files:
             if rel in sources:
                 continue
-            path = os.path.join(csrc_root, rel)
+            path = _safe_stage_path(csrc_root, rel)
             if os.path.isfile(path):
                 with open(path, "rb") as fh:
                     disk_hashes[rel] = hashlib.sha256(fh.read()).hexdigest()
+    arch = os.environ.get("FASTRSI_NATIVE_ARCH") or spec.get("arch") or "auto"
     payload = {
         "files": files,
         "disk_hashes": disk_hashes,
         "sources": sources,
-        "edits": [list(e) for e in (spec.get("edits") or ())],
+        "edits": edits,
         "ops": spec.get("ops") or {},
         "headers": list(spec.get("headers") or ["csrc/libtorch_stable/ops.h"]),
         "stable": bool(spec.get("stable", True)),
         "split_compile": int(spec.get("split_compile", 8)),
-        "arch": spec.get("arch", "auto"),
+        "arch": arch,
         "extra_nvcc_flags": list(spec.get("extra_nvcc_flags") or ()),
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
@@ -133,12 +155,12 @@ def generate_registration(key: str, ops: dict, headers=None, stable: bool = True
 def _apply_source_changes(csrc_stage: str, spec: dict) -> None:
     """Apply `spec['sources']` and `spec['edits']` inside staged `csrc/` directory."""
     for rel, content in (spec.get("sources") or {}).items():
-        dst = os.path.join(csrc_stage, rel)
+        dst = _safe_stage_path(csrc_stage, rel)
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(dst, "w", encoding="utf-8") as fh:
             fh.write(content)
     for rel, old, new in spec.get("edits") or ():
-        dst = os.path.join(csrc_stage, rel)
+        dst = _safe_stage_path(csrc_stage, rel)
         with open(dst, "r", encoding="utf-8") as fh:
             text = fh.read()
         if old not in text:
@@ -152,7 +174,7 @@ def build_native(spec: dict) -> dict:
     csrc_root = os.path.abspath(spec["csrc_root"])
     if not os.path.isdir(csrc_root):
         raise FileNotFoundError(f"csrc_root not found: {csrc_root}")
-    files = list(spec.get("files") or ())
+    files = [_validate_rel_path(rel) for rel in (spec.get("files") or ())]
     ops = dict(spec.get("ops") or {})
     if not files or not ops:
         raise ValueError("native spec requires non-empty 'files' and 'ops'")
@@ -212,6 +234,8 @@ def build_native(spec: dict) -> dict:
             flags.extend(str(f) for f in (spec.get("extra_nvcc_flags") or ()))
 
             objs = []
+            for rel in files:
+                _safe_stage_path(csrc_stage, rel)
             for idx, tu in enumerate([f"csrc/{rel}" for rel in files] + ["reg.cu"]):
                 obj = f"o{idx}.o"
                 objs.append(obj)

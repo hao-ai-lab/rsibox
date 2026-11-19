@@ -139,8 +139,10 @@ current_platform.import_kernels()
 from adapter import native as N
 
 csrc_root, pre_path, pr_path, build_root = sys.argv[1:5]
-pre_src = open(pre_path, encoding="utf-8").read()
-pr_src = open(pr_path, encoding="utf-8").read()
+with open(pre_path, encoding="utf-8") as fh:
+    pre_src = fh.read()
+with open(pr_path, encoding="utf-8") as fh:
+    pr_src = fh.read()
 ln_rel = "libtorch_stable/layernorm_kernels.cu"
 schema = "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, float epsilon) -> ()"
 
@@ -325,8 +327,9 @@ class VllmRunner:
                     tail = fh.read()[-2000:]
                 raise RuntimeError(f"vllm serve ({tag}) exited {self.proc.returncode}:\n{tail}")
             try:
-                if urllib.request.urlopen(url, timeout=2).status == 200:
-                    return round(time.monotonic() - t0, 3)
+                with urllib.request.urlopen(url, timeout=2) as resp:
+                    if resp.status == 200:
+                        return round(time.monotonic() - t0, 3)
             except OSError:
                 pass
             if time.monotonic() - t0 > 600:
