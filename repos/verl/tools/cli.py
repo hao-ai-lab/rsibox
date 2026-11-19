@@ -1,5 +1,5 @@
-"""Gate client, `verl` launcher, and CLI (`python3 -m tools.cli`: `train`, `request`, `stop`, `rescore`, `replay-adv`)."""
-import argparse, importlib.util, json, os, sys, sysconfig, time
+"""Gate client, `verl` launcher, and CLI (`python3 -m tools.cli`: `train`, `request`, `stop`, `conformance`, `rescore`, `replay-adv`)."""
+import argparse, importlib.util, json, os, socket, sys, sysconfig, time
 from pathlib import Path
 
 VERL_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -14,9 +14,12 @@ class GateError(RuntimeError):
 
 
 def _job_died(gate_dir):
+    """True only when the driver PID recorded in gate.json is gone on *this* host; a client on
+    another host (a Slurm login node reading a shared gate dir) cannot see the PID and says no."""
     try:
-        pid = json.loads((gate_dir / "gate.json").read_text(encoding="utf-8")).get("pid")
-        if isinstance(pid, int):
+        info = json.loads((gate_dir / "gate.json").read_text(encoding="utf-8"))
+        pid, host = info.get("pid"), info.get("host")
+        if isinstance(pid, int) and (host is None or host == socket.gethostname()):
             os.kill(pid, 0)
     except ProcessLookupError:
         return True
@@ -87,13 +90,24 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="command", required=True)
     req = sub.add_parser("request")
     req.add_argument("--gate", required=True)
-    req.add_argument("--verb", default="install", choices=("install", "status", "uninstall", "reset"))
-    req.add_argument("--steps", type=int, default=1)
+    req.add_argument("--verb", default="install", choices=("install", "check", "status", "uninstall", "reset", "inject"))
+    req.add_argument("--steps", type=int, default=None, help="RL steps to run after the verb (default: 1 for install/check, else 0)")
     req.add_argument("--timeout", type=float, default=1800.0)
     req.add_argument("--full", action="store_true")
     req.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    req.add_argument("--id", default=None, help="uninstall: undo this transaction and every later one")
+    req.add_argument("--fault", default=None, help="inject: fail_apply | fail_commit | crash | hang | lost | tamper")
+    req.add_argument("--participant", default=None, help="inject: driver, reward<i>, rollout<i> or trainer<i>")
     req.add_argument("files", nargs="*")
     sub.add_parser("stop").add_argument("--gate", required=True)
+    conf = sub.add_parser("conformance", help="run core/livelab conformance c0-c10 against a live gated job")
+    conf.add_argument("--gate", required=True)
+    conf.add_argument("--launch", default=None, help="shell command that starts the gated job on $GATE with reward $REWARD (needed for respawn and fresh checks)")
+    conf.add_argument("--reward", required=True, help="the custom reward file the job loads")
+    conf.add_argument("--only", default="")
+    conf.add_argument("--receipts", default=None)
+    conf.add_argument("--json", action="store_true")
+    conf.add_argument("--check-timeout", type=float, default=None)
     res = sub.add_parser("rescore")
     res.add_argument("--rollouts", required=True)
     res.add_argument("--reward", required=True)
@@ -119,6 +133,16 @@ def main(argv=None):
     if a.command == "stop":
         request(a.gate, stop=True)
         return 0
+    if a.command == "conformance":
+        import adapter  # noqa: F401  (puts core/livelab on sys.path)
+        os.environ.update({"FASTRSI_VERL_GATE": str(Path(a.gate).resolve()), "FASTRSI_VERL_REWARD": os.path.realpath(a.reward)})
+        if a.launch:
+            os.environ["FASTRSI_VERL_LAUNCH"] = a.launch
+        if a.check_timeout:
+            os.environ["FASTRSI_VERL_CHECK_TIMEOUT"] = str(a.check_timeout)
+        from conformance.__main__ import main as conformance_main
+        argv = ["--lab", "adapter.conformance_lab:VerlConformanceLab"] + (["--only", a.only] if a.only else []) + (["--receipts", a.receipts] if a.receipts else []) + (["--json"] if a.json else [])
+        return conformance_main(argv)
     if a.command == "rescore":
         from tools import rescore
         print(json.dumps(rescore.rescore(a.rollouts, a.reward, a.function, a.data_source)))
@@ -130,8 +154,12 @@ def main(argv=None):
     pairs = [it.partition("=") for it in a.set]
     if any(not sep for _, sep, _ in pairs):
         ap.error("--set expects KEY=VALUE")
+    steps = a.steps if a.steps is not None else (1 if a.verb in ("install", "check") else 0)
+    extra = {**({"id": a.id} if a.id else {}), **({"fault": a.fault} if a.fault else {}), **({"participant": a.participant} if a.participant else {})}
+    if a.verb == "inject" and not a.fault:
+        ap.error("--verb inject needs --fault")
     try:
-        rcpt = request(a.gate, files=a.files, steps=a.steps, timeout=a.timeout, live_settings={k: v for k, _, v in pairs}, verb=a.verb)
+        rcpt = request(a.gate, files=a.files, steps=steps, timeout=a.timeout, live_settings={k: v for k, _, v in pairs}, verb=a.verb, extra=extra)
     except GateError as err:
         print(json.dumps({"ok": False, "error": str(err)}))
         return 2
