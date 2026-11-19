@@ -120,10 +120,11 @@ class Session:
         return "poisoned" if self.poisoned() else "edited" if self.stack else "base"
 
     def status(self):
-        if not self.poisoned():
-            self.verify()
-        return F.ok(state=self.state(), txns=list(self.stack), poison=self.poisoned(),
-                    fingerprint=self.digest(self._fingerprint()))
+        """One fingerprint round: `verify` already took it, so its digest is reused instead of
+        asking every participant again (on a 21-actor Ray job a round costs about 10 s)."""
+        v = self.verify() if not self.poisoned() else None
+        fp = v.get("fingerprint") if v is not None else self.digest(self._fingerprint())
+        return F.ok(state=self.state(), txns=list(self.stack), poison=self.poisoned(), fingerprint=fp)
 
     def _refuse(self, what):
         return F.not_ok(f"{what} refused: session poisoned", [F.finding(
