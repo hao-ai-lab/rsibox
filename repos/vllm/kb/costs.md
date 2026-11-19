@@ -42,7 +42,7 @@ pinned host memory per rank. No torch.compile for this model in this image.
 Source: our 2026-11-10 run of [`../examples/live-edit-qwen3`](../examples/live-edit-qwen3/README.md):
 vLLM 0.31.0, TP 1, CUDA graphs on (defaults), `--no-enable-prefix-caching`, warm on-disk caches,
 weights on a memory disk. Check: 8 requests, greedy, 32 tokens each (1.03 s). Each number is one
-measurement. The lab has not run conformance on vLLM, so these are measurements, not receipts.
+measurement from a run that preceded vLLM conformance verification.
 
 | Edit | Restart, edit to result | Live, edit to result | Install (edit to commit) | Engine loop stalled | Undo | Witness calls |
 |---|---:|---:|---:|---:|---:|---:|
@@ -55,6 +55,22 @@ measurement. The lab has not run conformance on vLLM, so these are measurements,
 - Live output equals the fresh process's output for all three edits.
 - This 63 s restart is not the 228 s baseline of the ladder above (a different measurement,
   not reproduced here).
+
+## Live edit and undo on one B200
+
+Source: our 2026-11-19 Qwen3-8B walkthrough on vLLM 0.33.0, V2 runner, eager execution,
+prefix caching disabled, 8 greedy 32-token prompts. The independent fresh and live
+completions agreed for all three edits. The same B200 lab passed conformance c0–c10.
+
+| Edit | Native edit to commit | First edited check | Native undo | Undo client round trip | Witness calls |
+|---|---:|---:|---:|---:|---:|
+| Scheduler | 0.163079 s | 5.320 s | 1.682 ms | 15.4 ms | 816 |
+| Active sampler | 0.039252 s | 5.563 s | 1.270 ms | 10.4 ms | 768 |
+| Legacy sampler | 0.030376 s | 6.102 s | 1.272 ms | 15.5 ms | 0 |
+
+The legacy sampler produced `zero_witness`. All three undos restored the original
+code fingerprint and completion text. The full walkthrough took 390.128 s including
+six server launches, repeated checks and teardown.
 
 ## Restart after one edit (Qwen3-8B, warm caches otherwise)
 
