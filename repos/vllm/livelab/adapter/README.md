@@ -122,6 +122,10 @@ FASTRSI_VLLM_MODEL=<model-path> FASTRSI_VLLM_VENV=<venv> FASTRSI_VLLM_WORK=<scra
 
 `VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp FASTRSI_VLLM_TP`, default 1, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
 
+A tensor-parallel completion has one HTTP response for the worker group. The harness
+formats that response as one output entry. Check the host ping’s `parallel.expected`
+and the native proof’s `workers/rank0`, `workers/rank1` witness maps for rank coverage.
+
 ## Golden tests
 
 From the repo root (CPU, about 8 s; CI runs the same command):
