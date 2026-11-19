@@ -1,0 +1,122 @@
+"""Engine-agnostic stdlib runtime kit built on `core/livelab/kernel/` and `forksafe`.
+
+Provides shared, zero-dependency building blocks for FastRSI live labs:
+- `bootstrap_livelab`: locate `core/livelab` on `sys.path` without mutating `os.environ`.
+- `ipc`: atomic JSON, `AF_UNIX` JSON-line RPC, file channels, and NFS-safe mailboxes.
+- `proc`: cross-platform process-tree discovery, termination, reaping, and TCP port helpers.
+- `hooks`: stack-safe `MetaPathFinder` import hooks and source overlays (`OverlayFinder`).
+- `harness`: `edit_once`, module source lookup, `PackageOverlay`, fresh subprocess runner,
+  and canonical `fail_apply` / `fail_commit` / `tamper` fault injection.
+"""
+import os
+import sys
+
+from .harness import (
+    PackageOverlay,
+    build_package_overlay,
+    edit_once,
+    inject_participant_fault,
+    module_file,
+    module_relpath,
+    read_module,
+    run_fresh_subprocess,
+)
+from .hooks import AfterImportHook, OverlayFinder, install_import_hook, install_overlay
+from .ipc import (
+    MAX_SOCK_PATH,
+    FileChannelServer,
+    MailboxServer,
+    UnixJsonServer,
+    atomic_write_json,
+    file_channel_call,
+    mailbox_call,
+    read_json,
+    short_sock_path,
+    sock_path_error,
+    unix_json_call,
+    unix_json_stream,
+)
+from .proc import (
+    descendants,
+    direct_children,
+    free_port,
+    kill_tree,
+    pid_alive,
+    port_in_use,
+    ppid_map,
+    reap_all,
+    stat_ppid,
+    stat_state,
+    stop_tree,
+)
+
+
+def bootstrap_livelab(
+    anchor_file: str | None = None,
+    *,
+    env_var: str = "FASTRSI_LIVELAB",
+    fallback_env: str | None = None,
+) -> str:
+    """Resolve `core/livelab` and prepend it to `sys.path` without mutating `os.environ`."""
+    override = os.environ.get(env_var) or (os.environ.get(fallback_env) if fallback_env else None)
+    if override:
+        livelab = os.path.abspath(override)
+    elif anchor_file:
+        cur = os.path.dirname(os.path.realpath(anchor_file))
+        livelab = None
+        for _ in range(8):
+            cand = os.path.join(cur, "core", "livelab")
+            if os.path.isdir(cand):
+                livelab = os.path.abspath(cand)
+                break
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+        if livelab is None:
+            livelab = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    else:
+        livelab = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if livelab not in sys.path:
+        sys.path.insert(0, livelab)
+    return livelab
+
+
+__all__ = [
+    "AfterImportHook",
+    "FileChannelServer",
+    "MAX_SOCK_PATH",
+    "MailboxServer",
+    "OverlayFinder",
+    "PackageOverlay",
+    "UnixJsonServer",
+    "atomic_write_json",
+    "bootstrap_livelab",
+    "build_package_overlay",
+    "descendants",
+    "direct_children",
+    "edit_once",
+    "file_channel_call",
+    "free_port",
+    "inject_participant_fault",
+    "install_import_hook",
+    "install_overlay",
+    "kill_tree",
+    "mailbox_call",
+    "module_file",
+    "module_relpath",
+    "pid_alive",
+    "port_in_use",
+    "ppid_map",
+    "read_json",
+    "read_module",
+    "reap_all",
+    "run_fresh_subprocess",
+    "short_sock_path",
+    "sock_path_error",
+    "stat_ppid",
+    "stat_state",
+    "stop_tree",
+    "unix_json_call",
+    "unix_json_stream",
+]
