@@ -150,6 +150,29 @@ class ProcTests(unittest.TestCase):
             srv.listen(1)
             self.assertTrue(proc.port_in_use(port))
 
+    def test_reap_all_preserves_kept_live_and_exited_children(self):
+        """Input: a subprocess spawning one kept live child, one kept already-exited child
+        (exit code 17), and one unkept job child, then calling `proc.reap_all(keep={...})`.
+        Expected: only the unkept job child is killed/reaped; the kept live child survives and
+        the kept exited child's status (17) is not stolen by `waitpid(-1)`."""
+        script = (
+            "import json, subprocess, sys, time\n"
+            "from fastrsi import proc\n"
+            "slp = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
+            "helper = subprocess.Popen(slp)\n"
+            "finished = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(17)'])\n"
+            "time.sleep(0.2)\n"
+            "job = subprocess.Popen(slp)\n"
+            "reaped = proc.reap_all(timeout=5.0, keep={helper.pid, finished.pid})\n"
+            "alive = helper.poll() is None\n"
+            "helper.kill(); helper.wait()\n"
+            "print(json.dumps([job.pid in reaped, alive, finished.wait()]))\n"
+        )
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(json.loads(out.stdout.strip()), [True, True, 17], out.stderr)
+
 
 class HooksAndHarnessTests(unittest.TestCase):
     def setUp(self):

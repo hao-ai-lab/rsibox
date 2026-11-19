@@ -179,20 +179,19 @@ def reap_all(
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         left = [c for c in direct_children(proc_root=proc_root) if c not in keep_set]
+        if not left:
+            return reaped
         for child in left:
             if child not in killed:
                 kill_tree(child, signal.SIGKILL, include_pg=True, proc_root=proc_root)
                 killed.add(child)
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return reaped
-        if pid:
-            reaped.append(pid)
-        elif not left:
-            return reaped
-        else:
-            time.sleep(0.02)
+            try:
+                pid, _ = os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                continue
+            if pid:
+                reaped.append(pid)
+        time.sleep(0.02)
     return reaped
 
 
