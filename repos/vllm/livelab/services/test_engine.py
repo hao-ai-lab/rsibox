@@ -794,6 +794,8 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         KV cache dtype in WeightCacheKey).
     Expect: all three exit 2 with findings (`vllm_args`, `weights_reconfig_tier2` for tier2a
     and tier2b), and the original engine PID stays alive and serving /health on port P!
+    Then `--enable-expert-parallel` (the only tier-2 delta that takes the holder reshard route)
+    fails at that step here (no real vLLM): `weights_reshard`, engine still up.
     Then (4) with `--weights-accept-reconfig --kv-cache-dtype fp8`, preflight accepts the Tier-2
     change and replaces the engine."""
     from weights import socket_name
@@ -846,6 +848,21 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
                 assert refused_report["reconfig"]["subtier"] == want_subtier, refused_report
             assert not zygote._exited(pid1), "running engine must stay up on preflight refusal"
             assert engine.port_in_use(port) is True
+        # --enable-expert-parallel is the one tier-2 delta reshard_live can make live; it goes
+        # to the holder reshard step first. Here (no real vLLM) that step fails: a finding, and
+        # the running engine is still the one serving, not a stopped one.
+        ep_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "ep.log"),
+             "--enable-expert-parallel"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        assert ep_proc.returncode == 2, ep_proc.stdout + ep_proc.stderr
+        ep_report = _one_json_line(ep_proc.stdout)
+        assert ep_report["findings"][0]["check"] == "weights_reshard", ep_report
+        assert ep_report["reconfig"]["weight_key_changed"] == ["enable_expert_parallel"]
+        assert ep_report["note"] == "not started; old engine left running"
+        assert not zygote._exited(pid1) and engine.port_in_use(port) is True
         accepted_proc = subprocess.run(
             [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
              "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
