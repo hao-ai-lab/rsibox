@@ -66,12 +66,12 @@ def _sync():
         torch.cuda.synchronize()
 
 
-class RanksParticipant(C.Participant):
+class RanksParticipant(C.CallParticipant):
     """Every rank as one participant: one kernel call is one gloo round."""
-    bounded = True
 
     def __init__(self, lab):
-        self.lab, self.name = lab, "ranks"
+        super().__init__("ranks", self._all, bounded=True)
+        self.lab = lab
         self.expected = [str(r) for r in range(lab.ranks.world)]
 
     def _all(self, method, arg):
@@ -81,39 +81,6 @@ class RanksParticipant(C.Participant):
             return {"ok": ok, "code": {str(r.get("rank")): r.get("code") for r in rs},
                     "ranks": rs, **({} if ok else {"error": "a rank gave no fingerprint"})}
         return C.merge_ranks(method, rs)
-
-    def prepare(self, plan):
-        return self._all("prepare", plan)
-
-    def validate(self, txn):
-        return self._all("validate", txn)
-
-    def commit(self, txn):
-        return self._all("commit", txn)
-
-    def abort(self, txn):
-        return self._all("abort", txn)
-
-    def undo(self, txn):
-        return self._all("undo", txn)
-
-    def status(self, txn):
-        return self._all("status", txn)
-
-    def proof(self, txn):
-        return self._all("proof", txn)
-
-    def witness_check(self, txn):
-        return self._all("witness_check", txn)
-
-    def reset(self, kind):
-        return self._all("reset", kind)
-
-    def fingerprint(self, modules):
-        return self._all("fingerprint", modules)
-
-    def at_base(self, _=None):
-        return self._all("at_base", None)
 
 
 def unknown_state_finding(unknown):
