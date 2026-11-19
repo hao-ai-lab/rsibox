@@ -301,3 +301,23 @@ with the kept record before running a new candidate.
 - Have the harness check a `STOP` file between evaluations instead of killing it mid-evaluation.
 - At harness start, read the lab's active transactions (`status()`), compare them against the kept
   record, and undo any unknown transaction immediately before new swaps stack on top of it.
+
+### 17. A per-call file-system walk is a per-participant tax
+
+**What happened.** On a 21-process verl job every `status`, `install` and `uninstall` took 24-40 s.
+Each participant's fingerprint resolved the loaded reward file by calling `os.path.realpath` on every
+`sys.modules` entry (thousands of stats on a network file system, 0.2-0.9 s per process), and
+`Session.status` asked every participant twice. The same job answered `status` in 2.5-5.6 s once
+realpath results were memoized and `status` reused the round `verify()` had just taken. A second
+shared-file-system race followed: the gate wrote the response before advancing `ready.json`, so a
+fast client read the old request number and failed with "already pending".
+
+**Rule.** Anything the kernel does once per participant per call must not touch the file system
+proportionally to the process's size, and a file protocol must publish "next" before "done".
+
+**Apply it.**
+- Measure a verb's cost per participant (`fingerprint_s` in a verl `status` with `timing: true`) before
+  calling a lab slow; multiply by the participant count.
+- Memoize path resolution per process; a module's file never moves.
+- In file-based gates, write the next request number first, then the response, and let the client
+  wait out a briefly stale number instead of failing.

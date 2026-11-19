@@ -1,17 +1,53 @@
 # Costs (`verl` GRPO on 4x GB200)
 
-Measured on one node of **4x NVIDIA GB200 (`aarch64`, SM100, CUDA 13.0)** running `volcengine/verl`
-(`975f063b`, `0.10.0.dev`) with `Qwen3-0.6B` GRPO on GSM8K (`PPOTrainerSync`, Megatron-Core
-`TP1/PP1/DP4` with Transformer Engine + flash-attn, 4 colocated vLLM rollout replicas, 8
-`RewardLoopWorker` actors; 640 responses per step).
+Two measured batches, both on one node of **4x NVIDIA GB200 (`aarch64`, SM100, CUDA 13.0)** with `Qwen3-0.6B`
+GRPO on GSM8K (`PPOTrainerSync`, 4 colocated vLLM TP1 replicas, 8 `RewardLoopWorker` actors, 640 responses per
+step: 64 prompts x `rollout.n=10` or 128 x 5):
 
-Sources:
-- Startup phase breakdowns: `VERL_STARTUP_TRACE` (`verl/utils/startup_trace.py`) from our
-  2026-10-21 4x GB200 runs on fast parallel storage and on shared NFS.
-- Live install + step verdicts and offline probes: gate receipts (`install_s`, `verdict_s`,
-  `score_ms`, `compute_ms`) on the same 4x GB200 node.
+- **Batch A (current, 2026-11-19):** `volcengine/verl` `cd58f550` (`0.10.0.dev`), FSDP trainer (`sdpa`, gradient
+  checkpointing), vLLM 0.31 with `rollout.full_determinism=True` and therefore `enforce_eager=True` (its
+  `torch.compile` autotune refuses deterministic mode), torch 2.13, Ray 2.59. Receipts: the gate's
+  `resp-<n>.json` files of our 2026-11-19 run (`verdict_s`, `install_s`, `witness`), `gate.json` (`s0_capture_s`),
+  the launcher's timestamps, and `tools.rescore` / `tools.replay_adv` output.
+- **Batch B (2026-10-21):** `975f063b`, Megatron-Core `TP1/PP1/DP4` with Transformer Engine and flash-attn, CUDA
+  graphs on. Receipts: `VERL_STARTUP_TRACE` phase stamps and the gate of that lab generation.
 
-## 1. Verdict Cost Ladder: Offline Probes vs. Live Step-Gap vs. Restart
+The two differ in trainer backend and in eager vs. CUDA-graph rollout, so a step costs 102-117 s in A and 25-27 s in
+B; read ratios within one batch only. The site's facts (`site/facts/engines.json`) quote batch A.
+
+## 0. Batch A: One Unified Receipt Set (2026-11-19, FSDP, eager vLLM)
+
+| Measurement | Value | Source |
+|---|---:|---|
+| Launch -> gate ready (imports, `ray.init`, dataloader, FSDP actor+ref init, 4x vLLM boot, first weight sync) | **121.9 s** | `gate.json:started` minus launch stamp |
+| of which 4x vLLM eager boot | 60.7 s | `RLPROBE` stamps 58.4 -> 119.1 s |
+| First RL step (agent-loop spawn, 640 responses, first update) | 137.9 s | `resp-1.json` `verdict_s` |
+| **Restart -> first step verdict** | **259.8 s** | the two above |
+| Steady RL step (steps 2-8, eager FSDP) | 100.3-116.7 s | `verdict_s` of `check` requests (gen 58-66 s, old_log_prob 7.6-9.7 s, ref 5.9-8.5 s, adv 0.25 s, update_actor 23-27 s, update_weights 4.2-4.9 s) |
+| Live reward swap (`compute_score` on disk -> 13 processes, witnessed 640 calls on 8 reward actors) | install **5.8 s**, verdict **117.2 s** | `resp-6.json` |
+| Live advantage swap (`core_algos.compute_grpo_outcome_advantage`, witnessed on the driver) | install **0.58 s**, verdict **104.6 s** | `resp-9.json` |
+| Live `--set actor.ppo_micro_batch_size_per_gpu` 16 -> 8 -> 16 | applied in the gap, verdict 100.3-107.3 s | `resp-11/12.json` (`set: [16, 8]`, `[8, 16]`); `=7` refused: does not divide the per-GPU batch of 160 |
+| Coupled `S0` capture (4 ranks, 31 FSDP flat parameters each, optimizer, RNG, dataloader) | 0.24 s | `gate.json:s0_capture_s` |
+| **Coupled `S0` restore** (4 ranks + `sleep_replicas` + `update_weights`) | **1.10-1.16 s** | `resp-2/4.json` |
+| `uninstall` (undo on 13 processes) | 0.056-0.058 s | `resp-7/10.json` |
+| `status` (fingerprint on 13 processes) | 0.031-0.041 s | `resp-0/14.json` |
+| Inline-source install (`core_algos` edit) / `uninstall` on 21 participants, before / after the fingerprint fix | 21-26 s / **6.8-7.0 s** and 24-27 s / **5.7-6.0 s** | `install_s`, `cost_s` of the 2026-11-19 conformance jobs |
+| `status` with 21 participants, before / after the fingerprint fix (`core/livelab`: realpath memo, one round) | 23-25 s / **2.5-5.6 s** | `verdict_s` of the 2026-11-19 conformance jobs |
+| One fingerprint round over 21 participants, before the fix: driver 0.77 s, reward 0.21-0.25 s each, agent-loop 0.49-0.53 s each, trainer 0.72-0.87 s each | 9.8 s | `fingerprint_s` in a `status` reply (`timing: true`) |
+| Offline `tools.rescore` on 640 recorded responses | **0.83-0.86 ms** | `score_ms` |
+| Offline `tools.replay_adv` on 640 recorded trajectories | **16-29 ms** | `compute_ms` (estimator only; import and `torch.load` are outside) |
+
+With the per-sample seeds (`FASTRSI_RL_SEED_PER_SAMPLE=1`, 32 prompts x 8 samples), five checks after coupled `S0`
+resets gave the same `critic/score/mean 0.12890625`, `critic/advantages/max 2.4748666`, `actor/pg_loss 0.0084084`
+and the same rollout digest every time; a live `x2.0` advantage edit doubled `advantages/max` to `4.9497333` and
+`pg_loss` to `0.0168168` on the very same rollouts; a reward `x2` doubled `score/mean` to `0.2578125`. The job had
+21 warm participants (driver, 8 reward, 8 agent-loop, 4 trainer ranks); boot to gate ready 126.7-127 s.
+
+So in batch A a live verdict costs one step (plus 0.6-5.8 s of install): **2.2-2.5x** cheaper than a restart to
+the first verdict, and the offline probes are 5-6 orders of magnitude cheaper than either. The restart floor
+here is eager vLLM; with CUDA graphs (batch B) the step is 4x shorter and the ratio grows to 6-7x.
+
+## 1. Batch B: Verdict Cost Ladder (2026-10-21, Megatron-Core, CUDA graphs)
 
 | Verdict Path | Total Cost | Breakdown | Speedup vs. Fast-Storage Restart |
 |---|---:|---|---:|
@@ -28,7 +64,7 @@ With FSDP (`sdpa`, no sequence packing) on the same 4x GB200 node: steady step i
 (`update_actor` `26.2 s`), live verdict is `57-66 s`, warm-cache restart is `184-201 s`, and
 cold-cache restart is `362 s`.
 
-## 2. Startup Phase Anatomy (`VERL_STARTUP_TRACE`, Seconds)
+## 2. Batch B: Startup Phase Anatomy (`VERL_STARTUP_TRACE`, Seconds)
 
 | Phase | Parallel FS (cold) | Parallel FS (warm, 3 runs) | Node-Local Copy | Shared NFS (warm) | Shared NFS (cold) |
 |---|---:|---:|---:|---:|---:|
@@ -45,7 +81,7 @@ cold-cache restart is `362 s`.
 *\*Copying the venv to a new node-local path invalidated path-keyed `torch.compile` and Triton
 caches once (`57.4 s -> 104.6 s`); with path-stable caches, node-local startup is ~`160 s`.*
 
-## 3. Steady GRPO Step Breakdown (Megatron-Core, Mean of Steps 2-4)
+## 3. Batch B: Steady GRPO Step Breakdown (Megatron-Core, Mean of Steps 2-4)
 
 | `gen` (rollout + reward) | `old_log_prob` | `ref` log-prob | `adv` (`core_algos`) | `update_actor` | `update_weights` | Total Step |
 |---:|---:|---:|---:|---:|---:|---:|
