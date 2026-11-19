@@ -6,13 +6,13 @@ to the run. Each command starts its own servers and keeps scratch files under `-
 ```bash
 CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab live-edit --model "$MODEL" --work "$WORK/edit"
 CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/eager"
+CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/graphs" --graphs
 CUDA_VISIBLE_DEVICES=0,1 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/tp2" --tp 2
 ```
 
-Conformance defaults to eager execution. To enable graphs, set `FASTRSI_VLLM_EXTRA` to
-`--seed 0 --gpu-memory-utilization 0.35 --max-model-len 2048 --disable-flashinfer-autotune`.
+Conformance defaults to eager execution. `FASTRSI_VLLM_EXTRA` replaces the default serving
+flags, including the CUDA graph capture sizes.
 Use `--receipts FILE` to keep transaction receipts and `--only c2_visible` for a single case.
-
 
 vLLM live-lab integration built on the shared transaction kernel in `core/livelab/`.
 

@@ -1,6 +1,7 @@
 """Run vLLM conformance or the Qwen live-edit walkthrough with the serving Python."""
 import argparse
 import os
+import shlex
 from pathlib import Path
 import sys
 
@@ -12,6 +13,8 @@ def main(argv=None):
     conformance.add_argument("--model", required=True)
     conformance.add_argument("--work", required=True, help="private scratch directory")
     conformance.add_argument("--tp", type=int, default=1, help="tensor parallel size")
+    conformance.add_argument("--graphs", action="store_true",
+                             help="allow CUDA graphs by turning off enforced eager execution")
     conformance.add_argument("--only", help="comma-separated conformance case names")
     conformance.add_argument("--receipts", help="keep the kernel receipts in this file")
     conformance.add_argument("--json", action="store_true")
@@ -27,6 +30,10 @@ def main(argv=None):
 
     os.environ.update(FASTRSI_VLLM_MODEL=args.model, FASTRSI_VLLM_WORK=args.work,
                       FASTRSI_VLLM_TP=str(args.tp))
+    if args.graphs:
+        from adapter.conformance_lab import DEFAULT_EXTRA
+        flags = shlex.split(os.environ.get("FASTRSI_VLLM_EXTRA", DEFAULT_EXTRA))
+        os.environ["FASTRSI_VLLM_EXTRA"] = shlex.join([*flags, "--no-enforce-eager"])
     opts = ["--lab", "adapter.conformance_lab:VllmLab"]
     for key in ("only", "receipts"):
         if getattr(args, key):
