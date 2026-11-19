@@ -82,10 +82,13 @@ def test_policy_switch_preserves_both_queues_and_changes_dequeue_order():
     scheduler = SimpleNamespace(policy=SchedulingPolicy.FCFS, scheduler_config=config,
                                 running=[], max_num_running_reqs=2, max_num_scheduled_tokens=16)
     queues = ("waiting", "kv_holding_waiting")
+    requests = {}
     for name in queues:
         queue = create_request_queue(scheduler.policy)
         for args in [("early", 1, 5), ("urgent", 2, -1)]:
-            queue.add_request(request(name + args[0], *args[1:]))
+            req = request(name + args[0], *args[1:])
+            requests[req.request_id] = req
+            queue.add_request(req)
         setattr(scheduler, name, queue)
     agent = live_reconfig.Agent(SimpleNamespace(scheduler=scheduler, vllm_config=SimpleNamespace(
         scheduler_config=config, model_config=SimpleNamespace(max_model_len=16))), None)
@@ -94,5 +97,9 @@ def test_policy_switch_preserves_both_queues_and_changes_dequeue_order():
         assert ack["ok"], ack
         assert ack["after"]["scheduling_policy"] == config.policy == policy
         for name in queues:
-            assert [r.request_id for r in getattr(scheduler, name)] == [name + i for i in order]
-    assert not agent.apply({"scheduling_policy": "fifo"})["ok"]
+            actual = list(getattr(scheduler, name))
+            assert actual == [requests[name + suffix] for suffix in order]
+            assert all(req is requests[req.request_id] for req in actual)
+    before = agent.scheduler_view()
+    assert not agent.apply({"max_num_seqs": 1, "scheduling_policy": "fifo"})["ok"]
+    assert agent.scheduler_view() == before
