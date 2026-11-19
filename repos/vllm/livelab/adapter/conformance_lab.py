@@ -17,6 +17,7 @@ Environment variables (no hostnames or paths in code):
 """
 import argparse
 import atexit
+import contextlib
 import itertools
 import json
 import os
@@ -29,7 +30,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from fastrsi import diffs, harness
+from fastrsi import harness
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -363,42 +364,27 @@ class VllmLab:
             timeout=timeout)["choices"][0]["text"] for pr in prompts]}
 
     def _append_receipt(self, record):
-        if self.receipts and record:
-            with open(self.receipts, "a") as fh:
-                fh.write(json.dumps(record, default=str) + "\n")
+        if record:
+            harness.append_jsonl(self.receipts, record)
 
     def _disk_source(self, module_name):
-        if module_name in self.base_text:
-            return self.base_text[module_name]
-        if self.site:
-            try:
-                return Path(self.site, _module_relpath(self.site, module_name)).read_text()
-            except (FileNotFoundError, OSError):
-                return None
-        return None
+        if module_name not in self.base_text and getattr(self, "site", None):
+            with contextlib.suppress(FileNotFoundError, OSError):
+                self.base_text[module_name] = Path(self.site, _module_relpath(self.site, module_name)).read_text()
+        return self.base_text.get(module_name)
+
+    def _sources(self):
+        return harness.SourceStack(self._disk_source, self._stack_files, files_key="files", min_len=0)
 
     def _live_source(self, module_name):
-        for entry in reversed(self._stack_files):
-            if module_name in entry["files"]:
-                return entry["files"][module_name]
-        if module_name not in self.base_text:
-            self.base_text[module_name] = Path(self.site, _module_relpath(self.site, module_name)).read_text()
-        return self.base_text[module_name]
+        src = self._sources().live_source(module_name)
+        if src is None:
+            raise FileNotFoundError(f"module source not found: {module_name}")
+        return src
 
     def files(self, patch, against="live"):
         """Resolve `{module: new_text}` from `patch["files"]` or unified `patch["diff"]`."""
-        if not patch or patch.get("diff") is None:
-            return dict((patch or {}).get("files") or {})
-        if against == "disk":
-            return diffs.apply(patch["diff"], self._disk_source)
-
-        def current_live(mod):
-            try:
-                return self._live_source(mod)
-            except (FileNotFoundError, OSError, TypeError):
-                return None
-
-        return diffs.apply(patch["diff"], current_live)
+        return self._sources().resolve(patch, against=against)
 
     def _role_of(self, module_name):
         return "core" if (module_name in CORE_MODULES or module_name.startswith("vllm.v1.core.")) else "worker"
@@ -425,8 +411,7 @@ class VllmLab:
             }
         except Exception as err:
             finding = F.finding("patch_invalid", f"{type(err).__name__}: {err}", "valid module")
-            return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                    "mechanisms": [], "findings": [finding], "cost_s": round(time.perf_counter() - t0, 6)}
+            return harness.install_refusal(["patch_invalid"], [finding], t0=t0)
         plan = {"id": plan_id, "modules": modules, "accept": list(patch.get("accept", [])),
                 "undo_resets": list(patch.get("undo_resets", [])), "recipes": ["R0 swap"]}
         pending = self._pending_inject
@@ -440,8 +425,9 @@ class VllmLab:
         outcome, rec = res.get("outcome") or "refused", res.get("receipt")
         self._append_receipt(rec)
         if outcome == "committed":
-            self._stack_files.append({"id": res["txn"], "files": dict(resolved_files), "accept": list(patch.get("accept", [])),
-                                      "undo_resets": list(patch.get("undo_resets", []))})
+            self._sources().push({"id": res["txn"], "files": dict(resolved_files),
+                                  "accept": list(patch.get("accept", [])),
+                                  "undo_resets": list(patch.get("undo_resets", []))})
         codes = rec["decisions"]["blocking"] if rec else sorted({f["check"] for f in res.get("findings", [])})
         return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
                 "codes": [] if outcome == "committed" else codes,
@@ -451,8 +437,7 @@ class VllmLab:
 
     def _check_failed(self, msg, expected, t0):
         self.session.fault("participant_failed", msg, expected)
-        return {"ok": False, "error": msg, "output": None, "proven": None, "witness": {},
-                "findings": list(self.session.poisoned()), "cost_s": round(time.perf_counter() - t0, 6)}
+        return harness.check_failure(msg, list(self.session.poisoned()), t0=t0)
 
     def check(self, workload=None):
         t0 = time.perf_counter()
@@ -521,7 +506,7 @@ class VllmLab:
             self._append_receipt(item.get("receipt"))
         undone = res.get("undone", [])
         if undone:
-            del self._stack_files[-len(undone):]
+            self._sources().pop(len(undone))
         return {"ok": res["ok"], "undone": undone, "state": self.session.state(),
                 "findings": res.get("findings", []), "cost_s": round(time.perf_counter() - t0, 6)}
 

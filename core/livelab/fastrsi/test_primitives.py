@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -331,6 +332,77 @@ class DiffsTests(unittest.TestCase):
         cfg_diff = "--- a/cfg.yaml\n+++ b/cfg.yaml\n@@ -1 +1 @@\n-a: 1\n+a: 2\n"
         with self.assertRaisesRegex(ValueError, "not modules"):
             diffs.apply(cfg_diff, lambda _m: None)
+
+
+class HarnessHelpersTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fastrsi-harness-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_append_jsonl_writes_lines_and_optionally_suppresses_errors(self):
+        path = os.path.join(self.tmp, "receipts.jsonl")
+        harness.append_jsonl(None, {"skip": 1})
+        harness.append_jsonl(path, None)
+        self.assertFalse(os.path.exists(path))
+        harness.append_jsonl(path, {"n": 1})
+        harness.append_jsonl(path, {"n": 2, "path": os.path.join(self.tmp, "x")})
+        with open(path, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
+        self.assertEqual([r["n"] for r in rows], [1, 2])
+        # Missing parent directory raises unless suppress_errors=True.
+        bad = os.path.join(self.tmp, "missing-dir", "log.jsonl")
+        with self.assertRaises(OSError):
+            harness.append_jsonl(bad, {"ok": True})
+        harness.append_jsonl(bad, {"ok": True}, suppress_errors=True)
+
+    def test_source_stack_and_resolve_patch_files_handle_stacked_and_keyed_frames(self):
+        disk = {"pkg.m": "X = 0\n"}
+        d1 = "--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1 +1 @@\n-X = 0\n+X = 1\n"
+        d2 = "--- a/pkg/m.py\n+++ b/pkg/m.py\n@@ -1 +1 @@\n-X = 1\n+X = 2\n"
+
+        # Plain frame mode (min_len=1 preserves base frame).
+        frames = [{}]
+        stack = harness.SourceStack(disk.get, frames, min_len=1)
+        self.assertEqual(stack.resolve({"diff": d1}, against="live"), {"pkg.m": "X = 1\n"})
+        stack.push({"pkg.m": "X = 1\n"})
+        self.assertEqual(stack.resolve({"diff": d2}, against="live"), {"pkg.m": "X = 2\n"})
+        self.assertEqual(stack.resolve({"diff": d1}, against="disk"), {"pkg.m": "X = 1\n"})
+        with self.assertRaisesRegex(ValueError, "both"):
+            stack.resolve({"files": {"pkg.m": "X = 9\n"}, "diff": d1})
+        self.assertEqual(stack.pop(5), 1)
+        self.assertEqual(len(frames), 1)
+        self.assertEqual(stack.live_source("pkg.m"), "X = 0\n")
+
+        # Keyed frame mode (`files_key="files"`, `min_len=0`, matching VllmLab._stack_files).
+        keyed = []
+        kstack = harness.SourceStack(disk.get, keyed, files_key="files", min_len=0)
+        kstack.push({"id": "t1", "files": {"pkg.m": "X = 1\n"}})
+        self.assertEqual(kstack.live_source("pkg.m"), "X = 1\n")
+        self.assertEqual(kstack.resolve({"diff": d2}), {"pkg.m": "X = 2\n"})
+        kstack.clear()
+        self.assertEqual(keyed, [])
+
+        # Missing base file raising FileNotFoundError maps cleanly to None for created modules.
+        create = "--- /dev/null\n+++ b/pkg/new.py\n@@ -0,0 +1 @@\n+Y = 7\n"
+        def raising_reader(_m):
+            raise FileNotFoundError("absent")
+        self.assertEqual(harness.resolve_patch_files({"diff": create}, raising_reader), {"pkg.new": "Y = 7\n"})
+
+    def test_install_refusal_and_check_failure_shapes(self):
+        f = {"check": "patch_invalid", "observed": "bad"}
+        ref = harness.install_refusal(["patch_invalid"], [f], outcome="aborted", t0=time.perf_counter())
+        self.assertEqual((ref["ok"], ref["id"], ref["outcome"], ref["codes"], ref["mechanisms"], ref["findings"]),
+                         (False, None, "aborted", ["patch_invalid"], [], [f]))
+        self.assertIsInstance(ref["cost_s"], float)
+        ref_no_cost = harness.install_refusal(["patch_invalid"], [f])
+        self.assertNotIn("cost_s", ref_no_cost)
+
+        chk = harness.check_failure("timeout", [f], t0=time.perf_counter())
+        self.assertEqual((chk["ok"], chk["error"], chk["output"], chk["proven"], chk["witness"], chk["findings"]),
+                         (False, "timeout", None, None, {}, [f]))
+        self.assertIsInstance(chk["cost_s"], float)
+        chk_no_cost = harness.check_failure("lost", [f])
+        self.assertNotIn("cost_s", chk_no_cost)
 
 
 if __name__ == "__main__":

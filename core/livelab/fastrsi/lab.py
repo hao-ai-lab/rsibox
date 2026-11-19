@@ -17,7 +17,6 @@ from kernel import locate as L
 from kernel import receipt as R
 from kernel import session as SS
 
-from . import diffs as D
 from . import harness as H
 
 
@@ -322,10 +321,6 @@ class BaseLab:
         committed edit so far); with `against="disk"`, diffs apply to the files on disk.
         Raises `ValueError` when a diff does not apply cleanly.
         """
-        if not patch or patch.get("diff") is None:
-            return dict((patch or {}).get("files") or {})
-        if against == "disk":
-            return D.apply(patch["diff"], self._disk_source)
         live = self.live_text[-1]
 
         def current_live(mod: str) -> str | None:
@@ -336,7 +331,9 @@ class BaseLab:
             except (ImportError, OSError):
                 return None
 
-        return D.apply(patch["diff"], current_live)
+        return H.resolve_patch_files(
+            patch, current_live, self._disk_source, against=against, reject_mixed=False
+        )
 
     def _build_plan(self, patch: dict, live_map: dict[str, str]):
         modules = {}
@@ -390,28 +387,11 @@ class BaseLab:
             self.session = SS.Session(self.co, self.modules)
 
     def _refuse_install(self, outcome: str, codes: list[str], findings: list[dict], t0: float) -> dict:
-        return {
-            "ok": False,
-            "id": None,
-            "outcome": outcome,
-            "codes": codes,
-            "mechanisms": [],
-            "findings": findings,
-            "receipt": None,
-            "cost_s": round(time.perf_counter() - t0, 6),
-        }
+        return {**H.install_refusal(codes, findings, outcome=outcome, t0=t0), "receipt": None}
 
     def _fail_check(self, observed: str, expected: str, t0: float, *, subject: str | None = None) -> dict:
         self.session.fault("participant_failed", observed, expected, subject=subject)
-        return {
-            "ok": False,
-            "error": observed,
-            "output": None,
-            "proven": None,
-            "witness": {},
-            "findings": list(self.session.poisoned()),
-            "cost_s": round(time.perf_counter() - t0, 6),
-        }
+        return H.check_failure(observed, list(self.session.poisoned()), t0=t0)
 
     def _execute_workload(self, workload):
         if not self.threaded_check:

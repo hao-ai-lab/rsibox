@@ -1,5 +1,7 @@
-"""Shared conformance harness utilities: patch editing, package overlays, fresh subprocess
-execution, and canonical kernel fault injection (`fail_apply`, `fail_commit`, `tamper`)."""
+"""Shared conformance harness utilities: patch editing, patch/diff resolution, live-source stacks,
+JSONL receipt appending, package overlays, fresh subprocess execution, standardized verb refusals,
+and canonical kernel fault injection (`fail_apply`, `fail_commit`, `tamper`)."""
+import contextlib
 import importlib
 import importlib.util
 import json
@@ -8,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def edit_once(source: str, old: str, new: str) -> str:
@@ -249,3 +252,116 @@ def inject_participant_fault(participant, fault: str, **kw) -> dict:
         return {"ok": True, "fault": fault, "participant": participant.name}
 
     return {"ok": False, "error": f"unknown participant fault {fault!r}"}
+
+
+def append_jsonl(path: str | os.PathLike | None, record, *, suppress_errors: bool = False) -> None:
+    """Append one UTF-8 JSON line to `path` (no-op when `path` is empty or `record` is None)."""
+    if not path or record is None:
+        return
+    ctx = contextlib.suppress(Exception) if suppress_errors else contextlib.nullcontext()
+    with ctx:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+
+
+def resolve_patch_files(
+    patch: dict | None,
+    live_source,
+    disk_source=None,
+    *,
+    against: str = "live",
+    reject_mixed: bool = True,
+) -> dict[str, str]:
+    """Resolve `{module_or_path: text}` from a `{"files": ...}` or unified `{"diff": ...}` patch."""
+    if not patch:
+        return {}
+    if patch.get("diff") is not None:
+        if reject_mixed and patch.get("files"):
+            raise ValueError("patch cannot supply both 'files' and 'diff'")
+        from . import diffs
+
+        reader = (disk_source or live_source) if against == "disk" else live_source
+
+        def _safe_reader(key: str):
+            try:
+                return reader(key)
+            except (FileNotFoundError, OSError, TypeError):
+                return None
+
+        return diffs.apply(patch["diff"], _safe_reader)
+    return dict(patch.get("files") or {})
+
+
+class SourceStack:
+    """Layered live-source overlay stack over a base `disk_source(key)` reader."""
+
+    def __init__(
+        self,
+        disk_source,
+        frames: list[dict] | None = None,
+        *,
+        files_key: str | None = None,
+        min_len: int = 1,
+    ):
+        self.disk_source = disk_source
+        self.frames: list[dict] = frames if frames is not None else ([{}] if min_len else [])
+        self.files_key = files_key
+        self.min_len = min_len
+
+    def live_source(self, key: str) -> str | None:
+        for frame in reversed(self.frames):
+            mapping = frame.get(self.files_key, {}) if self.files_key else frame
+            if key in mapping:
+                return mapping[key]
+        return self.disk_source(key)
+
+    def push(self, frame: dict) -> None:
+        self.frames.append(frame)
+
+    def pop(self, count: int = 1) -> int:
+        drop = min(max(int(count), 0), max(len(self.frames) - self.min_len, 0))
+        if drop:
+            del self.frames[-drop:]
+        return drop
+
+    def clear(self) -> None:
+        self.frames[:] = [{}] if self.min_len else []
+
+    def resolve(self, patch: dict | None, against: str = "live") -> dict[str, str]:
+        return resolve_patch_files(patch, self.live_source, self.disk_source, against=against)
+
+
+def install_refusal(
+    codes: list[str],
+    findings: list[dict],
+    *,
+    outcome: str = "refused",
+    t0: float | None = None,
+) -> dict:
+    """Standardized failed/refused `LabUnderTest.install()` reply."""
+    res = {
+        "ok": False,
+        "id": None,
+        "outcome": outcome,
+        "codes": list(codes),
+        "mechanisms": [],
+        "findings": list(findings),
+    }
+    if t0 is not None:
+        res["cost_s"] = round(time.perf_counter() - t0, 6)
+    return res
+
+
+def check_failure(error: str | None, findings: list[dict], *, t0: float | None = None) -> dict:
+    """Standardized failed `LabUnderTest.check()` reply."""
+    res = {
+        "ok": False,
+        "error": error,
+        "output": None,
+        "proven": None,
+        "witness": {},
+        "findings": list(findings),
+    }
+    if t0 is not None:
+        res["cost_s"] = round(time.perf_counter() - t0, 6)
+    return res

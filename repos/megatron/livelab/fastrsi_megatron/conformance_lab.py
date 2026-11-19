@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 
-from fastrsi import diffs, harness, ipc, proc
+from fastrsi import harness, ipc, proc
 from kernel import findings as F
 
 from . import client
@@ -212,55 +212,44 @@ class MegatronLab:
                 return cand.read_text(encoding="utf-8")
         return None
 
+    def _sources(self):
+        return harness.SourceStack(self._disk_source, self._live_stack, min_len=1)
+
     def _live_source(self, module_name):
-        for frame in reversed(self._live_stack):
-            if module_name in frame:
-                return frame[module_name]
-        return self._disk_source(module_name)
+        return self._sources().live_source(module_name)
 
     def files(self, patch, against="live"):
         """Resolve `{module: new_text}` from `patch["files"]` or unified `patch["diff"]`."""
-        if not patch or patch.get("diff") is None:
-            return dict((patch or {}).get("files") or {})
-        if against == "disk":
-            return diffs.apply(patch["diff"], self._disk_source)
-        return diffs.apply(patch["diff"], self._live_source)
+        return self._sources().resolve(patch, against=against)
 
     # -- verbs ---------------------------------------------------------------------------
     def install(self, patch):
         t0 = time.perf_counter()
         if self.poison:
-            return {"ok": False, "outcome": "refused", "codes": ["session_poisoned"],
-                    "id": None, "mechanisms": [], "findings": list(self.poison), "cost_s": 0}
-        wire_patch = patch
-        resolved_files = None
+            return {**harness.install_refusal(["session_poisoned"], list(self.poison)), "cost_s": 0}
+        wire_patch, resolved_files = patch, None
         if isinstance(patch, dict) and patch.get("diff") is not None:
             try:
                 resolved_files = self.files(patch, against="live")
             except ValueError as err:
                 finding = F.finding("patch_invalid", str(err),
                                     "a unified diff that applies cleanly to the live source")
-                return {"ok": False, "outcome": "refused", "codes": ["patch_invalid"],
-                        "id": None, "mechanisms": [], "findings": [finding],
-                        "cost_s": round(time.perf_counter() - t0, 6)}
-            wire_patch = {k: v for k, v in patch.items() if k != "diff"}
-            wire_patch["files"] = resolved_files
+                return harness.install_refusal(["patch_invalid"], [finding], t0=t0)
+            wire_patch = {**{k: v for k, v in patch.items() if k != "diff"}, "files": resolved_files}
         elif isinstance(patch, dict) and isinstance(patch.get("files"), dict):
             resolved_files = dict(patch["files"])
         r = self._call({"verb": "install", "patch": wire_patch})
         if r.get("lost"):
-            return {"ok": False, "outcome": "refused", "codes": ["participant_failed"],
-                    "id": None, "mechanisms": [], "findings": list(self.poison), "cost_s": 0}
+            return {**harness.install_refusal(["participant_failed"], list(self.poison)), "cost_s": 0}
         if r.get("ok"):
-            self._live_stack.append(dict(resolved_files or {}))
+            self._sources().push(dict(resolved_files or {}))
         return r
 
     def check(self, workload=None):
         steps = (workload or {}).get("steps", self.steps)
         r = self._call({"verb": "check", "steps": steps})
         if r.get("lost"):
-            return {"ok": False, "error": r["error"], "output": None, "proven": None,
-                    "witness": {}, "findings": list(self.poison)}
+            return harness.check_failure(r["error"], list(self.poison))
         return r
 
     def reset(self, kind="state"):
@@ -278,9 +267,7 @@ class MegatronLab:
         r = self._call({"verb": "uninstall", **({"id": id} if id else {})})
         undone = r.get("undone") or []
         if undone:
-            drop = min(len(undone), len(self._live_stack) - 1)
-            if drop:
-                del self._live_stack[-drop:]
+            self._sources().pop(len(undone))
         return r
 
     def status(self):
