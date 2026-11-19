@@ -378,7 +378,7 @@
      },
      "status": "merged_gpu_verified",
      "source": "repos/fastvideo/kb/costs.md:56-72,150-155; repos/fastvideo/examples/h3-conformance/README.md:9-64; PR #76",
-     "note": "Conformance 11/11 on both 1x and 2x GB200 (SP2) via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G); live 01-20 hill-climb 1.43x (1G) / 1.52x (2G) bit-exact. Top-level @triton.jit/@triton.autotune bodies rebuild in place via kernel/jit.py R1 (signature/decorator edits block). Not covered: torch.compile regions (VAE), NVFP4 VAE CUDA graphs, native fastvideo-kernel code, 4 ranks."
+     "note": "Conformance 11/11 on 1x GB200, 2x GB200 (SP2), and 4x GB200 (SP4) via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G / 0.1140 s 4G); live 01-20 hill-climb 1.43x (1G) / 1.52x (2G) bit-exact, plus 4x SP4 Patch 20 multi-shape replay (124 -> 243 -> 124 -> 362 -> 124, 5/5 bit-exact, 0 OOM). Top-level @triton.jit/@triton.autotune bodies rebuild in place via kernel/jit.py R1 (signature/decorator edits block). Not covered: torch.compile regions (VAE), NVFP4 VAE CUDA graphs, native fastvideo-kernel code."
     },
     {
      "name": "In-place rebuild (`services/rebuild.py`)",
@@ -503,11 +503,11 @@
       "before": "259.8 (121.9 boot to gate ready + 137.9 first step; eager vLLM)",
       "after": "117.2 (live reward swap: 5.8 install + one step, 2.2x) / 104.6 (live advantage swap: 0.58 install + one step, 2.5x); offline rescore 0.00085 s (0.85 ms), replay_adv 0.016-0.029 s",
       "unit": "s",
-      "setup": "4x GB200, verl cd58f550, FSDP + vLLM 0.31 enforce_eager (full_determinism), Qwen3-0.6B GSM8K GRPO, 640 responses/step, 13 warm processes, 2026-11-19"
+      "setup": "4x GB200, verl 0.10.0.dev, FSDP + vLLM 0.31 enforce_eager (full_determinism), Qwen3-0.6B GSM8K GRPO, 640 responses/step, 13 warm processes, 2026-11-19"
      },
      "status": "merged_gpu_verified",
-     "source": "repos/verl/kb/costs.md section 0 (2026-11-19 receipts); PR #160; PR #161",
-     "note": "2026-11-19 receipts (repos/verl/kb/costs.md, batch A) replace the earlier 224.05 / 24.91 / 9.22 s figures, which came from a CUDA-graph configuration and are not reproducible with full_determinism on this stack. Eager FSDP steps are 100-117 s, so a live verdict is one step plus 0.6-5.8 s of install; with CUDA graphs (batch B, 25-27 s steps) the ratio grows to 6-7x. The 8 reward actors each witnessed the swapped compute_score (640 calls)."
+     "source": "repos/verl/kb/costs.md section 0 and 0.1 (2026-11-19 receipts); PR #160; PR #161",
+     "note": "2026-11-19 receipts (repos/verl/kb/costs.md, batch A) replace the earlier 224.05 / 24.91 / 9.22 s timings, which came from a CUDA-graph configuration and are not reproducible with full_determinism on this stack. Eager FSDP steps are 100-117 s, so a live verdict is one step plus 0.6-5.8 s of install; with CUDA graphs (batch B, 25-27 s steps) the ratio grows to 6-7x. On 4x GB200 21-participant GRPO (TBS=32 N=8), VerlConformanceLab passed 11/11 (6844 s, 113 receipts) and a live SingleTurnAgentLoop.run swap was witnessed 32 times on each of rollout0-7 (7.54 s install)."
     },
     {
      "name": "Coupled 4-GPU `S0` checkpoint restore",
@@ -517,11 +517,11 @@
       "before": 259.8,
       "after": 1.13,
       "unit": "s",
-      "setup": "4x GB200, verl cd58f550, FSDP, Qwen3-0.6B GSM8K GRPO, coupled 4-GPU S0 restore (1.10-1.16 s over 2 restores; capture 0.24 s), 2026-11-19"
+      "setup": "4x GB200, verl 0.10.0.dev, FSDP, Qwen3-0.6B GSM8K GRPO, coupled 4-GPU S0 restore (1.10-1.16 s over 2 restores; capture 0.24 s), 2026-11-19"
      },
      "status": "merged_gpu_verified",
      "source": "repos/verl/kb/costs.md section 0 (2026-11-19 receipts); PR #160; PR #161",
-     "note": "Coupled 4-GPU S0 restore measured at 1.10-1.16 s on 4x GB200 (2026-11-19), replacing the earlier 2.46 s figure."
+     "note": "Coupled 4-GPU S0 restore measured at 1.10-1.16 s on 4x GB200 (2026-11-19), replacing the earlier 2.46 s timing."
     }
    ]
   },

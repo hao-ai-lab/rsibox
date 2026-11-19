@@ -237,18 +237,19 @@ class VerifyFactsTests(unittest.TestCase):
                 rc_strict = VF.main(["--repo-root", tmp, "--strict"])
             self.assertEqual(rc_strict, 2)
 
-    def test_real_repo_has_zero_schema_errors_and_surfaces_known_drifts(self):
+    def test_real_repo_has_zero_errors_and_zero_drifts(self):
         """Input: actual repository root (read-only).
-        Expected: 0 schema/math/join errors (`schema_ok=True`, exit 0 default), while `--strict`
-        exits 2 and reports the known README/coverage split-brain drifts without editing any file."""
+        Expected: 0 schema/math/join errors and 0 split-brain drifts (`ok=True`, `--strict` exits 0)."""
         rep = VF.verify_repo(REPO_ROOT)
         self.assertTrue(rep["schema_ok"], rep["findings"])
         self.assertEqual(rep["summary"]["errors"], 0)
         self.assertGreaterEqual(len(rep["engines"]), 6)
-        self.assertGreater(rep["summary"]["drifts"], 0)
-        drift_codes = {f["code"] for f in rep["findings"] if f["severity"] == "drift"}
-        self.assertIn("readme_table_missing_engine", drift_codes)
-        self.assertIn("coverage_conformance_missing_engine", drift_codes)
+        self.assertEqual(rep["summary"]["drifts"], 0, rep["findings"])
+        self.assertTrue(rep["ok"], rep["findings"])
+        buf_strict = io.StringIO()
+        with contextlib.redirect_stdout(buf_strict):
+            rc_strict = VF.main(["--repo-root", str(REPO_ROOT), "--strict"])
+        self.assertEqual(rc_strict, 0, buf_strict.getvalue())
 
 
 if __name__ == "__main__":

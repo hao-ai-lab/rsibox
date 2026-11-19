@@ -216,6 +216,16 @@ class ConformanceHarnessTest(unittest.TestCase):
             self.assertEqual(lab.files({"diff": "live"}, against="live"), {"pkg.m": "X = 1\n# live"})
             self.assertEqual(lab.files({"diff": "disk"}, against="disk"), {"pkg.m": "X = 0\n# disk"})
 
+        # End-to-end with real core/livelab/fastrsi/diffs.py (unmocked).
+        unified = (
+            "--- a/pkg/m.py\n"
+            "+++ b/pkg/m.py\n"
+            "@@ -1 +1 @@\n"
+            "-X = 1\n"
+            "+X = 2\n"
+        )
+        self.assertEqual(lab.files({"diff": unified}, against="live"), {"pkg.m": "X = 2\n"})
+
     def test_cleanup_jobs_stops_reaps_owned_subprocesses_and_skips_external_jobs(self):
         """1. `_cleanup_jobs()` stops, kills, and reaps an owned launcher `Popen` in `_JOBS`
         with zero `ResourceWarning`s and empties `_JOBS`.
