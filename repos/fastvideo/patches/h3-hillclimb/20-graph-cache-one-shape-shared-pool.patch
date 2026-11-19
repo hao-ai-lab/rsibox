@@ -1,0 +1,212 @@
+diff --git a/fastvideo/models/dits/minimax_h3.py b/fastvideo/models/dits/minimax_h3.py
+index 84710ec..56d45f1 100644
+--- a/fastvideo/models/dits/minimax_h3.py
++++ b/fastvideo/models/dits/minimax_h3.py
+@@ -89,6 +89,114 @@ def _enabled_minimax_h3_exact_kernels(value: str | None = None) -> frozenset[str
+     return enabled
+ 
+ 
++def _h3_graph_policy():
++    """Settings a captured graph freezes or is sized by; None when DiT graphs are off.
++
++    FASTVIDEO_NVFP4_MM_BACKEND and FASTVIDEO_NVFP4_MM_ROW_SPLIT are read on every GEMM call,
++    so a graph captured under one value must not replay under another.
++    """
++    import os
++    if os.environ.get("FASTVIDEO_H3_DIT_CUDA_GRAPHS", "1") == "0":
++        return None
++    return (envs.FASTVIDEO_NVFP4_MM_BACKEND.get(), envs.FASTVIDEO_NVFP4_MM_ROW_SPLIT.get(),
++            os.environ.get("FASTVIDEO_H3_GRAPH_HEADROOM_GIB"))
++
++
++def _h3_graphs_new():
++    """An empty cache for every FFN and QKV graph: one request shape at a time, in a budget.
++
++    - One shape: the graphs of all blocks are captured for one token count and one GEMM
++      policy. A call with another shape or policy resets every graph first, so the old graphs'
++      memory is free before the new ones allocate (resetting one layer at a time kept the
++      other layers' graphs of the old shape alive: a second video length ran out of memory).
++    - Shared memory: all graphs use one pool, one side stream, and one static input buffer
++      (and one rotary pair). They replay one at a time in capture order, each after copying
++      its own input in, and every graph's outputs stay allocated until the next reset.
++    - Budget: a graph is captured only while the free memory stays above a headroom for the
++      eager work of the step (attention, VAE decode): 64x the layer input by default (about
++      twice the working set measured at 124 and 243 frames), or
++      FASTVIDEO_H3_GRAPH_HEADROOM_GIB. Layers past the budget run eagerly for this shape.
++
++    Plain functions over a namespace, not a class, so that a running engine can take this
++    code as a live edit (a new module-level class or global needs a restart).
++    """
++    import types
++    import weakref
++    return types.SimpleNamespace(key=None, pool=None, side=None, inputs={},
++                                 ff=weakref.WeakKeyDictionary(),
++                                 projection=weakref.WeakKeyDictionary(),
++                                 captures=0, skipped=0, resets=0)
++
++
++def _h3_graphs():
++    """The process's graph cache (kept on this function). When it is created it releases the
++    per-function caches the FFN and QKV paths used before it (`_graphs_v2`,
++    `_projection_graphs_v1`): an engine that takes this code as a live edit still holds their
++    graphs, and keeping both sets ran out of memory."""
++    graphs = getattr(_h3_graphs, "state", None)
++    if graphs is None:
++        graphs = _h3_graphs.state = _h3_graphs_new()
++        legacy = _h3_graphs_new()
++        legacy.ff = vars(_h3_ff_graph_forward).pop("_graphs_v2", None) or {}
++        legacy.projection = vars(_h3_projection_graph_forward).pop("_projection_graphs_v1", None) or {}
++        if legacy.ff or legacy.projection:
++            _h3_graphs_reset(legacy)
++    return graphs
++
++
++def _h3_graphs_enter(graphs, hidden_states, policy):
++    """`graphs` for this call's shape and policy: every graph is reset when either changed."""
++    key = (hidden_states.device, tuple(hidden_states.shape), hidden_states.dtype, policy)
++    if key != graphs.key:
++        if graphs.key is not None:
++            _h3_graphs_reset(graphs)
++        graphs.key = key
++    if graphs.pool is None:
++        graphs.pool = torch.cuda.graph_pool_handle()
++        graphs.side = torch.cuda.Stream(device=hidden_states.device)
++    return graphs
++
++
++def _h3_graphs_buffer(graphs, name, like):
++    """The static input buffer `name`, shared by every graph of this shape."""
++    buf = graphs.inputs.get(name)
++    if buf is None or buf.shape != like.shape or buf.dtype != like.dtype:
++        buf = graphs.inputs[name] = torch.empty_like(like, memory_format=torch.contiguous_format)
++    return buf
++
++
++def _h3_graphs_fits(graphs, hidden_states):
++    """Whether one more graph (outputs and work space, about 8 layer inputs) leaves the
++    headroom free; counts a skip when it does not."""
++    import os
++    device = hidden_states.device
++    free, _ = torch.cuda.mem_get_info(device)
++    free += torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
++    gib = os.environ.get("FASTVIDEO_H3_GRAPH_HEADROOM_GIB")
++    headroom = float(gib) * 2**30 if gib else 64 * hidden_states.nbytes
++    if free >= headroom + 8 * hidden_states.nbytes:
++        return True
++    graphs.skipped += 1
++    return False
++
++
++def _h3_graphs_reset(graphs):
++    """Drop every graph, its outputs and the shared inputs, and return the memory."""
++    import gc
++    states = [*graphs.ff.values(), *graphs.projection.values()]
++    graphs.ff.clear()
++    graphs.projection.clear()
++    for state in states:
++        if state[1] is not None:
++            state[1].reset()
++    del states
++    graphs.key = graphs.pool = graphs.side = None
++    graphs.inputs = {}
++    graphs.resets += 1
++    gc.collect()
++    torch.cuda.empty_cache()
++
++
+ def _h3_ff_graph_signature(ff, hidden_states, stream):
+     """Identify the frozen FFN state; reject unversioned weight tensors."""
+     tensors = []
+@@ -331,21 +439,23 @@ def _h3_ff_graph_forward(ff, hidden_states, residual_args=None):
+         if torch.cuda.is_current_stream_capturing():
+             return None
+         current = torch.cuda.current_stream(hidden_states.device)
++        policy = _h3_graph_policy()
+         signature = _h3_ff_graph_signature(ff, hidden_states, current)
+-        if signature is None:
++        if policy is None or signature is None:
+             return None
+ 
+-        cache = getattr(_h3_ff_graph_forward, "_graphs_v2", None)
+-        if cache is None:
+-            import weakref
+-            cache = weakref.WeakKeyDictionary()
+-            _h3_ff_graph_forward._graphs_v2 = cache
++        graphs = _h3_graphs_enter(_h3_graphs(), hidden_states, policy)
++        cache = graphs.ff
+ 
+         state = cache.get(ff)
+         if state is None or state[0] != signature:
+             cache.pop(ff, None)
+-            static_input = torch.empty_like(hidden_states)
+-            side = torch.cuda.Stream(device=hidden_states.device)
++            state = None
++            if not _h3_graphs_fits(graphs, hidden_states):
++                cache[ff] = (signature, None, None, None)
++                return None
++            static_input = _h3_graphs_buffer(graphs, "hidden", hidden_states)
++            side = graphs.side
+             side.wait_stream(current)
+             try:
+                 with torch.cuda.stream(side):
+@@ -360,8 +470,9 @@ def _h3_ff_graph_forward(ff, hidden_states, residual_args=None):
+                     return None
+ 
+                 graph = torch.cuda.CUDAGraph()
+-                with torch.cuda.graph(graph, stream=side):
++                with torch.cuda.graph(graph, pool=graphs.pool, stream=side):
+                     static_output = ff._forward(static_input)
++                graphs.captures += 1
+ 
+                 after_capture = _h3_ff_graph_signature(ff, hidden_states, current)
+                 if after_capture != signature:
+@@ -461,24 +572,27 @@ def _h3_projection_graph_forward(attn, hidden_states, rotary_emb):
+         if torch.cuda.is_current_stream_capturing():
+             return None
+         current = torch.cuda.current_stream(hidden_states.device)
++        policy = _h3_graph_policy()
+         signature = _h3_projection_graph_signature(
+             attn, hidden_states, rotary_emb, current,
+         )
+-        if signature is None:
++        if policy is None or signature is None:
+             return None
+ 
+-        cache = getattr(_h3_projection_graph_forward, "_projection_graphs_v1", None)
+-        if cache is None:
+-            import weakref
+-            cache = weakref.WeakKeyDictionary()
+-            _h3_projection_graph_forward._projection_graphs_v1 = cache
++        graphs = _h3_graphs_enter(_h3_graphs(), hidden_states, policy)
++        cache = graphs.projection
+ 
+         state = cache.get(attn)
+         if state is None or state[0] != signature:
+             cache.pop(attn, None)
+-            static_input = torch.empty_like(hidden_states)
+-            static_rotary = (torch.empty_like(cos), torch.empty_like(sin))
+-            side = torch.cuda.Stream(device=hidden_states.device)
++            state = None
++            if not _h3_graphs_fits(graphs, hidden_states):
++                cache[attn] = (signature, None, None, None, None)
++                return None
++            static_input = _h3_graphs_buffer(graphs, "hidden", hidden_states)
++            static_rotary = (_h3_graphs_buffer(graphs, "cos", cos),
++                             _h3_graphs_buffer(graphs, "sin", sin))
++            side = graphs.side
+             side.wait_stream(current)
+             try:
+                 with torch.cuda.stream(side):
+@@ -499,10 +613,11 @@ def _h3_projection_graph_forward(attn, hidden_states, rotary_emb):
+                     return None
+ 
+                 graph = torch.cuda.CUDAGraph()
+-                with torch.cuda.graph(graph, stream=side):
++                with torch.cuda.graph(graph, pool=graphs.pool, stream=side):
+                     static_outputs = _h3_projection_graph_ops(
+                         attn, static_input, static_rotary,
+                     )
++                graphs.captures += 1
+ 
+                 after_capture = _h3_projection_graph_signature(
+                     attn, hidden_states, rotary_emb, current,
