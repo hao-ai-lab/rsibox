@@ -784,6 +784,155 @@ def test_stop_engine_stops_the_session_after_its_leader_exited():
         _stop(worker)
 
 
+# An engine in miniature with vLLM's shutdown order: on SIGTERM the leader (the API server)
+# asks its child (the engine core) to abort the in-flight requests and waits for the answer,
+# then exits; the child answers and exits. A child killed before it answered leaves the leader
+# waiting forever, as uvicorn waits for request handlers whose outputs never come.
+ORDERED_ENGINE = r'''
+import os, signal, subprocess, sys, time
+CHILD = ("import sys; sys.stdin.readline(); print('aborted 3 requests', flush=True)")
+child = subprocess.Popen([sys.executable, "-c", CHILD], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE)
+print(child.pid, flush=True)
+
+def term(*_):
+    try:
+        child.stdin.write(b"abort\n"); child.stdin.flush()
+        answer = child.stdout.readline()
+    except OSError:
+        answer = b""
+    if not answer:
+        while True:
+            time.sleep(1)
+    open(sys.argv[1], "wb").write(answer)
+    child.wait()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, term)
+while True:
+    time.sleep(0.05)
+'''
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_lets_the_leader_stop_its_engine_in_order(tmp_path):
+    """Input: ORDERED_ENGINE (leader + child in the leader's session, vLLM's shutdown order in
+    miniature). Action: stop_engine(leader, grace=3). Expect: the leader got the child's answer
+    ("aborted 3 requests" written), both are gone in well under the grace, stopped True, no
+    SIGKILL (escalated False), how "leader". Before: SIGTERM went to every process at once, the
+    child died unanswered, the leader hung and only SIGKILL after the grace ended it: on B200
+    under client load, 10.1 s with requests left hanging, against 1.0 s leader-only. Not: vLLM's
+    own shutdown (the B200 receipt)."""
+    answer = tmp_path / "answer"
+    leader = subprocess.Popen([sys.executable, "-c", ORDERED_ENGINE, str(answer)],
+                              stdout=subprocess.PIPE, text=True, start_new_session=True)
+    child = int(leader.stdout.readline())
+    try:
+        r = engine.stop_engine(leader.pid, grace=3, kill_wait=3)
+        leader.wait(timeout=5)
+        assert r["stopped"] is True and r["escalated"] is False and r["how"] == "leader", r
+        assert r["seconds"] < 1.5 and r["tree"] == 2, r
+        assert answer.read_text() == "aborted 3 requests\n"
+        assert leader.returncode == 0 and zygote._exited(child)
+    finally:
+        _stop(leader.pid)
+        _stop(child)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_what_the_leader_leaves_behind_at_once():
+    """Input: a leader that dies on SIGTERM without stopping its child (a plain sleeper in its
+    session). Action: stop_engine(leader, grace=5). Expect: the child gets SIGTERM as soon as
+    the leader is gone: stopped True in well under the grace, escalated False. Pain point: a
+    leader-only stop that waited the whole grace for orphans holding the GPU. Not: SIGKILL."""
+    leader = subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, sys, time; print(subprocess.Popen("
+         "[sys.executable, '-c', 'import time; time.sleep(60)']).pid, flush=True); "
+         "time.sleep(60)"], stdout=subprocess.PIPE, text=True, start_new_session=True)
+    child = int(leader.stdout.readline())
+    try:
+        r = engine.stop_engine(leader.pid, grace=5, kill_wait=3)
+        assert r["stopped"] is True and r["escalated"] is False, r
+        assert r["seconds"] < 2.5 and zygote._exited(child), r
+        assert r["leader_exit_s"] is not None and r["tree_exit_s"] >= r["leader_exit_s"]
+    finally:
+        leader.wait(timeout=5)
+        _stop(child)
+
+
+def test_session_members_started_after_the_leader_are_verified(tmp_path):
+    """Input: a /proc tree for an exited leader 3000 (recorded start time 400): 3001 in session
+    3000 started at 500 (a server's worker forked from the zygote: no marker in its exec-time
+    environ), 3002 in session 3000 started at 300 (before the leader: not its), 3003 in
+    another session started at 600. Action: verified_members with session 3000, since 400,
+    no marker. Expect: [3001]; without `since`, []. Before: a forked engine's members were
+    never verified, so a stop after its leader died signalled nothing and they kept their GPU
+    memory. Does not prove: the signals (the Linux case below)."""
+    for pid, sid, start in ((3001, 3000, 500), (3002, 3000, 300), (3003, 3003, 600)):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(
+            f"{pid} (VLLM::Worker) S 1 {sid} {sid} " + " ".join(["0"] * 15) + f" {start} 0 0\n")
+        (tmp_path / str(pid) / "environ").write_bytes(b"PATH=/bin\0")
+    pids = [3001, 3002, 3003]
+    assert engine.verified_members(pids, "/m", proc_root=str(tmp_path), session=3000,
+                                   since=400) == [3001]
+    assert engine.verified_members(pids, "/m", proc_root=str(tmp_path), session=3000) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_a_forked_engines_members_after_its_leader_exited():
+    """Input: a leader in its own session forks (no exec) a worker that sets the launch marker
+    in os.environ after the fork, as a zygote-forked server does, then the leader exits; its
+    start time was recorded while it ran. Action: stop_engine(leader, marker) without the start
+    time, then with it. Expect: without it nothing is signalled (the marker is not in the
+    exec-time environ); with it the worker is stopped. Before: there was no start-time rule, so
+    such a worker was never stopped. Not: a reused session id (Linux forbids it while live)."""
+    marker = "/cache/engines/live/forked"
+    leader = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys, time\n"
+         "pid = os.fork()\n"
+         "if pid == 0:\n"
+         f"    os.environ[{engine.MARKER_ENV!r}] = {marker!r}\n"
+         "    time.sleep(60); os._exit(0)\n"
+         "print(pid, flush=True); sys.stdin.readline()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+    worker = int(leader.stdout.readline())
+    recorded = engine._start_time(leader.pid)
+    leader.stdin.close()
+    leader.wait(timeout=10)
+    try:
+        r = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
+        assert r["stopped"] is False and r["unverified"] == [worker], r
+        assert not zygote._exited(worker)
+        r = engine.stop_engine(leader.pid, grace=2, kill_wait=3, marker=marker,
+                               start_time=recorded)
+        assert r["stopped"] is True and r["how"] == "members", r
+        assert zygote._exited(worker)
+    finally:
+        _stop(worker)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_never_signals_a_pid_another_process_holds_now():
+    """Input: a live process whose start time differs from the one recorded at launch (the
+    engine's pid was reused). Action: stop_engine(pid, start_time=recorded). Expect: stopped
+    False, a note naming the other process, and the process still running. Pain point: a
+    stop that kills an unrelated server. Not: the members' rules (cases above)."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+    try:
+        time.sleep(0.2)
+        r = engine.stop_engine(other.pid, grace=0.5, kill_wait=0.5,
+                               start_time=engine._start_time(other.pid) - 1)
+        assert r["stopped"] is False and "another process" in r["note"], r
+        time.sleep(0.2)
+        assert not zygote._exited(other.pid)
+    finally:
+        other.kill()
+        other.wait()
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine():
     """Input: a running engine on port P (`--weights`), and three `reconfigure --pid PID` calls:

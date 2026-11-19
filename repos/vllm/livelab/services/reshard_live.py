@@ -59,12 +59,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
-if LIVELAB not in sys.path:
-    sys.path.insert(1, LIVELAB)
-
-from fastrsi import ipc  # noqa: E402
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
+from fastrsi import ipc  # noqa: E402  (stdlib only: engine.py imports this module)
 
 
 def map_global_expert_to_ep(*args, **kwargs):
@@ -642,25 +638,8 @@ _write_record = ipc.atomic_write_json
 
 def stop_group(pid, grace=15.0):
     """Stop a holder group this module started (its pid leads its session)."""
-    import signal
-    try:
-        if os.getpgid(pid) != pid:
-            return False
-        os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return False
-    deadline = time.time() + grace
-    while time.time() < deadline:
-        try:
-            os.killpg(pid, 0)
-        except ProcessLookupError:
-            return True
-        time.sleep(0.1)
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    return True
+    import weights
+    return weights.stop_session(pid, grace)
 
 
 def _probe_group(socket_dir, keys):

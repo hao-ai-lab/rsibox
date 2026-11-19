@@ -58,6 +58,12 @@ Contract:
   way back costs no reshard).
   Every preflight check runs BEFORE mutating or stopping PID; a refusal exits 2 and leaves PID
   running untouched.
+- Stopping PID (stop_engine) is drain-aware: SIGTERM goes to the API server only, which aborts
+  its in-flight requests (answering them), stops its engine core and workers, and closes the
+  port; only what it leaves behind is signalled by the launcher, and SIGKILL comes after the
+  grace. The report's `reconfig.stop` has the phases (leader exit, tree exit, port closed).
+  The engine's state file records the API server's start time, so a stop after it died still
+  finds the members of its session, zygote-forked ones included, and never a reused pid.
 - engine_env() is the one environment of every engine process. The zygote is started with it
   too, so a start that matches the zygote's settings passes the zygote's "env" check.
 - Weights load with vLLM's default load format (`auto`: from disk) unless the argv asks for
@@ -99,9 +105,10 @@ import argparse, json, os, signal, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
 import forksafe  # noqa: E402
-from fastrsi import ipc, proc  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402  (stdlib only)
 
 LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
@@ -401,9 +408,9 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
     `engine.py reconfigure --pid <pid>` can inspect and override it (including zygote forks whose
     `/proc/<pid>/cmdline` stays the zygote's)."""
     state_path = _engine_state_path(launcher_args.cache_root, pid)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "pid": pid,
+        "start_time": _start_time(pid),     # tells this process from a later one with its pid
         "port": port,
         "vargv": list(vllm_argv),
         "cmd": list(command),
@@ -448,12 +455,9 @@ def _strip_injected_flags(argv):
 def load_engine_state(cache_root, pid):
     """Load the state of engine `pid` from `<cache-root>/engines/<pid>.json`, falling back to
     `/proc/<pid>/cmdline` when started directly without a state file."""
-    state_path = _engine_state_path(cache_root, pid)
-    if state_path.exists():
-        try:
-            return json.loads(state_path.read_text())
-        except (OSError, ValueError):
-            pass
+    state = ipc.read_json(_engine_state_path(cache_root, pid))
+    if state is not None:
+        return state
     try:
         raw_tokens = [
             token for token in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
@@ -502,6 +506,17 @@ def load_engine_state(cache_root, pid):
     }
 
 
+def _stat(pid, proc_root="/proc"):
+    """(ppid, pgid, sid, start time) from /proc/<pid>/stat, or None when pid is gone. The start
+    time (clock ticks since boot, field 22) tells a reused pid from the process first seen."""
+    try:
+        with open(f"{proc_root}/{pid}/stat") as stat_file:
+            fields = stat_file.read().rsplit(")", 1)[1].split()
+        return int(fields[1]), int(fields[2]), int(fields[3]), int(fields[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _descendants(pid, proc_root="/proc"):
     """The processes below pid (ppid links), plus every process in pid's process group or
     session and theirs: a worker whose parent died is reparented (ppid 1) but stays in the
@@ -513,15 +528,13 @@ def _descendants(pid, proc_root="/proc"):
         return descendants
     for entry in entries:
         if entry.isdigit():
-            try:
-                with open(f"{proc_root}/{entry}/stat") as stat_file:
-                    fields = stat_file.read().rsplit(")", 1)[1].split()
-                parent_pid, group_id, session_id = (int(value) for value in fields[1:4])
-                children_by_parent.setdefault(parent_pid, []).append(int(entry))
-                if int(entry) != pid and pid in (group_id, session_id):
-                    members.append(int(entry))
-            except Exception:
-                pass
+            st = _stat(entry, proc_root)
+            if st is None:
+                continue
+            parent_pid, group_id, session_id, _ = st
+            children_by_parent.setdefault(parent_pid, []).append(int(entry))
+            if int(entry) != pid and pid in (group_id, session_id):
+                members.append(int(entry))
     stack = [pid] + members
     seen = {pid}
     while stack:
@@ -538,33 +551,40 @@ def _descendants(pid, proc_root="/proc"):
 MARKER_ENV = "FASTRSI_LIVE_RECONFIG_DIR"   # engine_env(): one folder per launch, inherited
 
 
-def verified_members(pids, marker, proc_root="/proc"):
-    """The pids whose environment has MARKER_ENV == marker (the processes of one launch),
-    never this process. Empty when marker is None: nothing ties the processes to the engine."""
-    if not marker:
-        return []
-    want = f"{MARKER_ENV}={marker}".encode()
+def verified_members(pids, marker, proc_root="/proc", session=None, since=None):
+    """The pids that belong to one launch, never this process: those whose exec-time
+    environment has MARKER_ENV == marker, and, when the launch recorded its leader's start
+    time `since`, the members of the leader's session `session` that started at or after it.
+    The second rule covers a server forked from the zygote: it sets MARKER_ENV after the fork,
+    without exec, so /proc/<pid>/environ (the exec-time environment) never shows it. It is
+    sound because Linux never reuses a pid while a live process has it as its session id: a
+    member of that session started after the leader is the leader's. Empty when neither is
+    given: nothing ties the processes to the engine."""
+    want = f"{MARKER_ENV}={marker}".encode() if marker else None
     verified = []
     for member_pid in pids:
         if member_pid == os.getpid():
             continue
-        try:
-            with open(f"{proc_root}/{member_pid}/environ", "rb") as environ_file:
-                if want in environ_file.read().split(b"\0"):
-                    verified.append(member_pid)
-        except OSError:
-            pass
+        if want is not None:
+            try:
+                with open(f"{proc_root}/{member_pid}/environ", "rb") as environ_file:
+                    if want in environ_file.read().split(b"\0"):
+                        verified.append(member_pid)
+                        continue
+            except OSError:
+                pass
+        if session is not None and since is not None:
+            st = _stat(member_pid, proc_root)
+            if st is not None and st[2] == session and st[3] >= since:
+                verified.append(member_pid)
     return verified
 
 
 def _start_time(pid):
     """The process start time (clock ticks since boot, /proc/<pid>/stat field 22), or None when
     pid is gone. A pid with another start time is another process (pid reuse)."""
-    try:
-        with open(f"/proc/{pid}/stat") as f:
-            return int(f.read().rsplit(")", 1)[1].split()[19])
-    except (OSError, ValueError, IndexError):
-        return None
+    st = _stat(pid)
+    return None if st is None else st[3]
 
 
 def _same_process(pid, start_time):
@@ -582,57 +602,87 @@ def _signal_if_same(pid, start_time, sig):
         return False
 
 
-def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None):
-    """Stop engine `pid` and its descendants (_descendants: its process tree, group and
-    session). After `pid` itself exited, only the members that carry the launch's `marker`
-    (its MARKER_ENV value) are stopped: a pid can be reused by another session's leader, and
-    without a marker nothing is signalled. /proc/<pid>/environ is the exec-time environment, so
-    a server forked from the zygote (which sets MARKER_ENV after the fork, without exec) never
-    shows it: for those, a stop after the leader exited signals nothing and says so. SIGTERM, up to `grace` s, then SIGKILL, up to
-    `kill_wait` s more. Each process is identified by (pid, start time) when first seen and is
-    signalled only while it still has that start time, so a reused pid is never hit.
-    Returns {"stopped", "seconds", "alive", "port_open"}: stopped is True only when every
-    recorded process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
+def stop_engine(pid, port=None, grace=10.0, kill_wait=5.0, marker=None, start_time=None):
+    """Stop engine `pid` (the `vllm serve` API server, leader of its session) and every process
+    below it (_descendants: its process tree, group and session), drain-aware: SIGTERM goes to
+    the leader only, and vLLM's own shutdown stops the rest in order (the API server aborts
+    its in-flight requests, answering them, stops the engine core and its workers, then closes
+    the port). Signalling every process at once, as before, races that order: the engine core
+    and workers died before the aborts reached the API server, whose request handlers then
+    waited forever, so uvicorn never closed its connections and only the SIGKILL after
+    `grace` ended it (10.1 s under client load on B200, against 1.0 s leader-only).
+    - When the leader exits and leaves members behind, those get SIGTERM at once (nothing
+      will stop them now); anything alive after `grace` s gets SIGKILL, up to `kill_wait` s.
+    - When `pid` exited before the stop, or another process has it now (its start time is not
+      `start_time`, the leader's recorded at launch), only verified members are stopped
+      (verified_members: the launch `marker`, or the leader's session and start time). Without
+      either, nothing is signalled, and the report says so.
+    Each process is identified by (pid, start time) when first seen and is signalled only
+    while it still has that start time, so a reused pid is never hit.
+    Returns {"stopped", "seconds", "alive", "port_open", "how", "escalated", "tree",
+    "leader_exit_s", "tree_exit_s", "port_closed_s"}: stopped is True only when every recorded
+    process is gone (or a zombie) and `port` no longer answers; it is never assumed."""
     t0 = time.time()
     below = [member_pid for member_pid in _descendants(pid) if member_pid != os.getpid()]
-    if zygote._exited(pid):
-        verified = verified_members(below, marker)
+    leader_start = _start_time(pid) if not zygote._exited(pid) else None
+    reused = leader_start is not None and start_time is not None and leader_start != start_time
+    if leader_start is None or reused:
+        verified = verified_members(below, marker, session=None if reused else pid,
+                                    since=start_time)
         if not verified:
-            note = (f"pid {pid} was not running" if not below else
+            note = (f"pid {pid} is another process now (start time {leader_start}, recorded "
+                    f"{start_time})" if reused else
+                    f"pid {pid} was not running" if not below else
                     f"pid {pid} exited; {len(below)} member(s) of its group or session not "
-                    "verified as this engine's (no launch marker): none signalled")
+                    "verified as this engine's (no launch marker or start time): none signalled")
             return {"stopped": False, "seconds": 0.0, "alive": [], "port_open": None,
                     "note": note, "unverified": below}
-        below = verified
-    procs = {proc_pid: _start_time(proc_pid) for proc_pid in [pid] + below}
+        below, leader = verified, None
+    else:
+        leader = pid
+    procs = {proc_pid: _start_time(proc_pid) for proc_pid in ([leader] if leader else []) + below}
     procs = {p: st for p, st in procs.items() if st is not None}
+    marks = {"leader_exit_s": None, "tree_exit_s": None, "port_closed_s": None}
 
     def alive():
         return sorted(p for p, st in procs.items() if _same_process(p, st) and not zygote._exited(p))
 
     def done():
-        return not alive() and (port is None or not port_in_use(port))
+        now, left = round(time.time() - t0, 3), alive()
+        if leader and marks["leader_exit_s"] is None and leader not in left:
+            marks["leader_exit_s"] = now
+        if marks["tree_exit_s"] is None and not left:
+            marks["tree_exit_s"] = now
+        if port is not None and marks["port_closed_s"] is None and not port_in_use(port):
+            marks["port_closed_s"] = now
+        return not left and (port is None or marks["port_closed_s"] is not None)
 
-    try:
-        if os.getpgid(pid) == pid and _same_process(pid, procs.get(pid)):
-            os.killpg(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    for p, st in procs.items():
-        _signal_if_same(p, st, signal.SIGTERM)
+    orphans_signalled = False
+    if leader:
+        _signal_if_same(leader, procs.get(leader), signal.SIGTERM)
+    else:                        # no API server left to stop them in order
+        for p, st in procs.items():
+            _signal_if_same(p, st, signal.SIGTERM)
+        orphans_signalled = True
     deadline = t0 + grace
     while time.time() < deadline and not done():
-        time.sleep(0.05)
-    if not done():
+        if not orphans_signalled and marks["leader_exit_s"] is not None:
+            for p in alive():    # the leader exited without them
+                _signal_if_same(p, procs[p], signal.SIGTERM)
+            orphans_signalled = True
+        time.sleep(0.02)
+    escalated = not done()
+    if escalated:
         for p in alive():
             _signal_if_same(p, procs[p], signal.SIGKILL)
         deadline = time.time() + kill_wait
         while time.time() < deadline and not done():
-            time.sleep(0.05)
+            time.sleep(0.02)
     left = alive()
     port_open = port_in_use(port) if port is not None else None
     return {"stopped": not left and not port_open, "seconds": round(time.time() - t0, 3),
-            "alive": left, "port_open": port_open}
+            "alive": left, "port_open": port_open, "how": "leader" if leader else "members",
+            "escalated": escalated, "tree": len(procs), **marks}
 
 
 def _launch_process(launcher_args, vllm_argv, parsed_vllm, env, preflight_report,
@@ -984,7 +1034,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                 new_parsed["args"]["tensor_parallel_size"],
             )
     t_stop = time.perf_counter()
-    stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"))
+    stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"),
+                            start_time=state.get("start_time"))
     if not stop_info["stopped"]:
         print(json.dumps({"findings": [{
             "check": "stop_engine", "observed": stop_info,
@@ -997,7 +1048,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                        "restarted": True,
                        "replaced_pid": launcher_args.pid,
                        "restart_reason": live_reason,
-                       "stop_seconds": round(time.perf_counter() - t_stop, 6)}
+                       "stop_seconds": round(time.perf_counter() - t_stop, 6),
+                       "stop": stop_info}
     if reshard_report is not None:
         reconfig_report["reshard"] = reshard_report
     return _launch_process(

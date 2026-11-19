@@ -92,6 +92,21 @@ def test_plan_of_another_config_is_a_finding_and_the_profile_runs(plan_dir, capl
     assert _events(caplog, True)[-1]["event"] == "kvplan_free_memory"
 
 
+def test_a_second_holder_group_outside_the_budget_does_not_miss_the_plan(plan_dir, caplog):
+    """Input: a plan measured with 150 GiB free (one holder group resident); the same config
+    starts again with 120 GiB free, because the other parallel config's holder group (the way
+    back of a TP <-> EP reshard, 30 GiB) now shares the GPU. The engine's budget,
+    requested_memory, is 110 GiB. Expect: the plan is reused (no profile run), since the budget
+    fits and the KV size was measured inside it. Before: kvplan_free_memory and a profile run
+    on every reshard switch. Not: that the GPU then has room (vLLM's own start check, GPU)."""
+    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    Planned(free=150 * GiB).determine_available_memory()
+    assert Planned(free=120 * GiB).determine_available_memory() == 90 * GiB
+    assert FakeWorker.profiles == 1
+    assert [e["event"] for e in _events(caplog, False)] == ["measured", "reused"]
+    assert _events(caplog, True) == []
+
+
 def test_a_measurement_with_no_kv_memory_is_never_recorded_or_reused(plan_dir, caplog):
     """Input: a start whose profile run leaves -9.64 GiB for the KV cache (another process held
     GPU memory on one rank in our TP2 run), then a start with more free memory and the same

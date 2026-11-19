@@ -35,13 +35,9 @@ instead of spawning them.
 import argparse, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-# forksafe.py is the framework's (core/livelab; FASTRSI_LIVELAB overrides the folder)
-LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
-if LIVELAB not in sys.path:
-    sys.path.insert(1, LIVELAB)
-import forksafe, vllm_args, zygote_refresh
-from fastrsi import ipc, proc
+import corelab  # noqa: F401,E402  (core/livelab on sys.path: forksafe, fastrsi)
+import forksafe, vllm_args, zygote_refresh  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.
 REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
@@ -73,6 +69,8 @@ BASE_MODULES = [
 ]
 
 
+# Whether this process has initialized the CUDA driver (cuInit): a forked child of a process
+# that did cannot use CUDA (forksafe: cuDeviceGetCount answers NOT_INITIALIZED until then).
 driver_initialized = forksafe.driver_initialized
 
 
@@ -373,6 +371,7 @@ def serve(sock_path, modules_file):
 
 
 def _call(sock_path, msg, timeout=60):
+    """One JSON line to the zygote, its JSON reply back (OSError when it does not answer)."""
     return ipc.unix_json_call(sock_path, msg, timeout=timeout)
 
 
@@ -400,6 +399,7 @@ def check(sock_path, env, accept=()):
     return _call(sock_path, {"cmd": "check", "env": env, "accept": list(accept)})
 
 
+# Why a Unix socket cannot be bound at this path (sun_path: 107 bytes on Linux), or None.
 MAX_SOCK_PATH = ipc.MAX_SOCK_PATH
 sock_path_error = ipc.sock_path_error
 
