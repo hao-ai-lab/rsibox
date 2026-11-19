@@ -7,12 +7,15 @@ Provides shared, zero-dependency building blocks for FastRSI live labs:
 - `hooks`: stack-safe `MetaPathFinder` import hooks and source overlays (`OverlayFinder`).
 - `harness`: `edit_once`, module source lookup, `PackageOverlay`, fresh subprocess runner,
   and canonical `fail_apply` / `fail_commit` / `tamper` fault injection.
+- `diffs`: pure-stdlib + `git apply` unified-diff resolver (`apply`, `paths`, `module_of`).
 - `lab`: `BaseLab` (`LabUnderTest`), `RecaptureCoordinator`, and `RoleEndpoint`.
 - `cli`: unified engine-agnostic CLI (`fastrsi list | conformance | survey | ctl | doctor`).
 """
 import os
 import sys
 
+from . import diffs
+from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .harness import (
     PackageOverlay,
     build_package_overlay,
@@ -96,8 +99,11 @@ __all__ = [
     "RecaptureCoordinator",
     "RoleEndpoint",
     "UnixJsonServer",
+    "apply_diff",
     "atomic_write_json",
     "bootstrap_livelab",
+    "diff_paths",
+    "diffs",
     "build_package_overlay",
     "descendants",
     "direct_children",
@@ -110,6 +116,7 @@ __all__ = [
     "kill_tree",
     "mailbox_call",
     "module_file",
+    "module_of_path",
     "module_relpath",
     "pid_alive",
     "port_in_use",

@@ -17,6 +17,7 @@ from kernel import locate as L
 from kernel import receipt as R
 from kernel import session as SS
 
+from . import diffs as D
 from . import harness as H
 
 
@@ -307,6 +308,36 @@ class BaseLab:
             self.base_text[key] = H.read_module(key)
         return self.base_text[key]
 
+    @staticmethod
+    def _disk_source(key: str) -> str | None:
+        try:
+            return H.read_module(key)
+        except (ImportError, OSError):
+            return None
+
+    def files(self, patch: dict | None, against: str = "live") -> dict[str, str]:
+        """Resolve `{module: new_text}` from `patch["files"]` or unified `patch["diff"]`.
+
+        With `against="live"` (default), diffs apply to the lab's live text (base plus every
+        committed edit so far); with `against="disk"`, diffs apply to the files on disk.
+        Raises `ValueError` when a diff does not apply cleanly.
+        """
+        if not patch or patch.get("diff") is None:
+            return dict((patch or {}).get("files") or {})
+        if against == "disk":
+            return D.apply(patch["diff"], self._disk_source)
+        live = self.live_text[-1]
+
+        def current_live(mod: str) -> str | None:
+            if mod in live:
+                return live[mod]
+            try:
+                return self._base_source(mod)
+            except (ImportError, OSError):
+                return None
+
+        return D.apply(patch["diff"], current_live)
+
     def _build_plan(self, patch: dict, live_map: dict[str, str]):
         modules = {}
         for mod, new_src in patch["files"].items():
@@ -413,7 +444,13 @@ class BaseLab:
                 return self._refuse_install("refused", codes, refused.get("findings", []), t0)
             live_map = self.live_text[-1]
             try:
-                plan, plan_findings = self._build_plan(patch, live_map)
+                if patch.get("diff") is not None:
+                    resolved_files = self.files(patch)
+                    effective_patch = {**patch, "files": resolved_files}
+                else:
+                    resolved_files = dict(patch.get("files") or {})
+                    effective_patch = patch
+                plan, plan_findings = self._build_plan(effective_patch, live_map)
             except Exception as exc:
                 finding = F.finding(
                     "patch_invalid", f"{type(exc).__name__}: {exc}", "importable modules"
@@ -422,12 +459,12 @@ class BaseLab:
             if plan is None:
                 codes = sorted({f["check"] for f in plan_findings})
                 return self._refuse_install("refused", codes, plan_findings, t0)
-            res = self.session.install(plan, edit_time=patch.get("edit_time"))
+            res = self.session.install(plan, edit_time=effective_patch.get("edit_time"))
             outcome = res.get("outcome") or "refused"
             rec = res.get("receipt")
             if outcome == "committed":
-                self.live_text.append({**live_map, **(patch.get("files") or {})})
-                self._after_commit(patch, rec)
+                self.live_text.append({**live_map, **resolved_files})
+                self._after_commit(effective_patch, rec)
             codes = (
                 rec["decisions"]["blocking"]
                 if rec

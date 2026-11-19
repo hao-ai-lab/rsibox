@@ -20,7 +20,7 @@ import unittest
 from unittest import mock
 
 import fastrsi
-from fastrsi import harness, hooks, ipc, proc
+from fastrsi import diffs, harness, hooks, ipc, proc
 
 LIVELAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SEQ = itertools.count(1)
@@ -288,6 +288,49 @@ class HooksAndHarnessTests(unittest.TestCase):
             self.assertEqual(resolved, os.path.abspath(LIVELAB))
             self.assertIn(resolved, sys.path)
             self.assertNotIn("FASTRSI_LIVELAB", os.environ)
+
+
+class DiffsTests(unittest.TestCase):
+    def test_apply_modifies_creates_and_refuses_invalid_or_stale_diffs(self):
+        """Input: unified diffs that (a) edit a module, (b) create a new module and `__init__.py`,
+        (c) fail context match, (d) delete a module, and (e) touch a non-Python file.
+        Expected: valid diffs produce `{module: new_text}` with zero disk side effects;
+        stale/deletion/non-Python diffs raise `ValueError`."""
+        base = "def f(x):\n    return x + 1\n"
+        edit_diff = (
+            "--- a/pkg/mod.py\n"
+            "+++ b/pkg/mod.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def f(x):\n"
+            "-    return x + 1\n"
+            "+    return x + 2\n"
+        )
+        self.assertEqual(diffs.paths(edit_diff), ["pkg/mod.py"])
+        self.assertEqual(diffs.module_of("pkg/sub/__init__.py"), "pkg.sub")
+        out = diffs.apply(edit_diff, lambda m: base if m == "pkg.mod" else None)
+        self.assertEqual(out, {"pkg.mod": "def f(x):\n    return x + 2\n"})
+
+        # Stale context refused without fuzz.
+        with self.assertRaisesRegex(ValueError, "does not apply"):
+            diffs.apply(edit_diff, lambda _m: "def f(x):\n    return x + 9\n")
+
+        # Created module & package __init__.py supported.
+        create_diff = (
+            "--- /dev/null\n"
+            "+++ b/pkg/sub/__init__.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+FLAG = True\n"
+        )
+        self.assertEqual(diffs.apply(create_diff, lambda _m: None), {"pkg.sub": "FLAG = True\n"})
+
+        # Deletion and non-Python files refused.
+        del_diff = "--- a/pkg/old.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-X = 1\n"
+        with self.assertRaisesRegex(ValueError, "deletes a module"):
+            diffs.apply(del_diff, lambda _m: "X = 1\n")
+
+        cfg_diff = "--- a/cfg.yaml\n+++ b/cfg.yaml\n@@ -1 +1 @@\n-a: 1\n+a: 2\n"
+        with self.assertRaisesRegex(ValueError, "not modules"):
+            diffs.apply(cfg_diff, lambda _m: None)
 
 
 if __name__ == "__main__":

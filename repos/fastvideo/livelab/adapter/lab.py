@@ -28,8 +28,7 @@ import time
 from fastrsi import harness, ipc, lab as lab_base
 from kernel import coordinator as C
 from kernel import findings as F
-from kernel import locate as L
-from adapter import agent, diffs
+from adapter import agent
 
 H3 = "fastvideo.pipelines.basic.minimax_h3"
 DEC = f"{H3}.stages.minimax_h3_decoding"
@@ -131,7 +130,6 @@ class FastVideoLab(lab_base.BaseLab):
             import numpy as np
             self.golden = np.load(golden)
         self.holder = self.holder_sock = None
-        self._pending_files = {}
         self.rebuilt = {}
         super().__init__(receipts=receipts, check_timeout=check_timeout,
                          rpc_timeout=rpc_timeout, auto_spawn=False)
@@ -176,7 +174,6 @@ class FastVideoLab(lab_base.BaseLab):
         self.dirty = None                      # a pipe that missed its deadline
         self.base_text = {}
         self.rebuilt = {}
-        self._pending_files = {}
         ps = [C.CallParticipant(f"rank{i}", self._caller(i)) for i in range(self.ranks)]
         co = C.Coordinator(ps, writer=self.writer, interface_version="1-draft",
                            engine={"name": "fastvideo", "version": self._version(),
@@ -241,41 +238,6 @@ class FastVideoLab(lab_base.BaseLab):
     # -- BaseLab hooks + FastVideo-specific verbs ----------------------------------------
     def _base(self, m):
         return self._base_source(m)
-
-    def _exists(self, m):
-        try:
-            return m in self.base_text or module_file(m) is not None
-        except ImportError:
-            return False
-
-    def files(self, patch, against="live"):
-        """{module: new text} of a patch: its `files`, or its `diff` (a unified diff, such as a
-        `patches/` file) applied to the live text (base plus every live edit and rebuild), or to
-        the files on disk with `against="disk"` (what a fresh process starts from). ValueError
-        when the diff does not apply."""
-        if patch.get("diff") is None:
-            return dict(patch.get("files") or {})
-        if against == "disk":
-            return diffs.apply(patch["diff"], lambda m: read_module(m) if self._exists(m) else None)
-        live = self.live_text[-1]
-        return diffs.apply(patch["diff"], lambda m: live.get(m) or (
-            self._base(m) if self._exists(m) else None))
-
-    def _build_plan(self, patch, live_map):
-        files = self.files(patch)
-        self._pending_files = files
-        modules = {
-            m: {"source": new, "base_hash": L.text_hash(live_map.get(m) or self._base(m))}
-            for m, new in files.items()
-        }
-        plan = {"modules": modules, "accept": patch.get("accept", []),
-                "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
-        return plan, []
-
-    def _after_commit(self, patch, receipt):
-        if self._pending_files:
-            self.live_text[-1].update(self._pending_files)
-            self._pending_files = {}
 
     def _probe_participants(self):
         for i in range(self.ranks):

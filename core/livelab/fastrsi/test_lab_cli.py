@@ -293,6 +293,39 @@ class BaseLabConformanceTests(unittest.TestCase):
         self.assertTrue(chk["proven"])
         self.assertEqual(list(chk["witness"]), ["rank0"])
 
+    def test_baselab_accepts_stacked_unified_diffs_and_refuses_stale_diff(self):
+        """Input: `MiniToyLab` (generic `BaseLab` subclass) receiving `install({"diff": ...})`
+        for two stacked unified diffs on `toy.ops`, then an out-of-order stale diff.
+        Expected: stacked diffs commit against live text, output updates, stale diff is refused
+        with `patch_invalid`, and uninstall restores base output."""
+        import difflib
+
+        ml = MiniToyLab()
+        self.addCleanup(ml.close)
+        base_out = ml.check()["output"]
+        ops0 = ml.base_text["toy.ops"]
+        ops1 = harness.edit_once(ops0, "    return x + 1", "    return x + 2")
+        ops2 = harness.edit_once(ops1, "    return x + 2", "    return x + 4")
+
+        def make_diff(old, new):
+            return "".join(difflib.unified_diff(
+                old.splitlines(True), new.splitlines(True), fromfile="a/toy/ops.py", tofile="b/toy/ops.py",
+            ))
+
+        d1, d2 = make_diff(ops0, ops1), make_diff(ops1, ops2)
+        stale = ml.install({"diff": d2})
+        self.assertEqual((stale["ok"], stale["outcome"], stale["codes"]), (False, "refused", ["patch_invalid"]))
+
+        r1 = ml.install({"diff": d1})
+        self.assertEqual((r1["ok"], r1["outcome"]), (True, "committed"), r1)
+        r2 = ml.install({"diff": d2})
+        self.assertEqual((r2["ok"], r2["outcome"]), (True, "committed"), r2)
+        chk = ml.check()
+        self.assertTrue(chk["ok"] and chk["proven"])
+        self.assertNotEqual(chk["output"], base_out)
+        self.assertTrue(ml.uninstall(r1["id"])["ok"])
+        self.assertEqual(ml.check()["output"], base_out)
+
 
 class CliTests(unittest.TestCase):
     def test_real_launch_args_keep_training_flags_after_delimiter(self):
