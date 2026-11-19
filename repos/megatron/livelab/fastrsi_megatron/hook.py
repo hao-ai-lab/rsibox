@@ -38,6 +38,7 @@ import traceback
 import torch
 import torch.distributed as dist
 
+from fastrsi import harness, ipc
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -253,37 +254,15 @@ class Lab:
         if msg.get("target") not in (None, self.rank):
             return {"ok": True, "skipped": True}
         fault = msg["fault"]
-        if fault == "fail_apply":
-            j, after, n = self.local.journal, msg.get("after", 1), [0]
-            orig = j.set_code
-
-            def set_code(*a, **k):
-                n[0] += 1
-                if n[0] > after:
-                    del j.set_code
-                    raise RuntimeError(f"rank {self.rank}: injected fault after {after} swap(s)")
-                return orig(*a, **k)
-            j.set_code = set_code
-        elif fault == "fail_commit":
-            lp = self.local
-            q = lp.quiesce
-
-            def failing(fn):
-                lp.quiesce = q
-                raise RuntimeError(f"rank {self.rank}: injected commit failure")
-            lp.quiesce = failing
-        elif fault in ("crash", "hang", "lost"):
+        if fault in ("fail_apply", "fail_commit", "tamper"):
+            kw = {k: v for k, v in msg.items() if k not in ("op", "fault", "target")}
+            reply = harness.inject_participant_fault(self.local, fault, **kw)
+            return {"ok": bool(reply.get("ok")), "fault": fault,
+                    **({"error": reply.get("error")} if not reply.get("ok") else {})}
+        if fault in ("crash", "hang", "lost"):
             self.faults[fault] = True
-        elif fault == "tamper":
-            mod = sys.modules[msg["module"]]
-            obj = mod
-            for part in msg["qualname"].split("."):
-                obj = getattr(obj, part)
-            fn = getattr(obj, "__func__", obj)
-            fn.__code__ = compile(msg["source"], fn.__code__.co_filename, "exec").co_consts[0]
-        else:
-            return {"ok": False, "error": f"unknown fault {fault}"}
-        return {"ok": True, "fault": fault}
+            return {"ok": True, "fault": fault}
+        return {"ok": False, "error": f"unknown fault {fault}"}
 
     # -- host (rank 0) -------------------------------------------------------------------
     def _host(self):
@@ -345,7 +324,7 @@ class Lab:
                     os._exit(LOST_ROUND_EXIT)
                 if msg.get("op") in ("resume", "exit"):
                     return msg["op"]
-        path = os.environ.get("FASTRSI_SOCK", f"/tmp/fastrsi-mg-{os.getpid()}.sock")
+        path = os.environ.get("FASTRSI_SOCK") or ipc.short_sock_path("fastrsi-mg")
         server = G.Server(path)
         if os.environ.get("FASTRSI_MAILBOX"):
             G.Mailbox(os.environ["FASTRSI_MAILBOX"], server.q)

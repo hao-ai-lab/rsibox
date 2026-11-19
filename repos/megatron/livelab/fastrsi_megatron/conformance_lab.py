@@ -19,40 +19,26 @@ One job is shared across cases while it stays at base (a start costs about a min
 poisoned or edited job is respawned instead.
 """
 import atexit
+import contextlib
 import json
 import os
 import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
 import time
 
+from fastrsi import harness, ipc, proc
+
 from . import client
 
 MLP = "megatron.core.transformer.mlp"
 ATT = "megatron.core.transformer.attention"
-
-
-def _edit(src, old, new):
-    assert src.count(old) == 1, f"anchor not unique ({src.count(old)}): {old!r}"
-    return src.replace(old, new)
-
-
-def _descendants(root):
-    """PIDs of every live descendant of root, parents before children (from /proc)."""
-    from .zygote import _tree
-    return _tree(root)[1:]
-
-
-def _free_port():
-    """A TCP port free right now (the kernel's pick), so a respawn or a second lab never reuses a
-    port still held by the job before it."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+_edit = harness.edit_once
+_descendants = proc.descendants
+_free_port = proc.free_port
 
 
 class _Job:
@@ -62,7 +48,7 @@ class _Job:
     def __init__(self, cmd, env, tag, timeout=900):
         self.dir = tempfile.mkdtemp(prefix=f"fastrsi-mg-{tag}-")
         self.ready = os.path.join(self.dir, "ready.json")
-        self.sock = os.path.join("/tmp", f"fmg-{os.getpid()}-{tag}.sock")
+        self.sock = ipc.short_sock_path(f"fmg-{tag}")
         env = {**os.environ, **env, "FASTRSI_READY": self.ready, "FASTRSI_SOCK": self.sock}
         self.log = open(os.path.join(self.dir, "job.log"), "w")
         self.t0 = time.time()
@@ -94,30 +80,19 @@ class _Job:
         sessions of their own, so a kill of the launcher's process group leaves them running
         (and holding GPU memory); walk the process tree instead, children first."""
         pids = _descendants(self.p.pid)
-        for pid in reversed(pids):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        if self.p.poll() is None:
-            try:
-                os.kill(self.p.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+        proc.kill_tree(self.p.pid, signal.SIGKILL, include_pg=False)
         try:
             self.p.wait(60)
         except subprocess.TimeoutExpired:
             pass
-        t0 = time.time()
-        while any(os.path.exists(f"/proc/{p}") for p in pids) and time.time() - t0 < 60:
+        deadline = time.monotonic() + 60
+        while any(proc.pid_alive(p) for p in pids) and time.monotonic() < deadline:
             time.sleep(0.2)
         if not self.log.closed:
             self.log.close()
         shutil.rmtree(self.dir, ignore_errors=True)
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(self.sock)
-        except OSError:
-            pass
 
     def tail(self, n=30):
         try:

@@ -11,47 +11,18 @@ step, so the caller must treat it as poisoned and respawn (the lab cannot answer
 """
 import argparse
 import json
-import socket
 import sys
+
+from fastrsi import ipc
 
 
 def call(sock, req, timeout=600):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(sock)
-        s.sendall((json.dumps(req) + "\n").encode())
-        f = s.makefile("rb")
-        line = f.readline()
-    except socket.timeout as e:
-        raise TimeoutError(f"no answer to {req.get('verb')} in {timeout} s") from e
-    finally:
-        s.close()
-    if not line:
-        raise ConnectionError(f"lab closed the connection during {req.get('verb')}")
-    return json.loads(line)
+    return ipc.unix_json_call(sock, req, timeout=timeout)
 
 
 def call_mailbox(root, req, timeout=600, poll_s=0.02):
     """The same request through a mailbox directory (gap.Mailbox), from another host."""
-    import os
-    import time
-    import uuid
-    rid = uuid.uuid4().hex[:12]
-    tmp, path = os.path.join(root, f".req-{rid}.tmp"), os.path.join(root, f"req-{rid}.json")
-    with open(tmp, "w") as f:
-        json.dump(req, f)
-    os.rename(tmp, path)
-    resp, t0 = os.path.join(root, f"resp-{rid}.json"), time.time()
-    while time.time() - t0 < timeout:
-        os.listdir(root)                      # revalidates the directory on NFS
-        if os.path.exists(resp):
-            with open(resp) as f:
-                r = json.load(f)
-            os.unlink(resp)
-            return r
-        time.sleep(poll_s)
-    raise TimeoutError(f"no answer to {req.get('verb')} in {timeout} s")
+    return ipc.mailbox_call(root, req, timeout=timeout, poll_s=poll_s)
 
 
 def main(argv=None):
