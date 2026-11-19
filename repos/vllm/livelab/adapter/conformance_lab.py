@@ -10,6 +10,7 @@ Environment variables (no hostnames or paths in code):
 - `FASTRSI_VLLM_VENV`: venv root (`bin/python`, `bin/vllm`, site-packages; default `sys.prefix`).
 - `FASTRSI_VLLM_WORK`: scratch dir for logs, caches, channels and source farm (default tempdir).
 - `FASTRSI_VLLM_PORT`: live port (default `18500`; `fresh_check` uses `port + 1`).
+- `FASTRSI_VLLM_TP`: tensor-parallel worker count (default 1).
 - `FASTRSI_VLLM_EXTRA`: extra `vllm serve` flags (default `--seed 0 --gpu-memory-utilization 0.35
   --enforce-eager --max-model-len 2048 --disable-flashinfer-autotune`).
 - `FASTRSI_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
@@ -20,7 +21,6 @@ import json
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -28,10 +28,13 @@ import time
 import urllib.request
 from pathlib import Path
 
+from fastrsi import harness
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
 from kernel import session as SS
+
+from services import engine
 
 from . import client
 
@@ -48,58 +51,18 @@ HOOK_SITE = "import os\nif os.environ.get('FASTRSI_KERNEL_DIR'):\n    import ada
 _seq = itertools.count(1)
 
 
-def _edit(source, old, new):
-    assert source.count(old) == 1, f"anchor not unique ({source.count(old)}): {old!r}"
-    return source.replace(old, new)
-
-
-def _descendants(root_pid):
-    children, found, queue = {}, [], [root_pid]
-    for entry in (os.listdir("/proc") if os.path.isdir("/proc") else ()):
-        if entry.isdigit():
-            try:
-                ppid = int(Path(f"/proc/{entry}/stat").read_text().rsplit(")", 1)[1].split()[1])
-                children.setdefault(ppid, []).append(int(entry))
-            except (OSError, ValueError, IndexError):
-                pass
-    while queue:
-        for child in children.get(queue.pop(0), []):
-            found.append(child)
-            queue.append(child)
-    return found
+_edit = harness.edit_once
+_module_relpath = harness.module_relpath
 
 
 def _alive(pid):
-    if not pid:
-        return False
-    if os.path.isdir("/proc"):
-        try:
-            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-        except OSError:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+    return bool(pid) and not engine.zygote._exited(pid)
 
 
 def stop_tree(pid, grace_s=8.0):
-    """Stop `pid` and every descendant it started (ours only: never unrelated processes)."""
-    if not _alive(pid):
-        return
-    tree = [pid] + _descendants(pid)
-    for sig, wait_s in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 5.0)):
-        targets = [pid] if sig == signal.SIGTERM else list(reversed(tree + _descendants(pid)))
-        for target in targets:
-            if _alive(target):
-                try:
-                    os.kill(target, sig)
-                except ProcessLookupError:
-                    pass
-        deadline = time.time() + wait_s
-        while time.time() < deadline and any(_alive(p) for p in tree):
-            time.sleep(0.05)
+    """Stop a live service process and its children using the launcher's lifecycle rules."""
+    if pid:
+        engine.stop_engine(pid, grace=grace_s)
 
 
 def build_farm(src_pkg, dst_pkg):
@@ -127,10 +90,13 @@ def _site_packages(venv):
     raise RuntimeError(f"vllm package not found under {venv}")
 
 
-def _module_relpath(site, module_name):
-    parts = module_name.split(".")
-    pkg_init = os.path.join(site, *parts, "__init__.py")
-    return os.path.join(*parts, "__init__.py") if os.path.isfile(pkg_init) else os.path.join(*parts) + ".py"
+def _check_topology(ping, tp):
+    if not ping.get("ok"):
+        raise RuntimeError(f"adapter host did not answer ping: {ping}")
+    parallel = ping.get("parallel") or {}
+    if tp is not None and (parallel.get("world") != tp
+                           or parallel.get("expected") != list(range(tp))):
+        raise RuntimeError(f"requested TP={tp}, adapter host reports {parallel}")
 
 
 def _http_post(port, path, body, timeout):
@@ -197,15 +163,17 @@ class HostBridge:
 
 
 class _ServerHandle:
-    def __init__(self, pid, port, kernel_dir, start_s, log_path):
+    def __init__(self, pid, port, kernel_dir, start_s, log_path, marker=None):
         self.pid, self.port, self.kernel_dir = pid, port, kernel_dir
         self.start_s, self.log_path = start_s, log_path
+        self.marker, self.start_ticks = marker, engine._start_time(pid)
 
     def alive(self):
-        return _alive(self.pid)
+        return _alive(self.pid) and engine._same_process(self.pid, self.start_ticks)
 
     def stop(self):
-        stop_tree(self.pid)
+        if self.alive() or not _alive(self.pid):
+            engine.stop_engine(self.pid, grace=8, marker=self.marker)
 
 
 class VllmLab:
@@ -227,6 +195,7 @@ class VllmLab:
         self.python_bin, self.vllm_bin = os.path.join(self.venv, "bin", "python"), os.path.join(self.venv, "bin", "vllm")
         self.site = _site_packages(self.venv)
         self.port = int(os.environ.get("FASTRSI_VLLM_PORT", "18500"))
+        self.tp = int(os.environ.get("FASTRSI_VLLM_TP", "1"))
         self.extra = shlex.split(os.environ.get("FASTRSI_VLLM_EXTRA", DEFAULT_EXTRA))
         self.share_gpu = os.environ.get("FASTRSI_VLLM_SHARE_GPU", "1") != "0"
         work_env = os.environ.get("FASTRSI_VLLM_WORK")
@@ -243,8 +212,13 @@ class VllmLab:
             build_farm(os.path.join(self.site, "vllm"), os.path.join(self.farm_dir, "vllm"))
         self._farm_dirty = set()
         self.base_text = {m: Path(self.site, _module_relpath(self.site, m)).read_text() for m in MODULES}
+        self.server_key = (self.model, self.venv, self.port, self.work_dir, self.tp,
+                           tuple(self.extra), os.environ.get("CUDA_VISIBLE_DEVICES"),
+                           os.environ.get("VLLM_USE_V2_MODEL_RUNNER"),
+                           os.environ.get("VLLM_BATCH_INVARIANT"))
         shared = VllmLab._shared
-        if shared is not None and shared.alive() and self._server_at_base(shared):
+        if (shared is not None and shared.key == self.server_key and shared.alive()
+                and self._server_at_base(shared)):
             self.server = shared
         else:
             if shared is not None:
@@ -277,7 +251,7 @@ class VllmLab:
             self.python_bin, self.engine_py, "start", "--cache-root", self.cache_root,
             "--log", log_path, "--vllm", self.vllm_bin,
             f"--kvplan={os.path.join(self.work_dir, 'kvplan')}", "--timeout", "900", "--",
-            self.model, "--port", str(port), "--served-model-name", "m", "-tp", "1",
+            self.model, "--port", str(port), "--served-model-name", "m", "-tp", str(self.tp),
             "--distributed-executor-backend", "mp",
             "--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension", *self.extra,
         ]
@@ -291,14 +265,21 @@ class VllmLab:
             tail = Path(log_path).read_text(errors="replace")[-2000:] if os.path.isfile(log_path) else ""
             raise RuntimeError(f"vllm start ({tag}) failed rc={proc.returncode}: "
                                f"{report.get('findings') or report.get('error')} {tail}")
-        srv = _ServerHandle(int(report["pid"]), port, kernel_dir, round(time.perf_counter() - t0, 3), log_path)
-        _http_post(port, "/v1/completions",
-                   {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
-                   timeout=120.0)
-        ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
-        if not ping.get("ok"):
+        pid = int(report["pid"])
+        state = engine.load_engine_state(self.cache_root, pid) or {}
+        srv = _ServerHandle(pid, port, kernel_dir, round(time.perf_counter() - t0, 3),
+                            log_path, state.get("live_dir"))
+        srv.key = self.server_key
+        try:
+            _http_post(port, "/v1/completions",
+                       {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
+                       timeout=120.0)
+            ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
+            # Older callers can still select TP through arbitrary extra serve flags.
+            _check_topology(ping, self.tp if "FASTRSI_VLLM_TP" in os.environ else None)
+        except BaseException:
             srv.stop()
-            raise RuntimeError(f"adapter host did not answer ping: {ping}")
+            raise
         return srv
 
     def _ctl(self, cmd, timeout=None):
@@ -344,8 +325,11 @@ class VllmLab:
         self.session.expected[0] = self.session._fingerprint()
 
     def install(self, patch):
-        t0 = time.perf_counter()
         plan_id = f"txn-{next(_seq):04d}-{int(time.time() * 1000) % 1000000}"
+        return self._install(patch, plan_id)
+
+    def _install(self, patch, plan_id):
+        t0 = time.perf_counter()
         try:
             modules = {
                 m: {"source": src, "base_hash": L.text_hash(self._live_source(m)),
@@ -369,7 +353,7 @@ class VllmLab:
         outcome, rec = res.get("outcome") or "refused", res.get("receipt")
         self._append_receipt(rec)
         if outcome == "committed":
-            self._stack_files.append({"files": dict(patch["files"]), "accept": list(patch.get("accept", [])),
+            self._stack_files.append({"id": res["txn"], "files": dict(patch["files"]), "accept": list(patch.get("accept", [])),
                                       "undo_resets": list(patch.get("undo_resets", []))})
         codes = rec["decisions"]["blocking"] if rec else sorted({f["check"] for f in res.get("findings", [])})
         return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
@@ -537,7 +521,9 @@ class VllmLab:
                 self.session = SS.Session(self.bridge, MODULES)
                 self._stack_files.clear()
                 for saved_patch in saved_stack:
-                    if not self.install(saved_patch)["ok"]:
+                    if not self._install(saved_patch, saved_patch["id"])["ok"]:
+                        self.session.fault("participant_failed", "incomplete edit replay",
+                                           "restore the live stack after fresh_check")
                         raise RuntimeError("failed to restore live stack after fresh_check")
 
     def inject(self, fault, **kw):

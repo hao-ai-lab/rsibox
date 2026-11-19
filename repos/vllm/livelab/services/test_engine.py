@@ -514,7 +514,7 @@ def core_main():
             self.scheduler = types.SimpleNamespace(
                 max_num_running_reqs=flag("--max-num-seqs", 256),
                 max_num_scheduled_tokens=flag("--max-num-batched-tokens", 8192),
-                running=[], waiting=[])
+                running=[], waiting=[], policy=types.SimpleNamespace(value="fcfs"))
             self.vllm_config = types.SimpleNamespace(
                 scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),
                 model_config=types.SimpleNamespace(max_model_len=flag("--max-model-len", 4096)),
@@ -794,6 +794,8 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         KV cache dtype in WeightCacheKey).
     Expect: all three exit 2 with findings (`vllm_args`, `weights_reconfig_tier2` for tier2a
     and tier2b), and the original engine PID stays alive and serving /health on port P!
+    Then `--enable-expert-parallel` (the only tier-2 delta that takes the holder reshard route)
+    fails at that step here (no real vLLM): `weights_reshard`, engine still up.
     Then (4) with `--weights-accept-reconfig --kv-cache-dtype fp8`, preflight accepts the Tier-2
     change and replaces the engine."""
     from weights import socket_name
@@ -846,6 +848,21 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
                 assert refused_report["reconfig"]["subtier"] == want_subtier, refused_report
             assert not zygote._exited(pid1), "running engine must stay up on preflight refusal"
             assert engine.port_in_use(port) is True
+        # --enable-expert-parallel is the one tier-2 delta reshard_live can make live; it goes
+        # to the holder reshard step first. Here (no real vLLM) that step fails: a finding, and
+        # the running engine is still the one serving, not a stopped one.
+        ep_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "ep.log"),
+             "--enable-expert-parallel"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        assert ep_proc.returncode == 2, ep_proc.stdout + ep_proc.stderr
+        ep_report = _one_json_line(ep_proc.stdout)
+        assert ep_report["findings"][0]["check"] == "weights_reshard", ep_report
+        assert ep_report["reconfig"]["weight_key_changed"] == ["enable_expert_parallel"]
+        assert ep_report["note"] == "not started; old engine left running"
+        assert not zygote._exited(pid1) and engine.port_in_use(port) is True
         accepted_proc = subprocess.run(
             [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
              "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
@@ -864,3 +881,54 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         if pid2:
             _stop(pid2)
         daemon.close()
+
+
+def test_reconfigure_refreshes_weights_probe_after_reshard_switches_socket_dir(monkeypatch, tmp_path):
+    """Input: `reconfigure()` taking the holder reshard route (`src_dir` -> `dst_dir`).
+    Expected: `preflight_report["weights_probe"]["socket_dir"]` passed to `_launch_process`
+    reflects `dst_dir`, not the stale pre-reshard `src_dir`."""
+    captured = {}
+    src_dir, dst_dir = str(tmp_path / "w"), str(tmp_path / "w.ep")
+    old_parsed = {"ok": True, "explicit": ["model"], "args": {"model": "m", "port": 8000, "tensor_parallel_size": 2,
+                                                              "enable_expert_parallel": False}}
+    new_parsed = {"ok": True, "explicit": ["model"], "args": {"model": "m", "port": 8000, "tensor_parallel_size": 2,
+                                                              "enable_expert_parallel": True}}
+    state = {"pid": 4242, "port": 8000, "vargv": ["m", "--port", "8000", "-tp", "2"],
+             "vllm_args": old_parsed, "log": str(tmp_path / "old.log"),
+             "launcher": {"vllm": "vllm", "weights": True, "weights_socket_dir": src_dir,
+                          "kvplan": None, "fork": False, "zygote": ""}}
+    args, _ = engine.parse(["reconfigure", "--pid", "4242", "--cache-root", str(tmp_path),
+                            "--log", str(tmp_path / "new.log"), "--enable-expert-parallel"])
+
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+    monkeypatch.setattr(engine, "load_engine_state", lambda root, pid: state)
+    monkeypatch.setattr(engine, "read_vllm_args", lambda a, v, e: new_parsed)
+    monkeypatch.setattr(engine.vllm_args, "override", lambda old, patch: list(old) + list(patch))
+    monkeypatch.setattr(engine.vllm_args, "classify_reconfig", lambda o, n: {
+        "tier": "live_reshard_or_cold", "subtier": "tier2a_reshard",
+        "weights_compatible": False,
+        "weight_key_changed": ["enable_expert_parallel"],
+    })
+    monkeypatch.setattr(engine.vllm_args, "override_finding", lambda *a: None)
+    monkeypatch.setattr(engine, "value_finding", lambda *a: None)
+    monkeypatch.setattr(engine.weights, "probe", lambda sdir, vis, tp: {
+        "ok": True, "socket_dir": sdir, "matched_gpus": True,
+    })
+
+    def fake_reshard_target(la, *a):
+        la.weights_socket_dir = dst_dir
+        return {"socket_dir": dst_dir, "target": "filled"}
+
+    monkeypatch.setattr(engine, "reshard_target", fake_reshard_target)
+    monkeypatch.setattr(engine, "stop_engine", lambda *a, **k: {"stopped": True})
+
+    def fake_launch(la, nv, np_, env_, preflight_rep, extra_report=None):
+        captured["weights_probe"] = dict(preflight_rep.get("weights_probe") or {})
+        captured["extra_report"] = extra_report
+        return {"ok": True, "weights_probe": captured["weights_probe"]}
+
+    monkeypatch.setattr(engine, "_launch_process", fake_launch)
+    out = engine.reconfigure(args, ["--enable-expert-parallel"])
+    assert out["ok"]
+    assert captured["weights_probe"]["socket_dir"] == dst_dir
+    assert captured["extra_report"]["reconfig"]["reshard"]["socket_dir"] == dst_dir

@@ -9,6 +9,8 @@ import importlib.util
 import itertools
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -206,6 +208,7 @@ class FakeBackend:
         self.worker_obj = worker_obj
         self.worker_side = Side("worker", scope={"worker": worker_obj}, rank=0, alias={"vllm": self.w_prefix})
         core_obj = NS(
+            vllm_config=NS(parallel_config=NS(world_size=1)),
             model_executor=FakeExecutor([self.worker_side], self.lost),
             reset_prefix_cache=self._reset_cache,
         )
@@ -293,6 +296,63 @@ def make_cpu_lab(check_timeout=0.4):
 
 class ConformanceOnFakeVllmTest(unittest.TestCase):
     """Every conformance case (c0-c10) passes on `VllmLab` over `Host` + `Side`."""
+
+    def test_single_worker_host_cannot_satisfy_tp2(self):
+        lab = make_cpu_lab()
+        self.addCleanup(lab.close)
+        ping = lab._ctl({"op": "ping"})
+        CL._check_topology(ping, 1)
+        with self.assertRaisesRegex(RuntimeError, "requested TP=2"):
+            CL._check_topology(ping, 2)
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "requires Linux process identity")
+    def test_stop_reclaims_marked_worker_after_server_exit(self):
+        with tempfile.TemporaryDirectory() as marker:
+            leader = subprocess.Popen(
+                [sys.executable, "-c", "import subprocess, sys; "
+                 "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+                 "stdout=subprocess.DEVNULL); print(p.pid, flush=True); input()"],
+                env={**os.environ, "FASTRSI_LIVE_RECONFIG_DIR": marker},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+            worker = int(leader.stdout.readline())
+            try:
+                srv = CL._ServerHandle(leader.pid, 0, marker, 0, "", marker=marker)
+                leader.communicate("\n", timeout=5)
+                self.assertFalse(srv.alive())
+                self.assertTrue(CL._alive(worker))
+                srv.stop()
+                self.assertFalse(CL._alive(worker))
+            finally:
+                if CL._alive(worker):
+                    os.kill(worker, signal.SIGKILL)
+                if leader.poll() is None:
+                    leader.kill()
+                leader.communicate()
+
+    def test_original_edit_id_can_undo_after_fresh_check_pauses_live_server(self):
+        lab = make_cpu_lab()
+        backend = lab._backend
+        self.addCleanup(backend.close)
+        edit = lab.patches()["visible"]
+        original = lab.install(edit)["id"]
+        # Keep the real session, replacement host and participants. Only process startup
+        # and HTTP are replaced with the fixture's independently loaded modules.
+        srv = NS(alive=lambda: True, stop=lambda: None, port=8111)
+        def start_server(port, tag, use_farm):
+            if tag == "live":
+                backend.respawn()
+            return srv
+        lab.server, lab.port, lab.share_gpu = srv, srv.port, True
+        with (mock.patch.object(lab, "_backend", None),
+              mock.patch.object(lab, "_ctl", backend.ctl),
+              mock.patch.object(lab, "_start_server", start_server),
+              mock.patch.object(lab, "_write_farm"),
+              mock.patch.object(lab, "_run_http", return_value=backend.fresh_check(edit)["output"]),
+              mock.patch.object(CL.VllmLab, "_shared", srv)):
+            self.assertTrue(lab.fresh_check(edit)["ok"])
+            self.assertEqual(lab.status()["txns"], [original])
+            self.assertTrue(lab.uninstall(original)["ok"])
+            self.assertEqual(lab.status()["state"], "base")
 
     def test_all_11_conformance_cases_pass(self):
         for name in cases.CASES:

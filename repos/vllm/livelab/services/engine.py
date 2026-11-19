@@ -35,7 +35,7 @@ Contract:
   `repos/vllm/kb/reconfiguration_matrix.md`), then applies it one of two ways and reports which
   (`reconfig.path`):
   - `in_process_live`: every changed flag has a live consumer (live_reconfig.LIVE_FIELDS:
-    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value). The launcher
+    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value, and `--scheduling-policy`). The launcher
     sends it to the engine core's live agent (started by engine.py in every engine it starts),
     which sets the scheduler's limits between two steps and reads them back. PID keeps
     running; only an acknowledged change updates the recorded state.
@@ -45,7 +45,17 @@ Contract:
     report's `restart_reason` says why it was not live. With `--weights`, resident CUDA IPC
     weights make the restart warm (zero disk reload).
   Tier-2 deltas (`WeightCacheKey` sharding, `subtier='tier2a_reshard'`, or weight format,
-  `'tier2b_weight_format'`) are refused before stopping PID unless `--weights-accept-reconfig`.
+  `'tier2b_weight_format'`) are refused before stopping PID unless `--weights-accept-reconfig`,
+  with one exception, `path: reshard`: on an engine with resident weights (ipc_cache), a delta
+  whose only weight-key change is the MoE expert sharding (`--enable-expert-parallel`,
+  `--expert-placement-strategy`: TP <-> EP on the same GPUs) is made live. Before PID stops,
+  `reshard_live.py ensure` makes the target engine's holder group exist (socket folder
+  `reshard_live.group_dir`: `<dir>.ep` for EP, `<dir>` without; a group already there with the
+  target flags is reused, e.g. the way back) or starts it without reading the checkpoint
+  (`--load-format dummy`) and fills it GPU to GPU from the running engine's group. Only then is
+  PID stopped and the engine restarted on the target group; any failure is a finding (exit 2)
+  with PID running and the half-started group stopped. The source group is left resident (the
+  way back costs no reshard).
   Every preflight check runs BEFORE mutating or stopping PID; a refusal exits 2 and leaves PID
   running untouched.
 - engine_env() is the one environment of every engine process. The zygote is started with it
@@ -85,11 +95,13 @@ adapter/worker_ext.py. The other startup hooks (graph memory, overlay, autotune 
 mode are not built. Pass their vLLM flags in the argv or set their variables in the
 environment.
 """
-import argparse, json, os, signal, socket, subprocess, sys, time, urllib.request, uuid
+import argparse, json, os, signal, subprocess, sys, time, urllib.request, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
+import forksafe  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402
 
 LIVE_SITE = str(Path(__file__).resolve().parent / "live_site")
 
@@ -167,20 +179,10 @@ def cute_dsl_arch(visible):
             file=sys.stderr)
         return None
     major, minor = (int(x) for x in caps.pop().split("."))
-    return f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+    return forksafe.cute_dsl_arch((major, minor))
 
 
-def port_in_use(port, host="127.0.0.1"):
-    """True when something already listens on host:port (a connect succeeds). Not a bind test:
-    a bind also fails on a privileged port or a TIME_WAIT socket, where nothing answers."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(1.0)
-    try:
-        return s.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-    finally:
-        s.close()
+port_in_use = proc.port_in_use
 
 
 def read_vllm_args(a, vargv, env):
@@ -229,7 +231,7 @@ def socket_dir(a, v):
 
 def value_finding(parsed):
     """A `vllm_value` finding when a live scheduler field (live_reconfig.LIVE_FIELDS) has a
-    value no engine runs with (not a positive integer), else None. vLLM's parser takes any
+    value no engine runs with, else None. vLLM's parser takes any
     int; a reconfigure refuses such a value before it stops the running engine."""
     args = parsed.get("args") or {}
     values = {field_name: args[field_name] for field_name in live_reconfig.LIVE_FIELDS
@@ -237,9 +239,9 @@ def value_finding(parsed):
     problems = live_reconfig.check_values(values, {})
     if not problems:
         return None
-    return {"check": "vllm_value", "observed": problems, "expected": "positive integers",
+    return {"check": "vllm_value", "observed": problems, "expected": "valid scheduler limits and policy",
             "why": "the restart would start a server that cannot run, after stopping this one",
-            "actions": ["pass a positive value"]}
+            "actions": ["correct the reported scheduler value"]}
 
 
 def argv_findings(a, v):
@@ -407,6 +409,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
         "cmd": list(command),
         "vllm_args": parsed_vllm,
         "live_dir": getattr(launcher_args, "live_dir", None),
+        "log": os.path.abspath(launcher_args.log),
         "launcher": {
             "vllm": launcher_args.vllm,
             "weights": bool(launcher_args.weights),
@@ -416,9 +419,7 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
             "zygote": launcher_args.zygote,
         },
     }
-    temp_path = state_path.with_suffix(f".{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(record))
-    temp_path.replace(state_path)
+    ipc.atomic_write_json(state_path, record)
 
 
 def _strip_injected_flags(argv):
@@ -786,6 +787,8 @@ def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, prefl
                   or after.get("target_max_num_seqs") == values["max_num_seqs"])
                  and ("max_num_batched_tokens" not in values
                       or after.get("max_num_scheduled_tokens") == values["max_num_batched_tokens"]))
+    if "scheduling_policy" in values:
+        confirmed = confirmed and after.get("scheduling_policy") == values["scheduling_policy"]
     if not confirmed:
         return None, f"live agent answered but the scheduler reads back {after}"
     command = serve_cmd(launcher_args, new_vargv, new_parsed)
@@ -798,6 +801,62 @@ def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, prefl
         "reconfig": {**reconfig, "path": "in_process_live", "restarted": False,
                      "replaced_pid": None, "apply_seconds": apply_s, "live_ack": ack},
     }, None
+
+
+def reshard_route(launcher_args, new_parsed, reconfig):
+    """True when this reconfiguration goes through a holder-to-holder reshard: resident weights
+    (ipc_cache), the weight key changes only in MoE expert sharding, and no
+    --weights-accept-reconfig (which means: the caller restarted the daemons itself)."""
+    import reshard_live     # no torch, no vLLM at import
+    return bool(reconfig and not reconfig["weights_compatible"]
+                and new_parsed.get("ok")
+                and load_format(launcher_args, new_parsed) == "ipc_cache"
+                and explicit_loader_config(new_parsed) is None
+                and not getattr(launcher_args, "weights_accept_reconfig", False)
+                and reshard_live.reshardable(reconfig))
+
+
+def vllm_python(launcher_args):
+    """The python next to --vllm (the venv the engine runs in), else this one."""
+    candidate = Path(launcher_args.vllm).with_name("python")
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+def reshard_target(launcher_args, state, old_vargv, new_vargv, old_parsed, new_parsed, env,
+                   reconfig):
+    """Run `reshard_live.py ensure` for the target engine (see the module contract); on success
+    point the launcher at the target group and return its report, else exit 2 with PID up."""
+    import reshard_live
+    src_dir = socket_dir(launcher_args, old_parsed)
+    dst_dir = reshard_live.group_dir(src_dir, new_parsed["args"])
+    cmd = [vllm_python(launcher_args), str(Path(__file__).resolve().parent / "reshard_live.py"),
+           "ensure", "--src-socket-dir", src_dir, "--src-vargv", json.dumps(old_vargv),
+           "--src-log", state.get("log") or "", "--dst-socket-dir", dst_dir,
+           "--dst-vargv", json.dumps(new_vargv), "--vllm", launcher_args.vllm,
+           "--state-dir", str(Path(launcher_args.cache_root).resolve() / "holders")]
+    t0 = time.perf_counter()
+    try:
+        r = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                           timeout=launcher_args.timeout)
+        out, err, code = r.stdout, r.stderr, r.returncode
+    except subprocess.TimeoutExpired as e:
+        out, err, code = e.stdout or "", f"timeout after {launcher_args.timeout} s", -1
+    line = next((x for x in (out or "").splitlines()[::-1] if x.startswith("{")), None)
+    report = json.loads(line) if line else {}
+    report["seconds"] = round(time.perf_counter() - t0, 3)
+    if code != 0 or not report.get("target"):
+        print(json.dumps({"findings": report.get("findings") or [{
+            "check": "weights_reshard",
+            "observed": f"reshard_live.py ensure exited {code}: {(err or '')[-1500:]}",
+            "expected": f"the target group at {dst_dir} holding the engine's weights",
+            "why": "the reconfigured engine maps that group; without it nothing can start",
+            "actions": ["read the report and the group log", "--weights-accept-reconfig "
+                        "after starting the target group yourself"]}],
+            "reshard": report, "reconfig": reconfig,
+            "note": "not started; old engine left running"}))
+        sys.exit(2)
+    launcher_args.weights_socket_dir = dst_dir
+    return report
 
 
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
@@ -854,7 +913,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         findings = [finding for finding in (
             vllm_args.override_finding(patch_vargv, old_parsed, new_parsed)
             if old_parsed.get("ok") else None, value_finding(new_parsed)) if finding]
-    if not findings and reconfig is not None:
+    reshard = reshard_route(launcher_args, new_parsed, reconfig)
+    if not findings and reconfig is not None and not reshard:
         findings = reconfig_findings(launcher_args, new_parsed, reconfig)
     if not findings:
         findings, preflight_report = preflight(launcher_args, new_parsed, env)
@@ -869,7 +929,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         print(json.dumps({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                           "pid": launcher_args.pid, "note": "nothing changed"}))
         sys.exit(0)
-    live_values, live_reason = (None, "--reconfigure-restart given") if getattr(
+    live_values, live_reason = (None, "the weight key changes (holder reshard)") if reshard \
+        else (None, "--reconfigure-restart given") if getattr(
         launcher_args, "reconfigure_restart", False) else (
         (None, "the port changes") if new_port != old_port else
         live_reconfig_plan(state, reconfig))
@@ -912,6 +973,16 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                                   "live_fallback_reason": live_reason,
                                   "note": "not started; old engine left running"}))
                 sys.exit(2)
+    reshard_report = None
+    if reshard:     # the target group must hold the weights before PID stops
+        reshard_report = reshard_target(launcher_args, state, old_vargv, new_vargv,
+                                        old_parsed, new_parsed, env, reconfig)
+        if load_format(launcher_args, new_parsed) == "ipc_cache":
+            preflight_report["weights_probe"] = weights.probe(
+                socket_dir(launcher_args, new_parsed),
+                env.get("CUDA_VISIBLE_DEVICES"),
+                new_parsed["args"]["tensor_parallel_size"],
+            )
     t_stop = time.perf_counter()
     stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"))
     if not stop_info["stopped"]:
@@ -922,10 +993,13 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             "actions": ["stop the listed pids yourself, then start the engine"]}],
             "reconfig": reconfig, "note": "not started; old engine may still be running"}))
         sys.exit(2)
-    reconfig_report = {**(reconfig or {}), "path": "restart", "restarted": True,
+    reconfig_report = {**(reconfig or {}), "path": "reshard" if reshard else "restart",
+                       "restarted": True,
                        "replaced_pid": launcher_args.pid,
                        "restart_reason": live_reason,
                        "stop_seconds": round(time.perf_counter() - t_stop, 6)}
+    if reshard_report is not None:
+        reconfig_report["reshard"] = reshard_report
     return _launch_process(
         launcher_args,
         new_vargv,

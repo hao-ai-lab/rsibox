@@ -42,7 +42,7 @@ pinned host memory per rank. No torch.compile for this model in this image.
 Source: our 2026-11-10 run of [`../examples/live-edit-qwen3`](../examples/live-edit-qwen3/README.md):
 vLLM 0.31.0, TP 1, CUDA graphs on (defaults), `--no-enable-prefix-caching`, warm on-disk caches,
 weights on a memory disk. Check: 8 requests, greedy, 32 tokens each (1.03 s). Each number is one
-measurement. The lab has not run conformance on vLLM, so these are measurements, not receipts.
+measurement from a run that preceded vLLM conformance verification.
 
 | Edit | Restart, edit to result | Live, edit to result | Install (edit to commit) | Engine loop stalled | Undo | Witness calls |
 |---|---:|---:|---:|---:|---:|---:|
@@ -55,6 +55,22 @@ measurement. The lab has not run conformance on vLLM, so these are measurements,
 - Live output equals the fresh process's output for all three edits.
 - This 63 s restart is not the 228 s baseline of the ladder above (a different measurement,
   not reproduced here).
+
+## Live edit and undo on one B200
+
+Source: our 2026-11-19 Qwen3-8B walkthrough on vLLM 0.33.0, V2 runner, eager execution,
+prefix caching disabled, 8 greedy 32-token prompts. The independent fresh and live
+completions agreed for all three edits. The same B200 lab passed conformance c0–c10.
+
+| Edit | Native edit to commit | First edited check | Native undo | Undo client round trip | Witness calls |
+|---|---:|---:|---:|---:|---:|
+| Scheduler | 0.163079 s | 5.320 s | 1.682 ms | 15.4 ms | 816 |
+| Active sampler | 0.039252 s | 5.563 s | 1.270 ms | 10.4 ms | 768 |
+| Legacy sampler | 0.030376 s | 6.102 s | 1.272 ms | 15.5 ms | 0 |
+
+The legacy sampler produced `zero_witness`. All three undos restored the original
+code fingerprint and completion text. The full walkthrough took 390.128 s including
+six server launches, repeated checks and teardown.
 
 ## Restart after one edit (Qwen3-8B, warm caches otherwise)
 
@@ -166,6 +182,61 @@ network file system. So: keep the build tree and headers on node-local disk; pas
 `-split-compile` (it parallelizes cicc and ptxas across the unit's kernels); the unit, not the
 edited kernel, stays the floor, since #49750 changes a kernel's signature and its host launcher.
 This repo has no native route yet (`mechanisms.md`).
+
+## Live TP2 <-> EP2 by holder reshard (Qwen3.5-35B-A3B BF16, 2× B200, 2026-11-19)
+
+Source: our 2026-11-19 runs on 2 idle B200 GPUs (vLLM 0.33.0, torch 2.14), `--max-model-len 8192
+--language-model-only --gpu-memory-utilization 0.30`, CUDA graphs on. Checkpoint 66.97 GiB,
+already in the host page cache (1.5 TiB RAM), so a "disk" load reads RAM at memory speed here.
+All rows are warm-cache starts (FlashInfer JIT, torch.compile) unless marked.
+
+| Step | Seconds | Note |
+|---|---:|---|
+| Reshard write, TP2 -> EP2 (80 expert tensors 64.4 GB, 32.2 GB of it GPU to GPU; 493 dense tensors 4.9 GB copied rank-locally) | 1.0–1.7 | 3 runs; plus map 0.7–0.8 s, plan < 0.01 s |
+| Reshard write, EP2 -> TP2 | 1.1 | 1 run |
+| `reshard_live.py ensure` total (vLLM import + config 7.4, dummy EP2 group start 23.0, map, write) | 34.2 | runs while the old engine serves; off the downtime |
+| `ensure` on the way back (TP2 group still resident: reused, nothing written) | 9.3–10.5 | |
+| EP2 holder group from disk (page cache warm) | 31.0 | the alternative to the dummy start (23.0) |
+| Stop engine (`stop_engine`) | 0.7–4.7 idle; 10.1 under load | under client load SIGTERM's 10 s grace expires, then SIGKILL |
+| EP2 engine on the resharded group (ipc_cache), launch to /health | 73.7 | weight map 1.8; vLLM's init-engine span 43.1 (profile, KV alloc, warmup, incl. graph capture 19); the other ~29 s are process spawn, imports, distributed init and the API server |
+| EP2 engine cold from disk, launch to /health | 82.5 | weight load 10.0 (32.35 GiB/rank) |
+| Client-observed unavailability, `engine.py reconfigure` TP2 -> EP2 | 77.5 | 1-token requests every 50 ms throughout |
+| Same, EP2 -> TP2 (reused group) | 82.7 | 10.1 s of it is the stop under load |
+| First engine in a fresh cache root (cold JIT), for scale | 697 | 654 s of it FlashInfer JIT builds |
+
+Correctness (same runs): the resharded EP2 group equals a disk-loaded EP2 group byte for byte
+(1308 tensors, buffers included), and the EP2 -> TP2 group equals the disk-loaded TP2 group
+(1228 tensors). Greedy completions (4 prompts × 32 tokens, logprobs) of the live EP2 engine
+equal a cold EP2 server's exactly, and TP2 after the round trip equals the original exactly.
+References must run without concurrent traffic: run next to a 1-token client, the same engine
+gave different greedy tokens (batch-dependent BF16 MoE numerics, not weights).
+
+Reading: the reshard is not the bottleneck (about 2 s of GPU time, off the critical path). The
+downtime is the engine start (about 73 s warm, of which 1.8 s is weights). With the checkpoint in
+page cache, the live path saves about 9 s per switch over a cold restart (weight load 10.0 vs
+map 1.8). It reads 0 bytes of checkpoint where a disk load reads 67 GiB, and that gap grows on
+hosts without the page cache (not measured here). The next lever is the engine start itself:
+kvplan and the zygote (the Qwen3-8B rows above), untested on this model.
+
+## Live scheduling policy
+
+Source: our 2026-11-19 Qwen3-8B test on one B200, vLLM 0.33.0 in eager mode,
+one running sequence, greedy decoding, prefix caching disabled. Each row is one
+switch on the same API server and engine core. The core applied the change between
+steps. The launcher timed the control request and acknowledgement. CLI wall time
+includes starting the launcher and its preflight checks.
+
+| Switch | Core apply | Launcher apply and acknowledgement | CLI wall |
+|---|---:|---:|---:|
+| FCFS to priority | 0.218 ms | 2.266 ms | 6.311 s |
+| Priority to FCFS | 0.374 ms | 6.487 ms | 6.023 s |
+
+Under FCFS a completion with priority −1 returned HTTP 400 both before and after the
+round trip. Under priority scheduling the core reported one running and three waiting.
+The waiting requests arrived with priorities 10, 5, −1. All returned HTTP 200 and
+completed in the order −1, 5, 10. Under restored FCFS the three equal-priority
+requests completed in arrival order. In each mode all four token sequences matched
+those from a separately started server with the corresponding scheduling policy.
 
 ## Not measured yet
 
