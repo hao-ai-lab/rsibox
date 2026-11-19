@@ -567,6 +567,12 @@ class ResetFailsClosed(unittest.TestCase):
                 self._scale, self.growth = sd["scale"].clone(), sd["growth_tracker"]
         fx.opt.grad_scaler = Scaler()
         s = ST.Snapshot([fx.model], fx.opt, fx.sched)
+        scaler = fx.opt.grad_scaler
+        fx.opt.grad_scaler = None
+        refused = s.restore()
+        self.assertFalse(refused["ok"])
+        self.assertIn("optimizer 0: grad scaler presence changed", refused["groups"])
+        fx.opt.grad_scaler = scaler
         d0 = ST.digest([fx.model], fx.opt, fx.sched)
         self.assertIn("buffers", s.restored)
         self.assertIn("grad_scaler", s.restored)

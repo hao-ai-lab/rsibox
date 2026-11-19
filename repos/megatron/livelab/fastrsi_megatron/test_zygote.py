@@ -21,6 +21,14 @@ out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTE
 out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:],
            cpus=sorted(os.sched_getaffinity(0)))
 json.dump(out, open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w"))
+if os.environ.get("IGNORE_TERM"):
+    import signal
+    if os.environ["RANK"] == "0":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        open(os.path.join(os.environ["OUT"], "ignoring"), "w").close()
+    else:
+        while not os.path.exists(os.path.join(os.environ["OUT"], "ignoring")):
+            import time; time.sleep(0.01)
 if os.environ.get("FAIL_RANK") == os.environ["RANK"]:
     sys.exit(7)
 if os.environ.get("HANG"):
@@ -92,6 +100,11 @@ class Zygote(unittest.TestCase):
         self.assertEqual(evs[-1]["rc"], [-15, 7])
         self.assertLess(time.time() - t, 20)
         self.assertEqual(self.start()[-1]["rc"], [0, 0])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "rank supervision requires Linux")
+    def test_failed_rank_escalates_when_peer_ignores_term(self):
+        events = self.start(env={"FAIL_RANK": "1", "HANG": "1", "IGNORE_TERM": "1"})
+        self.assertEqual(events[-1]["rc"], [-9, 7])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: /proc, child subreaper")
     def test_an_orphan_that_left_the_rank_group_is_reaped_after_the_job(self):
@@ -246,15 +259,17 @@ class Pieces(unittest.TestCase):
                 "from fastrsi_megatron import zygote\n"
                 "sleep = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
                 "helper = subprocess.Popen(sleep)\n"
+                "finished = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(17)'])\n"
+                "os.waitid(os.P_PID, finished.pid, os.WEXITED | os.WNOWAIT)\n"
                 "job = subprocess.Popen(sleep)\n"
-                "reaped = zygote.reap_all(timeout=10, keep={helper.pid})\n"
+                "reaped = zygote.reap_all(timeout=10, keep={helper.pid, finished.pid})\n"
                 "alive = helper.poll() is None\n"
                 "helper.kill(); helper.wait()\n"
-                "print(json.dumps([job.pid in reaped, alive]))\n")
+                "print(json.dumps([job.pid in reaped, alive, finished.wait()]))\n")
         env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
                              timeout=60)
-        self.assertEqual(json.loads(out.stdout or "null"), [True, True], out.stderr)
+        self.assertEqual(json.loads(out.stdout or "null"), [True, True, 17], out.stderr)
 
     def test_auto_numa_bind_returns_the_cpus_forksafe_bound(self):
         """forksafe.bind_rank_numa_and_cpus answers {"bound_cpus", "numa_node", "source"}; bind()

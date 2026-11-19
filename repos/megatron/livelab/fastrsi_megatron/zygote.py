@@ -614,23 +614,22 @@ def reap_all(timeout=10.0, keep=()):
     """Kill whatever is still our child (ranks, guards, or orphans the subreaper took in), except
     the children in `keep` (the zygote's own, alive before the job), and reap until none is left.
     Returns the pids reaped."""
-    reaped, deadline, killed = [], time.time() + timeout, set()
-    while time.time() < deadline:
+    reaped, deadline, killed = [], time.monotonic() + timeout, set()
+    while time.monotonic() < deadline:
         left = [child for child in _children() if child not in keep]
+        if not left:
+            return reaped
         for child in left:
             if child not in killed:
                 kill_tree(child, signal.SIGKILL)
                 killed.add(child)
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return reaped
-        if pid:
-            reaped.append(pid)
-        elif not left:
-            return reaped
-        else:
-            time.sleep(0.02)
+            try:
+                pid, _ = os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                continue
+            if pid:
+                reaped.append(pid)
+        time.sleep(0.02)
     log("reap_timeout", left=[child for child in _children() if child not in keep])
     return reaped
 
@@ -683,30 +682,29 @@ def handle(req, lsock, conn, src):
                 for p in left:
                     kill_tree(p)
                 deadline = min(deadline, time.time() + CLIENT_GONE_GRACE_S)
-            try:
-                pid, st = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if pid == 0:
-                if time.time() > deadline:
-                    for p in left:
-                        kill_tree(p, signal.SIGKILL)
-                    deadline = 1e18
+            for pid in tuple(left):
+                done, st = os.waitpid(pid, os.WNOHANG)
+                if not done:
+                    continue
+                left.remove(pid)
+                code = os.waitstatus_to_exitcode(st)
+                rc[pids.index(pid)] = code
+                if code:                        # torchrun's policy: one rank fails, stop all
+                    for peer in left:
+                        kill_tree(peer)
+                    deadline = min(deadline, time.time() + CLIENT_GONE_GRACE_S)
+            if left and time.time() > deadline:
+                for pid in left:
+                    kill_tree(pid, signal.SIGKILL)
+                deadline = float("inf")
+            if left:
                 time.sleep(0.05)
-                continue
-            if pid not in left:                 # an orphan the subreaper took in
-                continue
-            left.discard(pid)
-            rc[pids.index(pid)] = os.waitstatus_to_exitcode(st)
-            if rc[pids.index(pid)] != 0:        # torchrun's policy: one rank fails, stop all
-                for p in left:
-                    kill_tree(p)
-        _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
-                     "s": round(time.time() - t0, 3)})
     finally:
         reaped = reap_all(keep=before)          # ranks left by an exception, guards, orphans
         if pids:
             log("job_reaped", ranks=pids, reaped=len(reaped))
+    _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
+                 "s": round(time.time() - t0, 3)})
 
 
 def serve(sock, mods, script=None, forksafe=True):
