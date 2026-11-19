@@ -69,13 +69,43 @@ class H3LabClassTest(unittest.TestCase):
             self.assertTrue(callable(getattr(H3Lab, method, None)), method)
 
         env = H3Lab.launch_environment([
-            "--model", "/tmp/m", "--vae", "/tmp/v.safetensors", "--gpus", "2",
-            "--check-timeout", "900",
+            "--", "--model", "/tmp/m", "--vae", "/tmp/v.safetensors", "--gpus", "2",
+            "--check-timeout", "900", "--zygote", "--holder",
         ])
         self.assertEqual(env["FASTH3_MODEL"], os.path.abspath("/tmp/m"))
         self.assertEqual(env["FASTVIDEO_H3_VAE_NVFP4_DECODER"], os.path.abspath("/tmp/v.safetensors"))
         self.assertEqual(env["FASTRSI_H3_GPUS"], "2")
         self.assertEqual(env["FASTRSI_H3_CHECK_TIMEOUT"], "900.0")
+        self.assertEqual(env["FASTRSI_H3_ZYGOTE"], "1")
+        self.assertEqual(env["FASTRSI_H3_HOLDER"], "1")
+
+        plain_env = H3Lab.launch_environment(["--gpus", "4"])
+        self.assertEqual(plain_env, {"FASTRSI_H3_GPUS": "4"})
+
+        captured = {}
+
+        def fake_lab(cfg, **kw):
+            captured["cfg"] = cfg
+            captured["kw"] = kw
+            return "fake-lab"
+
+        from adapter import lab as lab_mod
+        with mock.patch.dict(os.environ, {"FASTRSI_H3_ZYGOTE": "1", "FASTRSI_H3_HOLDER": "true",
+                                          "FASTRSI_H3_CHECK_TIMEOUT": "750"}, clear=False), \
+             mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
+             mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
+            self.assertEqual(h3._make_h3("r.jsonl"), "fake-lab")
+        self.assertEqual(captured["kw"]["receipts"], "r.jsonl")
+        self.assertEqual(captured["kw"]["check_timeout"], 750.0)
+        self.assertIs(captured["kw"]["zygote"], True)
+        self.assertIs(captured["kw"]["holder"], True)
+
+        with mock.patch.dict(os.environ, {"FASTRSI_H3_ZYGOTE": "0", "FASTRSI_H3_HOLDER": ""}, clear=False), \
+             mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
+             mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
+            h3._make_h3(None)
+        self.assertIs(captured["kw"]["zygote"], False)
+        self.assertIs(captured["kw"]["holder"], False)
 
         built = []
 

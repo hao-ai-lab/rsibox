@@ -19,6 +19,10 @@ The machine-specific inputs come from the environment, nothing else:
                                      fresh_check gets it + 600 s). On a cold shared filesystem the
                                      first video after a respawn took 131 s and a fresh load more
                                      than 720 s (2026-11-12), so 120 s fails c3 and c8 there
+    FASTRSI_H3_ZYGOTE                set to 1/true/yes to fork workers from a preloaded zygote
+                                     (services/zygote.py) so respawns skip worker imports
+    FASTRSI_H3_HOLDER                set to 1/true/yes to keep loaded weights in a CUDA-IPC holder
+                                     process (services/holder.py; implies zygote)
 
 `workload_env()` sets the workload's FastVideo flags (kb/workload.md) unless already set. Every
 worker inherits them, so they must be set before the lab starts.
@@ -143,10 +147,20 @@ def shared_factory(make):
     return factory
 
 
+def _env_flag(name):
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes")
+
+
 def _make_h3(receipts):
     from adapter.lab import FastVideoLab
-    return FastVideoLab(h3_config(), receipts=receipts, golden=os.environ.get("FASTRSI_H3_GOLDEN"),
-                        check_timeout=float(os.environ.get("FASTRSI_H3_CHECK_TIMEOUT", "600")))
+    return FastVideoLab(
+        h3_config(),
+        receipts=receipts,
+        golden=os.environ.get("FASTRSI_H3_GOLDEN"),
+        check_timeout=float(os.environ.get("FASTRSI_H3_CHECK_TIMEOUT", "600")),
+        zygote=_env_flag("FASTRSI_H3_ZYGOTE"),
+        holder=_env_flag("FASTRSI_H3_HOLDER"),
+    )
 
 
 class H3Lab(Shared):
@@ -164,7 +178,9 @@ class H3Lab(Shared):
     @staticmethod
     def launch_environment(argv):
         """Translate `fastrsi conformance fastvideo --real ...` flags into H3 environment vars."""
-        clean = [tok for tok in argv if tok != "--"]
+        clean = list(argv)
+        if clean[:1] == ["--"]:
+            clean = clean[1:]
         ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", add_help=False)
         ap.add_argument("--model", default=None)
         ap.add_argument("--vae", default=None)
@@ -172,6 +188,8 @@ class H3Lab(Shared):
         ap.add_argument("--gpus", type=int, default=None)
         ap.add_argument("--golden", default=None)
         ap.add_argument("--check-timeout", type=float, default=None)
+        ap.add_argument("--zygote", action="store_true")
+        ap.add_argument("--holder", action="store_true")
         ns = ap.parse_args(clean)
         env = {}
         if ns.model:
@@ -186,4 +204,8 @@ class H3Lab(Shared):
             env["FASTRSI_H3_GOLDEN"] = os.path.abspath(ns.golden)
         if ns.check_timeout is not None:
             env["FASTRSI_H3_CHECK_TIMEOUT"] = str(ns.check_timeout)
+        if ns.zygote:
+            env["FASTRSI_H3_ZYGOTE"] = "1"
+        if ns.holder:
+            env["FASTRSI_H3_HOLDER"] = "1"
         return env
