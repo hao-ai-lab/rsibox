@@ -129,9 +129,12 @@ changes. Each soak completed 20 install/undo cycles.
 | 2 GB200 · TP2 | 11/11 | 0.0428 s | 0.0152 s | 29.34–30.42 s |
 | 4 GB200 · TP2/DP2 | 11/11 | 0.0451 s | 0.0170 s | 36.05–36.55 s |
 | 4 GB200 · TP4 | 11/11 | 0.0444 s | 0.0164 s | 35.65–36.95 s |
+| 4 GB200 · TP2/PP2 | 11/11 | 0.0468 s | 0.0168 s | 28.53–29.04 s |
 
 The harness prints its c0–c10 verdicts and can persist the kernel's transaction, proof and
-undo receipts with `--receipts`. All three layouts used one node, PP1 and eager execution.
+undo receipts with `--receipts`. The TP2, TP2/DP2, and TP4 runs used two layers, one node, PP1,
+and eager execution; the TP2/PP2 run used four layers, `--pipeline-model-parallel-size 2`
+(VPP1), one node, and deterministic eager execution.
 
 ## Restart by fork: the zygote
 

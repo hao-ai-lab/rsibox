@@ -236,13 +236,13 @@
       "note": "not recorded"
      },
      "installed_live": true,
-     "install_time": "19.22 s total incl. check (17.12 s commit incl. 17.09 s nvcc build and 1.17 ms load + 0.83 s R1 graph recapture + 1.27 s check; 0.0065 s cascade undo) on 1x B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
-     "check_time": "1.27 s (live) vs 1.58 s (fresh)",
-     "restart_time_replaced": "49.47 s (fresh restart + nvcc build + check on 1x B200 vLLM 0.33.0 Qwen3-8B)",
+     "install_time": "19.22 s TP1 / 20.26 s TP2 total incl. check (TP1: 17.12 s commit [17.09 s nvcc] + 0.83 s R1 + 1.27 s check; TP2: flock 18.28 s [18.24 s nvcc, 0.0 s cached peer] + 0.92 s R1 + 1.07 s check; 6.55 / 9.17 ms cascade undo) on B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
+     "check_time": "1.27 s TP1 / 1.07 s TP2 (live) vs 1.58 s TP1 / 1.43 s TP2 (fresh)",
+     "restart_time_replaced": "49.47 s TP1 / 55.28 s TP2 (fresh restart + nvcc build + check on B200 vLLM 0.33.0 Qwen3-8B)",
      "measured_effect": "non-contiguous residual accepted in live GPU check (max abs err 0.0156 vs reference)",
      "source": "repos/vllm/kb/mechanisms.md:10; repos/vllm/kb/costs.md; repos/vllm/examples/live-edit-native/verify_native_pr49750.py",
      "route": "in place (NATIVE versioned side library + R1 recapture, repos/vllm/livelab/adapter/native.py)",
-     "note": "Verified live on 1x B200 (vLLM 0.33.0, Qwen3-8B, V1 GPUModelRunner with FULL_DECODE_ONLY graphs): refused without rebuild=['R1'] in 0.022 s; pre-PR to PR #49750 installed live in 17.12 s + 0.83 s R1 recapture (576 live witness calls, 432 capture calls, live == fresh with max |delta logprob| == 0.0, 0.0065 s cascade undo); standalone GPU test confirms pre-PR rejects non-contiguous residual while PR #49750 matches reference."
+     "note": "Verified live on 1x B200 TP1 and 2x B200 TP2 (vLLM 0.33.0, Qwen3-8B, V1 GPUModelRunner with FULL_DECODE_ONLY graphs): refused without rebuild=['R1'] in 0.022 s; pre-PR to PR #49750 installed live (17.12 s TP1 / 18.28 s TP2 w/ flock cached peer + 0.83 / 0.92 s R1 recapture, 576 live / 432 capture witness calls per rank, live == fresh with max |delta logprob| == 0.0, 6.55 / 9.17 ms cascade undo); standalone GPU test confirms pre-PR rejects non-contiguous residual while PR #49750 matches reference."
     }
    ],
    "tagged_not_replayed": [

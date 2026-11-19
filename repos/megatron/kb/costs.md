@@ -291,3 +291,26 @@ base checks. Installs took 0.07-0.60 s, refusals included. A code restart for a 
 one 8-step check and exit, about 3.5-7.5 min in all. The placement and compile check of a fuzzy-applied
 diff takes about 1 s and needs no GPU.
 
+## Pipeline parallelism (`TP2 × PP2`, 4× GB200, 2026-11-19)
+
+Source: our 2026-11-19 NeMo 26.04.01 conformance run on four GB200s (4 layers, hidden 512, 8
+attention heads, `--tensor-model-parallel-size 2 --pipeline-model-parallel-size 2
+--sequence-parallel --global-batch-size 8 --deterministic-mode`, VPP1, 3-step checks). Pre-run
+unit tests (`test_pieces.py`, incl. `PipelineAndVppTest`) passed 13/13 with torch (`-W error::ResourceWarning`).
+
+| Case | Result | Seconds | Notes |
+|---|---|---:|---|
+| `c0_repeatable` | pass | 1.054 | 3 identical base checks after reset |
+| `c1_noop` | pass | 0.786 | `MLP.forward` calls `[48, 48, 48, 48]` across all 4 ranks |
+| `c2_visible` | pass | 0.768 | Loss changed `[9.0970, 9.0850, 9.0339] -> [9.1006, 9.0772, 9.0361]`, `[48, 48, 48, 48]` calls |
+| `c3_fresh_equivalence` | pass | 87.315 | Live == fresh (visible and 3-edit chain) |
+| `c4_uninstall` | pass | 1.456 | Undo `0.016704 s`; identity restored |
+| `c5_failed_install` / `c6_refusal` / `c7_chain` | pass | 1.865 / 2.761 / 3.109 | Clean rollback, refusals, 3-edit chain & unwind |
+| `c8_crash_and_hang` | pass | 297.264 | Crash / hang / lost / tamper respawns in `28.528–29.042 s` |
+| `c9_soak` | pass | 15.813 | 20 cycles; install median `0.0468 s`, undo median `0.0168 s` |
+| `c10_not_proven` | pass | 29.012 | `proven: false` (`zero_witness` × 4 ranks) vs altered fresh |
+
+11/11 conformance passed (`108` receipts, GPUs returned to `0 MiB`). Virtual pipeline parallelism
+(`VPP > 1`) VPP iterator list replay is covered in `PipelineAndVppTest` (unit-tested with torch);
+multi-chunk VPP > 1 on GPU is not yet run.
+

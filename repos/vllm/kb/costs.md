@@ -203,6 +203,12 @@ Standalone `nvcc 13.3` compile/load/dispatch/undo probe on GPU 0 measured `16.83
 pre-PR kernel rejects non-contiguous `residual` (`stride(-1) == 1, is_contiguous() == False`)
 with `RuntimeError`, while the live-compiled PR #49750 kernel matches PyTorch FP32 reference (`max abs err = 0.015625`).
 
+Multi-rank `TP=2` verification on 2 idle B200 GPUs (same model/flags, `verify_native_pr49750.py --tp 2`, cold live boot `37.22 s`) confirmed single-compile `flock` artifact sharing (`18.24–18.27 s` uncached rank vs `0.0 s` cached peer), `576` live / `432` capture witness calls per rank, and `0 MiB` cleanup on both GPUs:
+- Visible perturbation: `18.274 s` / `0.0 s` build, `2.55 ms` gap, `0.573 s` `R1` recapture (`18.880 s` edit-to-rebuilt), `1.074 s` check (`19.95 s` total vs `53.10 s` fresh), `max |Δlogprob| = 0.0`, `249.5 ms` undo (`2.9 ms` / `248.4 ms` per worker).
+- PR #49750: `18.240 s` / `0.0 s` build, `3.50 ms` gap, `0.916 s` `R1` recapture (`19.193 s` edit-to-rebuilt), `1.072 s` check (`20.26 s` total vs `55.28 s` fresh), `max |Δlogprob| = 0.0`, `9.17 ms` cascade undo (`8.13 ms` / `6.90 ms` per worker).
+
+And the `52`-test real-GPU `livelab/services/` E2E suite (`test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`) passed `52/52` (`0` skipped) on B200 under `-W error::ResourceWarning`.
+
 ## Live TP2 <-> EP2 by holder reshard (Qwen3.5-35B-A3B BF16, 2× B200, 2026-11-19)
 
 Source: our 2026-11-19 runs on 2 idle B200 GPUs (vLLM 0.33.0, torch 2.14), `--max-model-len 8192

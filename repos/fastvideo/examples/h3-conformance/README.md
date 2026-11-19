@@ -85,6 +85,21 @@ c10_not_proven        pass     63.0    proven False, findings ['zero_witness', '
 
 11/11 on 4 ranks (SP4), exiting cleanly to `0 MiB` on all 4 GPUs.
 
+## 2 GPUs with `--zygote --holder` (SP2, targeted recovery & soak)
+
+Our 2026-11-19 targeted run (`fastrsi conformance fastvideo --real --only c0_repeatable,c2_visible,c4_uninstall,c8_crash_and_hang,c9_soak -- --gpus 2 --zygote --holder`, `66` receipts, `5/5`, `0 MiB` after shutdown):
+
+```
+case               result  seconds  evidence
+c0_repeatable      pass     25.732  3 checks (one after reset ['cuda cache']) gave {'video': 'd0e55e892690e260', 'audio': 'ee49674663eae6e2'}
+c2_visible         pass      9.632  output {'video': 'd0e55e892690e260', ...} -> {'video': 'cd32f50b70d9479f', ...}; calls [1, 1]
+c4_uninstall       pass     18.786  uninstall ['txn-d7e3dd2c'] in 0.016595 s; identity fbe225a4dfe5b535 restored
+c8_crash_and_hang  pass   1362.848  crash: respawn 38.178275 s; hang: respawn 37.990799 s; lost: respawn 6.234872 s; tamper: respawn 5.726634 s
+c9_soak            pass    197.869  20 cycles; install median 0.0589 s, uninstall median 0.0175 s
+```
+
+Every `c8` respawn mapped `text_encoder` (`0.145–0.358 s`), `vae` (`0.032–0.063 s`), and `transformer` (`0.185–0.738 s`) via holder IPC (`served: true`). `c8`'s `1362.8 s` total case wall includes two ~`600 s` default NCCL watchdog waits during the injected SP2 `rank1` crash and hang before `reset("respawn")` starts.
+
 ## What these runs found (and the fixes they needed)
 
 - **c8, hang:** the injected hang must outlast the check's deadline; the lab now sets it from

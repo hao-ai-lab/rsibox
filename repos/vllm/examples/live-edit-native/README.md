@@ -24,6 +24,12 @@ using upstream vLLM PR `#49750` (`csrc/libtorch_stable/layernorm_kernels.cu`: no
    witness calls), matches fresh restart bit-for-bit (`max |Δlogprob| = 0.0`; `19.22 s` total
    vs `49.47 s` restart), and restores exact base on `cascade_undo` in `6.55 ms` (`5.60 ms`
    worker unbind).
+5. **Multi-rank `TP=2` (`--tp 2` on `2× B200`):** node-local `flock` compiles once per `.so`
+   cache key across TP ranks (`18.24–18.27 s` on the uncached rank, `0.0 s` on the cached peer);
+   both `visible_perturbation` (`0.573 s` `R1`, `19.95 s` total vs `53.10 s` restart) and
+   PR `#49750` (`0.916 s` `R1`, `20.26 s` total vs `55.28 s` restart, `9.17 ms` cascade undo)
+   report `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, and
+   `0 MiB` residual GPU memory.
 
 ## Usage
 
@@ -33,6 +39,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u verify_native_pr49750.py \
   --work <scratch-dir> \
   --csrc-root <path-to-vllm-csrc> \
   --vllm-git <path-to-vllm.git> \
+  --tp 1 \
   --port 29495 \
   --out summary.json
 ```

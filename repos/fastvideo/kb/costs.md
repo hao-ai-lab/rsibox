@@ -151,7 +151,9 @@ the tray's other GPUs; `tools/h3_climb.py`, every video bit-exact to base):
 | Zygote respawn with weights holder | 3.05-3.51 s (six respawns) | 6.23-7.27 s | 12.3-13.7 s |
 | Zygote respawn | 13.8-14.5 s | | 11.3-11.6 s |
 | Plain respawn (`reset("respawn")`) | 21.2-23.7 s | 29.7 s | 10.9-11.4 s |
-| Respawn after a poisoning fault (conformance c8) | 22.2-53.5 s | 29.7-59.2 s | |
+| Respawn after a poisoning fault (conformance c8) | 22.2-53.5 s | 29.7-59.2 s (plain) / 5.73-38.18 s (`--zygote --holder`: lost 6.23 s, tamper 5.73 s) | |
+
+- **`SP2 --zygote --holder` conformance recovery and soak (2026-11-19, 2× GB200, `fastrsi conformance fastvideo --real --only c0_repeatable,c2_visible,c4_uninstall,c8_crash_and_hang,c9_soak -- --gpus 2 --zygote --holder`):** `5/5` pass (`c0` `25.732 s` incl. holder deposit `10.57-10.99 s` text encoder / `0.07-0.09 s` VAE / `1.15-1.45 s` DiT; `c2` `9.632 s`; `c4` `18.786 s`, undo `0.016595 s`; `c9` `197.869 s`, 20 cycles, install median `0.0589 s` / uninstall `0.0175 s`; exit to `0 MiB` on GPUs 0–3). Across all four `c8` respawns (`1362.848 s` total case wall), every rank re-mapped all three held modules from the holder over CUDA IPC (`text_encoder` `0.145-0.358 s`, `vae` `0.032-0.063 s`, `transformer` `0.185-0.738 s`): `lost` respawned in `6.235 s` and `tamper` in `5.727 s`, while `crash` (`38.178 s` respawn) and `hang` (`37.991 s` respawn) waited ~`600 s` each on the default NCCL watchdog for the SP2 collective before executor teardown (~`30 s`).
 
 - **In-place rebuild** covers the edits the live swap refuses (a constructor, a new field, a
   module constant) on the H3 stages and the H3 DiT: a stage constructor edit (4 modules
