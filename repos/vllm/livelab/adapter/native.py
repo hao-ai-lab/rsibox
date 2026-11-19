@@ -9,6 +9,7 @@ Undo calls `lib._destroy()` via the kernel journal, restoring the original C++ i
 sub-millisecond time without recompiling or unloading shared libraries (already-captured graphs
 are handled orthogonally by `R1` recapture in the same step gap).
 """
+import concurrent.futures
 import contextlib
 import ctypes
 import fcntl
@@ -47,6 +48,44 @@ def find_nvcc() -> str:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     raise FileNotFoundError("nvcc not found (set FASTRSI_NVCC, CUDA_HOME, or install CUDA toolkit)")
+
+
+def find_gxx() -> str | None:
+    """Locate host `g++` for compiling/linking pure-C++ registration units without `nvcc`."""
+    candidates = [
+        os.environ.get("FASTRSI_GXX"),
+        shutil.which("g++"),
+        "/usr/bin/g++",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _cuda_dirs(nvcc: str) -> tuple[str | None, str | None]:
+    """Return `(cuda_include_dir, cuda_lib_dir)` adjacent to `nvcc` when present on disk."""
+    roots = [
+        os.path.dirname(os.path.dirname(os.path.abspath(nvcc))),
+        os.path.dirname(os.path.dirname(os.path.realpath(nvcc))),
+    ]
+    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda_home:
+        roots.append(os.path.abspath(cuda_home))
+    inc_dir = None
+    lib_dir = None
+    for root in roots:
+        if inc_dir is None:
+            cand_inc = os.path.join(root, "include")
+            if os.path.isfile(os.path.join(cand_inc, "cuda_runtime.h")):
+                inc_dir = cand_inc
+        if lib_dir is None:
+            for sub in ("lib64", "lib"):
+                cand_lib = os.path.join(root, sub)
+                if os.path.isfile(os.path.join(cand_lib, "libcudart.so")):
+                    lib_dir = cand_lib
+                    break
+    return inc_dir, lib_dir
 
 
 def torch_paths() -> tuple[str, str]:
@@ -116,7 +155,8 @@ def spec_key(spec: dict) -> str:
         "ops": spec.get("ops") or {},
         "headers": list(spec.get("headers") or ["csrc/libtorch_stable/ops.h"]),
         "stable": bool(spec.get("stable", True)),
-        "split_compile": int(spec.get("split_compile", 8)),
+        "split_compile": int(spec.get("split_compile", 16)),
+        "threads": int(spec.get("threads", 16)),
         "arch": arch,
         "extra_nvcc_flags": list(spec.get("extra_nvcc_flags") or ()),
     }
@@ -196,6 +236,8 @@ def build_native(spec: dict) -> dict:
 
         t0 = time.perf_counter()
         nvcc = find_nvcc()
+        gxx = find_gxx()
+        cuda_inc, cuda_lib = _cuda_dirs(nvcc)
         torch_inc, torch_lib = torch_paths()
         arch_flags = detect_arch(spec.get("arch", "auto"))
         stage_dir = os.path.join(build_dir, f"stage-{os.getpid()}")
@@ -204,7 +246,8 @@ def build_native(spec: dict) -> dict:
             csrc_stage = os.path.join(stage_dir, "csrc")
             shutil.copytree(csrc_root, csrc_stage)
             _apply_source_changes(csrc_stage, spec)
-            with open(os.path.join(stage_dir, "reg.cu"), "w", encoding="utf-8") as fh:
+            reg_name = "reg.cpp" if gxx else "reg.cu"
+            with open(os.path.join(stage_dir, reg_name), "w", encoding="utf-8") as fh:
                 fh.write(generate_registration(key, ops, spec.get("headers"), spec.get("stable", True)))
 
             flags = [
@@ -225,48 +268,101 @@ def build_native(spec: dict) -> dict:
                 "-Icsrc/libtorch_stable",
                 "-w",
             ]
-            split = int(spec.get("split_compile", 8))
+            split = int(spec.get("split_compile", 16))
             if split > 0:
                 flags.append(f"-split-compile={split}")
-            threads = int(spec.get("threads", 8))
+            threads = int(spec.get("threads", 16))
             if threads > 0:
                 flags.append(f"--threads={threads}")
             flags.extend(str(f) for f in (spec.get("extra_nvcc_flags") or ()))
 
+            compile_timeout = int(spec.get("compile_timeout_s", 300))
+            jobs = []
             objs = []
             for rel in files:
                 _safe_stage_path(csrc_stage, rel)
-            for idx, tu in enumerate([f"csrc/{rel}" for rel in files] + ["reg.cu"]):
+            for idx, tu in enumerate(f"csrc/{rel}" for rel in files):
                 obj = f"o{idx}.o"
                 objs.append(obj)
+                jobs.append((tu, [nvcc, *flags, "-c", tu, "-o", obj]))
+
+            reg_obj = "reg.o"
+            objs.append(reg_obj)
+            if gxx:
+                gxx_flags = [
+                    "-std=c++20",
+                    "-O1",
+                    "-fPIC",
+                    "-fvisibility=hidden",
+                    "-DNDEBUG",
+                    "-DUSE_CUDA",
+                    "-DENABLE_FP8",
+                    f"-DTORCH_TARGET_VERSION={_TORCH_TARGET_VERSION}",
+                    "-DTORCH_EXTENSION_NAME=_C",
+                    f"-I{torch_inc}",
+                    *(["-I" + cuda_inc] if cuda_inc else []),
+                    "-I.",
+                    "-Icsrc",
+                    "-Icsrc/libtorch_stable",
+                    "-w",
+                ]
+                jobs.append((reg_name, [gxx, *gxx_flags, "-c", reg_name, "-o", reg_obj]))
+            else:
+                jobs.append((reg_name, [nvcc, *flags, "-c", reg_name, "-o", reg_obj]))
+
+            def _compile_unit(tu_name: str, cmd: list[str]) -> None:
                 proc = subprocess.run(
-                    [nvcc, *flags, "-c", tu, "-o", obj],
+                    cmd,
                     cwd=stage_dir,
                     capture_output=True,
                     text=True,
-                    timeout=int(spec.get("compile_timeout_s", 300)),
+                    timeout=compile_timeout,
                 )
                 if proc.returncode != 0:
+                    tool = os.path.basename(cmd[0])
                     msg = (proc.stderr or proc.stdout or "").strip()[-1200:]
-                    raise RuntimeError(f"nvcc compile failed for {tu}: {msg}")
+                    raise RuntimeError(f"{tool} compile failed for {tu_name}: {msg}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                futs = [pool.submit(_compile_unit, tu_name, cmd) for tu_name, cmd in jobs]
+                for fut in concurrent.futures.as_completed(futs):
+                    fut.result()
 
             tmp_so = os.path.join(build_dir, f"libfastrsi_{key}.so.tmp.{os.getpid()}")
             with contextlib.suppress(OSError):
                 os.unlink(tmp_so)
-            link_cmd = [
-                nvcc,
-                "-shared",
-                "-Xlinker=-Bsymbolic",
-                "-o",
-                tmp_so,
-                *objs,
-                f"-L{torch_lib}",
-                "-ltorch_cpu",
-                "-ltorch",
-                "-lc10",
-                "-lcuda",
-                f"-Xlinker=-rpath={torch_lib}",
-            ]
+            if gxx and cuda_lib:
+                link_cmd = [
+                    gxx,
+                    "-shared",
+                    "-Wl,-Bsymbolic",
+                    "-o",
+                    tmp_so,
+                    *objs,
+                    f"-L{torch_lib}",
+                    "-ltorch_cpu",
+                    "-ltorch",
+                    "-lc10",
+                    f"-L{cuda_lib}",
+                    "-lcudart",
+                    "-lcuda",
+                    f"-Wl,-rpath={torch_lib}",
+                ]
+            else:
+                link_cmd = [
+                    nvcc,
+                    "-shared",
+                    "-Xlinker=-Bsymbolic",
+                    "-o",
+                    tmp_so,
+                    *objs,
+                    f"-L{torch_lib}",
+                    "-ltorch_cpu",
+                    "-ltorch",
+                    "-lc10",
+                    "-lcuda",
+                    f"-Xlinker=-rpath={torch_lib}",
+                ]
             proc = subprocess.run(
                 link_cmd,
                 cwd=stage_dir,
@@ -277,8 +373,9 @@ def build_native(spec: dict) -> dict:
             if proc.returncode != 0:
                 with contextlib.suppress(OSError):
                     os.unlink(tmp_so)
+                tool = os.path.basename(link_cmd[0])
                 msg = (proc.stderr or proc.stdout or "").strip()[-1200:]
-                raise RuntimeError(f"nvcc link failed: {msg}")
+                raise RuntimeError(f"{tool} link failed: {msg}")
             os.replace(tmp_so, final_so)
         finally:
             shutil.rmtree(stage_dir, ignore_errors=True)

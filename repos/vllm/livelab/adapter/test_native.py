@@ -487,6 +487,63 @@ class NativeUnitTests(unittest.TestCase):
                         N.build_native(bad_edit_spec)
             self.assertFalse(os.path.exists(escape_name))
 
+    def test_parallel_gxx_registration_and_nvcc_fallback(self):
+        """Compiles `reg.cpp` with `g++` in parallel with `nvcc` + links with `g++ -shared` when
+        adjacent CUDA libs exist, and falls back cleanly to `nvcc` for both when `g++` is absent."""
+        fake_torch, _, _ = _make_fake_torch()
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc = _make_csrc(tmp, body="// base\nvoid f() {}\n")
+            cuda_root = os.path.join(tmp, "cuda")
+            os.makedirs(os.path.join(cuda_root, "bin"), exist_ok=True)
+            os.makedirs(os.path.join(cuda_root, "include"), exist_ok=True)
+            os.makedirs(os.path.join(cuda_root, "lib64"), exist_ok=True)
+            fake_nvcc = os.path.join(cuda_root, "bin", "nvcc")
+            for p in (fake_nvcc, os.path.join(cuda_root, "include", "cuda_runtime.h"), os.path.join(cuda_root, "lib64", "libcudart.so")):
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write("stub\n")
+            os.chmod(fake_nvcc, 0o755)
+
+            spec_gxx = _native_spec(csrc, os.path.join(tmp, "b1"), edits=[["libtorch_stable/layernorm_kernels.cu", "// base", "// gxx"]])
+            calls_gxx = []
+            t0 = time.perf_counter()
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value=fake_nvcc),
+                mock.patch.object(N, "find_gxx", return_value="/usr/bin/g++"),
+                mock.patch.object(N.subprocess, "run", side_effect=_fake_nvcc_factory(calls_gxx, delay_s=0.12)),
+            ):
+                built_gxx = N.build_native(spec_gxx)
+            elapsed = time.perf_counter() - t0
+            self.assertTrue(os.path.isfile(built_gxx["so"]))
+            self.assertLess(elapsed, 0.22, f"expected parallel compile (<0.22s), took {elapsed:.3f}s")
+            compiles = [c for c in calls_gxx if "-c" in c]
+            links = [c for c in calls_gxx if "-shared" in c]
+            self.assertEqual(len(compiles), 2)
+            self.assertEqual(len(links), 1)
+            cu_cmd = next(c for c in compiles if c[0] == fake_nvcc)
+            reg_cmd = next(c for c in compiles if c[0] == "/usr/bin/g++")
+            self.assertIn("-split-compile=16", cu_cmd)
+            self.assertIn("--threads=16", cu_cmd)
+            self.assertIn("reg.cpp", reg_cmd)
+            self.assertIn(f"-I{os.path.join(cuda_root, 'include')}", reg_cmd)
+            self.assertEqual(links[0][0], "/usr/bin/g++")
+            self.assertIn("-lcudart", links[0])
+
+            spec_nvcc = _native_spec(csrc, os.path.join(tmp, "b2"), edits=[["libtorch_stable/layernorm_kernels.cu", "// base", "// nvcc"]])
+            calls_nvcc = []
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value=fake_nvcc),
+                mock.patch.object(N, "find_gxx", return_value=None),
+                mock.patch.object(N.subprocess, "run", side_effect=_fake_nvcc_factory(calls_nvcc)),
+            ):
+                built_nvcc = N.build_native(spec_nvcc)
+            self.assertTrue(os.path.isfile(built_nvcc["so"]))
+            compiles2 = [c for c in calls_nvcc if "-c" in c]
+            links2 = [c for c in calls_nvcc if "-shared" in c]
+            self.assertTrue(all(c[0] == fake_nvcc for c in compiles2 + links2))
+            self.assertTrue(any("reg.cu" in c for c in compiles2))
+
 
 if __name__ == "__main__":
     unittest.main()
