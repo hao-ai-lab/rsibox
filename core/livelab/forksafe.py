@@ -480,6 +480,31 @@ def unpatch_child(cuda=None, clear_env: bool = False) -> dict:
     }
 
 
+def _resolve_guard_capability(capability):
+    """Normalize `capability` for `install_all_guards` into `(cap_pair_or_None, cap_fn_or_None)`.
+
+    Accepts `None`, `(major, minor)`, `((major, minor), count)`, or a callable returning
+    any of those.
+    """
+    if capability is None:
+        return None, None
+    if callable(capability):
+        val = capability()
+        if val is None:
+            return None, capability
+        if isinstance(val, (tuple, list)) and len(val) == 2 and isinstance(val[0], (tuple, list)):
+            pair = (int(val[0][0]), int(val[0][1]))
+            return pair, capability
+        pair = (int(val[0]), int(val[1]))
+        return pair, (lambda _pair=pair: (_pair, 1))
+    if isinstance(capability, (tuple, list)) and len(capability) == 2 and isinstance(capability[0], (tuple, list)):
+        pair = (int(capability[0][0]), int(capability[0][1]))
+        count = int(capability[1])
+        return pair, (lambda _pair=pair, _count=count: (_pair, _count))
+    pair = (int(capability[0]), int(capability[1]))
+    return pair, (lambda _pair=pair: (_pair, 1))
+
+
 def install_all_guards(
     cuda=None,
     *,
@@ -501,24 +526,22 @@ def install_all_guards(
     if nvml_env_set:
         os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
     report = {"nvml_env_set": nvml_env_set}
+    resolved_cap, cap_fn = _resolve_guard_capability(capability)
     if cute_dsl:
-        report["cute_dsl_arch"] = pin_cute_dsl_arch(capability, nvml)
+        report["cute_dsl_arch"] = pin_cute_dsl_arch(resolved_cap, nvml)
     if cuda_python:
-        report["cuda_python"] = guard_cuda_python(capability, nvml)
+        report["cuda_python"] = guard_cuda_python(resolved_cap, nvml)
     if cuda is None:
         torch_mod = sys.modules.get("torch")
         cuda = getattr(torch_mod, "cuda", None)
     if cuda is not None:
-        cap_fn = None if capability is None else (
-            capability if callable(capability) else (lambda: (tuple(capability), 1))
-        )
         report["torch_cuda"] = install(cuda, capability=cap_fn)
         if properties:
             report["properties"] = install_properties(cuda, probe=probe)
     restore = lambda: None
     if triton:
         try:
-            restore = pin_triton_target(capability=None if callable(capability) else capability, nvml=nvml)
+            restore = pin_triton_target(capability=resolved_cap, nvml=nvml)
             report["triton"] = {"installed": not hasattr(restore, "skipped"),
                                 **({"skipped": restore.skipped} if hasattr(restore, "skipped") else {})}
         except RuntimeError as exc:

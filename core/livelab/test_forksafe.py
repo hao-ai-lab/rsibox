@@ -722,6 +722,75 @@ class DriverCuTeAndAllGuards(unittest.TestCase):
             self.assertEqual(drv_mod.cuInit(0), (0,))
             self.assertEqual(cuinit_calls, [0])
 
+    def test_install_all_guards_resolves_callable_capability(self):
+        """Input: `install_all_guards` given callable `capability` providers returning
+        `((10, 0), 2)` (count=2), `(9, 0)` (flat pair), and `None` under `CUDA_VISIBLE_DEVICES=""`
+        so NVML cannot supply a fallback. Expected: CuTe DSL arch, cuda-python guard, torch.cuda
+        (including device count), and Triton target all resolve cleanly without initializing CUDA."""
+        drv_mod = types.ModuleType("cuda.bindings.driver")
+        drv_mod.CUresult = types.SimpleNamespace(CUDA_ERROR_NOT_INITIALIZED=3)
+        drv_mod.cuInit = lambda flags=0: (0,)
+        cuda_pkg = types.ModuleType("cuda")
+        bindings_pkg = types.ModuleType("cuda.bindings")
+        cuda_pkg.bindings = bindings_pkg
+        bindings_pkg.driver = drv_mod
+        self.addCleanup(forksafe.unguard_cuda_python)
+
+        base_env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")
+        }
+        base_env["CUDA_VISIBLE_DEVICES"] = ""
+
+        # Case 1: callable returning ((major, minor), count)
+        cuda = fake_cuda()
+        triton_mods, CudaDriver, triton_calls = fake_triton()
+        mods = {**triton_mods, "cuda": cuda_pkg, "cuda.bindings": bindings_pkg,
+                "cuda.bindings.driver": drv_mod}
+        with mock.patch.dict(os.environ, base_env, clear=True), mock.patch.dict(sys.modules, mods):
+            report, restore = forksafe.install_all_guards(
+                cuda, capability=lambda: ((10, 0), 2), properties=False
+            )
+            self.assertEqual(report["cute_dsl_arch"], "sm_100a")
+            self.assertEqual(os.environ["CUTE_DSL_ARCH"], "sm_100a")
+            self.assertEqual(report["cuda_python"]["cute_dsl_arch"], "sm_100a")
+            self.assertTrue(report["triton"]["installed"])
+            self.assertEqual(cuda.get_device_capability(0), (10, 0))
+            self.assertEqual(cuda.get_device_capability(1), (10, 0))
+            self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 100, 32))
+            self.assertFalse(cuda.is_initialized())
+            self.assertEqual(triton_calls, [])
+            restore()
+            forksafe.unpatch_child(cuda, clear_env=report["nvml_env_set"])
+
+        # Case 2: callable returning flat (major, minor)
+        cuda2 = fake_cuda()
+        triton_mods2, CudaDriver2, _ = fake_triton()
+        mods2 = {**triton_mods2, "cuda": cuda_pkg, "cuda.bindings": bindings_pkg,
+                 "cuda.bindings.driver": drv_mod}
+        with mock.patch.dict(os.environ, base_env, clear=True), mock.patch.dict(sys.modules, mods2):
+            report2, restore2 = forksafe.install_all_guards(
+                cuda2, capability=lambda: (9, 0), properties=False
+            )
+            self.assertEqual(report2["cute_dsl_arch"], "sm_90a")
+            self.assertEqual(cuda2.get_device_capability(0), (9, 0))
+            self.assertEqual(tuple(CudaDriver2().get_current_target()), ("cuda", 90, 32))
+            self.assertFalse(cuda2.is_initialized())
+            restore2()
+            forksafe.unpatch_child(cuda2, clear_env=report2["nvml_env_set"])
+
+        # Case 3: callable returning None degrades cleanly without error
+        cuda3 = fake_cuda()
+        with mock.patch.dict(os.environ, base_env, clear=True), mock.patch.dict(sys.modules, mods2):
+            report3, restore3 = forksafe.install_all_guards(
+                cuda3, capability=lambda: None, properties=False
+            )
+            self.assertIsNone(report3["cute_dsl_arch"])
+            self.assertFalse(report3["triton"]["installed"])
+            self.assertFalse(cuda3.is_initialized())
+            restore3()
+            forksafe.unpatch_child(cuda3, clear_env=report3["nvml_env_set"])
+
 
 if __name__ == "__main__":
     unittest.main()

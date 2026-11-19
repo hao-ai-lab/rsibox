@@ -143,8 +143,12 @@ def resolve_lab(target: str, *, real: bool = False, repo_root: str | None = None
     if entry is None:
         known = ", ".join(sorted(by_name))
         raise ValueError(f"unknown lab {target!r} (known: {known}; or pass module:Class)")
-    spec = entry["real_spec"] if real else (entry["toy_spec"] or entry["real_spec"])
+    spec = entry["real_spec"] if real else entry["toy_spec"]
     if not spec:
+        if not real and entry["real_spec"]:
+            raise ValueError(
+                f"lab {target!r} has no toy conformance class; pass --real to run {entry['real_spec']}"
+            )
         kind = "real" if real else "toy"
         raise ValueError(f"lab {target!r} has no {kind} conformance class")
     return spec, entry["livelab_dir"]

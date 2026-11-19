@@ -308,6 +308,44 @@ class CliTests(unittest.TestCase):
                 rc_ref = cli.main(["ctl", "--sock", sock, "install"])
             self.assertEqual(rc_ref, 2)
 
+    def test_resolve_lab_requires_real_flag_when_toy_spec_missing(self):
+        """Input: a discovered lab exposing only a real-engine conformance class (`RealOnlyLab`)
+        and no toy class. Expected: `resolve_lab(name, real=False)` raises `ValueError` telling
+        the caller to pass `--real`, `cli.main(["conformance", name])` exits 2 without starting
+        a real lab, and `resolve_lab(name, real=True)` returns the real spec."""
+        tmp = tempfile.mkdtemp(prefix="fastrsi-cli-realonly-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "core", "livelab"))
+        real_dir = os.path.join(tmp, "repos", "realonly", "livelab")
+        real_pkg = os.path.join(real_dir, "realpkg")
+        toy_pkg = os.path.join(tmp, "repos", "toyonly", "livelab", "toypkg")
+        os.makedirs(real_pkg)
+        os.makedirs(toy_pkg)
+        with open(os.path.join(real_pkg, "__init__.py"), "w", encoding="utf-8") as handle:
+            handle.write("")
+        with open(os.path.join(real_pkg, "conformance_lab.py"), "w", encoding="utf-8") as handle:
+            handle.write("class RealOnlyLab:\n    pass\n")
+        with open(os.path.join(toy_pkg, "__init__.py"), "w", encoding="utf-8") as handle:
+            handle.write("")
+        with open(os.path.join(toy_pkg, "toy_lab.py"), "w", encoding="utf-8") as handle:
+            handle.write("class ToyOnlyLab:\n    pass\n")
+
+        with self.assertRaisesRegex(ValueError, "--real.*realpkg\\.conformance_lab:RealOnlyLab"):
+            cli.resolve_lab("realonly", real=False, repo_root=tmp)
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli.main(["conformance", "realonly", "--repo-root", tmp])
+        self.assertEqual(rc, 2)
+        self.assertIn("--real", err.getvalue())
+
+        self.assertEqual(
+            cli.resolve_lab("realonly", real=True, repo_root=tmp),
+            ("realpkg.conformance_lab:RealOnlyLab", real_dir),
+        )
+        with self.assertRaisesRegex(ValueError, "no real conformance class"):
+            cli.resolve_lab("toyonly", real=True, repo_root=tmp)
+
 
 if __name__ == "__main__":
     unittest.main()
