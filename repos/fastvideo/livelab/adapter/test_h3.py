@@ -103,9 +103,29 @@ class H3LabClassTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"FASTRSI_H3_ZYGOTE": "0", "FASTRSI_H3_HOLDER": ""}, clear=False), \
              mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
              mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
+            os.environ.pop("FASTRSI_H3_CHECK_TIMEOUT", None)
             h3._make_h3(None)
         self.assertIs(captured["kw"]["zygote"], False)
         self.assertIs(captured["kw"]["holder"], False)
+        self.assertEqual(captured["kw"]["check_timeout"], 600.0)
+
+        for flag_env in ({"FASTRSI_H3_ZYGOTE": "1", "FASTRSI_H3_HOLDER": "0"},
+                         {"FASTRSI_H3_ZYGOTE": "0", "FASTRSI_H3_HOLDER": "1"}):
+            with mock.patch.dict(os.environ, flag_env, clear=False), \
+                 mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
+                 mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
+                os.environ.pop("FASTRSI_H3_CHECK_TIMEOUT", None)
+                h3._make_h3(None)
+            self.assertEqual(captured["kw"]["check_timeout"], 120.0, flag_env)
+
+        with mock.patch.object(lab_mod.harness, "run_fresh_subprocess",
+                               return_value={"ok": True, "output": BASE}) as run_fresh:
+            toy = ToyFastVideoLab(ranks=1, check_timeout=120.0)
+            try:
+                toy.fresh_check({"files": {}})
+                self.assertEqual(run_fresh.call_args.kwargs["timeout"], 1200.0)
+            finally:
+                toy.close()
 
         built = []
 

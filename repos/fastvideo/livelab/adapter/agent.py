@@ -25,10 +25,10 @@ _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 
-from fastrsi import harness  # noqa: E402
+from fastrsi import harness, ipc  # noqa: E402
 
 # rebuilt: {module: text} an in-place rebuild made the module's base (what it runs, not its file)
-_STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}}
+_STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}, "fault_path": None}
 
 if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
     # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
@@ -311,12 +311,47 @@ def rebuild(worker, payload):
     return {"ok": True, **out, "cost_s": round(time.perf_counter() - t0, 4)}
 
 
+def arm_fault_beacon(worker, path):
+    """Wrap the worker's forward entrypoint once so an uncaught exception writes an atomic
+    fault beacon for the driver (fast-failing SP>=2 asymmetric crashes instead of blocking on
+    peer ranks' NCCL watchdog)."""
+    _STATE["fault_path"] = path
+    target = worker if callable(getattr(worker, "execute_forward", None)) else getattr(worker, "pipeline", None)
+    attr = "execute_forward" if target is worker else "forward"
+    orig = getattr(target, attr, None) if target is not None else None
+    if not callable(orig) or getattr(orig, "_fastrsi_fault_guarded", False):
+        return {"ok": True, "armed": callable(orig)}
+
+    def guarded(*args, **kwargs):
+        try:
+            return orig(*args, **kwargs)
+        except BaseException as exc:
+            fault_path = _STATE.get("fault_path")
+            if fault_path:
+                try:
+                    ipc.atomic_write_json(fault_path, {
+                        "rank": rank_of(worker),
+                        "pid": os.getpid(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "t": time.time(),
+                    })
+                except OSError:
+                    pass
+            raise
+
+    guarded._fastrsi_fault_guarded = True
+    setattr(target, attr, guarded)
+    return {"ok": True, "armed": True}
+
+
 def rpc(worker, method, payload=None):
     """The collective_rpc target. `worker` is the FastVideo worker of this process."""
     if _STATE["faults"].get("lost"):
         raise ConnectionError(f"rank{rank_of(worker)}: process lost (injected)")
     if method == "ping":
         return {"ok": True, "rank": rank_of(worker), "pid": os.getpid()}
+    if method == "arm_fault_beacon":
+        return arm_fault_beacon(worker, payload)
     if method == "inject":
         return inject(worker, **(payload or {}))
     if method == "repl":

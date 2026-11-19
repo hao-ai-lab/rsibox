@@ -14,11 +14,11 @@ The machine-specific inputs come from the environment, nothing else:
                                      fastvideo package, examples/inference/basic/)
     FASTRSI_H3_GPUS                  ranks (default: the devices in CUDA_VISIBLE_DEVICES, else 1)
     FASTRSI_H3_GOLDEN                optional uint8 frames .npy: adds psnr_vs_golden to checks
-    FASTRSI_H3_CHECK_TIMEOUT         seconds a check may take in the conformance lab (default 600,
-                                     the lab's own; c8's injected hang outlasts it by 30 s, and a
-                                     fresh_check gets it + 600 s). On a cold shared filesystem the
-                                     first video after a respawn took 131 s and a fresh load more
-                                     than 720 s (2026-11-12), so 120 s fails c3 and c8 there
+    FASTRSI_H3_CHECK_TIMEOUT         seconds a check may take in the conformance lab (default 120
+                                     when --zygote or --holder is enabled, else 600; c8's injected
+                                     hang outlasts it by 30 s, and fresh_check gets at least 1200 s).
+                                     On a cold shared filesystem without zygote/holder, the first
+                                     video after a respawn took 131 s and a fresh load >720 s
     FASTRSI_H3_ZYGOTE                set to 1/true/yes to fork workers from a preloaded zygote
                                      (services/zygote.py) so respawns skip worker imports
     FASTRSI_H3_HOLDER                set to 1/true/yes to keep loaded weights in a CUDA-IPC holder
@@ -153,13 +153,17 @@ def _env_flag(name):
 
 def _make_h3(receipts):
     from adapter.lab import FastVideoLab
+    zygote = _env_flag("FASTRSI_H3_ZYGOTE")
+    holder = _env_flag("FASTRSI_H3_HOLDER")
+    raw_timeout = os.environ.get("FASTRSI_H3_CHECK_TIMEOUT")
+    default_timeout = 120.0 if (zygote or holder) else 600.0
     return FastVideoLab(
         h3_config(),
         receipts=receipts,
         golden=os.environ.get("FASTRSI_H3_GOLDEN"),
-        check_timeout=float(os.environ.get("FASTRSI_H3_CHECK_TIMEOUT", "600")),
-        zygote=_env_flag("FASTRSI_H3_ZYGOTE"),
-        holder=_env_flag("FASTRSI_H3_HOLDER"),
+        check_timeout=float(raw_timeout) if raw_timeout else default_timeout,
+        zygote=zygote,
+        holder=holder,
     )
 
 

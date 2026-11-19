@@ -19,13 +19,16 @@ golden is set, PSNR against it.
 
 Never raises: every verb returns an ok-dict.
 """
+import contextlib
 import hashlib
 import json
 import os
+import signal
+import tempfile
 import threading
 import time
 
-from fastrsi import harness, ipc, lab as lab_base
+from fastrsi import harness, ipc, lab as lab_base, proc
 from kernel import coordinator as C
 from kernel import findings as F
 from adapter import agent
@@ -131,6 +134,8 @@ class FastVideoLab(lab_base.BaseLab):
             self.golden = np.load(golden)
         self.holder = self.holder_sock = None
         self.rebuilt = {}
+        self._fault_path = None
+        self._check_thread = None
         super().__init__(receipts=receipts, check_timeout=check_timeout,
                          rpc_timeout=rpc_timeout, auto_spawn=False)
         self.modules = list(modules)
@@ -167,6 +172,11 @@ class FastVideoLab(lab_base.BaseLab):
         from adapter import patches
         return patches.h3_patches({m: self._base(m) for m in (DEC, LAT, INP, patches.NVD)})
 
+    def _clear_fault_file(self):
+        if self._fault_path:
+            with contextlib.suppress(OSError):
+                os.unlink(self._fault_path)
+
     def _start_engine(self):
         self.gen = self.make_generator()
         self.executor = self.gen.executor
@@ -174,6 +184,15 @@ class FastVideoLab(lab_base.BaseLab):
         self.dirty = None                      # a pipe that missed its deadline
         self.base_text = {}
         self.rebuilt = {}
+        self._fault_path = None
+        self._check_thread = None
+        if self.ranks > 1:
+            self._fault_path = os.path.join(
+                tempfile.gettempdir(), f"fastrsi-fv-fault-{os.getpid()}-{id(self.gen)}.json"
+            )
+            self._clear_fault_file()
+            for i in range(self.ranks):
+                self.rank_call(i, "arm_fault_beacon", self._fault_path, timeout=10.0)
         ps = [C.CallParticipant(f"rank{i}", self._caller(i)) for i in range(self.ranks)]
         co = C.Coordinator(ps, writer=self.writer, interface_version="1-draft",
                            engine={"name": "fastvideo", "version": self._version(),
@@ -181,8 +200,39 @@ class FastVideoLab(lab_base.BaseLab):
                            phase2_deadline_s=self.rpc_timeout)
         return co, self.modules
 
+    def _force_stop_workers(self, grace_s=4.0, kill_grace_s=3.0):
+        workers = list(getattr(getattr(self, "executor", None), "workers", ()) or ())
+        live = [w for w in workers if getattr(w, "proc", None) is not None and w.proc.is_alive()]
+        for w in live:
+            if w.proc.pid:
+                # Never killpg: workers forked from forkserver/spawn share the driver's pgrp.
+                proc.kill_tree(w.proc.pid, signal.SIGTERM, include_pg=False)
+        deadline = time.monotonic() + grace_s
+        for w in live:
+            w.proc.join(timeout=max(0.0, deadline - time.monotonic()))
+        still = [w for w in live if w.proc.is_alive()]
+        for w in still:
+            if w.proc.pid:
+                proc.kill_tree(w.proc.pid, signal.SIGKILL, include_pg=False)
+        kill_deadline = time.monotonic() + kill_grace_s
+        for w in still:
+            w.proc.join(timeout=max(0.0, kill_deadline - time.monotonic()))
+
     def _stop_engine(self):
-        self.gen.shutdown()
+        dirty = bool(self._dirty or self.dirty is not None)
+        try:
+            if dirty:
+                self._force_stop_workers()
+            try:
+                self.gen.shutdown()
+            except Exception:
+                if not dirty:
+                    raise
+            if self._check_thread is not None:
+                self._check_thread.join(timeout=2.0)
+                self._check_thread = None
+        finally:
+            self._clear_fault_file()
 
     @staticmethod
     def _version():
@@ -216,7 +266,10 @@ class FastVideoLab(lab_base.BaseLab):
 
     def close(self):
         with self.lock:
-            super().close()
+            try:
+                super().close()
+            finally:
+                self._clear_fault_file()
             if self.holder is not None:
                 from services import holder as H
                 try:
@@ -246,6 +299,59 @@ class FastVideoLab(lab_base.BaseLab):
             except Exception as exc:
                 return False, f"rank{i}: {type(exc).__name__}: {exc}"
         return True, None
+
+    def _execute_workload(self, workload):
+        """Run `_run_workload` in a thread, fast-failing on asymmetric worker faults or death."""
+        self._clear_fault_file()
+        box = {}
+
+        def runner():
+            try:
+                box["result"] = self._run_workload(workload)
+            except BaseException as exc:
+                box["error"] = exc
+
+        thread = threading.Thread(target=runner, daemon=True, name=f"fastrsi-{self.name}-check")
+        self._check_thread = thread
+        thread.start()
+        deadline = time.monotonic() + self.check_timeout
+        workers = list(getattr(getattr(self, "executor", None), "workers", ()) or ())
+        try:
+            while thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._dirty = True
+                    raise TimeoutError(f"no result in {self.check_timeout} s")
+                thread.join(min(0.1, remaining))
+                if not thread.is_alive():
+                    break
+                for i, w in enumerate(workers):
+                    p = getattr(w, "proc", None)
+                    if p is not None and not p.is_alive():
+                        thread.join(min(1.0, max(0.0, deadline - time.monotonic())))
+                        if thread.is_alive():
+                            self._dirty = True
+                            raise RuntimeError(f"rank{i} exited during forward (exitcode={p.exitcode})")
+                        break
+                if not thread.is_alive():
+                    break
+                fault = ipc.read_json(self._fault_path) if self._fault_path else None
+                if isinstance(fault, dict):
+                    thread.join(min(1.0, max(0.0, deadline - time.monotonic())))
+                    if thread.is_alive():
+                        self._dirty = True
+                        raise RuntimeError(
+                            f"rank{fault.get('rank')} failed during forward while peers blocked: "
+                            f"{fault.get('error')}"
+                        )
+                    break
+        finally:
+            if not thread.is_alive():
+                self._check_thread = None
+                self._clear_fault_file()
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
 
     def _run_workload(self, workload):
         return self.gen.generate(self.request(workload))
@@ -363,7 +469,7 @@ class FastVideoLab(lab_base.BaseLab):
                     self.fresh_module,
                     {"config": self.config, "workload": workload},
                     ov.root,
-                    timeout=self.check_timeout + 600,
+                    timeout=max(self.check_timeout + 600, 1200),
                 )
         except Exception as error:
             return {"ok": False, "error": [f"fresh_check: {type(error).__name__}: {error}"], "output": None}
