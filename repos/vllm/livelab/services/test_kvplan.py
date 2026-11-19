@@ -167,8 +167,9 @@ def test_ranks_that_cannot_agree_never_decide_alone():
 FAKE_VLLM_KV = r'''#!{py}
 import http.server, json, os, sys
 argv = sys.argv[1:]
-open(os.environ["FAKE_OUT"], "w").write(json.dumps({{"argv": argv, "env": {{
-    k: os.environ.get(k) for k in ("PYTHONPATH", "FASTRSI_KVPLAN_DIR")}}}}))
+with open(os.environ["FAKE_OUT"], "w") as _f:
+    _f.write(json.dumps({{"argv": argv, "env": {{
+        k: os.environ.get(k) for k in ("PYTHONPATH", "FASTRSI_KVPLAN_DIR")}}}}))
 print('(EngineCore pid=1) INFO fastrsi kvplan: {{"event": "reused", "seconds": 0.07}}', flush=True)
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):

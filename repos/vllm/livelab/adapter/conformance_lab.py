@@ -184,15 +184,24 @@ class VllmLab:
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance vllm --real ...` flags into `FASTRSI_VLLM_*` env vars."""
+        """Translate `fastrsi conformance vllm --real ...` flags into `FASTRSI_VLLM_*` env vars.
+
+        Accepts both `fastrsi conformance vllm --real --model M [-- <serve flags>]` and
+        `fastrsi conformance vllm --real -- --model M [-- <serve flags>]`, as well as
+        `fastrsi conformance vllm --real -- <serve flags>` when `FASTRSI_VLLM_MODEL` is preset.
+        """
         argv = list(argv)
+        known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
+                      "--check-timeout", "--no-share-gpu", "-h", "--help"}
+        if argv[:1] == ["--"] and len(argv) > 1:
+            first_opt = argv[1].split("=", 1)[0]
+            if first_opt in known_opts or "--" in argv[1:]:
+                argv = argv[1:]
         if "--" in argv:
             idx = argv.index("--")
             own, tail = argv[:idx], argv[idx + 1:]
         else:
             own, tail = argv, []
-        known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
-                      "--check-timeout", "--no-share-gpu", "-h", "--help"}
         norm, i = [], 0
         while i < len(own):
             if own[i] == "--extra" and i + 1 < len(own) and own[i + 1] not in known_opts:

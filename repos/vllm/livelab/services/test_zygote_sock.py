@@ -23,10 +23,12 @@ def test_wait_ready_sees_an_unreaped_dead_child():
     wait_ready returns {"ready": False, "error": "zygote exited"} in under 5 s. Pain point: a
     10-minute wait on a zombie zygote. Not: a zygote that is alive but never binds."""
     p = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])
-    time.sleep(0.5)                  # exited but not reaped: a zombie, /proc/<pid> still exists
-    assert os.path.exists(f"/proc/{p.pid}")
-    t = time.time()
-    r = zygote.wait_ready("/tmp/nonexistent-zyg.sock", p.pid, timeout=20)
-    assert r == {"ready": False, "error": "zygote exited"}
-    assert time.time() - t < 5
-    p.wait()
+    try:
+        time.sleep(0.5)                  # exited but not reaped: a zombie, /proc/<pid> still exists
+        assert os.path.exists(f"/proc/{p.pid}")
+        t = time.time()
+        r = zygote.wait_ready("/tmp/nonexistent-zyg.sock", p.pid, timeout=20)
+        assert r == {"ready": False, "error": "zygote exited"}
+        assert time.time() - t < 5
+    finally:
+        p.wait(timeout=5)

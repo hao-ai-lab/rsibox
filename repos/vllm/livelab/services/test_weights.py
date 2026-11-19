@@ -239,9 +239,10 @@ def test_stop_terminates_surviving_child_after_session_leader_exits(d):
 
     child_pid_file = os.path.join(d, "child.pid")
     leader_code = (
-        "import os, subprocess, sys, time\n"
+        "import os, subprocess, sys\n"
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
-        f"open({child_pid_file!r}, 'w').write(str(child.pid))\n"
+        f"with open({child_pid_file!r}, 'w') as _f: _f.write(str(child.pid))\n"
+        "os._exit(0)\n"
     )
     leader_proc = subprocess.Popen(
         [sys.executable, "-c", leader_code], start_new_session=True
@@ -271,7 +272,7 @@ def test_a_socket_dir_too_long_for_af_unix_is_refused_before_the_daemon_loads(d)
     long_dir = os.path.join(d, "s" * (60 - len(d) - 1))
     assert len(os.fsencode(os.path.abspath(long_dir))) == 60
     marker = os.path.join(d, "preload-ran")
-    fake = _script(d, "vllm", "#!{py}\nopen(%r, 'w').write('ran')\n" % marker)
+    fake = _script(d, "vllm", "#!{py}\nwith open(%r, 'w') as _f: _f.write('ran')\n" % marker)
     started = time.time()
     result = subprocess.run([sys.executable, str(HERE / "weights.py"), "start", "--model", "m",
                         "--socket-dir", long_dir, "--log", os.path.join(d, "preload.log"),

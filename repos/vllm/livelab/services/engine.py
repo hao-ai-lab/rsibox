@@ -378,20 +378,21 @@ def preflight(a, v, env):
 def kvplan_report(log):
     """The KV plan's log lines (one per rank per start): counts, seconds and findings."""
     rep = {"reused": 0, "measured": 0, "profiled": 0, "seconds": [], "findings": []}
-    for line in open(log, errors="replace"):
-        i = line.find(kvplan.TAG)
-        j = line.find("{", i)
-        if i < 0 or j < 0:
-            continue
-        try:
-            ev = json.loads(line[j:])
-        except ValueError:
-            continue
-        if line[i:j].startswith(kvplan.TAG + " finding"):
-            rep["findings"].append(ev)
-        elif ev.get("event") in ("reused", "measured", "profiled"):
-            rep[ev["event"]] += 1
-            rep["seconds"].append(ev.get("seconds"))
+    with open(log, errors="replace") as fh:
+        for line in fh:
+            i = line.find(kvplan.TAG)
+            j = line.find("{", i)
+            if i < 0 or j < 0:
+                continue
+            try:
+                ev = json.loads(line[j:])
+            except ValueError:
+                continue
+            if line[i:j].startswith(kvplan.TAG + " finding"):
+                rep["findings"].append(ev)
+            elif ev.get("event") in ("reused", "measured", "profiled"):
+                rep[ev["event"]] += 1
+                rep["seconds"].append(ev.get("seconds"))
     return rep
 
 

@@ -429,6 +429,22 @@ class FarmAndHelpersTest(unittest.TestCase):
         only_tail = CL.VllmLab.launch_environment(["--model", "/models/qwen", "--", "--enforce-eager"])
         self.assertEqual(only_tail["FASTRSI_VLLM_EXTRA"], "--enforce-eager")
 
+        # `fastrsi conformance vllm --real -- --model ...` forwards a leading "--".
+        leading = CL.VllmLab.launch_environment(["--", "--model", "/models/qwen", "--tp", "2"])
+        self.assertEqual(leading, {"FASTRSI_VLLM_MODEL": "/models/qwen", "FASTRSI_VLLM_TP": "2"})
+
+        leading_with_tail = CL.VllmLab.launch_environment(
+            ["--", "--model=/models/qwen", "--", "--enforce-eager", "--max-model-len", "1024"]
+        )
+        self.assertEqual(leading_with_tail, {
+            "FASTRSI_VLLM_MODEL": "/models/qwen",
+            "FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024",
+        })
+
+        # Preset FASTRSI_VLLM_MODEL + raw serve flags behind a single leading "--".
+        raw_tail_only = CL.VllmLab.launch_environment(["--", "--enforce-eager", "--max-model-len", "1024"])
+        self.assertEqual(raw_tail_only, {"FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024"})
+
 
 if __name__ == "__main__":
     unittest.main()

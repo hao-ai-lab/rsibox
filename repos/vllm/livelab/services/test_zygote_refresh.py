@@ -33,9 +33,12 @@ def _in_child(fn):
         os._exit(0)
     os.close(w)
     data = b""
-    while chunk := os.read(r, 65536):
-        data += chunk
-    os.waitpid(pid, 0)
+    try:
+        while chunk := os.read(r, 65536):
+            data += chunk
+    finally:
+        os.close(r)
+        os.waitpid(pid, 0)
     return json.loads(data)
 
 

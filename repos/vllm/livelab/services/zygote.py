@@ -257,12 +257,13 @@ def serve(sock_path, modules_file):
     mods = list(BASE_MODULES)
     skip = set()
     if modules_file:
-        for line in open(modules_file):
-            m = line.strip()
-            if m.startswith("-"):           # "-name": never pre-import (it initializes CUDA)
-                skip.add(m[1:])
-            elif m and not m.startswith("#"):
-                mods.append(m)
+        with open(modules_file) as fh:
+            for line in fh:
+                m = line.strip()
+                if m.startswith("-"):           # "-name": never pre-import (it initializes CUDA)
+                    skip.add(m[1:])
+                elif m and not m.startswith("#"):
+                    mods.append(m)
     failed = []
     for m in mods:
         if m in sys.modules or m in skip:
