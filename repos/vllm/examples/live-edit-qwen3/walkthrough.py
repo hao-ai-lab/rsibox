@@ -204,6 +204,7 @@ class Run:
     # -- server -------------------------------------------------------------------------
     def serve(self, adapter, tag):
         """Start `vllm serve`; return seconds from launch to the first 200 on /health."""
+        self.server_tag = tag
         env = dict(os.environ, PYTHONPATH=self.pythonpath)
         cmd = [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", self.a.model,
                "--served-model-name", "model", "--port", str(self.a.port),
@@ -287,6 +288,9 @@ class Run:
             require(first is not None, "completion returned no token IDs")
             texts.append("".join(pieces))
             ttft.append(first)
+            self.full.setdefault("requests", []).append({
+                "server": self.server_tag, "prompt": prompt, "ttft_s": first,
+                "wall_s": time.monotonic() - started})
         return {"seconds": round(time.monotonic() - t0, 3), "texts": texts, "ttft_s": ttft,
                 "output": hashlib.sha256(json.dumps(texts).encode()).hexdigest()[:16]}
 
