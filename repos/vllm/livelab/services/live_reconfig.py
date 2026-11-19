@@ -24,7 +24,8 @@ What can be changed live (LIVE_FIELDS), and only within what the engine was buil
   model runner's input batch and CUDA graphs are sized by the boot value).
 - `max_num_batched_tokens` -> `scheduler.max_num_scheduled_tokens`, value <= the boot value
   (runner buffers are sized by it); below max_model_len only with chunked prefill on.
-Everything else (max_model_len, prefix caching, scheduling policy, eager/graph mode, ...) has
+- `scheduling_policy` rebuilds both waiting queues for fcfs or priority.
+Everything else (max_model_len, prefix caching, eager/graph mode, ...) has
 no live consumer: engine.py restarts the engine for it and says so.
 
 Lab use only. No vLLM files are edited; the patch is applied at import.
@@ -39,7 +40,7 @@ import traceback
 
 TAG = "FASTRSI_LIVE_RECONFIG"
 ENV = "FASTRSI_LIVE_RECONFIG_DIR"
-LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens")
+LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy")
 _AGENT = []
 
 
@@ -60,6 +61,10 @@ def check_values(values, boot):
         if name not in LIVE_FIELDS:
             problems.append(f"{name}: no live consumer (live: {', '.join(LIVE_FIELDS)})")
             continue
+        if name == "scheduling_policy":
+            if value not in ("fcfs", "priority"):
+                problems.append(f"scheduling_policy={value!r}: expected fcfs or priority")
+            continue
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             problems.append(f"{name}={value!r}: must be a positive integer")
             continue
@@ -77,6 +82,24 @@ def check_values(values, boot):
 
 
 # -- agent (engine-core process) -----------------------------------------------------------
+
+def _switch_policy(scheduler, value):
+    from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+
+    policy = SchedulingPolicy(value)
+    if policy == scheduler.policy:
+        return
+    # Stage both replacements before publishing either one on the engine-loop thread.
+    queues = []
+    for old in (scheduler.waiting, scheduler.kv_holding_waiting):
+        queue = create_request_queue(policy)
+        for request in sorted(old, key=lambda r: r.arrival_time):
+            queue.add_request(request)
+        queues.append(queue)
+    scheduler.waiting, scheduler.kv_holding_waiting = queues
+    scheduler.policy = policy
+    scheduler.scheduler_config.policy = value
+
 
 class _Job:
     def __init__(self, fn):
@@ -112,6 +135,7 @@ class Agent:
         return {"max_num_running_reqs": int(s.max_num_running_reqs),
                 "max_num_scheduled_tokens": int(s.max_num_scheduled_tokens),
                 "target_max_num_seqs": int(self.target_seqs),
+                "scheduling_policy": s.policy.value,
                 "running": len(s.running), "waiting": len(s.waiting), "steps": self.steps}
 
     def tick(self):
@@ -131,6 +155,8 @@ class Agent:
             return {"ok": False, "error": "; ".join(problems), "before": before,
                     "after": before, "boot": self.boot}
         s = self.core.scheduler
+        if "scheduling_policy" in values:
+            _switch_policy(s, values["scheduling_policy"])
         if "max_num_batched_tokens" in values:
             s.max_num_scheduled_tokens = int(values["max_num_batched_tokens"])
         if "max_num_seqs" in values:

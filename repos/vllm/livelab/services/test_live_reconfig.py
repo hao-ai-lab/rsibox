@@ -57,3 +57,49 @@ def test_import_hook_asks_only_the_finders_after_it():
             capture_output=True, text=True, timeout=60)
         assert child.returncode == 0, child.stderr[-2000:]
         assert child.stdout.strip() == "patched True", child.stdout
+
+
+def test_policy_switch_preserves_both_queues_and_changes_dequeue_order():
+    """Lower numeric priority wins, then FCFS restores arrival order in both queues."""
+    import unittest
+    from types import SimpleNamespace
+
+    try:
+        from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+        from vllm.v1.request import Request
+    except ModuleNotFoundError as err:
+        if err.name == "vllm":
+            raise unittest.SkipTest("needs installed vLLM request queues")
+        raise
+    import live_reconfig
+
+    def request(name, arrival, priority):
+        req = Request.__new__(Request)
+        req.request_id, req.arrival_time, req.priority = name, arrival, priority
+        return req
+
+    config = SimpleNamespace(policy="fcfs", enable_chunked_prefill=True)
+    scheduler = SimpleNamespace(policy=SchedulingPolicy.FCFS, scheduler_config=config,
+                                running=[], max_num_running_reqs=2, max_num_scheduled_tokens=16)
+    queues = ("waiting", "kv_holding_waiting")
+    requests = {}
+    for name in queues:
+        queue = create_request_queue(scheduler.policy)
+        for args in [("early", 1, 5), ("urgent", 2, -1)]:
+            req = request(name + args[0], *args[1:])
+            requests[req.request_id] = req
+            queue.add_request(req)
+        setattr(scheduler, name, queue)
+    agent = live_reconfig.Agent(SimpleNamespace(scheduler=scheduler, vllm_config=SimpleNamespace(
+        scheduler_config=config, model_config=SimpleNamespace(max_model_len=16))), None)
+    for policy, order in [("priority", ["urgent", "early"]), ("fcfs", ["early", "urgent"])]:
+        ack = agent.apply({"scheduling_policy": policy})
+        assert ack["ok"], ack
+        assert ack["after"]["scheduling_policy"] == config.policy == policy
+        for name in queues:
+            actual = list(getattr(scheduler, name))
+            assert actual == [requests[name + suffix] for suffix in order]
+            assert all(req is requests[req.request_id] for req in actual)
+    before = agent.scheduler_view()
+    assert not agent.apply({"max_num_seqs": 1, "scheduling_policy": "fifo"})["ok"]
+    assert agent.scheduler_view() == before

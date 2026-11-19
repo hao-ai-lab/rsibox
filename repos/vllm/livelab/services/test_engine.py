@@ -514,7 +514,7 @@ def core_main():
             self.scheduler = types.SimpleNamespace(
                 max_num_running_reqs=flag("--max-num-seqs", 256),
                 max_num_scheduled_tokens=flag("--max-num-batched-tokens", 8192),
-                running=[], waiting=[])
+                running=[], waiting=[], policy=types.SimpleNamespace(value="fcfs"))
             self.vllm_config = types.SimpleNamespace(
                 scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),
                 model_config=types.SimpleNamespace(max_model_len=flag("--max-model-len", 4096)),
