@@ -331,14 +331,15 @@ class MegatronLab:
                 env.pop("FASTRSI_LAB")
                 job = _Job(self.cmd, env, "fresh")
                 rc = job.wait_exit()
-                tail = job.tail(8)
+                tail = job.tail(80)
                 job.kill()
                 if os.path.exists(out):
                     break
-                joined = " | ".join(tail)
+                joined = "\n".join(tail)
                 if attempt == 0 and ("Address already in use" in joined or "EADDRINUSE" in joined):
                     continue
-                return {"ok": False, "error": f"fresh run rc={rc}: {joined}",
+                summary = " | ".join(tail[-25:])
+                return {"ok": False, "error": f"fresh run rc={rc}: {summary}",
                         "output": None}
             with open(out, encoding="utf-8") as f:
                 r = json.load(f)

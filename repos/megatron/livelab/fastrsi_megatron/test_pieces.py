@@ -496,8 +496,8 @@ class ConformanceLabDiffsTest(unittest.TestCase):
                 def wait_exit(self):
                     return self.rc
 
-                def tail(self, _n=8):
-                    return list(self._tail)
+                def tail(self, n=30):
+                    return list(self._tail[-n:])
 
                 def kill(self):
                     events[self._idx]["killed"] = True
@@ -533,6 +533,55 @@ class ConformanceLabDiffsTest(unittest.TestCase):
         self.assertFalse(res_err["ok"])
         self.assertIn("model exploded", res_err["error"])
         self.assertEqual(ev_err, [{"port": "29501", "killed": True}])
+
+        # 4. Worker-side EADDRINUSE sitting above a 25-line torch.distributed.elastic
+        # ChildFailedError footer still triggers the single retry (tail(80) sees past the box).
+        elastic_footer_25 = [
+            "torch.distributed.elastic.multiprocessing.errors.ChildFailedError:",
+            "============================================================",
+            *[f"elastic_detail_line_{i}" for i in range(22)],
+            "============================================================",
+        ]
+        self.assertEqual(len(elastic_footer_25), 25)
+        eaddr_with_box = (
+            [f"startup_line_{i}" for i in range(10)]
+            + ["[rank0]: OSError: [Errno 98] Address already in use"]
+            + elastic_footer_25
+        )
+        res_box_retry, ev_box_retry = run_scenario([
+            (1, eaddr_with_box, False),
+            (0, [], True),
+        ])
+        self.assertTrue(res_box_retry["ok"], res_box_retry)
+        self.assertEqual(res_box_retry["output"], {"loss": [1.5]})
+        self.assertEqual(
+            ev_box_retry,
+            [{"port": "29501", "killed": True}, {"port": "29502", "killed": True}],
+        )
+
+        # 5. Worker-side RuntimeError above torch.distributed.elastic's ~20-line ChildFailedError
+        # box does not retry and is surfaced in the returned error via tail[-25:], while earlier
+        # preamble lines beyond the last 25 are omitted.
+        elastic_footer_20 = [
+            "torch.distributed.elastic.multiprocessing.errors.ChildFailedError:",
+            "============================================================",
+            *[f"elastic_detail_line_{i}" for i in range(17)],
+            "============================================================",
+        ]
+        self.assertEqual(len(elastic_footer_20), 20)
+        runtime_with_box = (
+            [f"startup_line_{i}" for i in range(15)]
+            + ["[rank1]: RuntimeError: worker rank1 exploded"]
+            + elastic_footer_20
+        )
+        res_box_err, ev_box_err = run_scenario([
+            (1, runtime_with_box, False),
+        ])
+        self.assertFalse(res_box_err["ok"])
+        self.assertEqual(ev_box_err, [{"port": "29501", "killed": True}])
+        self.assertIn("worker rank1 exploded", res_box_err["error"])
+        self.assertIn("ChildFailedError:", res_box_err["error"])
+        self.assertNotIn("startup_line_0", res_box_err["error"])
 
 
 if __name__ == "__main__":
