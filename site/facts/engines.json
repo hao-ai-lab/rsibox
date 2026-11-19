@@ -491,31 +491,31 @@
    "mechanisms": [
     {
      "name": "Multi-actor Ray GRPO live swap and offline `rescore`",
-     "what": "Coordinates two-phase swaps across 13 warm Ray actors/processes (`RayActorParticipant` over `core/livelab/ray_participants.py`) at step-gap barriers, plus cached-batch offline reward/advantage `rescore`.",
-     "startup_cost_removed": "Full multi-actor RL job boot (Ray cluster, FSDP trainer, rollout engine, reward actors).",
+     "what": "Coordinates two-phase swaps across the warm Ray processes of a GRPO job (driver, 8 reward actors, 4 WorkerDict ranks, agent-loop actors; `RayActorParticipant` over `core/livelab/ray_participants.py`) at the step-gap barrier, plus offline reward/advantage replays on recorded steps.",
+     "startup_cost_removed": "Full multi-actor RL job boot (Ray cluster, FSDP actor+ref, 4x vLLM boot, reward actors) and the slow first step.",
      "measured_saving": {
-      "before": "224.05 (4-GPU GRPO cold boot)",
-      "after": "24.91 (live reward swap, 9.0x) / 9.22 (live advantage swap, 24.3x); offline rescore 0.04215 s (42.15 ms)",
+      "before": "259.8 (121.9 boot to gate ready + 137.9 first step; eager vLLM)",
+      "after": "117.2 (live reward swap: 5.8 install + one step, 2.2x) / 104.6 (live advantage swap: 0.58 install + one step, 2.5x); offline rescore 0.00085 s (0.85 ms), replay_adv 0.016-0.029 s",
       "unit": "s",
-      "setup": "4x GB200, Qwen3-0.6B GSM8K GRPO across 13 warm processes"
+      "setup": "4x GB200, verl cd58f550, FSDP + vLLM 0.31 enforce_eager (full_determinism), Qwen3-0.6B GSM8K GRPO, 640 responses/step, 13 warm processes, 2026-11-19"
      },
      "status": "merged_gpu_verified",
-     "source": "PR #160; PR #161; repos/verl",
-     "note": "11/11 conformance; on 4x GB200 Qwen3-0.6B GSM8K GRPO across 13 warm processes: live reward swap 24.91 s (9.0x vs 224.05 s boot), live advantage swap 9.22 s (24.3x), offline rescore 42.15 ms."
+     "source": "repos/verl/kb/costs.md section 0 (2026-11-19 receipts); PR #160; PR #161",
+     "note": "2026-11-19 receipts (repos/verl/kb/costs.md, batch A) replace the earlier 224.05 / 24.91 / 9.22 s figures, which came from a CUDA-graph configuration and are not reproducible with full_determinism on this stack. Eager FSDP steps are 100-117 s, so a live verdict is one step plus 0.6-5.8 s of install; with CUDA graphs (batch B, 25-27 s steps) the ratio grows to 6-7x. The 8 reward actors each witnessed the swapped compute_score (640 calls)."
     },
     {
      "name": "Coupled 4-GPU `S0` checkpoint restore",
-     "what": "Restores coupled trainer, optimizer, RNG, and rollout weights to a clean starting state `S0` across all 4 GPUs between RL candidate evaluations.",
+     "what": "Restores trainer weights, optimizer, scheduler, RNG and dataloader position on all 4 WorkerDict ranks, then pushes the weights to the 4 vLLM replicas (`sleep_replicas` + `update_weights`) between RL candidate evaluations.",
      "startup_cost_removed": "Re-initializing FSDP trainer and rollout actors to compare RL edits from an identical start state.",
      "measured_saving": {
-      "before": 224.05,
-      "after": 2.46,
+      "before": 259.8,
+      "after": 1.13,
       "unit": "s",
-      "setup": "4x GB200, Qwen3-0.6B GSM8K GRPO, coupled 4-GPU S0 restore"
+      "setup": "4x GB200, verl cd58f550, FSDP, Qwen3-0.6B GSM8K GRPO, coupled 4-GPU S0 restore (1.10-1.16 s over 2 restores; capture 0.24 s), 2026-11-19"
      },
      "status": "merged_gpu_verified",
-     "source": "PR #160; PR #161; repos/verl",
-     "note": "Coupled 4-GPU S0 restore measured at 2.46 s on 4x GB200."
+     "source": "repos/verl/kb/costs.md section 0 (2026-11-19 receipts); PR #160; PR #161",
+     "note": "Coupled 4-GPU S0 restore measured at 1.10-1.16 s on 4x GB200 (2026-11-19), replacing the earlier 2.46 s figure."
     }
    ]
   },
