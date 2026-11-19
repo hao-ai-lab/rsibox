@@ -45,12 +45,14 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
 
 from . import graphs as G
+from . import native as N
 from . import recapture as RC
 from .worker_ext import Endpoint
 
@@ -102,6 +104,7 @@ class Side(Endpoint):
         self._plan = threading.local()    # the plan this thread prepares (graph checks read it)
         self.recapture = RC.Recapture()
         self.r1 = self.recapture
+        self.native = N.NativeManager()
 
     # -- graph detection ----------------------------------------------------------------
     def _graph(self):
@@ -170,16 +173,72 @@ class Side(Endpoint):
         return out
 
     def _route(self, r):
-        """Proof time: a zero_witness on model code, or on the split decorator, while the
-        engine runs graphs says why."""
+        """Proof time: a zero_witness on model code, on the split decorator, or on a native CUDA
+        kernel while the engine runs graphs says why."""
         for f in (r.get("findings") or []) if isinstance(r, dict) else []:
-            mod, _, rest = str(f.get("subject", "")).partition(":")
-            what = "model code" if mod.startswith(self.captured_prefixes) else \
+            subj = str(f.get("subject", ""))
+            mod, _, rest = subj.partition(":")
+            what = (
+                "native CUDA kernel" if subj.startswith("native:") else
+                "model code" if mod.startswith(self.captured_prefixes) else
                 "the split decorator" if G.decoration_time(rest.rpartition(":")[0]) else None
+            )
             if f.get("check") == "zero_witness" and what and self._graph() is not None:
                 f.update(route="R1", today="T1")
                 f["observed"] += f" ({what}; the engine runs captured graphs; {R1_NOT_HERE})"
                 f["actions"] = [R1] + list(f.get("actions", []))
+        return r
+
+    def prepare(self, plan):
+        """Prepare a normal plan or one carrying `plan['native']` (worker compiles/loads, non-worker abstains)."""
+        native_spec = (plan or {}).get("native")
+        if not native_spec:
+            return super().prepare(plan)
+        txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"
+        sub = self.subplan(plan)
+        if self.role != "worker":
+            if not sub["modules"] and not sub["repairs"]:
+                self._abstain[txn] = "prepared"
+                return F.ok(staged={}, abstain=True, note=f"no native/module/cell for role {self.role}")
+            clean_plan = {k: v for k, v in plan.items() if k != "native"}
+            return super().prepare({**clean_plan, "id": txn})
+        nr = self.native.prepare(
+            txn,
+            native_spec,
+            graph=self._graph(),
+            wants_r1=wants_r1(plan),
+            accept=plan.get("accept", ()),
+            participant=self.role,
+        )
+        if not nr["ok"]:
+            return nr
+        clean_plan = {k: v for k, v in plan.items() if k != "native"}
+        clean_plan["id"] = txn
+        clean_plan["repairs"] = list(plan.get("repairs") or []) + [self.native.commit_cell(txn)]
+        r = super().prepare(clean_plan)
+        if not r.get("ok"):
+            self.native.abort(txn)
+            return r
+        r["native"] = nr["native"]
+        if nr.get("findings"):
+            r["findings"] = list(r.get("findings") or []) + list(nr["findings"])
+        return r
+
+    def local(self, method, payload):
+        """Include staged native validation, cleanup on abort/undo, and native hashes in proof."""
+        txn, _ = C.txn_ref(payload)
+        if isinstance(txn, str):
+            if method == "validate" and self.native.has_staged(txn):
+                nr = self.native.validate(txn)
+                if not nr["ok"]:
+                    return nr
+            elif method in ("abort", "undo"):
+                self.native.abort(txn)
+        r = super().local(method, payload)
+        if method == "proof" and isinstance(txn, str) and r.get("ok") and isinstance(r.get("hashes"), dict):
+            nh = self.native.hashes(txn)
+            if nh:
+                r["hashes"] = {**r["hashes"], **nh}
         return r
 
     # -- version log ----------------------------------------------------------------------
@@ -331,6 +390,7 @@ class Side(Endpoint):
                     cancelled = job["cancelled"]
                 if cancelled:        # aborted/undone while staging: drop what this prepare staged
                     cancel_method = cancelled if isinstance(cancelled, str) else "abort"
+                    self.native.abort(txn)
                     Endpoint._dispatch(self, cancel_method, txn)
                     self._drop_watch(txn)
             threading.Thread(target=run, daemon=True,
