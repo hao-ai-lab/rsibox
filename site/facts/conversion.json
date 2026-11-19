@@ -343,8 +343,8 @@
      "source": "PR #160; PR #161; repos/verl"
     },
     {
-     "fact": "Passed 11/11 conformance and verified on 4x GB200 Qwen3-0.6B GSM8K GRPO across 13 warm processes: live reward swap 24.91 s (9.0x vs 224.05 s boot), live advantage swap 9.22 s (24.3x), coupled 4-GPU S0 restore 2.46 s, offline rescore 42.15 ms.",
-     "source": "PR #160; PR #161"
+     "fact": "Passed 11/11 conformance on CPU; on 4x GB200 Qwen3-0.6B GSM8K GRPO (verl cd58f550, FSDP, eager vLLM, 640 responses/step, 13 warm processes, 2026-11-19): restart to first verdict 259.8 s, live reward swap verdict 117.2 s (install 5.8 s), live advantage swap verdict 104.6 s (install 0.58 s), coupled 4-GPU S0 restore 1.10-1.16 s, offline rescore 0.85 ms, replay_adv 16-29 ms.",
+     "source": "repos/verl/kb/costs.md section 0; PR #160; PR #161"
     }
    ],
    "derived_from_git": {

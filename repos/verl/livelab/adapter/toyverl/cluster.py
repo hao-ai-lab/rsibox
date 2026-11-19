@@ -1,6 +1,6 @@
 """Spawned multi-actor synchronous RL cluster for `ToyVerlLab`."""
 import importlib.util, multiprocessing as mp, os, sys, time, types
-from adapter import state as S0
+from adapter import faults, state as S0
 
 RPC_ERROR = "__verl_rpc_error__"
 def _read_policy_weights(host):
@@ -53,37 +53,6 @@ class RewardWorkerHost:
         return [round(float(self._score_fn(data_source="toy", solution_str=str(t), ground_truth=str(p))), 6) for p, t in zip(prompts, tokens)]
 
 
-def _inject_in_actor(actor_name, fault_state, fault, **kw):
-    import ray_participants as RP
-    from kernel import coordinator as C
-    local = RP._LOCAL.get(actor_name) or RP._LOCAL.setdefault(actor_name, C.LocalParticipant(actor_name))
-    if fault == "fail_apply":
-        journal, after, cnt, orig = local.journal, int(kw.get("after", 1)), [0], local.journal.set_code
-        def set_code(*a, **k):
-            cnt[0] += 1
-            if cnt[0] > after:
-                del journal.set_code
-                raise RuntimeError(f"{actor_name}: injected fault after {after}")
-            return orig(*a, **k)
-        journal.set_code = set_code
-    elif fault == "fail_commit":
-        orig_q = local.quiesce
-        def failing_q(_fn):
-            local.quiesce = orig_q
-            raise RuntimeError(f"{actor_name}: injected commit failure")
-        local.quiesce = failing_q
-    elif fault in ("crash", "lost"):
-        fault_state[fault] = True
-    elif fault == "hang":
-        fault_state["hang_s"] = float(kw.get("hang_s", 5.0))
-    elif fault == "tamper":
-        fn = getattr(sys.modules[kw.get("module", "adapter.toyverl.algos")], kw.get("function", "grpo_advantages"))
-        fn.__code__ = fn.__code__.replace(co_name=fn.__code__.co_name)
-    else:
-        return {"ok": False, "error": f"unknown fault {fault}"}
-    return {"ok": True, "fault": fault, "participant": actor_name, "pid": os.getpid()}
-
-
 def _actor_loop(pipe, role, actor_name, config):
     import adapter  # noqa: F401
     if role == "rollout":
@@ -93,7 +62,7 @@ def _actor_loop(pipe, role, actor_name, config):
         host = TrainerWorkerHost(rank=0)
     else:
         host = RewardWorkerHost(config["reward_file"])
-    fault_state = {}
+    fault_state = faults.STATE
     pipe.send("ready")
     while True:
         try:
@@ -111,7 +80,9 @@ def _actor_loop(pipe, role, actor_name, config):
             if kind == "ping":
                 pipe.send({"ok": True, "pid": os.getpid()})
             elif kind == "inject":
-                pipe.send(_inject_in_actor(actor_name, fault_state, **msg["kwargs"]))
+                kw = dict(msg["kwargs"])
+                kw.setdefault("module", "adapter.toyverl.algos"), kw.setdefault("function", "grpo_advantages")
+                pipe.send(faults.inject(actor_name, kw.pop("fault"), **kw))
             elif kind == "ray_call":
                 pipe.send(msg["fn"](host, *msg["args"]))
             elif kind == "method":

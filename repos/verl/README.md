@@ -24,20 +24,27 @@ repos/verl/
     workload.md              Fixed GRPO GSM8K workload F(x) and correctness gate
     lessons.md               Ray @ray.remote class copy trap, file_namespace, coupled S0 sync
     survey_rules.json        Static coverage rules (fastrsi-survey-rules/1: 71.8% functions live)
+  examples/
+    grpo-gsm8k/
+      reward_gsm8k.py        The custom reward the GPU runs load; also the conformance harness's edit target
   livelab/
-    README.md                Running VerlLab, ToyVerlLab conformance (11/11), and the gate CLI
+    README.md                Gate protocol, VerlLab, ToyVerlLab (CPU) and VerlConformanceLab (GPU) conformance
     adapter/
       __init__.py            Adds core/livelab to sys.path
-      gate.py                GateMixin + PPOTrainerFastRSISync step-gap Coordinator
+      gate.py                GateMixin + PPOTrainerFastRSISync step-gap Coordinator and the gate verbs
+      conformance_lab.py     VerlConformanceLab: LabUnderTest over a real gated job (owns relaunch and fresh jobs)
+      determinism.py         Per-sample vLLM seeds so a step after S0 reset resamples the same rollouts
+      faults.py              Conformance fault injection inside one participant process
       hook.py                Ray worker_process_setup_hook import finder
       lab.py                 VerlLab (LabUnderTest) over RayActorParticipant + coupled S0
       settings.py            Live --set micro-batch and dynamic-batch validators
       state.py               Coupled trainer + rollout S0 weight/optimizer/RNG snapshot
       toy_lab.py             ToyVerlLab passing 11/11 conformance cases on CPU
       test_lab.py            Golden unit tests for coupled S0 reset, --set, setup hook, and Ray swap
+      test_gate.py           Golden unit tests for actor discovery, FSDP sizes, dataloader S0, inline sources, seeds, harness patches
       toyverl/               Spawned multi-actor synchronous RL toy (rollout, trainer, reward)
   tools/
-    cli.py                   Gate client, verl main_ppo launcher, and CLI (train, request, stop)
+    cli.py                   Gate client, verl main_ppo launcher, and CLI (train, request, stop, conformance, rescore, replay-adv)
     rescore.py               0.5 ms CPU offline reward re-scorer over recorded rollouts
     replay_adv.py            12 ms CPU offline advantage re-evaluator over recorded steps
     test_tools.py            Golden unit tests for rescore, replay_adv, and dead-PID gate client
@@ -54,3 +61,6 @@ PYTHONPATH=repos/verl/livelab \
 cd core/livelab && PYTHONPATH=../../repos/verl/livelab \
   python3 -m conformance --lab adapter.toy_lab:ToyVerlLab
 ```
+
+On GPUs the same eleven cases run against a real gated job (`livelab/README.md`, "Running Conformance"):
+`python3 -m tools.cli conformance --gate <dir> --reward examples/grpo-gsm8k/reward_gsm8k.py --launch '<job command>'`.

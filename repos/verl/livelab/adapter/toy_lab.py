@@ -1,15 +1,11 @@
 """ToyVerlLab: `VerlLab` (`LabUnderTest`) on the multi-actor synchronous RL toy (`toyverl/`)."""
 import os, shutil, tempfile
-import ray_participants as RP
 from adapter.lab import VerlLab
 from adapter.toyverl import cluster as TC
+from fastrsi import harness
 
 ALGOS, ROLLOUT = "adapter.toyverl.algos", "adapter.toyverl.rollout"
-
-
-def _edit(src, old, new):
-    assert src.count(old) == 1, f"anchor not unique: {old!r}"
-    return src.replace(old, new)
+_edit = harness.edit_once
 
 
 class ToyVerlLab(VerlLab):
