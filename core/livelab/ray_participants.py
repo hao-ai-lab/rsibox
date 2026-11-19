@@ -100,7 +100,7 @@ def file_namespace(path):
     path = os.path.realpath(path)
     for name, module in list(sys.modules.items()):
         file = getattr(module, "__file__", None)
-        if isinstance(file, str) and os.path.realpath(file) == path:
+        if isinstance(file, str) and _real(file) == path:
             return name, module
     base, dicts = os.path.basename(path), {}
     for obj in L.all_objects():
@@ -115,6 +115,16 @@ def file_namespace(path):
     globals_dict = next(iter(dicts.values()))
     globals_dict.setdefault("__file__", path)
     return _register(file_module(path), Namespace(globals_dict))
+
+
+_REAL = {}   # module __file__ -> realpath: a module's file never moves, and realpath on a network file system costs a stat per path component
+
+
+def _real(file):
+    try:
+        return _REAL[file]
+    except KeyError:
+        return _REAL.setdefault(file, os.path.realpath(file))
 
 
 def file_module(path):
