@@ -18,10 +18,12 @@ kills the lab's process group and starts the job again.
 One job is shared across cases while it stays at base (a start costs about a minute); a
 poisoned or edited job is respawned instead.
 """
+import argparse
 import atexit
 import contextlib
 import json
 import os
+from pathlib import Path
 import shlex
 import shutil
 import signal
@@ -103,6 +105,25 @@ class _Job:
 
 
 class MegatronLab:
+    @staticmethod
+    def launch_environment(argv):
+        parser = argparse.ArgumentParser(description="Run conformance on a local Megatron checkout")
+        parser.add_argument("--root", required=True, help="Megatron-LM checkout")
+        parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
+        parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
+        args = parser.parse_args(argv)
+        root = os.path.abspath(args.root)
+        training = args.training_args
+        if training[:1] == ["--"]:
+            training = training[1:]
+        launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
+        worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
+        return {
+            "FASTRSI_MG_CMD": f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}',
+            "FASTRSI_MG_ROOT": root,
+            "PYTHONPATH": os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH")))),
+        }
+
     name = "megatron"
     _shared = None
 
@@ -114,7 +135,7 @@ class MegatronLab:
                                                                    "120"))
         self.receipts = receipts
         self.poison = []
-        self.base = {m: open(os.path.join(self.root, *m.split(".")) + ".py").read()
+        self.base = {m: Path(self.root, *m.split(".")).with_suffix(".py").read_text()
                      for m in (MLP, ATT)}
         sh = MegatronLab._shared
         if sh is not None and sh.p.poll() is None and self._at_base(sh):
@@ -286,30 +307,8 @@ def _stop_shared():
     if MegatronLab._shared is not None:
         MegatronLab._shared.kill()
 
-if __name__ == "__main__":
-    import argparse
-    from conformance.__main__ import main
 
-    parser = argparse.ArgumentParser(description="Run conformance on a local Megatron checkout")
-    parser.add_argument("--root", required=True, help="Megatron-LM checkout")
-    parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
-    parser.add_argument("--only", default="", help="comma-separated conformance case names")
-    parser.add_argument("--receipts", help="append transaction receipts here")
-    parser.add_argument("--json", action="store_true")
-    parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
-    args = parser.parse_args()
-    root = os.path.abspath(args.root)
-    training = args.training_args
-    if training[:1] == ["--"]:
-        training = training[1:]
-    launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
-    worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
-    os.environ["FASTRSI_MG_CMD"] = f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}'
-    os.environ["FASTRSI_MG_ROOT"] = root
-    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH"))))
-    options = ["--only", args.only]
-    if args.receipts:
-        options += ["--receipts", args.receipts]
-    if args.json:
-        options.append("--json")
-    sys.exit(main(["--lab", "fastrsi_megatron.conformance_lab:MegatronLab", *options]))
+if __name__ == "__main__":
+    from fastrsi.cli import main
+
+    sys.exit(main(["conformance", "fastrsi_megatron.conformance_lab:MegatronLab", "--real", *sys.argv[1:]]))
