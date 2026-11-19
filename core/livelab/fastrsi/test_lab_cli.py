@@ -404,6 +404,139 @@ class CliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no real conformance class"):
             cli.resolve_lab("toyonly", real=True, repo_root=tmp)
 
+    def test_conformance_prepends_livelab_core_for_explicit_module_spec_with_launch_args(self):
+        """Regression test for [W2M-P1-1]: when an external entrypoint invokes
+        `cli.main(["conformance", "ext_lab:ExtLab", "--real", "--", ...])` with only the
+        engine's package dir in `PYTHONPATH` (not `core/livelab`), `resolve_lab` returns
+        `extra_path=None`, so `_cmd_conformance` must still prepend `core/livelab` to
+        `PYTHONPATH` before spawning `python3 -m conformance`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "ext_lab.py").write_text(
+                "import json, os, sys\n"
+                f"sys.path.insert(0, {LIVELAB!r})\n"
+                "from kernel.toy_lab import ToyLab\n"
+                "class ExtLab(ToyLab):\n"
+                "    @staticmethod\n"
+                "    def launch_environment(argv):\n"
+                "        return {'EXT_LAUNCH_ARGS': json.dumps(argv)}\n"
+                "    def __init__(self, receipts=None):\n"
+                "        assert json.loads(os.environ['EXT_LAUNCH_ARGS']) == ['--', '--flag', '1']\n"
+                "        super().__init__(receipts=receipts)\n"
+                "if __name__ == '__main__':\n"
+                "    from fastrsi import cli\n"
+                "    raise SystemExit(cli.main([\n"
+                "        'conformance', 'ext_lab:ExtLab', '--real', '--only', 'c0_repeatable', '--', '--flag', '1'\n"
+                "    ]))\n",
+                encoding="utf-8",
+            )
+            env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+            env["PYTHONPATH"] = tmp
+            env["PYTHONNOUSERSITE"] = "1"
+            result = subprocess.run(
+                [sys.executable, "-m", "ext_lab"],
+                cwd=tmp, capture_output=True, text=True, env=env, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("1/1 as expected", result.stdout)
+
+    def test_conformance_rejects_launch_args_for_toy_lab(self):
+        """Input: `fastrsi conformance toy --only c0_repeatable -- --extra 1`.
+        Expected: exits 2 cleanly without running conformance because toy labs are not `--real`."""
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = cli.main(["conformance", "toy", "--only", "c0_repeatable", "--", "--extra", "1"])
+        self.assertEqual(rc, 2)
+        self.assertIn("does not accept launch arguments", err.getvalue())
+
+    def test_doctor_checks_core_health_all_repo_engines_and_human_table(self):
+        """Input: `fastrsi doctor` (both `--json` and human table) against the real repository.
+        Expected: core kernel & 11 conformance cases healthy, every engine under `repos/`
+        discovered and importable with zero eager GPU/torch imports, exit 0."""
+        buf_json = io.StringIO()
+        with contextlib.redirect_stdout(buf_json):
+            rc_json = cli.main(["doctor", "--json"])
+        self.assertEqual(rc_json, 0, buf_json.getvalue())
+        doc = json.loads(buf_json.getvalue())
+        self.assertTrue(doc["ok"], doc)
+        self.assertTrue(doc["core"]["ok"])
+        self.assertEqual(doc["core"]["conformance"]["case_count"], 11)
+        repos_dir = os.path.join(doc["repo_root"], "repos")
+        expected_engines = sorted(
+            d for d in os.listdir(repos_dir)
+            if not d.startswith(".") and os.path.isdir(os.path.join(repos_dir, d))
+        )
+        self.assertGreaterEqual(len(expected_engines), 6)
+        self.assertEqual(sorted(doc["engines"]), expected_engines)
+        self.assertEqual(doc["summary"]["engines_ok"], len(expected_engines))
+        self.assertEqual(doc["summary"]["gpu_import_violations"], 0)
+
+        buf_txt = io.StringIO()
+        with contextlib.redirect_stdout(buf_txt):
+            rc_txt = cli.main(["doctor"])
+        self.assertEqual(rc_txt, 0, buf_txt.getvalue())
+        text = buf_txt.getvalue()
+        self.assertIn("core:", text)
+        self.assertIn("conformance 11/11", text)
+        for eng in expected_engines:
+            self.assertIn(eng, text)
+
+    def test_doctor_flags_eager_gpu_import_missing_methods_and_unregistered_engine(self):
+        """Input: synthetic repo with (a) a clean engine, (b) an engine whose lab eagerly
+        imports a GPU runtime (`torch`), (c) an engine lab missing required `LabUnderTest`
+        methods, and (d) an engine directory without `livelab/`.
+        Expected: `doctor --json` exits 1, reports `ok=False`, names each failing engine,
+        and records the GPU import violation."""
+        tmp = tempfile.mkdtemp(prefix="fastrsi-doctor-neg-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "core", "livelab"))
+        valid_body = (
+            "class GoodLab:\n"
+            "    def install(self, p): pass\n"
+            "    def check(self, w=None): pass\n"
+            "    def reset(self): pass\n"
+            "    def uninstall(self, tid=None): pass\n"
+            "    def status(self): pass\n"
+            "    def patches(self): pass\n"
+            "    def fresh_check(self, p, w=None): pass\n"
+            "    def inject(self, f, **k): pass\n"
+            "    def close(self): pass\n"
+        )
+        # (a) clean engine
+        good_pkg = Path(tmp, "repos", "good_eng", "livelab", "adapter")
+        good_pkg.mkdir(parents=True)
+        (good_pkg / "__init__.py").write_text("")
+        (good_pkg / "toy_lab.py").write_text(valid_body)
+        # (b) eager torch import (simulated via stub torch.py on livelab_dir)
+        gpu_dir = Path(tmp, "repos", "eager_gpu", "livelab")
+        gpu_pkg = gpu_dir / "adapter"
+        gpu_pkg.mkdir(parents=True)
+        (gpu_dir / "torch.py").write_text("X = 1\n")
+        (gpu_pkg / "__init__.py").write_text("")
+        (gpu_pkg / "lab.py").write_text("import torch\n" + valid_body.replace("GoodLab", "EagerLab"))
+        # (c) incomplete LabUnderTest API
+        bad_pkg = Path(tmp, "repos", "incomplete_eng", "livelab", "adapter")
+        bad_pkg.mkdir(parents=True)
+        (bad_pkg / "__init__.py").write_text("")
+        (bad_pkg / "toy_lab.py").write_text("class IncompleteLab:\n    def status(self): pass\n")
+        # (d) engine folder without livelab/
+        Path(tmp, "repos", "orphan_eng").mkdir(parents=True)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["doctor", "--repo-root", tmp, "--json"])
+        self.assertEqual(rc, 1)
+        doc = json.loads(buf.getvalue())
+        self.assertFalse(doc["ok"])
+        by_name = {item["name"]: item for item in doc["labs"]}
+        self.assertTrue(by_name["good_eng"]["ok"])
+        self.assertFalse(by_name["eager_gpu"]["ok"])
+        self.assertEqual(by_name["eager_gpu"]["gpu_imports"], ["torch"])
+        self.assertFalse(by_name["incomplete_eng"]["ok"])
+        self.assertIn("install", by_name["incomplete_eng"]["toy"]["missing_methods"])
+        self.assertFalse(by_name["orphan_eng"]["ok"])
+        self.assertIn("missing livelab/ directory", by_name["orphan_eng"]["errors"])
+        self.assertEqual(doc["summary"]["gpu_import_violations"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

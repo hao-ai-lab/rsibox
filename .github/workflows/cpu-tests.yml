@@ -65,6 +65,12 @@ jobs:
         run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
       - name: Run the shared stdlib runtime kit tests (IPC, process trees, hooks, overlays, BaseLab 11/11, unified CLI)
         run: python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab -v
+      - name: Run fastrsi doctor (core health + all engine registrations without eager GPU/torch imports)
+        env:
+          PYTHONPATH: core/livelab
+        run: python3 -m fastrsi doctor
+      - name: Run site/facts and README consistency validator tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Run the engine onboarding template skeleton golden tests
         run: python3 -m unittest discover -s template/livelab/adapter -t template/livelab -v
       - name: Run the conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)

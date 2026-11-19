@@ -12,11 +12,14 @@ Commands:
 - `fastrsi ctl (--sock PATH | --file-channel DIR | --mailbox DIR) <verb> [...]`
     Transport-agnostic JSON control client for any running live lab.
 - `fastrsi doctor [--repo-root PATH] [--json]`
-    Checks Python version, shared runtime imports, `forksafe` environment audit,
-    `AF_UNIX` socket path limits, and discovered labs.
+    Checks core `kernel` & `conformance` health, `forksafe` environment audit, `AF_UNIX`
+    socket path limits, and every discovered engine lab's `LabUnderTest` API and lazy
+    GPU/torch-free importability.
 """
 import argparse
 import ast
+from concurrent.futures import ThreadPoolExecutor
+import importlib
 import json
 import os
 import subprocess
@@ -25,6 +28,71 @@ import sys
 import forksafe
 
 from . import ipc
+
+_CORE_KERNEL_MODULES = (
+    "kernel.coordinator",
+    "kernel.findings",
+    "kernel.journal",
+    "kernel.locate",
+    "kernel.receipt",
+    "kernel.session",
+    "kernel.swap",
+    "kernel.witness",
+    "kernel.toy_lab",
+)
+_LAB_METHODS = (
+    "install",
+    "check",
+    "reset",
+    "uninstall",
+    "status",
+    "patches",
+    "fresh_check",
+    "inject",
+    "close",
+)
+# Generic GPU/accelerator runtime packages that must stay lazy at lab-module import time.
+_GPU_RUNTIME_LIBS = (
+    "torch",
+    "cuda",
+    "cupy",
+    "triton",
+    "pynvml",
+    "nvidia",
+    "tensorrt",
+    "jax",
+    "tensorflow",
+)
+_PROBE_SCRIPT = (
+    "import importlib, json, sys\n"
+    "spec, req_csv, gpu_csv = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+    "mod_name, _, cls_name = spec.partition(':')\n"
+    "req = [m for m in req_csv.split(',') if m]\n"
+    "gpu_set = set(g for g in gpu_csv.split(',') if g)\n"
+    "before = set(sys.modules)\n"
+    "out = {'ok': False, 'spec': spec, 'gpu_imports': [], 'missing_methods': [], 'error': None}\n"
+    "try:\n"
+    "    mod = importlib.import_module(mod_name)\n"
+    "    loaded = sorted({m.split('.')[0] for m in (set(sys.modules) - before) if m.split('.')[0] in gpu_set})\n"
+    "    out['gpu_imports'] = loaded\n"
+    "    cls = getattr(mod, cls_name, None)\n"
+    "    if cls is None:\n"
+    "        out['error'] = f'class {cls_name!r} not found in {mod_name}'\n"
+    "    else:\n"
+    "        missing = [m for m in req if not callable(getattr(cls, m, None))]\n"
+    "        out['missing_methods'] = missing\n"
+    "        if missing:\n"
+    "            out['error'] = f'missing LabUnderTest methods: {missing}'\n"
+    "        elif loaded:\n"
+    "            out['error'] = f'eager GPU/runtime import(s): {loaded}'\n"
+    "        else:\n"
+    "            out['ok'] = True\n"
+    "except BaseException as exc:\n"
+    "    loaded = sorted({m.split('.')[0] for m in (set(sys.modules) - before) if m.split('.')[0] in gpu_set})\n"
+    "    out['gpu_imports'] = loaded\n"
+    "    out['error'] = f'{type(exc).__name__}: {exc}'\n"
+    "print('FASTRSI_DOCTOR_PROBE:' + json.dumps(out))\n"
+)
 
 
 def find_repo_root(start: str | None = None) -> str | None:
@@ -179,14 +247,13 @@ def _cmd_conformance(args, engine_args) -> int:
     if extra_path and extra_path not in sys.path:
         sys.path.insert(0, extra_path)
         inserted = True
+    livelab_core = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
     prev_py = os.environ.get("PYTHONPATH")
-    if extra_path:
-        livelab_core = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-        parts = [p for p in (prev_py.split(os.pathsep) if prev_py else []) if p]
-        for needed in (livelab_core, extra_path):
-            if needed not in parts:
-                parts.insert(0, needed)
-        os.environ["PYTHONPATH"] = os.pathsep.join(parts)
+    parts = [p for p in (prev_py.split(os.pathsep) if prev_py else []) if p]
+    for needed in (livelab_core, extra_path):
+        if needed and needed not in parts:
+            parts.insert(0, needed)
+    os.environ["PYTHONPATH"] = os.pathsep.join(parts)
     try:
         from conformance import __main__ as conf_main
 
@@ -207,11 +274,10 @@ def _cmd_conformance(args, engine_args) -> int:
             return subprocess.run([sys.executable, "-m", "conformance", *conf_argv], env=env).returncode
         return conf_main.main(conf_argv)
     finally:
-        if extra_path:
-            if prev_py is None:
-                os.environ.pop("PYTHONPATH", None)
-            else:
-                os.environ["PYTHONPATH"] = prev_py
+        if prev_py is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = prev_py
         if inserted and extra_path in sys.path:
             sys.path.remove(extra_path)
 
@@ -259,29 +325,217 @@ def _cmd_ctl(args) -> int:
     return 0 if isinstance(reply, dict) and reply.get("ok") else 1
 
 
-def _cmd_doctor(args) -> int:
-    labs = discover_labs(args.repo_root)
+def _check_core_health() -> dict:
+    """Verify stdlib `kernel` modules and `conformance` cases load cleanly."""
+    loaded, missing = [], []
+    for mod_name in _CORE_KERNEL_MODULES:
+        try:
+            importlib.import_module(mod_name)
+            loaded.append(mod_name)
+        except Exception as exc:  # noqa: BLE001
+            missing.append({"module": mod_name, "error": f"{type(exc).__name__}: {exc}"})
+    conf_ok = False
+    case_names: list[str] = []
+    conf_error = None
+    try:
+        conf_cases = importlib.import_module("conformance.cases")
+        case_names = list(getattr(conf_cases, "CASES", ()))
+        conf_ok = len(case_names) == 11
+        if not conf_ok:
+            conf_error = f"expected 11 conformance cases, found {len(case_names)}"
+    except Exception as exc:  # noqa: BLE001
+        conf_error = f"{type(exc).__name__}: {exc}"
+    return {
+        "ok": not missing and conf_ok,
+        "kernel": {"ok": not missing, "loaded": loaded, "missing": missing},
+        "conformance": {
+            "ok": conf_ok,
+            "case_count": len(case_names),
+            "cases": case_names,
+            "error": conf_error,
+        },
+    }
+
+
+def _probe_lab_spec(livelab_dir: str, spec: str, livelab_core: str, *, timeout: float = 15.0) -> dict:
+    """Import `spec` in an isolated subprocess, checking `LabUnderTest` API and lazy GPU imports."""
+    py_parts = [livelab_dir] if livelab_dir == livelab_core else [livelab_dir, livelab_core]
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(py_parts),
+        "PYTHONNOUSERSITE": "1",
+        "CUDA_VISIBLE_DEVICES": "",
+    }
+    try:
+        proc_res = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _PROBE_SCRIPT,
+                spec,
+                ",".join(_LAB_METHODS),
+                ",".join(_GPU_RUNTIME_LIBS),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "ok": False,
+            "spec": spec,
+            "gpu_imports": [],
+            "missing_methods": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    prefix = "FASTRSI_DOCTOR_PROBE:"
+    for line in reversed(proc_res.stdout.splitlines()):
+        if line.startswith(prefix):
+            try:
+                return json.loads(line[len(prefix):])
+            except ValueError:
+                break
+    detail = (proc_res.stderr or proc_res.stdout).strip().splitlines()
+    msg = detail[-1] if detail else f"probe exited with code {proc_res.returncode}"
+    return {
+        "ok": False,
+        "spec": spec,
+        "gpu_imports": [],
+        "missing_methods": [],
+        "error": msg,
+    }
+
+
+def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dict:
+    """Audit core kernel/conformance health, environment, and all discovered engine labs."""
+    livelab_core = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    resolved_root = find_repo_root(repo_root)
+    discovered = discover_labs(repo_root)
+    by_name = {entry["name"]: entry for entry in discovered}
+
+    # Also detect engine folders under repos/ missing a livelab/ directory.
+    entries: list[dict] = []
+    for entry in discovered:
+        kind = "builtin" if entry["name"] == "toy" else ("template" if entry["name"] == "template" else "engine")
+        entries.append({**entry, "kind": kind, "registered": True})
+    if resolved_root:
+        repos_dir = os.path.join(resolved_root, "repos")
+        if os.path.isdir(repos_dir):
+            for name in sorted(os.listdir(repos_dir)):
+                full = os.path.join(repos_dir, name)
+                if name.startswith(".") or name == "__pycache__" or not os.path.isdir(full):
+                    continue
+                if name not in by_name:
+                    entries.append({
+                        "name": name,
+                        "kind": "engine",
+                        "registered": False,
+                        "livelab_dir": os.path.join(full, "livelab"),
+                        "toy_spec": None,
+                        "real_spec": None,
+                    })
+
+    jobs: list[tuple[int, str, str, str]] = []
+    for idx, entry in enumerate(entries):
+        for slot in ("toy", "real"):
+            spec = entry.get(f"{slot}_spec")
+            if spec:
+                jobs.append((idx, slot, entry["livelab_dir"], spec))
+
+    probe_results: dict[tuple[int, str], dict] = {}
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(6, len(jobs))) as pool:
+            futs = {
+                pool.submit(_probe_lab_spec, ldir, spec, livelab_core, timeout=timeout): (idx, slot)
+                for idx, slot, ldir, spec in jobs
+            }
+            for fut, key in futs.items():
+                probe_results[key] = fut.result()
+
+    lab_reports: list[dict] = []
+    for idx, entry in enumerate(entries):
+        toy_res = probe_results.get((idx, "toy"))
+        real_res = probe_results.get((idx, "real"))
+        errors: list[str] = []
+        gpu_imports: list[str] = []
+        if not entry["registered"]:
+            errors.append("missing livelab/ directory")
+        elif not entry["toy_spec"] and not entry["real_spec"]:
+            errors.append("no toy or real Lab class discovered")
+        for slot, res in (("toy", toy_res), ("real", real_res)):
+            if res is None:
+                continue
+            gpu_imports.extend(res.get("gpu_imports") or [])
+            if not res.get("ok"):
+                errors.append(f"{slot}: {res.get('error')}")
+        lab_reports.append({
+            "name": entry["name"],
+            "kind": entry["kind"],
+            "livelab_dir": entry["livelab_dir"],
+            "toy_spec": entry["toy_spec"],
+            "real_spec": entry["real_spec"],
+            "toy": toy_res,
+            "real": real_res,
+            "gpu_imports": sorted(set(gpu_imports)),
+            "ok": not errors,
+            "errors": errors,
+        })
+
+    core = _check_core_health()
     env_findings = forksafe.audit_system_environment()
-    report = {
-        "ok": True,
+    engine_reports = [item for item in lab_reports if item["kind"] == "engine"]
+    overall_ok = bool(core["ok"] and all(item["ok"] for item in lab_reports))
+    return {
+        "ok": overall_ok,
         "python": sys.version.split()[0],
         "platform": sys.platform,
-        "livelab_root": os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-        "repo_root": find_repo_root(args.repo_root),
+        "livelab_root": livelab_core,
+        "repo_root": resolved_root,
         "max_unix_sock_bytes": ipc.MAX_SOCK_PATH,
-        "discovered_labs": [x["name"] for x in labs],
+        "discovered_labs": [x["name"] for x in discovered],
+        "engines": [x["name"] for x in engine_reports],
+        "core": core,
+        "labs": lab_reports,
         "env_findings": env_findings,
+        "summary": {
+            "labs_total": len(lab_reports),
+            "labs_ok": sum(1 for x in lab_reports if x["ok"]),
+            "engines_total": len(engine_reports),
+            "engines_ok": sum(1 for x in engine_reports if x["ok"]),
+            "gpu_import_violations": sum(1 for x in lab_reports if x["gpu_imports"]),
+        },
     }
+
+
+def _cmd_doctor(args) -> int:
+    report = doctor_report(args.repo_root)
     if args.json:
         print(json.dumps(report, indent=1, default=str))
-    else:
-        print(f"python:        {report['python']} ({report['platform']})")
-        print(f"livelab_root:  {report['livelab_root']}")
-        print(f"repo_root:     {report['repo_root']}")
-        print(f"max_sock_path: {report['max_unix_sock_bytes']} bytes")
-        print(f"labs:          {', '.join(report['discovered_labs'])}")
-        print(f"env_findings:  {len(env_findings)}")
-    return 0
+        return 0 if report["ok"] else 1
+    core = report["core"]
+    k_ok = len(core["kernel"]["loaded"])
+    k_tot = k_ok + len(core["kernel"]["missing"])
+    c_cnt = core["conformance"]["case_count"]
+    print(f"python:        {report['python']} ({report['platform']})")
+    print(f"livelab_root:  {report['livelab_root']}")
+    print(f"repo_root:     {report['repo_root']}")
+    print(f"max_sock_path: {report['max_unix_sock_bytes']} bytes")
+    print(f"core:          {'ok' if core['ok'] else 'FAIL'} (kernel {k_ok}/{k_tot}, conformance {c_cnt}/11)")
+    print(f"env_findings:  {len(report['env_findings'])}")
+    print()
+    w_name = max((len(x["name"]) for x in report["labs"]), default=4)
+    print(f"{'lab':<{w_name}}  {'kind':<8}  {'toy':<5}  {'real':<5}  {'gpu_imports':<11}  status")
+    for item in report["labs"]:
+        toy_s = "-" if item["toy"] is None else ("ok" if item["toy"]["ok"] else "FAIL")
+        real_s = "-" if item["real"] is None else ("ok" if item["real"]["ok"] else "FAIL")
+        gpu_s = ",".join(item["gpu_imports"]) if item["gpu_imports"] else "none"
+        st_s = "ok" if item["ok"] else "FAIL: " + "; ".join(item["errors"])
+        print(f"{item['name']:<{w_name}}  {item['kind']:<8}  {toy_s:<5}  {real_s:<5}  {gpu_s:<11}  {st_s}")
+    s = report["summary"]
+    print(f"\nsummary: {s['labs_ok']}/{s['labs_total']} labs ok ({s['engines_ok']}/{s['engines_total']} engines), "
+          f"{s['gpu_import_violations']} GPU import violation(s)")
+    return 0 if report["ok"] else 1
 
 
 def main(argv: list[str] | None = None) -> int:
