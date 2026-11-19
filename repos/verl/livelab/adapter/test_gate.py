@@ -189,3 +189,36 @@ class PerSampleSeedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WitnessUninvolvedRolesTest(unittest.TestCase):
+    def test_flush_leaves_an_empty_entry_for_roles_that_never_ran_the_edit(self):
+        """Input: a proof whose witness names the driver with 1 call of the GRPO advantage
+        function and eight rollout actors plus four trainers with 0 calls (they import
+        `core_algos`, so the swap reached them, but only the driver computes advantages).
+        Action: `_flush`. Expected: the response keeps `{}` for every silent role and the
+        driver's count, forwards the kernel's `abstained` list, and stays proven. The
+        conformance c2 case reads an empty entry as an uninvolved role; a `{key: 0}` entry
+        made the real 4-GPU run fail c2 with 'witness > 0 on every participant'."""
+        key = "verl.trainer.ppo.core_algos:compute_grpo_outcome_advantage:267"
+        witness = {"driver": {key: 1}, **{f"rollout{i}": {key: 0} for i in range(8)}, **{f"trainer{i}": {key: 0} for i in range(4)}}
+        findings = [{"check": "zero_witness", "subject": key, "participant": f"rollout{i}"} for i in range(8)]
+        proof = {"receipt": {"witness": witness, "findings": findings, "abstained": ["reward0"]}}
+        tmp = Path(tempfile.mkdtemp())
+        g = types.SimpleNamespace(_pending={"n": 7, "steps_run": 1, "t_seen": 0.0}, _gate=tmp,
+                                  _session=types.SimpleNamespace(stack=["txn-1"]),
+                                  _coordinator=types.SimpleNamespace(prove=lambda tid: proof))
+        gate.GateMixin._flush(g)
+        resp = json.loads((tmp / "resp-7.json").read_text())
+        self.assertEqual(resp["witness"]["driver"], {key: 1})
+        self.assertEqual(resp["witness"]["rollout3"], {})
+        self.assertEqual(resp["witness"]["trainer0"], {})
+        self.assertEqual(resp["abstained"], ["reward0"])
+        self.assertTrue(resp["proven"], resp)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "core" / "livelab"))
+        from conformance import cases
+        involved = cases._involved_witnesses(resp["witness"], resp.get("abstained"))
+        self.assertEqual(set(involved), {"driver"})
+        # a silent sibling rank of an involved role is still a failure
+        resp["witness"]["rollout0"] = {key: 2}
+        self.assertIn("rollout3", cases._involved_witnesses(resp["witness"]))

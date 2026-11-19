@@ -198,12 +198,17 @@ class GateMixin:
         pending, self._pending = self._pending, None
         pending["verdict_s"] = round(time.time() - pending.pop("t_seen"), 3)
         if pending["steps_run"] and self._session is not None and self._session.stack:
-            proofs, witness, totals = [self._coordinator.prove(tid) for tid in self._session.stack], {}, {}
+            proofs, witness, totals, abstained = [self._coordinator.prove(tid) for tid in self._session.stack], {}, {}, set()
             for prf in proofs:
+                abstained.update(prf["receipt"].get("abstained") or ())
                 for pname, cnts in prf["receipt"]["witness"].items():
-                    if cnts: witness.setdefault(pname, {}).update(cnts); [totals.update({k: totals.get(k, 0) + v}) for k, v in cnts.items()]
+                    # a participant that swapped the function but never ran it keeps an empty
+                    # entry: the conformance cases read it as an uninvolved role (c2), unless a
+                    # sibling of its role did run it (silent rank), which stays a failure
+                    live = {k: v for k, v in cnts.items() if v}
+                    witness.setdefault(pname, {}).update(live); [totals.update({k: totals.get(k, 0) + v}) for k, v in live.items()]
             findings = [f for prf in proofs for f in prf["receipt"]["findings"] if not (f["check"] == "zero_witness" and totals.get(f.get("subject"), 0) > 0)]
-            pending.update(witness=witness, proven=not findings, findings=findings)
+            pending.update(witness=witness, proven=not findings, findings=findings, **({"abstained": sorted(abstained)} if abstained else {}))
             if not pending["proven"]: pending.update(ok=False, error="edited code never ran: " + ", ".join(sorted({str(f.get("subject") or f["check"]) for f in findings})))
         _write_json(self._gate / f"resp-{pending['n']}.json", pending)
 

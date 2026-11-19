@@ -259,7 +259,8 @@ class VerlConformanceLab:
             return {"ok": False, "error": r.get("error") or "no step ran", "output": None, "proven": None, "witness": {}, "findings": list(self.poison), "cost_s": round(time.perf_counter() - t0, 6)}
         live = bool(self._request(verb="status", steps=0, timeout=60.0).get("txns")) if "proven" not in r else True
         return {"ok": True, "output": self._output(r), "seconds": r.get("verdict_s"), "proven": r.get("proven") if live else None,
-                "witness": r.get("witness") or {}, "findings": r.get("findings") or [], "reset_s": rs.get("cost_s"), "cost_s": round(time.perf_counter() - t0, 6)}
+                "witness": r.get("witness") or {}, "findings": r.get("findings") or [], "reset_s": rs.get("cost_s"), "cost_s": round(time.perf_counter() - t0, 6),
+                **({"abstained": r["abstained"]} if r.get("abstained") else {})}
 
     def reset(self, kind="state"):
         from tools import cli
