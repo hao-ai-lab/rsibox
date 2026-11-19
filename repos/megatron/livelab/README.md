@@ -72,7 +72,7 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
 
 A patch may edit any module the job has imported; each one it names joins the session's code
 fingerprint (status, tamper checks). A module the job has not imported is refused
-(`patch_invalid`). The reply lists every missing module under `not_loaded`; all files stay at base.
+(`patch_invalid`). The reply lists every missing module under `not_loaded`; the current transaction stack stays intact.
 
 For a journaled attribute change, pass `{"files": {}, "repairs": [{"cell": code, "declares": []}]}`
 to `install`. The cell runs on each rank with `model` (local chunks), `optimizer`, `journal`
@@ -119,34 +119,19 @@ tree from the checkout with `bash repos/megatron/tools/stage_local.sh --tree-onl
 Use `"$LOCAL_SCRATCH/$(basename "$MEGATRON_ROOT")"` for `--root`. Mount the checkout and a writable output and cache directory.
 The existing `FASTRSI_MG_CMD` and `FASTRSI_MG_ROOT` entry point remains available to custom launchers.
 
-Our 2026-11-07 run: 2 layers, hidden 512, TP 2 on 2 GB200, `--deterministic-mode`, 3-step
-checks, 11/11 as expected:
+The 2026-11-19 deterministic runs used two layers, hidden size 512, sequence length 128 and
+three-step checks. Live edits matched fresh edited processes in loss and gradient norm. The
+fault cases restored the original output after crash, hang, lost rank and out-of-journal code
+changes. Each soak completed 20 install/undo cycles.
 
-```
-case                  result  seconds  evidence
-c0_repeatable         pass      1.406  3 checks (one after reset ['weights', 'optimizer', 'scheduler', 'rng', 'data']) gave {'loss': [12.064836502075195, 12.067537307739258, 11.609490394592285], ...}
-c1_noop               pass      1.043  installed by ['R0 swap']; calls {'megatron.core.transformer.mlp:MLP.forward:259': [48, 48]}; output unchanged
-c2_visible            pass      1.038  loss [12.0648, 12.0675, 11.6095] -> [12.0546, 12.0663, 11.5643]; calls per participant [48, 48]
-c3_fresh_equivalence  pass    124.224  visible: live == fresh; chain of 3: live == fresh (bit-exact loss and grad norm)
-c4_uninstall          pass      1.937  uninstall ['txn-3728055d'] in 0.026158 s; identity 2138091df388705c restored
-c5_failed_install     pass      2.547  fail_apply: rolled_back, codes ['participant_failed'], base proven
-                                       fail_commit: rolled_back, codes ['participant_failed'], base proven
-                                       control: no fault, committed 3 targets, output changed
-c6_refusal            pass      3.481  syntax: ['patch_invalid']; closure: ['closure_changed']
-                                       module_state: ['empty_change', 'outside_changes']; empty: ['empty_change']
-c7_chain              pass      5.757  3 stacked edits each visible, undone one by one to base
-c8_crash_and_hang     pass    243.804  crash: poisoned by ['participant_failed'], respawn 46.029 s
-                                       hang: poisoned by ['participant_failed'], respawn 51.576 s
-                                       lost: poisoned by ['participant_failed'], respawn 37.613 s
-                                       tamper: poisoned by ['tampered'], respawn 45.019 s
-c9_soak               pass     27.711  20 cycles; install median 0.0716 s, uninstall median 0.0320 s
-c10_not_proven        pass     48.798  MLP.__init__ edit: proven False, findings ['zero_witness', 'zero_witness'];
-                                       live loss stays at base, a fresh process differs
-```
+| Layout | Conformance | Median install | Median undo | Respawn after fault |
+|---|---:|---:|---:|---:|
+| 2 GB200 · TP2 | 11/11 | 0.0428 s | 0.0152 s | 29.34–30.42 s |
+| 4 GB200 · TP2/DP2 | 11/11 | 0.0451 s | 0.0170 s | 36.05–36.55 s |
+| 4 GB200 · TP4 | 11/11 | 0.0444 s | 0.0164 s | 35.65–36.95 s |
 
-What it does not show: more than 2 ranks, PP > 1, edits of `jit_fuser` functions or CUDA graphs,
-the 14B model (see the hill-climb), a conformance receipt (the receipt writer has no record kind
-for it yet).
+The harness prints its c0–c10 verdicts and can persist the kernel's transaction, proof and
+undo receipts with `--receipts`. All three layouts used one node, PP1 and eager execution.
 
 ## Restart by fork: the zygote
 
