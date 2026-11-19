@@ -341,6 +341,9 @@ class BaseLab:
     def _golden_for(self, output, extra: dict) -> dict:
         return {"output_hash": L.text_hash(json.dumps(output, sort_keys=True))}
 
+    def _clean_witness(self, raw_witness: dict, proof_ok: bool) -> dict:
+        return raw_witness or {}
+
     # -- internal helpers ----------------------------------------------------------------
     def _spawn(self) -> None:
         t0 = time.perf_counter()
@@ -430,12 +433,17 @@ class BaseLab:
                 if rec
                 else sorted({f["check"] for f in res.get("findings", [])})
             )
+            mechanisms = list(rec["actual_recipes"]) if rec else []
+            if outcome == "committed" and ((rec or {}).get("rebuild") or {}).get("ok"):
+                for recipe in plan.get("recipes") or ():
+                    if recipe not in mechanisms:
+                        mechanisms.append(recipe)
             return {
                 "ok": outcome == "committed",
                 "id": res.get("txn"),
                 "outcome": outcome,
                 "codes": [] if outcome == "committed" else codes,
-                "mechanisms": list(rec["actual_recipes"]) if rec else [],
+                "mechanisms": mechanisms,
                 "findings": list(rec["findings"]) if rec else list(res.get("findings", [])),
                 "edit_to_run_s": rec.get("edit_to_run_s") if rec else None,
                 "receipt": rec,
@@ -468,7 +476,8 @@ class BaseLab:
             for proof in proofs:
                 rec = proof.get("receipt") or {}
                 abstained.update(rec.get("abstained") or ())
-                for part, counts in (rec.get("witness") or {}).items():
+                cleaned = self._clean_witness(rec.get("witness") or {}, bool(proof.get("ok")))
+                for part, counts in cleaned.items():
                     witness.setdefault(part, {}).update(counts)
             return {
                 "ok": True,

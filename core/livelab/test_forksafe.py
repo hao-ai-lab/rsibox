@@ -791,6 +791,44 @@ class DriverCuTeAndAllGuards(unittest.TestCase):
             restore3()
             forksafe.unpatch_child(cuda3, clear_env=report3["nvml_env_set"])
 
+    def test_install_all_guards_import_torch_runs_after_env_and_cuinit_guard(self):
+        """Input: `install_all_guards(import_torch=True)` with a stand-in `torch` imported on demand.
+        Expected: `PYTORCH_NVML_BASED_CUDA_CHECK=1`, `CUTE_DSL_ARCH`, and `cuInit` stub are already
+        active during `import torch`, and `torch.cuda` is patched without initializing CUDA."""
+        observed = {}
+        fake_pkg = tempfile.mkdtemp(prefix="forksafe-import-torch-")
+        self.addCleanup(shutil.rmtree, fake_pkg, True)
+        with open(os.path.join(fake_pkg, "torch.py"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "import os, types\n"
+                "ENV_AT_IMPORT = (os.environ.get('PYTORCH_NVML_BASED_CUDA_CHECK'), os.environ.get('CUTE_DSL_ARCH'))\n"
+                "cuda = types.SimpleNamespace(initialized=False)\n"
+                "cuda.is_initialized = lambda: cuda.initialized\n"
+                "cuda.get_device_capability = lambda d=None: (setattr(cuda, 'initialized', True) or (10, 0))\n"
+                "cuda.current_device = lambda: (setattr(cuda, 'initialized', True) or 0)\n"
+            )
+        base_env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")
+        }
+        sys.path.insert(0, fake_pkg)
+        self.addCleanup(sys.path.remove, fake_pkg)
+        saved_torch = sys.modules.pop("torch", None)
+        self.addCleanup(lambda: (sys.modules.pop("torch", None),
+                                 saved_torch is not None and sys.modules.__setitem__("torch", saved_torch)))
+        with mock.patch.dict(os.environ, base_env, clear=True):
+            report, restore = forksafe.install_all_guards(
+                capability=(10, 0), properties=False, triton=False, cuda_python=False, import_torch=True
+            )
+            import torch as loaded_torch
+            observed["env"] = loaded_torch.ENV_AT_IMPORT
+            self.assertEqual(observed["env"], ("1", "sm_100a"))
+            self.assertTrue(report["torch_cuda"]["installed"])
+            self.assertEqual(loaded_torch.cuda.get_device_capability(0), (10, 0))
+            self.assertFalse(loaded_torch.cuda.is_initialized())
+            restore()
+            forksafe.unpatch_child(loaded_torch.cuda, clear_env=report["nvml_env_set"])
+
 
 if __name__ == "__main__":
     unittest.main()

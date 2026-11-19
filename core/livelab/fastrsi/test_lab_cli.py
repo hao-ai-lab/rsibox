@@ -260,6 +260,38 @@ class BaseLabConformanceTests(unittest.TestCase):
                 verdict = conformance_cases.run(case_name, MiniToyLab)
                 self.assertEqual(verdict["result"], "pass", f"{case_name}: {verdict}")
 
+    def test_baselab_clean_witness_and_rebuild_mechanisms_hooks(self):
+        """Input: a `BaseLab` subclass using `RecaptureCoordinator` and overriding `_clean_witness`.
+        Expected: committed rebuild appends planned rebuild recipe (`R1 recapture`) to `mechanisms`,
+        and `_clean_witness` filters participant witness entries returned by `check()`."""
+        class HookedMiniLab(MiniToyLab):
+            def _start_engine(self):
+                co, mods = super()._start_engine()
+                rc = lab.RecaptureCoordinator(
+                    co.participants,
+                    gap=co.gap,
+                    rebuild=lambda txn, spec: {"ok": True, "ranks": [{"rank": 0, "ok": True, "captured": [1]}]},
+                )
+                return rc, mods
+
+            def _build_plan(self, patch, live_map):
+                plan, fs = super()._build_plan(patch, live_map)
+                plan["rebuild"] = ["recapture"]
+                plan["recipes"] = ["R0 swap", "R1 recapture"]
+                return plan, fs
+
+            def _clean_witness(self, raw_witness, proof_ok):
+                return {k: v for k, v in raw_witness.items() if k == "rank0"}
+
+        hl = HookedMiniLab()
+        self.addCleanup(hl.close)
+        ins = hl.install(hl.patches()["visible"])
+        self.assertTrue(ins["ok"], ins)
+        self.assertEqual(ins["mechanisms"], ["R0 swap", "R1 recapture"])
+        chk = hl.check()
+        self.assertTrue(chk["proven"])
+        self.assertEqual(list(chk["witness"]), ["rank0"])
+
 
 class CliTests(unittest.TestCase):
     def test_cli_list_doctor_conformance_and_ctl_end_to_end(self):

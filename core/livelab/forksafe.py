@@ -515,8 +515,13 @@ def install_all_guards(
     triton: bool = True,
     cuda_python: bool = True,
     cute_dsl: bool = True,
+    import_torch: bool = False,
 ):
     """Install all pre-fork CUDA guards in the safe order before heavy ML imports.
+
+    When `import_torch=True` and `cuda is None`, imports `torch` after setting
+    `PYTORCH_NVML_BASED_CUDA_CHECK`, `CUTE_DSL_ARCH`, and the `cuda-python` `cuInit`
+    stub so `torch.cuda` guards can be installed before downstream ML imports.
 
     Returns `(report, restore_triton)`: call `restore_triton()` after preloading imports
     in the zygote, and call `unpatch_child(clear_env=report["nvml_env_set"])` in each
@@ -532,6 +537,11 @@ def install_all_guards(
     if cuda_python:
         report["cuda_python"] = guard_cuda_python(resolved_cap, nvml)
     if cuda is None:
+        if import_torch and "torch" not in sys.modules:
+            try:
+                __import__("torch")
+            except ImportError:
+                pass
         torch_mod = sys.modules.get("torch")
         cuda = getattr(torch_mod, "cuda", None)
     if cuda is not None:
