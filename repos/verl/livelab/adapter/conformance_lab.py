@@ -24,6 +24,7 @@ Run via the unified CLI:
 or `python3 -m tools.cli conformance --gate G --launch CMD --reward FILE` from `repos/verl`.
 """
 import argparse
+import atexit
 import contextlib
 import hashlib
 import json
@@ -130,7 +131,8 @@ class VerlConformanceLab:
         return p.stat().st_size if p.exists() else 0
 
     def _info(self, gate=None):
-        data = ipc.read_json((gate or self.gate) / "gate.json")
+        target = Path(gate) if gate is not None else self.gate
+        data = ipc.read_json(target / "gate.json")
         return data if isinstance(data, dict) else {}
 
     def _alive(self, gate=None):
@@ -138,13 +140,14 @@ class VerlConformanceLab:
         return isinstance(pid, int) and not isinstance(pid, bool) and proc.pid_alive(pid)
 
     def _reap_job(self, gate, timeout_s=5.0):
-        job = _JOBS.get(str(gate))
+        gate_key = str(gate)
+        job = _JOBS.get(gate_key)
         if job is None:
             return
         with contextlib.suppress(subprocess.TimeoutExpired):
             job.wait(timeout=timeout_s)
         if job.poll() is not None:
-            _JOBS.pop(str(gate), None)
+            _JOBS.pop(gate_key, None)
 
     def _ensure_job(self):
         if (self.gate / "ready.json").exists() and self._alive():
@@ -248,7 +251,7 @@ class VerlConformanceLab:
         self._reap_job(gate)
 
     def _stop_job(self, gate=None):
-        gate = gate or self.gate
+        gate = Path(gate) if gate is not None else self.gate
         t0 = time.time()
         killed = False
         if self._alive(gate):
@@ -257,6 +260,10 @@ class VerlConformanceLab:
             if not self._wait_gone(gate, 120):
                 self._kill_job(gate)
                 killed = True
+        job = _JOBS.get(str(gate))
+        if not killed and (self._alive(gate) or (job is not None and job.poll() is None)):
+            self._kill_job(gate)
+            killed = True
         self._reap_job(gate)
         if not killed:
             deadline = time.monotonic() + 60
@@ -724,3 +731,24 @@ def _jsonable(kw):
     if extra:
         out["extra"] = extra
     return out
+
+
+@atexit.register
+def _cleanup_jobs():
+    """Stop and reap every launcher process this process spawned (never touches external jobs)."""
+    if not _JOBS:
+        return
+    lab = VerlConformanceLab.__new__(VerlConformanceLab)
+    lab.costs = {}
+    for gate_str in list(_JOBS):
+        gate = Path(gate_str)
+        try:
+            with contextlib.suppress(Exception):
+                lab._stop_job(gate)
+        finally:
+            job = _JOBS.pop(gate_str, None)
+            if job is not None and job.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.kill_tree(job.pid, signal.SIGKILL, include_pg=True)
+                with contextlib.suppress(Exception):
+                    job.wait(timeout=5.0)

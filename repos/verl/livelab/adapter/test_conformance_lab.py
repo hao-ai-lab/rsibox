@@ -216,6 +216,67 @@ class ConformanceHarnessTest(unittest.TestCase):
             self.assertEqual(lab.files({"diff": "live"}, against="live"), {"pkg.m": "X = 1\n# live"})
             self.assertEqual(lab.files({"diff": "disk"}, against="disk"), {"pkg.m": "X = 0\n# disk"})
 
+    def test_cleanup_jobs_stops_reaps_owned_subprocesses_and_skips_external_jobs(self):
+        """1. `_cleanup_jobs()` stops, kills, and reaps an owned launcher `Popen` in `_JOBS`
+        with zero `ResourceWarning`s and empties `_JOBS`.
+        2. When `_JOBS` is empty (attached external job), `_cleanup_jobs()` is a no-op and never
+        calls `client.request` or `_pkill_orphans`.
+        3. When `gate.json` is missing/dead while a launcher `Popen` is still running in `_JOBS`,
+        `_stop_job()` terminates and reaps the launcher cleanly."""
+        import gc
+
+        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-cleanup-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.addCleanup(CL._JOBS.clear)
+
+        # (1) Owned live subprocess in _JOBS is terminated, reaped, and popped cleanly.
+        gate1 = tmp / "gate-owned"
+        gate1.mkdir()
+        proc1 = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        CL._JOBS[str(gate1)] = proc1
+        with mock.patch.object(CL.VerlConformanceLab, "_gpus_busy", return_value=[]):
+            CL._cleanup_jobs()
+        self.assertEqual(CL._JOBS, {})
+        self.assertIsNotNone(proc1.poll())
+        del proc1
+        gc.collect()  # verifies Popen.__del__ raises zero ResourceWarnings under -W error::ResourceWarning
+
+        # (2) Empty _JOBS (external attached job) is a strict no-op.
+        with mock.patch.object(CL.client, "request", side_effect=AssertionError("must not call request")), \
+             mock.patch.object(CL.VerlConformanceLab, "_pkill_orphans", side_effect=AssertionError("must not pkill")), \
+             mock.patch.object(CL.VerlConformanceLab, "_gpus_busy", side_effect=AssertionError("must not query gpus")):
+            CL._cleanup_jobs()
+
+        # (3) Missing/dead gate.json with a still-running launcher Popen in _JOBS: _stop_job kills & reaps it.
+        gate2 = tmp / "gate-orphan-launcher"
+        gate2.mkdir()
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        (gate2 / "gate.json").write_text(json.dumps({"pid": dead.pid}), encoding="utf-8")
+        proc2 = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        CL._JOBS[str(gate2)] = proc2
+        lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
+        lab.gate = gate2
+        lab.costs = {}
+        with mock.patch.object(CL.VerlConformanceLab, "_gpus_busy", return_value=[]):
+            lab._stop_job(gate2)
+        self.assertNotIn(str(gate2), CL._JOBS)
+        self.assertIsNotNone(proc2.poll())
+        del proc2
+        gc.collect()
+
 
 if __name__ == "__main__":
     unittest.main()
