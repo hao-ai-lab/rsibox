@@ -33,6 +33,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import traceback
 
 import torch
@@ -308,7 +309,7 @@ class Lab:
             if m in d:
                 return d[m]
         return L.module_source(m) if hasattr(L, "module_source") else \
-            open(sys.modules[m].__file__).read()
+            Path(sys.modules[m].__file__).read_text()
 
     def serve(self):
         """Every rank: serve the gap until resume or exit."""

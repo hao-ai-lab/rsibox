@@ -64,7 +64,8 @@ class StepDetail(unittest.TestCase):
                                  capture_output=True, text=True, timeout=120)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertTrue(json.loads(out.stdout.strip().splitlines()[-1])["restored"])
-            steps = json.load(open(os.path.join(d, "phases.rank0.json")))["steps"]
+            with open(os.path.join(d, "phases.rank0.json")) as phases:
+                steps = json.load(phases)["steps"]
             self.assertEqual(len(steps), 3)
             for s in steps[:2]:
                 mb, det = s["detail"]["mb"], s["detail"]

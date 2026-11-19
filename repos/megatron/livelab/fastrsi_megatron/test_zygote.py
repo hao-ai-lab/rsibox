@@ -4,6 +4,7 @@ GPU: what the GPU run adds (CUDA usable after the fork, Megatron start) is in th
 (../README.md)."""
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,8 @@ out = {k: os.environ.get(k) for k in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTE
                                       "OMP_NUM_THREADS", "TORCHINDUCTOR_COMPILE_THREADS")}
 out.update(heavy_pid=heavy.PID, pid=os.getpid(), sid=os.getsid(0), argv=sys.argv[1:],
            cpus=sorted(os.sched_getaffinity(0)))
-json.dump(out, open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w"))
+with open(os.path.join(os.environ["OUT"], "r%s.json" % os.environ["RANK"]), "w") as f:
+    json.dump(out, f)
 if os.environ.get("IGNORE_TERM"):
     import signal
     if os.environ["RANK"] == "0":
@@ -37,7 +39,8 @@ if os.environ.get("ORPHAN"):    # a child in a session of its own, left behind w
     import subprocess
     kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                            start_new_session=True)
-    open(os.path.join(os.environ["OUT"], "orphan%s" % os.environ["RANK"]), "w").write(str(kid.pid))
+    with open(os.path.join(os.environ["OUT"], "orphan%s" % os.environ["RANK"]), "w") as f:
+        f.write(str(kid.pid))
 """
 
 
@@ -54,6 +57,7 @@ class Zygote(unittest.TestCase):
         self.z = subprocess.Popen([sys.executable, "-m", "fastrsi_megatron.zygote", "serve",
                                    "--sock", self.sock, "--preload", "heavy"],
                                   stdout=subprocess.PIPE, text=True, env=env)
+        self.addCleanup(self.z.stdout.close)
         self.ready = json.loads(self.z.stdout.readline())
 
     def tearDown(self):
@@ -77,7 +81,7 @@ class Zygote(unittest.TestCase):
         self.assertEqual([e["event"] for e in evs], ["forked", "exited"])
         self.assertEqual(evs[1]["rc"], [0, 0])
         for r in (0, 1):
-            o = json.load(open(os.path.join(self.d, f"r{r}.json")))
+            o = json.loads(Path(self.d, f"r{r}.json").read_text())
             self.assertEqual((o["RANK"], o["LOCAL_RANK"], o["WORLD_SIZE"], o["MASTER_PORT"],
                               o["MY_FLAG"]), (str(r), str(r), "2", "29999", "on"))
             self.assertEqual(o["argv"], ["--flag", "x"])
@@ -190,7 +194,7 @@ class Zygote(unittest.TestCase):
         self.assertEqual([e["event"] for e in ev], ["forked", "exited"], ev)
         self.assertEqual(ev[-1]["rc"], [0, 0])
         for r in (0, 1):
-            out = json.load(open(os.path.join(self.d, "r%d.json" % r)))
+            out = json.loads(Path(self.d, f"r{r}.json").read_text())
             self.assertEqual(out["heavy_pid"], -1)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
@@ -200,10 +204,10 @@ class Zygote(unittest.TestCase):
         rank's sched_getaffinity == [0]; without `cpus`, the zygote's full set."""
         self.start(cpus=["0", "0"])
         for r in (0, 1):
-            self.assertEqual(json.load(open(os.path.join(self.d, f"r{r}.json")))["cpus"], [0])
+            self.assertEqual(json.loads(Path(self.d, f"r{r}.json").read_text())["cpus"], [0])
         self.start()
         full = sorted(os.sched_getaffinity(0))
-        self.assertEqual(json.load(open(os.path.join(self.d, "r1.json")))["cpus"], full)
+        self.assertEqual(json.loads(Path(self.d, "r1.json").read_text())["cpus"], full)
 
 
 class Pieces(unittest.TestCase):

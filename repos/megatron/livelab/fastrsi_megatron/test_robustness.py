@@ -38,8 +38,8 @@ LINUX = sys.platform.startswith("linux")
 # both pids and sleeps
 TRAIN = """import json, os, subprocess, sys, time
 kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
-json.dump({"pid": os.getpid(), "kid": kid.pid},
-          open(os.path.join(os.environ["OUT"], "p%s.json" % os.environ["RANK"]), "w"))
+with open(os.path.join(os.environ["OUT"], "p%s.json" % os.environ["RANK"]), "w") as f:
+    json.dump({"pid": os.getpid(), "kid": kid.pid}, f)
 time.sleep(float(os.environ.get("SLEEP", "300")))
 """
 
@@ -97,6 +97,7 @@ class ZygoteSupervision(unittest.TestCase):
                                    "--sock", self.sock, "--preload", "heavy"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                   env=env)
+        self.addCleanup(self.z.stdout.close)
         self.ready = json.loads(self.z.stdout.readline())
         self.pids = []
 

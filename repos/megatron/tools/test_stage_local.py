@@ -50,7 +50,8 @@ class StageLocal(unittest.TestCase):
                 self.assertEqual(f.readline().strip(), f"#!{dest}/venv/bin/python")
             self.assertEqual(sorted(os.listdir(os.path.join(dest, "tree"))), ["megatron"])
             self.assertTrue(os.path.exists(os.path.join(dest, "cache", "inductor", "graph")))
-            env = open(os.path.join(dest, "env.sh")).read()
+            with open(os.path.join(dest, "env.sh")) as env_file:
+                env = env_file.read()
             self.assertIn(f"export PATH={dest}/venv/bin:", env)
             self.assertIn(f"export PYTHONPATH={dest}/tree", env)
             self.assertIn(f"CUDA_CACHE_PATH={dest}/cache/cuda", env)
