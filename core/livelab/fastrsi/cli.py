@@ -19,6 +19,7 @@ import argparse
 import ast
 import json
 import os
+import subprocess
 import sys
 
 import forksafe
@@ -166,7 +167,7 @@ def _cmd_list(args) -> int:
     return 0
 
 
-def _cmd_conformance(args) -> int:
+def _cmd_conformance(args, engine_args) -> int:
     try:
         spec, extra_path = resolve_lab(args.target, real=args.real, repo_root=args.repo_root)
     except ValueError as exc:
@@ -196,6 +197,14 @@ def _cmd_conformance(args) -> int:
             conf_argv += ["--receipts", args.receipts]
         if args.json:
             conf_argv.append("--json")
+        if engine_args:
+            lab = conf_main.load(spec)
+            configure = getattr(lab, "launch_environment", None)
+            if not args.real or configure is None:
+                print(f"fastrsi conformance: {spec} does not accept launch arguments", file=sys.stderr)
+                return 2
+            env = {**os.environ, **configure(engine_args)}
+            return subprocess.run([sys.executable, "-m", "conformance", *conf_argv], env=env).returncode
         return conf_main.main(conf_argv)
     finally:
         if extra_path:
@@ -282,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="fastrsi",
+        allow_abbrev=False,
         description="Unified engine-agnostic CLI for FastRSI live labs.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -290,7 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--repo-root", default=None)
     p_list.add_argument("--json", action="store_true")
 
-    p_conf = sub.add_parser("conformance", help="run c0-c10 conformance on a lab")
+    p_conf = sub.add_parser(
+        "conformance", allow_abbrev=False, help="run c0-c10 conformance on a lab",
+        epilog="For real labs with launch options, append the engine options followed by -- and its workload arguments.",
+    )
     p_conf.add_argument("target", help="discovered lab name (e.g. toy) or module:Class")
     p_conf.add_argument("--real", action="store_true", help="select the real-engine lab class")
     p_conf.add_argument("--path", default=None, help="extra directory to prepend to sys.path")
@@ -318,11 +331,14 @@ def main(argv: list[str] | None = None) -> int:
     p_doc.add_argument("--repo-root", default=None)
     p_doc.add_argument("--json", action="store_true")
 
+    if raw_argv[:1] == ["conformance"]:
+        # Engine training options beyond the delimiter may reuse CLI option names.
+        end = raw_argv.index("--") if "--" in raw_argv else len(raw_argv)
+        args, extra = parser.parse_known_args(raw_argv[:end])
+        return _cmd_conformance(args, extra + raw_argv[end:])
     args = parser.parse_args(raw_argv)
     if args.command == "list":
         return _cmd_list(args)
-    if args.command == "conformance":
-        return _cmd_conformance(args)
     if args.command == "ctl":
         return _cmd_ctl(args)
     if args.command == "doctor":
