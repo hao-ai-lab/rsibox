@@ -305,6 +305,8 @@ def _member_functions(obj):
         fns = (obj.__func__,)
     elif isinstance(obj, functools.cached_property):
         fns = (obj.func,)
+    elif isinstance(getattr(obj, "__wrapped__", None), types.FunctionType):
+        fns = (obj.__wrapped__,)
     else:
         fns = (obj,)
     return [f for f in fns if isinstance(f, types.FunctionType)]
@@ -1341,7 +1343,40 @@ def closure_pairs(st):
     return pairs
 
 
-def _build_adds(st, journal):
+def _retarget_code_filename(code, filename):
+    """Return `code` (and all nested code objects) with `co_filename` pinned to `filename`."""
+    consts = tuple(
+        _retarget_code_filename(c, filename) if isinstance(c, types.CodeType) else c
+        for c in code.co_consts
+    )
+    return code.replace(co_filename=filename, co_consts=consts)
+
+
+def _retarget_nested_filename(code, filename):
+    """Retarget only nested code objects inside `code` to `filename`, keeping `code`'s own
+    `co_filename` intact (preserving `locate.code_id` and `file_namespace` matching) so a
+    lazily-built nested `@triton.jit` kernel keeps reading the exact transaction source even
+    after later swaps shift lines in `mod.__file__`."""
+    if not any(isinstance(c, types.CodeType) for c in code.co_consts):
+        return code
+    consts = tuple(
+        _retarget_code_filename(c, filename) if isinstance(c, types.CodeType) else c
+        for c in code.co_consts
+    )
+    return code.replace(co_consts=consts)
+
+
+def _retarget_added_nested(obj, filename):
+    if isinstance(obj, type):
+        for member in vars(obj).values():
+            for fn_obj in _member_functions(member):
+                fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
+    else:
+        for fn_obj in _member_functions(obj):
+            fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
+
+
+def _build_adds(st, journal, ver_file=None):
     """Build the definitions the edit adds (stage only planned them), in a scratch namespace:
     their decorators and class bodies run now, at the commit. Returns the namespace of new
     imports and top-level definitions (for deferred defaults)."""
@@ -1362,12 +1397,16 @@ def _build_adds(st, journal):
             exec(_raise(ad), mod.__dict__, ns)
         cls_name, name = ad["cls"], ad["name"]
         if cls_name is None:
+            if ver_file:
+                _retarget_added_nested(ns[name], ver_file)
             top[name] = ns[name]       # a later added definition may use it
             st.adds.append((mod.__dict__, name, ns[name]))
             if ad["def"] and JIT.unwrap(ns[name])[0] is not None:
                 st.jit_adds.append((ns[name], ad["key"]))
         else:
             obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
+            if ver_file:
+                _retarget_added_nested(obj, ver_file)
             built.setdefault(cls_name, {})[name] = obj
             _set_class_cell(obj, cls)
             st.adds.append((cls, name, obj))
@@ -1383,23 +1422,37 @@ def apply(st, journal, witness):
     g = st.mod.__dict__
     try:
         mod_file = getattr(st.mod, "__file__", None)
+        ver_file = None
         if mod_file and getattr(st, "source", None) is not None and hasattr(journal, "on_undo"):
+            lines = st.source.splitlines(True)
+            ver_file = f"<fastrsi-live:{mod_file}#{L.text_hash(st.source)}>"
             prev_linecache = linecache.cache.get(mod_file)
-            linecache.cache[mod_file] = (
-                len(st.source),
-                None,
-                st.source.splitlines(True),
-                mod_file,
-            )
+            prev_ver = linecache.cache.get(ver_file)
+            linecache.cache[mod_file] = (len(st.source), None, lines, mod_file)
+            linecache.cache[ver_file] = (len(st.source), None, lines, ver_file)
 
-            def _restore_linecache(target_file=mod_file, previous=prev_linecache):
+            def _restore_linecache(
+                target_file=mod_file,
+                previous=prev_linecache,
+                version_file=ver_file,
+                previous_ver=prev_ver,
+            ):
                 if previous is None:
                     linecache.cache.pop(target_file, None)
                 else:
                     linecache.cache[target_file] = previous
+                if previous_ver is None:
+                    linecache.cache.pop(version_file, None)
+                else:
+                    linecache.cache[version_file] = previous_ver
 
             journal.on_undo(_restore_linecache)
-        top = _build_adds(st, journal)
+        if ver_file:
+            st.swaps = [
+                (fn, _retarget_nested_filename(code, ver_file), d, kw)
+                for fn, code, d, kw in st.swaps
+            ]
+        top = _build_adds(st, journal, ver_file=ver_file)
         journal.record_closures(closure_pairs(st), mod=st.mod)
         for name, value in st.imports.items():
             journal.set_item(g, name, value)

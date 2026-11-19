@@ -300,6 +300,55 @@ class EditAddedDefinitionTest(unittest.TestCase):
             (4, 4, True),
         )
 
+    def test_lru_cache_and_container_cached_jit_builders_undo_cleanly_to_base(self):
+        """Input: an edit that (1) adds a `@functools.lru_cache` lazy JIT builder and
+        (2) caches a tuple/dict of JIT wrappers on module globals and a class attribute
+        (FastVideo H3 patches 09-13 pattern). Expected: after running the builders, `undo`
+        clears LRU and container caches with zero `closure_not_restored` findings and
+        `at_base()['ok']` is True."""
+        idx = next(_n)
+        mod_name = f"kt_lru_jit{idx}"
+        base_src = (
+            "class Block:\n"
+            "    @staticmethod\n"
+            "    def run(val):\n"
+            "        return val + 1\n"
+        )
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        patched_src = (
+            "import functools\n\n"
+            "class _FakeJIT:\n"
+            "    def __init__(self, func):\n"
+            "        self.fn = func\n"
+            "        self.device_caches = {0: ({'k': func}, {})}\n"
+            "        self.pre_run_hooks = [lambda *a: func]\n\n\n"
+            "@functools.lru_cache(maxsize=4)\n"
+            "def _cached_builder(tag):\n"
+            "    @_FakeJIT\n"
+            "    def _k_a(x):\n"
+            "        return x + 10\n"
+            "    @_FakeJIT\n"
+            "    def _k_b(x):\n"
+            "        return x * 2\n"
+            "    return (_k_a, _k_b)\n\n\n"
+            "class Block:\n"
+            "    @staticmethod\n"
+            "    def run(val):\n"
+            "        pair = _cached_builder('default')\n"
+            "        globals()['_RUNTIME_KERNEL_TUPLE'] = pair\n"
+            "        Block._runtime_kernel_map = {'pair': pair}\n"
+            "        return pair[1].fn(pair[0].fn(val))\n"
+        )
+        self.assertTrue(part.prepare({"id": "txn-lru", "modules": {mod_name: {"source": patched_src}}})["ok"])
+        self.assertTrue(part.commit("txn-lru")["ok"])
+        self.assertEqual(mod_obj.Block.run(3), 26)
+        undo_res = part.undo("txn-lru")
+        self.assertEqual((undo_res["ok"], undo_res.get("findings", [])), (True, []))
+        self.assertFalse(hasattr(mod_obj, "_RUNTIME_KERNEL_TUPLE"))
+        self.assertFalse(hasattr(mod_obj.Block, "_runtime_kernel_map"))
+        self.assertEqual((mod_obj.Block.run(3), part.at_base()["ok"]), (4, True))
+
     def test_undo_keeps_base_globals_and_class_attributes_the_engine_set(self):
         """Input: a module with `make_shift(k)` (returns `shift`, x + k), a base global
         `DEFAULT_SHIFT = make_shift(1)` and an empty `class Config`. The edit makes shift

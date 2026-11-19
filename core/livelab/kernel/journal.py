@@ -105,16 +105,35 @@ def _label(obj):
 
 
 def _clear_cached_fn_state(value, depth=0):
-    """Clear runtime attributes cached on a removed function or JIT wrapper."""
+    """Clear runtime attributes and caches held on a removed function, wrapper, or container."""
     if depth > 4 or value is None:
         return
+    if callable(getattr(value, "cache_clear", None)):
+        try:
+            value.cache_clear()
+        except Exception:
+            pass
     if isinstance(value, types.FunctionType):
+        for cached_val in list(value.__dict__.values()):
+            _clear_cached_fn_state(cached_val, depth + 1)
         value.__dict__.clear()
+        return
+    if isinstance(value, (tuple, list, set, frozenset)):
+        for item in list(value):
+            _clear_cached_fn_state(item, depth + 1)
+        return
+    if isinstance(value, dict):
+        for item in list(value.values()):
+            _clear_cached_fn_state(item, depth + 1)
         return
     if isinstance(value, type):
         for member in list(vars(value).values()):
             _clear_cached_fn_state(member, depth + 1)
         return
+    for container_attr in ("device_caches", "pre_run_hooks", "cache"):
+        container = getattr(value, container_attr, None)
+        if isinstance(container, (dict, list, set)):
+            container.clear()
     for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
         inner = getattr(value, attr_name, None)
         if inner is not None and inner is not value:
@@ -122,13 +141,17 @@ def _clear_cached_fn_state(value, depth=0):
 
 
 def _holds_nested_code(value, code_pairs, depth=0):
-    """Does `value` (a function or JIT/descriptor wrapper) hold a code object in `code_pairs`?"""
+    """Does `value` (a function, JIT/descriptor wrapper, or container) hold a code object in `code_pairs`?"""
     if depth > 4 or value is None:
         return False
     if isinstance(value, types.FunctionType):
         pair = code_pairs.get(id(value.__code__))
         return pair is not None and pair[0] is value.__code__
-    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return any(_holds_nested_code(item, code_pairs, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_nested_code(item, code_pairs, depth + 1) for item in value.values())
+    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func", "pre_run_hooks"):
         inner = getattr(value, attr_name, None)
         if inner is not None and inner is not value and _holds_nested_code(inner, code_pairs, depth + 1):
             return True
@@ -159,6 +182,9 @@ class Entry:
         elif self.kind == "code":
             if len(old) == 4:
                 t.__code__, t.__defaults__, t.__kwdefaults__, old_dict = old
+                for attr_k, attr_v in list(t.__dict__.items()):
+                    if attr_k not in old_dict or old_dict[attr_k] is not attr_v:
+                        _clear_cached_fn_state(attr_v)
                 t.__dict__.clear()
                 t.__dict__.update(old_dict)
             else:
@@ -230,6 +256,7 @@ def _restore_closures(entry):
             if _holds_nested_code(attr_val, pairs):
                 _clear_cached_fn_state(attr_val)
                 mod_dict.pop(attr_name, None)
+    attr_val = None
     now = _refs(pairs)
     pairs = {k: p for k, p in pairs.items() if now[k] != base[k]}
     if not pairs:

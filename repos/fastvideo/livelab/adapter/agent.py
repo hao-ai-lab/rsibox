@@ -139,16 +139,6 @@ def _show_lines(module, text):
         linecache.cache[f] = (len(text), None, text.splitlines(True), f)
 
 
-def _sync_lines(p, modules):
-    """After a transaction step, each module's lines are the text that is live now."""
-    for m in modules:
-        _show_lines(m, p._live_source(m))
-
-
-def _plan_modules(plan):
-    return list((plan or {}).get("modules", {})) if isinstance(plan, dict) else []
-
-
 def _ctor_args(module):
     """Constructor arguments of a loaded component, when the module keeps them: FastVideo's
     DiTs (`BaseDiT`) keep `config` and `hf_config`, their only arguments."""
@@ -317,7 +307,6 @@ def rebuild(worker, payload):
     out["held_findings"] = held["findings"]
     out["cuda_bytes_released"] = held["cuda_bytes_released"]
     _STATE["rebuilt"].update(files)         # what a later live swap of these modules starts from
-    _STATE["plans"] = {}                    # the old journal's modules: its lines are not live now
     _STATE["participant"] = None            # a new base: the kernel journal starts over
     return {"ok": True, **out, "cost_s": round(time.perf_counter() - t0, 4)}
 
@@ -340,19 +329,6 @@ def rpc(worker, method, payload=None):
                                                "observed": traceback.format_exc()[-3000:],
                                                "expected": "the rebuild runs"}]}
     p = participant(worker)
-    if method == "prepare":
-        # stage compiles the new module text: decorators that read source at definition time
-        # (Triton's @jit, torch.compile) must see the new text, not the file on disk
-        mods = _plan_modules(payload)
-        for m, spec in (payload or {}).get("modules", {}).items():
-            _show_lines(m, spec.get("source"))
-        r = p.prepare(payload)
-        _STATE.setdefault("plans", {})[r.get("txn")] = mods
-        if not r.get("ok"):
-            _sync_lines(p, mods)
-        return r
-    r = getattr(p, method)(payload)
-    if method in ("commit", "abort", "undo"):
-        # an undo also takes back later transactions: resync every module ever planned
-        _sync_lines(p, {m for ms in _STATE.get("plans", {}).values() for m in ms})
-    return r
+    # `core/livelab/kernel/swap.py` manages linecache (including per-version nested keys for
+    # lazy `@triton.jit` builders) during commit/abort/undo without clobbering linecache at prepare.
+    return getattr(p, method)(payload)

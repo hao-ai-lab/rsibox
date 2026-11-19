@@ -101,8 +101,9 @@ not caught by the tamper check.
 ## Not covered
 
 - Code inside `torch.compile` regions (the VAE is compiled in the workload; the DiT is eager),
-  Triton kernel sources (`@triton.jit`: the live swap replaces the Python wrapper, not the compiled kernel),
-  CUDA graphs of the NVFP4 VAE decoder, and native `fastvideo-kernel` code. See
-  `docs/architecture.md` for their restart classes.
+  CUDA graphs of the NVFP4 VAE decoder, and native `fastvideo-kernel` code. Top-level
+  `@triton.jit` and `@triton.autotune` kernel bodies **are** rebuilt in place by
+  `core/livelab/kernel/jit.py` (`R1`, with launch witness and zero-recompile undo); signature or
+  decorator changes block via `jit_target`. See `docs/architecture.md` for their restart classes.
 - Constructors and fields (`constructor_edit`, `new_fields` block in `install`, as in the
   kernel): `rebuild` runs them in the warm workers unless they need new weights.
