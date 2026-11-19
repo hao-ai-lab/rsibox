@@ -2,10 +2,10 @@
 
 Test an edit to a running ML engine without restarting it.
 
-A coding agent (or a person) optimizing vLLM, Megatron-LM or FastVideo pays a full engine restart
-for every idea it tries. FastRSI installs the edit into the warm engine process, proves that the new
-code actually ran, measures it, and undoes it. When an edit cannot be swapped in safely, it refuses
-and says which restart boundary the edit needs.
+A coding agent (or a person) optimizing vLLM, Megatron-LM, FastVideo, SGLang or miles pays a full
+engine restart for every idea it tries. FastRSI installs the edit into the warm engine process,
+proves that the new code actually ran, measures it, and undoes it. When an edit cannot be swapped
+in safely, it refuses and says which restart boundary the edit needs.
 
 ## Why
 
@@ -36,16 +36,24 @@ own. 204 s of the 228 s restart is setup that the edit did not invalidate. The o
 Python 3.11 or newer, no GPU, no third-party packages. From the repository root:
 
 ```sh
+# Check environment, kernel, and engine adapters without importing torch or CUDA
+PYTHONPATH=core/livelab python3 -m fastrsi doctor
+PYTHONPATH=core/livelab python3 -m fastrsi list
+
 # The 11 conformance cases on the toy lab (about 1.5 s on a laptop)
-PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab
-# Installed in a venv, so it runs from any directory
+PYTHONPATH=core/livelab python3 -m fastrsi conformance toy
+
+# Installed in a venv, so `fastrsi` runs from any directory
 python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-python3 -m conformance --lab kernel.toy_lab:ToyLab
-# The same 11 cases on a FastVideo-shaped toy engine with real worker processes (about 5 s)
-PYTHONPATH=core/livelab:repos/fastvideo/livelab python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
+python3 -m fastrsi conformance toy
+
+# The same 11 cases on multi-process CPU engine toys (fastvideo, sglang, miles)
+PYTHONPATH=core/livelab python3 -m fastrsi conformance fastvideo
+PYTHONPATH=core/livelab python3 -m fastrsi conformance sglang
+PYTHONPATH=core/livelab python3 -m fastrsi conformance miles
 ```
 
-Excerpt of the output of the first command:
+Excerpt of the conformance output:
 
 ```
 case                  result  seconds  evidence
@@ -90,10 +98,12 @@ Every engine's lab implements the same calls ([`core/livelab/INTERFACE.md`](core
 
 | Engine | CPU, in CI | Run on GPUs, with a written result | Not there yet |
 |---|---|---|---|
-| Toy lab | kernel unit tests; conformance 11/11 | not applicable | |
-| FastVideo | adapter tests with real worker processes; conformance 11/11 on a FastVideo-shaped toy | conformance on MiniMax H3, 11/11 on 2 GPUs (10/11 on 1: c2 needs two ranks) ([h3-conformance](repos/fastvideo/examples/h3-conformance/README.md)); one live edit ([h3-live-edit](repos/fastvideo/examples/h3-live-edit/README.md)); upstream PR replays ([pr-replay](repos/fastvideo/examples/pr-replay/README.md), [replay-1882](repos/fastvideo/examples/replay-1882/README.md)) | edits inside compiled or graph-captured code; Triton kernels edited in place; 4 ranks |
-| Megatron-LM | lab tests (overlay, mailbox, phase stamps, zygote; torch cases skip) | conformance 11/11 on a 2-layer model, TP 2 on 2 GB200 ([livelab](repos/megatron/livelab/README.md)); a Codex hill-climb ([codex-hillclimb](repos/megatron/examples/codex-hillclimb/README.md)); 8 upstream PRs ([upstream-replay](repos/megatron/examples/upstream-replay/README.md)) | pipeline parallelism; conformance beyond 2 ranks; CUDA graph edits |
-| vLLM | adapter tests on in-process toy ranks; services tests against fake `vllm serve` processes | one walkthrough: three one-line edits on a live Qwen3-8B server, 1 GB200, each against a restart ([live-edit-qwen3](repos/vllm/examples/live-edit-qwen3/README.md)); measurements: the ladder above, zygote fork and weight holder ([kb/costs.md](repos/vllm/kb/costs.md)), Triton rebuild and graph recapture ([docs/architecture.md](repos/vllm/docs/architecture.md)) | conformance on a real vLLM engine (no conformance adapter yet, 0 of 11 cases run); the DeepSeek-V4.1-Flash prefill replay is a plan with the three upstream patches, no receipts yet ([dsv41-prefill](repos/vllm/examples/dsv41-prefill/README.md)); component restart; KV holder |
+| Toy lab | kernel & `fastrsi` unit tests; conformance 11/11 | not applicable | |
+| FastVideo | adapter & services tests with real worker processes; conformance 11/11 on `ToyFastVideoLab` | conformance on MiniMax H3, 11/11 on 1× and 2× GB200 (SP2) via `fastrsi conformance fastvideo --real` ([h3-conformance](repos/fastvideo/examples/h3-conformance/README.md)); live 01–20 hill-climb (1.43–1.45× 1G, 1.51–1.52× 2G) with Patch 20 shared-pool single-shape graph cache (124→243→124→362→124, 0 OOM) ([h3-hillclimb](repos/fastvideo/patches/h3-hillclimb/README.md)); zygote+holder respawn 3.05–3.53 s 1G / 6.23–7.27 s 2G ([kb/costs.md](repos/fastvideo/kb/costs.md)); upstream PR replays ([pr-replay](repos/fastvideo/examples/pr-replay/README.md), [replay-1882](repos/fastvideo/examples/replay-1882/README.md)) | edits inside `torch.compile` (VAE) or VAE NVFP4 CUDA graphs; Triton signature/decorator changes (top-level `@triton.jit` bodies rebuild in place); native `fastvideo-kernel` code; 4 ranks |
+| Megatron-LM | lab tests (overlay, mailbox, phase stamps, zygote; torch cases skip) | conformance 11/11 on 2× GB200 TP2, 4× GB200 TP2/DP2, and 4× GB200 TP4 via `fastrsi conformance megatron --real` ([livelab](repos/megatron/livelab/README.md)); 30/30 paired 8-layer Qwen3-14B dense runs (5.52–5.61 s live vs 41.83–42.27 s fresh, 0% diff), EP4 MoE 8-gate walkthrough, and 10-cycle warm-fork zygote soak ([kb/costs.md](repos/megatron/kb/costs.md)); Codex hill-climb with public `te_wgrad.py` repair ([codex-hillclimb](repos/megatron/examples/codex-hillclimb/README.md)); 8 upstream PRs ([upstream-replay](repos/megatron/examples/upstream-replay/README.md)) | pipeline parallelism > 1; `torch.compile` (`jit_fuser`) and CUDA graph edits; constructors/optimizer rebuild |
+| vLLM | adapter tests on in-process toy ranks; services tests against fake `vllm serve` processes; `live-edit-qwen3` unit checks | conformance 11/11 on 1× B200 eager, 2× B200 TP2, and 1× B200 V2 `FULL_DECODE_ONLY` CUDA graphs (including via `fastrsi conformance vllm --real`) ([adapter](repos/vllm/livelab/adapter/README.md)); live TP2 ↔ EP2 holder-to-holder resharding (`reshard_live.py`: 1.0–2.8 s write, 0.36–1.18 s drain-aware stop, 49.4–52.8 s switch with zygote+kvplan reuse, `max \|Δlogprob\| == 0.0`) and live `--scheduling-policy` switching (0.218–0.374 ms core apply, HTTP 400 FCFS guard) ([kb/costs.md](repos/vllm/kb/costs.md)); Qwen3-8B walkthrough ([live-edit-qwen3](repos/vllm/examples/live-edit-qwen3/README.md)); Triton rebuild, constructor reinit (`#62872`), and V1 selective graph recapture ([docs/architecture.md](repos/vllm/docs/architecture.md)) | DeepSeek-V4.1-Flash prefill replay receipts ([dsv41-prefill](repos/vllm/examples/dsv41-prefill/README.md)); data parallel > 1; component restart; KV holder |
+| SGLang | adapter & zygote tests; conformance 11/11 on `ToySglangLab` | conformance 11/11 on 2× GB200 TP2 Qwen3-0.6B (install median 0.091 s / undo 0.008 s, R1 decode graph recapture 0.839 s, `SglangZygote` 11.75 s; PR #163/#164); v0 Qwen3-8B conformance & overhead receipts plus static coverage survey (49.3% live / 66.1% in `srt`) ([kb/costs.md](repos/sglang/kb/costs.md)) | `dp_size > 1` and `--enable-dp-attention`; PD disaggregation; in-place rebuild (constructors); non-scheduler processes |
+| miles | adapter tests (incl. Ray actor gate); conformance 11/11 on 3-process `ToyMilesLab` (~1.69 s) | 2× GB200 `miles` 0.2.0 multi-actor live swap (0.069 s, `EpochDataBuffer` `code_epoch` drain, coupled S0 weight sync; PR #162); 4× GB200 Qwen3-0.6B GRPO startup baseline (60–95 s cold) ([kb/costs.md](repos/miles/kb/costs.md)) | standalone GPU conformance launcher (`livelab.json` sets `real: null`); in-place rebuild; placement-group respawn |
 
 - **FastVideo replay-1882:** upstream PR #1882, reversed, was swapped into a warm H3 engine (install
   0.086 s), checked 3 times and undone (0.030 s). The witness showed 0 calls: this workload never
@@ -104,7 +114,9 @@ Every engine's lab implements the same calls ([`core/livelab/INTERFACE.md`](core
   only the live check said why: the witness showed 0 calls.
 - **Megatron codex-hillclimb:** 82 iterations on the Qwen3-14B architecture (TP 2, 2 GB200), no
   restart between edits. The 3 kept edits: +5.1% tokens/s/GPU (median of 4 paired rounds); +7.1% on
-  the Qwen3-32B architecture at TP 4. One of them (iteration 12) ran in a private harness, not the lab.
+  the Qwen3-32B architecture at TP 4. Iteration 12 (TE fused weight-gradient accumulation)
+  originally ran in a private harness and is now reproduced in the public lab as a journaled repair
+  ([`te_wgrad.py`](repos/megatron/examples/codex-hillclimb/te_wgrad.py)).
 
 ## How it works
 
@@ -127,40 +139,49 @@ Every engine's lab implements the same calls ([`core/livelab/INTERFACE.md`](core
 | In place, Triton | rebuild `@triton.jit` kernels and their callers; undo restores the compiled binaries | Triton kernel bodies | `core/livelab/kernel/jit.py` | 0.07 s ([vLLM architecture](repos/vllm/docs/architecture.md)) |
 | In place, CUDA graphs | recapture the affected graphs in the live worker | edits inside graph-captured code | `repos/vllm/livelab/adapter/recapture.py` | 3.0-5.6 s per region, 14.4 s all graphs, Qwen3-8B ([vLLM architecture](repos/vllm/docs/architecture.md)) |
 | In process, module rebuild | re-import the edited module and rebuild the live objects | constructors, new fields, module constants | `repos/fastvideo/livelab/services/rebuild.py` | 0.19-1.27 s, 1 GPU ([costs](repos/fastvideo/kb/costs.md)) |
-| New process, warm | fork from a server with imports done; weights served over CUDA IPC by a holder | launch flags, startup code, anything the in-place paths refuse | `core/livelab/forksafe.py`, `repos/*/livelab/services/zygote.py`, `weights.py`, `holder.py`, `repos/megatron/livelab/fastrsi_megatron/zygote.py` | vLLM 7.37 s to `/health`, Qwen3-8B ([costs](repos/vllm/kb/costs.md)); FastVideo respawn 4.78 s and 5.62 s, weights held ([costs](repos/fastvideo/kb/costs.md)); Megatron 15.0-16.5 s to first step, 14B ([costs](repos/megatron/kb/costs.md)) |
-| New layout, same weights | reshard held weights between TP, DP and EP in memory | parallelism changes | `repos/vllm/livelab/services/reshard.py` | not yet measured here |
+| New process, warm | fork from a server with imports done; weights served over CUDA IPC by a holder | launch flags, startup code, anything the in-place paths refuse | `core/livelab/forksafe.py`, `repos/*/livelab/services/zygote.py`, `weights.py`, `holder.py`, `repos/megatron/livelab/fastrsi_megatron/zygote.py` | vLLM 7.37 s to `/health`, Qwen3-8B ([costs](repos/vllm/kb/costs.md)); FastVideo respawn 3.05–3.53 s (1G) / 6.23–7.27 s (2G), weights held ([costs](repos/fastvideo/kb/costs.md)); Megatron 15.0–16.5 s to first step, 14B ([costs](repos/megatron/kb/costs.md)) |
+| New layout, same weights | reshard held weights between TP and EP in memory over CUDA IPC | expert-parallelism layout switches | `repos/vllm/livelab/services/reshard_live.py` | 1.0–2.8 s write, 0.36–1.18 s drain-aware stop, 49.4–52.8 s switch with zygote+kvplan reuse (TP2 ↔ EP2, 2× B200; [costs](repos/vllm/kb/costs.md)) |
 | Full restart | new process, warm disk caches | anything else | | 228 s in the vLLM ladder above |
 
 ## Repository layout
 
 ```
 core/livelab/        shared runtime, standard library only
-  kernel/            transaction kernel (locate, swap, witness, journal, coordinator) and the toy lab
+  kernel/            transaction kernel (locate, swap, witness, journal, jit, reinit, coordinator) and the toy lab
+  fastrsi/           shared stdlib kit (BaseLab, diffs, ipc, proc, harness, unified CLI)
   conformance/       the 11 cases every lab must pass
   INTERFACE.md       the lab interface
 core/agents/         prompts for the developer, toolsmith and orchestrator agents
-repos/<engine>/      vllm, fastvideo, megatron
+repos/<engine>/      vllm, fastvideo, megatron, sglang, miles
   docs/, kb/         architecture and restart boundaries; measured costs, each with its source
   livelab/           the engine's lab, built on core/livelab
   examples/<name>/   walkthroughs of replayed changes
+scripts/             fact and README consistency checks (verify_facts.py)
 template/            scaffold for a new engine
 ```
 
 ## Tests
 
-What CPU CI runs (`.github/workflows/cpu-tests.yml`), next to the two conformance runs of the
-quickstart; torch, vLLM and Linux-only cases skip on a laptop:
+What CPU CI runs (`.github/workflows/cpu-tests.yml`), next to the `fastrsi` doctor and conformance
+runs of the quickstart; torch, vLLM and Linux-only cases skip on a laptop:
 
 ```sh
+PYTHONPATH=core/livelab python3 -m fastrsi doctor
 python3 -m unittest discover -s core/livelab/kernel -t core/livelab
+python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab
 python3 -m unittest discover -s core/livelab -p 'test_forksafe.py'
 (cd core/livelab && python3 -m unittest discover -s conformance -t .)
+python3 -m unittest discover -s scripts -p 'test_*.py'
+python3 scripts/verify_facts.py
 python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab
 python3 -m pytest -rs repos/vllm/livelab/services            # needs pytest
 python3 -m unittest discover -s repos/fastvideo/livelab/adapter -t repos/fastvideo/livelab
 python3 -m unittest discover -s repos/fastvideo/livelab/services -t repos/fastvideo/livelab
 python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab
 python3 -m unittest discover -s repos/megatron/tools
+python3 -m unittest discover -s repos/sglang/livelab/adapter -t repos/sglang/livelab
+python3 -m unittest discover -s repos/sglang/livelab/services -t repos/sglang/livelab
+python3 -m unittest discover -s repos/miles/livelab/adapter -t repos/miles/livelab
 ```
 
 Rules for contributors, people and agents: [`AGENTS.md`](AGENTS.md).
