@@ -40,8 +40,10 @@ import traceback
 
 TAG = "FASTRSI_LIVE_RECONFIG"
 ENV = "FASTRSI_LIVE_RECONFIG_DIR"
+POLICY_FILE = "policy.json"
 LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy")
 _AGENT = []
+_POLICY_CACHE = {"path": None, "mtime_ns": None, "policy": None}
 
 
 def _write_json(path, payload):
@@ -49,6 +51,14 @@ def _write_json(path, payload):
     with open(tmp, "w") as f:
         json.dump(payload, f, default=str)
     os.replace(tmp, path)
+
+
+def _read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 # -- validation (shared by agent and client) ----------------------------------------------
@@ -89,16 +99,47 @@ def _switch_policy(scheduler, value):
     policy = SchedulingPolicy(value)
     if policy == scheduler.policy:
         return
-    # Stage both replacements before publishing either one on the engine-loop thread.
-    queues = []
-    for old in (scheduler.waiting, scheduler.kv_holding_waiting):
+    # Stage all replacements before publishing any on the engine-loop thread.
+    queue_attrs = [
+        attr for attr in ("waiting", "kv_holding_waiting")
+        if getattr(scheduler, attr, None) is not None
+    ]
+    rebuilt = []
+    for attr in queue_attrs:
+        old = getattr(scheduler, attr)
         queue = create_request_queue(policy)
         for request in sorted(old, key=lambda r: r.arrival_time):
             queue.add_request(request)
-        queues.append(queue)
-    scheduler.waiting, scheduler.kv_holding_waiting = queues
+        rebuilt.append((attr, queue))
+    for attr, queue in rebuilt:
+        setattr(scheduler, attr, queue)
     scheduler.policy = policy
-    scheduler.scheduler_config.policy = value
+    if getattr(scheduler, "scheduler_config", None) is not None:
+        scheduler.scheduler_config.policy = value
+
+
+def _sync_api_policy(obj):
+    """In the parent API server process: keep `scheduler_config.policy` synced with the engine
+    core's live policy (`<root>/policy.json`) so `/v1/completions` priority validation matches."""
+    root = os.environ.get(ENV)
+    if not root:
+        return
+    path = os.path.join(root, POLICY_FILE)
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime_ns, st.st_ino, st.st_size)
+    except OSError:
+        return
+    if _POLICY_CACHE["path"] != path or _POLICY_CACHE["mtime_ns"] != sig:
+        data = _read_json(path)
+        if not isinstance(data, dict) or data.get("scheduling_policy") not in ("fcfs", "priority"):
+            return
+        _POLICY_CACHE.update(path=path, mtime_ns=sig, policy=data["scheduling_policy"])
+    policy = _POLICY_CACHE["policy"]
+    for holder in (obj, getattr(obj, "vllm_config", None), getattr(obj, "input_processor", None)):
+        sc = getattr(holder, "scheduler_config", None)
+        if sc is not None and getattr(sc, "policy", None) != policy:
+            sc.policy = policy
 
 
 class _Job:
@@ -157,6 +198,9 @@ class Agent:
         s = self.core.scheduler
         if "scheduling_policy" in values:
             _switch_policy(s, values["scheduling_policy"])
+            if self.root:
+                _write_json(os.path.join(self.root, POLICY_FILE),
+                            {"scheduling_policy": values["scheduling_policy"]})
         if "max_num_batched_tokens" in values:
             s.max_num_scheduled_tokens = int(values["max_num_batched_tokens"])
         if "max_num_seqs" in values:
@@ -253,13 +297,47 @@ def _patch_core(mod):
     P._fastrsi_live_reconfig = True
 
 
+def _patch_api_entry(mod, cls_names, method_name):
+    for cls_name in cls_names:
+        cls = getattr(mod, cls_name, None)
+        if cls is None or getattr(cls, "_fastrsi_live_policy", False):
+            continue
+        orig = getattr(cls, method_name, None)
+        if orig is None:
+            continue
+
+        def wrapped(self, *a, _orig=orig, **k):
+            _sync_api_policy(self)
+            return _orig(self, *a, **k)
+
+        wrapped.__wrapped__ = orig
+        setattr(cls, method_name, wrapped)
+        cls._fastrsi_live_policy = True
+
+
+def _patch_input_processor(mod):
+    _patch_api_entry(mod, ("InputProcessor", "Processor"), "process_inputs")
+
+
+def _patch_async_llm(mod):
+    _patch_api_entry(mod, ("AsyncLLM",), "add_request")
+
+
 class _After(importlib.abc.MetaPathFinder):
-    """Patch vllm.v1.engine.core right after it is imported, via the finders after this one
+    """Patch target vLLM modules right after they are imported, via the finders after this one
     (an overlay finder first, then the installed package). Only the finders after it: a hook
     before it that asks every finder would otherwise call back into it without end."""
 
+    TARGETS = {
+        "vllm.v1.engine.core": _patch_core,
+        "vllm.v1.engine.input_processor": _patch_input_processor,
+        "vllm.v1.engine.processor": _patch_input_processor,
+        "vllm.v1.engine.async_llm": _patch_async_llm,
+    }
+
     def find_spec(self, name, path, target=None):
-        if name != "vllm.v1.engine.core":
+        patcher = self.TARGETS.get(name)
+        if patcher is None:
             return None
         spec = None
         finders = list(sys.meta_path)
@@ -276,16 +354,17 @@ class _After(importlib.abc.MetaPathFinder):
 
         def exec_module(module):
             orig(module)
-            _patch_core(module)
+            patcher(module)
         spec.loader.exec_module = exec_module
         return spec
 
 
 def install():
     """Called by live_site/sitecustomize.py when ENV is set."""
-    if "vllm.v1.engine.core" in sys.modules:
-        _patch_core(sys.modules["vllm.v1.engine.core"])
-    elif not any(isinstance(f, _After) for f in sys.meta_path):
+    for mod_name, patcher in _After.TARGETS.items():
+        if mod_name in sys.modules:
+            patcher(sys.modules[mod_name])
+    if not any(isinstance(f, _After) for f in sys.meta_path):
         sys.meta_path.insert(0, _After())
 
 

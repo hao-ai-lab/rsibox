@@ -87,7 +87,7 @@ def moe_kind(name, shape):
     return None
 
 
-def plan(src, dst):
+def plan(src, dst, *, src_ep=None, dst_ep=None):
     """src, dst: one dict per rank {name: {"kind": "param"|"buffer", "shape": [...],
     "dtype": str}}. Returns {"copy": [names], "moe": {name: "w13"|"w2"}, "keep": [buffer names],
     "ignored_src": [src-only buffer names], "findings": [...]}; findings mean refuse."""
@@ -119,7 +119,8 @@ def plan(src, dst):
                               "expected": "one dtype (BF16 MoE only)"})
             else:
                 problem = moe_mesh_problem(kind, [m["shape"] for m in metas_s],
-                                           [m["shape"] for m in metas_d])
+                                           [m["shape"] for m in metas_d],
+                                           src_ep=src_ep, dst_ep=dst_ep)
                 if problem:
                     found.append({"check": "reshard_live_moe_shape", "observed": f"{name}: "
                                   f"{problem}", "expected": "same experts and intermediate size"})
@@ -148,13 +149,28 @@ def plan(src, dst):
     return out
 
 
+def _key_moe_mesh(keys, world):
+    """Extract `(ep_size_or_None, placement_strategy)` from `WeightCacheKey`s."""
+    if not keys:
+        return None, "linear"
+    k0 = keys[0]
+    placement = getattr(k0, "expert_placement_strategy", None) or "linear"
+    ep_flag = getattr(k0, "enable_expert_parallel", None)
+    if ep_flag is False:
+        return 1, placement
+    if ep_flag is True:
+        explicit = getattr(k0, "ep_size", None)
+        return (int(explicit) if explicit else world), placement
+    return None, placement
+
+
 def moe_mesh(kind, shapes):
     """(experts_per_rank, local_intermediate, hidden) of per-rank expert tensor shapes."""
     e, a, b = shapes[0]
     return (e, a // 2, b) if kind == "w13" else (e, b, a)
 
 
-def moe_mesh_problem(kind, src_shapes, dst_shapes):
+def moe_mesh_problem(kind, src_shapes, dst_shapes, *, src_ep=None, dst_ep=None):
     world = len(src_shapes)
     se, si, sh = moe_mesh(kind, src_shapes)
     de, di, dh = moe_mesh(kind, dst_shapes)
@@ -163,23 +179,30 @@ def moe_mesh_problem(kind, src_shapes, dst_shapes):
         return "ranks hold different shapes"
     if sh != dh:
         return f"hidden {sh} vs {dh}"
-    src_ep, dst_ep = moe_ep(se, si, de, di, world)
-    if src_ep is None:
+    r_src_ep, r_dst_ep = moe_ep(se, si, de, di, world, src_ep=src_ep, dst_ep=dst_ep)
+    if r_src_ep is None:
         return f"source {se}x{si}, target {de}x{di} on {world} ranks fit no (moe_tp, ep) mesh"
     return None
 
 
-def moe_ep(src_e, src_i, dst_e, dst_i, world):
-    """(src_ep, dst_ep) such that experts * ep and intermediate * moe_tp agree on both sides."""
-    for src_ep in range(1, world + 1):
-        if world % src_ep:
+def moe_ep(src_e, src_i, dst_e, dst_i, world, *, src_ep=None, dst_ep=None):
+    """(src_ep, dst_ep) such that experts * ep and intermediate * moe_tp agree on both sides.
+
+    When `src_ep` and/or `dst_ep` are provided (e.g. from `WeightCacheKey`), constrains the
+    search to those values so EP->EP placement swaps and 4-GPU meshes do not pick an ambiguous
+    smaller divisor pair.
+    """
+    src_candidates = [int(src_ep)] if src_ep is not None else list(range(1, world + 1))
+    dst_candidates = [int(dst_ep)] if dst_ep is not None else list(range(1, world + 1))
+    for s_ep in src_candidates:
+        if s_ep < 1 or world % s_ep:
             continue
-        for dst_ep in range(1, world + 1):
-            if world % dst_ep:
+        for d_ep in dst_candidates:
+            if d_ep < 1 or world % d_ep:
                 continue
-            if (src_e * src_ep == dst_e * dst_ep and
-                    src_i * (world // src_ep) == dst_i * (world // dst_ep)):
-                return src_ep, dst_ep
+            if (src_e * s_ep == dst_e * d_ep and
+                    src_i * (world // s_ep) == dst_i * (world // d_ep)):
+                return s_ep, d_ep
     return None, None
 
 
@@ -274,12 +297,15 @@ class MoeLayout:
         return self._apply(x, kind, inverse=False)
 
 
-def moe_transpose(src, kind, src_ep, dst_ep, devices=None, placement="linear"):
+def moe_transpose(src, kind, src_ep, dst_ep, devices=None, placement="linear", *,
+                  src_placement=None, dst_placement=None):
     """Checkpoint-layout expert tensors, one per source rank ([E/src_ep, 2*I/src_tp, H] for w13 with
     gate rows before up rows, [E/src_ep, H, I/src_tp] for w2) -> one per target rank for the
     (world/dst_ep, dst_ep) mesh. Rank r is ep rank r // moe_tp and moe-tp rank r % moe_tp (vLLM's
     order). `devices[r]` is where target rank r's tensor is built."""
     import torch
+    s_place = src_placement or placement
+    d_place = dst_placement or placement
     world = len(src)
     src_tp, dst_tp = world // src_ep, world // dst_ep
     e_src = src[0].shape[0]
@@ -297,10 +323,10 @@ def moe_transpose(src, kind, src_ep, dst_ep, devices=None, placement="linear"):
         filled = torch.zeros(shape[0], dtype=torch.int64)
         slots = {}                                     # src ep rank -> [(dst slot, src slot)]
         for g in range(num_experts):
-            ep_d, slot_d = map_global_expert_to_ep(g, num_experts, dst_ep, placement)
+            ep_d, slot_d = map_global_expert_to_ep(g, num_experts, dst_ep, d_place)
             if ep_d != d_ep:
                 continue
-            ep_s, slot_s = map_global_expert_to_ep(g, num_experts, src_ep, placement)
+            ep_s, slot_s = map_global_expert_to_ep(g, num_experts, src_ep, s_place)
             slots.setdefault(ep_s, []).append((slot_d, slot_s))
         lo, hi = d_tp * i_dst, (d_tp + 1) * i_dst
         for ep_s, pairs in slots.items():
@@ -420,7 +446,8 @@ def _sync_all(torch):
         torch.cuda.synchronize(d)
 
 
-def execute(src, dst, p, src_layout, dst_layout):
+def execute(src, dst, p, src_layout, dst_layout, *, src_ep=None, dst_ep=None,
+            src_placement="linear", dst_placement="linear"):
     """Write the target group in place following plan `p`. Returns byte counts and seconds."""
     import torch
     world = len(src)
@@ -438,17 +465,22 @@ def execute(src, dst, p, src_layout, dst_layout):
         d_shapes = [list(dst[r][name][1].shape) for r in range(world)]
         se, si, _ = moe_mesh(kind, s_shapes)
         de, di, _ = moe_mesh(kind, d_shapes)
-        src_ep, dst_ep = moe_ep(se, si, de, di, world)
+        r_src_ep, r_dst_ep = moe_ep(se, si, de, di, world, src_ep=src_ep, dst_ep=dst_ep)
+        if r_src_ep is None:
+            raise ValueError(f"{name}: source {se}x{si}, target {de}x{di} on {world} ranks fit no "
+                             f"(moe_tp, ep) mesh for src_ep={src_ep}, dst_ep={dst_ep}")
         canon = [src_layout.decode(src[r][name][1], kind) for r in range(world)]
-        outs = moe_transpose(canon, kind, src_ep, dst_ep,
-                             devices=[dst[r][name][1].device for r in range(world)])
+        outs = moe_transpose(canon, kind, r_src_ep, r_dst_ep,
+                             devices=[dst[r][name][1].device for r in range(world)],
+                             src_placement=src_placement, dst_placement=dst_placement)
         for r in range(world):
             d = dst[r][name][1]
             d.copy_(dst_layout.encode(outs[r], kind))
             rep["moe_bytes"] += _bytes(d)
         # bytes whose source rank differs from their target rank (NVLink peer copies)
+        cross_rank = r_src_ep != r_dst_ep or (r_src_ep > 1 and src_placement != dst_placement)
         rep["moe_cross_gpu_bytes"] += sum(_bytes(o) for o in outs) * (world - 1) // world \
-            if src_ep != dst_ep else 0
+            if cross_rank else 0
         del canon, outs
     _sync_all(torch)
     t2 = time.perf_counter()
@@ -498,9 +530,12 @@ def reshard_groups(src_dir, src_keys, dst_dir, dst_keys, src_layout, dst_layout,
                             f"{len(dst_keys)} ranks on {torch.cuda.device_count()} GPUs",
                             "expected": "the same GPUs, one rank each"}]
         return 2, rep
+    src_ep, src_placement = _key_moe_mesh(src_keys, len(src_keys))
+    dst_ep, dst_placement = _key_moe_mesh(dst_keys, len(dst_keys))
+    rep["placement"] = {"src": src_placement, "dst": dst_placement}
     src, dst = map_group(src_dir, src_keys), map_group(dst_dir, dst_keys)
     phase("map")
-    p = plan(metadata(src), metadata(dst))
+    p = plan(metadata(src), metadata(dst), src_ep=src_ep, dst_ep=dst_ep)
     rep["plan"] = {k: len(v) for k, v in p.items() if k != "findings"}
     rep["ignored_src_buffers"] = p["ignored_src"]
     phase("plan")
@@ -508,7 +543,8 @@ def reshard_groups(src_dir, src_keys, dst_dir, dst_keys, src_layout, dst_layout,
         rep["findings"] = p["findings"][:20]
         rep["note"] = "refused before writing; target group unchanged"
         return 2, rep
-    rep.update(execute(src, dst, p, src_layout, dst_layout))
+    rep.update(execute(src, dst, p, src_layout, dst_layout, src_ep=src_ep, dst_ep=dst_ep,
+                       src_placement=src_placement, dst_placement=dst_placement))
     phase("write")
     rep["buffers_differ_from_src"] = buffers_differ(src, dst, p["keep"])[:20]
     if verify_dir:

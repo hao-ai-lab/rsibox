@@ -103,3 +103,93 @@ def test_policy_switch_preserves_both_queues_and_changes_dequeue_order():
     before = agent.scheduler_view()
     assert not agent.apply({"max_num_seqs": 1, "scheduling_policy": "fifo"})["ok"]
     assert agent.scheduler_view() == before
+
+
+def test_policy_switch_handles_missing_kv_holding_waiting_and_syncs_api_server(tmp_path, monkeypatch):
+    """Input: (a) a scheduler lacking `kv_holding_waiting` (like FakeCore / older vLLM builds);
+    (b) an API server `InputProcessor` / `AsyncLLM` booted under `fcfs` that rejects `priority != 0`.
+    Expected: `Agent.apply({"scheduling_policy": "priority"})` succeeds without `AttributeError`,
+    writes `<root>/policy.json`, and the hooked API server accepts `priority=-1`; switching back
+    to `fcfs` updates the API server again so `priority=-1` is rejected."""
+    import enum
+    import types
+    import pytest
+    sys.path.insert(0, str(HERE))
+    import live_reconfig
+
+    class FakePolicy(enum.Enum):
+        FCFS = "fcfs"
+        PRIORITY = "priority"
+
+    class FakeQueue(list):
+        def __init__(self, policy):
+            super().__init__()
+            self.policy = policy
+
+        def add_request(self, req):
+            self.append(req)
+            if self.policy == FakePolicy.PRIORITY:
+                self.sort(key=lambda r: (r.priority, r.arrival_time))
+            else:
+                self.sort(key=lambda r: r.arrival_time)
+
+    rq_mod = types.ModuleType("vllm.v1.core.sched.request_queue")
+    rq_mod.SchedulingPolicy = FakePolicy
+    rq_mod.create_request_queue = lambda p: FakeQueue(p)
+    for mod_name in ("vllm", "vllm.v1", "vllm.v1.core", "vllm.v1.core.sched"):
+        monkeypatch.setitem(sys.modules, mod_name, types.ModuleType(mod_name))
+    monkeypatch.setitem(sys.modules, "vllm.v1.core.sched.request_queue", rq_mod)
+
+    # Child EngineCoreProc scheduler (no kv_holding_waiting attribute!)
+    core_cfg = types.SimpleNamespace(policy="fcfs", enable_chunked_prefill=True)
+    waiting = FakeQueue(FakePolicy.FCFS)
+    waiting.add_request(types.SimpleNamespace(request_id="early", arrival_time=1, priority=5))
+    waiting.add_request(types.SimpleNamespace(request_id="urgent", arrival_time=2, priority=-1))
+    sched = types.SimpleNamespace(
+        policy=FakePolicy.FCFS, scheduler_config=core_cfg, running=[], waiting=waiting,
+        max_num_running_reqs=4, max_num_scheduled_tokens=64,
+    )
+    core = types.SimpleNamespace(
+        scheduler=sched,
+        vllm_config=types.SimpleNamespace(
+            scheduler_config=core_cfg, model_config=types.SimpleNamespace(max_model_len=64)
+        ),
+    )
+
+    # Parent API server process with its own separate VllmConfig (booted under fcfs)
+    api_sc = types.SimpleNamespace(policy="fcfs")
+    api_vllm_cfg = types.SimpleNamespace(scheduler_config=api_sc)
+    ip_mod = types.ModuleType("vllm.v1.engine.input_processor")
+
+    class FakeInputProcessor:
+        def __init__(self):
+            self.vllm_config = api_vllm_cfg
+
+        def process_inputs(self, request_id, priority=0):
+            if priority != 0 and self.vllm_config.scheduler_config.policy != "priority":
+                raise ValueError("Priority scheduling is not enabled.")
+            return (request_id, priority)
+
+    ip_mod.InputProcessor = FakeInputProcessor
+    live_reconfig._patch_input_processor(ip_mod)
+    ip = FakeInputProcessor()
+
+    monkeypatch.setenv(live_reconfig.ENV, str(tmp_path))
+    live_reconfig._POLICY_CACHE.update(path=None, mtime_ns=None, policy=None)
+    agent = live_reconfig.Agent(core, str(tmp_path))
+
+    with pytest.raises(ValueError, match="Priority scheduling is not enabled"):
+        ip.process_inputs("r0", priority=-1)
+
+    ack = agent.apply({"scheduling_policy": "priority"})
+    assert ack["ok"] and ack["after"]["scheduling_policy"] == "priority"
+    assert [r.request_id for r in sched.waiting] == ["urgent", "early"]
+    assert ip.process_inputs("r1", priority=-1) == ("r1", -1)
+    assert api_sc.policy == "priority"
+
+    ack_back = agent.apply({"scheduling_policy": "fcfs"})
+    assert ack_back["ok"] and ack_back["after"]["scheduling_policy"] == "fcfs"
+    assert [r.request_id for r in sched.waiting] == ["early", "urgent"]
+    with pytest.raises(ValueError, match="Priority scheduling is not enabled"):
+        ip.process_inputs("r2", priority=-1)
+    assert api_sc.policy == "fcfs"

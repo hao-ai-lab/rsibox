@@ -987,6 +987,12 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     if reshard:     # the target group must hold the weights before PID stops
         reshard_report = reshard_target(launcher_args, state, old_vargv, new_vargv,
                                         old_parsed, new_parsed, env, reconfig)
+        if load_format(launcher_args, new_parsed) == "ipc_cache":
+            preflight_report["weights_probe"] = weights.probe(
+                socket_dir(launcher_args, new_parsed),
+                env.get("CUDA_VISIBLE_DEVICES"),
+                new_parsed["args"]["tensor_parallel_size"],
+            )
     t_stop = time.perf_counter()
     stop_info = stop_engine(launcher_args.pid, port=old_port, marker=state.get("live_dir"))
     if not stop_info["stopped"]:

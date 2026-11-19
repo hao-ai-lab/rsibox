@@ -241,6 +241,61 @@ def test_reshardable_and_group_dir_round_trip():
                                   "expert_placement_strategy": "round_robin"}) == "/s/w.eprr"
 
 
+def test_moe_ep_and_key_mesh_disambiguate_ep_swaps_and_4gpu_meshes():
+    """Input: (a) 2-GPU EP2 linear -> EP2 round_robin (128x512 -> 128x512);
+    (b) 4-GPU (TP4, EP2) -> (TP4, EP4) (128x256 -> 64x512).
+    Expected: constrained `moe_ep` returns `(2, 2)` and `(2, 4)` rather than the ambiguous
+    smaller divisor pairs `(1, 1)` and `(1, 2)`, and `_key_moe_mesh` extracts EP & placement."""
+    from types import SimpleNamespace
+    assert RL.moe_ep(128, 512, 128, 512, 2, src_ep=2, dst_ep=2) == (2, 2)
+    assert RL.moe_ep(128, 256, 64, 512, 4, dst_ep=4) == (2, 4)
+    assert RL.moe_ep(128, 256, 64, 512, 4, src_ep=2, dst_ep=4) == (2, 4)
+    k_tp = [SimpleNamespace(enable_expert_parallel=False, expert_placement_strategy="linear")] * 2
+    k_rr = [SimpleNamespace(enable_expert_parallel=True, expert_placement_strategy="round_robin")] * 2
+    assert RL._key_moe_mesh(k_tp, 2) == (1, "linear")
+    assert RL._key_moe_mesh(k_rr, 2) == (2, "round_robin")
+    p = RL.plan([ep2_rank(), ep2_rank()], [ep2_rank(), ep2_rank()], src_ep=2, dst_ep=2)
+    assert p["findings"] == [] and set(p["moe"]) == {
+        "layers.0.mlp.experts.w13_weight", "layers.0.mlp.experts.w2_weight"
+    }
+
+
+@pytest.mark.skipif(not HAS_TORCH, reason="needs torch")
+@pytest.mark.parametrize("world,src_ep,dst_ep,src_place,dst_place", [
+    (2, 1, 2, "linear", "round_robin"),       # TP2 -> EP2 round_robin (.eprr)
+    (2, 2, 1, "round_robin", "linear"),       # EP2 round_robin -> TP2
+    (2, 2, 2, "linear", "round_robin"),       # EP2 linear -> EP2 round_robin
+    (2, 2, 2, "round_robin", "linear"),       # EP2 round_robin -> EP2 linear
+    (4, 2, 4, "linear", "round_robin"),       # 4-GPU (TP4,EP2) -> (TP4,EP4) round_robin
+])
+def test_execute_and_transpose_honor_src_and_dst_expert_placement(
+    world, src_ep, dst_ep, src_place, dst_place
+):
+    """Input: experts sharded under `(src_ep, src_place)` and transposed via `execute()` into
+    `(dst_ep, dst_place)`. Expected: bit-exact match with direct target sharding on every rank
+    and nonzero `moe_cross_gpu_bytes` even on same-EP placement swaps (`EP2 linear <-> rr`)."""
+    import torch
+    g = torch.Generator().manual_seed(7)
+    full13 = torch.randn(8, 2 * 64, 32, generator=g).to(torch.bfloat16)
+    full2 = torch.randn(8, 32, 64, generator=g).to(torch.bfloat16)
+    s13, s2 = shards(full13, full2, world, src_ep, src_place)
+    d13, d2 = shards(full13, full2, world, dst_ep, dst_place)
+    src_group = [{"e.w13_weight": ("param", s13[r]), "e.w2_weight": ("param", s2[r])}
+                 for r in range(world)]
+    dst_group = [{"e.w13_weight": ("param", torch.zeros_like(d13[r])),
+                  "e.w2_weight": ("param", torch.zeros_like(d2[r]))}
+                 for r in range(world)]
+    p = RL.plan(RL.metadata(src_group), RL.metadata(dst_group), src_ep=src_ep, dst_ep=dst_ep)
+    assert p["findings"] == []
+    id_layout = RL.MoeLayout("triton")
+    rep = RL.execute(src_group, dst_group, p, id_layout, id_layout,
+                     src_ep=src_ep, dst_ep=dst_ep, src_placement=src_place, dst_placement=dst_place)
+    assert rep["moe_cross_gpu_bytes"] > 0
+    for r in range(world):
+        assert torch.equal(dst_group[r]["e.w13_weight"][1], d13[r])
+        assert torch.equal(dst_group[r]["e.w2_weight"][1], d2[r])
+
+
 HOLDER_ARGV_CASE = textwrap.dedent("""
     import json, sys
     sys.path.insert(0, sys.argv[1])
