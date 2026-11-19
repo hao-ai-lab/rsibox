@@ -7,6 +7,8 @@ Provides shared, zero-dependency building blocks for FastRSI live labs:
 - `hooks`: stack-safe `MetaPathFinder` import hooks and source overlays (`OverlayFinder`).
 - `harness`: `edit_once`, module source lookup, `PackageOverlay`, fresh subprocess runner,
   and canonical `fail_apply` / `fail_commit` / `tamper` fault injection.
+- `lab`: `BaseLab` (`LabUnderTest`), `RecaptureCoordinator`, and `RoleEndpoint`.
+- `cli`: unified engine-agnostic CLI (`fastrsi list | conformance | survey | ctl | doctor`).
 """
 import os
 import sys
@@ -36,6 +38,7 @@ from .ipc import (
     unix_json_call,
     unix_json_stream,
 )
+from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
 from .proc import (
     descendants,
     direct_children,
@@ -84,11 +87,14 @@ def bootstrap_livelab(
 
 __all__ = [
     "AfterImportHook",
+    "BaseLab",
     "FileChannelServer",
     "MAX_SOCK_PATH",
     "MailboxServer",
     "OverlayFinder",
     "PackageOverlay",
+    "RecaptureCoordinator",
+    "RoleEndpoint",
     "UnixJsonServer",
     "atomic_write_json",
     "bootstrap_livelab",
