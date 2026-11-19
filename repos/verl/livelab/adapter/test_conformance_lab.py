@@ -6,9 +6,13 @@ Run from repo root:
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from adapter import conformance_lab as CL
 
@@ -98,6 +102,119 @@ class ConformanceHarnessTest(unittest.TestCase):
         live = lab._output({"steps_run": [{"metrics": {"critic/score/mean": 0.5, "actor/pg_loss": 0.008408404886722565}, "rollouts": str(tmp / "1.jsonl")}]})
         self.assertEqual(live, out)
 
+    def test_launch_environment_maps_all_flags_and_strips_leading_separator(self):
+        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-cli-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        gate_dir = tmp / "gate"
+        reward_py = tmp / "reward.py"
+        reward_py.write_text("def compute_score(**kw): return 1.0\n", encoding="utf-8")
+        launch_cmd = "python3 -m tools.cli train --gate $GATE -- actor.x=1 reward.path=$REWARD"
+
+        env = CL.VerlConformanceLab.launch_environment([
+            "--",
+            "--gate", str(gate_dir),
+            "--reward", str(reward_py),
+            "--launch", launch_cmd,
+            "--check-timeout", "420",
+            "--boot-timeout", "2400",
+        ])
+        self.assertEqual(env["FASTRSI_VERL_GATE"], str(gate_dir.resolve()))
+        self.assertEqual(env["FASTRSI_VERL_REWARD"], os.path.realpath(str(reward_py)))
+        self.assertEqual(env["FASTRSI_VERL_LAUNCH"], launch_cmd)
+        self.assertEqual(env["FASTRSI_VERL_CHECK_TIMEOUT"], "420.0")
+        self.assertEqual(env["FASTRSI_VERL_BOOT_TIMEOUT"], "2400.0")
+
+        minimal = CL.VerlConformanceLab.launch_environment(["--gate", str(gate_dir), "--reward", str(reward_py)])
+        self.assertEqual(set(minimal), {"FASTRSI_VERL_GATE", "FASTRSI_VERL_REWARD"})
+
+    def test_gpus_busy_scopes_nvidia_smi_to_cuda_visible_devices(self):
+        lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
+        seen_cmds = []
+
+        def fake_run(cmd, **_kw):
+            seen_cmds.append(cmd)
+            return types.SimpleNamespace(stdout="1234\n")
+
+        with mock.patch.object(CL.subprocess, "run", side_effect=fake_run):
+            with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,2"}, clear=False):
+                self.assertEqual(lab._gpus_busy(), ["1234"])
+            self.assertEqual(
+                seen_cmds[-1],
+                ["nvidia-smi", "-i", "0,2", "--query-compute-apps=pid", "--format=csv,noheader"],
+            )
+
+            seen_cmds.clear()
+            with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": ""}, clear=False):
+                self.assertEqual(lab._gpus_busy(), [])
+            self.assertEqual(seen_cmds, [])
+
+            clean_env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+            with mock.patch.dict(os.environ, clean_env, clear=True):
+                self.assertEqual(lab._gpus_busy(), ["1234"])
+            self.assertEqual(
+                seen_cmds[-1],
+                ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+            )
+
+    def test_overlay_handles_package_init_and_reward_and_reap_clears_jobs(self):
+        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-ov-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pkg_root = tmp / "site"
+        pkg = pkg_root / "verlovpkg"
+        pkg.mkdir(parents=True)
+        (pkg / "__init__.py").write_text("TAG = 'base'\n", encoding="utf-8")
+        (pkg / "leaf.py").write_text("VAL = 1\n", encoding="utf-8")
+        reward = tmp / "reward.py"
+        reward.write_text("SCORE = 1.0\n", encoding="utf-8")
+        other = tmp / "other.py"
+        other.write_text("X = 1\n", encoding="utf-8")
+
+        sys.path.insert(0, str(pkg_root))
+        self.addCleanup(sys.path.remove, str(pkg_root))
+        self.addCleanup(lambda: [sys.modules.pop(k, None) for k in list(sys.modules) if k == "verlovpkg" or k.startswith("verlovpkg.")])
+
+        lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
+        lab.reward = os.path.realpath(str(reward))
+        ov_tmp = tmp / "out"
+        ov_tmp.mkdir()
+        overlay, rew_out = lab._overlay(
+            str(ov_tmp),
+            {
+                "verlovpkg": "TAG = 'patched'\n",
+                "verlovpkg.leaf": "VAL = 2\n",
+                str(reward): "SCORE = 2.0\n",
+            },
+        )
+        self.assertEqual(Path(overlay, "verlovpkg", "__init__.py").read_text(encoding="utf-8"), "TAG = 'patched'\n")
+        self.assertEqual(Path(overlay, "verlovpkg", "leaf.py").read_text(encoding="utf-8"), "VAL = 2\n")
+        self.assertEqual(Path(rew_out).read_text(encoding="utf-8"), "SCORE = 2.0\n")
+        self.assertEqual((pkg / "__init__.py").read_text(encoding="utf-8"), "TAG = 'base'\n")
+        with self.assertRaises(ValueError):
+            lab._overlay(str(ov_tmp), {str(other): "X = 2\n"})
+
+        # _reap_job waits and pops finished Popen entries from _JOBS cleanly (no ResourceWarning).
+        gate = tmp / "gate"
+        gate.mkdir()
+        CL._JOBS[str(gate)] = subprocess.Popen([sys.executable, "-c", "pass"])
+        lab._reap_job(gate)
+        self.assertNotIn(str(gate), CL._JOBS)
+
+    def test_files_rejects_mixed_files_and_diff_and_supports_lazy_diffs(self):
+        lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
+        lab._live_stack = [{"pkg.m": "X = 1\n"}]
+        lab._disk_source = lambda m: "X = 0\n" if m == "pkg.m" else None
+        self.assertEqual(lab.files({"files": {"pkg.m": "X = 2\n"}}), {"pkg.m": "X = 2\n"})
+        with self.assertRaisesRegex(ValueError, "both"):
+            lab.files({"files": {"pkg.m": "X = 2\n"}, "diff": "--- a/pkg/m.py\n+++ b/pkg/m.py\n"})
+
+        fake_diffs = types.SimpleNamespace(
+            apply=lambda d, cur: {"pkg.m": cur("pkg.m") + "# " + d}
+        )
+        import fastrsi
+        with mock.patch.dict(sys.modules, {"fastrsi.diffs": fake_diffs}), \
+             mock.patch.object(fastrsi, "diffs", fake_diffs, create=True):
+            self.assertEqual(lab.files({"diff": "live"}, against="live"), {"pkg.m": "X = 1\n# live"})
+            self.assertEqual(lab.files({"diff": "disk"}, against="disk"), {"pkg.m": "X = 0\n# disk"})
 
 
 if __name__ == "__main__":

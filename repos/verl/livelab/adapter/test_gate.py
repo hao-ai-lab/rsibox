@@ -148,15 +148,55 @@ class CrossHostGateClientTest(unittest.TestCase):
         trainer runs on a compute node, the client on a login node sharing the gate dir).
         Expected: `_job_died` is False; with `host` = this machine it is True. Before the fix
         every cross-host request failed at once with "job process died"."""
-        from tools import cli
+        from adapter import client
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
         tmp = Path(tempfile.mkdtemp(prefix="fastrsi-gate-host-"))
         self.addCleanup(shutil.rmtree, tmp, True)
+        self.assertFalse(client._job_died(tmp))
         (tmp / "gate.json").write_text(json.dumps({"pid": dead.pid, "host": "some-other-node"}), encoding="utf-8")
-        self.assertFalse(cli._job_died(tmp))
+        self.assertFalse(client._job_died(tmp))
         (tmp / "gate.json").write_text(json.dumps({"pid": dead.pid, "host": socket.gethostname()}), encoding="utf-8")
-        self.assertTrue(cli._job_died(tmp))
+        self.assertTrue(client._job_died(tmp))
+        (tmp / "gate.json").write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}), encoding="utf-8")
+        self.assertFalse(client._job_died(tmp))
+
+    def test_client_request_waits_out_stale_ready_json_and_fails_on_dead_job(self):
+        """Input: `adapter.client.request` against a gate whose `ready.json` lags behind `req-3.json`
+        and then advances to 4, plus a dead-PID gate. Expected: waits out stale `ready.json`, writes
+        `req-4.json` atomically, and fails fast when the local driver PID has exited."""
+        import threading
+        import time
+        from adapter import client
+
+        gate_dir = Path(tempfile.mkdtemp(prefix="fastrsi-client-"))
+        self.addCleanup(shutil.rmtree, gate_dir, True)
+        (gate_dir / "ready.json").write_text(json.dumps({"n": 3}), encoding="utf-8")
+        (gate_dir / "req-3.json").write_text("{}", encoding="utf-8")
+        (gate_dir / "gate.json").write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname()}), encoding="utf-8")
+
+        def serve():
+            time.sleep(0.15)
+            (gate_dir / "ready.json").write_text(json.dumps({"n": 4}), encoding="utf-8")
+            while not (gate_dir / "req-4.json").exists():
+                time.sleep(0.01)
+            (gate_dir / "resp-4.json").write_text(json.dumps({"n": 4, "ok": True}), encoding="utf-8")
+
+        th = threading.Thread(target=serve, daemon=True)
+        th.start()
+        resp = client.request(gate_dir, verb="status", steps=0, timeout=10.0)
+        th.join(5.0)
+        self.assertEqual(resp, {"n": 4, "ok": True})
+        self.assertEqual(client.summary({"ok": True, "outcome": "committed", "extra": 1}), {"ok": True, "outcome": "committed"})
+
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        dead_dir = Path(tempfile.mkdtemp(prefix="fastrsi-client-dead-"))
+        self.addCleanup(shutil.rmtree, dead_dir, True)
+        (dead_dir / "ready.json").write_text(json.dumps({"n": 0}), encoding="utf-8")
+        (dead_dir / "gate.json").write_text(json.dumps({"pid": dead.pid}), encoding="utf-8")
+        with self.assertRaisesRegex(client.GateError, "died"):
+            client.request(dead_dir, timeout=10.0)
 
 
 class PerSampleSeedTest(unittest.TestCase):
@@ -187,10 +227,6 @@ class PerSampleSeedTest(unittest.TestCase):
         self.assertTrue(determinism.seed_agent_loops(host, 42).get("already"))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WitnessUninvolvedRolesTest(unittest.TestCase):
     def test_flush_leaves_an_empty_entry_for_roles_that_never_ran_the_edit(self):
         """Input: a proof whose witness names the driver with 1 call of the GRPO advantage
@@ -204,21 +240,25 @@ class WitnessUninvolvedRolesTest(unittest.TestCase):
         witness = {"driver": {key: 1}, **{f"rollout{i}": {key: 0} for i in range(8)}, **{f"trainer{i}": {key: 0} for i in range(4)}}
         findings = [{"check": "zero_witness", "subject": key, "participant": f"rollout{i}"} for i in range(8)]
         proof = {"receipt": {"witness": witness, "findings": findings, "abstained": ["reward0"]}}
-        tmp = Path(tempfile.mkdtemp())
+        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-gate-witness-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
         g = types.SimpleNamespace(_pending={"n": 7, "steps_run": 1, "t_seen": 0.0}, _gate=tmp,
                                   _session=types.SimpleNamespace(stack=["txn-1"]),
                                   _coordinator=types.SimpleNamespace(prove=lambda tid: proof))
         gate.GateMixin._flush(g)
-        resp = json.loads((tmp / "resp-7.json").read_text())
+        resp = json.loads((tmp / "resp-7.json").read_text(encoding="utf-8"))
         self.assertEqual(resp["witness"]["driver"], {key: 1})
         self.assertEqual(resp["witness"]["rollout3"], {})
         self.assertEqual(resp["witness"]["trainer0"], {})
         self.assertEqual(resp["abstained"], ["reward0"])
         self.assertTrue(resp["proven"], resp)
-        sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "core" / "livelab"))
         from conformance import cases
         involved = cases._involved_witnesses(resp["witness"], resp.get("abstained"))
         self.assertEqual(set(involved), {"driver"})
         # a silent sibling rank of an involved role is still a failure
         resp["witness"]["rollout0"] = {key: 2}
         self.assertIn("rollout3", cases._involved_witnesses(resp["witness"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

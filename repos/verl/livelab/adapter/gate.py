@@ -9,6 +9,7 @@ Gate protocol (files in `$FASTRSI_RL_GATE`, served at `on_step_begin`, one reque
 import contextlib, copy, importlib.util, json, os, socket, sys, time, types
 from pathlib import Path
 import ray_participants as RP
+from fastrsi import ipc
 from kernel import coordinator as C, locate as L, receipt as R, session as SS
 from adapter import determinism, faults, settings, state as S0
 
@@ -20,13 +21,6 @@ _DRIVER = types.SimpleNamespace(__ray_call__=types.SimpleNamespace(remote=lambda
 def _serve_verl(host, name, method, payload):
     if faults.STATE.get("lost"):
         raise RuntimeError(f"{name}: participant lost (injected fault)")
-    if method == "prepare" and isinstance(payload, dict):
-        local = RP._LOCAL.get(name) or RP._LOCAL.setdefault(name, C.LocalParticipant(name))
-        base_map = local._sources.setdefault("__base__", {})
-        for mkey, spec in (payload.get("modules") or {}).items():
-            if "base_source" in spec:
-                base_map.setdefault(mkey, spec["base_source"])
-                base_map.setdefault(mkey + RP.ACTOR, spec["base_source"])
     return RP.serve(host, name, method, payload)
 
 
@@ -39,12 +33,6 @@ class VerlActorParticipant(RP.RayActorParticipant):
 def _inject_in_actor(host, name, fault, kw):
     """Runs inside the actor through `__ray_call__`, which passes the actor instance first."""
     return faults.inject(name, fault, **kw)
-
-
-def _write_json(path, data):
-    tmp = path.with_name("." + path.name)
-    tmp.write_text(json.dumps(data, indent=1, default=str), encoding="utf-8")
-    tmp.rename(path)
 
 
 def module_for_file(file_path, roots=()):
@@ -106,7 +94,7 @@ class GateMixin:
         self._info = {"pid": os.getpid(), "host": socket.gethostname(), "started": time.time(), "snapshot_files": len(self._sources), "snapshot_secs": round(time.time() - t0, 2),
                       "warm_processes": 1 + len(self._actor_handles()), "s0": s0, "s0_capture_s": round(time.perf_counter() - t_s0, 3),
                       "s0_dataloader": self._s0_dataloader is not None, "tracked": tracked_modules(self.config)}
-        _write_json(self._gate / "gate.json", self._info)
+        ipc.atomic_write_json(self._gate / "gate.json", self._info, indent=1)
 
     # -- participants ---------------------------------------------------------------------
     def _actor_handles(self):
@@ -138,7 +126,7 @@ class GateMixin:
             self._coordinator = C.StepGapCoordinator(parts, gap=lambda job: job(), writer=self._writer, engine={"name": "verl", "version": None, "commit": None}, interface_version="1-draft", phase2_deadline_s=60.0)
             self._session = SS.Session(self._coordinator, tracked_modules(self.config))
             self._info.update(warm_processes=len(parts), participants=[p.name for p in parts])
-            _write_json(self._gate / "gate.json", self._info)
+            ipc.atomic_write_json(self._gate / "gate.json", self._info, indent=1)
 
     # -- coupled S0 ----------------------------------------------------------------------
     def _dataloader_state(self):
@@ -210,7 +198,7 @@ class GateMixin:
             findings = [f for prf in proofs for f in prf["receipt"]["findings"] if not (f["check"] == "zero_witness" and totals.get(f.get("subject"), 0) > 0)]
             pending.update(witness=witness, proven=not findings, findings=findings, **({"abstained": sorted(abstained)} if abstained else {}))
             if not pending["proven"]: pending.update(ok=False, error="edited code never ran: " + ", ".join(sorted({str(f.get("subject") or f["check"]) for f in findings})))
-        _write_json(self._gate / f"resp-{pending['n']}.json", pending)
+        ipc.atomic_write_json(self._gate / f"resp-{pending['n']}.json", pending, indent=1)
 
     def on_step_begin(self):
         if self._gate is None or self._steps_left > 0:
@@ -219,15 +207,15 @@ class GateMixin:
             return super().on_step_begin()
         while True:
             # ready first, then the previous response: a client that sees the response never reads a stale request number
-            _write_json(self._gate / "ready.json", {"n": self._req_index, "step": self.global_steps, "t": time.time()})
+            ipc.atomic_write_json(self._gate / "ready.json", {"n": self._req_index, "step": self.global_steps, "t": time.time()}, indent=1)
             self._flush()
             req_path = self._gate / f"req-{self._req_index}.json"
             while not req_path.exists():
                 time.sleep(0.05)
             req, req_num, self._req_index = json.loads(req_path.read_text(encoding="utf-8")), self._req_index, self._req_index + 1
             if req.get("stop"):
-                _write_json(self._gate / f"resp-{req_num}.json", {"n": req_num, "ok": True, "stopped": True})
-                _write_json(self._gate / "stopped.json", {"t": time.time()})
+                ipc.atomic_write_json(self._gate / f"resp-{req_num}.json", {"n": req_num, "ok": True, "stopped": True}, indent=1)
+                ipc.atomic_write_json(self._gate / "stopped.json", {"t": time.time()}, indent=1)
                 raise SystemExit("fastrsi gate: stop requested")
             try:
                 self._pending = self._serve_request(req_num, req)
@@ -326,7 +314,7 @@ class GateMixin:
     def on_train_end(self):
         if self._gate is not None:
             self._flush()
-            _write_json(self._gate / "stopped.json", {"t": time.time()})
+            ipc.atomic_write_json(self._gate / "stopped.json", {"t": time.time()}, indent=1)
         return super().on_train_end()
 
 

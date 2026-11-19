@@ -1,7 +1,7 @@
 # verl Live Lab (`repos/verl/livelab/`)
 
 Step-gap live-edit adapter for **verl** synchronous RL (`PPOTrainerSync`), built on
-`core/livelab/kernel/` and `core/livelab/ray_participants.py`.
+`core/livelab/kernel/`, `core/livelab/ray_participants.py`, and `core/livelab/fastrsi/`.
 
 ## Architecture & Contract
 
@@ -46,22 +46,27 @@ instead, inside every agent-loop actor.
 
 ## Running Conformance
 
-On CPU, against the spawned multi-actor toy (`11/11`):
+On CPU, against the spawned multi-actor toy (`11/11`) via the unified CLI:
 
 ```sh
-cd core/livelab
-PYTHONPATH=../../repos/verl/livelab \
-  python3 -m conformance --lab adapter.toy_lab:ToyVerlLab
+PYTHONPATH=core/livelab python3 -m fastrsi conformance verl
 ```
 
-On GPUs, against a real gated verl job (`adapter/conformance_lab.py`, a client of the gate that also
-owns the job's lifetime, so `respawn` and `fresh_check` really restart it). `--launch` is a shell
-command that starts the job on `$GATE` with the reward file `$REWARD` and exits when the job exits; a
-fresh process with a patched module gets a `PYTHONPATH` overlay first. The job must run with
-`rollout.full_determinism=True` and `FASTRSI_RL_SEED_PER_SAMPLE=1`, and its reward file must be
-`examples/grpo-gsm8k/reward_gsm8k.py` (the harness edits its anchors):
+On GPUs, against a real gated verl job (`adapter/conformance_lab.py`, a client of the gate via
+`adapter/client.py` that also owns the job's lifetime, so `respawn` and `fresh_check` really restart
+it). `--launch` is a shell command that starts the job on `$GATE` with the reward file `$REWARD` and
+exits when the job exits; a fresh process with a patched module gets a `PYTHONPATH` overlay first.
+The job must run with `rollout.full_determinism=True` and `FASTRSI_RL_SEED_PER_SAMPLE=1`, and its
+reward file must be `examples/grpo-gsm8k/reward_gsm8k.py` (the harness edits its anchors):
 
 ```sh
+# Unified CLI (from repo root)
+PYTHONPATH=core/livelab python3 -m fastrsi conformance verl --real \
+  --receipts receipts.jsonl --json -- \
+  --gate /tmp/verl-gate --reward repos/verl/examples/grpo-gsm8k/reward_gsm8k.py \
+  --launch 'python3 -m tools.cli train --gate $GATE -- ... reward.custom_reward_function.path=$REWARD'
+
+# Or via repos/verl's wrapper CLI
 cd repos/verl
 python3 -m tools.cli conformance --gate /tmp/verl-gate --reward examples/grpo-gsm8k/reward_gsm8k.py \
   --launch 'python3 -m tools.cli train --gate $GATE -- ... reward.custom_reward_function.path=$REWARD' \

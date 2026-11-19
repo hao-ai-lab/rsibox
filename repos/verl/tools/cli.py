@@ -1,5 +1,5 @@
 """Gate client, `verl` launcher, and CLI (`python3 -m tools.cli`: `train`, `request`, `stop`, `conformance`, `rescore`, `replay-adv`)."""
-import argparse, importlib.util, json, os, socket, sys, sysconfig, time
+import argparse, importlib.util, json, os, sys, sysconfig
 from pathlib import Path
 
 VERL_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -8,72 +8,7 @@ for p in (VERL_REPO, LIVELAB_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-
-class GateError(RuntimeError):
-    """The gated verl job is not answering or has exited."""
-
-
-def _job_died(gate_dir):
-    """True only when the driver PID recorded in gate.json is gone on *this* host; a client on
-    another host (a Slurm login node reading a shared gate dir) cannot see the PID and says no."""
-    try:
-        info = json.loads((gate_dir / "gate.json").read_text(encoding="utf-8"))
-        pid, host = info.get("pid"), info.get("host")
-        if isinstance(pid, int) and (host is None or host == socket.gethostname()):
-            os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except (OSError, ValueError):
-        return False
-    return False
-
-
-def _next_request(gate_path, settle_s=10.0):
-    """The request number `ready.json` names. Right after a response the gate may not have
-    advanced `ready.json` yet (two files on a shared file system), so a `req-<n>.json` that
-    already exists is waited out for `settle_s` before it counts as another client's request."""
-    deadline = time.monotonic() + settle_s
-    while True:
-        try:
-            req_num = json.loads((gate_path / "ready.json").read_text(encoding="utf-8"))["n"]
-        except (OSError, ValueError, KeyError):
-            req_num = None
-        if req_num is not None and not (gate_path / f"req-{req_num}.json").exists():
-            return req_num
-        if time.monotonic() > deadline:
-            raise GateError(f"{gate_path}: request {req_num} is already pending")
-        time.sleep(0.05)
-
-
-def request(gate_dir, files=(), steps=1, stop=False, timeout=1800.0, live_settings=None, verb="install", extra=None):
-    gate_path = Path(gate_dir)
-    ready = gate_path / "ready.json"
-    if not ready.exists():
-        raise GateError(f"{gate_path}: no ready.json; is the job running with this gate?")
-    req_num = _next_request(gate_path)
-    payload = ({"stop": True} if stop else
-               {"verb": verb, "files": [os.path.realpath(f) for f in files], "steps": steps, **(extra or {}),
-                **({"set": {k: str(v) for k, v in live_settings.items()}} if live_settings else {})})
-    payload["t_client"] = time.time()
-    tmp = gate_path / f".req-{req_num}.json"
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    tmp.rename(gate_path / f"req-{req_num}.json")
-    resp, deadline = gate_path / f"resp-{req_num}.json", time.monotonic() + timeout
-    while not resp.exists():
-        if (gate_path / "stopped.json").exists() and not stop:
-            raise GateError(f"{gate_path}: job stopped while serving request {req_num}")
-        if _job_died(gate_path) and not stop:
-            raise GateError(f"{gate_path}: job process died while serving request {req_num}")
-        if time.monotonic() > deadline:
-            raise GateError(f"{gate_path}: timed out after {timeout}s")
-        time.sleep(0.05)
-    return json.loads(resp.read_text(encoding="utf-8"))
-
-
-def summary(receipt):
-    keep = ("ok", "outcome", "verdict_s", "install_s", "processes", "proven",
-            "witness", "set", "metrics", "error", "codes", "restart_required")
-    return {k: receipt[k] for k in keep if k in receipt}
+from adapter.client import GateError, _job_died, _next_request, request, summary  # noqa: E402, F401
 
 
 def launch_command(overrides, gate_dir=None, trace_path=None, roots=None):
@@ -123,6 +58,7 @@ def main(argv=None):
     conf.add_argument("--receipts", default=None)
     conf.add_argument("--json", action="store_true")
     conf.add_argument("--check-timeout", type=float, default=None)
+    conf.add_argument("--boot-timeout", type=float, default=None)
     res = sub.add_parser("rescore")
     res.add_argument("--rollouts", required=True)
     res.add_argument("--reward", required=True)
@@ -150,11 +86,15 @@ def main(argv=None):
         return 0
     if a.command == "conformance":
         import adapter  # noqa: F401  (puts core/livelab on sys.path)
-        os.environ.update({"FASTRSI_VERL_GATE": str(Path(a.gate).resolve()), "FASTRSI_VERL_REWARD": os.path.realpath(a.reward)})
-        if a.launch:
-            os.environ["FASTRSI_VERL_LAUNCH"] = a.launch
-        if a.check_timeout:
-            os.environ["FASTRSI_VERL_CHECK_TIMEOUT"] = str(a.check_timeout)
+        from adapter.conformance_lab import VerlConformanceLab
+        launch_argv = ["--gate", a.gate, "--reward", a.reward]
+        if a.launch is not None:
+            launch_argv += ["--launch", a.launch]
+        if a.check_timeout is not None:
+            launch_argv += ["--check-timeout", str(a.check_timeout)]
+        if a.boot_timeout is not None:
+            launch_argv += ["--boot-timeout", str(a.boot_timeout)]
+        os.environ.update(VerlConformanceLab.launch_environment(launch_argv))
         from conformance.__main__ import main as conformance_main
         argv = ["--lab", "adapter.conformance_lab:VerlConformanceLab"] + (["--only", a.only] if a.only else []) + (["--receipts", a.receipts] if a.receipts else []) + (["--json"] if a.json else [])
         return conformance_main(argv)
