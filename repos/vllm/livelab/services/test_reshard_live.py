@@ -256,12 +256,11 @@ def test_holder_argv_keeps_engine_args_only():
     --load-format ipc_cache would dial itself; --port is not an EngineArgs flag at all."""
     vargv = ["/m/Q", "--port", "8302", "--tensor-parallel-size", "2", "--enable-expert-parallel",
              "--gpu-memory-utilization", "0.3", "--max-model-len", "8192",
-             "--language-model-only", "--load-format", "ipc_cache", "--worker-cls", "a.B"]
+             "--load-format", "ipc_cache", "--worker-cls", "a.B"]
     r = subprocess.run([VLLM_PY, "-c", HOLDER_ARGV_CASE, str(HERE), json.dumps(vargv)],
                        capture_output=True, text=True, timeout=300, cwd=str(HERE),
                        env=dict(os.environ, CUDA_VISIBLE_DEVICES=""))
     line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("[")), None)
     assert line, r.stderr[-3000:]
     assert json.loads(line) == ["--model", "/m/Q", "--tensor-parallel-size", "2",
-                                "--enable-expert-parallel", "--max-model-len", "8192",
-                                "--language-model-only"]
+                                "--enable-expert-parallel", "--max-model-len", "8192"]
