@@ -10,6 +10,22 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class StageLocal(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "staging uses GNU cp")
+    def test_container_stages_only_the_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            tree = os.path.join(d, "engine")
+            dest = os.path.join(d, "stage")
+            name = "module's data.py"
+            os.makedirs(os.path.join(tree, ".git"))
+            with open(os.path.join(tree, name), "w") as f:
+                f.write("version = 2")
+            subprocess.run(["bash", os.path.join(HERE, "stage_local.sh"), "--tree-only",
+                            tree, dest], check=True)
+            self.assertEqual(os.listdir(dest), ["engine"])
+            self.assertEqual(os.listdir(os.path.join(dest, "engine")), [name])
+            with open(os.path.join(dest, "engine", name)) as f:
+                self.assertEqual(f.read(), "version = 2")
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: stage_local.sh uses GNU sed -i")
     def test_staged_env_points_at_the_copy(self):
         """Input: a venv whose console script names the venv's python in its shebang, a tree
