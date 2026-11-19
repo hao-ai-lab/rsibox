@@ -303,7 +303,30 @@ def _patch_async_llm(mod):
     _patch_api_entry(mod, ("AsyncLLM",), "add_request")
 
 
+def _patch_http_priority(mod):
+    """Validate the resolved header/body priority before vLLM starts an HTTP stream."""
+    cls = getattr(mod, "GenerateBaseServing", None)
+    resolve = getattr(cls, "_get_priority", None)
+    if resolve is None or getattr(resolve, "_fastrsi_live_policy", False):
+        return
+
+    def get_priority(self, request, raw_request):
+        priority = resolve(request, raw_request)
+        if priority:
+            client = self.engine_client
+            _sync_api_policy(client)
+            if client.vllm_config.scheduler_config.policy != "priority":
+                from vllm.exceptions import VLLMValidationError
+                raise VLLMValidationError("Nonzero priority requires priority scheduling.",
+                                          parameter="priority", value=priority)
+        return priority
+
+    get_priority._fastrsi_live_policy = True
+    cls._get_priority = get_priority
+
+
 _IMPORT_HOOKS = (
+    ("vllm.entrypoints.generate.base.serving", _patch_http_priority),
     ("vllm.v1.engine.core", _patch_core),
     ("vllm.v1.engine.input_processor", _patch_input_processor),
     ("vllm.v1.engine.processor", _patch_input_processor),

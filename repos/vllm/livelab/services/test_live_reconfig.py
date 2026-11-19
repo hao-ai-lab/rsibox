@@ -193,3 +193,40 @@ def test_policy_switch_handles_missing_kv_holding_waiting_and_syncs_api_server(t
     with pytest.raises(ValueError, match="Priority scheduling is not enabled"):
         ip.process_inputs("r2", priority=-1)
     assert api_sc.policy == "fcfs"
+
+
+def test_serving_priority_uses_effective_header_and_live_policy(tmp_path, monkeypatch):
+    """Exercise vLLM's HTTP priority resolver before a stream can send its headers."""
+    import pytest
+    from types import SimpleNamespace
+    import live_reconfig
+
+    serving = pytest.importorskip("vllm.entrypoints.generate.base.serving")
+    from starlette.requests import Request
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.exceptions import VLLMValidationError
+
+    # Restore the module's real class after exercising the production import hooks.
+    class Handler(serving.GenerateBaseServing):
+        pass
+
+    monkeypatch.setattr(serving, "GenerateBaseServing", Handler)
+    monkeypatch.setenv(live_reconfig.ENV, str(tmp_path))
+    for module, patch in live_reconfig._IMPORT_HOOKS:
+        if module == serving.__name__:
+            patch(serving)
+    handler = object.__new__(Handler)
+    config = SimpleNamespace(policy="fcfs")
+    handler.engine_client = SimpleNamespace(vllm_config=SimpleNamespace(scheduler_config=config))
+    request = CompletionRequest(prompt="Hello", model="m", priority=-1)
+    override = Request({"type": "http", "headers": [(b"x-vllm-priority", b"0")]})
+    with pytest.raises(VLLMValidationError, match="priority"):
+        handler._get_priority(request, None)
+    assert handler._get_priority(request, override) == 0
+    for policy in ("priority", "fcfs"):
+        live_reconfig._write_json(str(tmp_path / "policy.json"), {"scheduling_policy": policy})
+        if policy == "priority":
+            assert handler._get_priority(request, None) == -1
+        else:
+            with pytest.raises(VLLMValidationError, match="priority"):
+                handler._get_priority(request, None)
