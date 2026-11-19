@@ -35,7 +35,7 @@ Contract:
   `repos/vllm/kb/reconfiguration_matrix.md`), then applies it one of two ways and reports which
   (`reconfig.path`):
   - `in_process_live`: every changed flag has a live consumer (live_reconfig.LIVE_FIELDS:
-    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value). The launcher
+    `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value, and `--scheduling-policy`). The launcher
     sends it to the engine core's live agent (started by engine.py in every engine it starts),
     which sets the scheduler's limits between two steps and reads them back. PID keeps
     running; only an acknowledged change updates the recorded state.
@@ -229,7 +229,7 @@ def socket_dir(a, v):
 
 def value_finding(parsed):
     """A `vllm_value` finding when a live scheduler field (live_reconfig.LIVE_FIELDS) has a
-    value no engine runs with (not a positive integer), else None. vLLM's parser takes any
+    value no engine runs with, else None. vLLM's parser takes any
     int; a reconfigure refuses such a value before it stops the running engine."""
     args = parsed.get("args") or {}
     values = {field_name: args[field_name] for field_name in live_reconfig.LIVE_FIELDS
@@ -237,9 +237,9 @@ def value_finding(parsed):
     problems = live_reconfig.check_values(values, {})
     if not problems:
         return None
-    return {"check": "vllm_value", "observed": problems, "expected": "positive integers",
+    return {"check": "vllm_value", "observed": problems, "expected": "valid scheduler limits and policy",
             "why": "the restart would start a server that cannot run, after stopping this one",
-            "actions": ["pass a positive value"]}
+            "actions": ["correct the reported scheduler value"]}
 
 
 def argv_findings(a, v):
@@ -786,6 +786,8 @@ def apply_in_process_reconfig(launcher_args, state, new_vargv, new_parsed, prefl
                   or after.get("target_max_num_seqs") == values["max_num_seqs"])
                  and ("max_num_batched_tokens" not in values
                       or after.get("max_num_scheduled_tokens") == values["max_num_batched_tokens"]))
+    if "scheduling_policy" in values:
+        confirmed = confirmed and after.get("scheduling_policy") == values["scheduling_policy"]
     if not confirmed:
         return None, f"live agent answered but the scheduler reads back {after}"
     command = serve_cmd(launcher_args, new_vargv, new_parsed)
