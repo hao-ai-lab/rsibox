@@ -18,6 +18,6 @@ wait afterwards. Across eight deterministic steps, the edited job matched both t
 and the fresh edited process in loss and gradient norm.
 
 On the same pin, the residual patch needs a context adjustment around the residual
-accumulator. We replayed a port with the identical two guarded additions. On four GB200s
+accumulator. The [pin-compatible patch](residual-plain-add-without-bias-dropout.ported-to-pin.patch) preserves both guarded additions. On four GB200s
 (TP2/DP2), all three edits ran on every rank and passed the per-step loss and gradient-norm
 gates over ten steps on eight Qwen3-14B-shaped layers. See [measured costs](../kb/costs.md).
