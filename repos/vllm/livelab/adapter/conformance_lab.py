@@ -21,7 +21,6 @@ import json
 import os
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -33,6 +32,8 @@ from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
 from kernel import session as SS
+
+from services import engine
 
 from . import client
 
@@ -54,53 +55,14 @@ def _edit(source, old, new):
     return source.replace(old, new)
 
 
-def _descendants(root_pid):
-    children, found, queue = {}, [], [root_pid]
-    for entry in (os.listdir("/proc") if os.path.isdir("/proc") else ()):
-        if entry.isdigit():
-            try:
-                ppid = int(Path(f"/proc/{entry}/stat").read_text().rsplit(")", 1)[1].split()[1])
-                children.setdefault(ppid, []).append(int(entry))
-            except (OSError, ValueError, IndexError):
-                pass
-    while queue:
-        for child in children.get(queue.pop(0), []):
-            found.append(child)
-            queue.append(child)
-    return found
-
-
 def _alive(pid):
-    if not pid:
-        return False
-    if os.path.isdir("/proc"):
-        try:
-            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-        except OSError:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
+    return bool(pid) and not engine.zygote._exited(pid)
 
 
 def stop_tree(pid, grace_s=8.0):
-    """Stop `pid` and every descendant it started (ours only: never unrelated processes)."""
-    if not _alive(pid):
-        return
-    tree = [pid] + _descendants(pid)
-    for sig, wait_s in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 5.0)):
-        targets = [pid] if sig == signal.SIGTERM else list(reversed(tree + _descendants(pid)))
-        for target in targets:
-            if _alive(target):
-                try:
-                    os.kill(target, sig)
-                except ProcessLookupError:
-                    pass
-        deadline = time.time() + wait_s
-        while time.time() < deadline and any(_alive(p) for p in tree):
-            time.sleep(0.05)
+    """Stop a live service process and its children using the launcher's lifecycle rules."""
+    if pid:
+        engine.stop_engine(pid, grace=grace_s)
 
 
 def build_farm(src_pkg, dst_pkg):
@@ -207,15 +169,17 @@ class HostBridge:
 
 
 class _ServerHandle:
-    def __init__(self, pid, port, kernel_dir, start_s, log_path):
+    def __init__(self, pid, port, kernel_dir, start_s, log_path, marker=None):
         self.pid, self.port, self.kernel_dir = pid, port, kernel_dir
         self.start_s, self.log_path = start_s, log_path
+        self.marker, self.start_ticks = marker, engine._start_time(pid)
 
     def alive(self):
-        return _alive(self.pid)
+        return _alive(self.pid) and engine._same_process(self.pid, self.start_ticks)
 
     def stop(self):
-        stop_tree(self.pid)
+        if self.alive() or not _alive(self.pid):
+            engine.stop_engine(self.pid, grace=8, marker=self.marker)
 
 
 class VllmLab:
@@ -307,7 +271,10 @@ class VllmLab:
             tail = Path(log_path).read_text(errors="replace")[-2000:] if os.path.isfile(log_path) else ""
             raise RuntimeError(f"vllm start ({tag}) failed rc={proc.returncode}: "
                                f"{report.get('findings') or report.get('error')} {tail}")
-        srv = _ServerHandle(int(report["pid"]), port, kernel_dir, round(time.perf_counter() - t0, 3), log_path)
+        pid = int(report["pid"])
+        state = engine.load_engine_state(self.cache_root, pid) or {}
+        srv = _ServerHandle(pid, port, kernel_dir, round(time.perf_counter() - t0, 3),
+                            log_path, state.get("live_dir"))
         srv.key = self.server_key
         try:
             _http_post(port, "/v1/completions",
