@@ -131,6 +131,34 @@ From the lab smoke (tiny, TP 2, 2026-11-07) and the conformance run.
 | Restart to the same point (tiny) | 57.5 | the warm restart a live edit replaces |
 | Respawn after a crash, hang or lost rank (tiny, conformance c8) | 37.6-51.6 | kill the job's process tree, start again |
 
+For the two-layer, hidden-512 deterministic lab on two GB200s (TP2, sequence length 128,
+global batch 4, eight-step checks), our 2026-11-19 NeMo 26.08 measurements were:
+
+| Phase | Fresh torchrun | Request to a preloaded zygote |
+|---|---:|---:|
+| Launch to lab ready | 31.01 s | 10.42 s |
+| Freeze batches | 0.045 s | 0.035 s |
+| Take S0 | 0.007 s | 0.006 s |
+| Two warmup steps | 3.821 s | 3.267 s |
+| Restore S0, zero Adam state, take S | 0.006 s | 0.006 s |
+
+The warm request includes 0.058 s to fork. Starting the parent separately took 21.62 s.
+The two jobs returned identical loss and gradient norm over all eight steps. These are
+single startup measurements with node-local engine sources and warm disk caches.
+
+The four-GB200 dense replay on 2026-11-19 used eight Qwen3-14B-shaped layers, TP2/DP2,
+sequence length 4096, global batch 16 and ten steps per check on mock data.
+
+| Edit | Base check | Edited check |
+|---|---:|---:|
+| LM-head gather before cast, FP32 logits | 4.501 s | 4.503 s |
+| Residual plain add | 4.532 s | 4.505 s |
+| TE gather before norm | 5.019 s | 5.430 s |
+
+Each row is one pair. All four ranks witnessed each edit and undo restored the base
+fingerprint. Across the three edits, the maximum per-step relative differences were 0.2525%
+in loss and 1.9140% in gradient norm.
+
 At 14B (Qwen3-14B architecture, TP 2, hill-climb lab, 2026-11-07):
 
 | Call | Seconds | Notes |

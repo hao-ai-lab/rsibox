@@ -31,9 +31,11 @@ class Opt:
     def step(self):
         time.sleep(0.05)
 opt = Opt()
+original = opt.step
+opt.step = original
 for _ in range(3):
     tr.train_step(lambda i: time.sleep(0.01), None, None, opt)
-print(json.dumps({"restored": "step" not in vars(opt)}))
+print(json.dumps({"restored": opt.step is original}))
 """
 
 

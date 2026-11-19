@@ -66,12 +66,12 @@ def _sync():
         torch.cuda.synchronize()
 
 
-class RanksParticipant(C.Participant):
+class RanksParticipant(C.CallParticipant):
     """Every rank as one participant: one kernel call is one gloo round."""
-    bounded = True
 
     def __init__(self, lab):
-        self.lab, self.name = lab, "ranks"
+        super().__init__("ranks", self._all, bounded=True)
+        self.lab = lab
         self.expected = [str(r) for r in range(lab.ranks.world)]
 
     def _all(self, method, arg):
@@ -81,39 +81,6 @@ class RanksParticipant(C.Participant):
             return {"ok": ok, "code": {str(r.get("rank")): r.get("code") for r in rs},
                     "ranks": rs, **({} if ok else {"error": "a rank gave no fingerprint"})}
         return C.merge_ranks(method, rs)
-
-    def prepare(self, plan):
-        return self._all("prepare", plan)
-
-    def validate(self, txn):
-        return self._all("validate", txn)
-
-    def commit(self, txn):
-        return self._all("commit", txn)
-
-    def abort(self, txn):
-        return self._all("abort", txn)
-
-    def undo(self, txn):
-        return self._all("undo", txn)
-
-    def status(self, txn):
-        return self._all("status", txn)
-
-    def proof(self, txn):
-        return self._all("proof", txn)
-
-    def witness_check(self, txn):
-        return self._all("witness_check", txn)
-
-    def reset(self, kind):
-        return self._all("reset", kind)
-
-    def fingerprint(self, modules):
-        return self._all("fingerprint", modules)
-
-    def at_base(self, _=None):
-        return self._all("at_base", None)
 
 
 def unknown_state_finding(unknown):
@@ -417,26 +384,29 @@ class Lab:
         if verb == "install":
             patch = req.get("patch")
             files = patch.get("files") if isinstance(patch, dict) else None
+            repairs = patch.get("repairs", []) if isinstance(patch, dict) else []
             why, modules = None, {}
+            missing = sorted(name for name in files if name not in sys.modules) if isinstance(files, dict) else []
             if not isinstance(files, dict):
                 why = "a patch is an object with `files`: {module: source}"
-            for name, new in (files or {}).items():
-                if name not in sys.modules:
-                    why = f"module {name!r} is not loaded in the job"
-                    break
-                try:
-                    modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
-                except (AttributeError, OSError, TypeError, ValueError) as error:
-                    why = f"module {name!r} has no readable source file ({type(error).__name__})"
-                    break
+            elif missing:
+                why = f"modules not loaded in the job: {missing!r}"
+            else:
+                for name, new in files.items():
+                    try:
+                        modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
+                    except (AttributeError, OSError, TypeError, ValueError) as error:
+                        why = f"module {name!r} has no readable source file ({type(error).__name__})"
+                        break
             if why:
                 return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "receipt": None, "findings": [F.finding(
+                        "mechanisms": [], "receipt": None, "not_loaded": missing, "findings": [F.finding(
                             "patch_invalid", why, "modules the running job imported from source")]}
             if not s.poisoned():
                 self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
-                    "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
+                    "undo_resets": patch.get("undo_resets", []), "repairs": repairs,
+                    "recipes": (["R0 swap"] if files else []) + (["R10 repair"] if repairs else [])}
             res = s.install(plan, edit_time=patch.get("edit_time"))
             outcome, rec = res.get("outcome", "refused"), res.get("receipt")
             if outcome == "committed":

@@ -72,9 +72,16 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
 
 A patch may edit any module the job has imported; each one it names joins the session's code
 fingerprint (status, tamper checks). A module the job has not imported is refused
-(`patch_invalid`).
+(`patch_invalid`). The reply lists every missing module under `not_loaded`; the current transaction stack stays intact.
 
-The kernel's live code swap (function bodies, every rank) and repair cells. Not yet: edits of
+For a journaled attribute change, pass `{"files": {}, "repairs": [{"cell": code, "declares": []}]}`
+to `install`. The cell runs on each rank with `model` (local chunks), `optimizer`, `journal`
+and `arm` in scope. Use `journal.set_attr(module, name, value)` for nested modules.
+`uninstall` restores their original values. A training check and a workload-specific witness
+must establish that the changed setting affected execution. Fresh-process overlays take source
+files only.
+
+The kernel also swaps function bodies on every rank. Unsupported paths include edits of
 `jit_fuser` (torch.compile) functions, CUDA graph regions, constructors (which require a model
 rebuild), optimizer construction, TE C++ code.
 
@@ -93,39 +100,38 @@ rank's process exit, hang makes a rank sleep inside a train step, tamper rebinds
 code outside the journal.
 
 ```sh
-FASTRSI_MG_CMD='<a command that runs torchrun -m fastrsi_megatron.run pretrain_gpt.py ...>' \
-FASTRSI_MG_ROOT=<Megatron-LM tree> FASTRSI_CHECK_STEPS=3 FASTRSI_CHECK_TIMEOUT=60 \
-python3 -m conformance --lab fastrsi_megatron.conformance_lab:MegatronLab   # from core/livelab
+# From the FastRSI checkout, in an allocated worker environment with Megatron installed:
+export FASTRSI_RUN="$(mktemp -d)"
+export PYTHONPATH="$PWD/repos/megatron/livelab${PYTHONPATH:+:$PYTHONPATH}"
+python -m fastrsi_megatron.conformance_lab --root "$MEGATRON_ROOT" --nproc 2 \
+  --receipts "$FASTRSI_RUN/transactions.jsonl" -- \
+  --num-layers 2 --hidden-size 512 --num-attention-heads 8 --ffn-hidden-size 1536 \
+  --tensor-model-parallel-size 2 --sequence-parallel --seq-length 128 \
+  --max-position-embeddings 128 --normalization RMSNorm --swiglu --disable-bias-linear \
+  --hidden-dropout 0 --attention-dropout 0 --micro-batch-size 1 --global-batch-size 4 \
+  --bf16 --lr 1e-4 --train-iters 1000 --eval-iters 0 --mock-data \
+  --tokenizer-type NullTokenizer --vocab-size 8192 --use-distributed-optimizer \
+  --transformer-impl transformer_engine --deterministic-mode
 ```
 
-Our 2026-11-07 run: 2 layers, hidden 512, TP 2 on 2 GB200, `--deterministic-mode`, 3-step
-checks, 11/11 as expected:
+In a container with the Python environment already on local storage, stage just the engine
+tree from the checkout with `bash repos/megatron/tools/stage_local.sh --tree-only "$MEGATRON_ROOT" "$LOCAL_SCRATCH"`.
+Use `"$LOCAL_SCRATCH/$(basename "$MEGATRON_ROOT")"` for `--root`. Mount the checkout and a writable output and cache directory.
+The existing `FASTRSI_MG_CMD` and `FASTRSI_MG_ROOT` entry point remains available to custom launchers.
 
-```
-case                  result  seconds  evidence
-c0_repeatable         pass      1.406  3 checks (one after reset ['weights', 'optimizer', 'scheduler', 'rng', 'data']) gave {'loss': [12.064836502075195, 12.067537307739258, 11.609490394592285], ...}
-c1_noop               pass      1.043  installed by ['R0 swap']; calls {'megatron.core.transformer.mlp:MLP.forward:259': [48, 48]}; output unchanged
-c2_visible            pass      1.038  loss [12.0648, 12.0675, 11.6095] -> [12.0546, 12.0663, 11.5643]; calls per participant [48, 48]
-c3_fresh_equivalence  pass    124.224  visible: live == fresh; chain of 3: live == fresh (bit-exact loss and grad norm)
-c4_uninstall          pass      1.937  uninstall ['txn-3728055d'] in 0.026158 s; identity 2138091df388705c restored
-c5_failed_install     pass      2.547  fail_apply: rolled_back, codes ['participant_failed'], base proven
-                                       fail_commit: rolled_back, codes ['participant_failed'], base proven
-                                       control: no fault, committed 3 targets, output changed
-c6_refusal            pass      3.481  syntax: ['patch_invalid']; closure: ['closure_changed']
-                                       module_state: ['empty_change', 'outside_changes']; empty: ['empty_change']
-c7_chain              pass      5.757  3 stacked edits each visible, undone one by one to base
-c8_crash_and_hang     pass    243.804  crash: poisoned by ['participant_failed'], respawn 46.029 s
-                                       hang: poisoned by ['participant_failed'], respawn 51.576 s
-                                       lost: poisoned by ['participant_failed'], respawn 37.613 s
-                                       tamper: poisoned by ['tampered'], respawn 45.019 s
-c9_soak               pass     27.711  20 cycles; install median 0.0716 s, uninstall median 0.0320 s
-c10_not_proven        pass     48.798  MLP.__init__ edit: proven False, findings ['zero_witness', 'zero_witness'];
-                                       live loss stays at base, a fresh process differs
-```
+The 2026-11-19 deterministic runs used two layers, hidden size 512, sequence length 128 and
+three-step checks. Live edits matched fresh edited processes in loss and gradient norm. The
+fault cases restored the original output after crash, hang, lost rank and out-of-journal code
+changes. Each soak completed 20 install/undo cycles.
 
-What it does not show: more than 2 ranks, PP > 1, edits of `jit_fuser` functions or CUDA graphs,
-the 14B model (see the hill-climb), a conformance receipt (the receipt writer has no record kind
-for it yet).
+| Layout | Conformance | Median install | Median undo | Respawn after fault |
+|---|---:|---:|---:|---:|
+| 2 GB200 · TP2 | 11/11 | 0.0428 s | 0.0152 s | 29.34–30.42 s |
+| 4 GB200 · TP2/DP2 | 11/11 | 0.0451 s | 0.0170 s | 36.05–36.55 s |
+| 4 GB200 · TP4 | 11/11 | 0.0444 s | 0.0164 s | 35.65–36.95 s |
+
+The harness prints its c0–c10 verdicts and can persist the kernel's transaction, proof and
+undo receipts with `--receipts`. All three layouts used one node, PP1 and eager execution.
 
 ## Restart by fork: the zygote
 
