@@ -464,6 +464,76 @@ class ConformanceLabDiffsTest(unittest.TestCase):
                 fresh_bad = lab.fresh_check({"diff": diff2})
                 self.assertFalse(fresh_bad["ok"])
 
+    def test_fresh_check_retries_once_on_eaddrinuse_only(self):
+        from fastrsi_megatron import conformance_lab as CL
+
+        lab = CL.MegatronLab.__new__(CL.MegatronLab)
+        lab.cmd = "true"
+        lab.root = "/unused"
+        lab.steps = 3
+        lab.check_timeout = 30.0
+        lab.receipts = None
+        lab.poison = []
+        lab._live_stack = [{}]
+        lab.base = {}
+
+        def run_scenario(outcomes):
+            events = []
+            ports = iter([29501, 29502, 29503])
+
+            class _SeqJob:
+                def __init__(self, _cmd, env, _tag):
+                    idx = len(events)
+                    rc, tail, write_out = outcomes[idx]
+                    self.rc, self._tail = rc, tail
+                    events.append({"port": env["PORT"], "killed": False})
+                    self._idx = idx
+                    if write_out:
+                        Path(env["FASTRSI_FRESH"]).write_text(
+                            json.dumps({"ok": True, "output": {"loss": [1.5]}}), encoding="utf-8"
+                        )
+
+                def wait_exit(self):
+                    return self.rc
+
+                def tail(self, _n=8):
+                    return list(self._tail)
+
+                def kill(self):
+                    events[self._idx]["killed"] = True
+
+            with mock.patch.object(CL, "_Job", _SeqJob), \
+                 mock.patch.object(CL, "_free_port", side_effect=lambda: next(ports)):
+                res = lab.fresh_check({"files": {}})
+            return res, events
+
+        # 1. Transient "Address already in use" kills attempt 1 and succeeds on attempt 2 with a new port.
+        res_ok, ev_ok = run_scenario([
+            (1, ["OSError: [Errno 98] Address already in use"], False),
+            (0, [], True),
+        ])
+        self.assertTrue(res_ok["ok"], res_ok)
+        self.assertEqual(res_ok["output"], {"loss": [1.5]})
+        self.assertEqual(ev_ok, [{"port": "29501", "killed": True}, {"port": "29502", "killed": True}])
+
+        # 2. Persistent EADDRINUSE stops after exactly 1 retry (2 total attempts, both killed).
+        res_twice, ev_twice = run_scenario([
+            (1, ["socket error: EADDRINUSE"], False),
+            (1, ["socket error: EADDRINUSE"], False),
+        ])
+        self.assertFalse(res_twice["ok"])
+        self.assertIn("EADDRINUSE", res_twice["error"])
+        self.assertEqual(len(ev_twice), 2)
+        self.assertTrue(all(e["killed"] for e in ev_twice))
+
+        # 3. Real training/code error never retries.
+        res_err, ev_err = run_scenario([
+            (1, ["RuntimeError: model exploded"], False),
+        ])
+        self.assertFalse(res_err["ok"])
+        self.assertIn("model exploded", res_err["error"])
+        self.assertEqual(ev_err, [{"port": "29501", "killed": True}])
+
 
 if __name__ == "__main__":
     unittest.main()

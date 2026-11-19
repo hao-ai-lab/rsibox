@@ -325,17 +325,22 @@ class MegatronLab:
             for m, text in resolved_files.items():
                 with open(os.path.join(d, m + ".py"), "w", encoding="utf-8") as f:
                     f.write(text)
-            env = {**self._env(_free_port()), "FASTRSI_FRESH": out,
-                   "FASTRSI_OVERLAY": d}
-            env.pop("FASTRSI_LAB")
-            job = _Job(self.cmd, env, "fresh")
-            rc = job.wait_exit()
-            tail = job.tail(8)
-            job.kill()
-            if not os.path.exists(out):
-                return {"ok": False, "error": f"fresh run rc={rc}: " + " | ".join(tail),
+            for attempt in range(2):
+                env = {**self._env(_free_port()), "FASTRSI_FRESH": out,
+                       "FASTRSI_OVERLAY": d}
+                env.pop("FASTRSI_LAB")
+                job = _Job(self.cmd, env, "fresh")
+                rc = job.wait_exit()
+                tail = job.tail(8)
+                job.kill()
+                if os.path.exists(out):
+                    break
+                joined = " | ".join(tail)
+                if attempt == 0 and ("Address already in use" in joined or "EADDRINUSE" in joined):
+                    continue
+                return {"ok": False, "error": f"fresh run rc={rc}: {joined}",
                         "output": None}
-            with open(out) as f:
+            with open(out, encoding="utf-8") as f:
                 r = json.load(f)
             return {"ok": bool(r.get("ok")), "output": r.get("output"), "error": r.get("error")}
         finally:

@@ -143,7 +143,8 @@ def c3_fresh_equivalence(lab):
     live = lab.check()["output"]
     fresh = lab.fresh_check(P["visible"])
     expect(live != out0, "the edit is visible", _short(live))
-    expect(fresh["ok"] and fresh["output"] == live, "fresh equals live (visible)",
+    expect(fresh["ok"], "fresh check succeeds (visible)", fresh.get("error") or fresh)
+    expect(fresh["output"] == live, "fresh equals live (visible)",
            (_short(fresh["output"]), _short(live)))
     lab.uninstall()
     merged = {}
@@ -152,7 +153,8 @@ def c3_fresh_equivalence(lab):
         merged.update(p["files"])
     live_c = lab.check()["output"]
     fresh_c = lab.fresh_check({"files": merged})
-    expect(fresh_c["ok"] and fresh_c["output"] == live_c, "fresh equals live (chain of 3)",
+    expect(fresh_c["ok"], "fresh check succeeds (chain of 3)", fresh_c.get("error") or fresh_c)
+    expect(fresh_c["output"] == live_c, "fresh equals live (chain of 3)",
            (_short(fresh_c["output"]), _short(live_c)))
     lab.uninstall(lab.status()["txns"][0])
     return [f"visible: live == fresh == {_short(live)}",
