@@ -203,5 +203,74 @@ class StampFilesTest(unittest.TestCase):
         self.assertEqual(sorted(H.stamp_files(vae, prefixes=("spkg.loader",), own=())), ["spkg.vaes.vae"])
 
 
+EXIT_DRIVER = """
+import multiprocessing as mp, os, subprocess, sys
+from services import holder
+
+
+def child(fix):
+    if fix:
+        holder._private_tracker_fd()
+    # what torch's file_system sharing does: fork and exec a daemon that inherits open fds
+    p = subprocess.Popen(["sleep", "20"], close_fds=False, start_new_session=True)
+    print(p.pid, flush=True)
+    p.returncode = 0  # intentionally detached; parent test kills it in finally
+
+
+if __name__ == "__main__":
+    from multiprocessing import resource_tracker
+    resource_tracker.ensure_running()
+    ctx = mp.get_context("spawn")
+    proc = ctx.Process(target=child, args=(sys.argv[1] == "fix",))
+    proc.start()
+    proc.join()
+"""
+
+
+class HostExitTest(unittest.TestCase):
+    def run_host(self, mode):
+        import subprocess
+        livelab = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {**os.environ, "PYTHONPATH": livelab}
+        with tempfile.TemporaryDirectory(prefix="holder-exit-") as tmp:
+            script = os.path.join(tmp, "host.py")
+            with open(script, "w", encoding="utf-8") as fh:
+                fh.write(EXIT_DRIVER)                 # spawn re-imports the main module
+            t0 = time.time()
+            p = subprocess.Popen([sys.executable, script, mode], env=env,
+                                 stdout=subprocess.PIPE, text=True)
+            daemon = None
+            try:
+                line = p.stdout.readline()
+                daemon = int(line) if line.strip() else None
+                try:
+                    p.wait(timeout=10)
+                    return round(time.time() - t0, 1)
+                except subprocess.TimeoutExpired:
+                    return None
+            finally:
+                if daemon is not None:
+                    try:
+                        os.kill(daemon, 9)
+                    except ProcessLookupError:
+                        pass
+                if p.stdout is not None:
+                    p.stdout.close()
+                p.wait()
+
+    def test_a_daemon_a_spawned_child_executes_does_not_hang_the_host_at_exit(self):
+        """Input: a host that runs multiprocessing's resource tracker spawns a child (as the lab
+        spawns the holder); the child executes a 20 s daemon that keeps inherited fds open (as
+        torch's file_system sharing starts torch_shm_manager) and returns. Expect: with
+        `_private_tracker_fd` the host exits at once; without it, on Linux with Python 3.12 (CI,
+        the GPU nodes' environment), it is still waiting after 10 s: the tracker's finalizer
+        waits for the tracker, which waits for its pipe to close (Python 3.14 on macOS does not
+        wait). Proves: the holder no longer hangs the lab host at exit. Not: torch itself (the
+        GPU run with the holder exits)."""
+        self.assertIsNotNone(self.run_host("fix"))
+        if sys.platform.startswith("linux") and sys.version_info[:2] == (3, 12):
+            self.assertIsNone(self.run_host("nofix"))
+
+
 if __name__ == "__main__":
     unittest.main()

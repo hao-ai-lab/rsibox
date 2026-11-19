@@ -12,7 +12,6 @@ Never raises for a participant call: the kernel's replies are ok-dicts. `lost` m
 call raise ConnectionError until the process is respawned, as a dead worker would.
 """
 import copy
-import importlib.util
 import linecache
 import os
 import sys
@@ -25,6 +24,8 @@ _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
+
+from fastrsi import harness  # noqa: E402
 
 # rebuilt: {module: text} an in-place rebuild made the module's base (what it runs, not its file)
 _STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}}
@@ -82,25 +83,16 @@ def _transformer(worker):
 def inject(worker, fault, **kw):
     """Conformance faults, injected in this worker. Returns an ok-dict."""
     p = participant(worker)
-    if fault == "fail_apply":
-        j, after, n = p.journal, kw.get("after", 1), [0]
-        orig = j.set_code
-
-        def set_code(*a, **k):
-            n[0] += 1
-            if n[0] > after:
-                del j.set_code                      # one shot
-                raise RuntimeError(f"{p.name}: injected fault after {after} swap(s)")
-            return orig(*a, **k)
-        j.set_code = set_code
-    elif fault == "fail_commit":
-        q = p.quiesce
-
-        def failing(fn):
-            p.quiesce = q
-            raise RuntimeError(f"{p.name}: injected commit failure")
-        p.quiesce = failing
-    elif fault in ("crash", "hang"):
+    if fault in ("fail_apply", "fail_commit", "tamper"):
+        if fault == "tamper":
+            kw = {
+                "module": "fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_decoding",
+                "function": "_layout",
+                **kw,
+            }
+        res = harness.inject_participant_fault(p, fault, **kw)
+        return {**res, "pid": os.getpid()} if res.get("ok") else res
+    if fault in ("crash", "hang"):
         t = _transformer(worker)
         if t is None:
             return {"ok": False, "error": "no transformer module to hook"}
@@ -116,11 +108,6 @@ def inject(worker, fault, **kw):
         _STATE["hooks"].append(t.register_forward_pre_hook(hook))
     elif fault == "lost":
         _STATE["faults"]["lost"] = True
-    elif fault == "tamper":
-        mod = sys.modules[kw.get("module", "fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_decoding")]
-        fn = getattr(mod, kw.get("function", "_layout"))
-        # a REPL edit, not journaled: same behavior, another code object
-        fn.__code__ = fn.__code__.replace(co_name=fn.__code__.co_name)
     else:
         return {"ok": False, "error": f"unknown fault {fault}"}
     return {"ok": True, "fault": fault, "participant": p.name, "pid": os.getpid()}
@@ -137,9 +124,7 @@ def repl(worker, code):
         return {"ok": False, "error": traceback.format_exc()[-4000:]}
 
 
-def _file_of(module):
-    spec = importlib.util.find_spec(module)
-    return spec.origin if spec else None
+_file_of = harness.module_file
 
 
 def _show_lines(module, text):

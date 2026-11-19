@@ -1,0 +1,4 @@
+{
+  "toy": "adapter.toy_lab:ToyFastVideoLab",
+  "real": "adapter.h3:H3Lab"
+}
