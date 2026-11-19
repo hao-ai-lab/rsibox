@@ -400,6 +400,12 @@ def _same_bytes(a, b):
         a.contiguous().view(-1).view(torch.uint8), b.contiguous().view(-1).view(torch.uint8))
 
 
+def _sync_all(torch):
+    """Wait for every GPU: torch.cuda.synchronize() waits for the current device only."""
+    for d in range(torch.cuda.device_count()):
+        torch.cuda.synchronize(d)
+
+
 def execute(src, dst, p, src_layout, dst_layout):
     """Write the target group in place following plan `p`. Returns byte counts and seconds."""
     import torch
@@ -411,7 +417,7 @@ def execute(src, dst, p, src_layout, dst_layout):
             d = dst[r][name][1]
             d.copy_(src[r][name][1])
             rep["copy_bytes"] += _bytes(d)
-    torch.cuda.synchronize()
+    _sync_all(torch)
     t1 = time.perf_counter()
     for name, kind in p["moe"].items():
         s_shapes = [list(src[r][name][1].shape) for r in range(world)]
@@ -430,7 +436,7 @@ def execute(src, dst, p, src_layout, dst_layout):
         rep["moe_cross_gpu_bytes"] += sum(_bytes(o) for o in outs) * (world - 1) // world \
             if src_ep != dst_ep else 0
         del canon, outs
-    torch.cuda.synchronize()
+    _sync_all(torch)
     t2 = time.perf_counter()
     rep.update({"copy_s": round(t1 - t0, 3), "moe_s": round(t2 - t1, 3)})
     return rep
