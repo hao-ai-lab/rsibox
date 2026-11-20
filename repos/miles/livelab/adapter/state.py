@@ -49,13 +49,23 @@ class EpochDataBuffer:
             return {"evicted": evicted, "code_epoch": self.code_epoch, "remaining": len(self._entries)}
 
 
+def sync_weights_backuper(actor, tag="actor"):
+    """Refresh `actor.weights_backuper` after an S0 restore so subsequent steps do not revert to stale weights."""
+    wb = getattr(actor, "weights_backuper", None)
+    tags = getattr(wb, "backup_tags", None) or ()
+    if wb is not None and tag in tags:
+        wb.backup(tag)
+        return True
+    return False
+
+
 class CoupledWeightReset:
     """Snapshot trainer `S0` state once and restore trainer + rollout weights together."""
     def __init__(self, get_trainer_states, set_trainer_states, sync_rollout_weights,
-                 flush_rollout_cache=None, data_buffer=None):
+                 flush_rollout_cache=None, data_buffer=None, post_restore=None):
         self._get_trainer, self._set_trainer = get_trainer_states, set_trainer_states
         self._sync_rollout, self._flush_cache = sync_rollout_weights, flush_rollout_cache
-        self.data_buffer, self.initial_states = data_buffer, None
+        self.data_buffer, self._post_restore, self.initial_states = data_buffer, post_restore, None
 
     def capture_s0(self):
         self.initial_states = copy.deepcopy(self._get_trainer())
@@ -69,6 +79,9 @@ class CoupledWeightReset:
             evicted = self.data_buffer.drain_stale(clear_all=True)["evicted"]
             reset_items.insert(0, "data_buffer")
         self._set_trainer(copy.deepcopy(self.initial_states))
+        if self._post_restore is not None:
+            self._post_restore()
+            reset_items.append("weights_backuper")
         if broadcast_rollout:
             self._sync_rollout(); reset_items.append("rollout_weights")
         if self._flush_cache is not None:

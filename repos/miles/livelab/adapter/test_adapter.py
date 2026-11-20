@@ -99,6 +99,49 @@ class MilesAdapterTest(unittest.TestCase):
         self.assertEqual(summary["evicted"], 1)
         self.assertEqual(summary["reset"], ["data_buffer", "trainer_s0", "rollout_weights", "kv_cache"])
 
+    def test_sync_weights_backuper_prevents_stale_backup_reversion_after_s0_restore(self):
+        """Regression for Wave 9 slime non-zero-grad S0 finding: without refreshing
+        `weights_backuper.backup("actor")` after restoring trainer weights, the next step's
+        `_switch_model("actor")` / `update_weights()` reverts to stale step-k weights."""
+        live = {"w": 1.0}
+        backed = {"actor": 1.0}
+        actor = types.SimpleNamespace(
+            weights_backuper=types.SimpleNamespace(
+                backup_tags=("actor", "ref"),
+                backup=lambda tag: backed.__setitem__(tag, live["w"]),
+                restore=lambda tag: live.__setitem__("w", backed[tag]),
+            )
+        )
+        coupled_unfixed = S.CoupledWeightReset(
+            get_trainer_states=lambda: {"w": live["w"]},
+            set_trainer_states=lambda s: live.__setitem__("w", s["w"]),
+            sync_rollout_weights=lambda: None,
+        )
+        coupled_unfixed.capture_s0()
+        live["w"] = 9.0
+        backed["actor"] = 9.0
+        coupled_unfixed.restore_and_sync(broadcast_rollout=False)
+        actor.weights_backuper.restore("actor")
+        self.assertEqual(live["w"], 9.0)
+
+        synced = []
+        coupled_fixed = S.CoupledWeightReset(
+            get_trainer_states=lambda: {"w": live["w"]},
+            set_trainer_states=lambda s: live.__setitem__("w", s["w"]),
+            sync_rollout_weights=lambda: synced.append(backed["actor"]),
+            post_restore=lambda: S.sync_weights_backuper(actor, "actor"),
+        )
+        live["w"] = 1.0
+        backed["actor"] = 1.0
+        coupled_fixed.capture_s0()
+        live["w"] = 9.0
+        backed["actor"] = 9.0
+        summary = coupled_fixed.restore_and_sync(broadcast_rollout=True)
+        self.assertEqual(summary["reset"], ["trainer_s0", "weights_backuper", "rollout_weights"])
+        actor.weights_backuper.restore("actor")
+        self.assertEqual(live["w"], 1.0)
+        self.assertEqual(synced, [1.0])
+
     def test_async_mode_quiesces_rollout_controller_and_drains_stale_epoch(self):
         """Input: `ToyMilesLab(mode='async')` with pre-edit trajectories buffered under epoch 0.
         Expected: `install` pauses generation + flushes cache before Phase 2 and resumes after,
