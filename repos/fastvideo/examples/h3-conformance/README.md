@@ -104,7 +104,7 @@ With asymmetric `SP >= 2` fault-beacon detection + parallel dirty `kill_tree(...
 
 ```
 case               result  seconds  evidence
-c0_repeatable      pass     24.6    3 checks gave {'video': 'd0e55e892690e260', 'audio': 'ee49674663eae6e2'}
+c0_repeatable      pass     25.105  3 checks gave {'video': 'd0e55e892690e260', 'audio': 'ee49674663eae6e2'}
 c2_visible         pass      9.451  output {'video': 'd0e55e892690e260', ...} -> {'video': 'cd32f50b70d9479f', ...}; calls [1, 1]
 c4_uninstall       pass     18.798  uninstall ['txn-cf88b31a'] in 0.016544 s; identity 40725d5a8154d4b1 restored
 c8_crash_and_hang  pass    214.018  crash: respawn 9.647481 s; hang: respawn 9.207822 s; lost: respawn 6.080594 s; tamper: respawn 6.516012 s

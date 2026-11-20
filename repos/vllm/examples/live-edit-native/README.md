@@ -36,7 +36,7 @@ using upstream vLLM PR `#49750` (`csrc/libtorch_stable/layernorm_kernels.cu`: no
 
 6. **V2 model runner (`--v2` -> `ModelCudaGraphManager`):**
    - `TP=1` selective `R1`: refuses without `R1`, selectively recaptures `[1]` in `0.299 s` (running `[4, 2]` eager concurrently), extends `[2, 4]` via `recapture_extend` in `0.360 s`, proves `1728` live / `432` capture witness calls, restores base in `2.93 ms` (`undo`), keeps `0.0 MiB` reserved growth across 5 consecutive recapture+undo cycles (`0.381–0.491 s` recapture, `2.56–2.81 ms` undo), and matches fresh V2 (`30.892 s`) with `max |Δlogprob| = 0.0`.
-   - `TP=2` (`2× B200`) PR `#49750` on V2: visible perturbation `12.659 s` edit-to-rebuilt (`12.129 s` build + `0.511 s` R1, `48.878 s` fresh) and PR `#49750` `13.063 s` edit-to-rebuilt (`12.224 s` build + `0.818 s` R1, `9.71 ms` cascade undo, `47.667 s` fresh), `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, `0 MiB` residual GPU memory.
+   - `TP=2` (`2× B200`) PR `#49750` on V2: visible perturbation `13.73 s` total incl. check (`12.659 s` edit-to-rebuilt [`12.129 s` build + `0.511 s` R1] + `1.070 s` check vs `48.878 s` fresh) and PR `#49750` `14.13 s` total incl. check (`13.063 s` edit-to-rebuilt [`12.224 s` build + `0.818 s` R1] + `1.070 s` check, `9.71 ms` cascade undo vs `47.667 s` fresh), `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, `0 MiB` residual GPU memory.
 
 ## Usage
 

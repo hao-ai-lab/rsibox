@@ -54,13 +54,13 @@
      "startup_cost_removed": "Full extension rebuild and cold engine restart for single-unit C++/CUDA kernel edits (#49750).",
      "measured_saving": {
       "before": "49.47 (TP1) / 46.97 (TP2 V1, 47.67 s TP2 V2) fresh cold restart + nvcc build + check",
-      "after": "19.22 (TP1 V1 serial) / 13.62 (TP2 V1 parallel) / 13.06 (TP2 V2 parallel edit-to-rebuilt)",
+      "after": "19.22 (TP1 V1 serial) / 13.62 (TP2 V1 parallel) / 14.13 (TP2 V2 parallel)",
       "unit": "s",
       "setup": "1x and 2x B200, vLLM 0.33.0 V1 and V2 FULL_DECODE_ONLY graphs, Qwen3-8B TP1/TP2, layernorm_kernels.cu (#49750 and eps=0.25f perturbation), 2026-11-19"
      },
      "status": "merged_gpu_verified",
      "source": "repos/vllm/kb/mechanisms.md:10; repos/vllm/kb/costs.md; repos/vllm/livelab/adapter/native.py",
-     "note": "Both PR #49750 (1x TP1 V1 serial: 17.12 s commit, 0.83 s R1 recapture, 19.22 s total vs 49.47 s restart, 6.55 ms cascade undo; 2x TP2 V1 parallel native.py: flock 11.85 s uncached / 0.0 s cached peer, 0.68 s R1, 13.62 s total vs 46.97 s restart [down from 20.26 s vs 55.28 s serial], 8.94 ms cascade undo, 576 live / 432 capture witness calls per rank, max |delta logprob| == 0.0; 2x TP2 V2 parallel: live_boot 36.544 s, 13.06 s edit-to-rebuilt [12.22 s build, 0.82 s R1, 9.71 ms cascade undo] vs 47.67 s fresh) and a visible epsilon perturbation (18.87 s TP1 V1 / 13.28 s TP2 V1 parallel / 12.66 s TP2 V2 edit-to-rebuilt vs 48.97 / 49.42 / 48.88 s restart) match fresh restarts bit-for-bit on B200 with 0 MiB leftover, while refusing plans without R1 in 0.022 s. Standalone 7-arm compile-phase waterfall on B200 GPU 0 reaches 11.99 s with parallel reg.cpp + split=16 and 8.60 s on a thin single-kernel TU (8.32 s BF16 floor)."
+     "note": "Both PR #49750 (1x TP1 V1 serial: 17.12 s commit, 0.83 s R1 recapture, 19.22 s total vs 49.47 s restart, 6.55 ms cascade undo; 2x TP2 V1 parallel native.py: flock 11.85 s uncached / 0.0 s cached peer, 0.68 s R1, 13.62 s total vs 46.97 s restart [down from 20.26 s vs 55.28 s serial], 8.94 ms cascade undo, 576 live / 432 capture witness calls per rank, max |delta logprob| == 0.0; 2x TP2 V2 parallel: live_boot 36.544 s, 14.13 s total incl. check [13.06 s edit-to-rebuilt (12.22 s build + 0.82 s R1) + 1.07 s check], 9.71 ms cascade undo vs 47.67 s fresh) and a visible epsilon perturbation (18.87 s TP1 V1 / 13.28 s TP2 V1 parallel / 13.73 s TP2 V2 total incl. check [12.66 s edit-to-rebuilt + 1.07 s check] vs 48.97 / 49.42 / 48.88 s restart) match fresh restarts bit-for-bit on B200 with 0 MiB leftover, while refusing plans without R1 in 0.022 s. Standalone 7-arm compile-phase waterfall on B200 GPU 0 reaches 11.99 s with parallel reg.cpp + split=16 and 8.60 s on a thin single-kernel TU (8.32 s BF16 floor)."
     },
     {
      "name": "Triton kernel rebuild in place",
@@ -555,7 +555,7 @@
       "setup": "2x GB200, miles 0.2.0, multi-actor live swap + EpochDataBuffer code_epoch drain + coupled S0 weight sync"
      },
      "status": "merged_gpu_verified",
-     "source": "PR #162; repos/miles; launch/receipts/w8-miles-ladder/summary.json",
+     "source": "PR #162; repos/miles/kb/costs.md:37-50",
      "note": "11/11 conformance; on 2x GB200 miles 0.2.0: multi-actor live swap in 0.069 s (69.22 ms) with EpochDataBuffer code_epoch drain and coupled S0 weight sync. Paired 2x B200 Qwen3-0.6B GSM8K GRPO receipt (slime/MilesStepGate + Snapshot S0): 83.87 s cold restart (83.8696 s) -> 0.0570 s install + 0.2027 s S0 restore + 0.8957 s live step = 1.1555 s (72.6x), or 0.6641 s (126.3x) on recorded-rollout trainer replay (0.4043 s), 0.0159 s undo with bit-exact post-undo weight restore (bit_exact_undo_on_same_rollout: true)."
     }
    ]

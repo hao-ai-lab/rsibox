@@ -36,7 +36,7 @@ first training step completes:
 
 ## 3. Paired 2× B200 Receipt (`slime` / `MilesStepGate` + `miles 0.2.0` `PR #162`)
 
-Source: `launch/receipts/w8-miles-ladder/summary.json` (`Qwen3-0.6B` GSM8K GRPO on `2× B200`, `1` SGLang rollout + `1` Megatron trainer via `MilesStepGate`, `slime` `miles`-lineage trainer stack; `fastrsi_megatron.state.Snapshot` `S0` over `3,576,299,520 B` / `3.33 GiB`).
+Source: our 2026-11-19 paired live-swap run on `2× B200` (`Qwen3-0.6B` GSM8K GRPO, `1` SGLang rollout + `1` Megatron trainer via `MilesStepGate`, `slime` `miles`-lineage trainer stack; `fastrsi_megatron.state.Snapshot` `S0` over `3,576,299,520 B` / `3.33 GiB`).
 
 | Measurement | Wall Time | Breakdown / Notes |
 |---|---:|---|

@@ -236,7 +236,7 @@
       "note": "not recorded"
      },
      "installed_live": true,
-     "install_time": "19.22 s V1 TP1 / 13.62 s V1 TP2 / 13.06 s V2 TP2 edit-to-rebuilt (V1 TP1: 17.12 s commit [17.09 s nvcc] + 0.83 s R1 + 1.27 s check; V1 TP2 parallel: flock 11.88 s commit [11.85 s build, 0.0 s cached peer] + 0.68 s R1 + 1.06 s check; V2 TP2 ModelCudaGraphManager: 12.22 s build + 0.82 s R1, 9.71 ms cascade undo) on B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
+     "install_time": "19.22 s V1 TP1 / 13.62 s V1 TP2 / 14.13 s V2 TP2 (V1 TP1: 17.12 s commit [17.09 s nvcc] + 0.83 s R1 + 1.27 s check; V1 TP2 parallel: flock 11.88 s commit [11.85 s build, 0.0 s cached peer] + 0.68 s R1 + 1.06 s check; V2 TP2 ModelCudaGraphManager: 12.22 s build + 0.82 s R1 [13.06 s edit-to-rebuilt] + 1.07 s check, 9.71 ms cascade undo) on B200 vLLM 0.33.0 Qwen3-8B; 28 s in earlier pre-repo prototype",
      "check_time": "1.27 s V1 TP1 / 1.06 s V1 TP2 / 1.07 s V2 TP2 (live) vs 1.58 s / 1.48 s / 1.12 s (fresh)",
      "restart_time_replaced": "49.47 s V1 TP1 / 46.97 s V1 TP2 / 47.67 s V2 TP2 (fresh restart + nvcc build + check on B200 vLLM 0.33.0 Qwen3-8B; 55.28 s serial baseline)",
      "measured_effect": "non-contiguous residual accepted in live GPU check (max abs err 0.0156 vs reference)",
