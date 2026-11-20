@@ -100,7 +100,7 @@ def file_namespace(path):
     path = os.path.realpath(path)
     for name, module in list(sys.modules.items()):
         file = getattr(module, "__file__", None)
-        if isinstance(file, str) and os.path.realpath(file) == path:
+        if isinstance(file, str) and _real(file) == path:
             return name, module
     base, dicts = os.path.basename(path), {}
     for obj in L.all_objects():
@@ -115,6 +115,16 @@ def file_namespace(path):
     globals_dict = next(iter(dicts.values()))
     globals_dict.setdefault("__file__", path)
     return _register(file_module(path), Namespace(globals_dict))
+
+
+_REAL = {}   # module __file__ -> realpath: a module's file never moves, and realpath on a network file system costs a stat per path component
+
+
+def _real(file):
+    try:
+        return _REAL[file]
+    except KeyError:
+        return _REAL.setdefault(file, os.path.realpath(file))
 
 
 def file_module(path):
@@ -201,6 +211,25 @@ def _fingerprint_modules(local, host, modules):
     return present
 
 
+def _seed_base_sources(local, modules):
+    """Seed pre-edit `base_source` snapshots (if supplied in plan module specs) at the oldest
+    position of `local._sources` so edits made on disk before `prepare` diff against the
+    in-memory base without shadowing committed transactions."""
+    seeded = {}
+    for mkey, spec in (modules or {}).items():
+        if isinstance(spec, dict) and "base_source" in spec:
+            seeded[mkey] = spec["base_source"]
+            seeded[mkey + ACTOR] = spec["base_source"]
+    if not seeded:
+        return
+    base_map = local._sources.get("__base__")
+    if base_map is None:
+        base_map = {}
+        local._sources = {"__base__": base_map, **local._sources}
+    for key, text in seeded.items():
+        base_map.setdefault(key, text)
+
+
 def serve(host, name, method, payload):
     """One participant call in this process; `host` is the actor (None outside one)."""
     actor_view(host)  # ensure a pure-class @ray.remote actor imports its defining module
@@ -211,6 +240,8 @@ def serve(host, name, method, payload):
     local = _LOCAL.get(name) or _LOCAL.setdefault(name, C.LocalParticipant(name))
     absent = _ABSENT.setdefault(name, {})
     if method == "prepare":
+        if isinstance(payload, dict):
+            _seed_base_sources(local, payload.get("modules"))
         plan = actor_plan(local, host, payload)
         if not plan["modules"] and not plan.get("repairs"):
             txn = plan.get("id") or f"txn-{uuid.uuid4().hex[:8]}"

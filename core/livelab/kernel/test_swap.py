@@ -277,6 +277,54 @@ class SwapEdgeCaseTest(unittest.TestCase):
         base_lines, _ = inspect.getsourcelines(module_obj.compute)
         self.assertIn("return val + 1", "".join(base_lines))
 
+    def test_shifted_lines_in_later_swap_do_not_break_earlier_lazy_triton_builder_source_lookup(self):
+        """Input: txn 1 adds a lazy Triton-like builder (NOT called yet) at the bottom of a
+        module; txn 2 edits an earlier function and inserts 15 lines above the builder, leaving
+        the builder unchanged (reproducing the FastVideo H3 patches 02-08 stacked live-install
+        `CompilationError ... StopIteration` failure). Expected: calling txn 1's lazy builder
+        AFTER txn 2 still reads the exact nested kernel source via `inspect.getsourcelines`, and
+        undoing both transactions removes all `<fastrsi-live:...>` linecache entries."""
+        import inspect
+        import linecache
+        from . import coordinator as C
+
+        module_name = f"kt_sw{next(_n)}"
+        base_source = (
+            "def head(x):\n"
+            "    return x + 1\n"
+        )
+        txn1_source = (
+            "import inspect\n\n"
+            "def head(x):\n"
+            "    return x + 1\n\n\n"
+            "def lazy_builder():\n"
+            "    def _lazy_kernel(inp):\n"
+            "        return inp * 7\n"
+            "    lines, _ = inspect.getsourcelines(_lazy_kernel)\n"
+            "    return ''.join(lines).strip(), _lazy_kernel(3)\n"
+        )
+        padding = "\n".join(f"    x = x + {i}" for i in range(15))
+        txn2_source = txn1_source.replace("    return x + 1\n", f"{padding}\n    return x + 2\n")
+
+        (module_obj,) = temp_modules(self, {module_name: base_source})
+        part = C.LocalParticipant("core")
+        self.assertTrue(part.prepare({"id": "t1", "modules": {module_name: {"source": txn1_source}}})["ok"])
+        self.assertTrue(part.commit("t1")["ok"])
+        # Do NOT call lazy_builder() yet: install txn 2 shifting lines above lazy_builder first.
+        self.assertTrue(part.prepare({"id": "t2", "modules": {module_name: {"source": txn2_source}}})["ok"])
+        self.assertTrue(part.commit("t2")["ok"])
+
+        src_text, out_val = module_obj.lazy_builder()
+        self.assertIn("def _lazy_kernel(inp):", src_text)
+        self.assertIn("return inp * 7", src_text)
+        self.assertEqual(out_val, 21)
+
+        self.assertTrue(part.undo("t2")["ok"])
+        self.assertTrue(part.undo("t1")["ok"])
+        self.assertTrue(part.at_base()["ok"])
+        live_keys = [k for k in linecache.cache if k.startswith(f"<fastrsi-live:{module_obj.__file__}#")]
+        self.assertEqual(live_keys, [])
+
     def test_a_method_added_to_or_removed_from_a_nested_class_is_refused(self):
         """Input: `class Outer: class Inner: def f(self, x): return x + 1`; edits that (a) add
         `Inner.helper` and make f call it, (b) remove a second method `Inner.g`. Expected:

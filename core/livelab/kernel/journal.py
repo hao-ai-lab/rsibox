@@ -104,10 +104,117 @@ def _label(obj):
     return type(obj).__name__
 
 
-def _clear_cached_fn_state(value, depth=0):
-    """Clear runtime attributes cached on a removed function or JIT wrapper."""
+def _triton_jit_registry():
+    """Return Triton's global JIT function registry dict when `triton.runtime.jit` is loaded
+    (pure stdlib lookup via `sys.modules`, never importing `triton`)."""
+    triton_jit = sys.modules.get("triton.runtime.jit")
+    reg = getattr(triton_jit, "_triton_jit_function_registry", None) if triton_jit is not None else None
+    return reg if isinstance(reg, dict) else None
+
+
+def _snapshot_triton_jit_registry(pairs, mod=None):
+    """Snapshot existing Triton registry entries that this transaction's nested codes may overwrite."""
+    reg = _triton_jit_registry()
+    if not reg:
+        return {}
+    qualnames = {new_code.co_qualname for new_code, _ in pairs.values()}
+    mod_name = getattr(mod, "__name__", None) if mod is not None else None
+    mod_dict = vars(mod) if mod is not None else None
+    snap = {}
+    for key, val in list(reg.items()):
+        if not isinstance(key, str):
+            continue
+        matched = False
+        if mod_name is not None and key.startswith(f"{mod_name}:"):
+            matched = key[len(mod_name) + 1:] in qualnames
+        elif ":" in key:
+            _, qual = key.split(":", 1)
+            if qual in qualnames:
+                fn = getattr(val, "fn", None)
+                matched = mod_dict is None or getattr(fn, "__globals__", None) is mod_dict
+        if matched:
+            snap[key] = val
+    return snap
+
+
+def _unregister_triton_jit(value):
+    """Remove `value` from `triton.runtime.jit._triton_jit_function_registry` if present."""
+    reg = _triton_jit_registry()
+    if not reg:
+        return
+    fn = getattr(value, "fn", None)
+    if not isinstance(fn, types.FunctionType):
+        return
+    mod_name = getattr(value, "module", None) or getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if mod_name and qualname:
+        key = f"{mod_name}:{qualname}"
+        if reg.get(key) is value:
+            reg.pop(key, None)
+            return
+    for key, reg_val in list(reg.items()):
+        if reg_val is value:
+            reg.pop(key, None)
+
+
+def _clear_jit_containers(value):
+    """Clear JIT cache containers on a removed/undone wrapper and break `defaultdict` cycles."""
+    _unregister_triton_jit(value)
+    for container_attr in ("device_caches", "pre_run_hooks", "cache", "used_global_vals"):
+        container = getattr(value, container_attr, None)
+        if isinstance(container, (dict, list, set)):
+            container.clear()
+            if hasattr(container, "default_factory"):
+                try:
+                    container.default_factory = None
+                except Exception:
+                    pass
+
+
+def _clear_cached_fn_state(value, depth=0, code_pairs=None):
+    """Clear runtime attributes and caches held on a removed definition or nested-code holder.
+
+    When `code_pairs` is given (from `_restore_closures`), only objects holding a code object
+    in `code_pairs` have their JIT caches cleared/unregistered, so any base JIT object sharing
+    a container with an undone nested kernel stays intact. When `code_pairs` is None (for an
+    added definition removed by `Entry('added')`), clear the definition's own caches without
+    mutating unrelated objects stored inside its `__dict__`.
+    """
     if depth > 4 or value is None:
         return
+    if code_pairs is not None:
+        if not _holds_nested_code(value, code_pairs):
+            return
+        if callable(getattr(value, "cache_clear", None)):
+            try:
+                value.cache_clear()
+            except Exception:
+                pass
+        if isinstance(value, types.FunctionType):
+            for cached_val in list(value.__dict__.values()):
+                _clear_cached_fn_state(cached_val, depth + 1, code_pairs=code_pairs)
+            value.__dict__.clear()
+            return
+        if isinstance(value, (tuple, list, set, frozenset)):
+            for item in list(value):
+                _clear_cached_fn_state(item, depth + 1, code_pairs=code_pairs)
+            return
+        if isinstance(value, dict):
+            for item in list(value.values()):
+                _clear_cached_fn_state(item, depth + 1, code_pairs=code_pairs)
+            return
+        _clear_jit_containers(value)
+        for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
+            inner = getattr(value, attr_name, None)
+            if inner is not None and inner is not value:
+                _clear_cached_fn_state(inner, depth + 1, code_pairs=code_pairs)
+        return
+
+    if callable(getattr(value, "cache_clear", None)):
+        try:
+            value.cache_clear()
+        except Exception:
+            pass
     if isinstance(value, types.FunctionType):
         value.__dict__.clear()
         return
@@ -115,6 +222,9 @@ def _clear_cached_fn_state(value, depth=0):
         for member in list(vars(value).values()):
             _clear_cached_fn_state(member, depth + 1)
         return
+    if isinstance(value, (tuple, list, set, frozenset, dict)):
+        return
+    _clear_jit_containers(value)
     for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
         inner = getattr(value, attr_name, None)
         if inner is not None and inner is not value:
@@ -122,13 +232,17 @@ def _clear_cached_fn_state(value, depth=0):
 
 
 def _holds_nested_code(value, code_pairs, depth=0):
-    """Does `value` (a function or JIT/descriptor wrapper) hold a code object in `code_pairs`?"""
+    """Does `value` (a function, JIT/descriptor wrapper, or container) hold a code object in `code_pairs`?"""
     if depth > 4 or value is None:
         return False
     if isinstance(value, types.FunctionType):
         pair = code_pairs.get(id(value.__code__))
         return pair is not None and pair[0] is value.__code__
-    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func"):
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return any(_holds_nested_code(item, code_pairs, depth + 1) for item in value)
+    if isinstance(value, dict):
+        return any(_holds_nested_code(item, code_pairs, depth + 1) for item in value.values())
+    for attr_name in ("__func__", "__wrapped__", "fn", "fget", "fset", "fdel", "func", "pre_run_hooks"):
         inner = getattr(value, attr_name, None)
         if inner is not None and inner is not value and _holds_nested_code(inner, code_pairs, depth + 1):
             return True
@@ -209,6 +323,7 @@ def _restore_closures(entry):
     mod_obj = entry[2] if len(entry) > 2 else None
     cls_snapshots = entry[3] if len(entry) > 3 else ()
     module_keys = entry[4] if len(entry) > 4 else None
+    triton_snapshot = entry[5] if len(entry) > 5 else None
     # Only names absent when the entry was recorded, and only those that hold a new nested
     # code (the new code cached what it made there). A name the base had, or a plain value
     # the engine set, stays: the heap pass below gives a closure under it its old code.
@@ -217,7 +332,7 @@ def _restore_closures(entry):
             attr_val = vars(cls_obj).get(attr_name, MISSING)
             if not _holds_nested_code(attr_val, pairs):
                 continue
-            _clear_cached_fn_state(attr_val)
+            _clear_cached_fn_state(attr_val, code_pairs=pairs)
             try:
                 delattr(cls_obj, attr_name)
             except AttributeError:
@@ -228,8 +343,24 @@ def _restore_closures(entry):
             if module_keys is not None and attr_name in module_keys:
                 continue
             if _holds_nested_code(attr_val, pairs):
-                _clear_cached_fn_state(attr_val)
+                _clear_cached_fn_state(attr_val, code_pairs=pairs)
                 mod_dict.pop(attr_name, None)
+    reg = _triton_jit_registry()
+    if reg is not None:
+        for reg_key, reg_val in list(reg.items()):
+            if _holds_nested_code(reg_val, pairs):
+                _clear_cached_fn_state(reg_val, code_pairs=pairs)
+                if triton_snapshot and reg_key in triton_snapshot:
+                    reg[reg_key] = triton_snapshot[reg_key]
+                else:
+                    reg.pop(reg_key, None)
+        if triton_snapshot:
+            for reg_key, saved_val in triton_snapshot.items():
+                if reg_key not in reg:
+                    reg[reg_key] = saved_val
+        reg_val = None
+        saved_val = None
+    attr_val = None
     now = _refs(pairs)
     pairs = {k: p for k, p in pairs.items() if now[k] != base[k]}
     if not pairs:
@@ -383,8 +514,10 @@ class Journal:
                     if isinstance(cls_obj, type)
                 )
             module_keys = set(vars(mod)) if mod is not None else None
+            triton_snapshot = _snapshot_triton_jit_registry(pairs, mod=mod)
             self.entries.append(Entry("closures", None, "closures",
-                                      (pairs, _refs(pairs), mod, cls_snapshots, module_keys)))
+                                      (pairs, _refs(pairs), mod, cls_snapshots,
+                                       module_keys, triton_snapshot)))
 
     def set_attr(self, obj, name, value):
         self.record_attr(obj, name)
