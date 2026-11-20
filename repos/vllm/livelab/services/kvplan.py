@@ -16,7 +16,12 @@ Contract:
 - Plan file: <FASTRSI_KVPLAN_DIR>/<key>.json, key = hash of ident(): vLLM version, config hash,
   load format (the config hash leaves it out, but resident weights change what is free), rank,
   world size, GPU name and total memory, requested memory, FASTRSI_KVPLAN_SALT.
-- Reuse needs the same key and at least as much free GPU memory at start as when measured.
+- Reuse needs the same key and free GPU memory at start that holds this engine's budget:
+  at least as much as when measured, or at least `requested_memory` (vLLM's budget for the
+  engine's own allocations: gpu_memory_utilization x total, minus weights a holder process
+  keeps; it is in the key, and the plan's KV size was measured inside it). The second bound
+  matters with resident weights: a holder group of another parallel config (the way back of a
+  TP <-> EP reshard) takes memory outside the budget, and the engine fits all the same.
   Otherwise the worker logs a finding and profiles as usual. A miss next to plans of other
   configs names the fields that differ (finding "kvplan_mismatch"). FASTRSI_KVPLAN_FORCE=1
   reuses despite less free memory.
@@ -162,6 +167,14 @@ def grow_workspace(sizes):
     return workspace_bytes()
 
 
+def fits(free, rec, requested):
+    """Can a start with `free` bytes free reuse plan `rec`? Its KV size was measured inside the
+    engine's budget `requested` (part of the key), so free memory that holds the budget is
+    enough, even when it is less than at the measurement (another holder group resident)."""
+    return (free >= rec["init_free"] or free >= requested
+            or os.environ.get("FASTRSI_KVPLAN_FORCE") == "1")
+
+
 def wrap(orig):
     """determine_available_memory that reuses or records the plan around `orig`."""
     @functools.wraps(orig)
@@ -186,8 +199,7 @@ def wrap(orig):
                  actions=["accept: this start records a new plan if its measurement is "
                           "positive", "free the GPU memory held by other processes"])
             rec = None
-        local = rec is not None and (free >= rec["init_free"]
-                                     or os.environ.get("FASTRSI_KVPLAN_FORCE") == "1")
+        local = rec is not None and fits(free, rec, int(self.requested_memory))
         agreed = all_agree(local)
         if rec is not None and agreed:
             for name in ATTRS:
@@ -210,7 +222,9 @@ def wrap(orig):
         elif not local:
             _say("kvplan_free_memory", finding=True, key=key(idn), rank=idn["rank"],
                  free_now=free, free_then=rec["init_free"],
-                 why="less free GPU memory than when the plan was measured; profiling",
+                 requested=int(self.requested_memory),
+                 why="less free GPU memory than when the plan was measured, and less than "
+                     "the engine's budget (requested_memory); profiling",
                  actions=["FASTRSI_KVPLAN_FORCE=1 reuses it (risk: OOM at the first large "
                           "batch)", "free the GPU memory held by other processes"])
         elif rec is not None:
