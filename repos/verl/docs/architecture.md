@@ -100,6 +100,9 @@ breaking repeatability (`c0`), fresh-process equivalence (`c3`), and uninstall s
 
 ## 6. Three-Tier Verdict Ladder
 
+Costs below are batch B of `../kb/costs.md` (Megatron-Core, CUDA graphs, 2026-10-21). Batch A (FSDP, eager vLLM,
+2026-11-19) measured the same ladder as 0.85 ms / 16-29 ms / 104.6-117.2 s / 259.8 s.
+
 | Edit Target | Fastest Sound Tier | Typical Cost | Mechanism |
 |---|---|---:|---|
 | Custom reward function (`compute_score`) | Offline `tools/rescore.py` | **0.5 ms** | Re-scores recorded `<gate>/rollouts/<step>.jsonl` in a fresh CPU process |
