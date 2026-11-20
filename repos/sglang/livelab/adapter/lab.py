@@ -1,9 +1,11 @@
-"""SglangLab: live-lab verbs over `StepGapCoordinator` + `RecaptureCoordinator` across TP ranks."""
-import contextlib, functools, hashlib, importlib, importlib.util, itertools, json, os, select, signal, threading, time
+"""SglangLab: live-lab verbs over `fastrsi.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
+import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
-from kernel import coordinator as C, findings as F, locate as L, receipt as R, session as SS
+from fastrsi import ipc
+from fastrsi.lab import BaseLab, RecaptureCoordinator
+from kernel import coordinator as C, findings as F, locate as L
 
 EAGER_LAYERS = (".srt.layers.sampler", ".srt.layers.logits_processor")
 _counters = itertools.count(1)
@@ -11,54 +13,18 @@ _counters = itertools.count(1)
 def is_graph_module(module_name):
     return not module_name.endswith(EAGER_LAYERS) and (".srt.models." in module_name or ".srt.layers." in module_name)
 
-class RecaptureCoordinator(C.StepGapCoordinator):
-    def __init__(self, *args, rebuild=None, flush_on_commit=True, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.rebuild, self.flush_on_commit = rebuild, flush_on_commit
-    def _phase2(self, txn, timeline):
-        out = super()._phase2(txn, timeline)
-        if out["outcome"] != "committed": return out
-        rebuild_keys = self.txns[txn]["plan"].get("rebuild") or ()
-        if self.rebuild is not None and ("recapture" in rebuild_keys or "R1" in rebuild_keys):
-            spec, started = dict(self.txns[txn]["plan"].get("recapture") or {}), self.clock()
-            reply = self.rebuild(txn, spec)
-            timeline["rebuilt"] = self.clock()
-            ranks, dur = reply.get("ranks") or [], round(timeline["rebuilt"] - started, 6)
-            route = "recapture" if "recapture" in rebuild_keys else "R1"
-            keys = ("ok", "error", "seconds", "captured", "graphs", "eager", "skipped")
-            out["rebuild"] = {"ok": bool(reply.get("ok")), "routes": [route], "spec": spec,
-                              "seconds": {route: dur, "R1": dur, "recapture": dur},
-                              "ranks": {str(r.get("rank")): {k: r.get(k) for k in keys} for r in ranks}}
-            if not reply.get("ok"):
-                extra = [f for r in ranks for f in r.get("findings", [])] or [
-                    F.finding("rebuild_failed", str(reply.get("error")), "recapture on every rank")]
-                out["extra"] += [{**f, "participant": "workers"} for f in extra]
-                rollback, res_map = {"status": "undone", "participants": {}}, self.txns[txn]["res"]
-                deadline, missed = (time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None), set()
-                for part in reversed(self.participants):
-                    rollback["participants"][part.name] = res_map[part.name]["undo"] = self._bounded(part, "undo", txn, deadline, missed)
-                if not all(r["ok"] for r in rollback["participants"].values()): rollback["status"] = "partial"
-                out.update(rollback=rollback, outcome="rolled_back")
-                timeline.pop("committed", None)
-                timeline["gap_end"] = self.clock()
-                return out
-            self.txns[txn]["rebuilt"] = [route]
-        if self.flush_on_commit:
-            deadline, missed = (time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None), set()
-            for part in self.participants:
-                self._bounded(part, "reset", "state", deadline, missed)
-        timeline["gap_end"] = self.clock()
-        return out
-
-class SglangLab(ConformanceHarness):
+class SglangLab(ConformanceHarness, BaseLab):
     name, scheduler_module, io_module = "sglang", "sglang.srt.managers.scheduler", "sglang.srt.managers.io_struct"
+    threaded_check = True
     def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0):
-        self.config, self.modules = json.loads(json.dumps(config)), list(modules)
-        self.writer = R.ReceiptWriter(receipts) if receipts else None
-        self.rpc_timeout, self.check_timeout = float(rpc_timeout), float(check_timeout)
-        self.lock, self.costs, self.engine, self.sock_path = threading.RLock(), {}, None, None
-        self.rank_conns, self.rank_locks, self.dirty = {}, {}, False
-        self._spawn()
+        self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
+        self.engine, self.sock_path, self.ranks, self.rank_conns, self.rank_locks = None, None, 0, {}, {}
+        super().__init__(receipts=receipts, check_timeout=check_timeout, rpc_timeout=rpc_timeout)
+    @property
+    def dirty(self): return self._dirty
+    @dirty.setter
+    def dirty(self, value): self._dirty = bool(value)
+    _base = BaseLab._base_source
     def engine_class(self):
         return importlib.import_module("sglang.srt.entrypoints.engine").Engine
     def default_workload(self):
@@ -70,10 +36,9 @@ class SglangLab(ConformanceHarness):
                   "ignore_eos": bool(merged.get("ignore_eos", True))}
         tokens = [x.get("output_ids") or x["text"] for x in self.engine.generate(prompt=merged["prompts"], sampling_params=params)]
         return {"digest": hashlib.sha256(json.dumps(tokens).encode()).hexdigest()[:16], "tokens": tokens}
-    def _spawn(self):
-        started, tp_size = time.perf_counter(), int(self.config.get("tp_size", 1))
-        self.sock_path = f"/tmp/fsgl-{os.getpid()}-{next(_counters)}.sock"
-        if len(self.sock_path) >= 104: raise ValueError(f"AF_UNIX path too long: {self.sock_path}")
+    def _start_engine(self):
+        tp_size = int(self.config.get("tp_size", 1))
+        self.sock_path = ipc.short_sock_path("fsgl")
         with contextlib.suppress(FileNotFoundError): os.unlink(self.sock_path)
         listener, accepted, errors = Listener(self.sock_path, "AF_UNIX", backlog=max(8, tp_size * 2)), {}, []
 
@@ -98,16 +63,17 @@ class SglangLab(ConformanceHarness):
         if errors or len(accepted) != tp_size:
             self._shutdown_engine()
             raise RuntimeError(f"scheduler handshake failed: {errors or list(accepted)}")
-        self.costs["load_s"], self.ranks, self.rank_conns, self.dirty = round(time.perf_counter() - started, 3), tp_size, accepted, False
-        self.rank_locks, self.base_text, self.live_text, ver = {r: threading.Lock() for r in range(tp_size)}, {}, [{}], "0"
+        self.ranks, self.rank_conns, self.dirty = tp_size, accepted, False
+        self.rank_locks, self.base_text, ver = {r: threading.Lock() for r in range(tp_size)}, {}, "0"
         with contextlib.suppress(Exception): ver = importlib.metadata.version("sglang")
         participants = [C.CallParticipant(f"rank{r}", lambda m, p, r=r: self.rank_call(r, m, p)) for r in range(tp_size)]
-        self.co = RecaptureCoordinator(participants, gap=self.at_gap, writer=self.writer, interface_version="1-draft",
-                                       engine={"name": self.name, "version": ver, "commit": None},
-                                       phase2_deadline_s=self.rpc_timeout, rebuild=self._rebuild_all_ranks)
-        if hasattr(self, "session"): self.session.recovered(self.co)
-        else:
-            self.session = SS.Session(self.co, self.modules)
+        co = RecaptureCoordinator(participants, gap=self.at_gap, writer=self.writer, interface_version="1-draft",
+                                  engine={"name": self.name, "version": ver, "commit": None},
+                                  phase2_deadline_s=self.rpc_timeout, rebuild=self._rebuild_all_ranks,
+                                  post_commit_reset="state")
+        return co, self._init_modules
+    def _stop_engine(self):
+        self._shutdown_engine()
     def rank_call(self, rank, method, payload=None, timeout=None):
         if self.dirty: raise ConnectionError("control channel dirty; respawn required")
         conn, deadline = self.rank_conns[rank], timeout if timeout is not None else self.rpc_timeout
@@ -184,95 +150,27 @@ class SglangLab(ConformanceHarness):
             self.engine = None
         if self.sock_path:
             with contextlib.suppress(OSError): os.unlink(self.sock_path)
-    def close(self):
-        with self.lock:
-            self._shutdown_engine()
-    def _base(self, module_name):
-        if module_name not in self.base_text:
-            with open(importlib.util.find_spec(module_name).origin) as handle:
-                self.base_text[module_name] = handle.read()
-        return self.base_text[module_name]
-    def install(self, patch):
-        started = time.perf_counter()
-        with self.lock:
-            live, modules = self.live_text[-1], {}
-            try:
-                for name, new_src in patch["files"].items():
-                    modules[name] = {"source": new_src, "base_hash": L.text_hash(live.get(name) or self._base(name))}
-            except Exception as exc:
-                bad = F.finding("patch_invalid", f"{type(exc).__name__}: {exc}", "importable modules")
-                return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "findings": [bad], "cost_s": round(time.perf_counter() - started, 6)}
-            rebuild = patch.get("rebuild")
-            if rebuild is None:
-                rebuild = ["recapture"] if (patch.get("recapture", True) and any(is_graph_module(m) for m in modules)) else []
-            plan = {"modules": modules, "accept": patch.get("accept", []), "undo_resets": patch.get("undo_resets", ["R3"]),
-                    "recipes": ["R0 swap"] + (["R1 recapture"] if rebuild else []), "rebuild": list(rebuild),
-                    **({"recapture": {"sizes": list(patch["sizes"])}} if "sizes" in patch else {})}
-            res = self.session.install(plan, edit_time=patch.get("edit_time"))
-            outcome, rec = res.get("outcome") or "refused", res.get("receipt")
-            if outcome == "committed": self.live_text.append({**live, **patch["files"]})
-            codes = rec["decisions"]["blocking"] if rec else sorted({f["check"] for f in res.get("findings", [])})
-            mechs = list(rec["actual_recipes"]) if rec else []
-            if outcome == "committed" and rebuild and "R1 recapture" not in mechs: mechs.append("R1 recapture")
-            return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
-                    "codes": [] if outcome == "committed" else codes, "mechanisms": mechs,
-                    "findings": rec["findings"] if rec else res.get("findings", []),
-                    "receipt": rec, "cost_s": round(time.perf_counter() - started, 6)}
-    def _fail_check(self, observed, expected, started):
-        self.session.fault("participant_failed", observed, expected)
-        return {"ok": False, "error": observed, "output": None, "proven": None, "witness": {},
-                "findings": list(self.session.poisoned()), "cost_s": round(time.perf_counter() - started, 6)}
-    def check(self, workload=None):
-        started, box = time.perf_counter(), {}
-        with self.lock:
-            for rank in range(self.ranks):
-                try:
-                    self.rank_call(rank, "ping", None, timeout=min(5.0, self.rpc_timeout))
-                except Exception as exc:
-                    return self._fail_check(f"rank{rank}: {type(exc).__name__}: {exc}", "every rank answers", started)
-            thread = threading.Thread(target=self._run_workload_into, args=(workload, box), daemon=True)
-            gen_t0 = time.perf_counter()
-            thread.start()
-            thread.join(self.check_timeout)
-            seconds = round(time.perf_counter() - gen_t0, 4)
-            if thread.is_alive() or "error" in box:
-                self.dirty = True
-                return self._fail_check(f"check: {box.get('error') or f'no result in {self.check_timeout} s'}", "completes", started)
-            output = box["output"]
-            proofs = [self.co.prove(t, golden={"output_hash": L.text_hash(json.dumps(output, sort_keys=True))}) for t in self.session.stack]
-            witness = {}
-            for proof in proofs:
-                for part, counts in proof["receipt"]["witness"].items():
-                    witness.setdefault(part, {}).update(counts)
-            return {"ok": True, "output": output, "seconds": seconds, "witness": witness,
-                    "proven": all(p["ok"] for p in proofs) if proofs else None,
-                    "findings": [f for p in proofs for f in p["receipt"]["findings"]], "cost_s": round(time.perf_counter() - started, 6)}
-    def _run_workload_into(self, workload, box):
-        try:
-            box["output"] = self.run_generate(workload)
-        except BaseException as exc:
-            box["error"] = f"{type(exc).__name__}: {exc}"
-    def reset(self, kind="state"):
-        started = time.perf_counter()
-        with self.lock:
-            if kind == "respawn":
-                self._shutdown_engine()
-                self._spawn()
-                return {"ok": not self.session.poisoned(), "reset": ["worker group", "session"], "cost_s": round(time.perf_counter() - started, 6)}
-            try:
-                replies = self.at_gap(lambda: [C._call(p, "reset", "state") for p in self.co.participants], self.rpc_timeout)
-            except Exception as exc:
-                return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "reset": [], "cost_s": round(time.perf_counter() - started, 6)}
-            ok = all(r.get("ok") for r in replies)
-            return {"ok": ok, "reset": ["radix_cache", "kv_pool", "mamba_pool", "rng"] if ok else [], "cost_s": round(time.perf_counter() - started, 6)}
-    def uninstall(self, id=None):
-        started = time.perf_counter()
-        with self.lock:
-            reply = self.session.uninstall(id)
-            if reply.get("undone"): del self.live_text[-len(reply["undone"]):]
-            return {"ok": reply["ok"], "undone": reply.get("undone", []), "state": self.session.state(),
-                    "findings": reply.get("findings", []), "cost_s": round(time.perf_counter() - started, 6)}
-    def status(self):
-        with self.lock:
-            return self.session.status()
+    def _build_plan(self, patch, live_map):
+        modules = {name: {"source": new_src, "base_hash": L.text_hash(live_map.get(name) or self._base(name))}
+                   for name, new_src in patch["files"].items()}
+        rebuild = patch.get("rebuild")
+        if rebuild is None:
+            rebuild = ["recapture"] if (patch.get("recapture", True) and any(is_graph_module(m) for m in modules)) else []
+        plan = {"modules": modules, "accept": list(patch.get("accept", [])), "undo_resets": list(patch.get("undo_resets", ["R3"])),
+                "recipes": ["R0 swap"] + (["R1 recapture"] if rebuild else []), "rebuild": list(rebuild),
+                **({"recapture": {"sizes": list(patch["sizes"])}} if "sizes" in patch else {})}
+        return plan, []
+    def _probe_participants(self):
+        for rank in range(self.ranks):
+            try: self.rank_call(rank, "ping", None, timeout=min(5.0, self.rpc_timeout))
+            except Exception as exc: return False, f"rank{rank}: {type(exc).__name__}: {exc}"
+        return True, None
+    def _run_workload(self, workload):
+        try: return self.run_generate(workload)
+        except BaseException:
+            self.dirty = True
+            raise
+    def _reset_state(self):
+        replies = self.at_gap(lambda: [C._call(p, "reset", "state") for p in self.co.participants], self.rpc_timeout)
+        ok = all(r.get("ok") for r in replies)
+        return {"ok": ok, "reset": ["radix_cache", "kv_pool", "mamba_pool", "rng"] if ok else []}

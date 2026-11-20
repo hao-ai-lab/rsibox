@@ -1,7 +1,14 @@
 """Golden CPU tests for the SGLang live-lab adapter, decode-graph recapture, and TP rollback."""
+import contextlib
+import io
+import json
+import os
+import sys
 import unittest
+from unittest import mock
 
-from adapter.fixture.harness import edit_once
+from adapter.conformance_lab import SglangConformanceLab
+from adapter.fixture.harness import edit_once, sglang_env_config
 from adapter.toy_lab import LAYERNORM, ToySglangLab
 
 
@@ -120,6 +127,104 @@ class SglangAdapterTests(unittest.TestCase):
         finally:
             normal_lab.close()
             overlap_lab.close()
+
+    def test_conformance_lab_launch_environment_and_lazy_imports(self):
+        """`SglangConformanceLab.launch_environment` maps CLI flags cleanly without GPU imports."""
+        self.assertFalse(any(m.split(".")[0] in ("torch", "sglang") for m in sys.modules))
+        env = SglangConformanceLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B",
+            "--tp", "2",
+            "--mem-fraction", "0.4",
+            "--max-bs", "8",
+            "--port", "31000",
+            "--work", "rel-sgl-work",
+            "--disable-cuda-graph",
+            "--extra", '{"context_length": 2048}',
+            "--check-timeout", "30",
+            "--rpc-timeout", "240",
+        ])
+        self.assertEqual(env["FASTRSI_SGLANG_MODEL"], "Qwen/Qwen3-8B")
+        self.assertEqual(env["FASTRSI_SGLANG_TP"], "2")
+        self.assertEqual(env["FASTRSI_SGLANG_MEM_FRACTION"], "0.4")
+        self.assertEqual(env["FASTRSI_SGLANG_MAX_BS"], "8")
+        self.assertEqual(env["TMPDIR"], os.path.abspath("rel-sgl-work"))
+        self.assertEqual(env["FASTRSI_SGLANG_CHECK_TIMEOUT"], "30.0")
+        self.assertEqual(env["FASTRSI_SGLANG_RPC_TIMEOUT"], "240.0")
+        self.assertEqual(
+            json.loads(env["FASTRSI_SGLANG_EXTRA_ARGS"]),
+            {"context_length": 2048, "port": 31000, "disable_cuda_graph": True},
+        )
+        with mock.patch.dict(os.environ, env, clear=False):
+            cfg = sglang_env_config()
+        self.assertEqual(cfg["model_path"], "Qwen/Qwen3-8B")
+        self.assertEqual(cfg["tp_size"], 2)
+        self.assertEqual(cfg["mem_fraction_static"], 0.4)
+        self.assertEqual(cfg["port"], 31000)
+        self.assertTrue(cfg["disable_cuda_graph"])
+        self.assertEqual(cfg["context_length"], 2048)
+
+        minimal = SglangConformanceLab.launch_environment(["--", "--model", "/models/qwen"])
+        self.assertEqual(minimal, {"FASTRSI_SGLANG_MODEL": "/models/qwen"})
+        self.assertNotIn("FASTRSI_SGLANG_EXTRA_ARGS", minimal)
+
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            SglangConformanceLab.launch_environment(["--extra", "[1, 2]"])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_agent_rank_fallback_resolves_runtime_context(self):
+        """`agent._rank` falls back cleanly across modern SGLang runtime_context getters."""
+        from types import SimpleNamespace
+        from adapter import agent
+
+        self.assertEqual(agent._rank(SimpleNamespace(tp_rank=3)), 3)
+        self.assertEqual(agent._rank(SimpleNamespace(tp_worker=SimpleNamespace(tp_rank=2))), 2)
+        sched_none = SimpleNamespace(tp_worker=SimpleNamespace(model_runner=SimpleNamespace()))
+        fake_ctx = SimpleNamespace(get_parallel=lambda: SimpleNamespace(tp_rank=1))
+        with mock.patch.dict(sys.modules, {"sglang.srt.runtime_context": fake_ctx}):
+            self.assertEqual(agent._rank(sched_none), 1)
+        with mock.patch.dict(sys.modules, {"sglang.srt.runtime_context": None, "sglang.srt.distributed": None}):
+            self.assertEqual(agent._rank(sched_none), 0)
+
+    def test_faults_inject_and_module_state_fallback_without_legacy_attrs(self):
+        """`faults.inject` uses participant name without `.tp_rank`; `module_state` patch falls back cleanly."""
+        from types import SimpleNamespace
+        from adapter.fixture import faults, harness
+
+        class DummyRunner:
+            def sample(self):
+                return "ok"
+
+        sched = SimpleNamespace(tp_worker=SimpleNamespace(model_runner=DummyRunner()))
+        lp = SimpleNamespace(name="rank1")
+        state = {"faults": {}}
+        reply = faults.inject(sched, lp, state, "crash")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["participant"], "rank1")
+        with self.assertRaisesRegex(RuntimeError, "rank1: injected crash in sample"):
+            sched.tp_worker.model_runner.sample()
+        self.assertEqual(sched.tp_worker.model_runner.sample(), "ok")
+
+        sampler_src = (
+            'SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")\n'
+            'def _trace_e2e_sampler(stage, **fields):\n'
+            '    details = " ".join(f"{key}={value}" for key, value in fields.items())\n'
+            '    return details\n'
+            'class Sampler:\n'
+            '    def forward(self, logits):\n'
+            '        batch_next_token_ids = torch.argmax(logits, -1)\n'
+            '        return logits\n'
+        )
+        worker_src = (
+            '    def set_hicache_consumer(self, consumer_index: int):\n        pass\n'
+            '    def _init_dllm_algorithm(self):\n        pass\n'
+        )
+        patches = harness.sglang_patches(
+            lambda m: sampler_src if "sampler" in m else worker_src,
+            "sglang.srt.layers.sampler",
+            "sglang.srt.managers.tp_worker",
+        )
+        ms = next(iter(patches["refused"]["module_state"]["files"].values()))
+        self.assertIn("bool(get_bool_env_var(", ms)
 
 
 if __name__ == "__main__":
