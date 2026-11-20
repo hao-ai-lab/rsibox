@@ -57,8 +57,8 @@
      "source": "docs/lessons.md:28-34"
     },
     {
-     "fact": "VllmLab passed 11/11 conformance on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (including via the unified fastrsi CLI); 52/52 real-GPU E2E livelab/services tests passed on B200 (colocated weight scaling, zygote module refresh, CLI args, live resharder); holder-to-holder TP2 <-> EP2 resharding (reshard_live.py) measured 49.4-52.8 s with --zygote --kvplan reuse and 0.36-1.18 s drain-aware stop (byte-equal 1308/1308 EP2 and 1228/1228 TP2, max |delta logprob| == 0.0); live --scheduling-policy switching measured 0.218-0.374 ms core apply with HTTP 400 FCFS priority validation; C++/CUDA NATIVE hot-reload (native.py) verified PR #49750 live in 19.22 s TP1 (17.12 s commit + 0.83 s R1 + 1.27 s check) vs 49.47 s restart and 20.26 s TP2 (flock 18.24 s uncached / 0.0 s cached peer + 0.92 s R1 + 1.07 s check) vs 55.28 s restart (6.55 / 9.17 ms cascade undo, max |delta logprob| == 0.0, lifting vLLM PR coverage from 79% to 89%).",
-     "source": "repos/vllm/kb/costs.md:187-332; repos/vllm/kb/mechanisms.md; repos/vllm/livelab/adapter/README.md:115-129"
+     "fact": "VllmLab passed 11/11 conformance on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (including via the unified fastrsi CLI); selective R1 plus recapture_extend runs on V2 ModelCudaGraphManager (1x B200: sizes=[1] 0.299 s, extend [2, 4] 0.360 s, 2.93 ms undo, 0.0 MiB reserved growth across 5 cycles, max |delta logprob| == 0.0); 52/52 real-GPU E2E livelab/services tests passed on B200 (colocated weight scaling, zygote module refresh, CLI args, live resharder); holder-to-holder TP2 <-> EP2 resharding (reshard_live.py) measured 49.4-52.8 s with --zygote --kvplan reuse and 0.36-1.18 s drain-aware stop (byte-equal 1308/1308 EP2 and 1228/1228 TP2, max |delta logprob| == 0.0); unified core_hook.py ran pre-swap live --scheduling-policy reconfig (0.191 / 0.219 ms core apply), live worker+core swap (79.2 ms install / 38.1 ms undo), and post-swap reconfig (0.260 / 0.245 ms) inside the same EngineCoreProc PID with 0 errors; C++/CUDA NATIVE hot-reload (native.py) verified PR #49750 live in 19.22 s V1 TP1 vs 49.47 s restart, 13.62 s V1 TP2 parallel (11.85 s build, 0.68 s R1, 8.94 ms cascade undo) vs 46.97 s restart, and 13.06 s V2 TP2 edit-to-rebuilt (12.22 s build, 0.82 s R1, 9.71 ms cascade undo) vs 47.67 s restart (max |delta logprob| == 0.0, lifting vLLM PR coverage from 79% to 89%).",
+     "source": "repos/vllm/kb/costs.md:187-348; repos/vllm/kb/mechanisms.md; repos/vllm/livelab/adapter/README.md:77-98"
     }
    ],
    "derived_from_git": {
@@ -124,8 +124,8 @@
      "source": "repos/megatron/kb/costs.md:3-6; gh pr list"
     },
     {
-     "fact": "Conformance c0-c10 passed 11/11 on 2x GB200 TP2 (0.0428 s install / 0.0152 s undo), 4x GB200 TP2/DP2 (0.0451 / 0.0170 s), 4x GB200 TP4 (0.0444 / 0.0164 s), and 4x GB200 TP2/PP2 (0.0468 / 0.0168 s, c8 respawns 28.53-29.04 s, 48 calls/rank across all 4 ranks), including via fastrsi conformance megatron --real.",
-     "source": "repos/megatron/livelab/README.md:122-136; repos/megatron/kb/costs.md"
+     "fact": "Conformance c0-c10 passed 11/11 on 2x GB200 TP2 (0.0428 s install / 0.0152 s undo), 4x GB200 TP2/DP2 (0.0451 / 0.0170 s), 4x GB200 TP4 (0.0444 / 0.0164 s), 4x GB200 TP2/PP2 (0.0468 / 0.0168 s, c8 respawns 28.53-29.04 s, 48 calls/rank), and 4x GB200 TP2/PP2/VPP2 (8 layers, 0.0468 s install / 0.0170 s undo, c8 respawns 30.04-31.05 s, [96,96,96,96] calls/rank), including via fastrsi conformance megatron --real.",
+     "source": "repos/megatron/livelab/README.md:122-145; repos/megatron/kb/costs.md"
     },
     {
      "fact": "On 4x GB200 (2026-11-19 NeMo 26.08.01), 30/30 paired 8-layer Qwen3-14B-shaped TP2xDP2 dense runs took 5.52-5.61 s live vs 41.83-42.27 s fresh (0% diff vs fresh), an EP4 MoE 8-gate walkthrough passed (0.119 s install, 0.385 s check), and a 10-cycle warm-fork zygote soak ran in 0.064-0.095 s/fork with 0 FD/VRAM leaks.",
@@ -221,8 +221,8 @@
      "source": "repos/fastvideo/kb/costs.md:9,47,58; gh pr list"
     },
     {
-     "fact": "Conformance c0-c10 passed 11/11 on 1x, 2x (SP2), and 4x GB200 (SP4), including via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G / 0.1140 s 4G), plus targeted SP2 --zygote --holder 5/5 (c8 lost 6.23 s and tamper 5.73 s respawns with holder IPC serving text_encoder, vae, and transformer in 0.032-0.738 s, c9 install median 0.0589 s / undo 0.0175 s, 0 MiB).",
-     "source": "repos/fastvideo/examples/h3-conformance/README.md:9-116; repos/fastvideo/kb/costs.md"
+     "fact": "Conformance c0-c10 passed 11/11 on 1x, 2x (SP2), and 4x GB200 (SP4), including via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G / 0.1140 s 4G), plus targeted SP2 --zygote --holder 5/5 (c8 1362.85 s; c9 0.0589 s / 0.0175 s) and SP2 --zygote --holder fast-fail + inline CPU IPC 4/4 (c8 cut 6.37x to 214.02 s: crash 9.65 s, hang 9.21 s, lost 6.08 s, tamper 6.52 s; 24/24 holder IPC hits across 4 respawns, 0 Broken pipe, 0 MiB).",
+     "source": "repos/fastvideo/examples/h3-conformance/README.md:9-118; repos/fastvideo/kb/costs.md"
     }
    ],
    "derived_from_git": {

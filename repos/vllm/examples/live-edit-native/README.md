@@ -34,6 +34,10 @@ using upstream vLLM PR `#49750` (`csrc/libtorch_stable/layernorm_kernels.cu`: no
      total vs `49.42 s` restart; PR `#49750` `11.854 s` build, `0.676 s` `R1`, `12.558 s`
      edit-to-rebuilt, `13.62 s` total vs `46.97 s` restart, `8.94 ms` cascade undo).
 
+6. **V2 model runner (`--v2` -> `ModelCudaGraphManager`):**
+   - `TP=1` selective `R1`: refuses without `R1`, selectively recaptures `[1]` in `0.299 s` (running `[4, 2]` eager concurrently), extends `[2, 4]` via `recapture_extend` in `0.360 s`, proves `1728` live / `432` capture witness calls, restores base in `2.93 ms` (`undo`), keeps `0.0 MiB` reserved growth across 5 consecutive recapture+undo cycles (`0.381–0.491 s` recapture, `2.56–2.81 ms` undo), and matches fresh V2 (`30.892 s`) with `max |Δlogprob| = 0.0`.
+   - `TP=2` (`2× B200`) PR `#49750` on V2: visible perturbation `12.659 s` edit-to-rebuilt (`12.129 s` build + `0.511 s` R1, `48.878 s` fresh) and PR `#49750` `13.063 s` edit-to-rebuilt (`12.224 s` build + `0.818 s` R1, `9.71 ms` cascade undo, `47.667 s` fresh), `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, `0 MiB` residual GPU memory.
+
 ## Usage
 
 ```sh
@@ -42,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0 python3 -u verify_native_pr49750.py \
   --work <scratch-dir> \
   --csrc-root <path-to-vllm-csrc> \
   --vllm-git <path-to-vllm.git> \
-  --tp 1 \
+  --tp 1 [--v2] \
   --port 29495 \
   --out summary.json
 ```

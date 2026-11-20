@@ -211,6 +211,12 @@ Multi-rank `TP=2` verification on 2 idle B200 GPUs (same model/flags, `verify_na
   - Visible perturbation: `11.716 s` / `0.0 s` build (`1.36 ms` load, `2.39 ms` gap), `0.480 s` `R1` recapture (`12.223 s` edit-to-rebuilt), `1.060 s` check (`13.28 s` total vs `49.416 s` fresh), `max |Δlogprob| = 0.0`, `473.1 ms` undo.
   - PR #49750: `11.854 s` / `0.0 s` build (`1.04 ms` load, `2.81 ms` gap), `0.676 s` `R1` recapture (`12.558 s` edit-to-rebuilt), `1.060 s` check (`13.62 s` total vs `46.965 s` fresh), `max |Δlogprob| = 0.0`, `8.94 ms` cascade undo (`7.94 ms` / `6.38 ms` per worker).
 
+V2 model runner (`ModelCudaGraphManager`, `--v2`, `FULL_DECODE_ONLY [4, 2, 1]` graphs, B200, 2026-11-19):
+- TP1 selective R1 + `recapture_extend` + 5-cycle stream-reuse memory proof (`boot 29.287 s`): graph refusal without R1 (`aborted: ['captured_target']`), selective `sizes=[1]` recapture in `0.299 s` (`[4, 2]` left eager for concurrent batch-2 execution), `recapture_extend [2, 4]` in `0.360 s`, witness `1728` live / `432` capture, `undo` in `2.93 ms`, 5 consecutive R1 recapture (`0.381–0.491 s`) + undo (`2.56–2.81 ms`) cycles with **`0.0 MiB`** reserved memory change (`c0->c4`, `c1->c4`, `c0` capture all `0.0 MiB`), and exact fresh V2 parity (`max |Δlogprob| = 0.0`; fresh boot `30.892 s`).
+- `TP=2` native PR `#49750` on V2 (`2× B200`, `boot 36.544 s`, `FULL [4, 2, 1]`): `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, `0 MiB` after shutdown:
+  - Visible perturbation: `12.129 s` / `0.0 s` build (`1.38 ms` load, `2.79 ms` gap), `0.511 s` R1 (`12.659 s` edit-to-rebuilt, `48.878 s` fresh), `261.0 ms` undo.
+  - PR `#49750`: `12.224 s` / `0.0 s` build (`1.08 ms` load, `2.51 ms` gap), `0.818 s` R1 (`13.063 s` edit-to-rebuilt, `47.667 s` fresh), `9.71 ms` cascade undo.
+
 Standalone 7-arm `layernorm_kernels.cu` compile-phase waterfall on B200 GPU 0 (`max_err = 0.012826 < 2e-2` vs FP32 reference, `0.42–0.73 ms` load):
 - `A_baseline` (serial `nvcc` `.cu` + `reg.cu` + link): `16.704 s` (`copytree 0.016 s`, `.cu 12.076 s` [pp `1.676 s` + `cudafe++ 2.824 s` + `cicc 3.834 s` + `ptxas 0.883 s` + `gcc 3.648 s`], `reg 4.400 s`, `link 0.212 s`).
 - `B_parallel_gxx_split8` (`g++ -O1 reg.cpp` + `g++ -shared` + `split=8`): `12.190 s` (`reg 0.678 s`).

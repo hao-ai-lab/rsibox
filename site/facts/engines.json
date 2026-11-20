@@ -53,14 +53,14 @@
      "what": "Compiles edited .cu translation units plus a versioned registration unit under node-local flock, loads without dlclose, rebinds torch.ops._C via torch.library.Library in the step gap with R1 CUDA graph recapture, and undoes via lib._destroy().",
      "startup_cost_removed": "Full extension rebuild and cold engine restart for single-unit C++/CUDA kernel edits (#49750).",
      "measured_saving": {
-      "before": "49.47 (TP1) / 46.97 (TP2, 55.28 s serial baseline) fresh cold restart + nvcc build + check",
-      "after": "19.22 (TP1 serial) / 13.62 (TP2 parallel native.py: 11.85 s build w/ flock cached peer + 0.68 s R1 + 1.06 s check; undo 8.94 ms)",
+      "before": "49.47 (TP1) / 46.97 (TP2 V1, 47.67 s TP2 V2) fresh cold restart + nvcc build + check",
+      "after": "19.22 (TP1 V1 serial) / 13.62 (TP2 V1 parallel) / 13.06 (TP2 V2 parallel edit-to-rebuilt)",
       "unit": "s",
-      "setup": "1x and 2x B200, vLLM 0.33.0 V1 FULL_DECODE_ONLY graphs, Qwen3-8B TP1/TP2, layernorm_kernels.cu (#49750 and eps=0.25f perturbation), 2026-11-19"
+      "setup": "1x and 2x B200, vLLM 0.33.0 V1 and V2 FULL_DECODE_ONLY graphs, Qwen3-8B TP1/TP2, layernorm_kernels.cu (#49750 and eps=0.25f perturbation), 2026-11-19"
      },
      "status": "merged_gpu_verified",
      "source": "repos/vllm/kb/mechanisms.md:10; repos/vllm/kb/costs.md; repos/vllm/livelab/adapter/native.py",
-     "note": "Both PR #49750 (1x TP1 serial: 17.12 s commit, 0.83 s R1 recapture, 19.22 s total vs 49.47 s restart, 6.55 ms cascade undo; 2x TP2 parallel native.py: flock 11.85 s uncached / 0.0 s cached peer, 0.68 s R1, 13.62 s total vs 46.97 s restart [down from 20.26 s vs 55.28 s serial], 8.94 ms cascade undo, 576 live / 432 capture witness calls per rank, max |delta logprob| == 0.0) and a visible epsilon perturbation (18.87 s TP1 / 13.28 s TP2 parallel vs 48.97 / 49.42 s restart) match fresh restarts bit-for-bit on B200 with 0 MiB leftover, while refusing plans without R1 in 0.022 s. Standalone 7-arm compile-phase waterfall on B200 GPU 0 reaches 11.99 s with parallel reg.cpp + split=16 and 8.60 s on a thin single-kernel TU (8.32 s BF16 floor)."
+     "note": "Both PR #49750 (1x TP1 V1 serial: 17.12 s commit, 0.83 s R1 recapture, 19.22 s total vs 49.47 s restart, 6.55 ms cascade undo; 2x TP2 V1 parallel native.py: flock 11.85 s uncached / 0.0 s cached peer, 0.68 s R1, 13.62 s total vs 46.97 s restart [down from 20.26 s vs 55.28 s serial], 8.94 ms cascade undo, 576 live / 432 capture witness calls per rank, max |delta logprob| == 0.0; 2x TP2 V2 parallel: live_boot 36.544 s, 13.06 s edit-to-rebuilt [12.22 s build, 0.82 s R1, 9.71 ms cascade undo] vs 47.67 s fresh) and a visible epsilon perturbation (18.87 s TP1 V1 / 13.28 s TP2 V1 parallel / 12.66 s TP2 V2 edit-to-rebuilt vs 48.97 / 49.42 / 48.88 s restart) match fresh restarts bit-for-bit on B200 with 0 MiB leftover, while refusing plans without R1 in 0.022 s. Standalone 7-arm compile-phase waterfall on B200 GPU 0 reaches 11.99 s with parallel reg.cpp + split=16 and 8.60 s on a thin single-kernel TU (8.32 s BF16 floor)."
     },
     {
      "name": "Triton kernel rebuild in place",
@@ -88,7 +88,7 @@
      },
      "status": "merged_gpu_verified",
      "source": "PR #110",
-     "note": "Verified on V1 GPUModelRunner (`VLLM_USE_V2_MODEL_RUNNER=0`) at TP1 (re-verified on 1x B200 2026-11-19: size-1 recapture 0.321 s, 11 CUDA graph launches, undo 2.62 ms, bit-exact tokens). TP>1, GB200 and the V2 model runner are not covered by selective recapture."
+     "note": "Verified on V1 GPUModelRunner (`VLLM_USE_V2_MODEL_RUNNER=0`) at TP1 (re-verified on 1x B200 2026-11-19: size-1 recapture 0.321 s, 11 CUDA graph launches, undo 2.62 ms, bit-exact tokens) and on V2 ModelCudaGraphManager (`VLLM_USE_V2_MODEL_RUNNER=1`) on 1x B200 FULL_DECODE_ONLY (29.29 s live boot, 0.299 s selective R1 [1], 0.360 s recapture_extend [2, 4], 2.93 ms undo, 5 consecutive R1 cycles with 0.0 MiB reserved growth, max |delta logprob| == 0.0; plus TP2 V2 NATIVE PR #49750 0.82 s R1 recapture). GB200 is not covered by selective recapture."
     },
     {
      "name": "Zygote (fork server) with module refresh",
@@ -433,7 +433,7 @@
      },
      "status": "merged_gpu_verified",
      "source": "repos/fastvideo/kb/costs.md:94,151,176-187; repos/fastvideo/examples/h3-conformance/README.md; PR #87",
-     "note": "With the 2026-11-19 holder exit-hang fix, zygote+holder respawns measured 3.05-3.53 s on 1x GB200 and 6.23-7.27 s on 2x GB200 (0 failures, bit-exact). SP2 conformance --zygote --holder passed 5/5 initially (c0, c2, c4 [0.0166 s undo], c9 [20 cycles, 0.0589 s install / 0.0175 s undo], c8 1362.85 s with two ~600 s NCCL watchdog waits), and after adding asymmetric SP>=2 fault-beacon detection + parallel dirty kill_tree fast-fail (adapter/agent.py + adapter/lab.py), 4/4 re-run (c0, c2, c4, c8) cut c8_crash_and_hang 6.24x to 218.46 s (crash 11.66 s, hang 11.94 s, lost 7.19 s, tamper 6.08 s respawns; 0 MiB on all 4 GPUs; text_encoder and vae served via holder IPC in 0.031-0.323 s on all respawns while transformer fell back cleanly from Broken pipe on the two dirty-killed respawns to 1.66-1.70 s local load + re-deposit, then served via holder IPC on lost and tamper). The audio VAE cannot be shared (a non-leaf tensor that requires grad) and is loaded by the worker (0.9 s)."
+     "note": "With the 2026-11-19 holder exit-hang fix, zygote+holder respawns measured 3.05-3.53 s on 1x GB200 and 6.23-7.27 s on 2x GB200 (0 failures, bit-exact). SP2 conformance --zygote --holder passed 5/5 initially (c0, c2, c4 [0.0166 s undo], c9 [20 cycles, 0.0589 s install / 0.0175 s undo], c8 1362.85 s with two ~600 s NCCL watchdog waits); after adding asymmetric SP>=2 fault-beacon detection + parallel dirty kill_tree fast-fail (adapter/agent.py + adapter/lab.py) and _HolderPickler inline CPU IPC (services/holder.py, bypassing libshm manager sockets), 4/4 re-run (c0, c2, c4, c8) cut c8_crash_and_hang 6.37x to 214.02 s (crash 9.65 s, hang 9.21 s, lost 6.08 s, tamper 6.52 s respawns; 24/24 holder IPC hits across all 4 respawns [text_encoder 0.146-0.333 s, vae 0.033-0.036 s, transformer 0.256-0.393 s], 0 Broken pipe, 0 MiB on all 4 GPUs). The audio VAE cannot be shared (a non-leaf tensor that requires grad) and is loaded by the worker (0.9 s)."
     },
     {
      "name": "Path-stable JIT caches (`services/jitcache.py`)",
@@ -479,14 +479,14 @@
      "what": "Two-phase coordinator across TP Scheduler processes in the inter-batch gap, with selective `R1` decode CUDA graph recapture on `@captured_target` commits and rollback.",
      "startup_cost_removed": "Full engine cold load and CUDA graph capture across TP ranks.",
      "measured_saving": {
-      "before": "24.97 (cold load)",
-      "after": "0.091 (c9 live install median; uninstall 0.008 s) / 0.839 (R1 decode graph recapture, 29.8x)",
+      "before": "24.97 (2x GB200 Qwen3-0.6B cold load) / 25.10 (1x B200 Qwen3-8B warm restart + 16x64 check; 66.47 s cold)",
+      "after": "0.091 (2x GB200 c9 install) / 0.839 (R1 decode graph recapture) / 1.97 (1x B200 Qwen3-8B live swap + 16x64 check, 0.060 s install; 0.427 s targeted 2x16 probe)",
       "unit": "s",
-      "setup": "2x GB200, TP=2, Qwen3-0.6B; SglangConformanceLab 11/11 conformance"
+      "setup": "2x GB200 (TP=2, Qwen3-0.6B; SglangConformanceLab 11/11) and 1x B200 (TP=1, Qwen3-8B, decode CUDA graphs [1, 2, 4], 2026-11-19)"
      },
      "status": "merged_gpu_verified",
-     "source": "PR #163; PR #164; repos/sglang",
-     "note": "SglangConformanceLab passed 11/11 conformance on 2x GB200 TP=2 Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load (29.8x)."
+     "source": "PR #163; PR #164; repos/sglang/kb/costs.md",
+     "note": "SglangConformanceLab passed 11/11 conformance on 2x GB200 TP=2 Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load (29.8x). On 1x B200 Qwen3-8B TP=1 (2026-11-19), warm restart + 16x64 check took 25.10 s (6.92 s imports, 1.77 s weights, 2.88 s decode graphs, 11.27 s scheduler/init, 2.26 s check; cold container start 66.47 s) vs 1.97 s live Sampler.forward swap + full check (0.060 s install, 0.011 s undo, 12.8x vs warm / 33.8x vs cold, bit-exact) and 0.427 s targeted 2x16 probe (58.8x vs warm), plus 0.839 s edit-to-rebuilt (0.794 s R1 recapture, 216 capture witness calls) on Qwen3DecoderLayer.forward (sizes=[1, 2])."
     },
     {
      "name": "Zygote fork server (`SglangZygote`)",
@@ -555,8 +555,8 @@
       "setup": "2x GB200, miles 0.2.0, multi-actor live swap + EpochDataBuffer code_epoch drain + coupled S0 weight sync"
      },
      "status": "merged_gpu_verified",
-     "source": "PR #162; repos/miles",
-     "note": "11/11 conformance; on 2x GB200 miles 0.2.0: multi-actor live swap in 0.069 s with EpochDataBuffer code_epoch drain and coupled S0 weight sync."
+     "source": "PR #162; repos/miles; launch/receipts/w8-miles-ladder/summary.json",
+     "note": "11/11 conformance; on 2x GB200 miles 0.2.0: multi-actor live swap in 0.069 s (69.22 ms) with EpochDataBuffer code_epoch drain and coupled S0 weight sync. Paired 2x B200 Qwen3-0.6B GSM8K GRPO receipt (slime/MilesStepGate + Snapshot S0): 83.87 s cold restart (83.8696 s) -> 0.0570 s install + 0.2027 s S0 restore + 0.8957 s live step = 1.1555 s (72.6x), or 0.6641 s (126.3x) on recorded-rollout trainer replay (0.4043 s), 0.0159 s undo with bit-exact post-undo weight restore (bit_exact_undo_on_same_rollout: true)."
     }
    ]
   }

@@ -84,12 +84,19 @@ Where the 9,464 uncovered non-restart functions sit once the adapter is present:
 
 ## Not measured yet
 
-- Phase-by-phase startup breakdown on Qwen3-0.6B and Qwen3-8B at snapshot `cf9845f8e`
-  (`init_torch_distributed`, `load_model`, `init_memory_pool`, `kernel_warmup`,
-  `CudaGraphRunner` capture).
 - Zygote fork time to ready vs fresh `sglang.Engine` start, and module-refresh cost on SGLang's
   import graph.
-- In-place `CudaGraphRunner` recapture latency (single batch size vs full `capture_bs` sweep) at
-  TP 1 and TP > 1.
 - Overlap-scheduler drain latency (`pause_generation(mode="retract")` + `continue_generation`)
   at the step gap.
+
+## 1x B200 phase-split 1-change ladder (`Qwen3-8B`, TP=1, `2026-11-19`)
+
+Source: nightly `sglang` `0.0.0.dev1+g302b78ccf` on `1x NVIDIA B200` (`Qwen3-8B`, TP=1, decode CUDA graphs `[1, 2, 4]`), visible edit on `Sampler.forward` (`greedy + 1 mod V`) + selective `R1` recapture on `Qwen3DecoderLayer.forward` (`sizes=[1, 2]`):
+
+| Arm / Phase | Value | Notes |
+|---|---:|---|
+| Fresh container start + `16x64` check (`fresh_base`) | **66.47 s** | `19.96 s` imports + `33.15 s` engine init (`1.83 s` weights, `18.37 s` cold graph capture/warmup, `12.95 s` spawn/KV/init) + `13.37 s` check |
+| Warm-cache fresh restart + `16x64` check (`fresh_edited`) | **25.10 s** | `6.92 s` imports + `15.92 s` engine init (`1.77 s` weights, `2.88 s` decode graphs, `11.27 s` spawn/KV/init) + `2.26 s` check; `proc_wall_s = 27.08 s` |
+| Live `R0` swap + `16x64` check (`SglangLab`) | **1.97 s** (`12.8x` vs warm / `33.8x` vs cold) | `0.0600 s` (`60.0 ms`) install + `1.908 s` check (`witness = 65` calls, digest bit-exact to `fresh_edited`), `0.0109 s` (`10.9 ms`) undo (bit-exact to base) |
+| Live `R0` swap + targeted `2x16` probe | **0.427 s** (`58.8x` vs warm / `155.6x` vs cold) | `0.0600 s` install + `0.367 s` probe (`proven = True`, witness `81` calls cumulative) |
+| Live `R1` selective decode graph recapture (`Qwen3DecoderLayer.forward`, `sizes=[1, 2]`) | **0.839 s** edit-to-rebuilt | `0.045 s` commit + `0.794 s` R1 recapture (`216` capture witness calls); post-recapture probe `0.095 s` (`proven = True`) |
