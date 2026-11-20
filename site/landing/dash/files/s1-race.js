@@ -93,8 +93,10 @@ dash.calc('race_targets', {
   const DURATION = 13.5; // seconds for a whole race
 
   function workloads() {
-    const r = FR.ok('race_workloads');
-    return r ? r.data.slice().sort((a, b) => Number(a.order) - Number(b.order)) : [];
+    const r = FR.ok('race_workloads'), st = FR.ok('race_steps');
+    if (!r) return [];
+    const has = st ? new Set(st.data.map((x) => x.workload)) : null;
+    return r.data.filter((w) => !has || has.has(w.workload)).sort((a, b) => Number(a.order) - Number(b.order));
   }
   function current() {
     const ws = workloads();
