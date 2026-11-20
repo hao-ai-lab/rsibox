@@ -185,6 +185,7 @@ class HolderTest(unittest.TestCase):
                 "    def __init__(self):\n"
                 "        super().__init__()\n"
                 "        base = torch.arange(16, dtype=torch.float32)\n"
+                "        self.empty_p = nn.Parameter(torch.empty(0, dtype=torch.bfloat16), requires_grad=False)\n"
                 "        self.register_buffer('view_a', base[2:10].view(2, 4))\n"
                 "        self.register_buffer('view_b', base[6:14].view(4, 2))\n"
                 "        self.tables = {'nested': [torch.linspace(0.0, 1.0, 5)]}\n"
@@ -229,7 +230,10 @@ class HolderTest(unittest.TestCase):
         )
         try:
             line = dep.stdout.readline()
-            self.assertTrue(line, dep.stderr.read())
+            if not line:
+                dep.kill()
+                dep.wait(timeout=5)
+                self.fail(f"depositor exited early:\n{dep.stderr.read()}")
             info = json.loads(line)
             # Simulate dirty worker teardown killing depositor AND its torch_shm_manager child.
             proc_util.kill_tree(dep.pid, signal.SIGKILL, include_pg=False)
@@ -249,6 +253,10 @@ class HolderTest(unittest.TestCase):
             "assert r.get('ok'), r\n"
             "m = r['module']\n"
             "base = torch.arange(16, dtype=torch.float32)\n"
+            "assert not m.view_a.untyped_storage().is_shared()\n"
+            "assert not m.view_b.untyped_storage().is_shared()\n"
+            "assert not m.empty_p.untyped_storage().is_shared()\n"
+            "assert m.empty_p.shape == (0,)\n"
             "assert torch.equal(m.view_a, base[2:10].view(2, 4))\n"
             "assert torch.equal(m.view_b, base[6:14].view(4, 2))\n"
             "assert torch.equal(m.tables['nested'][0], torch.linspace(0.0, 1.0, 5))\n"
@@ -257,12 +265,14 @@ class HolderTest(unittest.TestCase):
             "assert float(m.view_b[0, 0]) == 999.0\n"
             "print('OK')\n"
         )
-        out = subprocess.run(
-            [sys.executable, "-c", getter_code, self.sock, json.dumps(info["files"])],
-            env=env, capture_output=True, text=True, timeout=60,
-        )
-        self.assertEqual(out.returncode, 0, out.stderr[-2000:])
-        self.assertEqual(out.stdout.strip(), "OK")
+        for _ in range(2):
+            out = subprocess.run(
+                [sys.executable, "-Wdefault", "-Werror::ResourceWarning", "-Werror::UserWarning",
+                 "-c", getter_code, self.sock, json.dumps(info["files"])],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(out.returncode, 0, out.stderr[-2000:])
+            self.assertEqual(out.stdout.strip(), "OK")
 
 
 class OwnCpuStorageUnitTest(unittest.TestCase):

@@ -22,7 +22,9 @@ file). CPU tensors in the tree travel through shared memory (a copy, not pinned)
 
 Transport: `multiprocessing.connection` over a unix socket (no network port), ForkingPickler.
 """
+import ctypes
 import hashlib
+import io
 import json
 import os
 import sys
@@ -192,6 +194,68 @@ def _ipc():
     tmp.set_sharing_strategy("file_system")
 
 
+def _rebuild_cpu_untyped(raw):
+    import torch
+    u = torch.UntypedStorage(len(raw))
+    if raw:
+        ctypes.memmove(u.data_ptr(), raw, len(raw))
+    return u
+
+
+def _rebuild_cpu_typed(untyped, dtype):
+    import torch
+    return torch.storage.TypedStorage(wrap_storage=untyped, dtype=dtype, _internal=True)
+
+
+def _alias_untyped(untyped):
+    return untyped
+
+
+def _dumps(obj):
+    from multiprocessing.reduction import ForkingPickler
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return bytes(ForkingPickler.dumps(obj))
+
+    untyped_cls = torch.UntypedStorage
+    typed_cls = torch.storage.TypedStorage
+    seen_cpu = {}
+
+    class _HolderPickler(ForkingPickler):
+        def reducer_override(self, item):
+            # Serialize CPU storages inline so libshm never binds holder to depositor's shm manager.
+            if isinstance(item, untyped_cls):
+                if item.device.type != "cpu":
+                    return NotImplemented
+                key = getattr(item, "_cdata", id(item))
+                canon = seen_cpu.get(key)
+                if canon is not None:
+                    return (_alias_untyped, (canon,))
+                seen_cpu[key] = item
+                n = item.nbytes()
+                raw = ctypes.string_at(item.data_ptr(), n) if n else b""
+                return (_rebuild_cpu_untyped, (raw,))
+            if isinstance(item, typed_cls):
+                u = item._untyped_storage
+                if u.device.type != "cpu":
+                    return NotImplemented
+                return (_rebuild_cpu_typed, (u, item.dtype))
+            return NotImplemented
+
+    buf = io.BytesIO()
+    _HolderPickler(buf).dump(obj)
+    return buf.getvalue()
+
+
+def _send(conn, obj):
+    conn.send_bytes(_dumps(obj))
+
+
+def _recv(conn):
+    from multiprocessing.reduction import ForkingPickler
+    return ForkingPickler.loads(conn.recv_bytes())
+
+
 def serve(sock_path, ready_path=None):
     """Run the holder: one request per connection: {"op": "put"|"get"|"status"|"stop", ...}."""
     _ipc()
@@ -210,7 +274,7 @@ def serve(sock_path, ready_path=None):
                         return
                 except Exception as e:                # one bad request never stops the holder
                     try:
-                        conn.send({"ok": False, "findings": [finding(
+                        _send(conn, {"ok": False, "findings": [finding(
                             "holder_error", f"{type(e).__name__}: {e}", "the request served")]})
                     except Exception:
                         pass
@@ -223,39 +287,39 @@ def _handle(conn, entries):
     a client that stops in the middle of sending its request (`conn.recv` waits for the rest)."""
     if not conn.poll(REQUEST_TIMEOUT_S):
         raise TimeoutError(f"no request in {REQUEST_TIMEOUT_S} s")
-    req = conn.recv()
+    req = _recv(conn)
     op, key = req.get("op"), req.get("key")
     t0 = time.perf_counter()
     if op == "put":
         entries[key] = {"stamp": req["stamp"], "module": _own(req["module"]),
                         "files": req.get("files")}
-        conn.send({"ok": True, "op": op, "key": key, "seconds": round(time.perf_counter() - t0, 4)})
+        _send(conn, {"ok": True, "op": op, "key": key, "seconds": round(time.perf_counter() - t0, 4)})
     elif op == "get":
         e = entries.get(key)
         if e is None:
-            conn.send({"ok": False, "findings": [finding("holder_empty", f"no entry {key}",
-                                                          "a deposit before the first get")]})
+            _send(conn, {"ok": False, "findings": [finding("holder_empty", f"no entry {key}",
+                                                           "a deposit before the first get")]})
         else:
             diff = stamp_diff(e["stamp"], req["stamp"])
             if diff:
                 del entries[key]          # never serve it again
-                conn.send({"ok": False, "findings": [finding(
+                _send(conn, {"ok": False, "findings": [finding(
                     "holder_stale", f"{key}: changed since the deposit: {diff[:8]}",
                     "the loader, quantization, model classes, weights and env unchanged")]})
             else:
-                conn.send({"ok": True, "module": e["module"], "files": e["files"]})
+                _send(conn, {"ok": True, "module": e["module"], "files": e["files"]})
                 if conn.poll(ACK_TIMEOUT_S):  # the worker mapped the tensors
-                    conn.recv()
+                    _recv(conn)
     elif op == "files":
         e = entries.get(key)
-        conn.send({"ok": e is not None, "files": e["files"] if e else None})
+        _send(conn, {"ok": e is not None, "files": e["files"] if e else None})
     elif op == "status":
-        conn.send({"ok": True, "keys": sorted(map(str, entries)), "pid": os.getpid()})
+        _send(conn, {"ok": True, "keys": sorted(map(str, entries)), "pid": os.getpid()})
     elif op == "stop":
-        conn.send({"ok": True})
+        _send(conn, {"ok": True})
         return "stop"
     else:
-        conn.send({"ok": False, "error": f"unknown op {op}"})
+        _send(conn, {"ok": False, "error": f"unknown op {op}"})
 
 
 def call(sock_path, msg, timeout=120.0):
@@ -263,12 +327,12 @@ def call(sock_path, msg, timeout=120.0):
     from multiprocessing.connection import Client
     c = Client(sock_path, family="AF_UNIX")
     try:
-        c.send(msg)
+        _send(c, msg)
         if not c.poll(timeout):
             raise TimeoutError(f"holder: no reply to {msg.get('op')} in {timeout} s")
-        r = c.recv()
+        r = _recv(c)
         if msg.get("op") == "get" and r.get("ok"):
-            c.send("mapped")
+            _send(c, "mapped")
         return r
     finally:
         c.close()
