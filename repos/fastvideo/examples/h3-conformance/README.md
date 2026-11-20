@@ -100,6 +100,18 @@ c9_soak            pass    197.869  20 cycles; install median 0.0589 s, uninstal
 
 Every `c8` respawn mapped `text_encoder` (`0.145–0.358 s`), `vae` (`0.032–0.063 s`), and `transformer` (`0.185–0.738 s`) via holder IPC (`served: true`). `c8`'s `1362.8 s` total case wall includes two ~`600 s` default NCCL watchdog waits during the injected SP2 `rank1` crash and hang before `reset("respawn")` starts.
 
+With asymmetric `SP >= 2` fault-beacon detection + parallel dirty `kill_tree(..., include_pg=False)` fast-fail (`4/4` pass, `0 MiB` across all 4 GPUs):
+
+```
+case               result  seconds  evidence
+c0_repeatable      pass     25.529  3 checks (one after reset ['cuda cache']) gave {'video': 'd0e55e892690e260', 'audio': 'ee49674663eae6e2'}
+c2_visible         pass      9.438  output {'video': 'd0e55e892690e260', ...} -> {'video': 'cd32f50b70d9479f', ...}; calls [1, 1]
+c4_uninstall       pass     18.787  uninstall ['txn-a67f532d'] in 0.016656 s; identity 88d0e78248c36bf7 restored
+c8_crash_and_hang  pass    218.459  crash: respawn 11.659885 s; hang: respawn 11.94372 s; lost: respawn 7.194716 s; tamper: respawn 6.079436 s
+```
+
+`c8` total wall fell **`6.24×` (`1362.848 s -> 218.459 s`)**; `text_encoder` (`0.142–0.323 s`) and `vae` (`0.031–0.035 s`) served via holder IPC on every respawn (`transformer` fell back cleanly to `1.66–1.70 s` local load + re-deposit after `RuntimeError: Broken pipe` on the two dirty-killed respawns, then served via holder IPC in `0.181–0.601 s` on `lost` and `tamper`).
+
 ## What these runs found (and the fixes they needed)
 
 - **c8, hang:** the injected hang must outlast the check's deadline; the lab now sets it from

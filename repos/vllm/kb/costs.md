@@ -203,9 +203,20 @@ Standalone `nvcc 13.3` compile/load/dispatch/undo probe on GPU 0 measured `16.83
 pre-PR kernel rejects non-contiguous `residual` (`stride(-1) == 1, is_contiguous() == False`)
 with `RuntimeError`, while the live-compiled PR #49750 kernel matches PyTorch FP32 reference (`max abs err = 0.015625`).
 
-Multi-rank `TP=2` verification on 2 idle B200 GPUs (same model/flags, `verify_native_pr49750.py --tp 2`, cold live boot `37.22 s`) confirmed single-compile `flock` artifact sharing (`18.24–18.27 s` uncached rank vs `0.0 s` cached peer), `576` live / `432` capture witness calls per rank, and `0 MiB` cleanup on both GPUs:
-- Visible perturbation: `18.274 s` / `0.0 s` build, `2.55 ms` gap, `0.573 s` `R1` recapture (`18.880 s` edit-to-rebuilt), `1.074 s` check (`19.95 s` total vs `53.10 s` fresh), `max |Δlogprob| = 0.0`, `249.5 ms` undo (`2.9 ms` / `248.4 ms` per worker).
-- PR #49750: `18.240 s` / `0.0 s` build, `3.50 ms` gap, `0.916 s` `R1` recapture (`19.193 s` edit-to-rebuilt), `1.072 s` check (`20.26 s` total vs `55.28 s` fresh), `max |Δlogprob| = 0.0`, `9.17 ms` cascade undo (`8.13 ms` / `6.90 ms` per worker).
+Multi-rank `TP=2` verification on 2 idle B200 GPUs (same model/flags, `verify_native_pr49750.py --tp 2`) confirmed single-compile `flock` artifact sharing across ranks and `0 MiB` cleanup on both GPUs:
+- Original serial `nvcc` build (`cold live boot 37.22 s`, `576` live / `432` capture witness calls per rank):
+  - Visible perturbation: `18.274 s` / `0.0 s` build, `2.55 ms` gap, `0.573 s` `R1` recapture (`18.880 s` edit-to-rebuilt), `1.074 s` check (`19.95 s` total vs `53.10 s` fresh), `max |Δlogprob| = 0.0`, `249.5 ms` undo (`2.9 ms` / `248.4 ms` per worker).
+  - PR #49750: `18.240 s` / `0.0 s` build, `3.50 ms` gap, `0.916 s` `R1` recapture (`19.193 s` edit-to-rebuilt), `1.072 s` check (`20.26 s` total vs `55.28 s` fresh), `max |Δlogprob| = 0.0`, `9.17 ms` cascade undo (`8.13 ms` / `6.90 ms` per worker).
+- Parallel `native.py` build (`g++ -O1` parallel `reg.cpp` + `-split-compile=16 --threads=16` + `g++ -shared`, `cold live boot 32.895 s`):
+  - Visible perturbation: `11.716 s` / `0.0 s` build (`1.36 ms` load, `2.39 ms` gap), `0.480 s` `R1` recapture (`12.223 s` edit-to-rebuilt), `1.060 s` check (`13.28 s` total vs `49.416 s` fresh), `max |Δlogprob| = 0.0`, `473.1 ms` undo.
+  - PR #49750: `11.854 s` / `0.0 s` build (`1.04 ms` load, `2.81 ms` gap), `0.676 s` `R1` recapture (`12.558 s` edit-to-rebuilt), `1.060 s` check (`13.62 s` total vs `46.965 s` fresh), `max |Δlogprob| = 0.0`, `8.94 ms` cascade undo (`7.94 ms` / `6.38 ms` per worker).
+
+Standalone 7-arm `layernorm_kernels.cu` compile-phase waterfall on B200 GPU 0 (`max_err = 0.012826 < 2e-2` vs FP32 reference, `0.42–0.73 ms` load):
+- `A_baseline` (serial `nvcc` `.cu` + `reg.cu` + link): `16.704 s` (`copytree 0.016 s`, `.cu 12.076 s` [pp `1.676 s` + `cudafe++ 2.824 s` + `cicc 3.834 s` + `ptxas 0.883 s` + `gcc 3.648 s`], `reg 4.400 s`, `link 0.212 s`).
+- `B_parallel_gxx_split8` (`g++ -O1 reg.cpp` + `g++ -shared` + `split=8`): `12.190 s` (`reg 0.678 s`).
+- `C_split16` (`g++ reg.cpp` + `g++ -shared` + `-split-compile=16 --threads=16`): `11.989 s` (`-28.2%` vs `A`; `F_host_O0_gpu_O2` `-Xcompiler=-O0`: `11.851 s`).
+- `E_thin_fused_only_O2` (thin single-kernel TU stripping unrelated `rms_norm`): `8.596 s` (`ptxas 0.081 s` [`10.9×` vs `A`], `cicc 2.168 s`, `gcc 2.535 s`).
+- `H_thin_bf16_host_O0` (`BFloat16`-only thin TU): `8.321 s` (`pp 1.651 s + cudafe++ 2.813 s + gcc 2.389 s = 6.853 s` header/host floor).
 
 And the `52`-test real-GPU `livelab/services/` E2E suite (`test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`) passed `52/52` (`0` skipped) on B200 under `-W error::ResourceWarning`.
 
@@ -321,9 +332,19 @@ includes starting the launcher and its preflight checks.
 Under FCFS a completion with priority −1 returned HTTP 400 both before and after the
 round trip. Under priority scheduling the core reported one running and three waiting.
 The waiting requests arrived with priorities 10, 5, −1. All returned HTTP 200 and
-completed in the order −1, 5, 10. Under restored FCFS the three equal-priority
-requests completed in arrival order. In each mode all four token sequences matched
-those from a separately started server with the corresponding scheduling policy.
+completed in the order −1, 5, 10. Under restored FCFS the three equal-priority requests completed in arrival order. In each mode
+all four token sequences matched those from a separately started server with the corresponding
+scheduling policy.
+
+With `services/core_hook.py` unifying the `EngineCoreProc` hook and `_ChannelMux` thread across
+`adapter.host` (`FASTRSI_KERNEL_DIR`) and `services.live_reconfig` (`FASTRSI_LIVE_RECONFIG_DIR`),
+a combined B200 GPU run (`VllmLab`, Qwen3-8B TP1 eager, `0 MiB` cleanup) verified both channels on
+the same `EngineCoreProc` (`core_pid == ping1_pid == ping2_pid == 1228641`, `hook_errors: []`):
+pre-swap live `fcfs -> priority` (`max_num_seqs=2`, `apply_s 0.191 ms`, client `6.374 ms`, HTTP
+`400 -> 200`) and restore (`0.219 ms` / `6.477 ms`, HTTP `400`), live worker+core kernel swap
+(`install 0.079163 s`, witnesses `Sampler.__call__` `31` / `check_stop` `29`), exact `undo`
+(`0.038081 s`, output restored to base), and post-swap live `fcfs <-> priority` (`0.260 ms` /
+`0.245 ms` apply, client `4.429 ms` / `2.375 ms`, HTTP `200`).
 
 ## Not measured yet
 

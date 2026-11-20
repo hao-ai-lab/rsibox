@@ -310,7 +310,26 @@ unit tests (`test_pieces.py`, incl. `PipelineAndVppTest`) passed 13/13 with torc
 | `c9_soak` | pass | 15.813 | 20 cycles; install median `0.0468 s`, undo median `0.0168 s` |
 | `c10_not_proven` | pass | 29.012 | `proven: false` (`zero_witness` × 4 ranks) vs altered fresh |
 
-11/11 conformance passed (`108` receipts, GPUs returned to `0 MiB`). Virtual pipeline parallelism
-(`VPP > 1`) VPP iterator list replay is covered in `PipelineAndVppTest` (unit-tested with torch);
-multi-chunk VPP > 1 on GPU is not yet run.
+11/11 conformance passed (`108` receipts, GPUs returned to `0 MiB`).
+
+## Virtual pipeline parallelism (`TP2 × PP2 × VPP2`, 4× GB200, 2026-11-19)
+
+Source: our 2026-11-19 NeMo 26.04.01 conformance run on four GB200s (8 layers, hidden 512, 8
+attention heads, `--tensor-model-parallel-size 2 --pipeline-model-parallel-size 2
+--num-layers-per-virtual-pipeline-stage 2 --sequence-parallel --global-batch-size 8
+--deterministic-mode`, VPP2 interleaved chunks, 3-step checks via `fastrsi conformance megatron --real`).
+
+| Case | Result | Seconds | Notes |
+|---|---|---:|---|
+| `c0_repeatable` | pass | 1.811 | 3 identical base checks after reset |
+| `c1_noop` | pass | 1.296 | `MLP.forward` calls `[96, 96, 96, 96]` across all 4 ranks |
+| `c2_visible` | pass | 1.285 | Loss changed `[9.1179, 9.0996, 9.0368] -> [9.1245, 9.0891, 9.0389]`, `[96, 96, 96, 96]` calls |
+| `c3_fresh_equivalence` | pass | 94.707 | Live == fresh (visible and 3-edit chain) |
+| `c4_uninstall` | pass | 2.521 | Undo `0.017231 s`; identity restored |
+| `c5_failed_install` / `c6_refusal` / `c7_chain` | pass | 2.905 / 4.013 / 5.220 | Clean rollback, refusals, 3-edit chain & unwind |
+| `c8_crash_and_hang` | pass | 306.980 | Crash / hang / lost / tamper respawns in `30.044–31.046 s` |
+| `c9_soak` | pass | 26.507 | 20 cycles; install median `0.0468 s`, undo median `0.0170 s` |
+| `c10_not_proven` | pass | 31.717 | `proven: false` (`zero_witness` × 4 ranks) vs altered fresh |
+
+11/11 conformance passed (`108` receipts, all 4 GPUs returned to `0 MiB`), with every rank recording all `96` calls across both virtual chunks.
 

@@ -25,11 +25,14 @@ using upstream vLLM PR `#49750` (`csrc/libtorch_stable/layernorm_kernels.cu`: no
    vs `49.47 s` restart), and restores exact base on `cascade_undo` in `6.55 ms` (`5.60 ms`
    worker unbind).
 5. **Multi-rank `TP=2` (`--tp 2` on `2× B200`):** node-local `flock` compiles once per `.so`
-   cache key across TP ranks (`18.24–18.27 s` on the uncached rank, `0.0 s` on the cached peer);
-   both `visible_perturbation` (`0.573 s` `R1`, `19.95 s` total vs `53.10 s` restart) and
-   PR `#49750` (`0.916 s` `R1`, `20.26 s` total vs `55.28 s` restart, `9.17 ms` cascade undo)
-   report `576` live / `432` capture witness calls per rank, `max |Δlogprob| = 0.0`, and
-   `0 MiB` residual GPU memory.
+   cache key across TP ranks (`0.0 s` on the cached peer), `576` live / `432` capture witness calls
+   per rank, `max |Δlogprob| = 0.0`, and `0 MiB` residual GPU memory:
+   - Serial `nvcc`: `18.24–18.27 s` build (`visible_perturbation` `19.95 s` total vs `53.10 s`
+     restart; PR `#49750` `0.916 s` `R1`, `20.26 s` total vs `55.28 s` restart, `9.17 ms` cascade undo).
+   - Parallel `native.py` (`g++` `reg.cpp` + `-split-compile=16 --threads=16` + `g++ -shared`):
+     `11.72–11.85 s` build (`visible_perturbation` `11.716 s` build, `0.480 s` `R1`, `13.28 s`
+     total vs `49.42 s` restart; PR `#49750` `11.854 s` build, `0.676 s` `R1`, `12.558 s`
+     edit-to-rebuilt, `13.62 s` total vs `46.97 s` restart, `8.94 ms` cascade undo).
 
 ## Usage
 
