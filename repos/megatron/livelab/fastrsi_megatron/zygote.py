@@ -53,6 +53,7 @@ import argparse, ast, ctypes, errno, gc, importlib, json, os, select, signal, so
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
 import forksafe
 from forksafe import PROPS_CODE, Properties, freeze_gc_before_fork  # noqa: F401
+from fastrsi import ipc, proc
 
 START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
@@ -95,81 +96,39 @@ def log(event, **kw):
 
 
 def install_forksafe():
-    """Keep the imports from initializing CUDA. Some imports only ask about the GPU (quack, via
-    Transformer Engine, calls torch.cuda.get_device_capability at import, which initializes
-    CUDA; tvm_ffi calls torch.cuda.is_available, which initializes the driver; flashinfer reads
-    device properties): answer those from NVML and a probe process, with the framework's
-    forksafe and torch's NVML-based availability check. Returns what was done."""
+    """Keep the imports from initializing CUDA via `forksafe.install_all_guards`."""
     os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "1")
     try:
         import torch
     except ImportError as e:
         return {"installed": False, "why": repr(e)}
-    out = forksafe.install(torch.cuda)
-    out["properties"] = install_properties(torch.cuda)
-    out["cuda_python"] = guard_cuda_python(torch.cuda)
+    report, _ = forksafe.install_all_guards(torch.cuda, triton=False, cute_dsl=True, cuda_python=True)
+    if os.environ.get("CUTE_DSL_ARCH"):
+        START_ENV.setdefault("CUTE_DSL_ARCH", os.environ["CUTE_DSL_ARCH"])
+    out = dict(report.get("torch_cuda", {"installed": False}))
+    out["properties"] = report.get("properties", {})
+    out["cuda_python"] = report.get("cuda_python", {})
     return out
 
 
-_CUINIT = {}
-
-
 def guard_cuda_python(cuda=None):
-    """The CuTe DSL (nvidia-cutlass-dsl, imported by flashinfer through Megatron in NeMo 26.04)
-    calls cuda-python's cuInit at import to pick its target arch, and falls back to sm_100 when
-    that fails. In the zygote, cuInit answers CUDA_ERROR_NOT_INITIALIZED (CUDA stays off) and
-    CUTE_DSL_ARCH, if unset, is set from the NVML-answered capability, so the DSL targets the
-    right arch; the forked rank gets the real cuInit back (unguard_cuda_python). Returns what was
-    done."""
-    try:
-        import cuda.bindings.driver as drv
-    except ImportError:
-        return {"installed": False, "why": "no cuda-python"}
-    if "fn" not in _CUINIT:
-        _CUINIT["fn"], _CUINIT["mod"] = drv.cuInit, drv
-        drv.cuInit = lambda flags=0: (drv.CUresult.CUDA_ERROR_NOT_INITIALIZED,)
-    arch = None
+    """Stub `cuda.bindings.driver.cuInit` and pin `CUTE_DSL_ARCH` via `forksafe.guard_cuda_python`."""
+    cap = None
     if cuda is not None and "CUTE_DSL_ARCH" not in os.environ:
         try:
-            major, minor = cuda.get_device_capability(0)
-            arch = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
-            os.environ["CUTE_DSL_ARCH"] = arch
-            START_ENV["CUTE_DSL_ARCH"] = arch
-        except Exception as e:                  # no GPU visible: leave the DSL's default
-            arch = f"unset: {e!r}"
-    return {"installed": True, "cute_dsl_arch": arch or os.environ.get("CUTE_DSL_ARCH")}
+            cap = cuda.get_device_capability(0)
+        except Exception:
+            cap = None
+    out = forksafe.guard_cuda_python(capability=cap)
+    if os.environ.get("CUTE_DSL_ARCH"):
+        START_ENV.setdefault("CUTE_DSL_ARCH", os.environ["CUTE_DSL_ARCH"])
+    return out
 
 
-def unguard_cuda_python():
-    if "fn" in _CUINIT:
-        _CUINIT["mod"].cuInit = _CUINIT.pop("fn")
-        _CUINIT.pop("mod")
-        return True
-    return False
-
-
-def install_properties(cuda, probe=None):
-    """forksafe.install_properties: cuda.get_device_properties(i) answers the values a probe
-    process read from CUDA, while CUDA is not initialized here."""
-    return forksafe.install_properties(cuda, probe=probe)
-
-
-def driver_initialized():
-    """Whether this process has initialized the CUDA driver: cuDeviceGetCount fails with
-    CUDA_ERROR_NOT_INITIALIZED (3) until something called cuInit."""
-    try:
-        cu = ctypes.CDLL("libcuda.so.1")
-    except OSError:
-        return False
-    n = ctypes.c_int()
-    return cu.cuDeviceGetCount(ctypes.byref(n)) != 3
-
-
-def cuda_initialized():
-    t = sys.modules.get("torch")
-    if t is not None and t.cuda.is_initialized():
-        return True
-    return driver_initialized()
+unguard_cuda_python = forksafe.unguard_cuda_python
+install_properties = forksafe.install_properties
+driver_initialized = forksafe.driver_initialized
+cuda_initialized = forksafe.cuda_initialized
 
 
 def script_imports(script):
@@ -373,11 +332,7 @@ def rank_env(request_data, local_rank):
 
 def cpu_list(spec):
     """'0-3,8,10-11' -> {0, 1, 2, 3, 8, 10, 11}."""
-    out = set()
-    for part in spec.split(","):
-        a, _, b = part.strip().partition("-")
-        out.update(range(int(a), int(b or a) + 1))
-    return out
+    return set(forksafe.parse_cpulist(spec))
 
 
 def unpatch(cuda=None):
@@ -536,50 +491,20 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
             os._exit(code)
 
 
-def stat_ppid(text):
-    """The parent pid in the text of /proc/<pid>/stat: `pid (comm) state ppid pgrp ...`. comm may
-    hold spaces and parentheses, so the fields are counted after its last ')'."""
-    return int(text.rsplit(")", 1)[1].split()[1])
+stat_ppid = proc.stat_ppid
 
 
-def _ppids(proc="/proc"):
-    """{pid: ppid} of every process listed under `proc`."""
-    out = {}
-    for entry in os.listdir(proc) if os.path.isdir(proc) else []:
-        if entry.isdigit():
-            try:
-                with open(os.path.join(proc, entry, "stat")) as stat_file:
-                    out[int(entry)] = stat_ppid(stat_file.read())
-            except (OSError, IndexError, ValueError):
-                pass
-    return out
+def _ppids(proc_root="/proc"):
+    return proc.ppid_map(proc_root=proc_root)
 
 
-def _tree(pid, proc="/proc"):
-    """pid and its descendants, from /proc."""
-    kids = {}
-    for child, parent in _ppids(proc).items():
-        kids.setdefault(parent, []).append(child)
-    out, todo = [], [pid]
-    while todo:
-        q = todo.pop()
-        out.append(q)
-        todo += kids.get(q, [])
-    return out
+def _tree(pid, proc_root="/proc"):
+    return [pid] + proc.descendants(pid, proc_root=proc_root)
 
 
 def kill_tree(pid, sig=signal.SIGTERM):
-    """Signal pid's process tree (children first) and its process group: a rank leads its own
-    group, which also holds children that were orphaned out of the tree."""
-    for p in reversed(_tree(pid)):
-        try:
-            os.kill(p, sig)
-        except ProcessLookupError:
-            pass
-    try:
-        os.killpg(pid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
+    """Signal pid's process tree (children first) and its process group."""
+    return proc.kill_tree(pid, sig, include_pg=True)
 
 
 def _send(conn, obj):
@@ -603,35 +528,17 @@ def _client_gone(conn):
         return True
 
 
-def _children(parent_pid=None, proc="/proc"):
-    """Our direct children (ranks, guards, orphans the subreaper took in), by parent pid. Each
-    rank leads a session of its own, so its process group is never ours."""
-    parent_pid = os.getpid() if parent_pid is None else parent_pid
-    return [child for child, parent in _ppids(proc).items() if parent == parent_pid]
+def _children(parent_pid=None, proc_root="/proc"):
+    """Our direct children (ranks, guards, orphans the subreaper took in), by parent pid."""
+    return proc.direct_children(parent_pid, proc_root=proc_root)
 
 
 def reap_all(timeout=10.0, keep=()):
-    """Kill whatever is still our child (ranks, guards, or orphans the subreaper took in), except
-    the children in `keep` (the zygote's own, alive before the job), and reap until none is left.
-    Returns the pids reaped."""
-    reaped, deadline, killed = [], time.time() + timeout, set()
-    while time.time() < deadline:
-        left = [child for child in _children() if child not in keep]
-        for child in left:
-            if child not in killed:
-                kill_tree(child, signal.SIGKILL)
-                killed.add(child)
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return reaped
-        if pid:
-            reaped.append(pid)
-        elif not left:
-            return reaped
-        else:
-            time.sleep(0.02)
-    log("reap_timeout", left=[child for child in _children() if child not in keep])
+    """Kill and reap non-kept direct children (ranks, guards, adopted orphans)."""
+    reaped = proc.reap_all(timeout=timeout, keep=keep)
+    left = [child for child in _children() if child not in set(keep)]
+    if left:
+        log("reap_timeout", left=left)
     return reaped
 
 
@@ -683,30 +590,29 @@ def handle(req, lsock, conn, src):
                 for p in left:
                     kill_tree(p)
                 deadline = min(deadline, time.time() + CLIENT_GONE_GRACE_S)
-            try:
-                pid, st = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            if pid == 0:
-                if time.time() > deadline:
-                    for p in left:
-                        kill_tree(p, signal.SIGKILL)
-                    deadline = 1e18
+            for pid in tuple(left):
+                done, st = os.waitpid(pid, os.WNOHANG)
+                if not done:
+                    continue
+                left.remove(pid)
+                code = os.waitstatus_to_exitcode(st)
+                rc[pids.index(pid)] = code
+                if code:                        # torchrun's policy: one rank fails, stop all
+                    for peer in left:
+                        kill_tree(peer)
+                    deadline = min(deadline, time.time() + CLIENT_GONE_GRACE_S)
+            if left and time.time() > deadline:
+                for pid in left:
+                    kill_tree(pid, signal.SIGKILL)
+                deadline = float("inf")
+            if left:
                 time.sleep(0.05)
-                continue
-            if pid not in left:                 # an orphan the subreaper took in
-                continue
-            left.discard(pid)
-            rc[pids.index(pid)] = os.waitstatus_to_exitcode(st)
-            if rc[pids.index(pid)] != 0:        # torchrun's policy: one rank fails, stop all
-                for p in left:
-                    kill_tree(p)
-        _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
-                     "s": round(time.time() - t0, 3)})
     finally:
         reaped = reap_all(keep=before)          # ranks left by an exception, guards, orphans
         if pids:
             log("job_reaped", ranks=pids, reaped=len(reaped))
+    _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
+                 "s": round(time.time() - t0, 3)})
 
 
 def serve(sock, mods, script=None, forksafe=True):
@@ -763,15 +669,7 @@ def serve(sock, mods, script=None, forksafe=True):
 
 def request(sock, req, out=sys.stdout):
     """Send one request; yield each reply event."""
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.connect(sock)
-        connection.sendall((json.dumps(req) + "\n").encode())
-        with connection.makefile() as lines:
-            for line in lines:
-                event = json.loads(line)
-                yield event
-                if event["event"] in ("exited", "refused", "error", "stopped", "pong"):
-                    break
+    return ipc.unix_json_stream(sock, req)
 
 
 def main(argv=None):

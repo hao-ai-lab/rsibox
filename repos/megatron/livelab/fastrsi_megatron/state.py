@@ -231,8 +231,9 @@ class Snapshot:
             n = len(getattr(getattr(opt, "optimizer", None), "param_groups", []))
             if n != len(gs):
                 groups.append(f"optimizer {i}: {n} param groups, snapshot has {len(gs)}")
-        if len(scaler_states(self.optimizer)) != len(self.scalers):
-            groups.append("grad scaler count changed")
+            scaler = getattr(opt, "grad_scaler", None)
+            if hasattr(scaler, "state_dict") != (self.scalers[i] is not None):
+                groups.append(f"optimizer {i}: grad scaler presence changed")
         return live, {"missing": missing, "extra": [] if allow_extra else extra,
                       "mismatch": mismatch, "groups": groups, "n_extra_allowed":
                       len(extra) if allow_extra else 0}
@@ -305,6 +306,8 @@ def _hash_tensor(h, t, buf):
     if u8.device.type == "cpu":
         _feed(h, u8)
         return buf
+    if u8.is_meta:
+        raise ValueError("cannot hash a meta tensor without storage")
     if buf is None:
         buf = torch.empty(CHUNK, dtype=torch.uint8, pin_memory=True)
     for i in range(0, u8.numel(), CHUNK):
@@ -379,13 +382,22 @@ def zero_new_state(optimizer, before):
 
 class FrozenBatches:
     """The first n items of the training iterator, kept to feed every check the same data.
-    Ranks without an iterator (Megatron gives tensor-parallel ranks > 0 None) keep None."""
+    Ranks without an iterator (Megatron gives tensor-parallel ranks > 0 and middle PP stages
+    None, and VPP passes a list of per-chunk iterators) keep None."""
 
     def __init__(self, it, n):
+        if isinstance(it, list):
+            self._sub = [FrozenBatches(sub, n) for sub in it]
+            self.items = [sub.items for sub in self._sub]
+            self.wrapper = None
+            return
+        self._sub = None
         self.items = None if it is None else [next(it) for _ in range(n)]
         self.wrapper = None if it is None else type(it)
 
     def iterator(self):
+        if self._sub is not None:
+            return [sub.iterator() for sub in self._sub]
         if self.items is None:
             return None
         base = iter(list(self.items))
