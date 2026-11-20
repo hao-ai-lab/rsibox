@@ -97,10 +97,10 @@ class StateSnapshot:
                 for pkey, entry in list((getattr(inner, "state", None) or {}).items()):
                     if id(pkey) not in snap["state"]:
                         for fk, fv in (entry.items() if isinstance(entry, dict) else ()):
-                            if fk in ZERO_KEYS and _is_tensor(fv):
+                            if (fk in ZERO_KEYS or fk == "step") and _is_tensor(fv):
                                 with t.no_grad():
                                     fv.zero_()
-                            elif fk == "step" and not _is_tensor(fv):
+                            elif fk == "step":
                                 entry[fk] = 0
                     else:
                         for fk, sv in snap["state"][id(pkey)][1].items():
@@ -111,6 +111,8 @@ class StateSnapshot:
                                 entry[fk] = _clone(sv)
                 for grp, sgrp in zip(getattr(inner, "param_groups", ()), snap["groups"]):
                     grp.update({gk: _clone(gv) for gk, gv in sgrp.items()})
+                if callable(getattr(opt, "reload_model_params", None)):
+                    opt.reload_model_params()
         if self.scheduler is not None and self.sched_step is not None:
             setattr(self.scheduler, "num_steps" if hasattr(self.scheduler, "num_steps") else "last_epoch", copy.deepcopy(self.sched_step))
         random.setstate(self.rng["python"])

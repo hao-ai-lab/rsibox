@@ -4,10 +4,12 @@ Run from repo root:
     PYTHONPATH=repos/verl:repos/verl/livelab python3 -m unittest discover -s repos/verl/tools -t repos/verl -v
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -84,6 +86,31 @@ class OfflineProbesAndCliTest(unittest.TestCase):
         self.assertAlmostEqual(result["before"]["max"], 1.8, places=5)
         self.assertAlmostEqual(result["after"]["max"], 1.0, places=5)
         self.assertAlmostEqual(result["max_abs_diff"], 0.8, places=5)
+
+    def test_request_waits_out_a_stale_ready_json_instead_of_failing(self):
+        """Input: `ready.json` still names request 3 while `req-3.json` (the request just
+        answered) exists; 0.3 s later the gate advances `ready.json` to 4. Expected: the client
+        sends `req-4.json` and gets `resp-4.json`; before the fix it raised "already pending"
+        at once, which poisoned a conformance case after every fast reset."""
+        import threading
+        gate_dir = Path(self.tmp) / "gate2"
+        gate_dir.mkdir()
+        (gate_dir / "ready.json").write_text(json.dumps({"n": 3}), encoding="utf-8")
+        (gate_dir / "req-3.json").write_text("{}", encoding="utf-8")
+        (gate_dir / "gate.json").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+
+        def gate():
+            time.sleep(0.3)
+            (gate_dir / "ready.json").write_text(json.dumps({"n": 4}), encoding="utf-8")
+            while not (gate_dir / "req-4.json").exists():
+                time.sleep(0.01)
+            (gate_dir / "resp-4.json").write_text(json.dumps({"n": 4, "ok": True}), encoding="utf-8")
+        threading.Thread(target=gate, daemon=True).start()
+        self.assertEqual(cli.request(gate_dir, verb="status", steps=0, timeout=10.0)["n"], 4)
+        with self.assertRaisesRegex(cli.GateError, "already pending"):
+            (gate_dir / "req-5.json").write_text("{}", encoding="utf-8")
+            (gate_dir / "ready.json").write_text(json.dumps({"n": 5}), encoding="utf-8")
+            cli._next_request(gate_dir, settle_s=0.2)
 
     def test_dead_gate_process_fails_client_request_immediately(self):
         """Input: a gate directory whose recorded driver PID has already exited.

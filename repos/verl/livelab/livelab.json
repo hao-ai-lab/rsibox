@@ -1,0 +1,4 @@
+{
+  "toy": "adapter.toy_lab:ToyVerlLab",
+  "real": "adapter.conformance_lab:VerlConformanceLab"
+}
