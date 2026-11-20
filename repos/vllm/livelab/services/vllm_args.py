@@ -12,7 +12,7 @@ flags: the launcher passes the argv through verbatim and only reads back what it
       - live_reshard_or_cold (WeightCacheKey sharding or weight-format change)
     The tier says what the delta touches. `in_process` says whether it can be applied inside the
     running engine today: True only when every changed field has a live consumer
-    (live_reconfig.LIVE_FIELDS: max_num_seqs, max_num_batched_tokens). Every other delta,
+    (live_reconfig.LIVE_FIELDS: max_num_seqs, max_num_batched_tokens, scheduling_policy). Every other delta,
     including all of in_process_graph, is applied by a restart (engine.py says which path ran).
 
 Contract:

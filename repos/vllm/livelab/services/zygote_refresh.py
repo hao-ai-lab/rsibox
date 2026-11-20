@@ -66,7 +66,8 @@ def import_graph(prefixes=("vllm",), modules=None):
         if not (f and f.endswith(".py") and name.split(".")[0] in prefixes):
             continue
         try:
-            tree = ast.parse(open(f, "rb").read(), f)
+            with open(f, "rb") as fh:
+                tree = ast.parse(fh.read(), f)
         except (OSError, SyntaxError, ValueError):
             continue
         is_pkg = os.path.basename(f) == "__init__.py"
