@@ -1,18 +1,11 @@
 """Conformance-only harness helpers (`fresh_check`, `inject`, and named patch suites)."""
-import importlib
 import json
 import os
-import shutil
-import subprocess
-import sys
-import tempfile
+
+from fastrsi import harness as H
+from fastrsi.harness import edit_once
 
 GREEDY = "batch_next_token_ids = torch.argmax(logits, -1)"
-
-
-def edit_once(source, old, new):
-    assert source.count(old) == 1, f"anchor count={source.count(old)}: {old!r}"
-    return source.replace(old, new)
 
 
 class ConformanceHarness:
@@ -23,40 +16,24 @@ class ConformanceHarness:
     fresh_mode = "real"
 
     def fresh_check(self, patch, workload=None):
-        pkg = importlib.import_module(self.package)
-        pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(pkg.__file__)))
         livelab_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        tmp = tempfile.mkdtemp(prefix="sglab-fresh-")
         try:
-            for dirpath, dirnames, filenames in os.walk(os.path.join(pkg_root, self.package)):
-                dirnames[:] = [d for d in dirnames if d != "__pycache__"]
-                rel = os.path.relpath(dirpath, pkg_root)
-                os.makedirs(os.path.join(tmp, rel), exist_ok=True)
-                for fname in filenames:
-                    if not fname.endswith(".pyc"):
-                        os.symlink(os.path.join(dirpath, fname), os.path.join(tmp, rel, fname))
-            for name, text in ((patch or {}).get("files") or {}).items():
-                target = os.path.join(tmp, *name.split(".")) + ".py"
-                if os.path.lexists(target):
-                    os.unlink(target)
-                with open(target, "w") as handle:
-                    handle.write(text)
-            spec_path = os.path.join(tmp, "fresh.json")
-            with open(spec_path, "w") as handle:
-                json.dump({"mode": self.fresh_mode, "config": self.config,
-                           "workload": workload or self.default_workload()}, handle)
-            extra_py = [os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []
-            env = {**os.environ, "PYTHONPATH": os.pathsep.join([tmp, livelab_dir] + extra_py)}
-            proc = subprocess.run([sys.executable, "-m", self.fresh_module, spec_path], env=env,
-                                  capture_output=True, text=True, timeout=self.check_timeout + 300,
-                                  cwd=tmp)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        lines = [line for line in proc.stdout.splitlines() if line.startswith("FRESH ")]
-        if proc.returncode or not lines:
-            return {"ok": False, "error": " | ".join(proc.stderr.strip().splitlines()[-4:]),
-                    "output": None}
-        return {"ok": True, **json.loads(lines[-1][6:])}
+            files = self.files(patch, against="disk") if hasattr(self, "files") else (patch or {}).get("files")
+        except ValueError as err:
+            return {"ok": False, "output": None, "error": str(err)}
+        spec = {
+            "mode": self.fresh_mode,
+            "config": self.config,
+            "workload": workload or self.default_workload(),
+        }
+        with H.PackageOverlay(self.package, files) as overlay:
+            return H.run_fresh_subprocess(
+                self.fresh_module,
+                spec,
+                overlay.root,
+                extra_pythonpath=(livelab_dir,),
+                timeout=self.check_timeout + 300,
+            )
 
     def inject(self, fault, **kwargs):
         if fault == "hang":
@@ -163,7 +140,10 @@ def sglang_patches(base_fn, sampler_mod, worker_mod):
                 'details = " ".join(f"{stage}:{key}={value}" for key, value in fields.items())')),
             "module_state": wrap(sampler_mod, edit_once(
                 sampler_src, '_BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch",',
-                '_BUILT_IN_SAMPLING_BACKENDS = {"pytorch",')),
+                '_BUILT_IN_SAMPLING_BACKENDS = {"pytorch",')
+                if '_BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch",' in sampler_src else edit_once(
+                sampler_src, 'SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")',
+                'SGLANG_RETURN_ORIGINAL_LOGPROB = bool(get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB"))')),
             "empty": wrap(sampler_mod, edit_once(sampler_src, GREEDY, GREEDY + "  # greedy")),
         },
     }

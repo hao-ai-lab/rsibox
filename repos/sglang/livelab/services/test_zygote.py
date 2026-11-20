@@ -65,6 +65,8 @@ class SglangZygoteTests(unittest.TestCase):
         env["PYTHONPATH"] = f"{self.pkg_dir}{os.pathsep}{existing_py}" if existing_py else str(self.pkg_dir)
         env.pop("CUTE_DSL_ARCH", None)
         env.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("FASTRSI_ZYGOTE_CC", None)
         if extra_env:
             env.update(extra_env)
         proc = subprocess.Popen(

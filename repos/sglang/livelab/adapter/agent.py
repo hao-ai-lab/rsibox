@@ -20,7 +20,25 @@ def _sync_lines(local_p, names):
             else:
                 linecache.cache.pop(path, None)
 
-def _rank(scheduler): return scheduler.tp_rank if hasattr(scheduler, "tp_rank") else scheduler.tp_worker.model_runner.tp_rank
+def _rank(scheduler):
+    for obj in (
+        scheduler,
+        getattr(scheduler, "tp_worker", None),
+        getattr(getattr(scheduler, "tp_worker", None), "model_runner", None),
+    ):
+        if obj is not None and hasattr(obj, "tp_rank"):
+            return int(obj.tp_rank)
+    for mod_name in ("sglang.srt.runtime_context", "sglang.srt.distributed"):
+        mod = sys.modules.get(mod_name)
+        for getter_name, attr in (("get_parallel", "tp_rank"), ("get_tensor_model_parallel_rank", None)):
+            getter = getattr(mod, getter_name, None)
+            if callable(getter):
+                try:
+                    val = getter()
+                    return int(getattr(val, attr) if attr else val)
+                except Exception:
+                    pass
+    return 0
 
 def _is_capturing(scheduler):
     runner, torch_mod = scheduler.tp_worker.model_runner, sys.modules.get("torch")

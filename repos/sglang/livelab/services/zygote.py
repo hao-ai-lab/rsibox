@@ -1,63 +1,39 @@
 """Zygote for SGLang: pre-imports torch and SGLang without CUDA, listens on a short AF_UNIX
 socket, and starts each server (or callable) by fork instead of exec. SGLang spawns its
 schedulers (`engine.py`), so only the server inherits; see README.md for guards (a)-(d)."""
-import argparse, contextlib, ctypes, importlib, importlib.util, json, linecache, os, runpy
-import signal, socket, subprocess, sys, time, tokenize, traceback
+import argparse, contextlib, importlib, importlib.util, json, linecache, os, runpy
+import signal, socket, sys, time, tokenize, traceback
 
 LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
 import forksafe  # noqa: E402
+from fastrsi import ipc, proc  # noqa: E402
 
 DEFAULT_PRELOAD = ("torch", "sglang.srt.server_args", "sglang.srt.entrypoints.engine",
                    "sglang.srt.entrypoints.http_server", "sglang.srt.managers.tokenizer_manager")
-MAX_SOCK_PATH = 103 if sys.platform == "darwin" else 106   # <107 bytes, fits sun_path + NUL
-CUINIT, SET_ENV = [], []
+MAX_SOCK_PATH = min(ipc.MAX_SOCK_PATH, 106)   # <107 bytes, fits sun_path + NUL
 
 def sock_path_error(sock_path):
     """(d) Reject an AF_UNIX socket path exceeding MAX_SOCK_PATH (<107 bytes) pre-import."""
+    if err := ipc.sock_path_error(sock_path): return err
     length = len(os.fsencode(os.path.abspath(sock_path)))
     return (f"socket path too long for AF_UNIX ({length} bytes > {MAX_SOCK_PATH}): {sock_path}"
             if length > MAX_SOCK_PATH else None)
 
 def install_guards(modules):
-    """Install pre-import guards (a) and (b). Returns (report, restore_triton)."""
-    CUINIT.clear(); SET_ENV.clear(); report = {}
-    # (a) Set CUTE_DSL_ARCH and stub cuda-python cuInit before flashinfer/cutlass imports so
-    # CuTe DSL arch probing cannot call driver cuInit pre-fork and poison CUDA in children.
-    if not os.environ.get("CUTE_DSL_ARCH"):
-        try:
-            major, minor = forksafe.triton_capability()      # FASTRSI_ZYGOTE_CC, else NVML
-            os.environ["CUTE_DSL_ARCH"] = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
-        except Exception as exc:
-            report["cute_dsl_arch_error"] = repr(exc)[:200]
-    report["cute_dsl_arch"] = os.environ.get("CUTE_DSL_ARCH")
-    with contextlib.suppress(Exception):
-        import cuda.bindings.driver as driver
-        CUINIT[:] = [driver, driver.cuInit]
-        driver.cuInit = lambda flags=0: (driver.CUresult.CUDA_ERROR_NOT_INITIALIZED,)
-    report["cuinit_stub"] = bool(CUINIT)
-    # (b) Answer torch.cuda capability/properties/is_available and Triton target without CUDA.
-    if "PYTORCH_NVML_BASED_CUDA_CHECK" not in os.environ:
-        os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"; SET_ENV.append("PYTORCH_NVML_BASED_CUDA_CHECK")
-    if "torch" in modules and "torch" not in sys.modules:
-        with contextlib.suppress(ImportError):
-            importlib.import_module("torch")
-    if (torch_module := sys.modules.get("torch")) is not None:
-        report["forksafe"] = forksafe.install(torch_module.cuda)
-        if os.environ.get("FASTRSI_ZYGOTE_PROPS", "1") == "1":
-            report["properties"] = forksafe.install_properties(torch_module.cuda)
-    try:
-        return report, forksafe.pin_triton_target()
-    except RuntimeError as exc:
-        return {**report, "triton": repr(exc)[:200]}, (lambda: None)
+    """Install pre-import guards (a) and (b) via `forksafe.install_all_guards`."""
+    report, restore = forksafe.install_all_guards(
+        properties=os.environ.get("FASTRSI_ZYGOTE_PROPS", "1") == "1",
+        import_torch="torch" in modules,
+    )
+    report["forksafe"] = report.get("torch_cuda", {"installed": False})
+    report["cuinit_stub"] = bool(report.get("cuda_python", {}).get("installed"))
+    return report, restore
 
 def preload(modules):
     """Import each module; SystemExit naming the first one that initialized CUDA."""
-    libcuda = None
-    with contextlib.suppress(OSError):
-        libcuda = ctypes.CDLL("libcuda.so.1")
     took = {}
     for name in modules:
         start = time.time()
@@ -66,9 +42,7 @@ def preload(modules):
         except ImportError as exc:
             took[name] = f"skipped: {exc!r}"[:200]; continue
         took[name] = round(time.time() - start, 3)
-        cuda = getattr(sys.modules.get("torch"), "cuda", None)
-        if ((libcuda is not None and libcuda.cuDeviceGetCount(ctypes.byref(ctypes.c_int())) != 3)
-                or (cuda is not None and cuda.is_initialized())):
+        if forksafe.cuda_initialized():
             raise SystemExit(f"zygote: importing {name} initialized CUDA; fork cannot use GPU")
     return took
 
@@ -100,17 +74,7 @@ def refresh_child(changed, prefixes):
 
 def children():
     """(d) Direct child PIDs by ppid, never process group: children call setsid (Megatron M-H17)."""
-    parent, rows = os.getpid(), []
-    if os.path.isdir("/proc"):
-        for entry in filter(str.isdigit, os.listdir("/proc")):
-            with contextlib.suppress(OSError, IndexError, ValueError):
-                with open(f"/proc/{entry}/stat") as handle:
-                    rows.append([entry, handle.read().rsplit(")", 1)[1].split()[1]])
-    else:
-        lister = subprocess.Popen(["ps", "-A", "-o", "pid=,ppid="], stdout=subprocess.PIPE, text=True)
-        rows = [r for r in (ln.split() for ln in lister.communicate()[0].splitlines())
-                if r[:1] != [str(lister.pid)]]
-    return sorted(int(row[0]) for row in rows if len(row) == 2 and int(row[1]) == parent)
+    return proc.direct_children()
 
 def reap_exited(exits):
     with contextlib.suppress(ChildProcessError):
@@ -121,15 +85,14 @@ def reap_exited(exits):
 def kill_children(grace=5.0):
     pids, exits = children(), {}
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        for pid, kill in ((p, k) for p in pids for k in (os.killpg, os.kill)):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                kill(pid, sig)
+        for pid in pids:
+            proc.kill_tree(pid, sig, include_pg=True)
         deadline = time.time() + grace
         while time.time() < deadline and any(str(pid) not in exits for pid in pids):
             time.sleep(0.02); reap_exited(exits)
     return {str(pid): exits.get(str(pid)) for pid in pids}
 
-def child_main(req, changed, prefixes, sockets):
+def child_main(req, changed, prefixes, sockets, clear_nvml_env=False):
     code = 1
     try:
         for sock in sockets:
@@ -141,9 +104,8 @@ def child_main(req, changed, prefixes, sockets):
             log_fd = os.open(req["log"], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             os.dup2(log_fd, 1); os.dup2(log_fd, 2); os.close(log_fd)
         os.chdir(req.get("cwd") or os.getcwd())
-        if CUINIT: CUINIT[0].cuInit = CUINIT[1]
-        unpatched = forksafe.unpatch(None)     # (b) restore torch.cuda before real GPU work
-        for key in SET_ENV + list(req.get("unset", [])):
+        unpatched = forksafe.unpatch_child(None, clear_env=clear_nvml_env)["torch_cuda"]
+        for key in req.get("unset", ()):
             os.environ.pop(key, None)
         # (b) apply full request env including CUDA_VISIBLE_DEVICES (vLLM zygote lesson)
         os.environ.update({str(key): str(value) for key, value in req.get("env", {}).items()})
@@ -169,20 +131,22 @@ def child_main(req, changed, prefixes, sockets):
             sys.stdout.flush(); sys.stderr.flush()
         os._exit(code)
 
-def fork_request(req, snap, prefixes, sockets):
+def fork_request(req, snap, prefixes, sockets, clear_nvml_env=False):
     in_scope = lambda n: any(n == p or n.startswith(p + ".") for p in prefixes)
     changed = sorted(path for path, (_, sig) in snap.items() if _stat(path) != sig)
     blocked = [p for p in changed if not (p.endswith(".py") and in_scope(snap[p][0]))]
     if blocked and "stale" not in req.get("accept", []):
         return {"ok": False, "findings": [{"check": "stale", "files": blocked[:20]}]}
     sys.stdout.flush(); sys.stderr.flush()
-    if (pid := os.fork()) == 0: child_main(req, [p for p in changed if p not in blocked], prefixes, sockets)
-    return {"ok": True, "pid": pid, "refreshed": [p for p in changed if p not in blocked]}
+    refreshed = [p for p in changed if p not in blocked]
+    if (pid := os.fork()) == 0: child_main(req, refreshed, prefixes, sockets, clear_nvml_env=clear_nvml_env)
+    return {"ok": True, "pid": pid, "refreshed": refreshed}
 
 def serve(sock_path, modules=DEFAULT_PRELOAD, prefixes=("sglang",)):
     if error := sock_path_error(sock_path): raise SystemExit(error)
     start = time.time()
     guards, restore_triton = install_guards(modules)
+    clear_nvml_env = bool(guards.get("nvml_env_set"))
     try:
         took = preload(modules)
     finally:
@@ -214,7 +178,7 @@ def serve(sock_path, modules=DEFAULT_PRELOAD, prefixes=("sglang",)):
                 elif cmd in ("kill", "stop"):
                     exits.update(killed := kill_children()); reply = {"ok": True, "killed": killed}
                 elif cmd == "fork":
-                    reply = fork_request(req, snap, prefixes, [listener, conn])
+                    reply = fork_request(req, snap, prefixes, [listener, conn], clear_nvml_env=clear_nvml_env)
                 else:
                     reply = {"ok": False, "error": f"bad request: {req!r}"[:300]}
             except Exception as exc:
@@ -225,11 +189,7 @@ def serve(sock_path, modules=DEFAULT_PRELOAD, prefixes=("sglang",)):
     with contextlib.suppress(FileNotFoundError): os.unlink(sock_path)
 
 def call(sock_path, message, timeout=60):
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(timeout); client.connect(sock_path)
-        client.sendall((json.dumps(message) + "\n").encode())
-        with client.makefile() as reader:
-            return json.loads(reader.readline())
+    return ipc.unix_json_call(sock_path, message, timeout=timeout)
 
 def request(sock_path, argv=(), env=None, log="", entry=None, cwd=None, accept=(), unset=()):
     return call(sock_path, {"cmd": "fork", "argv": list(argv), "env": dict(env or {}), "log": log,
