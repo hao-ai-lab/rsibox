@@ -11,7 +11,8 @@ from adapter.lab import build_request, force_multiproc, output_of
 
 
 def main(path):
-    spec = json.load(open(path))
+    with open(path, encoding="utf-8") as fh:
+        spec = json.load(fh)
     from fastvideo import VideoGenerator
     from fastvideo.api.parser import parse_config
     from fastvideo.api.schema import RunConfig

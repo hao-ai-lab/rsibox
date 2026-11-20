@@ -12,7 +12,6 @@ Never raises for a participant call: the kernel's replies are ok-dicts. `lost` m
 call raise ConnectionError until the process is respawned, as a dead worker would.
 """
 import copy
-import importlib.util
 import linecache
 import os
 import sys
@@ -26,8 +25,10 @@ _LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 
+from fastrsi import harness, ipc  # noqa: E402
+
 # rebuilt: {module: text} an in-place rebuild made the module's base (what it runs, not its file)
-_STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}}
+_STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}, "fault_path": None}
 
 if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
     # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
@@ -82,25 +83,16 @@ def _transformer(worker):
 def inject(worker, fault, **kw):
     """Conformance faults, injected in this worker. Returns an ok-dict."""
     p = participant(worker)
-    if fault == "fail_apply":
-        j, after, n = p.journal, kw.get("after", 1), [0]
-        orig = j.set_code
-
-        def set_code(*a, **k):
-            n[0] += 1
-            if n[0] > after:
-                del j.set_code                      # one shot
-                raise RuntimeError(f"{p.name}: injected fault after {after} swap(s)")
-            return orig(*a, **k)
-        j.set_code = set_code
-    elif fault == "fail_commit":
-        q = p.quiesce
-
-        def failing(fn):
-            p.quiesce = q
-            raise RuntimeError(f"{p.name}: injected commit failure")
-        p.quiesce = failing
-    elif fault in ("crash", "hang"):
+    if fault in ("fail_apply", "fail_commit", "tamper"):
+        if fault == "tamper":
+            kw = {
+                "module": "fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_decoding",
+                "function": "_layout",
+                **kw,
+            }
+        res = harness.inject_participant_fault(p, fault, **kw)
+        return {**res, "pid": os.getpid()} if res.get("ok") else res
+    if fault in ("crash", "hang"):
         t = _transformer(worker)
         if t is None:
             return {"ok": False, "error": "no transformer module to hook"}
@@ -116,11 +108,6 @@ def inject(worker, fault, **kw):
         _STATE["hooks"].append(t.register_forward_pre_hook(hook))
     elif fault == "lost":
         _STATE["faults"]["lost"] = True
-    elif fault == "tamper":
-        mod = sys.modules[kw.get("module", "fastvideo.pipelines.basic.minimax_h3.stages.minimax_h3_decoding")]
-        fn = getattr(mod, kw.get("function", "_layout"))
-        # a REPL edit, not journaled: same behavior, another code object
-        fn.__code__ = fn.__code__.replace(co_name=fn.__code__.co_name)
     else:
         return {"ok": False, "error": f"unknown fault {fault}"}
     return {"ok": True, "fault": fault, "participant": p.name, "pid": os.getpid()}
@@ -137,9 +124,23 @@ def repl(worker, code):
         return {"ok": False, "error": traceback.format_exc()[-4000:]}
 
 
-def _file_of(module):
-    spec = importlib.util.find_spec(module)
-    return spec.origin if spec else None
+def set_dmd_steps(worker, steps):
+    """Temporarily slice `pipeline_config.dmd_denoising_steps` for short-step probes; None restores."""
+    pc = getattr(getattr(worker, "fastvideo_args", None), "pipeline_config", None)
+    if pc is None or not hasattr(pc, "dmd_denoising_steps"):
+        return {"ok": True, "skipped": True}
+    if steps is None:
+        if "orig_dmd_steps" in _STATE:
+            pc.dmd_denoising_steps = _STATE.pop("orig_dmd_steps")
+        return {"ok": True, "dmd_denoising_steps": list(pc.dmd_denoising_steps)}
+    if "orig_dmd_steps" not in _STATE:
+        _STATE["orig_dmd_steps"] = list(pc.dmd_denoising_steps)
+    orig = _STATE["orig_dmd_steps"]
+    pc.dmd_denoising_steps = orig[:steps] if isinstance(steps, int) else list(steps)
+    return {"ok": True, "dmd_denoising_steps": list(pc.dmd_denoising_steps)}
+
+
+_file_of = harness.module_file
 
 
 def _show_lines(module, text):
@@ -152,16 +153,6 @@ def _show_lines(module, text):
         linecache.cache.pop(f, None)
     else:
         linecache.cache[f] = (len(text), None, text.splitlines(True), f)
-
-
-def _sync_lines(p, modules):
-    """After a transaction step, each module's lines are the text that is live now."""
-    for m in modules:
-        _show_lines(m, p._live_source(m))
-
-
-def _plan_modules(plan):
-    return list((plan or {}).get("modules", {})) if isinstance(plan, dict) else []
 
 
 def _ctor_args(module):
@@ -332,9 +323,41 @@ def rebuild(worker, payload):
     out["held_findings"] = held["findings"]
     out["cuda_bytes_released"] = held["cuda_bytes_released"]
     _STATE["rebuilt"].update(files)         # what a later live swap of these modules starts from
-    _STATE["plans"] = {}                    # the old journal's modules: its lines are not live now
     _STATE["participant"] = None            # a new base: the kernel journal starts over
     return {"ok": True, **out, "cost_s": round(time.perf_counter() - t0, 4)}
+
+
+def arm_fault_beacon(worker, path):
+    """Wrap the worker's forward entrypoint once so an uncaught exception writes an atomic
+    fault beacon for the driver (fast-failing SP>=2 asymmetric crashes instead of blocking on
+    peer ranks' NCCL watchdog)."""
+    _STATE["fault_path"] = path
+    target = worker if callable(getattr(worker, "execute_forward", None)) else getattr(worker, "pipeline", None)
+    attr = "execute_forward" if target is worker else "forward"
+    orig = getattr(target, attr, None) if target is not None else None
+    if not callable(orig) or getattr(orig, "_fastrsi_fault_guarded", False):
+        return {"ok": True, "armed": callable(orig)}
+
+    def guarded(*args, **kwargs):
+        try:
+            return orig(*args, **kwargs)
+        except BaseException as exc:
+            fault_path = _STATE.get("fault_path")
+            if fault_path:
+                try:
+                    ipc.atomic_write_json(fault_path, {
+                        "rank": rank_of(worker),
+                        "pid": os.getpid(),
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "t": time.time(),
+                    })
+                except OSError:
+                    pass
+            raise
+
+    guarded._fastrsi_fault_guarded = True
+    setattr(target, attr, guarded)
+    return {"ok": True, "armed": True}
 
 
 def rpc(worker, method, payload=None):
@@ -343,10 +366,14 @@ def rpc(worker, method, payload=None):
         raise ConnectionError(f"rank{rank_of(worker)}: process lost (injected)")
     if method == "ping":
         return {"ok": True, "rank": rank_of(worker), "pid": os.getpid()}
+    if method == "arm_fault_beacon":
+        return arm_fault_beacon(worker, payload)
     if method == "inject":
         return inject(worker, **(payload or {}))
     if method == "repl":
         return repl(worker, payload)
+    if method == "set_dmd_steps":
+        return set_dmd_steps(worker, payload)
     if method == "rebuild":
         try:
             return rebuild(worker, payload)
@@ -355,19 +382,6 @@ def rpc(worker, method, payload=None):
                                                "observed": traceback.format_exc()[-3000:],
                                                "expected": "the rebuild runs"}]}
     p = participant(worker)
-    if method == "prepare":
-        # stage compiles the new module text: decorators that read source at definition time
-        # (Triton's @jit, torch.compile) must see the new text, not the file on disk
-        mods = _plan_modules(payload)
-        for m, spec in (payload or {}).get("modules", {}).items():
-            _show_lines(m, spec.get("source"))
-        r = p.prepare(payload)
-        _STATE.setdefault("plans", {})[r.get("txn")] = mods
-        if not r.get("ok"):
-            _sync_lines(p, mods)
-        return r
-    r = getattr(p, method)(payload)
-    if method in ("commit", "abort", "undo"):
-        # an undo also takes back later transactions: resync every module ever planned
-        _sync_lines(p, {m for ms in _STATE.get("plans", {}).values() for m in ms})
-    return r
+    # `core/livelab/kernel/swap.py` manages linecache (including per-version nested keys for
+    # lazy `@triton.jit` builders) during commit/abort/undo without clobbering linecache at prepare.
+    return getattr(p, method)(payload)

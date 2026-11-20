@@ -140,6 +140,23 @@ measured per-process first-video work plus a 6.1 s video.
 | Restart after the JIT cache root moved | page cache | 58-60 s to ready (measured) | moved, unfixed: 223.4 s (first video 174.0 s; FlashInfer rebuild 153-159 s), also through a re-pointed symlink (first video 170.0 s); staged back at its real path: first video 37.9 s on the cold copy (FlashInfer 11.8 s, no ninja step re-ran), 17.1 s on the next start (FlashInfer 0.60 s) | about 66 s once staged | moved-cache and staged-back runs (2026-11-07) |
 | Cold restart | nothing | 289 s to ready (93.5 + 195.6, measured earlier) | about 507 s (first video 217.9 s) | | ladder above |
 
+**Re-measured on 2026-11-19** (one GB200 tray, newer environment: torch 2.12, CUDA 13; weights
+on a node-local memory filesystem, so loads are 20-26 s instead of 60-150 s; other H3 runs on
+the tray's other GPUs; `tools/h3_climb.py`, every video bit-exact to base):
+
+| Action | 1 GPU | 2 ranks | First video after it |
+|---|---|---|---|
+| Live swap of one hill-climb patch from its file (`install({"diff": ...})`) | 0.02-0.13 s | 0.05-0.26 s | a warm video (a patch that captures CUDA graphs: +0.5-1.4 s once) |
+| In-place rebuild of `minimax_h3.py` with patches 15, 16, 17, 20 | 1.12 s | | 6.09 s |
+| Zygote respawn with weights holder | 3.05-3.51 s (six respawns) | 6.23-7.27 s | 12.3-13.7 s |
+| Zygote respawn | 13.8-14.5 s | | 11.3-11.6 s |
+| Plain respawn (`reset("respawn")`) | 21.2-23.7 s | 29.7 s | 10.9-11.4 s |
+| Respawn after a poisoning fault (conformance c8) | 22.2-53.5 s | 29.7-59.2 s (plain) / 6.08-9.65 s (`--zygote --holder` inline CPU IPC + fast-fail: crash 9.65 s, hang 9.21 s, lost 6.08 s, tamper 6.52 s; `24/24` holder hits, 0 `Broken pipe`) | |
+
+- **`SP2 --zygote --holder` conformance recovery and soak (2026-11-19, 2× GB200):**
+  - Initial `5/5` run (`fastrsi conformance fastvideo --real --only c0_repeatable,c2_visible,c4_uninstall,c8_crash_and_hang,c9_soak -- --gpus 2 --zygote --holder`, `66` receipts, `0 MiB` on GPUs 0–3): `c0` `25.732 s` (holder deposit `10.57–10.99 s` text encoder / `0.07–0.09 s` VAE / `1.15–1.45 s` DiT), `c2` `9.632 s`, `c4` `18.786 s` (undo `0.016595 s`), `c9` `197.869 s` (20 cycles; install median `0.0589 s`, uninstall `0.0175 s`). Across all four `c8` respawns (`1362.848 s` total case wall), every rank re-mapped all three held modules via holder IPC (`text_encoder` `0.145–0.358 s`, `vae` `0.032–0.063 s`, `transformer` `0.185–0.738 s`), with `lost` (`6.235 s`) and `tamper` (`5.727 s`) fast, while `crash` (`38.178 s` respawn) and `hang` (`37.991 s` respawn) waited ~`600 s` each on the default NCCL watchdog for the SP2 collective.
+  - With asymmetric `SP >= 2` fault-beacon detection + parallel dirty `kill_tree(..., include_pg=False)` fast-fail (`adapter/agent.py` + `adapter/lab.py`) and `_HolderPickler` inline CPU storage serialization (`services/holder.py`, bypassing `torch_shm_manager` so killing a depositor never poisons subsequent `get`s with `RuntimeError: Broken pipe`), `4/4` (`c0, c2, c4, c8`, `0 MiB × 4`) ran cleanly: `c0` `~25 s`, `c2` `9.451 s`, `c4` `18.798 s` (undo `0.016544 s`), **`c8_crash_and_hang` `214.018 s` (`6.37×` vs `1362.848 s`)**: `crash` respawn `9.647 s`, `hang` `9.208 s`, `lost` `6.081 s`, `tamper` `6.516 s`. All **`24/24`** respawn fetches (`4` respawns × `2` ranks × `3` components) hit holder IPC cleanly (`text_encoder` `0.146–0.333 s`, `vae` `0.033–0.036 s`, `transformer` `0.256–0.393 s`) with **0 `Broken pipe` / `holder_error` lines**.
+
 - **In-place rebuild** covers the edits the live swap refuses (a constructor, a new field, a
   module constant) on the H3 stages and the H3 DiT: a stage constructor edit (4 modules
   re-imported), a DiT block constructor edit that adds a field (merged into 50 live blocks), a
@@ -190,3 +207,21 @@ measured per-process first-video work plus a 6.1 s video.
   back to the same path: no ninja step re-ran (logs unchanged), FlashInfer 11.8 s on the first
   start from the cold copy and 0.60 s on the next; bit-exact. Keying FlashInfer on content would
   need its ninja files written with relative paths (an upstream change), not done.
+
+## Shortened 2-forward (`num_inference_steps=3`) H3 screen (`1× GB200`, `2026-11-19`)
+
+Measured separately on `1× GB200` (`FastVideoLab(zygote=True, holder=True)` on `FastH3-QAD-v2` NVFP4; kept strictly distinct from the `GB10` `t2va` race numbers):
+
+| Path | Setup / Scope | Total Wall | Notes / Witness |
+|---|---|---:|---|
+| `fresh_full` | Fresh worker + `9` sigma (`8` DiT forwards, `124` frames) | **`44.295 s`** | Warm disk caches; output `d0e55e892690e260 / ee49674663eae6e2` |
+| `warm_full_base` | Warm zygote+holder lab first full check | `12.893 s` | Matches `fresh_full` bit-for-bit |
+| `live_full` | Live `MiniMaxH3VideoDecodingStage.forward` swap + full check | **`6.398 s`** (`6.9×` vs fresh) | `0.0382 s` install + `6.360 s` check, `0.0110 s` undo, witness `1`, `cd32f50b70d9479f`, bit-exact undo verified |
+| `live_probe_2fwd` | `num_inference_steps=3` (`dmd_denoising_steps=[999, 874]` via `repl`: `2` DiT forwards vs `8`) | **`2.356 s`** (`18.8×` vs fresh) | `base_probe 2.177 s`, `0.0329 s` install + `2.323 s` check, `0.0106 s` undo, witness `1`, `474d5ebd470a6063 -> b2a414f50233cb60`, **`undo_exact: true`**, `0 MiB × 4` |
+
+Multi-GPU SP (`SP=2` and `SP=4`, `4× GB200`, `FastVideoLab(zygote=True, holder=True)` on `FastH3` NVFP4, `base_steps=9`, `0 MiB × 4` teardown):
+
+| Topology | `load_s` (zygote) | `fresh_full` (`subproc_wall_s`) | `warm_full_base` | `live_full` (install + check, undo) | `live_probe_2fwd` (`num_inference_steps=3`, install + check, undo) |
+|---|---:|---:|---:|---:|---:|
+| **`SP=2` (`2× GB200`)** | `45.924 s` | **`49.904 s`** (`24.747 s` import/ready + `10.531 s` first video) | `16.267 s` | **`4.771 s`** (**`10.5×`** vs fresh; `0.079 s + 4.692 s`, undo `17.5 ms`) | **`1.859 s`** (**`26.8×`** vs fresh; `0.055 s + 1.804 s` vs `base_probe 1.767 s`, undo `16.4 ms`, `undo_exact: true`, `full_restored_after_probe: true`) |
+| **`SP=4` (`4× GB200`)** | `47.211 s` | **`56.042 s`** (`29.628 s` import/ready + `11.871 s` first video) | `12.554 s` | **`3.578 s`** (**`15.7×`** vs fresh; `0.139 s + 3.439 s`, undo `32.2 ms`) | **`1.670 s`** (**`33.6×`** vs fresh; `0.108 s + 1.562 s` vs `base_probe 1.504 s`, undo `31.6 ms`, `undo_exact: true`, `full_restored_after_probe: true`) |

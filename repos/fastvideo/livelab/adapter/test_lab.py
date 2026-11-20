@@ -130,6 +130,102 @@ class LabTest(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["output"], BASE)
 
+    def test_sp2_asymmetric_crash_fails_fast_and_dirty_respawn_skips_shutdown_wait(self):
+        """Input: SP2 toy lab with check_timeout=30 s; rank0 sleeps 60 s in transformer (simulating
+        blocked NCCL collective) while rank1 injects `crash`. Expected: check() fails in <4 s via
+        the worker fault beacon (not 30 s), poisons with participant_failed, refuses install, and
+        reset('respawn') fast-kills dirty workers, cleans the temp fault file, and restores BASE."""
+        from fastrsi import proc
+        lab = ToyFastVideoLab(ranks=2, check_timeout=30.0)
+        try:
+            old_pids = [w.proc.pid for w in lab.executor.workers]
+            old_fault_path = lab._fault_path
+            self.assertIsNotNone(old_fault_path)
+            self.assertTrue(lab.repl(
+                "import time\n"
+                "pipeline.modules['transformer'].register_forward_pre_hook(lambda *a: time.sleep(60.0))",
+                rank=0,
+            )["ok"])
+            self.assertTrue(lab.inject("crash", participant=1)["ok"])
+            t0 = time.perf_counter()
+            c = lab.check()
+            elapsed = time.perf_counter() - t0
+            self.assertFalse(c["ok"])
+            self.assertLess(elapsed, 4.0, f"expected fast-fail, took {elapsed:.2f}s: {c}")
+            self.assertIn("rank1 failed during forward while peers blocked", c["error"])
+            self.assertEqual(lab.status()["state"], "poisoned")
+            self.assertEqual(lab.install(lab.patches()["visible"])["codes"], ["session_poisoned"])
+
+            t_rs = time.perf_counter()
+            rs = lab.reset("respawn")
+            rs_elapsed = time.perf_counter() - t_rs
+            self.assertTrue(rs["ok"], rs)
+            self.assertLess(rs_elapsed, 6.0, f"dirty respawn too slow: {rs_elapsed:.2f}s")
+            for pid in old_pids:
+                self.assertFalse(proc.pid_alive(pid))
+            self.assertFalse(os.path.exists(old_fault_path))
+            self.assertEqual(lab.check()["output"], BASE)
+        finally:
+            lab.close()
+
+    def test_sp2_worker_death_mid_forward_fails_fast_while_peer_blocked(self):
+        """Input: SP2 toy lab with check_timeout=30 s; rank0 blocks 60 s in transformer while rank1
+        exits abruptly (os._exit(9)) inside forward. Expected: check() fails in <4 s via worker
+        liveness polling and respawn restores BASE."""
+        lab = ToyFastVideoLab(ranks=2, check_timeout=30.0)
+        try:
+            self.assertTrue(lab.repl(
+                "import time\n"
+                "pipeline.modules['transformer'].register_forward_pre_hook(lambda *a: time.sleep(60.0))",
+                rank=0,
+            )["ok"])
+            self.assertTrue(lab.repl(
+                "import os\n"
+                "pipeline.modules['transformer'].register_forward_pre_hook(lambda *a: os._exit(9))",
+                rank=1,
+            )["ok"])
+            t0 = time.perf_counter()
+            c = lab.check()
+            elapsed = time.perf_counter() - t0
+            self.assertFalse(c["ok"])
+            self.assertLess(elapsed, 4.0, f"expected fast-fail on worker exit, took {elapsed:.2f}s")
+            self.assertIn("rank1 exited during forward", c["error"])
+            self.assertEqual(lab.status()["state"], "poisoned")
+            self.assertTrue(lab.reset("respawn")["ok"])
+            self.assertEqual(lab.check()["output"], BASE)
+        finally:
+            lab.close()
+
+    def test_dirty_shutdown_fast_kills_hung_workers_before_executor_shutdown(self):
+        """Input: hung worker (60 s sleep) after check_timeout=0.5 s expires (_dirty=True).
+        Expected: _stop_engine kills hung workers BEFORE gen.shutdown() runs (avoiding FastVideo's
+        30 s MultiprocExecutor graceful wait), cleans the temp fault file, and restores BASE."""
+        lab = ToyFastVideoLab(ranks=2, check_timeout=0.5)
+        try:
+            alive_at_shutdown = []
+            orig_shutdown = lab.gen.shutdown
+
+            def spy_shutdown():
+                alive_at_shutdown.extend(w.proc.is_alive() for w in lab.executor.workers)
+                return orig_shutdown()
+
+            lab.gen.shutdown = spy_shutdown
+            old_fault_path = lab._fault_path
+            self.assertTrue(lab.inject("hang", participant=1, hang_s=60.0)["ok"])
+            c = lab.check()
+            self.assertFalse(c["ok"])
+            self.assertTrue(lab._dirty)
+
+            t0 = time.perf_counter()
+            rs = lab.reset("respawn")
+            self.assertTrue(rs["ok"], rs)
+            self.assertLess(time.perf_counter() - t0, 6.0)
+            self.assertEqual(alive_at_shutdown, [False, False])
+            self.assertFalse(os.path.exists(old_fault_path))
+            self.assertEqual(lab.check()["output"], BASE)
+        finally:
+            lab.close()
+
 
 def _have_torch():
     try:
@@ -162,6 +258,61 @@ class HolderLabTest(unittest.TestCase):
         self.assertNotIn("FASTRSI_HOLDER_SOCK", os.environ)
         self.assertFalse(os.path.exists(sock))
         self.assertFalse(os.path.exists(sock + ".ready"))
+
+    def test_set_dmd_steps_slices_and_restores_on_exception_and_skips_dirty_cleanup(self):
+        """Input: FastVideoLab._run_workload with short `num_inference_steps=3` (vs base 9) and a
+        worker `pipeline_config.dmd_denoising_steps=[999, 874, 749, 624]`. Expected: agent.rpc
+        slices to 2 steps before generate, restores all 4 even if generate raises, and skips
+        cleanup RPCs when `dirty` is set."""
+        import types
+        from adapter import agent, lab as fv_lab
+
+        orig_state = dict(agent._STATE)
+        self.addCleanup(lambda: (agent._STATE.clear(), agent._STATE.update(orig_state)))
+
+        worker = types.SimpleNamespace(
+            fastvideo_args=types.SimpleNamespace(
+                pipeline_config=types.SimpleNamespace(dmd_denoising_steps=[999, 874, 749, 624])
+            )
+        )
+        seen_during = []
+        calls = []
+
+        class FakeLab:
+            config = {"request": {"sampling": {"num_inference_steps": 9}}}
+            ranks = 1
+            _dirty = False
+            dirty = None
+
+            def rank_call(self, i, method, payload=None):
+                calls.append((i, method, payload))
+                return agent.rpc(worker, method, payload)
+
+            def request(self, wl):
+                return wl
+
+            class gen:
+                @staticmethod
+                def generate(_req):
+                    seen_during.append(list(worker.fastvideo_args.pipeline_config.dmd_denoising_steps))
+                    return "ok"
+
+        flab = FakeLab()
+        self.assertEqual(fv_lab.FastVideoLab._run_workload(flab, {"sampling": {"num_inference_steps": 3}}), "ok")
+        self.assertEqual(seen_during, [[999, 874]])
+        self.assertEqual(worker.fastvideo_args.pipeline_config.dmd_denoising_steps, [999, 874, 749, 624])
+        self.assertEqual(calls, [(0, "set_dmd_steps", 2), (0, "set_dmd_steps", None)])
+
+        calls.clear()
+
+        def boom(_req):
+            flab.dirty = 0
+            raise RuntimeError("mid-forward fail")
+
+        flab.gen = types.SimpleNamespace(generate=boom)
+        with self.assertRaisesRegex(RuntimeError, "mid-forward fail"):
+            fv_lab.FastVideoLab._run_workload(flab, {"sampling": {"num_inference_steps": 3}})
+        self.assertEqual(calls, [(0, "set_dmd_steps", 2)])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ from adapter.toyfv.engine import Generator
 
 
 def main(path):
-    spec = json.load(open(path))
+    with open(path, encoding="utf-8") as fh:
+        spec = json.load(fh)
     g = Generator(spec["config"]["ranks"])
     try:
         print("FRESH " + json.dumps({"output": g.generate(spec["workload"] or {"seed": 1, "frames": 4})}))
