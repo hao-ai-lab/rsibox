@@ -145,49 +145,19 @@ def _install_worker_hook(poison=None):
     SP.prepare = prepare
 
 
-def fork_poisoned():
-    """Would a child forked now be unable to use CUDA? torch marks a child "in bad fork" when the
-    parent touched the CUDA runtime at all, also through `torch.cuda.is_available()` or
-    `device_count()` unless PYTORCH_NVML_BASED_CUDA_CHECK=1. Forks a probe child to ask."""
-    r, w = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(r)
-        try:
-            import torch
-            bad = bool(torch._C._cuda_isInBadFork()) if hasattr(torch._C, "_cuda_isInBadFork") else False
-        except Exception:
-            bad = False
-        os.write(w, b"1" if bad else b"0")
-        os._exit(0)
-    os.close(w)
-    out = os.read(r, 1)
-    os.close(r)
-    os.waitpid(pid, 0)
-    return out == b"1"
-
-
-LIBCUDA = "libcuda.so.1"
+fork_poisoned = forksafe.fork_poisoned
+LIBCUDA = forksafe.LIBCUDA
 
 
 def driver_initialized():
-    """Has this process initialized the CUDA driver (cuInit)? cuDeviceGetCount does not
-    initialize it and answers CUDA_ERROR_NOT_INITIALIZED (3) until something has. A library
-    that calls cuInit itself (CuTe DSL through flashinfer -> cutlass) leaves torch's bad-fork
-    flag unset, so `fork_poisoned` misses it. False without libcuda; raises when libcuda loads
-    but cannot answer (no cuDeviceGetCount)."""
-    import ctypes
-    try:
-        libcuda = ctypes.CDLL(LIBCUDA)
-    except OSError:
-        return False
-    count = ctypes.c_int()
-    return libcuda.cuDeviceGetCount(ctypes.byref(count)) != 3
+    """Has this process initialized the CUDA driver (cuInit)? Delegates to `forksafe` using
+    module-level `LIBCUDA` so unit tests can inject a stub library path."""
+    return forksafe.driver_initialized(libcuda=LIBCUDA)
 
 
 def poison_reasons():
-    """Why a child forked now could not use CUDA (empty: it can). A probe that cannot answer
-    on a host with libcuda counts as a reason: the state is unknown."""
+    """Why a child forked now could not use CUDA (empty: it can). Calls module-level
+    `driver_initialized` / `fork_poisoned` so callers and tests stay fail-closed."""
     out = []
     try:
         if driver_initialized():
@@ -202,18 +172,7 @@ def poison_reasons():
     return out
 
 
-def pin_cute_dsl_arch():
-    """CuTe DSL (imported by flashinfer -> cutlass) calls cuInit at import to find the GPU arch
-    unless CUTE_DSL_ARCH names it. Set it, when unset, from the capability Triton is pinned to
-    (FASTRSI_ZYGOTE_CC, else NVML). Returns the value, None when it cannot be found."""
-    if os.environ.get("CUTE_DSL_ARCH"):
-        return os.environ["CUTE_DSL_ARCH"]
-    try:
-        major, minor = forksafe.triton_capability()
-    except Exception:
-        return None
-    os.environ["CUTE_DSL_ARCH"] = f"sm_{major}{minor}{'a' if major >= 9 else ''}"
-    return os.environ["CUTE_DSL_ARCH"]
+pin_cute_dsl_arch = forksafe.pin_cute_dsl_arch
 
 
 def _serve():

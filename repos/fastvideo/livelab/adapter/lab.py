@@ -19,23 +19,18 @@ golden is set, PSNR against it.
 
 Never raises: every verb returns an ok-dict.
 """
+import contextlib
 import hashlib
-import importlib
-import importlib.util
 import json
 import os
-import shutil
-import subprocess
-import sys
+import signal
 import tempfile
 import threading
 import time
 
+from fastrsi import harness, ipc, lab as lab_base, proc
 from kernel import coordinator as C
 from kernel import findings as F
-from kernel import locate as L
-from kernel import receipt as R
-from kernel import session as SS
 from adapter import agent
 
 H3 = "fastvideo.pipelines.basic.minimax_h3"
@@ -57,14 +52,8 @@ def finding(check, observed, expected):
         return {"check": check, "observed": str(observed), "expected": str(expected)}
 
 
-def module_file(name):
-    spec = importlib.util.find_spec(name)
-    return spec.origin if spec else None
-
-
-def read_module(name):
-    with open(module_file(name)) as f:
-        return f.read()
+module_file = harness.module_file
+read_module = harness.read_module
 
 
 def digest(arr_bytes):
@@ -124,7 +113,7 @@ def force_multiproc():
     E.Executor.get_class = staticmethod(get_class)
 
 
-class FastVideoLab:
+class FastVideoLab(lab_base.BaseLab):
     """`config`: a FastVideo run config (dict, `fastvideo generate --config` schema).
     `receipts`: receipt file (JSON lines). `golden`: path of a uint8 frames .npy.
     `zygote`: fork the workers from a preloaded forkserver (services/zygote.py), so a
@@ -132,23 +121,27 @@ class FastVideoLab:
     encoder and VAE in a holder process (services/holder.py) that respawned workers map by CUDA
     IPC instead of loading; implies `zygote`."""
     name = "fastvideo"
+    threaded_check = True
+    package = "fastvideo"                      # the package fresh_check overlays
+    fresh_module = "adapter.fresh"
 
     def __init__(self, config, receipts=None, golden=None, modules=MODULES, rpc_timeout=60.0,
                  check_timeout=600.0, zygote=False, holder=False):
         self.config = json.loads(json.dumps(config))
-        self.writer = R.ReceiptWriter(receipts) if receipts else None
-        self.rpc_timeout, self.check_timeout = rpc_timeout, check_timeout
-        self.modules = list(modules)
         self.golden = None
         if golden and os.path.exists(golden):
             import numpy as np
             self.golden = np.load(golden)
-        self.lock = threading.RLock()
-        self.costs = {}
         self.holder = self.holder_sock = None
+        self.rebuilt = {}
+        self._fault_path = None
+        self._check_thread = None
+        super().__init__(receipts=receipts, check_timeout=check_timeout,
+                         rpc_timeout=rpc_timeout, auto_spawn=False)
+        self.modules = list(modules)
         if holder:          # loaded DiT, text encoder and VAE outlive the workers (services/holder.py)
             from services import holder as H
-            sock = os.path.join(tempfile.gettempdir(), f"fastrsi-holder-{os.getpid()}-{id(self):x}.sock")
+            sock = ipc.short_sock_path("fastrsi-holder")
             self.holder = H.start(sock)
             self.holder_sock = sock
             # the workers' loader hook reads it (forked from the zygote, which inherits the env)
@@ -159,11 +152,7 @@ class FastVideoLab:
             self.costs["zygote_preload"] = Z.enable()
         self._spawn()
 
-    # -- process layout ------------------------------------------------------------------
     # -- engine hooks (a toy engine overrides these; see toy_lab.py) ------------------------
-    package = "fastvideo"                      # the package fresh_check overlays
-    fresh_module = "adapter.fresh"
-
     def make_generator(self):
         from fastvideo import VideoGenerator
         from fastvideo.api.parser import parse_config
@@ -183,24 +172,67 @@ class FastVideoLab:
         from adapter import patches
         return patches.h3_patches({m: self._base(m) for m in (DEC, LAT, INP, patches.NVD)})
 
-    def _spawn(self):
-        t0 = time.perf_counter()
+    def _clear_fault_file(self):
+        if self._fault_path:
+            with contextlib.suppress(OSError):
+                os.unlink(self._fault_path)
+
+    def _start_engine(self):
         self.gen = self.make_generator()
-        self.costs["load_s"] = round(time.perf_counter() - t0, 3)
         self.executor = self.gen.executor
         self.ranks = len(self.executor.workers)
         self.dirty = None                      # a pipe that missed its deadline
         self.base_text = {}
-        self.live_text = [{}]                  # module -> text, one entry per stack depth
+        self.rebuilt = {}
+        self._fault_path = None
+        self._check_thread = None
+        if self.ranks > 1:
+            self._fault_path = os.path.join(
+                tempfile.gettempdir(), f"fastrsi-fv-fault-{os.getpid()}-{id(self.gen)}.json"
+            )
+            self._clear_fault_file()
+            for i in range(self.ranks):
+                self.rank_call(i, "arm_fault_beacon", self._fault_path, timeout=10.0)
         ps = [C.CallParticipant(f"rank{i}", self._caller(i)) for i in range(self.ranks)]
-        self.co = C.Coordinator(ps, writer=self.writer, interface_version="1-draft",
-                                engine={"name": "fastvideo", "version": self._version(),
-                                        "commit": os.environ.get("FASTRSI_ENGINE_COMMIT")},
-                                phase2_deadline_s=self.rpc_timeout)
-        if hasattr(self, "session"):
-            self.session.recovered(self.co)
-        else:
-            self.session = SS.Session(self.co, self.modules)
+        co = C.Coordinator(ps, writer=self.writer, interface_version="1-draft",
+                           engine={"name": "fastvideo", "version": self._version(),
+                                   "commit": os.environ.get("FASTRSI_ENGINE_COMMIT")},
+                           phase2_deadline_s=self.rpc_timeout)
+        return co, self.modules
+
+    def _force_stop_workers(self, grace_s=4.0, kill_grace_s=3.0):
+        workers = list(getattr(getattr(self, "executor", None), "workers", ()) or ())
+        live = [w for w in workers if getattr(w, "proc", None) is not None and w.proc.is_alive()]
+        for w in live:
+            if w.proc.pid:
+                # Never killpg: workers forked from forkserver/spawn share the driver's pgrp.
+                proc.kill_tree(w.proc.pid, signal.SIGTERM, include_pg=False)
+        deadline = time.monotonic() + grace_s
+        for w in live:
+            w.proc.join(timeout=max(0.0, deadline - time.monotonic()))
+        still = [w for w in live if w.proc.is_alive()]
+        for w in still:
+            if w.proc.pid:
+                proc.kill_tree(w.proc.pid, signal.SIGKILL, include_pg=False)
+        kill_deadline = time.monotonic() + kill_grace_s
+        for w in still:
+            w.proc.join(timeout=max(0.0, kill_deadline - time.monotonic()))
+
+    def _stop_engine(self):
+        dirty = bool(self._dirty or self.dirty is not None)
+        try:
+            if dirty:
+                self._force_stop_workers()
+            try:
+                self.gen.shutdown()
+            except Exception:
+                if not dirty:
+                    raise
+            if self._check_thread is not None:
+                self._check_thread.join(timeout=2.0)
+                self._check_thread = None
+        finally:
+            self._clear_fault_file()
 
     @staticmethod
     def _version():
@@ -212,8 +244,9 @@ class FastVideoLab:
 
     def rank_call(self, i, method, payload=None, timeout=None):
         """agent.rpc(method, payload) on worker i, through its pipe, with a deadline."""
-        if self.dirty is not None:
-            raise ConnectionError(f"pipe of rank {self.dirty} missed a deadline; respawn")
+        if self.dirty is not None or self._dirty:
+            who = self.dirty if self.dirty is not None else "check"
+            raise ConnectionError(f"pipe of rank {who} missed a deadline; respawn")
         w = self.executor.workers[i]
         w.pipe.send({"method": agent.rpc, "args": (method, payload), "kwargs": {}})
         if not w.pipe.poll(timeout or self.rpc_timeout):
@@ -234,9 +267,9 @@ class FastVideoLab:
     def close(self):
         with self.lock:
             try:
-                self.gen.shutdown()
-            except Exception:
-                pass
+                super().close()
+            finally:
+                self._clear_fault_file()
             if self.holder is not None:
                 from services import holder as H
                 try:
@@ -255,105 +288,92 @@ class FastVideoLab:
                 if os.environ.get("FASTRSI_HOLDER_SOCK") == self.holder_sock:
                     del os.environ["FASTRSI_HOLDER_SOCK"]
 
-    # -- verbs ---------------------------------------------------------------------------
+    # -- BaseLab hooks + FastVideo-specific verbs ----------------------------------------
     def _base(self, m):
-        if m not in self.base_text:
-            self.base_text[m] = read_module(m)
-        return self.base_text[m]
+        return self._base_source(m)
 
-    def install(self, patch):
-        t0 = time.perf_counter()
-        with self.lock:
-            live = self.live_text[-1]
-            modules = {}
+    def _probe_participants(self):
+        for i in range(self.ranks):
             try:
-                for m, new in patch["files"].items():
-                    modules[m] = {"source": new, "base_hash": L.text_hash(live.get(m) or self._base(m))}
-            except Exception as e:
-                f = F.finding("patch_invalid", f"{type(e).__name__}: {e}", "importable modules")
-                return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "findings": [f], "cost_s": round(time.perf_counter() - t0, 6)}
-            plan = {"modules": modules, "accept": patch.get("accept", []),
-                    "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
-            res = self.session.install(plan, edit_time=patch.get("edit_time"))
-            outcome, rec = res.get("outcome") or "refused", res.get("receipt")
-            if outcome == "committed":
-                self.live_text.append({**live, **patch["files"]})
-            codes = (rec["decisions"]["blocking"] if rec else
-                     sorted({f["check"] for f in res.get("findings", [])}))
-            return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
-                    "codes": [] if outcome == "committed" else codes,
-                    "mechanisms": rec["actual_recipes"] if rec else [],
-                    "findings": rec["findings"] if rec else res.get("findings", []),
-                    "edit_to_run_s": rec.get("edit_to_run_s") if rec else None,
-                    "receipt": rec, "cost_s": round(time.perf_counter() - t0, 6)}
+                self.rank_call(i, "ping", None, timeout=10)
+            except Exception as exc:
+                return False, f"rank{i}: {type(exc).__name__}: {exc}"
+        return True, None
 
-    def _fail(self, check, observed, expected, t0):
-        self.session.fault(check, observed, expected)
-        return {"ok": False, "error": observed, "output": None, "proven": None, "witness": {},
-                "findings": list(self.session.poisoned()),
-                "cost_s": round(time.perf_counter() - t0, 6)}
+    def _execute_workload(self, workload):
+        """Run `_run_workload` in a thread, fast-failing on asymmetric worker faults or death."""
+        self._clear_fault_file()
+        box = {}
 
-    def check(self, workload=None):
-        t0 = time.perf_counter()
-        with self.lock:
-            for i in range(self.ranks):                 # every rank answers before the run
-                try:
-                    self.rank_call(i, "ping", None, timeout=10)
-                except Exception as e:
-                    return self._fail("participant_failed", f"rank{i}: {type(e).__name__}: {e}",
-                                      "every rank answers", t0)
-            box = {}
+        def runner():
+            try:
+                box["result"] = self._run_workload(workload)
+            except BaseException as exc:
+                box["error"] = exc
 
-            def job():
-                try:
-                    box["result"] = self.gen.generate(self.request(workload))
-                except BaseException as e:
-                    box["error"] = f"{type(e).__name__}: {e}"
-            th = threading.Thread(target=job, daemon=True, name="fastrsi-check")
-            tg = time.perf_counter()
-            th.start()
-            th.join(self.check_timeout)
-            seconds = round(time.perf_counter() - tg, 4)
-            if th.is_alive():
-                self.dirty = "check"
-                return self._fail("participant_failed", f"check: no result in {self.check_timeout} s",
-                                  f"the workload finishes within {self.check_timeout} s", t0)
-            if "error" in box:
-                return self._fail("participant_failed", f"check: {box['error']}",
-                                  "the workload runs", t0)
-            out, frames, extra = self.output(box["result"])
-            golden = {"output": out}
-            if self.golden is not None and frames is not None:
-                golden["psnr_vs_golden"] = psnr(frames, self.golden)
-            proofs = [self.co.prove(t, golden=golden) for t in self.session.stack]
-            witness = {}
-            for p in proofs:
-                for part, counts in p["receipt"]["witness"].items():
-                    witness.setdefault(part, {}).update(counts)
-            self.last_frames = frames
-            return {"ok": True, "output": out, "seconds": seconds, **extra,
-                    "psnr_vs_golden": golden.get("psnr_vs_golden"),
-                    "proven": all(p["ok"] for p in proofs) if proofs else None,
-                    "proven_by_txn": {t: p["ok"] for t, p in zip(self.session.stack, proofs)},
-                    "witness": witness,
-                    "findings": [f for p in proofs for f in p["receipt"]["findings"]],
-                    "cost_s": round(time.perf_counter() - t0, 6)}
+        thread = threading.Thread(target=runner, daemon=True, name=f"fastrsi-{self.name}-check")
+        self._check_thread = thread
+        thread.start()
+        deadline = time.monotonic() + self.check_timeout
+        workers = list(getattr(getattr(self, "executor", None), "workers", ()) or ())
+        try:
+            while thread.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._dirty = True
+                    raise TimeoutError(f"no result in {self.check_timeout} s")
+                thread.join(min(0.1, remaining))
+                if not thread.is_alive():
+                    break
+                for i, w in enumerate(workers):
+                    p = getattr(w, "proc", None)
+                    if p is not None and not p.is_alive():
+                        thread.join(min(1.0, max(0.0, deadline - time.monotonic())))
+                        if thread.is_alive():
+                            self._dirty = True
+                            raise RuntimeError(f"rank{i} exited during forward (exitcode={p.exitcode})")
+                        break
+                if not thread.is_alive():
+                    break
+                fault = ipc.read_json(self._fault_path) if self._fault_path else None
+                if isinstance(fault, dict):
+                    thread.join(min(1.0, max(0.0, deadline - time.monotonic())))
+                    if thread.is_alive():
+                        self._dirty = True
+                        raise RuntimeError(
+                            f"rank{fault.get('rank')} failed during forward while peers blocked: "
+                            f"{fault.get('error')}"
+                        )
+                    break
+        finally:
+            if not thread.is_alive():
+                self._check_thread = None
+                self._clear_fault_file()
+        if "error" in box:
+            raise box["error"]
+        return box["result"]
 
-    def reset(self, kind="state"):
-        t0 = time.perf_counter()
-        with self.lock:
-            if kind == "respawn":
-                try:
-                    self.gen.shutdown()
-                except Exception:
-                    pass
-                self._spawn()
-                return {"ok": not self.session.poisoned(), "reset": ["worker group", "session"],
-                        "cost_s": round(time.perf_counter() - t0, 6)}
-            res = [C._call(p, "reset", "R3") for p in self.co.participants]  # "R3": CUDA cache
-            return {"ok": all(r["ok"] for r in res), "reset": ["cuda cache"],
-                    "cost_s": round(time.perf_counter() - t0, 6)}
+    def _run_workload(self, workload):
+        return self.gen.generate(self.request(workload))
+
+    def _format_output(self, raw):
+        out, frames, extra = self.output(raw)
+        self.last_frames = frames
+        extra = dict(extra)
+        extra["psnr_vs_golden"] = (
+            psnr(frames, self.golden) if self.golden is not None and frames is not None else None
+        )
+        return out, extra
+
+    def _golden_for(self, output, extra):
+        golden = {"output": output}
+        if extra.get("psnr_vs_golden") is not None:
+            golden["psnr_vs_golden"] = extra["psnr_vs_golden"]
+        return golden
+
+    def _reset_state(self):
+        res = [C._call(p, "reset", "R3") for p in self.co.participants]  # "R3": CUDA cache
+        return {"ok": all(r["ok"] for r in res), "reset": ["cuda cache"]}
 
     def rebuild(self, patch):
         """In-place rebuild: every warm worker re-imports the edited modules from `patch["files"]`
@@ -370,8 +390,15 @@ class FastVideoLab:
                 refuse = finding("live_edits_installed", f"{len(self.session.stack)} transaction(s)",
                                    "uninstall the live edits before a rebuild")
             revert = bool(patch.get("revert"))
-            files = ({m: read_module(m) for m in getattr(self, "rebuilt", {})} if revert
-                     else dict(patch.get("files") or {}))
+            files = {}
+            if revert:
+                files = {m: read_module(m) for m in getattr(self, "rebuilt", {})}
+            elif refuse is None:
+                try:
+                    files = self.files(patch)
+                except Exception as e:                  # a verb never raises
+                    refuse = finding("patch_invalid", f"{type(e).__name__}: {e}",
+                                     "a diff that applies to the live text")
             if not files and refuse is None:
                 refuse = finding("patch_invalid", "no files", "at least one edited module")
             if refuse is not None:
@@ -418,20 +445,6 @@ class FastVideoLab:
                     "ranks": ranks, "edit_to_rebuilt_s": round(time.time() - et, 4) if et else None,
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
-    def uninstall(self, id=None):
-        t0 = time.perf_counter()
-        with self.lock:
-            r = self.session.uninstall(id)
-            n = len(r.get("undone", []))
-            if n:
-                del self.live_text[-n:]
-            return {"ok": r["ok"], "undone": r.get("undone", []), "state": self.session.state(),
-                    "findings": r.get("findings", []), "cost_s": round(time.perf_counter() - t0, 6)}
-
-    def status(self):
-        with self.lock:
-            return self.session.status()
-
     def repl(self, code, rank=None):
         """Run a cell on every rank (or one): the notebook verb."""
         with self.lock:
@@ -449,39 +462,17 @@ class FastVideoLab:
         """The workload in a new process (its own workers) started from base files plus patch:
         a symlink farm of the engine package with the patched modules written in (a package's
         `__init__.py`, or a new file). Never raises."""
-        tmp = tempfile.mkdtemp(prefix="fvlab-fresh-")
         try:
-            pkg = importlib.import_module(self.package)
-            root = os.path.dirname(os.path.dirname(pkg.__file__))
-            for d, dirs, files in os.walk(os.path.join(root, self.package)):
-                dirs[:] = [x for x in dirs if x != "__pycache__"]
-                rel = os.path.relpath(d, root)
-                os.makedirs(os.path.join(tmp, rel), exist_ok=True)
-                for f in files:
-                    os.symlink(os.path.join(d, f), os.path.join(tmp, rel, f))
-            for m, text in ((patch or {}).get("files") or {}).items():
-                target = os.path.join(tmp, *m.split("."))
-                target = os.path.join(target, "__init__.py") if os.path.isdir(target) else target + ".py"
-                if os.path.lexists(target):
-                    os.unlink(target)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with open(target, "w") as fh:
-                    fh.write(text)
-            spec = os.path.join(tmp, "fresh.json")
-            with open(spec, "w") as fh:
-                json.dump({"config": self.config, "workload": workload}, fh)
-            env = {**os.environ, "PYTHONPATH": tmp + os.pathsep + os.environ.get("PYTHONPATH", "")}
-            r = subprocess.run([sys.executable, "-m", self.fresh_module, spec], env=env,
-                               capture_output=True, text=True, timeout=self.check_timeout + 600,
-                               cwd=tmp)
+            overrides = self.files(patch or {}, against="disk")
+            with harness.PackageOverlay(self.package, overrides) as ov:
+                return harness.run_fresh_subprocess(
+                    self.fresh_module,
+                    {"config": self.config, "workload": workload},
+                    ov.root,
+                    timeout=max(self.check_timeout + 600, 1200),
+                )
         except Exception as error:
             return {"ok": False, "error": [f"fresh_check: {type(error).__name__}: {error}"], "output": None}
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-        lines = [x for x in r.stdout.splitlines() if x.startswith("FRESH ")]
-        if r.returncode or not lines:
-            return {"ok": False, "error": r.stderr.strip().splitlines()[-3:], "output": None}
-        return {"ok": True, **json.loads(lines[-1][6:])}
 
     def inject(self, fault, **kw):
         if fault == "hang":                     # must outlast the check's deadline
