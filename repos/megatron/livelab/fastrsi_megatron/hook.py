@@ -33,11 +33,13 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import traceback
 
 import torch
 import torch.distributed as dist
 
+from fastrsi import diffs, harness, ipc
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -57,6 +59,18 @@ MODULES = ("megatron.core.transformer.mlp", "megatron.core.transformer.attention
            "megatron.core.models.gpt.gpt_model", "megatron.training.training")
 
 
+def _has_real(values):
+    return isinstance(values, (list, tuple)) and any(v is not None for v in values)
+
+
+def _merge_check_output(rs):
+    """Merge per-rank check outputs so `PP > 1` takes loss/grad_norm from a stage that computed them."""
+    first = next((r for r in rs if r), {})
+    loss = next((r["loss"] for r in rs if r and _has_real(r.get("loss"))), first.get("loss"))
+    gn = next((r["grad_norm"] for r in rs if r and _has_real(r.get("grad_norm"))), first.get("grad_norm"))
+    return {"loss": loss, "grad_norm": gn}
+
+
 def _now():
     return time.perf_counter()
 
@@ -66,12 +80,12 @@ def _sync():
         torch.cuda.synchronize()
 
 
-class RanksParticipant(C.Participant):
+class RanksParticipant(C.CallParticipant):
     """Every rank as one participant: one kernel call is one gloo round."""
-    bounded = True
 
     def __init__(self, lab):
-        self.lab, self.name = lab, "ranks"
+        super().__init__("ranks", self._all, bounded=True)
+        self.lab = lab
         self.expected = [str(r) for r in range(lab.ranks.world)]
 
     def _all(self, method, arg):
@@ -81,39 +95,6 @@ class RanksParticipant(C.Participant):
             return {"ok": ok, "code": {str(r.get("rank")): r.get("code") for r in rs},
                     "ranks": rs, **({} if ok else {"error": "a rank gave no fingerprint"})}
         return C.merge_ranks(method, rs)
-
-    def prepare(self, plan):
-        return self._all("prepare", plan)
-
-    def validate(self, txn):
-        return self._all("validate", txn)
-
-    def commit(self, txn):
-        return self._all("commit", txn)
-
-    def abort(self, txn):
-        return self._all("abort", txn)
-
-    def undo(self, txn):
-        return self._all("undo", txn)
-
-    def status(self, txn):
-        return self._all("status", txn)
-
-    def proof(self, txn):
-        return self._all("proof", txn)
-
-    def witness_check(self, txn):
-        return self._all("witness_check", txn)
-
-    def reset(self, kind):
-        return self._all("reset", kind)
-
-    def fingerprint(self, modules):
-        return self._all("fingerprint", modules)
-
-    def at_base(self, _=None):
-        return self._all("at_base", None)
 
 
 def unknown_state_finding(unknown):
@@ -286,37 +267,15 @@ class Lab:
         if msg.get("target") not in (None, self.rank):
             return {"ok": True, "skipped": True}
         fault = msg["fault"]
-        if fault == "fail_apply":
-            j, after, n = self.local.journal, msg.get("after", 1), [0]
-            orig = j.set_code
-
-            def set_code(*a, **k):
-                n[0] += 1
-                if n[0] > after:
-                    del j.set_code
-                    raise RuntimeError(f"rank {self.rank}: injected fault after {after} swap(s)")
-                return orig(*a, **k)
-            j.set_code = set_code
-        elif fault == "fail_commit":
-            lp = self.local
-            q = lp.quiesce
-
-            def failing(fn):
-                lp.quiesce = q
-                raise RuntimeError(f"rank {self.rank}: injected commit failure")
-            lp.quiesce = failing
-        elif fault in ("crash", "hang", "lost"):
+        if fault in ("fail_apply", "fail_commit", "tamper"):
+            kw = {k: v for k, v in msg.items() if k not in ("op", "fault", "target")}
+            reply = harness.inject_participant_fault(self.local, fault, **kw)
+            return {"ok": bool(reply.get("ok")), "fault": fault,
+                    **({"error": reply.get("error")} if not reply.get("ok") else {})}
+        if fault in ("crash", "hang", "lost"):
             self.faults[fault] = True
-        elif fault == "tamper":
-            mod = sys.modules[msg["module"]]
-            obj = mod
-            for part in msg["qualname"].split("."):
-                obj = getattr(obj, part)
-            fn = getattr(obj, "__func__", obj)
-            fn.__code__ = compile(msg["source"], fn.__code__.co_filename, "exec").co_consts[0]
-        else:
-            return {"ok": False, "error": f"unknown fault {fault}"}
-        return {"ok": True, "fault": fault}
+            return {"ok": True, "fault": fault}
+        return {"ok": False, "error": f"unknown fault {fault}"}
 
     # -- host (rank 0) -------------------------------------------------------------------
     def _host(self):
@@ -362,7 +321,7 @@ class Lab:
             if m in d:
                 return d[m]
         return L.module_source(m) if hasattr(L, "module_source") else \
-            open(sys.modules[m].__file__).read()
+            Path(sys.modules[m].__file__).read_text()
 
     def serve(self):
         """Every rank: serve the gap until resume or exit."""
@@ -378,7 +337,7 @@ class Lab:
                     os._exit(LOST_ROUND_EXIT)
                 if msg.get("op") in ("resume", "exit"):
                     return msg["op"]
-        path = os.environ.get("FASTRSI_SOCK", f"/tmp/fastrsi-mg-{os.getpid()}.sock")
+        path = os.environ.get("FASTRSI_SOCK") or ipc.short_sock_path("fastrsi-mg")
         server = G.Server(path)
         if os.environ.get("FASTRSI_MAILBOX"):
             G.Mailbox(os.environ["FASTRSI_MAILBOX"], server.q)
@@ -417,30 +376,48 @@ class Lab:
         if verb == "install":
             patch = req.get("patch")
             files = patch.get("files") if isinstance(patch, dict) else None
-            why, modules = None, {}
-            if not isinstance(files, dict):
-                why = "a patch is an object with `files`: {module: source}"
-            for name, new in (files or {}).items():
-                if name not in sys.modules:
-                    why = f"module {name!r} is not loaded in the job"
-                    break
-                try:
-                    modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
-                except (AttributeError, OSError, TypeError, ValueError) as error:
-                    why = f"module {name!r} has no readable source file ({type(error).__name__})"
-                    break
+            repairs = patch.get("repairs", []) if isinstance(patch, dict) else []
+            why, modules, missing = None, {}, []
+            if isinstance(patch, dict) and patch.get("diff") is not None:
+                diff_text = patch["diff"]
+                if not isinstance(diff_text, str):
+                    why = "patch `diff` must be a unified diff string"
+                else:
+                    diff_targets = [diffs.module_of(p) for p in diffs.paths(diff_text)]
+                    missing = sorted(name for name in diff_targets if name not in sys.modules)
+                    if missing:
+                        why = f"modules not loaded in the job: {missing!r}"
+                    else:
+                        try:
+                            files = diffs.apply(diff_text, self._text)
+                        except ValueError as error:
+                            why = str(error)
+            if not why:
+                missing = sorted(name for name in files if name not in sys.modules) if isinstance(files, dict) else []
+                if not isinstance(files, dict):
+                    why = "a patch is an object with `files`: {module: source} or `diff`: unified diff"
+                elif missing:
+                    why = f"modules not loaded in the job: {missing!r}"
+                else:
+                    for name, new in files.items():
+                        try:
+                            modules[name] = {"source": new, "base_hash": L.text_hash(self._text(name))}
+                        except (AttributeError, OSError, TypeError, ValueError) as error:
+                            why = f"module {name!r} has no readable source file ({type(error).__name__})"
+                            break
             if why:
                 return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "receipt": None, "findings": [F.finding(
+                        "mechanisms": [], "receipt": None, "not_loaded": missing, "findings": [F.finding(
                             "patch_invalid", why, "modules the running job imported from source")]}
             if not s.poisoned():
                 self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
-                    "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}
+                    "undo_resets": patch.get("undo_resets", []), "repairs": repairs,
+                    "recipes": (["R0 swap"] if files else []) + (["R10 repair"] if repairs else [])}
             res = s.install(plan, edit_time=patch.get("edit_time"))
             outcome, rec = res.get("outcome", "refused"), res.get("receipt")
             if outcome == "committed":
-                self.live_text.append(dict(patch["files"]))
+                self.live_text.append(dict(files))
             codes = (rec["decisions"]["blocking"] if rec else
                      sorted({f["check"] for f in res.get("findings", [])}))
             return {"ok": outcome == "committed", "id": res.get("txn"), "outcome": outcome,
@@ -457,7 +434,7 @@ class Lab:
                 s.fault("participant_failed", f"check: {err}", "every rank finishes the check")
                 return {"ok": False, "error": err, "output": None, "proven": None,
                         "witness": {}, "findings": list(s.poison)}
-            out = {"loss": rs[0]["loss"], "grad_norm": rs[0]["grad_norm"]}
+            out = _merge_check_output(rs)
             golden = {"output_hash": L.text_hash(json.dumps(out, sort_keys=True))}
             proofs = [s.co.prove(t, golden=golden) for t in s.stack]
             witness = {}
@@ -539,10 +516,21 @@ class Lab:
         if self.batches.items is None or getattr(self, "resumed", "start") != "start":
             return it
         if self.replayed is None or self.replayed[0] is not it:
-            base = _Replay(self.batches.items, it)
-            w = self.batches.wrapper
-            self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
-                             else base)
+            if isinstance(it, list) and isinstance(self.batches.items, list):
+                out = []
+                for sub_items, sub_it in zip(self.batches.items, it):
+                    if sub_items is None or sub_it is None:
+                        out.append(sub_it)
+                    else:
+                        base = _Replay(sub_items, sub_it)
+                        w = type(sub_it)
+                        out.append(w(base) if w.__name__ == "RerunDataIterator" else base)
+                self.replayed = (it, out)
+            else:
+                base = _Replay(self.batches.items, it)
+                w = self.batches.wrapper
+                self.replayed = (it, w(base) if w is not None and w.__name__ == "RerunDataIterator"
+                                 else base)
         return self.replayed[1]
 
 
@@ -603,13 +591,19 @@ def install_hook(tr):
             fresh = os.environ.get("FASTRSI_FRESH")
             if fresh:
                 out = lab.handle({"op": "check", "steps": lab.default_steps})
+                rs = [None] * lab.ranks.world if lab.rank == 0 else None
+                dist.gather_object(out, rs, dst=0, group=lab.ranks.group)
                 if lab.rank == 0:
+                    merged = _merge_check_output(rs)
+                    errs = "; ".join(
+                        f"rank {r.get('rank')}: {r.get('error')}"
+                        for r in rs
+                        if not (r and r.get("ok"))
+                    )
                     with open(fresh, "w") as f:
-                        json.dump({"output": {"loss": out.get("loss"),
-                                              "grad_norm": out.get("grad_norm")},
-                                   "ok": out.get("ok"), "error": out.get("error"),
-                                   "timings": lab.timings}, f)
-                dist.barrier()
+                        json.dump({"output": merged, "ok": all(r and r.get("ok") for r in rs),
+                                   "error": errs or None, "timings": lab.timings}, f)
+                dist.barrier(group=lab.ranks.group)
                 os._exit(0)
             if lab.serve() == "exit":
                 dist.barrier(group=lab.ranks.group)

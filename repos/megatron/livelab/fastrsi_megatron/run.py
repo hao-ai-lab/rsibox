@@ -88,11 +88,15 @@ def _detailed(a, k, raw):
         _sync()
         d["opt_done"] = round(time.time() - t0, 4)
         return r
+    had_override = "step" in vars(opt)
     opt.step = opt_step
     try:
         return raw(forward_step, *a[1:], **k), d
     finally:
-        del opt.step
+        if had_override:
+            opt.step = step
+        else:
+            del opt.step
 
 
 def main():
