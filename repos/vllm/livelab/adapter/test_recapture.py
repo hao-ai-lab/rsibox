@@ -427,5 +427,336 @@ class RecaptureTest(unittest.TestCase):
 R1Test = RecaptureTest
 
 
+class V2RecaptureTest(unittest.TestCase):
+    """Pure-Python tests of vLLM V2 `ModelCudaGraphManager` binding & selective R1 recapture."""
+
+    def _make_v2_stubs(self):
+        import contextlib
+        import enum
+        import types
+
+        class CUDAGraphMode(enum.Enum):
+            NONE = 0
+            PIECEWISE = 1
+            FULL = 2
+
+        class BatchExecutionDescriptor:
+            def __init__(self, cg_mode, num_tokens):
+                self.cg_mode = cg_mode
+                self.num_tokens = num_tokens
+
+            def __hash__(self):
+                return hash((self.cg_mode, self.num_tokens))
+
+            def __eq__(self, other):
+                return isinstance(other, BatchExecutionDescriptor) and (
+                    self.cg_mode, self.num_tokens) == (other.cg_mode, other.num_tokens)
+
+            def __repr__(self):
+                return f"Desc({self.cg_mode.name},{self.num_tokens})"
+
+        events = {"streams": [], "captured_streams": [], "gc_freeze": 0, "lora_enter": 0,
+                  "kv_reset": 0, "capturing_states": [], "groups": []}
+
+        class FakeStream:
+            def __init__(self, device=None):
+                self.device = device
+                events["streams"].append(self)
+
+        class FakeTorch(types.ModuleType):
+            pass
+
+        torch_mod = FakeTorch("torch")
+        torch_mod.cuda = NS(
+            Stream=FakeStream,
+            synchronize=lambda: None,
+            mem_get_info=lambda: (1024, 2048),
+            memory_reserved=lambda: 512,
+            memory_allocated=lambda: 256,
+        )
+
+        class FakeWrapper:
+            _all_instances = []
+
+        class FakeBreakable:
+            _all_instances = []
+
+        class GraphCaptureContext:
+            def __init__(self, stream):
+                self.stream = stream
+
+        class FakeGroup:
+            def __init__(self, tag):
+                self.tag = tag
+
+            @contextlib.contextmanager
+            def graph_capture(self, ctx):
+                events["groups"].append((self.tag, "enter", ctx.stream))
+                try:
+                    yield
+                finally:
+                    events["groups"].append((self.tag, "exit", ctx.stream))
+
+        def set_capturing(flag):
+            events["capturing_states"].append(flag)
+
+        @contextlib.contextmanager
+        def freeze_gc():
+            events["gc_freeze"] += 1
+            yield
+
+        cg_utils = types.ModuleType("vllm.v1.worker.gpu.cudagraph_utils")
+
+        @contextlib.contextmanager
+        def default_graph_capture(device=None):
+            # Emulate vLLM's unpatched behavior allocating a brand-new stream per capture.
+            yield GraphCaptureContext(FakeStream(device=device))
+
+        cg_utils.graph_capture = default_graph_capture
+
+        class FakeV2Manager:
+            def __init__(self, mod_name, sizes=(4, 2, 1), with_piecewise=False):
+                self.mod_name = mod_name
+                self.device = f"cuda:v2-{id(self)}"
+                self._needs = True
+                self._graphs_captured = True
+                self.ubatch_runner = None
+                self.breakable_cg_runner = None
+                self.fail_at = None
+                self.graphs = {}
+                self._candidates = {}
+                self._capture_descs = {CUDAGraphMode.FULL: []}
+                if with_piecewise:
+                    self.breakable_cg_runner = NS(runtime_mode=CUDAGraphMode.PIECEWISE, entries={})
+                    self._capture_descs[CUDAGraphMode.PIECEWISE] = []
+                for n in sizes:
+                    d_full = BatchExecutionDescriptor(CUDAGraphMode.FULL, n)
+                    self._capture_descs[CUDAGraphMode.FULL].append(d_full)
+                    cands = [d_full]
+                    if with_piecewise:
+                        d_pw = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, n)
+                        self._capture_descs[CUDAGraphMode.PIECEWISE].append(d_pw)
+                        cands.append(d_pw)
+                    self._candidates[(n, 0)] = cands
+                # Initial base capture
+                for mode, descs in self._capture_descs.items():
+                    for d in descs:
+                        self._record(mode, d)
+
+            def needs_capture(self):
+                return self._needs
+
+            def _run_python(self):
+                e = sys.modules[self.mod_name + ".engine"].Engine()
+                e.step(1)
+                return e.ran[-1]
+
+            def _record(self, mode, desc):
+                val = self._run_python()
+                if mode == CUDAGraphMode.FULL:
+                    self.graphs[desc] = Graph(val, None)
+                else:
+                    self.breakable_cg_runner.entries[desc] = Graph(val, None)
+
+            def capture(self, model, model_state, input_buffers, intermediate_tensors,
+                        block_tables, attn_groups, kv_cache_config, *, pcp_manager=None,
+                        has_lora=False, use_aux_hidden_state_outputs=False,
+                        lora_capture_hook=None):
+                with cg_utils.graph_capture(device=self.device) as ctx:
+                    events["captured_streams"].append(ctx.stream)
+                    for mode, descs in self._capture_descs.items():
+                        for d in descs:
+                            if self.fail_at == (mode.name, d.num_tokens):
+                                raise RuntimeError(f"boom on {mode.name} {d.num_tokens}")
+                            self._record(mode, d)
+                self._graphs_captured = True
+
+            def dispatch(self, num_tokens):
+                cands = self._candidates.get((num_tokens, 0), [])
+                if not cands:
+                    return (self._run_python(), CUDAGraphMode.NONE.name)
+                chosen = cands[0]
+                if chosen.cg_mode == CUDAGraphMode.FULL:
+                    assert chosen in self.graphs, f"missing graph for {chosen}"
+                    return (self.graphs[chosen].value, chosen.cg_mode.name)
+                assert chosen in self.breakable_cg_runner.entries
+                return (self.breakable_cg_runner.entries[chosen].value, chosen.cg_mode.name)
+
+        def make_worker(mod_name, sizes=(4, 2, 1), with_piecewise=False):
+            mgr = FakeV2Manager(mod_name, sizes=sizes, with_piecewise=with_piecewise)
+
+            @contextlib.contextmanager
+            def setup_loras(_cfg):
+                events["lora_enter"] += 1
+                yield
+
+            runner = NS(
+                cudagraph_manager=mgr,
+                device=mgr.device,
+                model=NS(),
+                model_state=NS(supports_mm_inputs=False),
+                input_buffers=NS(),
+                pcp_manager=None,
+                intermediate_tensors=None,
+                block_tables=None,
+                attn_groups=None,
+                kv_cache_config=None,
+                lora_config=None,
+                use_aux_hidden_state_outputs=False,
+                maybe_setup_dummy_loras=setup_loras,
+                kv_connector=NS(reset_capture_state=lambda: events.__setitem__(
+                    "kv_reset", events["kv_reset"] + 1)),
+            )
+            return NS(model_runner=runner), mgr
+
+        mods = {
+            "torch": torch_mod,
+            "vllm": types.ModuleType("vllm"),
+            "vllm.config": NS(CUDAGraphMode=CUDAGraphMode),
+            "vllm.compilation": types.ModuleType("vllm.compilation"),
+            "vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=FakeWrapper),
+            "vllm.compilation.breakable_cudagraph": NS(BreakableCUDAGraphWrapper=FakeBreakable),
+            "vllm.compilation.monitor": NS(set_cudagraph_capturing_enabled=set_capturing),
+            "vllm.distributed": types.ModuleType("vllm.distributed"),
+            "vllm.distributed.parallel_state": NS(
+                GraphCaptureContext=GraphCaptureContext,
+                get_tp_group=lambda: FakeGroup("tp"),
+                get_pp_group=lambda: FakeGroup("pp"),
+                get_dp_group=lambda: FakeGroup("dp"),
+            ),
+            "vllm.utils": types.ModuleType("vllm.utils"),
+            "vllm.utils.gc_utils": NS(freeze_gc_for_cudagraph_capture=freeze_gc),
+            "vllm.v1": types.ModuleType("vllm.v1"),
+            "vllm.v1.worker": types.ModuleType("vllm.v1.worker"),
+            "vllm.v1.worker.gpu": types.ModuleType("vllm.v1.worker.gpu"),
+            "vllm.v1.worker.gpu.lora_utils": NS(create_lora_capture_hook=lambda _c, _r: None),
+            "vllm.v1.worker.gpu.cudagraph_utils": cg_utils,
+        }
+        return mods, cg_utils, default_graph_capture, make_worker, events, CUDAGraphMode
+
+    def test_v2_selective_recapture_extend_priority_undo_and_stream_reuse(self):
+        """Input: 2-rank V2 ModelCudaGraphManager (FULL + PIECEWISE for sizes 4/2/1).
+        Expected: selective FULL sizes=[1] removes FULL(4)/FULL(2) from _candidates (dispatch falls
+        back to PIECEWISE or NONE); extend([4, 2]) restores FULL ahead of PIECEWISE in original
+        priority order; O(1) undo restores original `mgr.graphs` dict & `_candidates`; 5 cycles
+        preserve live graph count and reuse a single CUDA stream via `graph_capture` intercept."""
+        from unittest import mock
+        mods, cg_utils, orig_gc, make_worker, events, _ = self._make_v2_stubs()
+        h, names, sides = make_host(self, "v2sel")
+        workers, mgrs = [], []
+        with mock.patch.dict(sys.modules, mods):
+            for n, s in zip(names, sides):
+                w, mgr = make_worker(n, sizes=(4, 2, 1), with_piecewise=True)
+                workers.append(w)
+                mgrs.append(mgr)
+                s.scope["r1_engine"] = RC.vllm_engine(w)
+            old_dicts = [m.graphs for m in mgrs]
+            orig_cands = [{k: list(v) for k, v in m._candidates.items()} for m in mgrs]
+            orig_descs = [m._capture_descs for m in mgrs]
+
+            # Selective FULL recapture of size 1 only: FULL(4) & FULL(2) drop out -> fall back to PIECEWISE
+            r = h.handle({"op": "txn", "plan": plan(
+                "v2one", rebuild=["R1"], r1={"modes": ["FULL"], "sizes": [1]})})
+            self.assertEqual(r["outcome"], "committed", r["receipt"]["findings"])
+            for m, od in zip(mgrs, orig_descs):
+                self.assertEqual(m.dispatch(1), ("v1", "FULL"))
+                self.assertEqual(m.dispatch(4), ("base", "PIECEWISE"))
+                self.assertEqual(m.dispatch(2), ("base", "PIECEWISE"))
+                self.assertIs(m._capture_descs, od)
+            self.assertIs(cg_utils.graph_capture, orig_gc)
+
+            # Extend sizes [4, 2]: FULL restored AHEAD of PIECEWISE (original priority order!)
+            ext = h.handle({"op": "recapture_extend", "txn": "v2one", "sizes": [4, 2]})
+            self.assertTrue(ext["ok"], ext)
+            for m, oc in zip(mgrs, orig_cands):
+                self.assertEqual(m._candidates, oc)
+                self.assertEqual([m.dispatch(n) for n in (4, 2, 1)], [("v1", "FULL")] * 3)
+
+            # O(1) undo restores original dict identity and candidates
+            self.assertTrue(h.handle({"op": "undo", "txn": "v2one"})["ok"])
+            for m, od_dict, oc in zip(mgrs, old_dicts, orig_cands):
+                self.assertIs(m.graphs, od_dict)
+                self.assertEqual(m._candidates, oc)
+                self.assertEqual([m.dispatch(n) for n in (4, 2, 1)], [("base", "FULL")] * 3)
+            self.assertTrue(h.handle({"op": "at_base"})["ok"])
+
+            # 5 full recapture/undo cycles on FULL-only: stable graph count & single stream per device
+            h2, names2, sides2 = make_host(self, "v2cyc")
+            events["streams"].clear()
+            events["captured_streams"].clear()
+            events["kv_reset"] = 0
+            w2, m2 = make_worker(names2[0], sizes=(4, 2, 1), with_piecewise=False)
+            w2b, m2b = make_worker(names2[1], sizes=(4, 2, 1), with_piecewise=False)
+            sides2[0].scope["r1_engine"] = RC.vllm_engine(w2)
+            sides2[1].scope["r1_engine"] = RC.vllm_engine(w2b)
+            n0 = len(LIVE)
+            for i in range(5):
+                res = h2.handle({"op": "txn", "plan": plan(
+                    f"v2c{i}", rebuild=["R1"], r1={"sizes": [1]})})
+                self.assertEqual(res["outcome"], "committed")
+                # Uncaptured sizes 4 and 2 fall through dispatch() to NONE (eager on v1)
+                self.assertEqual(m2.dispatch(1), ("v1", "FULL"))
+                self.assertEqual(m2.dispatch(4), ("v1", "NONE"))
+                self.assertEqual(m2.dispatch(2), ("v1", "NONE"))
+                self.assertEqual(len(LIVE), n0 + 2)
+                self.assertTrue(h2.handle({"op": "undo", "txn": f"v2c{i}"})["ok"])
+                self.assertEqual(len(LIVE), n0)
+                self.assertEqual([m2.dispatch(n) for n in (4, 2, 1)], [("base", "FULL")] * 3)
+            # Exactly 1 stream created per device across all 5 cycles (reused via graph_capture patch)
+            self.assertEqual(len(events["streams"]), 2)
+            self.assertEqual(set(events["captured_streams"]), set(events["streams"]))
+            self.assertEqual(events["kv_reset"], 10)
+            self.assertIs(cg_utils.graph_capture, orig_gc)
+
+    def test_v2_failure_rollback_and_unsupported_refusals(self):
+        """Input: V2 capture error mid-batch; plus DBO (ubatch_runner), encoder cudagraph, and
+        eager/uncaptured V2 managers. Expected: failure rolls back graphs/_candidates/graph_capture;
+        DBO and encoder graphs raise NotImplementedError; eager returns None."""
+        from unittest import mock
+        mods, cg_utils, orig_gc, make_worker, _, _ = self._make_v2_stubs()
+        h, names, sides = make_host(self, "v2fail")
+        with mock.patch.dict(sys.modules, mods):
+            mgrs = []
+            for n, s in zip(names, sides):
+                w, mgr = make_worker(n, sizes=(4, 2, 1))
+                mgrs.append(mgr)
+                s.scope["r1_engine"] = RC.vllm_engine(w)
+            orig_dicts = [m.graphs for m in mgrs]
+            orig_cands = [{k: list(v) for k, v in m._candidates.items()} for m in mgrs]
+            mgrs[1].fail_at = ("FULL", 2)
+            r = h.handle({"op": "txn", "plan": plan("v2boom", rebuild=["R1"])})
+            self.assertEqual(r["outcome"], "rolled_back")
+            self.assertIn("rebuild_failed", [f["check"] for f in r["receipt"]["findings"]])
+            for m, od, oc in zip(mgrs, orig_dicts, orig_cands):
+                self.assertIs(m.graphs, od)
+                self.assertEqual(m._candidates, oc)
+                self.assertEqual([m.dispatch(n) for n in (4, 2, 1)], [("base", "FULL")] * 3)
+            self.assertIs(cg_utils.graph_capture, orig_gc)
+            self.assertTrue(h.handle({"op": "at_base"})["ok"])
+
+            # DBO refusal
+            w_dbo, m_dbo = make_worker(names[0])
+            m_dbo.ubatch_runner = object()
+            with self.assertRaises(NotImplementedError):
+                RC.vllm_engine(w_dbo)
+
+            # Encoder CUDA graph refusal
+            w_enc, _ = make_worker(names[0])
+            w_enc.model_runner.model_state = NS(
+                supports_mm_inputs=True, encoder_runner=NS(has_cudagraph=lambda: True)
+            )
+            with self.assertRaises(NotImplementedError):
+                RC.vllm_engine(w_enc)
+
+            # Eager / uncaptured returns None
+            w_eager, m_eager = make_worker(names[0])
+            m_eager._needs = False
+            self.assertIsNone(RC.vllm_engine(w_eager))
+            w_empty, m_empty = make_worker(names[0])
+            m_empty._graphs_captured = False
+            m_empty.graphs.clear()
+            self.assertIsNone(RC.vllm_engine(w_empty))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,10 +35,11 @@ put the old dicts and keys back. The base graphs never stopped existing, so undo
 nothing and costs microseconds; the new graphs are dropped and their pool memory is reused by
 the next capture. A capture that fails puts the old state back before it returns.
 
-Not here: vLLM's V2 model runner (`CudaGraphManager`; R1 says so), ubatched (DBO) graphs,
-encoder graphs, drafter-only modes, DP > 1 (the host refuses).
+Not here: ubatched (DBO) graphs, encoder graphs, drafter-only modes, DP > 1 (the host refuses).
+V2 model runner (`ModelCudaGraphManager`) is supported via `_vllm_v2_engine` alongside V1.
 """
 import contextlib
+import sys
 import time
 
 from kernel import findings as F
@@ -68,8 +69,166 @@ class Engine:
 _STREAMS = {}         # device -> the capture stream every R1 on it uses
 
 
+def _cuda_memory(torch_mod):
+    torch_mod.cuda.synchronize()
+    free, _total = torch_mod.cuda.mem_get_info()
+    return {"reserved": torch_mod.cuda.memory_reserved(),
+            "allocated": torch_mod.cuda.memory_allocated(), "device_free": free}
+
+
+@contextlib.contextmanager
+def _capture_session(device, torch_mod, parallel_state, set_capturing, on_enter, on_exit):
+    # vLLM's graph_capture() makes a new stream per call, stranding pool blocks (~132 MiB/capture);
+    # reusing one stream per device keeps the caching allocator's pool blocks reusable.
+    stream = _STREAMS.get(device)
+    if stream is None:
+        stream = _STREAMS[device] = torch_mod.cuda.Stream(device=device)
+    ctx = parallel_state.GraphCaptureContext(stream)
+    set_capturing(True)
+    try:
+        with contextlib.ExitStack() as stack:
+            on_enter(stack, ctx)
+            for grp in (parallel_state.get_tp_group(), parallel_state.get_pp_group(),
+                        parallel_state.get_dp_group()):
+                stack.enter_context(grp.graph_capture(ctx))
+            yield
+    finally:
+        set_capturing(False)
+        on_exit()
+
+
+class _V2FullWrapper:
+    """Exposes V2 `ModelCudaGraphManager.graphs` as a FULL graph wrapper for R1."""
+
+    def __init__(self, mgr, full_mode):
+        self._mgr, self.runtime_mode = mgr, full_mode
+
+    @property
+    def entries(self):
+        return self._mgr.graphs
+
+    @entries.setter
+    def entries(self, value):
+        self._mgr.graphs = value
+
+
+class _V2KeySet(set):
+    """Mode key set over `mgr._fastrsi_orig_candidates`; mutations re-filter `mgr._candidates`."""
+
+    def __init__(self, mgr, mode, initial=()):
+        super().__init__(initial)
+        self._mgr, self._mode = mgr, mode
+
+    def _sync(self):
+        keys = self._mgr._fastrsi_r1_keys
+        for k, descs in self._mgr._fastrsi_orig_candidates.items():
+            self._mgr._candidates[k] = [
+                d for d in descs if d.cg_mode not in keys or d in keys[d.cg_mode]
+            ]
+
+    def add(self, elem): super().add(elem); self._sync()
+    def discard(self, elem): super().discard(elem); self._sync()
+    def remove(self, elem): super().remove(elem); self._sync()
+    def clear(self): super().clear(); self._sync()
+    def update(self, *others): super().update(*others); self._sync()
+
+
+def _v2_helpers(runner):
+    mr = sys.modules.get(type(runner).__module__)
+    def _pick(mod_name, attr, fallback):
+        try:
+            return getattr(__import__(mod_name, fromlist=[attr]), attr)
+        except (ImportError, AttributeError):
+            return getattr(mr, attr, None) or fallback
+    freeze_gc = _pick("vllm.utils.gc_utils", "freeze_gc_for_cudagraph_capture",
+                      getattr(runner, "_freeze_gc", contextlib.nullcontext))
+    lora_hook = _pick("vllm.v1.worker.gpu.lora_utils", "create_lora_capture_hook", lambda *_a: None)
+    try:
+        import vllm.v1.worker.gpu.cudagraph_utils as cg_utils
+    except ImportError:
+        cg_utils = None
+    return freeze_gc, lora_hook, cg_utils
+
+
+def _vllm_v2_engine(runner, mgr, kinds, torch_mod, set_capturing, parallel_state):
+    """The Engine of a vLLM V2 GPU worker (`ModelCudaGraphManager`; None when no graphs)."""
+    if not mgr.needs_capture() or (not getattr(mgr, "_fastrsi_r1_keys", None)
+                                   and not getattr(mgr, "_graphs_captured", False)
+                                   and not getattr(mgr, "graphs", None)):
+        return None
+    if getattr(mgr, "ubatch_runner", None) is not None:
+        raise NotImplementedError("R1 does not support V2 ubatched (DBO) CUDA graphs")
+    ms = getattr(runner, "model_state", None)
+    enc = getattr(ms, "encoder_runner", None) if getattr(ms, "supports_mm_inputs", False) else None
+    if enc is not None and callable(getattr(enc, "has_cudagraph", None)) and enc.has_cudagraph():
+        raise NotImplementedError("R1 does not support V2 encoder CUDA graphs")
+
+    if not hasattr(mgr, "_fastrsi_r1_keys"):
+        mgr._fastrsi_orig_candidates = {k: list(v) for k, v in mgr._candidates.items()}
+        by_mode = {}
+        for descs in mgr._fastrsi_orig_candidates.values():
+            for d in descs:
+                if name(d.cg_mode) != "NONE":
+                    by_mode.setdefault(d.cg_mode, set()).add(d)
+        mgr._fastrsi_r1_keys = {m: _V2KeySet(mgr, m, ds) for m, ds in by_mode.items()}
+    r1_keys = mgr._fastrsi_r1_keys
+    if not any(r1_keys.values()) and not any(mgr._fastrsi_orig_candidates.values()):
+        return None
+    full_mode = next((m for m in r1_keys if name(m) == "FULL"), None)
+    full_wrapper = _V2FullWrapper(mgr, full_mode) if full_mode is not None else None
+    freeze_gc, lora_hook, cg_utils = _v2_helpers(runner)
+
+    def wrappers():
+        cands = ([full_wrapper] if full_wrapper else []) + [
+            w for k in kinds for w in list(k._all_instances)] + [getattr(mgr, "breakable_cg_runner", None)]
+        return list({id(w): w for w in cands if w is not None and _attr(w)}.values())
+
+    def capture(mode, desc):
+        orig = mgr._capture_descs
+        mgr._capture_descs = {mode: [desc]}
+        try:
+            pcp = getattr(runner, "pcp_manager", None)
+            bufs = pcp.input_buffers if pcp is not None else runner.input_buffers
+            lora_cfg = getattr(runner, "lora_config", None)
+            mgr.capture(
+                runner.model, runner.model_state, bufs, runner.intermediate_tensors,
+                runner.block_tables, runner.attn_groups, runner.kv_cache_config,
+                pcp_manager=pcp, has_lora=lora_cfg is not None,
+                use_aux_hidden_state_outputs=getattr(runner, "use_aux_hidden_state_outputs", False),
+                lora_capture_hook=lora_hook(lora_cfg, runner))
+            torch_mod.cuda.synchronize()
+        finally:
+            mgr._capture_descs = orig
+
+    def session():
+        mods = list({id(m): m for m in (sys.modules.get(type(mgr).__module__), cg_utils)
+                     if m is not None and hasattr(m, "graph_capture")}.values())
+        saved = []
+
+        def on_enter(stack, ctx):
+            for m in mods:
+                saved.append((m, m.graph_capture))
+                m.graph_capture = lambda *_a, _c=ctx, **_k: contextlib.nullcontext(_c)
+            stack.enter_context(freeze_gc())
+            setup_loras = getattr(runner, "maybe_setup_dummy_loras", None)
+            if callable(setup_loras) and (cm := setup_loras(getattr(runner, "lora_config", None))) is not None:
+                stack.enter_context(cm)
+
+        def on_exit():
+            for m, orig_gc in saved:
+                m.graph_capture = orig_gc
+            kv = getattr(runner, "kv_connector", None)
+            if kv is not None and callable(getattr(kv, "reset_capture_state", None)):
+                kv.reset_capture_state()
+
+        return _capture_session(runner.device, torch_mod, parallel_state, set_capturing, on_enter, on_exit)
+
+    return Engine(wrappers, r1_keys, capture, session, lambda: _cuda_memory(torch_mod),
+                  torch_mod.cuda.synchronize)
+
+
 def vllm_engine(worker):
-    """The Engine of a vLLM V1 GPU worker (None when it runs no graphs)."""
+    """The Engine of a vLLM V1 or V2 GPU worker (None when it runs no graphs)."""
     import torch
     from vllm.compilation.cuda_graph import CUDAGraphWrapper
     from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -82,9 +241,14 @@ def vllm_engine(worker):
         pass
     runner = worker.model_runner
     dispatcher = getattr(runner, "cudagraph_dispatcher", None)
-    if dispatcher is None:     # the V2 runner keeps graphs in CudaGraphManager.graphs: not bound yet
-        raise NotImplementedError(f"R1 knows vLLM's V1 GPUModelRunner; this worker runs "
-                                  f"{type(runner).__name__} (VLLM_USE_V2_MODEL_RUNNER=0)")
+    if dispatcher is None:
+        mgr = getattr(runner, "cudagraph_manager", None)
+        if mgr is not None:
+            return _vllm_v2_engine(
+                runner, mgr, kinds, torch, set_cudagraph_capturing_enabled, parallel_state
+            )
+        raise NotImplementedError(f"R1 knows vLLM's V1/V2 GPUModelRunner; this worker runs "
+                                  f"{type(runner).__name__}")
     if not any(dispatcher.cudagraph_keys.values()):
         return None
 
@@ -95,35 +259,15 @@ def vllm_engine(worker):
         runner._warmup_and_capture(desc, cudagraph_runtime_mode=mode)
         torch.cuda.synchronize()
 
-    @contextlib.contextmanager
     def session():
-        # vLLM's graph_capture() makes a new stream per call, and the caching allocator
-        # reuses a pool's free blocks only on the stream that freed them: every recapture
-        # then strands the last one's blocks (132 MiB per full recapture, Qwen3-8B). One
-        # stream per device for every R1 keeps them reusable. Same groups as graph_capture.
-        stream = _STREAMS.get(runner.device)
-        if stream is None:
-            stream = _STREAMS[runner.device] = torch.cuda.Stream(device=runner.device)
-        ctx = parallel_state.GraphCaptureContext(stream)
-        set_cudagraph_capturing_enabled(True)
-        try:
-            with runner._freeze_gc(), contextlib.ExitStack() as stack:
-                for group in (parallel_state.get_tp_group(),
-                              parallel_state.get_pp_group(),
-                              parallel_state.get_dp_group()):
-                    stack.enter_context(group.graph_capture(ctx))
-                yield
-        finally:
-            set_cudagraph_capturing_enabled(False)
-            runner.maybe_remove_all_loras(runner.lora_config)
+        return _capture_session(
+            runner.device, torch, parallel_state, set_cudagraph_capturing_enabled,
+            lambda stack, _ctx: stack.enter_context(runner._freeze_gc()),
+            lambda: runner.maybe_remove_all_loras(runner.lora_config),
+        )
 
-    def memory():
-        torch.cuda.synchronize()
-        free, _total = torch.cuda.mem_get_info()
-        return {"reserved": torch.cuda.memory_reserved(), "allocated":
-                torch.cuda.memory_allocated(), "device_free": free}
-    return Engine(wrappers, dispatcher.cudagraph_keys, capture, session, memory,
-                  torch.cuda.synchronize)
+    return Engine(wrappers, dispatcher.cudagraph_keys, capture, session,
+                  lambda: _cuda_memory(torch), torch.cuda.synchronize)
 
 
 def _attr(wrapper):

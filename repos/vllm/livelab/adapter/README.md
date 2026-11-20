@@ -75,8 +75,10 @@ needs one is a finding, not a silent swap.
   poisons the host), and a job that outlives the gap timeout poisons the host. While the host
   is poisoned, `recapture_extend` is refused. The receipt's `rebuild` holds
   each rank's captured descriptors, seconds, eager leftovers and memory before/after, and
-  `recapture_s` the gap's recapture time. Selective recapture runs only on vLLM's V1 `GPUModelRunner`
-  (`VLLM_USE_V2_MODEL_RUNNER=0`); on another runner it is `rebuild_failed`, said plainly.
+  `recapture_s` the gap's recapture time. Selective recapture runs on vLLM's V1 `GPUModelRunner`
+  (`VLLM_USE_V2_MODEL_RUNNER=0`) and V2 `ModelCudaGraphManager` (single capture stream reused per
+  device so consecutive recaptures keep `0.0 MiB` reserved delta; on another runner it returns
+  `rebuild_failed`, said plainly).
   A long recapture needs the op's `gap_timeout_s` above its duration.
 - **Version log.** Each side records which code version every watched function runs at each
   step (`versions`), and any change between a step's two calls (`execute_model`,
@@ -91,10 +93,11 @@ needs one is a finding, not a silent swap.
 | `host.py` | `Host` (coordinator, control channel, step timings), `WorkerGroup`, `parallel`, the `EngineCoreProc` patch, the import finder. |
 | `worker_ext.py` | `Endpoint` (the participant protocol in one process: role filter, abstain, never raise) and `KernelWorkerExtension` (`--worker-extension-cls`; serves a `Side` and wraps the step calls). |
 | `side.py` | `Side(Endpoint)`: background prepare, per-rank phase-2 lane and deadline, graph detection and routing, version log, a fault hook for tests. |
-| `recapture.py` | Selective CUDA graph recapture on one rank: `Engine` (what recapture needs from a model runner; `vllm_engine` binds vLLM's V1 runner), `Recapture.run` / `extend`, `graphs`. |
+| `recapture.py` | Selective CUDA graph recapture on one rank: `Engine` (what recapture needs from a model runner; `vllm_engine` binds vLLM's V1 `GPUModelRunner` and V2 `ModelCudaGraphManager`), `Recapture.run` / `extend`, `graphs`. |
+| `native.py` | C++/CUDA side-library hot-reload (`NATIVE`): compiles `.cu` + `_Cv<key>` `reg.cu` under node-local `flock`, loads via `RTLD_NOW \| RTLD_LOCAL` without `dlclose`, overrides `torch.ops._C` via `torch.library.Library` in the gap (paired with `R1` when graphs are active), and undoes via `lib._destroy()`. |
 | `graphs.py` | Where vLLM runs a model-code target, from the compilation config (cudagraph mode, compile mode, `splitting_ops`, breakable graphs' `eager_break_during_capture` ops) and the module source. |
 | `client.py` | Sends one op over the file channel and returns the reply. |
-| `conformance_lab.py` | `VllmLab` (`core/livelab/conformance` `LabUnderTest`): drives a live 1-GPU `vllm serve` (launched via `services/engine.py start`) through the file channel across all 11 conformance cases (`c0`-`c10`). |
+| `conformance_lab.py` | `VllmLab` (`core/livelab/conformance` `LabUnderTest`): drives a live tensor-parallel `vllm serve` (launched via `services/engine.py start`) through the file channel across all 11 conformance cases (`c0`-`c10`). |
 
 ## Run it
 
@@ -120,7 +123,11 @@ FASTRSI_VLLM_MODEL=<model-path> FASTRSI_VLLM_VENV=<venv> FASTRSI_VLLM_WORK=<scra
   PYTHONPATH=../../repos/vllm/livelab python3 -m conformance --lab adapter.conformance_lab:VllmLab
 ```
 
-`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp 1`, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
+`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp FASTRSI_VLLM_TP`, default 1, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
+
+A tensor-parallel completion has one HTTP response for the worker group. The harness
+formats that response as one output entry. Check the host ping’s `parallel.expected`
+and the native proof’s `workers/rank0`, `workers/rank1` witness maps for rank coverage.
 
 ## Golden tests
 
@@ -171,5 +178,4 @@ each rank with its own copy of the toy engine.
 
 ## Not here yet
 
-- R1 on vLLM's V2 model runner (`CudaGraphManager`), ubatched (DBO) and encoder graphs;
-  recompiles (torch.compile) and R6; DP>1; pipeline parallel.
+- Unbatched (DBO) and encoder CUDA graphs; recompiles (`torch.compile`) and R6; `DP > 1`; pipeline parallel.
