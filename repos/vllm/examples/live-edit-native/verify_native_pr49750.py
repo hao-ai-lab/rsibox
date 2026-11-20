@@ -282,7 +282,7 @@ class VllmRunner:
         site = self._prepare_site(mode, fresh_so, fresh_key)
         core_root = os.path.abspath(os.path.join(LIVELAB, "..", "..", "..", "core", "livelab"))
         env = dict(os.environ)
-        env["VLLM_USE_V2_MODEL_RUNNER"] = "0"
+        env["VLLM_USE_V2_MODEL_RUNNER"] = "1" if self.args.v2 else "0"
         env["VLLM_BATCH_INVARIANT"] = "0"
         env["HF_HUB_OFFLINE"] = "1"
         env["PYTHONPATH"] = os.pathsep.join([site, LIVELAB, core_root, env.get("PYTHONPATH", "")]).rstrip(":")
@@ -445,6 +445,7 @@ def main():
     ap.add_argument("--vllm-git", required=True)
     ap.add_argument("--port", type=int, default=29495)
     ap.add_argument("--tp", type=int, default=1)
+    ap.add_argument("--v2", action="store_true", default=False)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -457,7 +458,7 @@ def main():
 
     pr_text, pre_pr_text = extract_pre_pr_source(args.csrc_root, args.vllm_git)
     perturbed_text = make_visible_perturbed_source(pr_text)
-    summary = {"pr": PR_NUMBER, "tp": args.tp, "steps": {}}
+    summary = {"pr": PR_NUMBER, "tp": args.tp, "runner": "v2" if args.v2 else "v1", "steps": {}}
 
     # 1. Direct GPU non-contiguous tensor proof (pre-PR vs PR #49750)
     direct = direct_noncontiguous_check(args.csrc_root, pre_pr_text, pr_text, work)
