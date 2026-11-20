@@ -40,10 +40,12 @@ Contract:
 - unpatch puts back only functions this module patched, and returns their names.
 A zygote installs the guards before its imports, so every process it forks inherits them.
 """
-import functools, gc, json, os, subprocess, sys, time
+import ctypes, functools, gc, json, os, subprocess, sys, time
 
 COUNTS = {"get_device_capability": 0, "current_device": 0, "fallback": 0}
 PATCHED = ("get_device_capability", "current_device", "get_device_properties")
+LIBCUDA = "libcuda.so.1"
+_CUINIT = {}
 
 
 def _nvml():
@@ -345,6 +347,216 @@ def pin_triton_target(capability=None, nvml=None):
         else:
             del CudaDriver.get_current_target
     return restore
+
+
+def driver_initialized(libcuda: str = LIBCUDA) -> bool:
+    """Whether this process has initialized the CUDA driver (cuInit).
+
+    `cuDeviceGetCount` does not initialize the driver and returns
+    `CUDA_ERROR_NOT_INITIALIZED` (3) until something has called `cuInit`. Returns False
+    when `libcuda` is absent on this host; raises if `libcuda` loads but lacks
+    `cuDeviceGetCount` so callers can fail closed.
+    """
+    try:
+        driver = ctypes.CDLL(libcuda)
+    except OSError:
+        return False
+    count = ctypes.c_int()
+    return driver.cuDeviceGetCount(ctypes.byref(count)) != 3
+
+
+def cuda_initialized(libcuda: str = LIBCUDA) -> bool:
+    """True when either torch's CUDA runtime or the CUDA driver is initialized."""
+    torch_mod = sys.modules.get("torch")
+    cuda = getattr(torch_mod, "cuda", None)
+    if cuda is not None and callable(getattr(cuda, "is_initialized", None)) and cuda.is_initialized():
+        return True
+    return driver_initialized(libcuda)
+
+
+def fork_poisoned() -> bool:
+    """Would a child forked now be unable to use CUDA (torch bad-fork flag)?
+
+    Forks a short probe child to read `torch._C._cuda_isInBadFork()` without affecting
+    this process. Returns False when `os.fork` or torch is unavailable.
+    """
+    if not hasattr(os, "fork"):
+        return False
+    read_fd, write_fd = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read_fd)
+        try:
+            torch_mod = sys.modules.get("torch")
+            if torch_mod is None:
+                import torch as torch_mod
+            bad_fork = getattr(getattr(torch_mod, "_C", None), "_cuda_isInBadFork", None)
+            bad = bool(bad_fork()) if callable(bad_fork) else False
+        except Exception:
+            bad = False
+        try:
+            os.write(write_fd, b"1" if bad else b"0")
+        finally:
+            os.close(write_fd)
+            os._exit(0)
+    os.close(write_fd)
+    try:
+        out = os.read(read_fd, 1)
+    finally:
+        os.close(read_fd)
+        os.waitpid(pid, 0)
+    return out == b"1"
+
+
+def poison_reasons(libcuda: str = LIBCUDA) -> list[str]:
+    """Fail-closed list of reasons a child forked from this process cannot use CUDA.
+
+    Empty list means no CUDA driver or torch runtime poisoning was detected.
+    """
+    reasons: list[str] = []
+    try:
+        if driver_initialized(libcuda):
+            reasons.append("CUDA driver initialized in the zygote (cuInit)")
+    except Exception as exc:
+        reasons.append(f"CUDA driver state unreadable ({type(exc).__name__}: {exc})")
+    try:
+        if fork_poisoned():
+            reasons.append("torch CUDA runtime initialized in the zygote (bad fork)")
+    except Exception as exc:
+        reasons.append(f"bad-fork probe failed ({type(exc).__name__}: {exc})")
+    return reasons
+
+
+def cute_dsl_arch(capability=None, nvml=None) -> str | None:
+    """CuTe DSL arch tag (e.g. 'sm_100a', 'sm_90a', 'sm_80') without touching CUDA, or None."""
+    try:
+        major, minor = triton_capability(capability, nvml)
+    except Exception:
+        return None
+    return f"sm_{major}{minor}{'a' if major >= 9 else ''}"
+
+
+def pin_cute_dsl_arch(capability=None, nvml=None) -> str | None:
+    """Set `CUTE_DSL_ARCH` when unset so CuTe DSL (flashinfer -> cutlass) does not call
+    `cuInit` at import time to probe the GPU arch. Returns the active value or None."""
+    existing = os.environ.get("CUTE_DSL_ARCH")
+    if existing:
+        return existing
+    arch = cute_dsl_arch(capability, nvml)
+    if arch:
+        os.environ["CUTE_DSL_ARCH"] = arch
+    return arch
+
+
+def guard_cuda_python(capability=None, nvml=None) -> dict:
+    """Stub `cuda.bindings.driver.cuInit` to answer `CUDA_ERROR_NOT_INITIALIZED` pre-fork
+    and pin `CUTE_DSL_ARCH` if unset. Call `unguard_cuda_python()` in the forked child."""
+    arch = pin_cute_dsl_arch(capability, nvml)
+    try:
+        import cuda.bindings.driver as drv
+    except ImportError:
+        return {"installed": False, "why": "no cuda-python", "cute_dsl_arch": arch}
+    if "fn" not in _CUINIT:
+        _CUINIT["fn"], _CUINIT["mod"] = drv.cuInit, drv
+        drv.cuInit = lambda flags=0: (drv.CUresult.CUDA_ERROR_NOT_INITIALIZED,)
+    return {"installed": True, "cute_dsl_arch": arch}
+
+
+def unguard_cuda_python() -> bool:
+    """Restore `cuda.bindings.driver.cuInit` in a forked child. True when restored."""
+    if "fn" in _CUINIT:
+        _CUINIT["mod"].cuInit = _CUINIT.pop("fn")
+        _CUINIT.pop("mod")
+        return True
+    return False
+
+
+def unpatch_child(cuda=None, clear_env: bool = False) -> dict:
+    """In a forked worker child: restore `cuda-python` `cuInit` and all patched `torch.cuda`
+    functions before real GPU work."""
+    return {
+        "cuda_python": unguard_cuda_python(),
+        "torch_cuda": unpatch(cuda, clear_env=clear_env),
+    }
+
+
+def _resolve_guard_capability(capability):
+    """Normalize `capability` for `install_all_guards` into `(cap_pair_or_None, cap_fn_or_None)`.
+
+    Accepts `None`, `(major, minor)`, `((major, minor), count)`, or a callable returning
+    any of those.
+    """
+    if capability is None:
+        return None, None
+    if callable(capability):
+        val = capability()
+        if val is None:
+            return None, capability
+        if isinstance(val, (tuple, list)) and len(val) == 2 and isinstance(val[0], (tuple, list)):
+            pair = (int(val[0][0]), int(val[0][1]))
+            return pair, capability
+        pair = (int(val[0]), int(val[1]))
+        return pair, (lambda _pair=pair: (_pair, 1))
+    if isinstance(capability, (tuple, list)) and len(capability) == 2 and isinstance(capability[0], (tuple, list)):
+        pair = (int(capability[0][0]), int(capability[0][1]))
+        count = int(capability[1])
+        return pair, (lambda _pair=pair, _count=count: (_pair, _count))
+    pair = (int(capability[0]), int(capability[1]))
+    return pair, (lambda _pair=pair: (_pair, 1))
+
+
+def install_all_guards(
+    cuda=None,
+    *,
+    capability=None,
+    nvml=None,
+    properties: bool = True,
+    probe=None,
+    triton: bool = True,
+    cuda_python: bool = True,
+    cute_dsl: bool = True,
+    import_torch: bool = False,
+):
+    """Install all pre-fork CUDA guards in the safe order before heavy ML imports.
+
+    When `import_torch=True` and `cuda is None`, imports `torch` after setting
+    `PYTORCH_NVML_BASED_CUDA_CHECK`, `CUTE_DSL_ARCH`, and the `cuda-python` `cuInit`
+    stub so `torch.cuda` guards can be installed before downstream ML imports.
+
+    Returns `(report, restore_triton)`: call `restore_triton()` after preloading imports
+    in the zygote, and call `unpatch_child(clear_env=report["nvml_env_set"])` in each
+    forked child.
+    """
+    nvml_env_set = "PYTORCH_NVML_BASED_CUDA_CHECK" not in os.environ
+    if nvml_env_set:
+        os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
+    report = {"nvml_env_set": nvml_env_set}
+    resolved_cap, cap_fn = _resolve_guard_capability(capability)
+    if cute_dsl:
+        report["cute_dsl_arch"] = pin_cute_dsl_arch(resolved_cap, nvml)
+    if cuda_python:
+        report["cuda_python"] = guard_cuda_python(resolved_cap, nvml)
+    if cuda is None:
+        if import_torch and "torch" not in sys.modules:
+            try:
+                __import__("torch")
+            except ImportError:
+                pass
+        torch_mod = sys.modules.get("torch")
+        cuda = getattr(torch_mod, "cuda", None)
+    if cuda is not None:
+        report["torch_cuda"] = install(cuda, capability=cap_fn)
+        if properties:
+            report["properties"] = install_properties(cuda, probe=probe)
+    restore = lambda: None
+    if triton:
+        try:
+            restore = pin_triton_target(capability=resolved_cap, nvml=nvml)
+            report["triton"] = {"installed": not hasattr(restore, "skipped"),
+                                **({"skipped": restore.skipped} if hasattr(restore, "skipped") else {})}
+        except RuntimeError as exc:
+            report["triton"] = {"installed": False, "why": str(exc)}
+    return report, restore
 
 
 def parse_cpulist(cpulist_text: str) -> list[int]:

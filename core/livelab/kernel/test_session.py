@@ -332,3 +332,28 @@ class SessionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StatusOneRoundTest(unittest.TestCase):
+    def test_status_fingerprints_each_participant_once(self):
+        """Input: a session over one fake participant that counts `fingerprint` calls.
+        Action: `status()`. Expected: exactly one more fingerprint call (verify's), and the
+        digest reported is that round's; before the fix status asked twice, which on a 21-actor
+        Ray job cost about 10 s more per call."""
+        calls = []
+
+        class P(C.Participant):
+            name = "p"
+            def fingerprint(self, modules):
+                calls.append(modules)
+                return {"ok": True, "code": {"m:f:1": ["h", 1]}}
+
+        class Co:
+            participants = [P()]
+            poison = []
+        s = SS.Session(Co(), ["m"])
+        before = len(calls)
+        st = s.status()
+        self.assertEqual(len(calls) - before, 1)
+        self.assertEqual(st["state"], "base")
+        self.assertEqual(st["fingerprint"], SS.Session.digest({"p": {"m:f:1": ["h", 1]}}))

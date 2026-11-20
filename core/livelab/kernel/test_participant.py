@@ -5,8 +5,12 @@ a host does; the host itself (`Coordinator`) is the next kernel PR.
 Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 (or python3 -m pytest -q core/livelab/kernel)
 """
+import collections
+import sys
 import threading
+import types
 import unittest
+import weakref
 
 from . import coordinator as C
 from . import locate as L
@@ -299,6 +303,242 @@ class EditAddedDefinitionTest(unittest.TestCase):
             (mod_obj.CrossEntropyOp.apply_op(2), mod_obj.embed_op(3), part.at_base()["ok"]),
             (4, 4, True),
         )
+
+    def test_lru_cache_and_container_cached_jit_builders_undo_cleanly_to_base(self):
+        """Input: an edit that (1) adds a `@functools.lru_cache` lazy JIT builder and
+        (2) caches a tuple/dict of JIT wrappers on module globals and a class attribute
+        (FastVideo H3 patches 09-13 pattern). Expected: after running the builders, `undo`
+        clears LRU and container caches with zero `closure_not_restored` findings and
+        `at_base()['ok']` is True."""
+        idx = next(_n)
+        mod_name = f"kt_lru_jit{idx}"
+        base_src = (
+            "class Block:\n"
+            "    @staticmethod\n"
+            "    def run(val):\n"
+            "        return val + 1\n"
+        )
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        patched_src = (
+            "import functools\n\n"
+            "class _FakeJIT:\n"
+            "    def __init__(self, func):\n"
+            "        self.fn = func\n"
+            "        self.device_caches = {0: ({'k': func}, {})}\n"
+            "        self.pre_run_hooks = [lambda *a: func]\n\n\n"
+            "@functools.lru_cache(maxsize=4)\n"
+            "def _cached_builder(tag):\n"
+            "    @_FakeJIT\n"
+            "    def _k_a(x):\n"
+            "        return x + 10\n"
+            "    @_FakeJIT\n"
+            "    def _k_b(x):\n"
+            "        return x * 2\n"
+            "    return (_k_a, _k_b)\n\n\n"
+            "class Block:\n"
+            "    @staticmethod\n"
+            "    def run(val):\n"
+            "        pair = _cached_builder('default')\n"
+            "        globals()['_RUNTIME_KERNEL_TUPLE'] = pair\n"
+            "        Block._runtime_kernel_map = {'pair': pair}\n"
+            "        return pair[1].fn(pair[0].fn(val))\n"
+        )
+        self.assertTrue(part.prepare({"id": "txn-lru", "modules": {mod_name: {"source": patched_src}}})["ok"])
+        self.assertTrue(part.commit("txn-lru")["ok"])
+        self.assertEqual(mod_obj.Block.run(3), 26)
+        undo_res = part.undo("txn-lru")
+        self.assertEqual((undo_res["ok"], undo_res.get("findings", [])), (True, []))
+        self.assertFalse(hasattr(mod_obj, "_RUNTIME_KERNEL_TUPLE"))
+        self.assertFalse(hasattr(mod_obj.Block, "_runtime_kernel_map"))
+        self.assertEqual((mod_obj.Block.run(3), part.at_base()["ok"]), (4, True))
+
+    def _install_mock_triton_jit(self):
+        """Register a pure-stdlib fake `triton.runtime.jit` module in `sys.modules` modeling
+        Triton 3.5+'s `_triton_jit_function_registry` and `defaultdict(self.create_binder)` cycle."""
+        saved = {name: sys.modules.get(name) for name in ("triton", "triton.runtime", "triton.runtime.jit")}
+
+        def restore():
+            for name, old in saved.items():
+                if old is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = old
+
+        self.addCleanup(restore)
+        triton_mod = types.ModuleType("triton")
+        runtime_mod = types.ModuleType("triton.runtime")
+        jit_mod = types.ModuleType("triton.runtime.jit")
+        registry = {}
+        jit_mod._triton_jit_function_registry = registry
+
+        class MockJITFunction:
+            def __init__(self, fn):
+                self.fn = fn
+                self.module = fn.__module__
+                self.device_caches = collections.defaultdict(self.create_binder)
+                self.pre_run_hooks = []
+                self.used_global_vals = {}
+                registry[f"{self.module}:{self.fn.__qualname__}"] = self
+
+            def create_binder(self):
+                return ({}, lambda *args: self.fn(*args))
+
+            def __call__(self, *args):
+                cache_dict, binder = self.device_caches[0]
+                cache_dict["ran"] = True
+                return binder(*args)
+
+        def jit(fn):
+            return MockJITFunction(fn)
+
+        jit_mod.JITFunction = MockJITFunction
+        jit_mod.jit = jit
+        triton_mod.jit = jit
+        triton_mod.runtime = runtime_mod
+        runtime_mod.jit = jit_mod
+        sys.modules["triton"] = triton_mod
+        sys.modules["triton.runtime"] = runtime_mod
+        sys.modules["triton.runtime.jit"] = jit_mod
+        return registry
+
+    def test_triton_jit_registry_added_nested_and_toplevel_kernels_undo_cleanly(self):
+        """Input: a fake `triton.runtime.jit._triton_jit_function_registry` with Triton 3.5+'s
+        `device_caches = defaultdict(self.create_binder)` self-cycle; txn-1 adds a lazy nested
+        `@triton.jit` builder (`_builder.kernel = _kernel`, FastVideo Patch 07 pattern) plus a
+        top-level `@triton.jit` kernel, txn-2 stacks a second edit above it; both run and populate
+        `device_caches[0]`, then txn-2 and txn-1 are undone in reverse order. Expected: both undos
+        return `ok=True` with zero `closure_not_restored`, `_triton_jit_function_registry` has zero
+        leftover entries, `device_caches.default_factory` is cleared, and `at_base()['ok']` is True."""
+        registry = self._install_mock_triton_jit()
+        idx = next(_n)
+        mod_name = f"kt_triton_reg_add{idx}"
+        base_src = (
+            "def run(val):\n"
+            "    return val + 1\n"
+        )
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        part = C.LocalParticipant("core")
+        txn1_src = (
+            "import triton\n\n"
+            "@triton.jit\n"
+            "def _top_kernel(x):\n"
+            "    return x + 5\n\n\n"
+            "def _h3_direct_gate_merge_kernel():\n"
+            "    kern = getattr(_h3_direct_gate_merge_kernel, 'kernel', None)\n"
+            "    if kern is None:\n"
+            "        @triton.jit\n"
+            "        def _kernel(x):\n"
+            "            return x * 3\n"
+            "        _h3_direct_gate_merge_kernel.kernel = _kernel\n"
+            "        kern = _kernel\n"
+            "    return kern\n\n\n"
+            "def run(val):\n"
+            "    return _h3_direct_gate_merge_kernel()(_top_kernel(val))\n"
+        )
+        self.assertTrue(part.prepare({"id": "txn-1", "modules": {mod_name: {"source": txn1_src}}})["ok"])
+        self.assertTrue(part.commit("txn-1")["ok"])
+        txn2_src = (
+            "import triton\n\n"
+            "def _extra_padding(v):\n"
+            "    return v + 2\n\n\n"
+            + txn1_src.replace("import triton\n\n", "").replace(
+                "return _h3_direct_gate_merge_kernel()(_top_kernel(val))",
+                "return _extra_padding(_h3_direct_gate_merge_kernel()(_top_kernel(val)))",
+            )
+        )
+        self.assertTrue(part.prepare({"id": "txn-2", "modules": {mod_name: {"source": txn2_src}}})["ok"])
+        self.assertTrue(part.commit("txn-2")["ok"])
+        self.assertEqual(mod_obj.run(4), 29)
+        nested_key = f"{mod_name}:_h3_direct_gate_merge_kernel.<locals>._kernel"
+        top_key = f"{mod_name}:_top_kernel"
+        self.assertIn(nested_key, registry)
+        self.assertIn(top_key, registry)
+        nested_caches = registry[nested_key].device_caches
+        nested_ref = weakref.ref(registry[nested_key])
+        top_ref = weakref.ref(registry[top_key])
+
+        u2 = part.undo("txn-2")
+        self.assertEqual((u2["ok"], u2.get("findings", [])), (True, []))
+        self.assertEqual(mod_obj.run(4), 27)
+        u1 = part.undo("txn-1")
+        self.assertEqual((u1["ok"], u1.get("findings", [])), (True, []))
+        self.assertNotIn(nested_key, registry)
+        self.assertNotIn(top_key, registry)
+        self.assertIsNone(nested_caches.default_factory)
+        self.assertIsNone(nested_ref())
+        self.assertIsNone(top_ref())
+        self.assertEqual((mod_obj.run(4), part.at_base()["ok"]), (5, True))
+
+    def test_triton_jit_registry_modified_nested_kernel_restores_shadowed_base_entry(self):
+        """Input: a base module with an already-compiled nested `@triton.jit` builder AND a base
+        top-level `@triton.jit` kernel registered in `_triton_jit_function_registry`. Txn-1 edits
+        the builder's nested `@triton.jit` (overwriting the same `module:qualname` key in the
+        registry) and also stores `(base_top_kernel, new_nested_kernel)` in a new module global.
+        Expected: undo succeeds with zero `closure_not_restored`, restores the original base
+        `JITFunction` into `_triton_jit_function_registry` with its compiled `device_caches` and
+        `default_factory` intact, and leaves the base top-level kernel untouched."""
+        registry = self._install_mock_triton_jit()
+        idx = next(_n)
+        mod_name = f"kt_triton_reg_mod{idx}"
+        base_src = (
+            "import triton\n\n"
+            "@triton.jit\n"
+            "def _base_top(x):\n"
+            "    return x + 1\n\n\n"
+            "def _build(fresh=False):\n"
+            "    kern = None if fresh else getattr(_build, 'kernel', None)\n"
+            "    if kern is None:\n"
+            "        @triton.jit\n"
+            "        def _inner(x):\n"
+            "            return x * 2\n"
+            "        _build.kernel = _inner\n"
+            "        kern = _inner\n"
+            "    return kern\n\n\n"
+            "def run(val):\n"
+            "    return _build()(_base_top(val))\n"
+        )
+        (mod_obj,) = temp_modules(self, {mod_name: base_src})
+        self.assertEqual(mod_obj.run(3), 8)
+        nested_key = f"{mod_name}:_build.<locals>._inner"
+        top_key = f"{mod_name}:_base_top"
+        base_nested_jf = registry[nested_key]
+        base_top_jf = registry[top_key]
+        self.assertIn(0, base_nested_jf.device_caches)
+        self.assertIn(0, base_top_jf.device_caches)
+
+        part = C.LocalParticipant("core")
+        patched_src = base_src.replace(
+            "return x * 2", "return x * 10"
+        ).replace(
+            "return _build()(_base_top(val))",
+            "kern = _build(fresh=True)\n    globals()['_MIXED_PAIR'] = (_base_top, kern)\n    return kern(_base_top(val))",
+        )
+        self.assertTrue(
+            part.prepare({
+                "id": "txn-mod",
+                "accept": ["jit_target"],
+                "modules": {mod_name: {"source": patched_src}},
+            })["ok"]
+        )
+        self.assertTrue(part.commit("txn-mod")["ok"])
+        self.assertEqual(mod_obj.run(3), 40)
+        new_nested_jf = registry[nested_key]
+        self.assertIsNot(new_nested_jf, base_nested_jf)
+        new_ref = weakref.ref(new_nested_jf)
+        del new_nested_jf
+
+        undo_res = part.undo("txn-mod")
+        self.assertEqual((undo_res["ok"], undo_res.get("findings", [])), (True, []))
+        self.assertIs(registry.get(nested_key), base_nested_jf)
+        self.assertIsNotNone(base_nested_jf.device_caches.default_factory)
+        self.assertIn(0, base_nested_jf.device_caches)
+        self.assertIs(registry.get(top_key), base_top_jf)
+        self.assertIsNotNone(base_top_jf.device_caches.default_factory)
+        self.assertIn(0, base_top_jf.device_caches)
+        self.assertIsNone(new_ref())
+        self.assertFalse(hasattr(mod_obj, "_MIXED_PAIR"))
+        self.assertEqual((mod_obj.run(3), part.at_base()["ok"]), (8, True))
 
     def test_undo_keeps_base_globals_and_class_attributes_the_engine_set(self):
         """Input: a module with `make_shift(k)` (returns `shift`, x + k), a base global

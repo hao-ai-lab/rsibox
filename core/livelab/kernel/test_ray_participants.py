@@ -271,6 +271,38 @@ class RayParticipantsTest(unittest.TestCase):
         self.assertTrue(any(k.startswith(name + ":") for k in fp["code"]), fp)
         self.assertFalse(any(RP.file_module(unloaded) in k for k in fp["code"]), fp)
 
+    def test_base_source_handles_disk_edited_file_and_preserves_chained_order(self):
+        """Input: a module whose file on disk is edited BEFORE `prepare` (CLI edit-in-place
+        workflow), with `base_source` carrying the original pre-edit snapshot; then a second
+        chained edit on the same actor method.
+        Expected: edit 1 diffs against `base_source` (not the overwritten disk file) and swaps
+        `score` 4 -> 40; edit 2 diffs against edit 1 (not `__base__`) and swaps 40 -> 400;
+        undo restores 40 then 4."""
+        name, module = self.module()
+        with open(module.__file__) as handle:
+            base_src = handle.read()
+        actor = FakeActor(module.Worker)
+        participant = RP.RayActorParticipant("worker", actor, get=same_ref)
+        v1 = self.edit(("return helper(self.k)", "return helper(self.k) * 10"))
+        v2 = self.edit(("return helper(self.k)", "return helper(self.k) * 100"))
+        # Overwrite the file on disk BEFORE calling prepare (simulates editing the repo file).
+        with open(module.__file__, "w") as handle:
+            handle.write(v1)
+        coordinator = C.Coordinator([participant], phase2_deadline_s=None)
+        out1 = coordinator.run({"modules": {name: {"source": v1, "base_source": base_src}}})
+        self.assertEqual(out1["outcome"], "committed", out1)
+        self.assertEqual(actor.call("score"), 40)
+        # Second chained edit on disk + plan still carrying base_source must NOT shadow out1.
+        with open(module.__file__, "w") as handle:
+            handle.write(v2)
+        out2 = coordinator.run({"modules": {name: {"source": v2, "base_source": base_src}}})
+        self.assertEqual(out2["outcome"], "committed", out2)
+        self.assertEqual(actor.call("score"), 400)
+        self.assertEqual(coordinator.undo(out2["txn"])["status"], "undone")
+        self.assertEqual(actor.call("score"), 40)
+        self.assertEqual(coordinator.undo(out1["txn"])["status"], "undone")
+        self.assertEqual(actor.call("score"), 4)
+
     @unittest.skipUnless(importlib.util.find_spec("ray"), "ray is not installed")
     def test_real_ray_actors_run_the_edit_and_undo(self):
         """Input: two real Ray actors (local cluster, 2 CPUs) of `@ray.remote class Worker`;

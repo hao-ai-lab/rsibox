@@ -151,6 +151,36 @@ class CasesCatchMissingProperties(unittest.TestCase):
         self.assertCase("c2_visible", MultiRoleAbstain, "pass")
         self.assertCase("c2_visible", OneParticipant, "pass")
 
+    def test_c3_fresh_equivalence_surfaces_fresh_check_error(self):
+        """Input: a lab whose `fresh_check` returns `{"ok": False, "output": None, "error": ...}`
+        on the visible edit or on the chain-of-3 edit. Expected: `c3_fresh_equivalence` fails
+        and surfaces the error string instead of `('None', ...)`."""
+        class _ChainFakeLab(FakeLab):
+            def patches(self):
+                return {
+                    **super().patches(),
+                    "chain": [{"files": {"m": 2}}, {"files": {"m": 3}}, {"files": {"m": 4}}],
+                }
+
+        class _FailVisibleFresh(_ChainFakeLab):
+            def fresh_check(self, patch, workload=None):
+                if patch is not None:
+                    return {"ok": False, "output": None, "error": "boom-visible"}
+                return super().fresh_check(patch, workload)
+
+        class _FailChainFresh(_ChainFakeLab):
+            def fresh_check(self, patch, workload=None):
+                if patch and patch["files"]["m"] == 4:
+                    return {"ok": False, "output": None, "error": "boom-chain"}
+                return super().fresh_check(patch, workload)
+
+        r_vis = cases.run("c3_fresh_equivalence", _FailVisibleFresh)
+        self.assertEqual(r_vis["result"], "FAIL")
+        self.assertIn("boom-visible", r_vis["error"])
+        r_chain = cases.run("c3_fresh_equivalence", _FailChainFresh)
+        self.assertEqual(r_chain["result"], "FAIL")
+        self.assertIn("boom-chain", r_chain["error"])
+
     def test_c4_uninstall_catches_an_undo_that_leaves_the_edit(self):
         self.assertCase("c4_uninstall", FakeLab, "pass")
         self.assertCase("c4_uninstall", LeakyUninstall, "FAIL")

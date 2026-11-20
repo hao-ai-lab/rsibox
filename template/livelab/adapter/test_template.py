@@ -21,6 +21,7 @@ import adapter
 from adapter import lab as template_lab
 from conformance import __main__ as conformance_cli
 from conformance import cases as conformance_cases
+import fastrsi
 import forksafe
 from kernel import coordinator, session
 
@@ -31,7 +32,9 @@ class TemplateSkeletonTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(adapter.LIVELAB))
         self.assertTrue(hasattr(coordinator, "StepGapCoordinator"))
         self.assertTrue(hasattr(session, "Session"))
-        self.assertTrue(hasattr(forksafe, "install"))
+        self.assertTrue(hasattr(forksafe, "install_all_guards"))
+        self.assertTrue(hasattr(fastrsi, "BaseLab"))
+        self.assertTrue(hasattr(fastrsi, "PackageOverlay"))
 
     def test_conformance_runner_executes_all_eleven_cases_and_fails_eleven_of_eleven(self):
         output_buffer = io.StringIO()
