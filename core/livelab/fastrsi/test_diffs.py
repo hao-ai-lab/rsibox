@@ -111,8 +111,8 @@ class RealGitDiffCorpusTests(unittest.TestCase):
     def test_real_megatron_and_fastvideo_git_diff_patches(self):
         megatron_patches = sorted(MEGATRON_PATCH_DIR.glob("*.patch"))
         fastvideo_patches = sorted(FASTVIDEO_PATCH_DIR.glob("*.patch"))
-        self.assertGreaterEqual(len(megatron_patches), 3, megatron_patches)
-        self.assertGreaterEqual(len(fastvideo_patches), 19, fastvideo_patches)
+        self.assertGreaterEqual(len(megatron_patches), 4, megatron_patches)
+        self.assertGreaterEqual(len(fastvideo_patches), 20, fastvideo_patches)
 
         corpus = [
             ("megatron.", megatron_patches),

@@ -12,11 +12,11 @@
   if (hl && hr && window.dash) {
     const WLS = dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order);
     const RUNGS = dash.data('ladder_rungs').data, LAD = dash.data('eval_ladder').data;
-    const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen' };   // name of each engine's last measured rung
+    const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen', verl: 'Offline probe', sglang: 'Targeted probe', miles: 'Recorded-rollout replay' };   // name of each engine's last measured rung
     const PLAY = 4500, HOLD = 2500, TOTAL = PLAY + HOLD;   // ms: the animation, then the pause before the next engine
     let gen = 0, timer = null, cur = 0, paused = false, left = 0, since = 0;
     const later = (g, ms, fn) => setTimeout(() => { if (g === gen) fn(); }, ms);
-    const fmtS = (t) => (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s';
+    const fmtS = (t) => (t > 0 && t < 0.1 ? (t < 0.01 ? (t * 1000).toFixed(2) : Math.round(t * 1000)) + ' ms' : (t >= 100 ? Math.round(t) : t.toFixed(1)) + ' s');
 
     function ladder(wl, g, anim) {
       hl.replaceChildren();
@@ -35,7 +35,7 @@
         else {
           const t = tot(st), prev = i ? rows[i - 1][0] : st;
           segs = phases.map((ph) => { const sg = $('i', null, null, bar); sg.style.background = 'var(--ph-' + ph + ')'; sg.style.width = (100 * sec(anim ? prev : st, ph) / base) + '%'; return [sg, 100 * sec(st, ph) / base]; });
-          $('b', null, i ? (base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×' : '', v); $('span', null, fmtS(t), v);
+          $('b', null, i ? (base / t >= 1000 ? Math.round(base / t).toLocaleString('en-US') : base / t >= 10 ? Math.round(base / t) : (base / t).toFixed(1)) + '×' : '', v); $('span', null, fmtS(t), v);
         }
         if (anim) {
           r.style.opacity = 0; v.style.opacity = 0;
@@ -50,9 +50,18 @@
     function race(wl, g, anim, done) {
       hr.replaceChildren();
       const NS = 'http://www.w3.org/2000/svg', el = (t, a, p) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; };
-      const W = 480, Hh = 250, m = { l: 46, r: 46, t: 46, b: 36 }, T = +wl.budget_h;
+      const fig = hr.closest('.hero-fig');
       const pts = (arm) => dash.data('race_steps').data.filter((r) => r.workload === wl.workload && r.arm === arm && r.kind === 'best').map((r) => [+r.t_h, +r.value]).sort((x, y) => x[0] - y[0]);
-      const C = pts('codex'), F = pts('fastrsi'), endC = C[C.length - 1][1], endF = F[F.length - 1][1], target = endC, hi = Math.max(endF, endC);
+      const C = pts('codex'), F = pts('fastrsi');
+      if (!C.length || !F.length) {
+        if (fig) fig.classList.add('hero-blank');
+        $('div', 'hr-empty', 'Autoresearch race not run yet for this engine.', hr);
+        done();
+        return;
+      }
+      if (fig) fig.classList.remove('hero-blank');
+      const W = 480, Hh = 250, m = { l: 46, r: 46, t: 46, b: 36 }, T = +wl.budget_h;
+      const endC = C[C.length - 1][1], endF = F[F.length - 1][1], target = endC, hi = Math.max(endF, endC);
       const tC = C.find((p) => p[1] >= target)[0], hit = F.find((p) => p[1] >= target), tF = hit ? hit[0] : null;
       const stp = hi - 1 < 0.2 ? 0.05 : hi - 1 < 0.5 ? 0.1 : 0.25, dp = stp < 0.1 || stp === 0.25 ? 2 : 1;
       const ticks = []; for (let v = 1; v <= hi + 1e-9; v += stp) ticks.push(v);
@@ -108,8 +117,9 @@
       if (pager) [...pager.children].forEach((b, k) => { b.setAttribute('aria-pressed', String(k === i)); b.classList.remove('run'); });
       const draw = () => {
         if (g !== gen) return;
+        const hasRace = dash.data('race_steps').data.some((r) => r.workload === wl.workload && r.kind === 'best');
         document.getElementById('hero-ladder-sub').textContent = 'Time for one evaluation, ' + wl.engine_label;
-        document.getElementById('hero-race-sub').textContent = wl.label + ', best speedup found in ' + (+wl.budget_h) + ' h';
+        document.getElementById('hero-race-sub').textContent = hasRace ? wl.label + ', best speedup found in ' + (+wl.budget_h) + ' h' : wl.engine_label + ', autoresearch race not run yet';
         ladder(wl, g, anim); race(wl, g, anim, () => {});
         if (auto && pager) { const b = pager.children[i]; void b.offsetWidth; b.classList.add('run'); }
         left = TOTAL; run();
@@ -131,6 +141,7 @@
     let home = null, node = null;
     const back = () => { if (node && home) { home.replaceWith(node); node = home = null; } };
     document.querySelectorAll('[data-pop]').forEach((a) => a.addEventListener('click', (e) => {
+      if (a.classList.contains('hero-blank')) { e.preventDefault(); return; }
       const sec = document.getElementById(a.dataset.pop); if (!sec) return;
       e.preventDefault(); back();
       home = document.createElement('div'); home.style.height = sec.offsetHeight + 'px';
