@@ -57,9 +57,7 @@ How a transaction runs (kernel `StepGapCoordinator`):
 The host records every step's duration, so a reply says how long steps stalled.
 """
 import collections
-import importlib.abc
 import itertools
-import json
 import os
 import statistics
 import sys
@@ -67,9 +65,11 @@ import threading
 import time
 import traceback
 
+from fastrsi import hooks, lab as lab_base
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import receipt as R
+from services import core_hook
 
 from .side import Side
 
@@ -80,33 +80,8 @@ PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5"))
 RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
-
-
-class _Job:
-    """A callable for the busy loop. gap=True: run only with no batch in flight."""
-
-    def __init__(self, fn, gap):
-        self.fn, self.gap = fn, gap
-        self.done, self.started = threading.Event(), threading.Event()
-        self.lock = threading.Lock()
-        self.cancelled = False         # the caller stopped waiting before it started
-        self.value = self.error = None
-
-    def run(self):
-        with self.lock:
-            if self.cancelled:
-                self.done.set()
-                return
-            self.started.set()
-        try:
-            self.value = self.fn()
-        except BaseException as e:            # handed back to the waiting caller
-            self.error = e
-        self.done.set()
-
-
-class LateJob(TimeoutError):
-    """The loop started the job but it did not finish in time: it may still be running."""
+_Job = core_hook.LoopJob
+LateJob = core_hook.LateJob
 
 
 class WorkerGroup(C.Participant):
@@ -248,58 +223,8 @@ def parallel(core):
     return {"world": world, "dp": dp, "dp_rank": rank, "expected": expected, "note": note}
 
 
-class RecaptureCoordinator(C.StepGapCoordinator):
-    """StepGapCoordinator plus selective CUDA graph recapture after a commit, in the same gap
-    (see the module doc). `rebuild(txn, spec)` reaches the worker ranks."""
-
-    def __init__(self, *a, rebuild=None, **k):
-        super().__init__(*a, **k)
-        self.rebuild = rebuild
-
-    def _phase2(self, txn, tl):
-        out = super()._phase2(txn, tl)
-        plan = self.txns[txn]["plan"]
-        rebuild_keys = plan.get("rebuild") or ()
-        if out["outcome"] != "committed" or not ("recapture" in rebuild_keys or "R1" in rebuild_keys):
-            return out
-        spec = dict(plan.get("recapture") or plan.get("r1") or {})
-        t0 = self.clock()
-        r = self.rebuild(txn, spec)
-        tl["rebuilt"] = self.clock()
-        ranks = r.get("ranks") or []
-        dur = round(tl["rebuilt"] - t0, 6)
-        route_name = "recapture" if "recapture" in rebuild_keys else "R1"
-        out["rebuild"] = {"ok": bool(r.get("ok")), "routes": [route_name],
-                          "seconds": {route_name: dur, "R1": dur, "recapture": dur}, "spec": spec,
-                          "ranks": {str(x.get("rank")): {k: x.get(k) for k in (
-                              "ok", "error", "seconds", "captured", "modes", "wrappers",
-                              "eager", "memory", "skipped")} for x in ranks}}
-        if r.get("ok"):
-            self.txns[txn]["rebuilt"] = [route_name]
-            return out
-        fs = [f for x in ranks for f in x.get("findings", [])] or [F.finding(
-            "rebuild_failed", str(r.get("error")), "recapture on every rank")]
-        out["extra"] += [{**f, "participant": "workers"} for f in fs]
-        rb = out["rollback"] = {"status": "undone", "participants": {}}
-        res = self.txns[txn]["res"]
-        # the undo gets the phase-2 deadline afresh (a participant that misses it poisons
-        # the host in _bounded, and pending_rollback then holds steps until it lands)
-        undo_deadline = time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
-        missed = set()
-        for p in reversed(self.participants):
-            rb["participants"][p.name] = res[p.name]["undo"] = self._bounded(
-                p, "undo", txn, undo_deadline, missed)
-        if not all(u["ok"] for u in rb["participants"].values()):
-            rb["status"] = "partial"
-            with self._lock:
-                self.txns[txn]["pending_rollback"] = [
-                    participant for participant in reversed(self.participants)
-                    if not rb["participants"][participant.name]["ok"]
-                ]
-        out["outcome"] = "rolled_back"
-        tl.pop("committed", None)
-        tl["gap_end"] = self.clock()
-        return out
+class RecaptureCoordinator(lab_base.RecaptureCoordinator):
+    """`fastrsi.lab.RecaptureCoordinator` plus vLLM's in-loop pending-rollback gate."""
 
     def _queue_rollback_gate(self):
         gap_owner = getattr(self.gap, "__self__", None)
@@ -395,21 +320,9 @@ class Host:
         """Run fn on the busy-loop thread (between steps; with gap=True, also with no batch
         in flight) and return its result. The loop must start the job within `timeout` (else
         it is cancelled and never runs); once started it may run `timeout` more seconds."""
-        if threading.current_thread() is self.loop_thread:
-            return fn()
-        job = _Job(fn, gap)
-        self.core.input_queue.put_nowait((TAG, job))
-        if not job.started.wait(timeout):
-            with job.lock:
-                if not job.started.is_set():
-                    job.cancelled = True
-                    raise TimeoutError(f"the engine loop did not run the job within {timeout} s")
-        if not job.done.wait(timeout):
-            raise LateJob(f"the engine loop started the job but it did not finish within "
-                          f"{timeout} s")
-        if job.error is not None:
-            raise job.error
-        return job.value
+        return core_hook.in_loop(
+            self.core, TAG, fn, gap=gap, timeout=timeout, loop_thread=self.loop_thread
+        )
 
     def step_stats(self, t0, t1):
         d = [s for start, s in list(self.steps) if t0 <= start <= t1]
@@ -481,128 +394,89 @@ class Host:
                                                     if a <= st <= b)
         return r
 
-    def control(self):
-        ctl = os.path.join(self.root, "ctl.json")
-        os.makedirs(os.path.join(self.root, "reply"), exist_ok=True)
-        last = 0
-        while True:
-            try:
-                with open(ctl) as f:
-                    cmd = json.load(f)
-            except (OSError, ValueError):
-                cmd = None
-            if cmd and cmd.get("seq", 0) > last:
-                last = cmd["seq"]
-                r = self.handle(cmd)
-                tmp = os.path.join(self.root, "reply", f".{last}.tmp")
-                with open(tmp, "w") as f:
-                    json.dump(r, f, default=str)
-                os.replace(tmp, os.path.join(self.root, "reply", f"{last}.json"))
-            time.sleep(0.01)
+def _cur():
+    return _HOST[0] if _HOST else None
 
 
-def _patch_core(mod):
-    P = mod.EngineCoreProc
-    orig_handle, orig_step, orig_loop = (P._handle_client_request, P._process_engine_step,
-                                         P.run_busy_loop)
-
-    def _handle_client_request(self, request_type, request):
-        if request_type != TAG:
-            return orig_handle(self, request_type, request)
-        if request.gap and self.batch_queue:     # a batch is in flight: after it lands
-            _HOST[0].pending.append(request)
-        else:
-            request.run()
-
-    def _process_engine_step(self):
-        host = _HOST[0] if _HOST else None
-        coordinator = getattr(host, "co", None)
-        core_side = getattr(host, "core_side", None)
-        if host is not None:
-            host.loop_thread = threading.current_thread()
-            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
-            while host.pending and not self.batch_queue:
-                host.pending.pop(0).run()
-            if not self.batch_queue and coordinator is not None and coordinator.poll_rollback():
-                host.held_steps += 1
-                time.sleep(0.005)
-                return False
-        hold = bool(
-            host and (
-                host.pending or (coordinator is not None and coordinator.has_pending_rollback())
-            ) and self.batch_queue
-        )
-        if hold:                                 # pause keep: schedule nothing new
-            self.scheduler.has_requests = lambda: False
-            host.held_steps += 1
-        if core_side is not None:
-            core_side.tick(True)
-        step_start = time.perf_counter()
-        try:
-            result = orig_step(self)
-        finally:
-            if hold:
-                del self.scheduler.has_requests
-        if host is not None:
-            if core_side is not None:
-                core_side.tick(False)
-            host.steps.append((step_start, time.perf_counter() - step_start))
-            host.pending = [job for job in host.pending if not getattr(job, "cancelled", False)]
-            while host.pending and not self.batch_queue:
-                host.pending.pop(0).run()
-        return result
-
-    def run_busy_loop(self):
-        pc = getattr(getattr(self, "vllm_config", None), "parallel_config", None)
-        if DIR and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
-            print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "
-                  "channel)", file=sys.stderr, flush=True)
-            return orig_loop(self)
-        if DIR and not _HOST:
-            h = Host(self, DIR)
-            _HOST.append(h)
-            threading.Thread(target=h.control, daemon=True, name="fastrsi-kernel-host").start()
-        return orig_loop(self)
-
-    P._handle_client_request = _handle_client_request
-    P._process_engine_step = _process_engine_step
-    P.run_busy_loop = run_busy_loop
+def _drain(host, core):
+    host.pending = [j for j in host.pending if not getattr(j, "cancelled", False)]
+    while host.pending and not core.batch_queue:
+        host.pending.pop(0).run()
 
 
-class _After(importlib.abc.MetaPathFinder):
-    """Patch vllm.v1.engine.core right after it is imported, from wherever the other import
-    finders load it: it asks only the finders after it on sys.meta_path, in order (an overlay
-    finder first, then the installed package), instead of PathFinder directly, which would
-    bypass the overlay and report a false base_mismatch. Never the finders in front of it:
-    one of those may be asking it right now."""
-
-    def find_spec(self, name, path, target=None):
-        if name != "vllm.v1.engine.core":
-            return None
-        spec = None
-        finders = list(sys.meta_path)
-        # only the finders after this one: a finder in front of it that asks every other
-        # finder (live_reconfig's does) would otherwise be asked again, forever
-        later = finders[finders.index(self) + 1:] if self in finders else finders
-        for finder in later:
-            if isinstance(finder, _After) or not hasattr(finder, "find_spec"):
-                continue
-            spec = finder.find_spec(name, path, target)
-            if spec is not None:
-                break
-        if spec is None or spec.loader is None or not hasattr(spec.loader, "exec_module"):
-            return None
-        orig = spec.loader.exec_module
-
-        def exec_module(module):
-            orig(module)
-            _patch_core(module)
-        spec.loader.exec_module = exec_module
-        return spec
-
-
-if DIR and not any(isinstance(f, _After) for f in sys.meta_path):
-    if "vllm.v1.engine.core" in sys.modules:     # imported before this module: patch it now
-        _patch_core(sys.modules["vllm.v1.engine.core"])
+def _on_request(core, request):
+    if request.gap and core.batch_queue:         # a batch is in flight: after it lands
+        _HOST[0].pending.append(request)
     else:
-        sys.meta_path.insert(0, _After())
+        request.run()
+
+
+def _pre_step(core):
+    host = _cur()
+    if host is None:
+        return True
+    co = getattr(host, "co", None)
+    host.loop_thread = threading.current_thread()
+    _drain(host, core)
+    if not core.batch_queue and co is not None and co.poll_rollback():
+        host.held_steps += 1
+        time.sleep(0.005)
+        return False
+    return True
+
+
+def _should_hold(core):
+    host = _cur()
+    co = getattr(host, "co", None)
+    return bool(host and (host.pending or (co is not None and co.has_pending_rollback()))
+                and core.batch_queue)
+
+
+def _before_step(_core, _hold):
+    side = getattr(_cur(), "core_side", None)
+    if side is not None:
+        side.tick(True)
+
+
+def _after_step(core, step_start, _result):
+    host = _cur()
+    if host is None:
+        return
+    if getattr(host, "core_side", None) is not None:
+        host.core_side.tick(False)
+    host.steps.append((step_start, time.perf_counter() - step_start))
+    _drain(host, core)
+
+
+def _on_loop_start(core):
+    root = DIR or os.environ.get("FASTRSI_KERNEL_DIR")
+    pc = getattr(getattr(core, "vllm_config", None), "parallel_config", None)
+    if root and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
+        print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "
+              "channel)", file=sys.stderr, flush=True)
+        return None
+    if root and not _HOST:
+        h = Host(core, root)
+        _HOST.append(h)
+        return (h.root, h.handle, 0.01)
+    return None
+
+
+core_hook.register(core_hook.CorePlugin(
+    name="kernel_host", tag=TAG, on_loop_start=_on_loop_start, on_request=_on_request,
+    pre_step=_pre_step, should_hold=_should_hold, on_hold=lambda _: setattr(_HOST[0], "held_steps", _HOST[0].held_steps + 1),
+    before_step=_before_step, after_step=_after_step,
+))
+
+_patch_core = core_hook._patch_core
+
+
+class _After(hooks.AfterImportHook):
+    """Stack-safe import hook patching `vllm.v1.engine.core` via downstream finders only."""
+
+    def __init__(self):
+        super().__init__(core_hook.TARGET_MODULE, _patch_core, once=False)
+
+
+if DIR:
+    core_hook.install()

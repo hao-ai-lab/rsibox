@@ -5,10 +5,13 @@ by a real `adapter.host.Host` over in-process `Side` endpoints (one worker rank 
 core, each with its own synthetic copies of the 4 vLLM modules `VllmLab` edits), plus unit
 tests for farm construction and fault/timeout handling.
 """
+import difflib
 import importlib.util
 import itertools
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import threading
@@ -206,6 +209,7 @@ class FakeBackend:
         self.worker_obj = worker_obj
         self.worker_side = Side("worker", scope={"worker": worker_obj}, rank=0, alias={"vllm": self.w_prefix})
         core_obj = NS(
+            vllm_config=NS(parallel_config=NS(world_size=1)),
             model_executor=FakeExecutor([self.worker_side], self.lost),
             reset_prefix_cache=self._reset_cache,
         )
@@ -294,6 +298,64 @@ def make_cpu_lab(check_timeout=0.4):
 class ConformanceOnFakeVllmTest(unittest.TestCase):
     """Every conformance case (c0-c10) passes on `VllmLab` over `Host` + `Side`."""
 
+    def test_single_worker_host_cannot_satisfy_tp2(self):
+        lab = make_cpu_lab()
+        self.addCleanup(lab.close)
+        ping = lab._ctl({"op": "ping"})
+        CL._check_topology(ping, 1)
+        with self.assertRaisesRegex(RuntimeError, "requested TP=2"):
+            CL._check_topology(ping, 2)
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "requires Linux process identity")
+    def test_stop_reclaims_marked_worker_after_server_exit(self):
+        with tempfile.TemporaryDirectory() as marker:
+            with subprocess.Popen(
+                [sys.executable, "-c", "import os, subprocess, sys; "
+                 "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+                 "stdout=subprocess.DEVNULL); print(p.pid, flush=True); input(); os._exit(0)"],
+                env={**os.environ, "FASTRSI_LIVE_RECONFIG_DIR": marker},
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
+            ) as leader:
+                worker = int(leader.stdout.readline())
+                try:
+                    srv = CL._ServerHandle(leader.pid, 0, marker, 0, "", marker=marker)
+                    leader.communicate("\n", timeout=5)
+                    self.assertFalse(srv.alive())
+                    self.assertTrue(CL._alive(worker))
+                    srv.stop()
+                    self.assertFalse(CL._alive(worker))
+                finally:
+                    if CL._alive(worker):
+                        os.kill(worker, signal.SIGKILL)
+                    if leader.poll() is None:
+                        leader.kill()
+                        leader.communicate()
+
+    def test_original_edit_id_can_undo_after_fresh_check_pauses_live_server(self):
+        lab = make_cpu_lab()
+        backend = lab._backend
+        self.addCleanup(backend.close)
+        edit = lab.patches()["visible"]
+        original = lab.install(edit)["id"]
+        # Keep the real session, replacement host and participants. Only process startup
+        # and HTTP are replaced with the fixture's independently loaded modules.
+        srv = NS(alive=lambda: True, stop=lambda: None, port=8111)
+        def start_server(port, tag, use_farm):
+            if tag == "live":
+                backend.respawn()
+            return srv
+        lab.server, lab.port, lab.share_gpu = srv, srv.port, True
+        with (mock.patch.object(lab, "_backend", None),
+              mock.patch.object(lab, "_ctl", backend.ctl),
+              mock.patch.object(lab, "_start_server", start_server),
+              mock.patch.object(lab, "_write_farm"),
+              mock.patch.object(lab, "_run_http", return_value=backend.fresh_check(edit)["output"]),
+              mock.patch.object(CL.VllmLab, "_shared", srv)):
+            self.assertTrue(lab.fresh_check(edit)["ok"])
+            self.assertEqual(lab.status()["txns"], [original])
+            self.assertTrue(lab.uninstall(original)["ok"])
+            self.assertEqual(lab.status()["state"], "base")
+
     def test_all_11_conformance_cases_pass(self):
         for name in cases.CASES:
             with self.subTest(case=name):
@@ -339,6 +401,95 @@ class FarmAndHelpersTest(unittest.TestCase):
         for entry in saved:
             self.assertTrue(lab.install(entry)["ok"])
         self.assertTrue(lab.uninstall()["ok"])
+
+    def test_launch_environment_maps_flags_and_trailing_serve_args(self):
+        env = CL.VllmLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B",
+            "--venv", "rel-venv",
+            "--work", "rel-work",
+            "--port", "19000",
+            "--tp", "2",
+            "--check-timeout", "45.5",
+            "--no-share-gpu",
+            "--extra", "--seed 0 --enforce-eager",
+            "--", "--max-model-len", "1024",
+        ])
+        self.assertEqual(env, {
+            "FASTRSI_VLLM_MODEL": "Qwen/Qwen3-8B",
+            "FASTRSI_VLLM_VENV": os.path.abspath("rel-venv"),
+            "FASTRSI_VLLM_WORK": os.path.abspath("rel-work"),
+            "FASTRSI_VLLM_PORT": "19000",
+            "FASTRSI_VLLM_TP": "2",
+            "FASTRSI_VLLM_CHECK_TIMEOUT": "45.5",
+            "FASTRSI_VLLM_SHARE_GPU": "0",
+            "FASTRSI_VLLM_EXTRA": "--seed 0 --enforce-eager --max-model-len 1024",
+        })
+        minimal = CL.VllmLab.launch_environment(["--model", "/models/qwen"])
+        self.assertEqual(minimal, {"FASTRSI_VLLM_MODEL": "/models/qwen"})
+        self.assertNotIn("FASTRSI_VLLM_TP", minimal)
+        self.assertNotIn("FASTRSI_VLLM_EXTRA", minimal)
+        only_tail = CL.VllmLab.launch_environment(["--model", "/models/qwen", "--", "--enforce-eager"])
+        self.assertEqual(only_tail["FASTRSI_VLLM_EXTRA"], "--enforce-eager")
+
+        # `fastrsi conformance vllm --real -- --model ...` forwards a leading "--".
+        leading = CL.VllmLab.launch_environment(["--", "--model", "/models/qwen", "--tp", "2"])
+        self.assertEqual(leading, {"FASTRSI_VLLM_MODEL": "/models/qwen", "FASTRSI_VLLM_TP": "2"})
+
+        leading_with_tail = CL.VllmLab.launch_environment(
+            ["--", "--model=/models/qwen", "--", "--enforce-eager", "--max-model-len", "1024"]
+        )
+        self.assertEqual(leading_with_tail, {
+            "FASTRSI_VLLM_MODEL": "/models/qwen",
+            "FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024",
+        })
+
+        # Preset FASTRSI_VLLM_MODEL + raw serve flags behind a single leading "--".
+        raw_tail_only = CL.VllmLab.launch_environment(["--", "--enforce-eager", "--max-model-len", "1024"])
+        self.assertEqual(raw_tail_only, {"FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024"})
+
+    def test_install_and_fresh_check_accept_stacked_unified_diffs_and_refuse_stale_diff(self):
+        lab = make_cpu_lab()
+        self.addCleanup(lab.close)
+        base_out = lab.check()["output"]
+        sampler_path = CL.SAMPLER.replace(".", "/") + ".py"
+        anchor = "        sampled, processed_logits = self.sample(\n"
+        v1 = CL._edit(FAKE_SAMPLER, anchor, "        logits = -logits\n" + anchor)
+        v2 = CL._edit(v1, "        logits = -logits\n", "        logits = logits.roll(1, dims=-1)\n")
+
+        def make_diff(old_src, new_src):
+            return "".join(difflib.unified_diff(
+                old_src.splitlines(True), new_src.splitlines(True),
+                fromfile=f"a/{sampler_path}", tofile=f"b/{sampler_path}",
+            ))
+
+        diff1 = make_diff(FAKE_SAMPLER, v1)
+        diff2 = make_diff(v1, v2)
+        combined_diff = make_diff(FAKE_SAMPLER, v2)
+
+        r1 = lab.install({"diff": diff1})
+        self.assertTrue(r1["ok"], r1)
+        out1 = lab.check()["output"]
+        self.assertNotEqual(out1, base_out)
+
+        # Stacking diff2 applies against live v1 text; re-applying diff1 is refused cleanly.
+        stale = lab.install({"diff": diff1})
+        self.assertEqual((stale["ok"], stale["outcome"], stale["codes"]), (False, "refused", ["patch_invalid"]))
+        r2 = lab.install({"diff": diff2})
+        self.assertTrue(r2["ok"], r2)
+        out2 = lab.check()["output"]
+        self.assertNotEqual(out2, out1)
+
+        # fresh_check resolves unified diff against base/disk text and matches live stacked output.
+        fresh = lab.fresh_check({"diff": combined_diff})
+        self.assertTrue(fresh["ok"], fresh)
+        self.assertEqual(fresh["output"], out2)
+        bad_fresh = lab.fresh_check({"diff": diff2})
+        self.assertFalse(bad_fresh["ok"])
+
+        self.assertTrue(lab.uninstall()["ok"])
+        self.assertEqual((lab.check()["output"], lab.status()["state"]), (out1, "edited"))
+        self.assertTrue(lab.uninstall()["ok"])
+        self.assertEqual((lab.check()["output"], lab.status()["state"]), (base_out, "base"))
 
 
 if __name__ == "__main__":
