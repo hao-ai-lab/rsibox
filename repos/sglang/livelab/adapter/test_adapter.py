@@ -171,6 +171,20 @@ class SglangAdapterTests(unittest.TestCase):
             SglangConformanceLab.launch_environment(["--extra", "[1, 2]"])
         self.assertEqual(cm.exception.code, 2)
 
+    def test_agent_rank_fallback_resolves_runtime_context(self):
+        """`agent._rank` falls back cleanly across modern SGLang runtime_context getters."""
+        from types import SimpleNamespace
+        from adapter import agent
+
+        self.assertEqual(agent._rank(SimpleNamespace(tp_rank=3)), 3)
+        self.assertEqual(agent._rank(SimpleNamespace(tp_worker=SimpleNamespace(tp_rank=2))), 2)
+        sched_none = SimpleNamespace(tp_worker=SimpleNamespace(model_runner=SimpleNamespace()))
+        fake_ctx = SimpleNamespace(get_parallel=lambda: SimpleNamespace(tp_rank=1))
+        with mock.patch.dict(sys.modules, {"sglang.srt.runtime_context": fake_ctx}):
+            self.assertEqual(agent._rank(sched_none), 1)
+        with mock.patch.dict(sys.modules, {"sglang.srt.runtime_context": None, "sglang.srt.distributed": None}):
+            self.assertEqual(agent._rank(sched_none), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
