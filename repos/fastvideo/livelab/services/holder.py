@@ -22,7 +22,9 @@ file). CPU tensors in the tree travel through shared memory (a copy, not pinned)
 
 Transport: `multiprocessing.connection` over a unix socket (no network port), ForkingPickler.
 """
+import ctypes
 import hashlib
+import io
 import json
 import os
 import sys
@@ -105,23 +107,153 @@ def stamp_diff(old, new):
 
 
 # -- the holder process --------------------------------------------------------------------
+def _walk_tensors(root, tensor_cls):
+    """Iteratively yield every `tensor_cls` reachable from `root`, breaking cycles."""
+    import types
+    skip = (type(None), int, float, str, bytes, bool, type, types.ModuleType, types.FunctionType)
+    seen, stack = set(), [root]
+    while stack:
+        obj = stack.pop()
+        if isinstance(obj, skip) or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, tensor_cls):
+            yield obj
+        elif isinstance(obj, dict):
+            stack.extend(obj.values())
+            stack.extend(obj.keys())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+        else:
+            if isinstance(d := getattr(obj, "__dict__", None), dict):
+                stack.extend(d.values())
+            for cls in type(obj).__mro__:
+                slots = cls.__dict__.get("__slots__", ())
+                for s in ((slots,) if isinstance(slots, str) else slots):
+                    if s not in ("__dict__", "__weakref__") and hasattr(obj, s):
+                        stack.append(getattr(obj, s))
+
+
+def _private_cpu(torch_mod, storage, cache):
+    key = getattr(storage, "_cdata", id(storage))
+    if key not in cache:
+        priv = torch_mod.UntypedStorage(storage.nbytes())
+        if storage.nbytes():
+            priv.copy_(storage)
+        cache[key] = priv
+    return cache[key]
+
+
 def _own(module):
-    """A copy of a received module (its tensors IPC-mapped from the sender) whose every tensor,
-    nested ones included (lists, dicts, helper objects), this process owns: the sender may
-    exit, and the copy can be sent on (torch refuses to forward a received CUDA tensor)."""
+    """A copy of a received module whose tensors this process owns: private CPU storages
+    sever any sender `torch_shm_manager` while keeping tied views aliased."""
     import copy
     import torch
-    owned = copy.deepcopy(module)       # the memo keeps tied tensors tied
+    memo, private, keep = {"torch": {}}, {}, []
+    for t in _walk_tensors(module, torch.Tensor):
+        if t.device.type == "cpu" and (s := t.untyped_storage()).is_shared():
+            keep.append(s)
+            priv = _private_cpu(torch, s, private)
+            memo[id(s)] = priv
+            if (cdata := getattr(s, "_cdata", None)) is not None:
+                memo["torch"][cdata] = priv
+    owned = copy.deepcopy(module, memo)       # the memo keeps tied tensors tied
+    post = {}
+    with torch.no_grad():
+        for t in _walk_tensors(owned, torch.Tensor):
+            if t.device.type == "cpu" and (s := t.untyped_storage()).is_shared():
+                t.data.set_(_private_cpu(torch, s, post), t.storage_offset(), t.size(), t.stride())
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         torch.cuda.synchronize()
     return owned
 
 
+def _private_tracker_fd():
+    """Keep multiprocessing's resource-tracker pipe out of programs this process executes.
+
+    A spawned process receives the pipe as an inheritable fd. torch's `file_system` sharing
+    starts the `torch_shm_manager` daemon by fork and exec, so the daemon inherited it and
+    outlived the lab: the tracker never saw the pipe close, and the lab host, which waits for
+    the tracker at exit, hung after its last video (our 2026-11-19 runs with the holder).
+    multiprocessing passes the pipe to its own children explicitly, so this costs them nothing.
+    """
+    from multiprocessing import resource_tracker
+    fd = getattr(resource_tracker._resource_tracker, "_fd", None)
+    if fd is not None:
+        try:
+            os.set_inheritable(fd, False)
+        except OSError:
+            pass
+
+
 def _ipc():
     """CUDA tensors travel as IPC handles; CPU tensors through named shared memory (no fd
     passing between processes that do not share a parent's resource sharer)."""
+    _private_tracker_fd()
     import torch.multiprocessing as tmp
     tmp.set_sharing_strategy("file_system")
+
+
+def _rebuild_cpu_untyped(raw):
+    import torch
+    u = torch.UntypedStorage(len(raw))
+    if raw:
+        ctypes.memmove(u.data_ptr(), raw, len(raw))
+    return u
+
+
+def _rebuild_cpu_typed(untyped, dtype):
+    import torch
+    return torch.storage.TypedStorage(wrap_storage=untyped, dtype=dtype, _internal=True)
+
+
+def _alias_untyped(untyped):
+    return untyped
+
+
+def _dumps(obj):
+    from multiprocessing.reduction import ForkingPickler
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return bytes(ForkingPickler.dumps(obj))
+
+    untyped_cls = torch.UntypedStorage
+    typed_cls = torch.storage.TypedStorage
+    seen_cpu = {}
+
+    class _HolderPickler(ForkingPickler):
+        def reducer_override(self, item):
+            # Serialize CPU storages inline so libshm never binds holder to depositor's shm manager.
+            if isinstance(item, untyped_cls):
+                if item.device.type != "cpu":
+                    return NotImplemented
+                key = getattr(item, "_cdata", id(item))
+                canon = seen_cpu.get(key)
+                if canon is not None:
+                    return (_alias_untyped, (canon,))
+                seen_cpu[key] = item
+                n = item.nbytes()
+                raw = ctypes.string_at(item.data_ptr(), n) if n else b""
+                return (_rebuild_cpu_untyped, (raw,))
+            if isinstance(item, typed_cls):
+                u = item._untyped_storage
+                if u.device.type != "cpu":
+                    return NotImplemented
+                return (_rebuild_cpu_typed, (u, item.dtype))
+            return NotImplemented
+
+    buf = io.BytesIO()
+    _HolderPickler(buf).dump(obj)
+    return buf.getvalue()
+
+
+def _send(conn, obj):
+    conn.send_bytes(_dumps(obj))
+
+
+def _recv(conn):
+    from multiprocessing.reduction import ForkingPickler
+    return ForkingPickler.loads(conn.recv_bytes())
 
 
 def serve(sock_path, ready_path=None):
@@ -142,7 +274,7 @@ def serve(sock_path, ready_path=None):
                         return
                 except Exception as e:                # one bad request never stops the holder
                     try:
-                        conn.send({"ok": False, "findings": [finding(
+                        _send(conn, {"ok": False, "findings": [finding(
                             "holder_error", f"{type(e).__name__}: {e}", "the request served")]})
                     except Exception:
                         pass
@@ -155,39 +287,39 @@ def _handle(conn, entries):
     a client that stops in the middle of sending its request (`conn.recv` waits for the rest)."""
     if not conn.poll(REQUEST_TIMEOUT_S):
         raise TimeoutError(f"no request in {REQUEST_TIMEOUT_S} s")
-    req = conn.recv()
+    req = _recv(conn)
     op, key = req.get("op"), req.get("key")
     t0 = time.perf_counter()
     if op == "put":
         entries[key] = {"stamp": req["stamp"], "module": _own(req["module"]),
                         "files": req.get("files")}
-        conn.send({"ok": True, "op": op, "key": key, "seconds": round(time.perf_counter() - t0, 4)})
+        _send(conn, {"ok": True, "op": op, "key": key, "seconds": round(time.perf_counter() - t0, 4)})
     elif op == "get":
         e = entries.get(key)
         if e is None:
-            conn.send({"ok": False, "findings": [finding("holder_empty", f"no entry {key}",
-                                                          "a deposit before the first get")]})
+            _send(conn, {"ok": False, "findings": [finding("holder_empty", f"no entry {key}",
+                                                           "a deposit before the first get")]})
         else:
             diff = stamp_diff(e["stamp"], req["stamp"])
             if diff:
                 del entries[key]          # never serve it again
-                conn.send({"ok": False, "findings": [finding(
+                _send(conn, {"ok": False, "findings": [finding(
                     "holder_stale", f"{key}: changed since the deposit: {diff[:8]}",
                     "the loader, quantization, model classes, weights and env unchanged")]})
             else:
-                conn.send({"ok": True, "module": e["module"], "files": e["files"]})
+                _send(conn, {"ok": True, "module": e["module"], "files": e["files"]})
                 if conn.poll(ACK_TIMEOUT_S):  # the worker mapped the tensors
-                    conn.recv()
+                    _recv(conn)
     elif op == "files":
         e = entries.get(key)
-        conn.send({"ok": e is not None, "files": e["files"] if e else None})
+        _send(conn, {"ok": e is not None, "files": e["files"] if e else None})
     elif op == "status":
-        conn.send({"ok": True, "keys": sorted(map(str, entries)), "pid": os.getpid()})
+        _send(conn, {"ok": True, "keys": sorted(map(str, entries)), "pid": os.getpid()})
     elif op == "stop":
-        conn.send({"ok": True})
+        _send(conn, {"ok": True})
         return "stop"
     else:
-        conn.send({"ok": False, "error": f"unknown op {op}"})
+        _send(conn, {"ok": False, "error": f"unknown op {op}"})
 
 
 def call(sock_path, msg, timeout=120.0):
@@ -195,12 +327,12 @@ def call(sock_path, msg, timeout=120.0):
     from multiprocessing.connection import Client
     c = Client(sock_path, family="AF_UNIX")
     try:
-        c.send(msg)
+        _send(c, msg)
         if not c.poll(timeout):
             raise TimeoutError(f"holder: no reply to {msg.get('op')} in {timeout} s")
-        r = c.recv()
+        r = _recv(c)
         if msg.get("op") == "get" and r.get("ok"):
-            c.send("mapped")
+            _send(c, "mapped")
         return r
     finally:
         c.close()
