@@ -185,6 +185,47 @@ class SglangAdapterTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sglang.srt.runtime_context": None, "sglang.srt.distributed": None}):
             self.assertEqual(agent._rank(sched_none), 0)
 
+    def test_faults_inject_and_module_state_fallback_without_legacy_attrs(self):
+        """`faults.inject` uses participant name without `.tp_rank`; `module_state` patch falls back cleanly."""
+        from types import SimpleNamespace
+        from adapter.fixture import faults, harness
+
+        class DummyRunner:
+            def sample(self):
+                return "ok"
+
+        sched = SimpleNamespace(tp_worker=SimpleNamespace(model_runner=DummyRunner()))
+        lp = SimpleNamespace(name="rank1")
+        state = {"faults": {}}
+        reply = faults.inject(sched, lp, state, "crash")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["participant"], "rank1")
+        with self.assertRaisesRegex(RuntimeError, "rank1: injected crash in sample"):
+            sched.tp_worker.model_runner.sample()
+        self.assertEqual(sched.tp_worker.model_runner.sample(), "ok")
+
+        sampler_src = (
+            'SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")\n'
+            'def _trace_e2e_sampler(stage, **fields):\n'
+            '    details = " ".join(f"{key}={value}" for key, value in fields.items())\n'
+            '    return details\n'
+            'class Sampler:\n'
+            '    def forward(self, logits):\n'
+            '        batch_next_token_ids = torch.argmax(logits, -1)\n'
+            '        return logits\n'
+        )
+        worker_src = (
+            '    def set_hicache_consumer(self, consumer_index: int):\n        pass\n'
+            '    def _init_dllm_algorithm(self):\n        pass\n'
+        )
+        patches = harness.sglang_patches(
+            lambda m: sampler_src if "sampler" in m else worker_src,
+            "sglang.srt.layers.sampler",
+            "sglang.srt.managers.tp_worker",
+        )
+        ms = next(iter(patches["refused"]["module_state"]["files"].values()))
+        self.assertIn("bool(get_bool_env_var(", ms)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,10 +5,8 @@ import time
 from fastrsi import harness as H
 
 
-def _install_forward_fault(scheduler, fault, hang_s):
+def _install_forward_fault(scheduler, fault, hang_s, rank_name):
     runner = scheduler.tp_worker.model_runner
-    rank_num = scheduler.tp_rank if hasattr(scheduler, "tp_rank") else runner.tp_rank
-    rank_name = f"rank{rank_num}"
     attr = "sample" if hasattr(runner, "sample") else "forward"
     original_fn = getattr(runner, attr)
 
@@ -29,7 +27,7 @@ def inject(scheduler, local_participant, state_dict, fault, **kwargs):
     if fault == "fail_recapture":
         state_dict["faults"]["fail_recapture"] = True
     elif fault in ("crash", "hang"):
-        _install_forward_fault(scheduler, fault, float(kwargs.get("hang_s", 5.0)))
+        _install_forward_fault(scheduler, fault, float(kwargs.get("hang_s", 5.0)), local_participant.name)
     elif fault == "lost":
         state_dict["faults"]["lost"] = True
     else:

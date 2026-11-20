@@ -140,7 +140,10 @@ def sglang_patches(base_fn, sampler_mod, worker_mod):
                 'details = " ".join(f"{stage}:{key}={value}" for key, value in fields.items())')),
             "module_state": wrap(sampler_mod, edit_once(
                 sampler_src, '_BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch",',
-                '_BUILT_IN_SAMPLING_BACKENDS = {"pytorch",')),
+                '_BUILT_IN_SAMPLING_BACKENDS = {"pytorch",')
+                if '_BUILT_IN_SAMPLING_BACKENDS = {"flashinfer", "pytorch",' in sampler_src else edit_once(
+                sampler_src, 'SGLANG_RETURN_ORIGINAL_LOGPROB = get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB")',
+                'SGLANG_RETURN_ORIGINAL_LOGPROB = bool(get_bool_env_var("SGLANG_RETURN_ORIGINAL_LOGPROB"))')),
             "empty": wrap(sampler_mod, edit_once(sampler_src, GREEDY, GREEDY + "  # greedy")),
         },
     }
