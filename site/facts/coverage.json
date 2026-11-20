@@ -77,7 +77,7 @@
    "engine": "vLLM",
    "what": "Which mechanism a real performance PR needs",
    "unit": "upstream performance PRs",
-   "method": "487 performance PRs found (2026-07-24 to 2026-10-24); 80 sampled and inspected by hand (63/80 = 79% install in place in this repo, 8/80 = 10% C++/CUDA native edits demonstrated only in a pre-repo prototype, 9/80 = 11% restart). A classification of what each PR would need, not a test that each installs.",
+   "method": "487 performance PRs found (2026-07-24 to 2026-10-24); 80 sampled and inspected by hand (71/80 = 89% install in place in this repo: 63/80 via Python, graph, and resource paths plus 8/80 = 10% C++/CUDA native edits via repos/vllm/livelab/adapter/native.py; 9/80 = 11% restart). A classification of what each PR would need, not a test that each installs.",
    "when": "2026-07-24 to 2026-10-24",
    "rows": [
     {
@@ -107,12 +107,12 @@
      "class": "partial reset"
     },
     {
-     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture (pre-repo prototype only; restart in this repo)",
+     "mechanism": "Compile C++/CUDA into a versioned shared library, recapture (repos/vllm/livelab/adapter/native.py + Library rebind + R1)",
      "share_of_80_pct": 10,
      "groups": [
       "NATIVE"
      ],
-     "class": "restart"
+     "class": "partial reset"
     },
     {
      "mechanism": "Needs a restart (Rust rebuild, weights, startup logic, launch flags)",
@@ -181,7 +181,7 @@
    "what": "`vllm serve` flags by reconfiguration tier",
    "unit": "CLI flags",
    "method": "Hand classification in a matrix; tier latencies are targets.",
-   "when": "PR #123 merged 2026-11-10",
+   "when": "PR #123 merged 2026-11-10; live scheduling-policy B200 receipt 2026-11-19",
    "counts": {
     "in_process_instant": 7,
     "in_process_graph": 6,
@@ -190,13 +190,14 @@
     "counted_by": "counted from the matrix rows"
    },
    "verified_live_on_gpu": [
-    "--max-num-seqs"
+    "--max-num-seqs",
+    "--scheduling-policy"
    ],
    "implemented_live_not_gpu_run": [
     "--max-num-batched-tokens"
    ],
-   "caveat": "PR #137 states that every other flag change restarts the engine today. The matrix is a plan, not a coverage measurement.",
-   "source": "repos/vllm/kb/reconfiguration_matrix.md:20-72; PR #137"
+   "caveat": "Only --max-num-seqs (PR #137) and --scheduling-policy (2026-11-19 B200 receipt: 0.218-0.374 ms core apply, HTTP 400 FCFS priority guard) are verified live in-process on GPU; --max-num-batched-tokens is implemented but not GPU-run; --enable-expert-parallel switches live via holder-to-holder reshard (reshard_live.py). Every other flag restarts the engine today. The matrix is a plan, not a coverage measurement.",
+   "source": "repos/vllm/kb/reconfiguration_matrix.md:20-72; repos/vllm/kb/costs.md:282-300; PR #137"
   },
   {
    "id": "conformance",
@@ -205,18 +206,20 @@
    "unit": "cases",
    "results": {
     "toy lab (CPU)": "11/11",
-    "Megatron-LM (tiny model, 2 ranks, GB200)": "11/11",
-    "FastVideo (2 ranks, GB200)": "11/11",
-    "FastVideo (1 rank)": "10/11 (c2 needs two participants by design)",
-    "vLLM": null
+    "Megatron-LM (2x GB200 TP2, 4x GB200 TP2/DP2, 4x GB200 TP4, 4x GB200 TP2/PP2, 4x GB200 TP2/PP2/VPP2)": "11/11",
+    "FastVideo (1x GB200, 2x GB200 SP2, and 4x GB200 SP4)": "11/11",
+    "vLLM (1x B200 eager, 2x B200 TP2 V1, 1x & 2x TP2 B200 V2 FULL_DECODE_ONLY graphs)": "11/11",
+    "verl (ToyVerlLab CPU; 4x GB200 21-participant FSDP GRPO)": "11/11",
+    "SGLang (2-rank toy CPU; 2x GB200 TP2 Qwen3-0.6B; 1x B200 TP1 & 2x B200 TP2 Qwen3-8B)": "11/11",
+    "miles (3-process toy CPU; 11/11 RealSlime11Lab on 2x B200 slime parity_rm)": "11/11"
    },
-   "note": "No conformance pass table for a real vLLM engine is in the repo.",
-   "source": "core/livelab/conformance/README.md:45-70; repos/megatron/livelab/README.md:83-105; repos/fastvideo/examples/h3-conformance/README.md:9-57"
+   "note": "vLLM (VllmLab) passed 11/11 on 1x B200 eager, 2x B200 TP2 V1, 1x B200 V2 FULL_DECODE_ONLY CUDA graphs, and 2x B200 TP2 V2 FULL_DECODE_ONLY CUDA graphs (BATCH_INVARIANT=1, 113 receipts, c9 0.0857 / 0.0440 s, 0 MiB exit, including via the unified fastrsi CLI). FastVideo (H3Lab) passed 11/11 on 1x GB200, 2x GB200 SP2, and 4x GB200 SP4 via fastrsi conformance fastvideo --real. Megatron-LM passed 11/11 on 2x GB200 TP2, 4x GB200 TP2/DP2, 4x GB200 TP4, 4x GB200 TP2/PP2, and 4x GB200 TP2/PP2/VPP2 via fastrsi conformance megatron --real. verl passed 11/11 on ToyVerlLab (CPU) and 11/11 on 4x GB200 21-participant FSDP GRPO (VerlConformanceLab, 6844 s / 6879.8 s post-refactor, 113 receipts, plus 32x8 SingleTurnAgentLoop.run swap probe, 5-cycle fsdp_cg Lustre staged write pass, and deterministic_mode=True mcore_conf c2_visible pass with exact weights/optimizer/rollout/score/advantage determinism). SGLang passes 11/11 on ToySglangLab (CPU), 2x GB200 TP2 Qwen3-0.6B (PR #163/#164), 1x B200 TP1 Qwen3-8B (c9 0.0589 s / 0.0107 s), and 2x B200 TP2 Qwen3-8B (c9 0.1056 s / 0.0182 s) via fastrsi conformance sglang --real, plus SglangZygote fork_clean 17.041 s (3.51x) / fork_refresh 19.693 s (3.04x) and active overlap drain (0.076 ms retract / 0.192 ms in_place). miles passes 11/11 on 3-process ToyMilesLab (CPU, ~1.69 s) and 11/11 RealSlime11Lab full conformance (113 receipts, c9 0.0638 s / 0.0172 s, c8 respawns 50.09-50.66 s, c3 bit-exact, c10 zero_witness with fresh divergence) on 2x B200 slime parity_rm (repos/miles/livelab/livelab.json keeps real: null until a standalone fault/respawn GPU CLI launcher exists).",
+   "source": "core/livelab/conformance/README.md:45-70; repos/megatron/livelab/README.md:122-135; repos/fastvideo/examples/h3-conformance/README.md:9-64; repos/vllm/livelab/adapter/README.md:114-128; repos/verl/livelab/README.md; repos/verl/kb/costs.md; repos/sglang/kb/costs.md:6-35; repos/miles/kb/costs.md:7-19; PR #162; PR #163; PR #164"
   }
  ],
  "not_covered_stated_by_repo": {
   "vLLM": [
-   "start-up logic, launch flags, environment variables",
+   "start-up logic, launch flags (other than --max-num-seqs, --scheduling-policy, and --enable-expert-parallel reshard), environment variables",
    "data parallel > 1",
    "graph rebuild under load",
    "component restart and the KV holder are not built"
@@ -230,11 +233,29 @@
   ],
   "FastVideo": [
    "code inside torch.compile regions (the VAE)",
-   "Triton kernel sources edited in place",
+   "Triton kernel signature or decorator changes (top-level @triton.jit/@triton.autotune bodies rebuild in place via core/livelab/kernel/jit.py R1)",
    "CUDA graphs of the NVFP4 VAE decoder",
-   "native fastvideo-kernel code",
-   "4 ranks"
+   "native fastvideo-kernel code"
   ],
-  "source": "repos/vllm/kb/mechanisms.md:24-26; repos/vllm/docs/architecture.md:155-162; repos/megatron/livelab/README.md:59-61; repos/fastvideo/livelab/README.md ('Not covered')"
+  "verl": [
+   "Megatron trainer path full 11/11 deterministic conformance (c2_visible passed with deterministic_mode=True and exact 4-rank weights/optimizer/rollout/score/advantage determinism; actor/pg_loss has ~1e-4 MCore backward variance under strict pg_loss rounding 6 decimal places)",
+   "multi-node jobs (cross-host gate client logic covered by unit tests)",
+   "in-place rebuild, constructors, and Ray actor class layout changes (requires respawn)",
+   "CUDA-graph rollout under rollout.full_determinism=True on vLLM 0.31 / torch 2.13 (Inductor deterministic autotune conflict; requires enforce_eager=True on this stack)"
+  ],
+  "SGLang": [
+   "dp_size > 1 and --enable-dp-attention",
+   "PD disaggregation (--disaggregation-mode)",
+   "out-of-scope subpackages (sglang/multimodal_gen/*: 4,612 functions)",
+   "non-scheduler processes in srt (entrypoints, TokenizerManager, DetokenizerManager: 1,452 functions)",
+   "constructors and start-time builders (3,946 rebuild functions; no in-place rebuild wired yet)",
+   "native C++/CUDA code (96 files, 20,521 lines)"
+  ],
+  "miles": [
+   "constructors and Ray actor class layout changes (no in-place rebuild wired yet)",
+   "distributed and Ray placement-group initialization (requires respawn)",
+   "standalone CLI --real conformance launcher (repos/miles/livelab/livelab.json sets real: null; CPU 3-process ToyMilesLab 11/11, 2x B200 RealSlime11Lab full 11/11 conformance on slime parity_rm, and 2x GB200 live-swap smoke verified)"
+  ],
+  "source": "repos/vllm/kb/mechanisms.md:24-26; repos/vllm/docs/architecture.md:155-162; repos/megatron/livelab/README.md:84-86; repos/fastvideo/livelab/README.md ('Not covered'); repos/verl/kb/costs.md; repos/verl/kb/lessons.md; repos/sglang/kb/costs.md:69-83; repos/sglang/kb/lessons.md:36-39; repos/miles/kb/costs.md; repos/miles/kb/lessons.md"
  }
 }

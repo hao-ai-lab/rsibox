@@ -63,6 +63,16 @@ jobs:
         run: python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
       - name: Run the survey's unittest cases on its fixture tree (static scan, coverage read from lab files, history over a temporary git repository)
         run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
+      - name: Run the shared stdlib runtime kit tests (IPC, process trees, hooks, overlays, BaseLab 11/11, unified CLI)
+        run: python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab -v
+      - name: Run fastrsi doctor (core health + all engine registrations without eager GPU/torch imports)
+        env:
+          PYTHONPATH: core/livelab
+        run: python3 -m fastrsi doctor
+      - name: Run site/facts and README consistency validator tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+      - name: Run the engine onboarding template skeleton golden tests
+        run: python3 -m unittest discover -s template/livelab/adapter -t template/livelab -v
       - name: Run the conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)
         working-directory: core/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
@@ -142,6 +152,67 @@ jobs:
           if [ -d repos/megatron/tools ]; then
             python3 -m unittest discover -s repos/megatron/tools -v
           fi
+  verl-adapter:
+    name: veRL adapter, CLI tools, and conformance c0-c10 on the veRL-shaped toy (CPU, no Ray/verl)
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run veRL adapter golden tests (ray cases skip without ray)
+        run: python3 -m unittest discover -s repos/verl/livelab/adapter -t repos/verl/livelab -v
+      - name: Run veRL CLI and offline probe golden tests
+        run: python3 -m unittest discover -s repos/verl/tools -t repos/verl -v
+      - name: Run conformance c0-c10 against ToyVerlLab via unified CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core/livelab
+        run: python3 -m fastrsi conformance verl
+  miles-adapter:
+    name: miles adapter golden tests and conformance c0-c10 on the miles-shaped toy (CPU, no Ray/miles)
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run miles adapter golden tests (ray cases skip without ray)
+        run: python3 -m unittest discover -s repos/miles/livelab/adapter -t repos/miles/livelab -v
+      - name: Run conformance c0-c10 against ToyMilesLab via unified CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core/livelab
+        run: python3 -m fastrsi conformance miles
+  sglang-adapter:
+    name: SGLang adapter, zygote services, and conformance c0-c10 on the SGLang-shaped toy (CPU, no SGLang)
+    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run SGLang adapter golden tests (real spawned toy TP workers)
+        run: python3 -m unittest discover -s repos/sglang/livelab/adapter -t repos/sglang/livelab -v
+      - name: Run SGLang zygote golden tests (real fork, forksafe, linecache refresh)
+        run: python3 -m unittest discover -s repos/sglang/livelab/services -t repos/sglang/livelab -v
+      - name: Run conformance c0-c10 against ToySglangLab via unified CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core/livelab
+        run: python3 -m fastrsi conformance sglang
   b200-ci-runner:
     name: B200 CI runner and loop golden cases (CPU; real git and venvs, stand-in nvidia-smi and rack-run, no GitHub calls)
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}

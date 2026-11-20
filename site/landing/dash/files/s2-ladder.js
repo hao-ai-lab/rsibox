@@ -54,8 +54,8 @@ dash.calc('ladder_totals', {
   const FR = window.FR;
   const L = (FR.ladder = FR.ladder || { played: false, play: null, engine: null, visible: false, startupOnly: false });
   const SLOW = 1.5; // animation pace
-  const fs = (s) => (s >= 50 ? Math.round(s).toString() : s > 0 && s < 1 ? s.toFixed(2) : (Math.round(s * 10) / 10).toFixed(1)) + ' s';
-  const fx = (x) => (x >= 10 ? Math.round(x).toString() : x.toFixed(1)) + '×';
+  const fs = (s) => (s >= 50 ? Math.round(s).toString() : s > 0 && s < 0.1 ? (s < 0.01 ? (s * 1000).toFixed(2) : Math.round(s * 1000)) + ' ms' : (s > 0 && s < 1 ? s.toFixed(2) : (Math.round(s * 10) / 10).toFixed(1)) + ' s');
+  const fx = (x) => (x >= 1000 ? Math.round(x).toLocaleString('en-US') : x >= 10 ? Math.round(x).toString() : x.toFixed(1)) + '×';
 
   function engines() {
     const w = FR.ok('race_workloads'), l = FR.ok('eval_ladder');
