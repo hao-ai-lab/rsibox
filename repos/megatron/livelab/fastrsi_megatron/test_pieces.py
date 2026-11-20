@@ -3,8 +3,10 @@
 The adapter as a whole (hook.py on a real Megatron job) is proven by the conformance run on
 GPU (receipt in ../README.md); these cases pin the three pieces a reader cannot see in it.
 """
+import difflib
 import json
 import os
+from pathlib import Path
 import socket
 import subprocess
 import sys
@@ -12,6 +14,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -359,6 +362,256 @@ class StartState(unittest.TestCase):
             self.assertEqual(status["timings"]["zeroed"], 6)
 
 
+class ConformanceLabDiffsTest(unittest.TestCase):
+    """Pure-CPU tests for unified `patch['diff']` support in `MegatronLab`."""
+
+    @staticmethod
+    def _make_diff(rel_path, old_src, new_src):
+        return "".join(difflib.unified_diff(
+            old_src.splitlines(True), new_src.splitlines(True),
+            fromfile=f"a/{rel_path}", tofile=f"b/{rel_path}",
+        ))
+
+    def test_install_uninstall_and_fresh_check_resolve_stacked_unified_diffs(self):
+        from fastrsi_megatron import conformance_lab as CL
+
+        with tempfile.TemporaryDirectory() as root:
+            mlp_rel = CL.MLP.replace(".", "/") + ".py"
+            att_rel = CL.ATT.replace(".", "/") + ".py"
+            mlp_base = "def forward(x):\n    return x * 1\n"
+            att_base = "def attend(x):\n    return x\n"
+            for rel, txt in ((mlp_rel, mlp_base), (att_rel, att_base)):
+                p = Path(root, rel)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(txt, encoding="utf-8")
+
+            lab = CL.MegatronLab.__new__(CL.MegatronLab)
+            lab.cmd = "true"
+            lab.root = root
+            lab.steps = 3
+            lab.check_timeout = 30.0
+            lab.receipts = None
+            lab.poison = []
+            lab._live_stack = [{}]
+            lab.base = {CL.MLP: mlp_base, CL.ATT: att_base}
+
+            sent = []
+
+            def fake_call(req, timeout=None):
+                sent.append(req)
+                if req["verb"] == "install":
+                    return {"ok": True, "outcome": "committed", "id": f"txn-{len(sent)}",
+                            "codes": [], "mechanisms": ["R0 swap"], "findings": []}
+                if req["verb"] == "uninstall":
+                    return {"ok": True, "undone": ["txn-top"], "state": "edited", "findings": []}
+                return {"ok": True}
+
+            lab._call = fake_call
+
+            mlp_v1 = mlp_base.replace("x * 1", "x * 2")
+            mlp_v2 = mlp_v1.replace("x * 2", "x * 4")
+            diff1 = self._make_diff(mlp_rel, mlp_base, mlp_v1)
+            diff2 = self._make_diff(mlp_rel, mlp_v1, mlp_v2)
+            combined = self._make_diff(mlp_rel, mlp_base, mlp_v2)
+
+            # First diff installs cleanly and sends resolved `files` over the wire.
+            r1 = lab.install({"diff": diff1})
+            self.assertTrue(r1["ok"], r1)
+            self.assertEqual(sent[-1]["patch"]["files"], {CL.MLP: mlp_v1})
+            self.assertNotIn("diff", sent[-1]["patch"])
+
+            # Stale diff (re-applying diff1 on top of v1) refuses locally with patch_invalid.
+            calls_before = len(sent)
+            stale = lab.install({"diff": diff1})
+            self.assertEqual((stale["ok"], stale["outcome"], stale["codes"]), (False, "refused", ["patch_invalid"]))
+            self.assertEqual(len(sent), calls_before)
+
+            # Stacked diff2 applies cleanly against live v1 text.
+            r2 = lab.install({"diff": diff2})
+            self.assertTrue(r2["ok"], r2)
+            self.assertEqual(sent[-1]["patch"]["files"], {CL.MLP: mlp_v2})
+
+            # Uninstall pops one live-stack frame, so diff2 re-applies cleanly against v1.
+            self.assertTrue(lab.uninstall()["ok"])
+            r3 = lab.install({"diff": diff2})
+            self.assertTrue(r3["ok"], r3)
+            self.assertEqual(sent[-1]["patch"]["files"], {CL.MLP: mlp_v2})
+
+            # fresh_check resolves unified diff against disk (base) into FASTRSI_OVERLAY.
+            seen_overlay = {}
+
+            class _FakeFreshJob:
+                def __init__(self, _cmd, env, _tag):
+                    ov_file = Path(env["FASTRSI_OVERLAY"], CL.MLP + ".py")
+                    seen_overlay["mlp"] = ov_file.read_text(encoding="utf-8")
+                    Path(env["FASTRSI_FRESH"]).write_text(
+                        json.dumps({"ok": True, "output": {"loss": [1.0]}}), encoding="utf-8"
+                    )
+
+                def wait_exit(self):
+                    return 0
+
+                def tail(self, _n=8):
+                    return []
+
+                def kill(self):
+                    return None
+
+            with mock.patch.object(CL, "_Job", _FakeFreshJob):
+                fresh_ok = lab.fresh_check({"diff": combined})
+                self.assertTrue(fresh_ok["ok"], fresh_ok)
+                self.assertEqual(seen_overlay["mlp"], mlp_v2)
+                fresh_bad = lab.fresh_check({"diff": diff2})
+                self.assertFalse(fresh_bad["ok"])
+
+    def test_fresh_check_retries_once_on_eaddrinuse_only(self):
+        from fastrsi_megatron import conformance_lab as CL
+
+        lab = CL.MegatronLab.__new__(CL.MegatronLab)
+        lab.cmd = "true"
+        lab.root = "/unused"
+        lab.steps = 3
+        lab.check_timeout = 30.0
+        lab.receipts = None
+        lab.poison = []
+        lab._live_stack = [{}]
+        lab.base = {}
+
+        def run_scenario(outcomes):
+            events = []
+            ports = iter([29501, 29502, 29503])
+
+            class _SeqJob:
+                def __init__(self, _cmd, env, _tag):
+                    idx = len(events)
+                    rc, tail, write_out = outcomes[idx]
+                    self.rc, self._tail = rc, tail
+                    events.append({"port": env["PORT"], "killed": False})
+                    self._idx = idx
+                    if write_out:
+                        Path(env["FASTRSI_FRESH"]).write_text(
+                            json.dumps({"ok": True, "output": {"loss": [1.5]}}), encoding="utf-8"
+                        )
+
+                def wait_exit(self):
+                    return self.rc
+
+                def tail(self, n=30):
+                    return list(self._tail[-n:])
+
+                def kill(self):
+                    events[self._idx]["killed"] = True
+
+            with mock.patch.object(CL, "_Job", _SeqJob), \
+                 mock.patch.object(CL, "_free_port", side_effect=lambda: next(ports)):
+                res = lab.fresh_check({"files": {}})
+            return res, events
+
+        # 1. Transient "Address already in use" kills attempt 1 and succeeds on attempt 2 with a new port.
+        res_ok, ev_ok = run_scenario([
+            (1, ["OSError: [Errno 98] Address already in use"], False),
+            (0, [], True),
+        ])
+        self.assertTrue(res_ok["ok"], res_ok)
+        self.assertEqual(res_ok["output"], {"loss": [1.5]})
+        self.assertEqual(ev_ok, [{"port": "29501", "killed": True}, {"port": "29502", "killed": True}])
+
+        # 2. Persistent EADDRINUSE stops after exactly 1 retry (2 total attempts, both killed).
+        res_twice, ev_twice = run_scenario([
+            (1, ["socket error: EADDRINUSE"], False),
+            (1, ["socket error: EADDRINUSE"], False),
+        ])
+        self.assertFalse(res_twice["ok"])
+        self.assertIn("EADDRINUSE", res_twice["error"])
+        self.assertEqual(len(ev_twice), 2)
+        self.assertTrue(all(e["killed"] for e in ev_twice))
+
+        # 3. Real training/code error never retries.
+        res_err, ev_err = run_scenario([
+            (1, ["RuntimeError: model exploded"], False),
+        ])
+        self.assertFalse(res_err["ok"])
+        self.assertIn("model exploded", res_err["error"])
+        self.assertEqual(ev_err, [{"port": "29501", "killed": True}])
+
+        # 4. Worker-side EADDRINUSE sitting above a 25-line torch.distributed.elastic
+        # ChildFailedError footer still triggers the single retry (tail(80) sees past the box).
+        elastic_footer_25 = [
+            "torch.distributed.elastic.multiprocessing.errors.ChildFailedError:",
+            "============================================================",
+            *[f"elastic_detail_line_{i}" for i in range(22)],
+            "============================================================",
+        ]
+        self.assertEqual(len(elastic_footer_25), 25)
+        eaddr_with_box = (
+            [f"startup_line_{i}" for i in range(10)]
+            + ["[rank0]: OSError: [Errno 98] Address already in use"]
+            + elastic_footer_25
+        )
+        res_box_retry, ev_box_retry = run_scenario([
+            (1, eaddr_with_box, False),
+            (0, [], True),
+        ])
+        self.assertTrue(res_box_retry["ok"], res_box_retry)
+        self.assertEqual(res_box_retry["output"], {"loss": [1.5]})
+        self.assertEqual(
+            ev_box_retry,
+            [{"port": "29501", "killed": True}, {"port": "29502", "killed": True}],
+        )
+
+        # 5. Worker-side RuntimeError above torch.distributed.elastic's ~20-line ChildFailedError
+        # box does not retry and is surfaced in the returned error via tail[-25:], while earlier
+        # preamble lines beyond the last 25 are omitted.
+        elastic_footer_20 = [
+            "torch.distributed.elastic.multiprocessing.errors.ChildFailedError:",
+            "============================================================",
+            *[f"elastic_detail_line_{i}" for i in range(17)],
+            "============================================================",
+        ]
+        self.assertEqual(len(elastic_footer_20), 20)
+        runtime_with_box = (
+            [f"startup_line_{i}" for i in range(15)]
+            + ["[rank1]: RuntimeError: worker rank1 exploded"]
+            + elastic_footer_20
+        )
+        res_box_err, ev_box_err = run_scenario([
+            (1, runtime_with_box, False),
+        ])
+        self.assertFalse(res_box_err["ok"])
+        self.assertEqual(ev_box_err, [{"port": "29501", "killed": True}])
+        self.assertIn("worker rank1 exploded", res_box_err["error"])
+        self.assertIn("ChildFailedError:", res_box_err["error"])
+        self.assertNotIn("startup_line_0", res_box_err["error"])
+
+
+@unittest.skipUnless(torch is not None, "needs torch")
+class PipelineAndVppTest(unittest.TestCase):
+    def test_merge_check_output_prefers_non_none_stage_and_frozen_batches_vpp(self):
+        """PP > 1 takes loss/grad_norm from the stage that computed them; VPP lists replay cleanly."""
+        from fastrsi_megatron import hook, state
+
+        merged = hook._merge_check_output([
+            {"ok": True, "rank": 0, "loss": [None, None], "grad_norm": [1.5, 1.4]},
+            {"ok": True, "rank": 1, "loss": [None, None], "grad_norm": [None, None]},
+            {"ok": True, "rank": 2, "loss": [9.1, 9.0], "grad_norm": [1.5, 1.4]},
+        ])
+        self.assertEqual(merged, {"loss": [9.1, 9.0], "grad_norm": [1.5, 1.4]})
+
+        fallback = hook._merge_check_output([
+            {"ok": True, "rank": 0, "loss": [None], "grad_norm": [None]},
+        ])
+        self.assertEqual(fallback, {"loss": [None], "grad_norm": [None]})
+
+        self.assertIsNone(state.FrozenBatches(None, 2).iterator())
+        fb_single = state.FrozenBatches(iter([10, 20, 30]), 2)
+        self.assertEqual(list(fb_single.iterator()), [10, 20])
+
+        fb_vpp = state.FrozenBatches([iter([1, 2, 3]), None, iter(["a", "b", "c"])], 2)
+        it_vpp = fb_vpp.iterator()
+        self.assertEqual(len(it_vpp), 3)
+        self.assertEqual(list(it_vpp[0]), [1, 2])
+        self.assertIsNone(it_vpp[1])
+        self.assertEqual(list(it_vpp[2]), ["a", "b"])
 
 
 if __name__ == "__main__":

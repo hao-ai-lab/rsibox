@@ -23,15 +23,12 @@ be under 108 bytes) or, from another host, a mailbox directory on a shared file 
 shared NFS showed a file written on a login host to the node in 26-34 ms (2026-11-07 probe).
 """
 import ctypes
-import json
 import os
 import pickle
-import queue
-import socket
-import sys
-import threading
 import time
 from datetime import timedelta
+
+from fastrsi import ipc
 
 
 class RoundFailed(RuntimeError):
@@ -161,116 +158,16 @@ class Ranks:
             raise RoundFailed(self.failed) from error
 
 
-class Server:
+class Server(ipc.UnixJsonServer):
     """Rank 0: a thread accepts clients and queues (request, reply function) for the gap loop,
     which runs every request in the main thread, between two train steps."""
 
     def __init__(self, path):
-        self.path = path
-        self.q = queue.Queue()
-        if os.path.exists(path):
-            os.unlink(path)
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.bind(path)
-        self.sock.listen(8)
-        threading.Thread(target=self._accept, daemon=True, name="fastrsi-server").start()
-
-    def _accept(self):
-        while True:
-            try:
-                conn, _ = self.sock.accept()
-            except OSError:                     # closed by close()
-                return
-            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
-
-    def _one(self, conn):
-        done = threading.Event()
-
-        def reply(obj):
-            """Send obj; False when the client is gone (timed out, disconnected): the lab logs it
-            and serves on. Never raises."""
-            try:
-                f.write((json.dumps(obj, default=str) + "\n").encode())
-                f.flush()
-                return True
-            except (OSError, ValueError) as e:
-                print(f"[fastrsi] client gone before the reply ({type(e).__name__}: {e}); "
-                      "serving on", file=sys.stderr, flush=True)
-                return False
-            finally:
-                for c in (f, conn):
-                    try:
-                        c.close()
-                    except OSError:
-                        pass
-                done.set()
-        try:
-            f = conn.makefile("rwb")
-            line = f.readline()
-        except OSError:
-            conn.close()
-            return
-        if not line:
-            conn.close()
-            return
-        try:
-            req = json.loads(line)
-            if not isinstance(req, dict):
-                raise ValueError(f"a request is a JSON object, not {type(req).__name__}")
-        except ValueError as e:
-            reply({"ok": False, "error": f"bad request: {e}"})
-            return
-        self.q.put((req, reply))
-        done.wait()
-
-    def next(self, timeout=None):
-        return self.q.get(timeout=timeout)
-
-    def close(self):
-        try:
-            self.sock.close()
-            os.unlink(self.path)
-        except OSError:
-            pass
+        super().__init__(path, handler=None, backlog=8, mode=None, read_timeout_s=None)
 
 
-class Mailbox:
+class Mailbox(ipc.MailboxServer):
     """Rank 0: a thread polls `root` for requests and queues them on `q` like Server."""
 
     def __init__(self, root, q, poll_s=0.02):
-        self.root, self.q, self.poll_s = root, q, poll_s
-        os.makedirs(root, exist_ok=True)
-        threading.Thread(target=self._run, daemon=True, name="fastrsi-mailbox").start()
-
-    def _run(self):
-        while True:
-            try:
-                names = sorted(n for n in os.listdir(self.root)
-                               if n.startswith("req-") and n.endswith(".json"))
-            except OSError:
-                names = []
-            for n in names:
-                rid = n[4:-5]
-                src, taken = os.path.join(self.root, n), os.path.join(self.root, n + ".taken")
-                try:
-                    os.rename(src, taken)
-                    with open(taken) as f:
-                        req = json.load(f)
-                except (OSError, ValueError) as e:
-                    req = {"verb": "bad", "error": str(e)}
-                self.q.put((req, self._replier(rid)))
-            time.sleep(self.poll_s)
-
-    def _replier(self, rid):
-        def reply(obj):
-            tmp = os.path.join(self.root, f".resp-{rid}.tmp")
-            try:
-                with open(tmp, "w") as f:
-                    json.dump(obj, f, default=str)
-                os.rename(tmp, os.path.join(self.root, f"resp-{rid}.json"))
-                return True
-            except OSError as e:
-                print(f"[fastrsi] mailbox reply {rid} not written ({e}); serving on",
-                      file=sys.stderr, flush=True)
-                return False
-        return reply
+        super().__init__(root, q, poll_s=poll_s)
