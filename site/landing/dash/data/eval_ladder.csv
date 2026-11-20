@@ -61,6 +61,14 @@ megatron,5,first_step,5.72
 megatron,5,warmup,12.7
 megatron,5,run_workload,41.59
 megatron,5,other,0.64
+megatron,6,live_install,2.75
+megatron,6,restore_state,0.27
+megatron,6,run_workload,41.79
+megatron,6,other,0.71
+megatron,7,live_install,2.64
+megatron,7,restore_state,0.33
+megatron,7,run_workload,12.97
+megatron,7,other,1.1
 t2va,1,import_init,3.8
 t2va,1,weight_load,313.35
 t2va,1,jit_build,46.7

@@ -206,14 +206,14 @@
    "unit": "cases",
    "results": {
     "toy lab (CPU)": "11/11",
-    "Megatron-LM (2x GB200 TP2, 4x GB200 TP2/DP2, 4x GB200 TP4)": "11/11",
+    "Megatron-LM (2x GB200 TP2, 4x GB200 TP2/DP2, 4x GB200 TP4, 4x GB200 TP2/PP2, 4x GB200 TP2/PP2/VPP2)": "11/11",
     "FastVideo (1x GB200, 2x GB200 SP2, and 4x GB200 SP4)": "11/11",
     "vLLM (1x B200 eager, 2x B200 TP2, 1x B200 V2 FULL_DECODE_ONLY graphs)": "11/11",
     "verl (ToyVerlLab CPU; 4x GB200 21-participant FSDP GRPO)": "11/11",
-    "SGLang (2-rank toy CPU; 2x GB200 TP2 Qwen3-0.6B per PR #163/#164)": "11/11",
-    "miles (3-process toy CPU)": "11/11"
+    "SGLang (2-rank toy CPU; 2x GB200 TP2 Qwen3-0.6B; 1x B200 TP1 & 2x B200 TP2 Qwen3-8B)": "11/11",
+    "miles (3-process toy CPU; plus 8/8 RealSlimeMilesLab on 2x B200 slime parity_rm)": "11/11"
    },
-   "note": "vLLM (VllmLab) passed 11/11 on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (2026-11-19 B200 runs, including via the unified fastrsi CLI). FastVideo (H3Lab) passed 11/11 on 1x GB200, 2x GB200 SP2, and 4x GB200 SP4 via fastrsi conformance fastvideo --real. Megatron-LM passed 11/11 on 2x GB200 TP2, 4x GB200 TP2/DP2, and 4x GB200 TP4 via fastrsi conformance megatron --real. verl passed 11/11 on ToyVerlLab (CPU) and 11/11 on 4x GB200 21-participant FSDP GRPO (VerlConformanceLab, 6844 s, 113 receipts, plus 32x8 SingleTurnAgentLoop.run swap probe). SGLang passes 11/11 on ToySglangLab (CPU) and recorded 11/11 on 2x GB200 TP2 Qwen3-0.6B (PR #163/#164) plus v0 Qwen3-8B conformance in repos/sglang/kb/costs.md. miles passes 11/11 on 3-process ToyMilesLab (CPU, ~1.69 s; repos/miles/livelab/livelab.json sets real: null until a standalone GPU conformance launcher exists).",
+   "note": "vLLM (VllmLab) passed 11/11 on 1x B200 eager, 2x B200 TP2, and 1x B200 V2 FULL_DECODE_ONLY CUDA graphs (2026-11-19 B200 runs, including via the unified fastrsi CLI). FastVideo (H3Lab) passed 11/11 on 1x GB200, 2x GB200 SP2, and 4x GB200 SP4 via fastrsi conformance fastvideo --real. Megatron-LM passed 11/11 on 2x GB200 TP2, 4x GB200 TP2/DP2, 4x GB200 TP4, 4x GB200 TP2/PP2, and 4x GB200 TP2/PP2/VPP2 via fastrsi conformance megatron --real. verl passed 11/11 on ToyVerlLab (CPU) and 11/11 on 4x GB200 21-participant FSDP GRPO (VerlConformanceLab, 6844 s / 6879.8 s post-refactor, 113 receipts, plus 32x8 SingleTurnAgentLoop.run swap probe; plus Batch B CUDA-graph c2_visible pass on Megatron-Core and FSDP). SGLang passes 11/11 on ToySglangLab (CPU), 2x GB200 TP2 Qwen3-0.6B (PR #163/#164), 1x B200 TP1 Qwen3-8B (c9 0.0589 s / 0.0107 s), and 2x B200 TP2 Qwen3-8B (c9 0.1056 s / 0.0182 s) via fastrsi conformance sglang --real. miles passes 11/11 on 3-process ToyMilesLab (CPU, ~1.69 s) and 8/8 RealSlimeMilesLab non-fault conformance (c0,c1,c2,c4,c5,c6,c7,c9; c9 0.0616 s / 0.0166 s, bit-exact non-zero-grad S0 undo) on 2x B200 slime parity_rm (repos/miles/livelab/livelab.json keeps real: null until a standalone fault/respawn GPU CLI launcher exists).",
    "source": "core/livelab/conformance/README.md:45-70; repos/megatron/livelab/README.md:122-135; repos/fastvideo/examples/h3-conformance/README.md:9-64; repos/vllm/livelab/adapter/README.md:114-128; repos/verl/livelab/README.md; repos/verl/kb/costs.md; repos/sglang/kb/costs.md:6-35; repos/miles/kb/costs.md:7-19; PR #162; PR #163; PR #164"
   }
  ],
@@ -229,8 +229,7 @@
    "CUDA graph regions",
    "constructors (need a model rebuild)",
    "optimizer construction",
-   "Transformer Engine C++ code",
-   "pipeline parallelism > 1"
+   "Transformer Engine C++ code"
   ],
   "FastVideo": [
    "code inside torch.compile regions (the VAE)",
@@ -239,7 +238,7 @@
    "native fastvideo-kernel code"
   ],
   "verl": [
-   "Megatron trainer path with the gated RayPPOTrainer (_batch_sizes megatron branch covered by unit tests)",
+   "Megatron trainer path full 11/11 deterministic conformance (Batch B CUDA-graph c2_visible verified on Megatron-Core with enforce_eager=False, full_determinism=False)",
    "multi-node jobs (cross-host gate client logic covered by unit tests)",
    "in-place rebuild, constructors, and Ray actor class layout changes (requires respawn)",
    "CUDA-graph rollout under rollout.full_determinism=True on vLLM 0.31 / torch 2.13 (Inductor deterministic autotune conflict; requires enforce_eager=True on this stack)"
@@ -255,7 +254,7 @@
   "miles": [
    "constructors and Ray actor class layout changes (no in-place rebuild wired yet)",
    "distributed and Ray placement-group initialization (requires respawn)",
-   "standalone GPU conformance launcher (repos/miles/livelab/livelab.json sets real: null; CPU 3-process ToyMilesLab 11/11 and 2x GB200 live-swap smoke only)"
+   "standalone GPU c3/c8/c10 respawn conformance launcher (repos/miles/livelab/livelab.json sets real: null; CPU 3-process ToyMilesLab 11/11, 2x B200 RealSlimeMilesLab 8/8 non-fault conformance, and 2x GB200 live-swap smoke verified)"
   ],
   "source": "repos/vllm/kb/mechanisms.md:24-26; repos/vllm/docs/architecture.md:155-162; repos/megatron/livelab/README.md:84-86; repos/fastvideo/livelab/README.md ('Not covered'); repos/verl/kb/costs.md; repos/verl/kb/lessons.md; repos/sglang/kb/costs.md:69-83; repos/sglang/kb/lessons.md:36-39; repos/miles/kb/costs.md; repos/miles/kb/lessons.md"
  }

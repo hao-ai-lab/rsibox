@@ -134,3 +134,12 @@ cd core/livelab && python3 -m survey scan \
 ### 0.2 Batch A re-verification after adapter refactor (4x GB200, 2026-11-19)
 
 Post-refactor `VerlConformanceLab` (`fastrsi conformance verl --real`, 21 participants: driver, 8 reward, 8 agent-loop, 4 FSDP trainer ranks, `train_batch_size=32`, `rollout.n=8`, per-sample seeds) re-ran `11/11` cases in **6879.773 s** total case time with **113** receipts (`43` txn, `38` proof, `32` undo; median `edit_to_commit_s` **1.216 s**, median `undo_s` **44.77 ms**, `c9_soak` install median **8.1093 s**, uninstall median **6.6840 s**, `0` `ResourceWarning`s, immediate `@atexit` `0 MiB × 4`).
+
+### 0.3 Batch B CUDA-graph re-verification (`Megatron-Core` and `FSDP`, `4× GB200`, `2026-11-19`)
+
+Running the same `Qwen3-0.6B` GSM8K `640`-response (`TBS=64, N=10`, `21` warm participants) recipe with `rollout.enforce_eager=False` and `rollout.full_determinism=False` confirms CUDA-graph rollout speedups on the current `verl` stack:
+
+| Backend (`enforce_eager=False`, `full_determinism=False`) | Boot to ready / Step 1 | Steady live check (`verdict_s`) | Breakdown & Conformance notes |
+|---|---:|---:|---|
+| **`Megatron-Core` (`mcore`)** | `287.489 s` (cold CUDA-graph/Inductor compile) / `35.828 s` step 1 | **`24.293–24.397 s`** (`n=4` checks) | `gen 4.18 s`, `old_log_prob 4.21–4.37 s`, `ref 5.83–6.03 s`, `adv 0.23–0.25 s`, `update_actor 7.73–7.86 s`, `update_weights 1.36–1.40 s`; `install` `9.71–9.81 s` (`34.1 s` total live check, `9.5×` vs `323.3 s` cold start), `uninstall 8.68 s`, `S0` capture `1.194 s` (`226` tensors/rank), reset `2.26–2.50 s` (`1.035 s` initial); **`c2_visible` pass** (`adv_max 2.8460 -> 5.6921` exact 2×, `pg_loss 0.022 -> 0.0433`, witness `[1]`), `c4_uninstall` restored exact `adv_max/adv_min` with non-deterministic CUDA-graph rollout digest variance |
+| **`FSDP + CUDA graphs` (`fsdp_cg`)** | `49.591 s` step 1 | **`44.939 s`** (`gen 4.173 s`) | `update_actor 22.995 s`, `install 8.351 s`, `reset 1.103 s`; **`c2_visible` pass** (`adv_max 2.8460 -> 5.6921`); hit transient `torch.save` `inline_container.cc` write failure on `req-12`; `0 MiB × 4` teardown |

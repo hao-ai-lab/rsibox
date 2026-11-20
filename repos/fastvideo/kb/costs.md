@@ -207,3 +207,14 @@ the tray's other GPUs; `tools/h3_climb.py`, every video bit-exact to base):
   back to the same path: no ninja step re-ran (logs unchanged), FlashInfer 11.8 s on the first
   start from the cold copy and 0.60 s on the next; bit-exact. Keying FlashInfer on content would
   need its ninja files written with relative paths (an upstream change), not done.
+
+## Shortened 2-forward (`num_inference_steps=3`) H3 screen (`1× GB200`, `2026-11-19`)
+
+Measured separately on `1× GB200` (`FastVideoLab(zygote=True, holder=True)` on `FastH3-QAD-v2` NVFP4; kept strictly distinct from the `GB10` `t2va` race numbers):
+
+| Path | Setup / Scope | Total Wall | Notes / Witness |
+|---|---|---:|---|
+| `fresh_full` | Fresh worker + `9` sigma (`8` DiT forwards, `124` frames) | **`44.295 s`** | Warm disk caches; output `d0e55e892690e260 / ee49674663eae6e2` |
+| `warm_full_base` | Warm zygote+holder lab first full check | `12.893 s` | Matches `fresh_full` bit-for-bit |
+| `live_full` | Live `MiniMaxH3VideoDecodingStage.forward` swap + full check | **`6.398 s`** (`6.9×` vs fresh) | `0.0382 s` install + `6.360 s` check, `0.0110 s` undo, witness `1`, `cd32f50b70d9479f`, bit-exact undo verified |
+| `live_probe_2fwd` | `num_inference_steps=3` (`dmd_denoising_steps=[999, 874]` via `repl`: `2` DiT forwards vs `8`) | **`2.356 s`** (`18.8×` vs fresh) | `base_probe 2.177 s`, `0.0329 s` install + `2.323 s` check, `0.0106 s` undo, witness `1`, `474d5ebd470a6063 -> b2a414f50233cb60`, **`undo_exact: true`**, `0 MiB × 4` |

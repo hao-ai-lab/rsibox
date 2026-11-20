@@ -333,3 +333,14 @@ attention heads, `--tensor-model-parallel-size 2 --pipeline-model-parallel-size 
 
 11/11 conformance passed (`108` receipts, all 4 GPUs returned to `0 MiB`), with every rank recording all `96` calls across both virtual chunks.
 
+## Zero-warm-up and 3-step short-probe ladder (`Qwen3-30B-A3B` 24L MXFP8 `EP4`, `4× GB200`)
+
+Source: per-check runs on the race recipe (`Qwen3-30B-A3B` cut to 24 layers, MXFP8 `EP4`, `4× GB200`; `266.67 s` restart baseline and `65.52 s` 4-warm-up live baseline):
+
+| Run | Warm-up steps | Timed steps | Wall median (min–max, n=12) | Phase split (`pickup+install` / `restore` / `timed` / `pre_loop+other`) | Graphs / Verdict agreement |
+|---|---:|---:|---:|---|---|
+| `w-keep-ng-w0` | `0` | `10` | **`45.52 s`** (`45.32–45.72 s`) | `2.75 s` (`0.15 + 2.60`) / `0.27 s` (`0.21 s` copy) / `41.79 s` / `0.71 s` (`0.62 s` pre-loop) | `reused`, `62,851 tok/s/GPU` (`5.9×` vs restart) |
+| `w9-keep-ng-w0-s3` (`2026-11-19`) | `0` | `3` | **`17.04 s`** (`16.65–17.25 s`) | `2.64 s` (`0.14 + 2.50`) / `0.33 s` (`0.26 s` copy) / `12.97 s` (`4.28 + 4.34 + 4.34`) / `1.10 s` (`0.79 s` pre-loop) | `reused`, `12/12` ok, `0 MiB × 4` (`15.6×` vs restart) |
+
+In `probe-pairs6` (`10` candidate/incumbent pairs on the same setup: `5` regressions and `5` speedups), `k=1`, `k=3`, and `k=5` timed steps all agree **`10/10`** with the full `10`-step verdict at `0.5%`, `1%`, and `2%` thresholds.
+

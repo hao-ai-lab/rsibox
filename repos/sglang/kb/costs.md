@@ -100,3 +100,12 @@ Source: nightly `sglang` `0.0.0.dev1+g302b78ccf` on `1x NVIDIA B200` (`Qwen3-8B`
 | Live `R0` swap + `16x64` check (`SglangLab`) | **1.97 s** (`12.8x` vs warm / `33.8x` vs cold) | `0.0600 s` (`60.0 ms`) install + `1.908 s` check (`witness = 65` calls, digest bit-exact to `fresh_edited`), `0.0109 s` (`10.9 ms`) undo (bit-exact to base) |
 | Live `R0` swap + targeted `2x16` probe | **0.427 s** (`58.8x` vs warm / `155.6x` vs cold) | `0.0600 s` install + `0.367 s` probe (`proven = True`, witness `81` calls cumulative) |
 | Live `R1` selective decode graph recapture (`Qwen3DecoderLayer.forward`, `sizes=[1, 2]`) | **0.839 s** edit-to-rebuilt | `0.045 s` commit + `0.794 s` R1 recapture (`216` capture witness calls); post-recapture probe `0.095 s` (`proven = True`) |
+
+## Real-GPU `SglangConformanceLab` `11/11` receipts (`1x B200 TP=1` and `2x B200 TP=2`, `2026-11-19`)
+
+Source: `fastrsi conformance sglang --real` on `Qwen3-8B` inside nightly `sglang` (`lmsysorg/sglang:nightly-dev-cu13-20261030-302b78cc`, decode CUDA graphs `[1, 2, 4]`, `--mem-fraction 0.45 --max-bs 4 --check-timeout 25`), after fixing `adapter/fixture/faults.py` (`local_participant.name` instead of removed `.tp_rank`) and `adapter/fixture/harness.py` (`SGLANG_RETURN_ORIGINAL_LOGPROB` fallback for `module_state` refusal):
+
+| Configuration | Result | `c9_soak` (20 cycles install / undo) | `c8_crash_and_hang` respawns | `c3_fresh_equivalence` | GPU Cleanup |
+|---|---|---:|---|---|---|
+| `1x B200` (`TP=1`) | **11/11 pass** (`rc=0`) | **`0.0589 s` / `0.0107 s`** (`7.212 s` total) | crash `16.419 s`, hang `16.249 s`, lost `15.821 s`, tamper `16.059 s` (`117.933 s` case) | `112.782 s` (visible + 3-chain bit-exact to fresh) | `0 MiB` |
+| `2x B200` (`TP=2`) | **11/11 pass** (`rc=0`) | **`0.1056 s` / `0.0182 s`** (`8.362 s` total) | crash `17.215 s`, hang `16.895 s`, lost `17.271 s`, tamper `17.167 s` (`120.666 s` case) | `134.339 s` (`[16, 16]` witness calls across ranks) | `0 MiB x 2` |

@@ -128,8 +128,8 @@
      "source": "repos/megatron/livelab/README.md:122-145; repos/megatron/kb/costs.md"
     },
     {
-     "fact": "On 4x GB200 (2026-11-19 NeMo 26.08.01), 30/30 paired 8-layer Qwen3-14B-shaped TP2xDP2 dense runs took 5.52-5.61 s live vs 41.83-42.27 s fresh (0% diff vs fresh), an EP4 MoE 8-gate walkthrough passed (0.119 s install, 0.385 s check), and a 10-cycle warm-fork zygote soak ran in 0.064-0.095 s/fork with 0 FD/VRAM leaks.",
-     "source": "repos/megatron/kb/costs.md:8-45"
+     "fact": "On 4x GB200 (2026-11-19 NeMo 26.08.01), 30/30 paired 8-layer Qwen3-14B-shaped TP2xDP2 dense runs took 5.52-5.61 s live vs 41.83-42.27 s fresh (0% diff vs fresh), an EP4 MoE 8-gate walkthrough passed (0.119 s install, 0.385 s check), and a 10-cycle warm-fork zygote soak ran in 0.064-0.095 s/fork with 0 FD/VRAM leaks; on Qwen3-30B-A3B 24L MXFP8 EP4 (4x GB200), skipping warmup ran 12 live 10-step checks at 45.52 s median (w-keep-ng-w0) and a 3-step short probe ran 12/12 checks at 17.04 s median (w9-keep-ng-w0-s3, 15.6x vs 266.67 s restart, with probe-pairs6 10/10 agreement across k=1,3,5 at 0.5%/1%/2%).",
+     "source": "repos/megatron/kb/costs.md:8-45,335-345"
     }
    ],
    "derived_from_git": {
@@ -221,7 +221,7 @@
      "source": "repos/fastvideo/kb/costs.md:9,47,58; gh pr list"
     },
     {
-     "fact": "Conformance c0-c10 passed 11/11 on 1x, 2x (SP2), and 4x GB200 (SP4), including via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G / 0.1140 s 4G), plus targeted SP2 --zygote --holder 5/5 (c8 1362.85 s; c9 0.0589 s / 0.0175 s) and SP2 --zygote --holder fast-fail + inline CPU IPC 4/4 (c8 cut 6.37x to 214.02 s: crash 9.65 s, hang 9.21 s, lost 6.08 s, tamper 6.52 s; 24/24 holder IPC hits across 4 respawns, 0 Broken pipe, 0 MiB).",
+     "fact": "Conformance c0-c10 passed 11/11 on 1x, 2x (SP2), and 4x GB200 (SP4), including via fastrsi conformance fastvideo --real (2026-11-19: c9 install median 0.0335-0.0338 s 1G / 0.0621-0.0624 s 2G / 0.1140 s 4G), plus targeted SP2 --zygote --holder 5/5 (c8 1362.85 s; c9 0.0589 s / 0.0175 s) and SP2 --zygote --holder fast-fail + inline CPU IPC 4/4 (c8 cut 6.37x to 214.02 s: crash 9.65 s, hang 9.21 s, lost 6.08 s, tamper 6.52 s; 24/24 holder IPC hits across 4 respawns, 0 Broken pipe, 0 MiB); separately on 1x GB200 H3 (NVFP4), a 2-forward num_inference_steps=3 screen via repl dmd_denoising_steps=[999, 874] ran in 2.356 s (18.8x vs 44.295 s fresh / 2.7x vs 6.398 s live full, undo_exact: true).",
      "source": "repos/fastvideo/examples/h3-conformance/README.md:9-118; repos/fastvideo/kb/costs.md"
     }
    ],
@@ -293,8 +293,8 @@
      "source": "PR #163; PR #164; repos/sglang"
     },
     {
-     "fact": "Passed 11/11 conformance on CPU and on 2x GB200 (TP=2, Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load [29.8x], SglangZygote 11.75 s).",
-     "source": "PR #163; PR #164"
+     "fact": "Passed 11/11 conformance on CPU, 2x GB200 (TP=2, Qwen3-0.6B: c9 install median 0.091 s / uninstall 0.008 s, R1 decode graph recapture 0.839 s vs 24.97 s cold load [29.8x], SglangZygote 11.75 s), 1x B200 (TP=1, Qwen3-8B: c9 0.0589 s / 0.0107 s, c8 respawns 15.82-16.42 s, 0 MiB), and 2x B200 (TP=2, Qwen3-8B: c9 0.1056 s / 0.0182 s, c8 respawns 16.89-17.27 s, 0 MiB x 2) via fastrsi conformance sglang --real.",
+     "source": "PR #163; PR #164; repos/sglang/kb/costs.md"
     }
    ],
    "derived_from_git": {
@@ -343,8 +343,8 @@
      "source": "PR #160; PR #161; repos/verl"
     },
     {
-     "fact": "Passed 11/11 conformance on CPU (ToyVerlLab) and 4x GB200 (VerlConformanceLab, 21 participants, 6844 s, plus 32x8 SingleTurnAgentLoop.run live swap across rollout0-7); on 4x GB200 Qwen3-0.6B GSM8K GRPO batch A (verl 0.10.0.dev, FSDP, eager vLLM, 640 responses/step, 13 warm processes, 2026-11-19): restart to first verdict 259.8 s, live reward swap verdict 117.2 s (install 5.8 s), live advantage swap verdict 104.6 s (install 0.58 s), coupled 4-GPU S0 restore 1.10-1.16 s, offline rescore 0.85 ms, replay_adv 16-29 ms.",
-     "source": "repos/verl/kb/costs.md section 0 and 0.1; PR #160; PR #161"
+     "fact": "Passed 11/11 conformance on CPU (ToyVerlLab) and 4x GB200 (VerlConformanceLab, 21 participants, 6844 s / 6879.8 s post-refactor, plus 32x8 SingleTurnAgentLoop.run live swap across rollout0-7); on 4x GB200 Qwen3-0.6B GSM8K GRPO batch A (FSDP, eager vLLM): restart to first verdict 259.8 s, live reward 117.2 s / advantage 104.6 s, S0 restore 1.10-1.16 s, rescore 0.85 ms, replay_adv 16-29 ms; Batch B CUDA graphs (enforce_eager=False, full_determinism=False): Megatron-Core steady live checks 24.29-24.40 s (4.18 s gen; 34.1 s incl. install, 9.5x vs 323.3 s cold compile boot+step 1, c2_visible pass) and FSDP steady check 44.94 s (c2_visible pass).",
+     "source": "repos/verl/kb/costs.md section 0, 0.1, 0.2, and 0.3; PR #160; PR #161"
     }
    ],
    "derived_from_git": {
@@ -393,8 +393,8 @@
      "source": "PR #162; repos/miles"
     },
     {
-     "fact": "Passed 11/11 conformance and verified on 2x GB200 (miles 0.2.0): multi-actor live swap in 0.069 s, EpochDataBuffer code_epoch drain, and coupled S0 weight sync.",
-     "source": "PR #162"
+     "fact": "Passed 11/11 CPU conformance on ToyMilesLab, 8/8 real-GPU RealSlimeMilesLab conformance (c0,c1,c2,c4,c5,c6,c7,c9; c9 0.0616 s / 0.0166 s) on 2x B200 slime parity_rm (88.76 s fresh -> 0.697 s S0-restored trainer replay [127.3x] with weights_backuper S0 refresh and bit-exact non-zero-grad undo), and 2x GB200 miles 0.2.0 live swap (0.069 s, EpochDataBuffer code_epoch drain, coupled S0 sync).",
+     "source": "PR #162; repos/miles/kb/costs.md"
     }
    ],
    "derived_from_git": {

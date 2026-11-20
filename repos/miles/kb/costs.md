@@ -48,3 +48,18 @@ Source: our 2026-11-19 paired live-swap run on `2× B200` (`Qwen3-0.6B` GSM8K GR
 | Recorded-rollout trainer replay (`install` + `S0` restore + train/sync `0.4043 s`, skip rollout) | **`0.6641 s`** | **`126.3x`** faster than cold restart (`83.8696 / 0.6641`) |
 | `uninstall` + post-undo `S0` replay bit-exact check | **`0.0159 s`** (`15.9 ms`) | Base `0b23fd915b3ecbfc` (`13217973.159927`, unchanged on 0-reward base batch) $\to$ edited `b90017963cbcc302` (`13217979.694672`) $\to$ restored `0b23fd915b3ecbfc` (`bit_exact_undo_on_same_rollout: true`) |
 | Separate `miles 0.2.0` multi-actor live swap (`2× GB200`, `PR #162`) | **`0.069 s`** (`69.22 ms`) | Multi-actor Ray swap + `EpochDataBuffer` `code_epoch` drain + coupled `S0` weight sync |
+
+## 4. Non-Zero-Gradient `parity_rm` Receipt & `RealSlimeMilesLab` Conformance (`2× B200`, `2026-11-19`)
+
+Source: `2× B200` `Qwen3-0.6B` GSM8K GRPO (`1` SGLang rollout + `1` Megatron trainer via `MilesStepGate` + `fastrsi_megatron.state.Snapshot` `S0`) using `parity_rm` (non-zero reward variance so optimizer steps change weights on every base and edited check).
+
+- **`slime` `weights_backuper` finding:** `MegatronTrainRayActor` defaults to `enable_weights_backuper=True`, backing up updated weights at the end of `train_actor()` and calling `self._switch_model("actor")` at the start of the next step (and reading `weights_backuper.get("actor")` inside `update_weights()`). Coupled `S0` restore must therefore refresh `actor.weights_backuper.backup("actor")` right after `MState.zero_new_state(...)` so subsequent replay steps train from `S0` rather than stale post-step weights.
+
+| Measurement | Wall Time | Breakdown / Notes |
+|---|---:|---|
+| Fresh cold restart $\to$ first non-zero-grad step verdict | **`88.76 s`** (`88.7571 s`) | `import_ray 11.789 s` + `pg 6.2286 s` + `rollout_boot 0.0430 s` + `trainer_boot 59.1861 s` + `init_weight_sync 2.0441 s` (`boot_to_ready 79.2909 s`) + `first_step 9.4662 s` (`gen 1.8618 s` + `train 7.4802 s` + `sync 0.1243 s`) |
+| `Snapshot S0` capture | `1.5504 s` | `3,576,299,520 B` (`3.33 GiB`) pinned host copy (`take_s 1.5470 s`) |
+| Base weight step shift from `S0` (`weights_changed_from_s0: true`) | `8.2871 s` (`1.7628 s` gen + `6.5243 s` train/sync) | `w_s0 0b23fd915b3ecbfc` (`13217973.159927`) $\to$ `w_base_after 0d9e38119a154108` (`13217978.506348`) |
+| Live `get_grpo_returns` swap + `S0`-restored trainer replay | **`0.6972 s`** (`127.3×` vs fresh) | `0.0629 s` (`62.9 ms`) install (`trainer0` witness `1`) + `0.6343 s` `S0`-restored train + weight sync (`w_edit fcb55d6cec4f9268`, `13217978.401443`) |
+| `uninstall` + post-undo same-rollout bit-exact check | **`0.0159 s`** (`15.9 ms`) | `w_post_undo 0d9e38119a154108` (`13217978.506348`), **`bit_exact_undo_on_same_rollout: true`** |
+| `RealSlimeMilesLab` conformance (`c0, c1, c2, c4, c5, c6, c7, c9`) | **`8/8 pass`** | `c4` undo `0.014808 s`; `c7` 3-edit chain & unwind; `c9` 20-cycle soak `0.0616 s` install / `0.0166 s` undo; `0 MiB × 2` leftover |
