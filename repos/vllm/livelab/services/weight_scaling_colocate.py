@@ -443,7 +443,8 @@ LOG_PHASES = {
 
 
 def log_phases(log):
-    text = open(log, errors="replace").read()
+    with open(log, errors="replace") as fh:
+        text = fh.read()
     out = {}
     for k, rx in LOG_PHASES.items():
         m = rx.findall(text)
@@ -694,6 +695,7 @@ class Router:
     def close(self):
         self.open.set()
         self.server.shutdown()
+        self.server.server_close()
 
 
 # ---------------------------------------------------------------------------------------------

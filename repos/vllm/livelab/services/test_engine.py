@@ -20,8 +20,9 @@ ENGINE = str(HERE / "engine.py")
 FAKE_VLLM = r'''#!{py}
 import http.server, json, os, sys, time
 argv = sys.argv[1:]
-open(os.environ["FAKE_OUT"], "w").write(json.dumps({{"argv": argv, "env": {{
-    k: os.environ.get(k) for k in ("VLLM_CACHE_ROOT", "TRITON_CACHE_DIR")}}}}))
+with open(os.environ["FAKE_OUT"], "w") as _f:
+    _f.write(json.dumps({{"argv": argv, "env": {{
+        k: os.environ.get(k) for k in ("VLLM_CACHE_ROOT", "TRITON_CACHE_DIR")}}}}))
 time.sleep(float(os.environ.get("FAKE_DELAY", "0")))
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -171,12 +172,14 @@ def test_wait_healthy_returns_none_as_soon_as_the_server_exits():
             p = subprocess.Popen([sys.executable, "-c", "import sys; print('vllm: error: "
                                   "unrecognized arguments: --bogus'); sys.exit(2)"],
                                  stdout=f, stderr=subprocess.STDOUT)
-        time.sleep(0.5)
-        assert os.path.exists(f"/proc/{p.pid}")          # a zombie: exited, not reaped
-        t = time.time()
-        assert engine.wait_healthy(_free_port(), p.pid, log, timeout=30, poll=0.1) is None
-        assert time.time() - t < 5
-        p.wait()
+        try:
+            time.sleep(0.5)
+            assert os.path.exists(f"/proc/{p.pid}")          # a zombie: exited, not reaped
+            t = time.time()
+            assert engine.wait_healthy(_free_port(), p.pid, log, timeout=30, poll=0.1) is None
+            assert time.time() - t < 5
+        finally:
+            p.wait(timeout=5)
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
@@ -502,7 +505,8 @@ def test_fork_check_reads_vllms_spawn_fallback():
 FAKE_VLLM_LIVE = r'''#!{py}
 import http.server, json, multiprocessing as mp, os, queue, sys, threading, time, types
 argv = sys.argv[1:]
-open(os.environ["FAKE_OUT"], "w").write(json.dumps({{"argv": argv}}))
+with open(os.environ["FAKE_OUT"], "w") as _f:
+    _f.write(json.dumps({{"argv": argv}}))
 def flag(name, default):
     return int(argv[argv.index(name) + 1]) if name in argv else default
 def core_main():
@@ -514,7 +518,7 @@ def core_main():
             self.scheduler = types.SimpleNamespace(
                 max_num_running_reqs=flag("--max-num-seqs", 256),
                 max_num_scheduled_tokens=flag("--max-num-batched-tokens", 8192),
-                running=[], waiting=[])
+                running=[], waiting=[], policy=types.SimpleNamespace(value="fcfs"))
             self.vllm_config = types.SimpleNamespace(
                 scheduler_config=types.SimpleNamespace(enable_chunked_prefill=True),
                 model_config=types.SimpleNamespace(max_model_len=flag("--max-model-len", 4096)),
@@ -695,15 +699,21 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
     other = socket.socket()
     other.bind(("127.0.0.1", port))
     other.listen(64)
+    other.settimeout(0.1)
     import threading
+    stop_accept = threading.Event()
 
     def accept_all():
-        try:
-            while True:
-                other.accept()[0].close()
-        except OSError:
-            pass
-    threading.Thread(target=accept_all, daemon=True).start()
+        while not stop_accept.is_set():
+            try:
+                conn, _ = other.accept()
+                conn.close()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    accept_thread = threading.Thread(target=accept_all, daemon=True)
+    accept_thread.start()
     eng = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                            start_new_session=True)
     try:
@@ -711,8 +721,11 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
         eng.wait(timeout=5)
         assert r["stopped"] is False and r["port_open"] is True and r["alive"] == [], r
     finally:
+        stop_accept.set()
+        accept_thread.join(timeout=2)
         other.close()
         _stop(eng.pid)
+        eng.wait(timeout=5)
     eng = subprocess.Popen([sys.executable, "-c",
                             "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
                             " time.sleep(60)"], start_new_session=True)
@@ -722,6 +735,7 @@ def test_stop_engine_verifies_the_stop_and_never_signals_a_reused_pid():
         assert r["stopped"] is True and r["alive"] == [], r
     finally:
         _stop(eng.pid)
+        eng.wait(timeout=5)
 
 
 def test_descendants_include_workers_reparented_out_of_the_engine_tree(tmp_path):
@@ -765,23 +779,184 @@ def test_stop_engine_stops_the_session_after_its_leader_exited():
     verified", worker alive: the pid may belong to another session now); with it the worker is
     killed and stopped is True. Before: stop_engine returned at once with "was not running" and
     the worker kept running (holding the GPU, in a real engine)."""
-    marker = tempfile.mkdtemp(prefix="live")
-    leader = subprocess.Popen(
-        [sys.executable, "-c", "import subprocess, sys; print(subprocess.Popen([sys.executable,"
-         " '-c', 'import time; time.sleep(60)']).pid, flush=True)"],
-        stdout=subprocess.PIPE, text=True, start_new_session=True,
-        env={**os.environ, engine.MARKER_ENV: marker})
-    worker = int(leader.stdout.readline())
-    leader.wait(timeout=10)
+    with tempfile.TemporaryDirectory(prefix="live") as marker:
+        with subprocess.Popen(
+            [sys.executable, "-c", "import os, subprocess, sys; p = subprocess.Popen([sys.executable,"
+             " '-c', 'import time; time.sleep(60)']); print(p.pid, flush=True); os._exit(0)"],
+            stdout=subprocess.PIPE, text=True, start_new_session=True,
+            env={**os.environ, engine.MARKER_ENV: marker},
+        ) as leader:
+            worker = int(leader.stdout.readline())
+            leader.stdout.close()
+            leader.wait(timeout=10)
+            try:
+                unverified = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
+                assert unverified["stopped"] is False and unverified["unverified"] == [worker]
+                assert not zygote._exited(worker)
+                result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
+                assert result["stopped"] is True, result
+                assert zygote._exited(worker), "the leader's session member is still running"
+            finally:
+                _stop(worker)
+
+
+# An engine in miniature with vLLM's shutdown order: on SIGTERM the leader (the API server)
+# asks its child (the engine core) to abort the in-flight requests and waits for the answer,
+# then exits; the child answers and exits. A child killed before it answered leaves the leader
+# waiting forever, as uvicorn waits for request handlers whose outputs never come.
+ORDERED_ENGINE = r'''
+import os, signal, subprocess, sys, time
+CHILD = ("import sys; sys.stdin.readline(); print('aborted 3 requests', flush=True)")
+child = subprocess.Popen([sys.executable, "-c", CHILD], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE)
+print(child.pid, flush=True)
+
+def term(*_):
     try:
-        unverified = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3)
-        assert unverified["stopped"] is False and unverified["unverified"] == [worker]
-        assert not zygote._exited(worker)
-        result = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
-        assert result["stopped"] is True, result
-        assert zygote._exited(worker), "the leader's session member is still running"
+        child.stdin.write(b"abort\n"); child.stdin.flush()
+        answer = child.stdout.readline()
+    except OSError:
+        answer = b""
+    if not answer:
+        while True:
+            time.sleep(1)
+    with open(sys.argv[1], "wb") as _f:
+        _f.write(answer)
+    child.stdin.close()
+    child.stdout.close()
+    child.wait()
+    sys.exit(0)
+
+signal.signal(signal.SIGTERM, term)
+while True:
+    time.sleep(0.05)
+'''
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_lets_the_leader_stop_its_engine_in_order(tmp_path):
+    """Input: ORDERED_ENGINE (leader + child in the leader's session, vLLM's shutdown order in
+    miniature). Action: stop_engine(leader, grace=3). Expect: the leader got the child's answer
+    ("aborted 3 requests" written), both are gone in well under the grace, stopped True, no
+    SIGKILL (escalated False), how "leader". Before: SIGTERM went to every process at once, the
+    child died unanswered, the leader hung and only SIGKILL after the grace ended it: on B200
+    under client load, 10.1 s with requests left hanging, against 1.0 s leader-only. Not: vLLM's
+    own shutdown (the B200 receipt)."""
+    answer = tmp_path / "answer"
+    with subprocess.Popen([sys.executable, "-c", ORDERED_ENGINE, str(answer)],
+                          stdout=subprocess.PIPE, text=True, start_new_session=True) as leader:
+        child = int(leader.stdout.readline())
+        leader.stdout.close()
+        try:
+            r = engine.stop_engine(leader.pid, grace=3, kill_wait=3)
+            leader.wait(timeout=5)
+            assert r["stopped"] is True and r["escalated"] is False and r["how"] == "leader", r
+            assert r["seconds"] < 1.5 and r["tree"] == 2, r
+            assert answer.read_text() == "aborted 3 requests\n"
+            assert leader.returncode == 0 and zygote._exited(child)
+        finally:
+            _stop(leader.pid)
+            _stop(child)
+            leader.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_what_the_leader_leaves_behind_at_once():
+    """Input: a leader that dies on SIGTERM without stopping its child (a plain sleeper in its
+    session). Action: stop_engine(leader, grace=5). Expect: the child gets SIGTERM as soon as
+    the leader is gone: stopped True in well under the grace, escalated False. Pain point: a
+    leader-only stop that waited the whole grace for orphans holding the GPU. Not: SIGKILL."""
+    with subprocess.Popen(
+        [sys.executable, "-c", "import subprocess, sys, time; p = subprocess.Popen("
+         "[sys.executable, '-c', 'import time; time.sleep(60)']); print(p.pid, flush=True); "
+         "time.sleep(60)"], stdout=subprocess.PIPE, text=True, start_new_session=True,
+    ) as leader:
+        child = int(leader.stdout.readline())
+        leader.stdout.close()
+        try:
+            r = engine.stop_engine(leader.pid, grace=5, kill_wait=3)
+            assert r["stopped"] is True and r["escalated"] is False, r
+            assert r["seconds"] < 2.5 and zygote._exited(child), r
+            assert r["leader_exit_s"] is not None and r["tree_exit_s"] >= r["leader_exit_s"]
+        finally:
+            _stop(leader.pid)
+            leader.wait(timeout=5)
+            _stop(child)
+
+
+def test_session_members_started_after_the_leader_are_verified(tmp_path):
+    """Input: a /proc tree for an exited leader 3000 (recorded start time 400): 3001 in session
+    3000 started at 500 (a server's worker forked from the zygote: no marker in its exec-time
+    environ), 3002 in session 3000 started at 300 (before the leader: not its), 3003 in
+    another session started at 600. Action: verified_members with session 3000, since 400,
+    no marker. Expect: [3001]; without `since`, []. Before: a forked engine's members were
+    never verified, so a stop after its leader died signalled nothing and they kept their GPU
+    memory. Does not prove: the signals (the Linux case below)."""
+    for pid, sid, start in ((3001, 3000, 500), (3002, 3000, 300), (3003, 3003, 600)):
+        (tmp_path / str(pid)).mkdir()
+        (tmp_path / str(pid) / "stat").write_text(
+            f"{pid} (VLLM::Worker) S 1 {sid} {sid} " + " ".join(["0"] * 15) + f" {start} 0 0\n")
+        (tmp_path / str(pid) / "environ").write_bytes(b"PATH=/bin\0")
+    pids = [3001, 3002, 3003]
+    assert engine.verified_members(pids, "/m", proc_root=str(tmp_path), session=3000,
+                                   since=400) == [3001]
+    assert engine.verified_members(pids, "/m", proc_root=str(tmp_path), session=3000) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_stops_a_forked_engines_members_after_its_leader_exited():
+    """Input: a leader in its own session forks (no exec) a worker that sets the launch marker
+    in os.environ after the fork, as a zygote-forked server does, then the leader exits; its
+    start time was recorded while it ran. Action: stop_engine(leader, marker) without the start
+    time, then with it. Expect: without it nothing is signalled (the marker is not in the
+    exec-time environ); with it the worker is stopped. Before: there was no start-time rule, so
+    such a worker was never stopped. Not: a reused session id (Linux forbids it while live)."""
+    marker = "/cache/engines/live/forked"
+    with subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, sys, time\n"
+         "pid = os.fork()\n"
+         "if pid == 0:\n"
+         f"    os.environ[{engine.MARKER_ENV!r}] = {marker!r}\n"
+         "    time.sleep(60); os._exit(0)\n"
+         "print(pid, flush=True); sys.stdin.readline()\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
+    ) as leader:
+        worker = int(leader.stdout.readline())
+        leader.stdout.close()
+        recorded = engine._start_time(leader.pid)
+        leader.stdin.close()
+        leader.wait(timeout=10)
+        try:
+            r = engine.stop_engine(leader.pid, grace=0.5, kill_wait=3, marker=marker)
+            assert r["stopped"] is False and r["unverified"] == [worker], r
+            assert not zygote._exited(worker)
+            r = engine.stop_engine(leader.pid, grace=2, kill_wait=3, marker=marker,
+                                   start_time=recorded)
+            assert r["stopped"] is True and r["how"] == "members", r
+            assert zygote._exited(worker)
+        finally:
+            _stop(worker)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_stop_engine_never_signals_a_pid_another_process_holds_now():
+    """Input: a live process whose start time differs from the one recorded at launch (the
+    engine's pid was reused). Action: stop_engine(pid, start_time=recorded). Expect: stopped
+    False, a note naming the other process, and the process still running. Pain point: a
+    stop that kills an unrelated server. Not: the members' rules (cases above)."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                             start_new_session=True)
+    try:
+        time.sleep(0.2)
+        r = engine.stop_engine(other.pid, grace=0.5, kill_wait=0.5,
+                               start_time=engine._start_time(other.pid) - 1)
+        assert r["stopped"] is False and "another process" in r["note"], r
+        time.sleep(0.2)
+        assert not zygote._exited(other.pid)
     finally:
-        _stop(worker)
+        other.kill()
+        other.wait()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
@@ -794,6 +969,8 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         KV cache dtype in WeightCacheKey).
     Expect: all three exit 2 with findings (`vllm_args`, `weights_reconfig_tier2` for tier2a
     and tier2b), and the original engine PID stays alive and serving /health on port P!
+    Then `--enable-expert-parallel` (the only tier-2 delta that takes the holder reshard route)
+    fails at that step here (no real vLLM): `weights_reshard`, engine still up.
     Then (4) with `--weights-accept-reconfig --kv-cache-dtype fp8`, preflight accepts the Tier-2
     change and replaces the engine."""
     from weights import socket_name
@@ -846,6 +1023,21 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
                 assert refused_report["reconfig"]["subtier"] == want_subtier, refused_report
             assert not zygote._exited(pid1), "running engine must stay up on preflight refusal"
             assert engine.port_in_use(port) is True
+        # --enable-expert-parallel is the one tier-2 delta reshard_live can make live; it goes
+        # to the holder reshard step first. Here (no real vLLM) that step fails: a finding, and
+        # the running engine is still the one serving, not a stopped one.
+        ep_proc = subprocess.run(
+            [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
+             "--cache-root", cache_dir, "--log", os.path.join(work_dir, "ep.log"),
+             "--enable-expert-parallel"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        assert ep_proc.returncode == 2, ep_proc.stdout + ep_proc.stderr
+        ep_report = _one_json_line(ep_proc.stdout)
+        assert ep_report["findings"][0]["check"] == "weights_reshard", ep_report
+        assert ep_report["reconfig"]["weight_key_changed"] == ["enable_expert_parallel"]
+        assert ep_report["note"] == "not started; old engine left running"
+        assert not zygote._exited(pid1) and engine.port_in_use(port) is True
         accepted_proc = subprocess.run(
             [sys.executable, ENGINE, "reconfigure", "--pid", str(pid1),
              "--cache-root", cache_dir, "--log", os.path.join(work_dir, "s2.log"),
@@ -864,3 +1056,127 @@ def test_reconfigure_refuses_tier2_or_bad_flags_before_stopping_running_engine()
         if pid2:
             _stop(pid2)
         daemon.close()
+
+
+def test_reconfigure_refreshes_weights_probe_after_reshard_switches_socket_dir(monkeypatch, tmp_path):
+    """Input: `reconfigure()` taking the holder reshard route (`src_dir` -> `dst_dir`).
+    Expected: `preflight_report["weights_probe"]["socket_dir"]` passed to `_launch_process`
+    reflects `dst_dir`, not the stale pre-reshard `src_dir`."""
+    captured = {}
+    src_dir, dst_dir = str(tmp_path / "w"), str(tmp_path / "w.ep")
+    old_parsed = {"ok": True, "explicit": ["model"], "args": {"model": "m", "port": 8000, "tensor_parallel_size": 2,
+                                                              "enable_expert_parallel": False}}
+    new_parsed = {"ok": True, "explicit": ["model"], "args": {"model": "m", "port": 8000, "tensor_parallel_size": 2,
+                                                              "enable_expert_parallel": True}}
+    state = {"pid": 4242, "port": 8000, "vargv": ["m", "--port", "8000", "-tp", "2"],
+             "vllm_args": old_parsed, "log": str(tmp_path / "old.log"),
+             "launcher": {"vllm": "vllm", "weights": True, "weights_socket_dir": src_dir,
+                          "kvplan": None, "fork": False, "zygote": ""}}
+    args, _ = engine.parse(["reconfigure", "--pid", "4242", "--cache-root", str(tmp_path),
+                            "--log", str(tmp_path / "new.log"), "--enable-expert-parallel"])
+
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+    monkeypatch.setattr(engine, "load_engine_state", lambda root, pid: state)
+    monkeypatch.setattr(engine, "read_vllm_args", lambda a, v, e: new_parsed)
+    monkeypatch.setattr(engine.vllm_args, "override", lambda old, patch: list(old) + list(patch))
+    monkeypatch.setattr(engine.vllm_args, "classify_reconfig", lambda o, n: {
+        "tier": "live_reshard_or_cold", "subtier": "tier2a_reshard",
+        "weights_compatible": False,
+        "weight_key_changed": ["enable_expert_parallel"],
+    })
+    monkeypatch.setattr(engine.vllm_args, "override_finding", lambda *a: None)
+    monkeypatch.setattr(engine, "value_finding", lambda *a: None)
+    monkeypatch.setattr(engine.weights, "probe", lambda sdir, vis, tp: {
+        "ok": True, "socket_dir": sdir, "matched_gpus": True,
+    })
+
+    def fake_reshard_target(la, *a):
+        la.weights_socket_dir = dst_dir
+        return {"socket_dir": dst_dir, "target": "filled"}
+
+    monkeypatch.setattr(engine, "reshard_target", fake_reshard_target)
+    monkeypatch.setattr(engine, "stop_engine", lambda *a, **k: {"stopped": True})
+
+    def fake_launch(la, nv, np_, env_, preflight_rep, extra_report=None):
+        captured["weights_probe"] = dict(preflight_rep.get("weights_probe") or {})
+        captured["extra_report"] = extra_report
+        return {"ok": True, "weights_probe": captured["weights_probe"]}
+
+    monkeypatch.setattr(engine, "_launch_process", fake_launch)
+    out = engine.reconfigure(args, ["--enable-expert-parallel"])
+    assert out["ok"]
+    assert captured["weights_probe"]["socket_dir"] == dst_dir
+    assert captured["extra_report"]["reconfig"]["reshard"]["socket_dir"] == dst_dir
+
+
+def test_kvplan_report_closes_log_file_without_resource_warning(tmp_path):
+    """Input: a log file containing one kvplan reuse line. Action: `engine.kvplan_report(log)`
+    followed by `gc.collect()`. Expect: parses the reuse count and emits zero ResourceWarnings."""
+    import gc, warnings
+    log = tmp_path / "serve.log"
+    log.write_text('INFO fastrsi kvplan: {"event": "reused", "seconds": 0.12}\n')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        rep = engine.kvplan_report(str(log))
+        gc.collect()
+    assert rep["reused"] == 1 and rep["seconds"] == [0.12]
+    assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+
+
+def test_wait_healthy_ignores_exception_ignored_finalizer_traceback(tmp_path, monkeypatch):
+    """Input: a startup log containing a non-fatal finalizer warning (`Exception ignored in:`
+    followed by `Traceback (most recent call last):` from third-party `zmq.Context.__del__`),
+    with `/health` answering HTTP 200. Expect: `wait_healthy` does NOT treat it as fatal and
+    returns healthy seconds."""
+    log = tmp_path / "serve.log"
+    log.write_text(
+        "INFO Application startup complete.\n"
+        "Exception ignored in: <function Context.__del__ at 0x7f0000>\n"
+        "Traceback (most recent call last):\n"
+        '  File "/venv/lib/python3.12/site-packages/zmq/sugar/context.py", line 183, in __del__\n'
+        "    warn(f'Unclosed context {self}', ResourceWarning)\n"
+        "ResourceWarning: Unclosed context <zmq.Context() at 0x7f0000>\n"
+        "Exception ignored while finalizing file <_io.FileIO name='x' mode='rb'>:\n"
+        "Traceback (most recent call last):\n"
+        "ResourceWarning: unclosed file\n"
+    )
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(engine.urllib.request, "urlopen", lambda url, timeout=3: _Resp())
+    elapsed = engine.wait_healthy(18999, os.getpid(), str(log), timeout=5, poll=0.01)
+    assert elapsed is not None and elapsed >= 0.0
+
+
+def test_wait_healthy_fails_on_unhandled_traceback_and_engine_core_init_failure(tmp_path, monkeypatch):
+    """Input: logs containing (a) a real unhandled `Traceback (most recent call last):` (even
+    after an earlier `Exception ignored in:` block) and (b) `Engine core initialization failed`.
+    Expect: `wait_healthy` returns `None` immediately without probing `/health`."""
+    monkeypatch.setattr(engine.zygote, "_exited", lambda pid: False)
+    probed = []
+    monkeypatch.setattr(
+        engine.urllib.request,
+        "urlopen",
+        lambda url, timeout=3: probed.append(url),
+    )
+
+    tb_log = tmp_path / "fatal_tb.log"
+    tb_log.write_text(
+        "Exception ignored in: <function Context.__del__ at 0x1>\n"
+        "Traceback (most recent call last):\n"
+        "ResourceWarning: Unclosed context\n"
+        "ERROR startup failed\n"
+        "Traceback (most recent call last):\n"
+        '  File "vllm/entrypoints/cli/serve.py", line 10, in main\n'
+        "RuntimeError: boom\n"
+    )
+    assert engine.wait_healthy(18999, os.getpid(), str(tb_log), timeout=5, poll=0.01) is None
+
+    core_log = tmp_path / "core_fail.log"
+    core_log.write_text("RuntimeError: Engine core initialization failed. See root cause above.\n")
+    assert engine.wait_healthy(18999, os.getpid(), str(core_log), timeout=5, poll=0.01) is None
+    assert probed == []
