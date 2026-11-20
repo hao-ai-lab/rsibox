@@ -105,13 +105,62 @@ def stamp_diff(old, new):
 
 
 # -- the holder process --------------------------------------------------------------------
+def _walk_tensors(root, tensor_cls):
+    """Iteratively yield every `tensor_cls` reachable from `root`, breaking cycles."""
+    import types
+    skip = (type(None), int, float, str, bytes, bool, type, types.ModuleType, types.FunctionType)
+    seen, stack = set(), [root]
+    while stack:
+        obj = stack.pop()
+        if isinstance(obj, skip) or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, tensor_cls):
+            yield obj
+        elif isinstance(obj, dict):
+            stack.extend(obj.values())
+            stack.extend(obj.keys())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            stack.extend(obj)
+        else:
+            if isinstance(d := getattr(obj, "__dict__", None), dict):
+                stack.extend(d.values())
+            for cls in type(obj).__mro__:
+                slots = cls.__dict__.get("__slots__", ())
+                for s in ((slots,) if isinstance(slots, str) else slots):
+                    if s not in ("__dict__", "__weakref__") and hasattr(obj, s):
+                        stack.append(getattr(obj, s))
+
+
+def _private_cpu(torch_mod, storage, cache):
+    key = getattr(storage, "_cdata", id(storage))
+    if key not in cache:
+        priv = torch_mod.UntypedStorage(storage.nbytes())
+        if storage.nbytes():
+            priv.copy_(storage)
+        cache[key] = priv
+    return cache[key]
+
+
 def _own(module):
-    """A copy of a received module (its tensors IPC-mapped from the sender) whose every tensor,
-    nested ones included (lists, dicts, helper objects), this process owns: the sender may
-    exit, and the copy can be sent on (torch refuses to forward a received CUDA tensor)."""
+    """A copy of a received module whose tensors this process owns: private CPU storages
+    sever any sender `torch_shm_manager` while keeping tied views aliased."""
     import copy
     import torch
-    owned = copy.deepcopy(module)       # the memo keeps tied tensors tied
+    memo, private, keep = {"torch": {}}, {}, []
+    for t in _walk_tensors(module, torch.Tensor):
+        if t.device.type == "cpu" and (s := t.untyped_storage()).is_shared():
+            keep.append(s)
+            priv = _private_cpu(torch, s, private)
+            memo[id(s)] = priv
+            if (cdata := getattr(s, "_cdata", None)) is not None:
+                memo["torch"][cdata] = priv
+    owned = copy.deepcopy(module, memo)       # the memo keeps tied tensors tied
+    post = {}
+    with torch.no_grad():
+        for t in _walk_tensors(owned, torch.Tensor):
+            if t.device.type == "cpu" and (s := t.untyped_storage()).is_shared():
+                t.data.set_(_private_cpu(torch, s, post), t.storage_offset(), t.size(), t.stride())
     if torch.cuda.is_available() and torch.cuda.is_initialized():
         torch.cuda.synchronize()
     return owned
