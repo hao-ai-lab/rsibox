@@ -3,8 +3,9 @@
 
 Each case names the pain point it guards. Run: python3 .github/review/test_code_review.py -v
 """
-import json, os, socket, subprocess, sys, tempfile, threading, unittest
+import base64, json, os, socket, subprocess, sys, tempfile, threading, unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import code_review as cr          # noqa: E402
@@ -173,15 +174,51 @@ class Service(unittest.TestCase):
             srv.server_close()
 
     def test_reply_quoting_a_secret_file_is_withheld(self):
-        """Pain point: an injected 'print ~/.config/.../token' must never reach a public review."""
+        """Pain point: an injected 'print ~/.config/.../token' must never reach a public review,
+        even when obfuscated via spacing, reversal, escaping, partial slices, base64, or hex."""
+        tok = "tok_9f8e7d6c5b4a39281706f5e4"
         with tempfile.NamedTemporaryFile("w", delete=False) as f:
-            f.write("tok_9f8e7d6c5b4a39281706f5e4\n")
+            f.write(tok + "\n")
         try:
             s = server.secret_strings([f.name, "/nonexistent"])
-            self.assertTrue(server.leaks('{"findings": [], "summary": "tok_9f8e7d6c5b4a39281706f5e4"}', s))
+            self.assertTrue(server.leaks(f'{{"findings": [], "summary": "{tok}"}}', s))
+            self.assertTrue(server.leaks(" ".join(tok), s))
+            self.assertTrue(server.leaks(tok[::-1], s))
+            self.assertTrue(server.leaks(base64.b64encode(tok.encode()).decode(), s))
+            self.assertTrue(server.leaks(base64.b64encode(tok.encode()).decode().rstrip("="), s))
+            self.assertTrue(server.leaks(tok.encode().hex(), s))
+            self.assertTrue(server.leaks("\\u0074" + tok[1:], s))
+            self.assertTrue(server.leaks("%74" + tok[1:], s))
+            self.assertTrue(server.leaks(tok[:16], s))
+            pem_header = "".join(["-----", "BEGIN", " RSA ", "PRIVATE KEY-----"])
+            self.assertTrue(server.leaks(pem_header, set()))
+            self.assertTrue(server.leaks(base64.b64encode(pem_header.encode()).decode(), set()))
             self.assertFalse(server.leaks('{"findings": [], "summary": "fine"}', s))
         finally:
             os.unlink(f.name)
+
+    def test_leaks_catches_whole_file_base64_and_substring_encodings(self):
+        """[190-3]: whole-file base64 (arbitrary mod-3 offsets, line-wrapped, prose-prefixed),
+        URL-safe base64, and base64/hex of secret substrings must all be caught."""
+        tok = "sk_live_0123456789abcdefghij"
+        s = {tok}
+        # Test all three mod-3 alignments of tok inside a JSON payload.
+        for pad in ("", "x", "xy"):
+            auth_json = json.dumps({"pad": pad, "auth_mode": "chatgpt", "tokens": {"access_token": tok}})
+            b64_full = base64.b64encode(auth_json.encode()).decode()
+            wrapped = "\n".join(b64_full[i:i + 76] for i in range(0, len(b64_full), 76))
+            self.assertTrue(server.leaks(b64_full, s), f"raw b64 pad={pad!r}")
+            self.assertTrue(server.leaks(f"dump {wrapped}", s), f"wrapped prose b64 pad={pad!r}")
+            b64_url = base64.urlsafe_b64encode(auth_json.encode()).decode().rstrip("=")
+            self.assertTrue(server.leaks(b64_url, s), f"urlsafe b64 pad={pad!r}")
+            self.assertTrue(server.leaks(auth_json.encode().hex(), s), f"whole-file hex pad={pad!r}")
+        self.assertTrue(server.leaks(base64.b64encode(tok[1:].encode()).decode(), s))
+        self.assertTrue(server.leaks(base64.b64encode(tok[:-1].encode()).decode().rstrip("="), s))
+        self.assertTrue(server.leaks(tok[1:].encode().hex(), s))
+        self.assertTrue(server.leaks(tok[1:].encode().hex().upper(), s))
+        self.assertTrue(server.leaks(base64.b64encode(" ".join(tok).encode()).decode(), s))
+        self.assertTrue(server.leaks(base64.b64encode(tok[::-1].encode()).decode(), s))
+        self.assertFalse(server.leaks(base64.b64encode(b'{"findings": [], "summary": "clean"}').decode(), s))
 
 
 class JobIsolation(unittest.TestCase):
@@ -259,7 +296,75 @@ class JobIsolation(unittest.TestCase):
         job = server.JOBS.pop("0" * 16)
         self.assertEqual(job["status"], "error")
         self.assertNotIn(self.secret, job["error"])
+        if "Landlock is not available" in job["error"]:
+            self.skipTest("kernel without Landlock")
         self.assertIn("withheld", job["error"])
+
+    def test_command_restricts_binary_folder_run_and_shared_shm(self):
+        """M-M20: confine grants the binary file (and any shebang interpreter file) rather than
+        recursively granting its parent folder, excludes /run recursively, and uses --private-shm
+        instead of sharing host /dev/shm."""
+        bin_dir = Path(self.tmp.name, "tools")
+        bin_dir.mkdir()
+        interp = Path(self.tmp.name, "interp", "custom-py")
+        interp.parent.mkdir()
+        interp.write_text("#!/bin/sh\n")
+        exe = bin_dir / "fake-codex"
+        exe.write_text(f"#!{interp}\necho ok\n")
+        work = Path(self.tmp.name, "job")
+        work.mkdir()
+        with mock.patch.dict(os.environ, {"FASTRSI_REVIEW_EXTRA_READ": ""}):
+            argv, _ = server.command("codex", "hi", "default", str(work), {"codex": str(exe)})
+        r_idx = argv.index("--read")
+        w_idx = argv.index("--write")
+        sep_idx = argv.index("--")
+        read_paths = argv[r_idx + 1:w_idx]
+        write_paths = argv[w_idx + 1:sep_idx]
+        self.assertIn("--private-shm", argv[:r_idx])
+        self.assertNotIn("/run", server.SYSTEM_READ)
+        self.assertNotIn("/run", read_paths)
+        self.assertNotIn(str(bin_dir), read_paths)
+        self.assertNotIn(str(interp.parent), read_paths)
+        self.assertIn(os.path.realpath(exe), read_paths)
+        self.assertIn(os.path.realpath(interp), read_paths)
+        self.assertNotIn("/dev/shm", write_paths)
+
+    def test_private_shm_control_flow_never_grants_global_dev_shm(self):
+        """M-M20: when setup_private_shm fails (e.g. restricted userns), --private-shm must
+        NOT pass /dev/shm to confine(); --require-private-shm fails closed."""
+        confine_mod = __import__("confine")
+        seen = []
+        with mock.patch.object(confine_mod, "setup_private_shm", return_value=None), \
+                mock.patch.object(confine_mod, "confine", lambda r, w: seen.append((r, w))), \
+                mock.patch.object(confine_mod.os, "execvp", lambda *_a: None):
+            confine_mod.main(["--private-shm", "--read", "/usr", "--write", "/tmp/job", "--", "true"])
+            self.assertEqual(seen, [(["/usr"], ["/tmp/job"])])
+            with self.assertRaises(OSError):
+                confine_mod.main(["--require-private-shm", "--read", "/usr", "--write", "/tmp/job", "--", "true"])
+        seen.clear()
+        with mock.patch.object(confine_mod, "setup_private_shm", return_value="/dev/shm"), \
+                mock.patch.object(confine_mod, "confine", lambda r, w: seen.append((r, w))), \
+                mock.patch.object(confine_mod.os, "execvp", lambda *_a: None):
+            confine_mod.main(["--private-shm", "--read", "/usr", "--write", "/tmp/job", "--", "true"])
+            self.assertEqual(seen, [(["/usr"], ["/tmp/job", "/dev/shm"])])
+
+    def test_setup_private_shm_falls_back_on_enospc_and_eusers(self):
+        """[190-4]: hosts with user.max_user_namespaces=0 return ENOSPC (or EUSERS) from
+        unshare(CLONE_NEWUSER); setup_private_shm must return None rather than crashing."""
+        import errno
+        confine_mod = __import__("confine")
+        with tempfile.TemporaryDirectory() as shm_dir:
+            fake_libc = mock.MagicMock()
+            fake_libc.unshare.return_value = -1
+            fake_libc.mount.return_value = 0
+            for err in (errno.ENOSPC, getattr(errno, "EUSERS", errno.ENOSPC)):
+                with mock.patch.object(confine_mod, "libc", fake_libc), \
+                        mock.patch.object(confine_mod.ctypes, "get_errno", return_value=err):
+                    self.assertIsNone(confine_mod.setup_private_shm(shm_dir))
+            with mock.patch.object(confine_mod, "libc", fake_libc), \
+                    mock.patch.object(confine_mod.ctypes, "get_errno", return_value=errno.ENOMEM):
+                with self.assertRaises(OSError):
+                    confine_mod.setup_private_shm(shm_dir)
 
 
 @unittest.skipUnless(sys.platform == "linux", "Landlock is Linux-only")
@@ -280,6 +385,58 @@ class Confine(unittest.TestCase):
             self.assertNotEqual(r_no.returncode, 0)
             self.assertIn("Permission denied", r_no.stderr)
             self.assertNotIn("hidden", r_no.stdout)
+
+    def test_confined_binary_cannot_read_sibling_in_its_folder_or_run(self):
+        """M-M20: granting the executable file lets it run while denying sibling files and
+        subdirectories in the executable's directory, as well as /run."""
+        with tempfile.TemporaryDirectory() as folder:
+            bin_dir = Path(folder, "bin")
+            sub = bin_dir / "nested"
+            sub.mkdir(parents=True)
+            exe = bin_dir / "tool.sh"
+            exe.write_text("#!/bin/sh\necho ran\n")
+            exe.chmod(0o755)
+            (bin_dir / "sibling.txt").write_text("sibling-secret")
+            (sub / "deep.txt").write_text("deep-secret")
+            work = Path(folder, "work")
+            work.mkdir()
+            read_paths = server.system_read_paths() + server.binary_read_paths(str(exe))
+            base = [sys.executable, str(Path(server.HERE, "confine.py")),
+                    "--private-shm", "--read", *read_paths,
+                    "--write", str(work), "/dev/null", "--"]
+            r_exe = subprocess.run(base + [str(exe)], capture_output=True, text=True)
+            if "not available" in r_exe.stderr:
+                self.skipTest("kernel without Landlock")
+            self.assertEqual((r_exe.returncode, r_exe.stdout.strip()), (0, "ran"))
+            for blocked in (str(bin_dir / "sibling.txt"), str(sub / "deep.txt"), "/run"):
+                r_blk = subprocess.run(base + ["ls" if blocked == "/run" else "cat", blocked],
+                                       capture_output=True, text=True)
+                self.assertNotEqual(r_blk.returncode, 0, blocked)
+                self.assertIn("Permission denied", r_blk.stderr, blocked)
+
+    def test_private_shm_never_exposes_host_dev_shm(self):
+        """M-M20: with --private-shm, a confined process sees either its own empty /dev/shm
+        namespace (when unprivileged user namespaces work) or Permission denied (when disabled),
+        and never sees files created on the host /dev/shm."""
+        if not os.path.isdir("/dev/shm"):
+            self.skipTest("/dev/shm not present")
+        with tempfile.NamedTemporaryFile(dir="/dev/shm", prefix="fastrsi-host-", delete=False) as f:
+            f.write(b"host-shm-secret")
+            host_file = f.name
+        try:
+            with tempfile.TemporaryDirectory() as work:
+                probe = ("import os, sys; p = sys.argv[1]; "
+                         "print('HOST_LEAK' if os.path.exists(p) else 'ISOLATED')")
+                base = [sys.executable, str(Path(server.HERE, "confine.py")),
+                        "--private-shm", "--read", *server.system_read_paths(),
+                        "--write", work, "/dev/null", "--",
+                        sys.executable, "-c", probe, host_file]
+                r = subprocess.run(base, capture_output=True, text=True)
+                if "not available" in r.stderr:
+                    self.skipTest("kernel without Landlock")
+                self.assertNotIn("HOST_LEAK", r.stdout)
+        finally:
+            os.unlink(host_file)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 name: CPU tests
 # Fork PRs never run on the self-hosted runner: `runs-on` below picks FASTRSI_CI_RUNNER only for
 # pushes, manual runs and PRs whose head branch is in this repository. GPU and torch cases run in
-# the B200 CI (.github/b200-ci/), which posts the `b200-gpu` commit status.
+# the Modal GPU CI (.github/modal-ci/), which posts the `modal-gpu` commit status.
 on:
   push:
     branches: [main]
@@ -15,8 +15,9 @@ env:
   CUDA_VISIBLE_DEVICES: ""
   FASTRSI_VLLM_PYTHON: ""
 jobs:
-  conformance-cases:
-    name: Conformance cases fail labs that lack their property (fake labs, CPU, Python ${{ matrix.python }})
+  func-conformance-cases:
+    # Conformance cases fail labs that lack their property (fake labs, CPU, Python ${{ matrix.python }})
+    name: "func: Test suite self-check (Py ${{ matrix.python }})"
     # requires-python is >=3.11 (pyproject.toml), so every supported minor version runs.
     # Only 3.12 may use the self-hosted runner, which has one python3; the others run on
     # GitHub-hosted runners, where setup-python installs that exact version.
@@ -37,8 +38,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - working-directory: core/livelab
         run: python3 -m unittest discover -s conformance -t . -v
-  livelab-framework:
-    name: Framework kernel, forksafe, and conformance c0-c10 on the toy lab (CPU, Python ${{ matrix.python }})
+  func-livelab-framework:
+    # Framework kernel, forksafe, and conformance c0-c10 on the toy lab (CPU, Python ${{ matrix.python }})
+    name: "func: Core kernel & CLI (Py ${{ matrix.python }})"
     # requires-python is >=3.11 (pyproject.toml), so every supported minor version runs.
     # Only 3.12 may use the self-hosted runner, which has one python3; the others run on
     # GitHub-hosted runners, where setup-python installs that exact version.
@@ -80,8 +82,9 @@ jobs:
       - name: Run the conformance cases c0-c10 against the kernel's toy lab (2 ranks, step-gap host, session)
         working-directory: core/livelab
         run: python3 -m conformance --lab kernel.toy_lab:ToyLab
-  fastvideo-adapter:
-    name: FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
+  func-fastvideo-adapter:
+    # FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
+    name: "func: FastVideo adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -102,8 +105,9 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/repos/fastvideo/livelab
         run: python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
-  vllm-adapter:
-    name: vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
+  func-vllm-adapter:
+    # vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
+    name: "func: vLLM adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -117,8 +121,9 @@ jobs:
           python-version: "3.12"
       - name: Run the adapter's unittest cases (host, worker group, sides, graph detection; collective_rpc is an in-process loop)
         run: python3 -m unittest discover -s repos/vllm/livelab/adapter -t repos/vllm/livelab -v
-  vllm-services:
-    name: vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
+  func-vllm-services:
+    # vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
+    name: "func: vLLM services (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -136,8 +141,9 @@ jobs:
           "$RUNNER_TEMP/pytest-venv/bin/python" -m pip install --quiet --disable-pip-version-check pytest
       - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (FASTRSI_VLLM_PYTHON) or torch skip and are listed (-rs)
         run: '"$RUNNER_TEMP/pytest-venv/bin/python" -m pytest -v -rs repos/vllm/livelab/services'
-  megatron-livelab:
-    name: Megatron live-lab and tool golden tests (CPU; torch cases skip)
+  func-megatron-livelab:
+    # Megatron live-lab and tool golden tests (CPU; torch cases skip)
+    name: "func: Megatron adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -156,8 +162,9 @@ jobs:
           if [ -d repos/megatron/tools ]; then
             python3 -m unittest discover -s repos/megatron/tools -v
           fi
-  verl-adapter:
-    name: veRL adapter, CLI tools, and conformance c0-c10 on the veRL-shaped toy (CPU, no Ray/verl)
+  func-verl-adapter:
+    # veRL adapter, CLI tools, and conformance c0-c10 on the veRL-shaped toy (CPU, no Ray/verl)
+    name: "func: veRL adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -177,8 +184,9 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
         run: python3 -m fastrsi conformance verl
-  miles-adapter:
-    name: miles adapter golden tests and conformance c0-c10 on the miles-shaped toy (CPU, no Ray/miles)
+  func-miles-adapter:
+    # miles adapter golden tests and conformance c0-c10 on the miles-shaped toy (CPU, no Ray/miles)
+    name: "func: miles adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -196,8 +204,9 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
         run: python3 -m fastrsi conformance miles
-  sglang-adapter:
-    name: SGLang adapter, zygote services, and conformance c0-c10 on the SGLang-shaped toy (CPU, no SGLang)
+  func-sglang-adapter:
+    # SGLang adapter, zygote services, and conformance c0-c10 on the SGLang-shaped toy (CPU, no SGLang)
+    name: "func: SGLang adapter (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -217,8 +226,9 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
         run: python3 -m fastrsi conformance sglang
-  b200-ci-runner:
-    name: B200 CI runner and loop golden cases (CPU; real git and venvs, stand-in nvidia-smi and rack-run, no GitHub calls)
+  func-modal-ci-runner:
+    # Modal GPU CI runner and loop golden cases (CPU; real git mirror/archive, stand-in modal CLI, no GitHub calls)
+    name: "func: GPU CI runner self-test (CPU)"
     runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
@@ -230,5 +240,5 @@ jobs:
         if: runner.environment == 'github-hosted'
         with:
           python-version: "3.12"
-      - name: Run the runner's refusal, retry, GPU-lock, quickstart and loop cases
-        run: python3 .github/b200-ci/test_b200_ci.py -v
+      - name: Run Modal GPU CI runner golden tests
+        run: python3 .github/modal-ci/test_modal_ci.py -v

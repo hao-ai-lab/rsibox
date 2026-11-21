@@ -25,7 +25,7 @@ If the knowledge base already has measurements, start from them; measure only wh
   job is to make *this* engine's edit-to-signal loop fast and trustworthy.
 - **Do not invent cross-engine abstractions.** Never design generic base classes for hypothetical
   second engines, and never import from another `repos/<other>/` (enforced by the
-  `cross-engine-imports` check in `.github/workflows/pr-rules.yml`).
+  `rule-cross-engine-imports` check in `.github/workflows/pr-rules.yml`).
 - **Start engine-local even when a helper looks general.** Write new helpers inside
   `repos/<engine>/livelab/` or `repos/<engine>/tools/` first. Only after a second engine loop
   independently proves the need for the same narrow mechanism does `core/agents/toolsmith_distill.md`

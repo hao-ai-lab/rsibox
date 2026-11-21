@@ -1,11 +1,13 @@
 # Local and Self-Hosted CI
 
-FastRSI's CI suite consists of 11 CPU-only checks across two workflows:
+FastRSI's CI suite consists of 15 CPU-only checks across two workflows:
 
-- **`.github/workflows/pr-rules.yml` (5 checks):** `title`, `attribution`, `leak-check`,
-  `loop-record`, and `cross-engine-imports`.
-- **`.github/workflows/cpu-tests.yml` (6 checks):** `conformance-cases`, `livelab-framework`,
-  `fastvideo-adapter`, `vllm-adapter`, `vllm-services`, and `megatron-livelab`.
+- **`.github/workflows/pr-rules.yml` (5 checks):** `rule-pr-title`, `rule-no-ai-attribution`,
+  `rule-leak-check`, `docs-loop-record`, and `rule-cross-engine-imports`.
+- **`.github/workflows/cpu-tests.yml` (10 checks):** `func-conformance-cases`,
+  `func-livelab-framework`, `func-fastvideo-adapter`, `func-vllm-adapter`, `func-vllm-services`,
+  `func-megatron-livelab`, `func-verl-adapter`, `func-miles-adapter`, `func-sglang-adapter`, and
+  `func-modal-ci-runner`.
 
 Both workflows support two execution modes so pull requests remain gated and green regardless of
 whether GitHub-hosted runner minutes are used, a self-hosted runner is attached, or GitHub Actions
@@ -58,7 +60,7 @@ behavior to a fresh `ubuntu-latest` VM:
    variables `PYTHONNOUSERSITE: "1"`, `CUDA_VISIBLE_DEVICES: ""`, and `FASTRSI_VLLM_PYTHON: ""`,
    preventing host `~/.local` packages (such as `torch` or `triton`) or GPUs from leaking into
    standard-library CPU tests.
-3. **Ephemeral virtualenv for `pytest`:** `vllm-services` creates an isolated virtualenv inside
+3. **Ephemeral virtualenv for `pytest`:** `func-vllm-services` creates an isolated virtualenv inside
    `$RUNNER_TEMP/pytest-venv` (which the runner wipes after every job) rather than running
    `pip install` against the host or toolcache Python.
 4. **Conditional `setup-python`:** `actions/setup-python@v5` runs only when
