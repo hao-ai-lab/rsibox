@@ -44,8 +44,12 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   900 s) for its sends, and at most that long after its own part for the replies. A rank that has
   not answered by then (it exited, was killed, hangs, or is slower than rank 0 by more than the
   timeout) or a send or receive that fails fails the round and poisons the session
-  (`participant_failed`); no round runs after it. Rank 0 keeps the failed round's buffers, so a
-  reply that comes late lands there harmlessly. What a rank other than 0 does next depends on the
+  (`participant_failed`); no round runs after it. Rank 0 keeps the failed round's buffers in
+  a module-level list (`gap._KEPT_BUFFERS`) for the life of the process (even if `Ranks` is
+  dropped), so a reply that comes late lands there harmlessly. Sending `exit` after a failed round
+  (or when the `exit` round itself fails) replies `ok: false`, leaves `serve()` with
+  `"exit_failed"`, and skips `dist.barrier` on the failed group so rank 0 exits without blocking
+  for the group's long timeout. What a rank other than 0 does next depends on the
   transport: it stays blocked in its send or receive on the long-timeout group (seen with gloo's
   macOS transport) until the harness respawns the job, or its send or receive fails (seen on
   Linux) and it exits with code 19 and a one-line reason on stderr, never 0. A rank that answers
@@ -157,10 +161,13 @@ Contract: each rank gets torchrun's variables (OMP_NUM_THREADS=1 too, applied to
 and the request's, a session of its own, `D/rank<r>.log`, optionally a CPU list (`--cpus`), and
 torch.cuda's own functions back; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
 time. One rank exiting non-zero stops the others by PID tree. No rank or child of a rank outlives
-its job: the zygote is child subreaper and reaps everything after each job, each rank dies with
-the zygote (PR_SET_PDEATHSIG), a `fastrsi-guard` process per rank kills the rank's process group
-when the rank dies, and a client that disconnects stops its job (`on_client_gone: "keep"` lets it
-run). A malformed request gets an `error` event; the zygote serves on. Findings refuse a request unless
+its job: the zygote is child subreaper and reaps every non-kept child (ranks, guards, job-started
+helpers, adopted orphans) by parent PID after each job while leaving pre-job helpers and their
+descendants untouched, handles `SIGTERM` cleanup when running as PID 1, translates ancestor-namespace
+`/proc` via `NSpid`/`ns/pid` without signaling foreign PIDs, never kills its own process group
+when leading one, ensures each rank dies with the zygote (PR_SET_PDEATHSIG), starts a
+`fastrsi-guard` process per rank to kill the rank's process group when the rank dies, and stops the
+job when a client disconnects (`on_client_gone: "keep"` lets it run). A malformed request gets an `error` event; the zygote serves on. Findings refuse a request unless
 it accepts them: `stale` (an imported source file changed), `env` (a variable a library may
 read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_OVERLAY replaces a
 module the zygote has imported).

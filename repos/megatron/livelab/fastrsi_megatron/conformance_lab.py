@@ -61,9 +61,8 @@ class _Job:
 
     def wait_ready(self):
         while time.time() - self.t0 < self.timeout:
-            if os.path.exists(self.ready) and os.path.getsize(self.ready):
-                with open(self.ready) as f:
-                    self.info = json.load(f)
+            if (info := ipc.read_json(self.ready)) is not None:
+                self.info = info
                 self.start_s = round(time.time() - self.t0, 2)
                 return True
             if self.p.poll() is not None:
@@ -79,15 +78,11 @@ class _Job:
             return None
 
     def kill(self):
-        """Kill the job and every process it started, by PID. torchrun starts its workers in
-        sessions of their own, so a kill of the launcher's process group leaves them running
-        (and holding GPU memory); walk the process tree instead, children first."""
+        """Kill the job and every process it started, by PID (children first)."""
         pids = _descendants(self.p.pid)
         proc.kill_tree(self.p.pid, signal.SIGKILL, include_pg=False)
-        try:
+        with contextlib.suppress(subprocess.TimeoutExpired):
             self.p.wait(60)
-        except subprocess.TimeoutExpired:
-            pass
         deadline = time.monotonic() + 60
         while any(proc.pid_alive(p) for p in pids) and time.monotonic() < deadline:
             time.sleep(0.2)
@@ -271,14 +266,11 @@ class MegatronLab:
         return r
 
     def status(self):
-        if self.poison:
-            return {"ok": True, "state": "poisoned", "txns": [], "fingerprint": None,
-                    "poison": list(self.poison)}
-        r = self._call({"verb": "status"}, 120)
-        if r.get("lost"):
-            return {"ok": True, "state": "poisoned", "txns": [], "fingerprint": None,
-                    "poison": list(self.poison)}
-        return r
+        if not self.poison:
+            r = self._call({"verb": "status"}, 120)
+            if not r.get("lost"):
+                return r
+        return {"ok": True, "state": "poisoned", "txns": [], "fingerprint": None, "poison": list(self.poison)}
 
     # -- harness -------------------------------------------------------------------------
     def patches(self):
