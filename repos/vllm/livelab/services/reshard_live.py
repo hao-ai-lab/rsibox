@@ -50,7 +50,6 @@ import json
 import os
 import re
 import shlex
-import socket
 import subprocess
 import sys
 import time
@@ -59,8 +58,10 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-import corelab  # noqa: F401,E402  (core/livelab on sys.path)
-from fastrsi import ipc  # noqa: E402  (stdlib only: engine.py imports this module)
+import corelab  # noqa: E402  (core/livelab on sys.path + shared helpers)
+from fastrsi import harness, ipc  # noqa: E402  (stdlib only: engine.py imports this module)
+
+_finding = harness.plain_finding
 
 
 def map_global_expert_to_ep(*args, **kwargs):
@@ -95,17 +96,16 @@ def plan(src, dst, *, src_ep=None, dst_ep=None):
     "ignored_src": [src-only buffer names], "findings": [...]}; findings mean refuse."""
     found = []
     if len(src) != len(dst):
-        found.append({"check": "reshard_live_world", "observed": f"{len(src)} source ranks, "
-                      f"{len(dst)} target ranks", "expected": "the same GPUs, one rank each"})
+        found.append(_finding("reshard_live_world", f"{len(src)} source ranks, {len(dst)} target ranks",
+                              "the same GPUs, one rank each"))
         return {"copy": [], "moe": {}, "keep": [], "ignored_src": [], "findings": found}
     out = {"copy": [], "moe": {}, "keep": [], "ignored_src": [], "findings": found}
     names = sorted(set().union(*[set(d) for d in dst]))
     for name in names:
-        metas_d = [d.get(name) for d in dst]
-        metas_s = [s.get(name) for s in src]
+        metas_d, metas_s = [d.get(name) for d in dst], [s.get(name) for s in src]
         if any(m is None for m in metas_d):
-            found.append({"check": "reshard_live_ranks", "observed": f"{name} missing on some "
-                          "target ranks", "expected": "every rank holds the same tensor names"})
+            found.append(_finding("reshard_live_ranks", f"{name} missing on some target ranks",
+                                  "every rank holds the same tensor names"))
             continue
         if metas_d[0]["kind"] == "buffer":
             out["keep"].append(name)
@@ -113,41 +113,35 @@ def plan(src, dst, *, src_ep=None, dst_ep=None):
         kind = moe_kind(name, metas_d[0]["shape"])
         if kind is not None:
             if any(m is None or moe_kind(name, m["shape"]) != kind for m in metas_s):
-                found.append({"check": "reshard_live_unmapped", "observed": f"MoE {name} has no "
-                              "3-D source on every rank", "expected": "the same FusedMoE layer"})
+                found.append(_finding("reshard_live_unmapped", f"MoE {name} has no 3-D source on every rank",
+                                      "the same FusedMoE layer"))
             elif any(m["dtype"] != metas_d[0]["dtype"] for m in metas_s):
-                found.append({"check": "reshard_live_dtype", "observed": f"{name}: source "
-                              f"{metas_s[0]['dtype']}, target {metas_d[0]['dtype']}",
-                              "expected": "one dtype (BF16 MoE only)"})
+                found.append(_finding("reshard_live_dtype", f"{name}: source {metas_s[0]['dtype']}, target {metas_d[0]['dtype']}",
+                                      "one dtype (BF16 MoE only)"))
+            elif (problem := moe_mesh_problem(kind, [m["shape"] for m in metas_s], [m["shape"] for m in metas_d],
+                                              src_ep=src_ep, dst_ep=dst_ep)):
+                found.append(_finding("reshard_live_moe_shape", f"{name}: {problem}",
+                                      "same experts and intermediate size"))
             else:
-                problem = moe_mesh_problem(kind, [m["shape"] for m in metas_s],
-                                           [m["shape"] for m in metas_d],
-                                           src_ep=src_ep, dst_ep=dst_ep)
-                if problem:
-                    found.append({"check": "reshard_live_moe_shape", "observed": f"{name}: "
-                                  f"{problem}", "expected": "same experts and intermediate size"})
-                else:
-                    out["moe"][name] = kind
+                out["moe"][name] = kind
             continue
-        same = all(s is not None and list(s["shape"]) == list(d["shape"])
-                   and s["dtype"] == d["dtype"] for s, d in zip(metas_s, metas_d))
-        if same:
+        if all(s is not None and list(s["shape"]) == list(d["shape"]) and s["dtype"] == d["dtype"]
+               for s, d in zip(metas_s, metas_d)):
             out["copy"].append(name)
         else:
             shapes = [None if s is None else list(s["shape"]) for s in metas_s]
-            found.append({"check": "reshard_live_unmapped",
-                          "observed": f"target parameter {name} {list(metas_d[0]['shape'])} has "
-                                      f"source shapes {shapes}",
-                          "expected": "a rank-local copy (same shard) or a FusedMoE expert tensor",
-                          "why": "a dense shard change (e.g. TP2 -> DP2) needs per-module gather "
-                                 "rules this tool does not have; writing it would corrupt it"})
-    src_names = set().union(*[set(s) for s in src])
-    for name in sorted(src_names - set(names)):
+            found.append(_finding(
+                "reshard_live_unmapped",
+                f"target parameter {name} {list(metas_d[0]['shape'])} has source shapes {shapes}",
+                "a rank-local copy (same shard) or a FusedMoE expert tensor",
+                why="a dense shard change (e.g. TP2 -> DP2) needs per-module gather rules this tool does not have; writing it would corrupt it",
+            ))
+    for name in sorted(set().union(*[set(s) for s in src]) - set(names)):
         if src[0].get(name, {}).get("kind") == "buffer":
             out["ignored_src"].append(name)
         else:
-            found.append({"check": "reshard_live_dropped", "observed": f"source parameter {name} "
-                          "has no target", "expected": "the same model on both sides"})
+            found.append(_finding("reshard_live_dropped", f"source parameter {name} has no target",
+                                  "the same model on both sides"))
     return out
 
 
@@ -357,8 +351,7 @@ def moe_transpose(src, kind, src_ep, dst_ep, devices=None, placement="linear", *
 
 def moe_layout_from_log(path):
     """The unquantized MoE backend a holder's log says it picked (its last such line)."""
-    with open(path, errors="replace") as fh:
-        found = BACKEND_LOG.findall(fh.read())
+    found = BACKEND_LOG.findall(corelab.read_text(path, missing_ok=False))
     if not found:
         raise ValueError(f"{path}: no 'Using <backend> Unquantized MoE backend' line")
     if found[-1] not in LOG_NAMES:
@@ -414,17 +407,8 @@ def map_group(socket_dir, keys):
     ranks = []
     for r, key in enumerate(keys):
         path = P.get_socket_path(current_platform.get_device_uuid(r), socket_dir)
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(path)
-        try:
-            P.send_msg(s, {"cmd": "get_state", "cache_key": key})
-            reply = P.recv_msg(s)
-        finally:
-            s.close()
-        if reply.get("status") != "ok":
-            raise RuntimeError(f"holder rank {r} at {path} answered {reply}")
-        ranks.append({n: (e.kind, e.rebuild(r)) for n, e in reply["entries"].items()
-                      if e.ipc_args is not None})
+        entries = corelab.weight_cache_get_state(path, key, label=f"holder rank {r}")
+        ranks.append({n: (e.kind, e.rebuild(r)) for n, e in entries.items() if e.ipc_args is not None})
     return ranks
 
 
@@ -529,9 +513,9 @@ def reshard_groups(src_dir, src_keys, dst_dir, dst_keys, src_layout, dst_layout,
     phase = phase or Phases()
     rep = {"layouts": {"src": src_layout.backend, "dst": dst_layout.backend}}
     if len(src_keys) != len(dst_keys) or len(src_keys) > torch.cuda.device_count():
-        rep["findings"] = [{"check": "reshard_live_world", "observed": f"{len(src_keys)} -> "
-                            f"{len(dst_keys)} ranks on {torch.cuda.device_count()} GPUs",
-                            "expected": "the same GPUs, one rank each"}]
+        rep["findings"] = [_finding("reshard_live_world",
+                                    f"{len(src_keys)} -> {len(dst_keys)} ranks on {torch.cuda.device_count()} GPUs",
+                                    "the same GPUs, one rank each")]
         return 2, rep
     src_ep, src_placement = _key_moe_mesh(src_keys, len(src_keys))
     dst_ep, dst_placement = _key_moe_mesh(dst_keys, len(dst_keys))
@@ -678,21 +662,19 @@ def ensure(a):
         return done(0, target="reused", pid=(rec or {}).get("pid"),
                     filled_from=(rec or {}).get("filled_from"))
     if state not in ("ok", "absent") and rec is None:
-        return done(2, findings=[{"check": "weights_reshard_target", "observed": state,
-                                  "expected": f"no group at {a.dst_socket_dir}, or one with the "
-                                              "target flags",
-                                  "why": "another group owns that folder; it is not ours to stop"}])
+        return done(2, findings=[_finding(
+            "weights_reshard_target", state, f"no group at {a.dst_socket_dir}, or one with the target flags",
+            why="another group owns that folder; it is not ours to stop",
+        )])
     if rec is not None and rec.get("pid"):
-        stop_group(rec["pid"])                          # ours, never filled (or wrong): replace
-    finding = weights.long_socket_path_finding(a.dst_socket_dir)
-    if finding:
+        stop_group(rec["pid"])
+    if (finding := weights.long_socket_path_finding(a.dst_socket_dir)):
         return done(2, findings=[finding])
     os.makedirs(a.dst_socket_dir, exist_ok=True)
     log = str(rec_path.with_suffix(".log"))
     cmd = [a.vllm, "preload", *holder_argv(dst_vargv), "--weight-cache-socket-dir",
            a.dst_socket_dir, "--load-format", "dummy"]
-    with open(log, "w") as f:
-        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, start_new_session=True)
+    proc = corelab.spawn_logged(cmd, log)
     rec = {"pid": proc.pid, "socket_dir": a.dst_socket_dir, "cmd": cmd, "log": log,
            "filled": False, "started": time.time()}
     _write_record(rec_path, rec)
@@ -705,20 +687,16 @@ def ensure(a):
         rec_path.unlink(missing_ok=True)
         return done(2, stopped_target=True, **extra)
     if not ready["ready"]:
-        return fail(findings=[{"check": "weights_reshard_target", "observed": ready,
-                               "expected": "the target group READY", "why": "see its log"}])
+        return fail(findings=[_finding("weights_reshard_target", ready, "the target group READY", why="see its log")])
     try:
-        src_layout = MoeLayout(moe_layout_from_log(a.src_log))
-        dst_layout = MoeLayout(moe_layout_from_log(log))
+        src_layout, dst_layout = MoeLayout(moe_layout_from_log(a.src_log)), MoeLayout(moe_layout_from_log(log))
         code, res = reshard_groups(a.src_socket_dir, src_keys, a.dst_socket_dir, dst_keys,
                                    src_layout, dst_layout, a.verify_socket_dir, phase)
     except Exception as e:                       # noqa: BLE001 - reported, old engine untouched
-        return fail(findings=[{"check": "weights_reshard", "observed": f"{type(e).__name__}: "
-                               f"{e}", "expected": "the target group filled"}])
+        return fail(findings=[_finding("weights_reshard", f"{type(e).__name__}: {e}", "the target group filled")])
     rep["reshard"] = res
     if code != 0:
-        return fail(findings=res.get("findings") or [{"check": "weights_reshard_verify",
-                                                      "observed": res.get("verify")}])
+        return fail(findings=res.get("findings") or [{"check": "weights_reshard_verify", "observed": res.get("verify")}])
     rec.update(filled=True, filled_from=a.src_socket_dir)
     _write_record(rec_path, rec)
     return done(0, target="filled")
@@ -728,28 +706,26 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="reshard between two running groups (flags per group)")
-    r.add_argument("--model", required=True)
-    r.add_argument("--src-socket-dir", required=True)
-    r.add_argument("--dst-socket-dir", required=True)
-    r.add_argument("--src-args", required=True, help='vLLM flags of the source group, e.g. "-tp 2"')
-    r.add_argument("--dst-args", required=True)
-    r.add_argument("--vllm-args", default="", help="flags both groups share (max-model-len, ...)")
+    e = sub.add_parser("ensure", help="make the target engine's group exist and hold the source engine's weights")
+    for sp in (r, e):
+        for flag, kw in (("--src-socket-dir", dict(required=True)), ("--dst-socket-dir", dict(required=True)),
+                         ("--verify-socket-dir", dict(help="a group loaded from disk with target flags"))):
+            sp.add_argument(flag, **kw)
+    for flag, kw in (("--model", dict(required=True)),
+                     ("--src-args", dict(required=True, help='vLLM flags of the source group, e.g. "-tp 2"')),
+                     ("--dst-args", dict(required=True)),
+                     ("--vllm-args", dict(default="", help="flags both groups share (max-model-len, ...)"))):
+        r.add_argument(flag, **kw)
     for side in ("src", "dst"):
         g = r.add_mutually_exclusive_group(required=True)
         g.add_argument(f"--{side}-moe-layout", choices=LAYOUTS)
         g.add_argument(f"--{side}-log", help="the group's log, to read its MoE backend")
-    r.add_argument("--verify-socket-dir", help="a group loaded from disk with --dst-args")
-    e = sub.add_parser("ensure", help="make the target engine's group exist and hold the "
-                                      "source engine's weights (engine.py reconfigure)")
-    e.add_argument("--src-socket-dir", required=True)
-    e.add_argument("--src-vargv", required=True, help="JSON list: the running engine's argv")
-    e.add_argument("--src-log", required=True, help="the running engine's log (MoE backend)")
-    e.add_argument("--dst-socket-dir", required=True)
-    e.add_argument("--dst-vargv", required=True, help="JSON list: the target engine's argv")
-    e.add_argument("--state-dir", required=True, help="where group records and logs go")
-    e.add_argument("--vllm", default="vllm")
-    e.add_argument("--timeout", type=float, default=1800)
-    e.add_argument("--verify-socket-dir")
+    for flag, kw in (("--src-vargv", dict(required=True, help="JSON list: the running engine's argv")),
+                     ("--src-log", dict(required=True, help="the running engine's log (MoE backend)")),
+                     ("--dst-vargv", dict(required=True, help="JSON list: the target engine's argv")),
+                     ("--state-dir", dict(required=True, help="where group records and logs go")),
+                     ("--vllm", dict(default="vllm")), ("--timeout", dict(type=float, default=1800))):
+        e.add_argument(flag, **kw)
     a = ap.parse_args(argv)
     return run(a) if a.cmd == "run" else ensure(a)
 

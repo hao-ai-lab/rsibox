@@ -154,53 +154,15 @@ class WorkerGroup(C.Participant):
             if time.perf_counter() - t > PREPARE_TIMEOUT_S:
                 return F.not_ok(f"workers did not prepare within {PREPARE_TIMEOUT_S} s")
 
-    def versions(self, _=None):
-        return self._rpc("versions", None)
-
-    def validate(self, txn):
-        return self._rpc("validate", txn)
-
-    def commit(self, txn):
-        return self._rpc("commit", txn)
-
-    def abort(self, txn):
-        return self._rpc("abort", txn)
-
-    def undo(self, txn):
-        return self._rpc("undo", txn)
-
-    def status(self, txn):
-        return self._rpc("status", txn)
-
-    def proof(self, txn):
-        return self._rpc("proof", txn)
-
-    def witness_check(self, txn):
-        return self._rpc("witness_check", txn)
-
-    def reset(self, kind):
-        return self._rpc("reset", kind)
-
-    def fingerprint(self, modules):
-        return self._rpc("fingerprint", modules)
-
-    def at_base(self, _=None):
-        return self._rpc("at_base", None)
-
-    def recapture(self, payload):
-        return self._rpc("recapture", payload)
-
-    def recapture_extend(self, payload):
-        return self._rpc("recapture_extend", payload)
-
-    def recapture_extend_drop(self, payload):
-        return self._rpc("recapture_extend_drop", payload)
-
-    def r1_extend(self, payload):
-        return self.recapture_extend(payload)
-
-    def graphs(self, _=None):
-        return self._rpc("graphs", None)
+    for _m in ("versions", "at_base", "graphs"):
+        locals()[_m] = lambda self, _=None, _m=_m: self._rpc(_m, None)
+    for _m in (
+        "validate", "commit", "abort", "undo", "status", "proof", "witness_check",
+        "reset", "fingerprint", "recapture", "recapture_extend", "recapture_extend_drop",
+    ):
+        locals()[_m] = lambda self, payload, _m=_m: self._rpc(_m, payload)
+    r1_extend = locals()["recapture_extend"]
+    del _m
 
 
 def parallel(core):
@@ -333,40 +295,31 @@ class Host:
 
     # -- control channel -----------------------------------------------------------------
     def _op(self, op, cmd):
-        if op == "txn":
-            return self.co.run(cmd["plan"], edit_time=cmd.get("edit_time"),
-                               baseline_restart=cmd.get("baseline_restart"))
-        if op == "prove":
-            return self.co.prove(cmd["txn"], golden=cmd.get("golden"))
-        if op == "undo":
-            return self.co.undo(cmd["txn"])
-        if op == "recovered":
-            return self.co.recovered()
-        if op == "status":                   # no txn: the host's overall status
-            return self.co.status(cmd.get("txn"))
-        if op == "pstatus":                  # each participant's own state (per rank)
+        simple = {
+            "txn": lambda: self.co.run(cmd["plan"], edit_time=cmd.get("edit_time"), baseline_restart=cmd.get("baseline_restart")),
+            "prove": lambda: self.co.prove(cmd["txn"], golden=cmd.get("golden")),
+            "undo": lambda: self.co.undo(cmd["txn"]),
+            "recovered": self.co.recovered,
+            "status": lambda: self.co.status(cmd.get("txn")),
+            "versions": lambda: F.ok(workers=self.workers.versions(), core=self.core_side.versions()),
+            "at_base": self.co.at_base,
+            "graphs": lambda: F.ok(workers=self.workers.graphs()),
+            "ping": lambda: F.ok(pid=os.getpid(), poison=self.co.poison, parallel=self.dp),
+        }
+        if op in simple:
+            return simple[op]()
+        if op == "pstatus":
             if cmd.get("txn") is None:
                 return F.not_ok("pstatus needs a txn (status without one is the host's)")
-            return F.ok(workers=self.workers.status(cmd["txn"]),
-                        core=self.core_side.dispatch("status", cmd["txn"]))
+            return F.ok(workers=self.workers.status(cmd["txn"]), core=self.core_side.dispatch("status", cmd["txn"]))
         if op == "fingerprint":
             mods = list(cmd.get("modules") or [])
-            return F.ok(workers=self.workers.fingerprint(mods),
-                        core=self.core_side.dispatch("fingerprint", mods))
-        if op == "versions":                 # per-step version logs, per rank and core
-            return F.ok(workers=self.workers.versions(), core=self.core_side.versions())
-        if op == "at_base":                  # back at the start state? (warm engine pool)
-            return self.co.at_base()
-        if op == "graphs":
-            return F.ok(workers=self.workers.graphs())
-        if op in ("recapture_extend", "r1_extend"): # in a gap: no batch replays half-captured graphs
+            return F.ok(workers=self.workers.fingerprint(mods), core=self.core_side.dispatch("fingerprint", mods))
+        if op in ("recapture_extend", "r1_extend"):
             if self.co.poison:
                 return F.not_ok("host poisoned: undo or respawn first", poison=self.co.poison)
             t0 = time.perf_counter()
-            reply = self._in_gap(lambda: self._extend(cmd["txn"], cmd.get("sizes")))
-            return {**reply, "seconds": round(time.perf_counter() - t0, 6)}
-        if op == "ping":
-            return F.ok(pid=os.getpid(), poison=self.co.poison, parallel=self.dp)
+            return {**self._in_gap(lambda: self._extend(cmd["txn"], cmd.get("sizes"))), "seconds": round(time.perf_counter() - t0, 6)}
         return F.not_ok(f"unknown op {op!r}")
 
     def handle(self, cmd):

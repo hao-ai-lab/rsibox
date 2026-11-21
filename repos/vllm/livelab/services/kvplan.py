@@ -41,8 +41,14 @@ What moves: kernels the profile run would JIT-compile are compiled at their firs
 Risk: an edit that changes activation memory but not the config reuses a stale size. Set
 FASTRSI_KVPLAN_SALT (for example to the patch hash) when an edit touches the forward pass.
 """
-import functools, hashlib, json, logging, os, time
+import functools, hashlib, json, logging, os, sys, time
 from pathlib import Path
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import corelab  # noqa: F401,E402
+from fastrsi import ipc  # noqa: E402
 
 ATTRS = ("available_kv_cache_memory_bytes", "total_consumed", "peak_activation_memory",
          "cudagraph_memory_estimate")
@@ -80,16 +86,12 @@ def key(idn):
 def save(plan_dir, idn, rec):
     """Write the plan atomically (concurrent ranks and starts never see half a file)."""
     path = Path(plan_dir) / f"{key(idn)}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps({"ident": idn, **rec}, indent=1))
-    tmp.replace(path)
+    ipc.atomic_write_json(path, {"ident": idn, **rec})
     return path
 
 
 def load(plan_dir, idn):
-    path = Path(plan_dir) / f"{key(idn)}.json"
-    return json.loads(path.read_text()) if path.exists() else None
+    return ipc.read_json(Path(plan_dir) / f"{key(idn)}.json")
 
 
 def nearest(plan_dir, idn):

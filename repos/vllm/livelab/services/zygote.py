@@ -32,12 +32,12 @@ that asks for the GPU's capability at import (FlashInfer, imported by the API se
 no longer initializes CUDA there, and vLLM keeps forking the engine core and the workers
 instead of spawning them.
 """
-import argparse, importlib, json, os, signal, socket, sys, time, traceback
+import argparse, contextlib, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corelab  # noqa: F401,E402  (core/livelab on sys.path: forksafe, fastrsi)
 import forksafe, vllm_args, zygote_refresh  # noqa: E402
-from fastrsi import ipc, proc  # noqa: E402
+from fastrsi import harness, ipc, proc  # noqa: E402
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.
 REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
@@ -53,8 +53,10 @@ START_ENV = dict(os.environ)
 # Keys that may differ between the zygote's and the request's environment: shell bookkeeping,
 # the cluster harness's per-task ids, and the profiler's per-run output settings (re-read
 # after fork).
+MARKER_ENV = "FASTRSI_LIVE_RECONFIG_DIR"
+MARKER_MEMBERS_DIR = ".members"
 VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "FASTRSI_PROF_DIR", "FASTRSI_PROF_T0",
-            "FASTRSI_LIVE_RECONFIG_DIR"}   # engine.py: one live-agent folder per launch
+            MARKER_ENV}   # engine.py: one live-agent folder per launch
 VOLATILE_PREFIXES = ("RAY_",)
 
 # What `vllm serve` imports before it parses its arguments (vllm/entrypoints/cli/main.py), and
@@ -78,17 +80,21 @@ def _volatile(k):
     return k in VOLATILE or k.startswith(VOLATILE_PREFIXES)
 
 
+def _stat_sig(path):
+    try:
+        st = os.stat(path)
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
 def _sources():
     """{path: (mtime_ns, size)} of every imported module's file."""
     out = {}
     for m in list(sys.modules.values()):
         f = getattr(m, "__file__", None)
-        if f and f not in out:
-            try:
-                st = os.stat(f)
-                out[f] = (st.st_mtime_ns, st.st_size)
-            except OSError:
-                pass
+        if f and f not in out and (sig := _stat_sig(f)) is not None:
+            out[f] = sig
     return out
 
 
@@ -96,16 +102,11 @@ def _changed(snapshot):
     """Source files whose (mtime, size) differ from the snapshot. Stats run in threads: on a
     shared filesystem one stat costs ~0.1-0.2 ms and the snapshot holds ~8,000 files."""
     from concurrent.futures import ThreadPoolExecutor
-
-    def stat(item):
-        f, sig = item
-        try:
-            st = os.stat(f)
-            return None if (st.st_mtime_ns, st.st_size) == sig else f
-        except OSError:
-            return f
     with ThreadPoolExecutor(32) as pool:
-        return [f for f in pool.map(stat, snapshot.items(), chunksize=64) if f]
+        return [f for f in pool.map(
+            lambda item: None if _stat_sig(item[0]) == item[1] else item[0],
+            snapshot.items(), chunksize=64,
+        ) if f]
 
 
 def _env_diff(env):
@@ -114,14 +115,49 @@ def _env_diff(env):
     return sorted(k for k in set(mine) | set(theirs) if mine.get(k) != theirs.get(k))
 
 
+def _stat_start_time(pid="self", proc_root="/proc"):
+    """Linux /proc/<pid>/stat start time (clock ticks since boot, field 22), or None."""
+    try:
+        with open(f"{proc_root}/{pid}/stat") as stat_file:
+            return int(stat_file.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def record_marker_member(marker, pid=None, proc_root="/proc"):
+    """Record (pid, start_time) under `<marker>/.members/<pid>` for forked processes whose
+    exec-time `/proc/<pid>/environ` keeps the zygote's environment rather than `marker`."""
+    if not marker:
+        return False
+    member_pid = os.getpid() if pid is None else int(pid)
+    start_time = _stat_start_time(member_pid if pid is not None else "self", proc_root=proc_root)
+    if start_time is None:
+        return False
+    members_dir = os.path.join(marker, MARKER_MEMBERS_DIR)
+    try:
+        os.makedirs(members_dir, exist_ok=True)
+        fd = os.open(os.path.join(members_dir, str(member_pid)),
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        try:
+            os.write(fd, f"{start_time}\n".encode())
+        finally:
+            os.close(fd)
+        return True
+    except OSError:
+        return False
+
+
 def _child(req, conns, refresh=()):
     """In the forked child: become `vllm serve` with the request's argv, cwd, log and volatile
     env keys, after dropping the `refresh` modules so the server imports them again from their
-    new source. With the `env` finding accepted, the keys where the request differs from the
-    zygote's start environment take the request's value (or are removed); the other keys keep
-    the zygote's post-import values. Risk of accepting: a key read at import time
-    (CUDA_VISIBLE_DEVICES, HF_*, VLLM_*) shows the request's value in os.environ while the
-    modules the zygote imported already acted on its start value."""
+    new source. Propagates the launch marker (`FASTRSI_LIVE_RECONFIG_DIR`) both into
+    `os.environ` and `<marker>/.members/<pid>` (and via `os.register_at_fork` for any forked
+    descendant) because `/proc/<pid>/environ` stays the zygote's exec-time environment. With the
+    `env` finding accepted, the keys where the request differs from the zygote's start
+    environment take the request's value (or are removed); the other keys keep the zygote's
+    post-import values. Risk of accepting: a key read at import time (CUDA_VISIBLE_DEVICES,
+    HF_*, VLLM_*) shows the request's value in os.environ while the modules the zygote
+    imported already acted on its start value."""
     code = 1
     try:
         for c in conns:
@@ -144,26 +180,16 @@ def _child(req, conns, refresh=()):
                     os.environ[env_key] = req["env"][env_key]
                 else:
                     os.environ.pop(env_key, None)
-        if not req.get("env", {}).get("OMP_NUM_THREADS") and not os.environ.get("OMP_NUM_THREADS"):
-            forksafe.clamp_thread_pools(num_threads=1)
-        local_rank_str = (
-            req.get("env", {}).get("LOCAL_RANK")
-            or os.environ.get("LOCAL_RANK")
-            or ""
-        ).strip()
-        visible_gpu_ids = [
-            token.strip()
-            for token in (
-                req.get("env", {}).get("CUDA_VISIBLE_DEVICES")
-                or os.environ.get("CUDA_VISIBLE_DEVICES")
-                or ""
-            ).split(",")
-            if token.strip().isdigit()
-        ]
-        if local_rank_str.isdigit():
-            forksafe.bind_rank_numa_and_cpus(int(local_rank_str))
-        elif len(visible_gpu_ids) == 1:
-            forksafe.bind_rank_numa_and_cpus(0)
+        marker = os.environ.get(MARKER_ENV)
+        if marker:
+            record_marker_member(marker)
+            if hasattr(os, "register_at_fork"):
+                os.register_at_fork(
+                    after_in_child=lambda _m=marker: record_marker_member(
+                        os.environ.get(MARKER_ENV) or _m
+                    )
+                )
+        forksafe.apply_child_runtime_affinity(req.get("env"))
         sys.argv = list(req["argv"])
         if refresh:
             r = zygote_refresh.refresh(refresh)
@@ -200,14 +226,15 @@ def _stale_finding(fix, what="the forked server"):
     """The "stale" finding for changed files a refresh cannot apply, or None."""
     if not (fix and fix["blocked"]):
         return None
-    return {"check": "stale", "observed": f"{len(fix['blocked'])} changed files a refresh "
-            f"cannot apply: {fix['blocked'][:5]}",
-            "expected": "edited files the fork can refresh (Python source under "
-                        f"{','.join(REFRESH_PREFIXES) or 'no package'})",
-            "why": f"{what} would run the code the zygote imported",
-            "actions": ["restart the zygote (~25 s of imports, off the start path)",
-                        "start without the zygote", "accept 'stale'"],
-            "risk": "an edit is silently not applied"}
+    return harness.plain_finding(
+        "stale",
+        f"{len(fix['blocked'])} changed files a refresh cannot apply: {fix['blocked'][:5]}",
+        f"edited files the fork can refresh (Python source under {','.join(REFRESH_PREFIXES) or 'no package'})",
+        why=f"{what} would run the code the zygote imported",
+        actions=["restart the zygote (~25 s of imports, off the start path)",
+                 "start without the zygote", "accept 'stale'"],
+        risk="an edit is silently not applied",
+    )
 
 
 def _parse_in_child(argv, refresh, conns, cwd=None):
@@ -321,22 +348,19 @@ def serve(sock_path, modules_file):
             else:
                 t = time.time()
                 findings = []
-                bad_env = _env_diff(req["env"])
-                if bad_env:
-                    findings.append({
-                        "check": "env", "observed": bad_env[:20],
-                        "expected": "same environment as the zygote's start (except VOLATILE)",
-                        "why": "variables read at import time keep the zygote's values in the "
-                               "forked server", "actions": [
-                            "restart the zygote with this environment (~25 s of imports, off "
-                            "the start path)", "start without the zygote (+~21 s)",
-                            "accept 'env' if these variables are not read at import time "
-                            "(the server then gets the request's values)"],
-                        "risk": "what the zygote imported keeps the zygote's values of these "
-                                "variables"})
+                if (bad_env := _env_diff(req["env"])):
+                    findings.append(harness.plain_finding(
+                        "env", bad_env[:20],
+                        "same environment as the zygote's start (except VOLATILE)",
+                        why="variables read at import time keep the zygote's values in the forked server",
+                        actions=["restart the zygote with this environment (~25 s of imports, off the start path)",
+                                 "start without the zygote (+~21 s)",
+                                 "accept 'env' if these variables are not read at import time (the server then gets the request's values)"],
+                        risk="what the zygote imported keeps the zygote's values of these variables",
+                    ))
                 fix = _refresh_plan(sources, graph, req.get("refresh", True))
-                if _stale_finding(fix):
-                    findings.append(_stale_finding(fix))
+                if (stale := _stale_finding(fix)):
+                    findings.append(stale)
                 refresh = fix["modules"] if fix else []
                 check_s = round(time.time() - t, 3)
                 accept = req.get("accept", [])
@@ -362,11 +386,9 @@ def serve(sock_path, modules_file):
                 print(json.dumps({"event": "request", **reply}), flush=True)
             conn.sendall((json.dumps(reply) + "\n").encode())
         except Exception as e:
-            try:
+            with contextlib.suppress(OSError):
                 conn.sendall((json.dumps({"ok": False, "error": repr(e), "zygote_error": True})
                               + "\n").encode())
-            except OSError:
-                pass
         finally:
             conn.close()
 
@@ -415,11 +437,9 @@ def wait_ready(sock_path, pid, timeout=600):
     while time.time() - t0 < timeout:
         if _exited(pid):
             return {"ready": False, "error": "zygote exited"}
-        try:
+        with contextlib.suppress(OSError):
             if _call(sock_path, {"cmd": "ping"}, timeout=5).get("ok"):
                 return {"ready": True, "seconds": round(time.time() - t0, 2)}
-        except OSError:
-            pass
         time.sleep(0.5)
     return {"ready": False, "error": "timeout"}
 

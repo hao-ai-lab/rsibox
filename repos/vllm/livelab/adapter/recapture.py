@@ -291,6 +291,14 @@ def graphs(engine):
                          for wrapper, attr in wrappers if attr]}
 
 
+def _drop_descriptors(engine, wrappers, pairs):
+    for mode, desc in pairs:
+        engine.keys[mode].discard(desc)
+        for wrapper, attr in wrappers:
+            if getattr(wrapper, "runtime_mode", None) in (None, mode):
+                getattr(wrapper, attr).pop(desc, None)
+
+
 class Recapture:
     """R1 state of one rank: what each transaction replaced (for extend)."""
 
@@ -393,12 +401,9 @@ class Recapture:
         wrappers = state["wrappers"]
 
         def unextend():
-            for mode, descriptors in chosen.items():
-                for desc in descriptors:
-                    engine.keys[mode].discard(desc)
-                    for wrapper, attr in wrappers:
-                        if getattr(wrapper, "runtime_mode", None) in (None, mode):
-                            getattr(wrapper, attr).pop(desc, None)
+            _drop_descriptors(engine, wrappers,
+                              [(mode, desc) for mode, descs in chosen.items() for desc in descs])
+            for mode in chosen:
                 state["left"][mode] = [desc for desc in state["old_keys"][mode]
                                        if desc not in engine.keys[mode]]
 
@@ -441,11 +446,7 @@ class Recapture:
                         timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
         except Exception as e:
             wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
-            for mode, desc in done:
-                engine.keys[mode].discard(desc)
-                for wrapper, attr in wrappers:
-                    if getattr(wrapper, "runtime_mode", None) in (None, mode):
-                        getattr(wrapper, attr).pop(desc, None)
+            _drop_descriptors(engine, wrappers, done)
             engine.sync()
             return F.not_ok(f"R1 capture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"capture of {name(done[-1][0]) if done else '?'} "

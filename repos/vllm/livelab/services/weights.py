@@ -34,11 +34,11 @@ Contract:
 
 Writes only --log (and the daemon's sockets in --socket-dir).
 """
-import argparse, hashlib, json, os, re, signal, socket, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, re, socket, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corelab  # noqa: F401,E402  (core/livelab on sys.path)
-from fastrsi import proc  # noqa: E402
+from fastrsi import harness, proc  # noqa: E402
 
 READY = re.compile(r"Weight cache daemon READY")
 MAX_SOCK_PATH = 107     # Linux sun_path is 108 bytes with the trailing NUL
@@ -71,12 +71,13 @@ def long_socket_path_finding(socket_dir):
     path_bytes = len(os.fsencode(path))
     if path_bytes <= MAX_SOCK_PATH:
         return None
-    return {"check": "weights_socket_path",
-            "observed": f"daemon socket path is {path_bytes} bytes > {MAX_SOCK_PATH} (AF_UNIX): {path}",
-            "expected": f"--socket-dir short enough that the socket path fits {MAX_SOCK_PATH} "
-                        "bytes",
-            "why": "the daemon loads the weights, then fails to bind its socket",
-            "actions": ["use a short --socket-dir, such as /dev/shm/<run>/w"]}
+    return harness.plain_finding(
+        "weights_socket_path",
+        f"daemon socket path is {path_bytes} bytes > {MAX_SOCK_PATH} (AF_UNIX): {path}",
+        f"--socket-dir short enough that the socket path fits {MAX_SOCK_PATH} bytes",
+        why="the daemon loads the weights, then fails to bind its socket",
+        actions=["use a short --socket-dir, such as /dev/shm/<run>/w"],
+    )
 
 
 def gpu_uuids(visible, tp):
@@ -102,15 +103,13 @@ def socket_paths(socket_dir, visible, tp):
 
 
 def _answers(path, timeout=2.0):
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(path)
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.connect(path)
+            return True
+        except OSError:
+            return False
 
 
 def probe(socket_dir, visible=None, tp=1):
@@ -171,11 +170,7 @@ def wait_ready(log, pid, timeout=1800, poll=0.5):
     as it exits or logs a failure, or at the timeout."""
     t0 = time.time()
     while time.time() - t0 < timeout:
-        if os.path.exists(log):
-            with open(log, errors="replace") as fh:
-                text = fh.read()
-        else:
-            text = ""
+        text = corelab.read_text(log)
         if READY.search(text):
             return {"ready": True, "seconds": round(time.time() - t0, 2)}
         if any(s in text for s in FAILED) or _exited(pid):
@@ -190,46 +185,12 @@ def _exited(pid):
     return not proc.pid_alive(pid)
 
 
-def _pg_alive(pgid):
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
-def stop_session(pid, grace=10.0, reap=None):
-    """Stop the process group `pid` leads (a daemon started with start_new_session, here or by
-    reshard_live.py) and the processes below it: SIGTERM, then SIGKILL after `grace` s, each
-    followed by a wait of up to `grace` s for the group to empty. `reap` (the caller's
-    Popen.poll) collects a zombie leader, which would keep the group alive. Returns True when
-    something of it was running. A live pid that leads no group of its own is another process
-    and is never signalled; a leader that exited keeps its group id reserved while members
-    remain (Linux reuses no live group id), so the group is still stopped by it."""
-    try:
-        if not _exited(pid) and os.getpgid(pid) != pid:
-            return False
-    except ProcessLookupError:
-        pass
-    if not _pg_alive(pid):
-        return False
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        proc.kill_tree(pid, sig, include_pg=True)
-        deadline = time.time() + grace
-        while time.time() < deadline:
-            if reap is not None:
-                reap()
-            if not _pg_alive(pid):
-                return True
-            time.sleep(0.02)
-    return True
+_pg_alive = proc.pg_alive
+stop_session = proc.stop_session
 
 
 def stop(p, grace=10):
-    """Stop the daemon's session (SIGTERM, SIGKILL after `grace` s); True if it was running.
-    Only a session this module started: its pid leads it (start_new_session)."""
+    """Stop the daemon's session (SIGTERM, SIGKILL after `grace` s); True if it was running."""
     return stop_session(p.pid, grace, reap=p.poll)
 
 
@@ -239,9 +200,7 @@ def start(a, extra):
     if finding:
         return {"pid": None, "cmd": cmd, "ready": False, "error": finding["observed"],
                 "seconds": 0.0, "finding": finding}
-    os.makedirs(os.path.dirname(os.path.abspath(a.log)), exist_ok=True)
-    with open(a.log, "w") as log:
-        p = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    p = corelab.spawn_logged(cmd, a.log)
     r = {"pid": p.pid, "cmd": cmd, **wait_ready(a.log, p.pid, a.timeout)}
     if not r["ready"]:
         r["stopped"] = stop(p)

@@ -51,7 +51,6 @@ import json
 import os
 import re
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -61,8 +60,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+import corelab  # noqa: E402
+from fastrsi import proc  # noqa: E402
+
 EXT_CLS = "weight_scaling_colocate.LeaseWorkerExtension"
 CHUNK_WORDS = 1 << 26          # 512 MiB of 64-bit words per digest step
+_free_port = proc.free_port
 
 
 # ---------------------------------------------------------------------------------------------
@@ -195,12 +200,7 @@ class LeaseWorkerExtension:
     and catches its own errors except `lease_fault("cuda")`, whose job is to break the context."""
 
     def _named(self):
-        model = self.model_runner.model
-        named = {}
-        for n, p in model.named_parameters():
-            if p.is_cuda:
-                named[n] = p.data
-        return named
+        return {n: p.data for n, p in self.model_runner.model.named_parameters() if p.is_cuda}
 
     def lease_digest(self, _arg: str = "{}"):
         try:
@@ -268,17 +268,9 @@ def _holder_tensors(model, socket_dir, max_model_len=None):
         expert_placement_strategy=cfg.parallel_config.expert_placement_strategy,
         kernel_config=cfg.kernel_config)
     path = P.get_socket_path(P.get_current_device_uuid(), socket_dir)
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.connect(path)
-    try:
-        P.send_msg(s, {"cmd": "get_state", "cache_key": key})
-        reply = P.recv_msg(s)
-    finally:
-        s.close()
-    if reply.get("status") != "ok":
-        raise RuntimeError(f"holder at {path} answered {reply}")
+    entries = corelab.weight_cache_get_state(path, key)
     dev = torch.cuda.current_device()
-    return {n: e.rebuild(dev) for n, e in reply["entries"].items() if e.ipc_args is not None}
+    return {n: e.rebuild(dev) for n, e in entries.items() if e.ipc_args is not None}
 
 
 def copy_rank(a):
@@ -332,14 +324,6 @@ def copy_rank(a):
     return 0 if agree["ok"] else 1
 
 
-def _free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    p = s.getsockname()[1]
-    s.close()
-    return p
-
-
 def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.executable,
          log_dir=None):
     """Copy the holder on src_gpu into the holder on dst_gpu over NCCL. Returns the
@@ -371,16 +355,11 @@ def copy(model, socket_dir, src_gpu, dst_gpu, max_model_len=None, python=sys.exe
             if proc.poll() is None:
                 proc.kill()
             proc.wait()
-        outs = []
         for out in files:
             out.seek(0)
-            outs.append(out.read())
+        outs = [out.read() for out in files]
     rcs = [p.returncode for p in procs]
-    rep = {}
-    for line in outs[1].splitlines()[::-1]:
-        if line.startswith("{"):
-            rep = json.loads(line)
-            break
+    rep = corelab.last_json_line(outs[1])
     rep.update({"wall_s": time.monotonic() - t0, "returncodes": rcs, "src_gpu": src_gpu,
                 "dst_gpu": dst_gpu, "ok": rcs == [0, 0] and rep.get("digests_agree", False)})
     return rep
@@ -413,9 +392,7 @@ class Holder:
         cmd = weights.daemon_cmd(model, self.socket_dir, 1, max_model_len, vllm_bin(python), extra)
         env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(self.gpu))
         t0 = time.monotonic()
-        with open(self.log, "w") as f:
-            self.proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env,
-                                         start_new_session=True)
+        self.proc = corelab.spawn_logged(cmd, self.log, env=env)
         r = weights.wait_ready(self.log, self.proc.pid, timeout=1800)
         self.report = {"gpu": self.gpu, "dummy": dummy, "ready": r["ready"],
                        "ready_s": time.monotonic() - t0, "pid": self.proc.pid}
@@ -443,18 +420,14 @@ LOG_PHASES = {
 
 
 def log_phases(log):
-    with open(log, errors="replace") as fh:
-        text = fh.read()
-    out = {}
+    text, out = corelab.read_text(log, missing_ok=False), {}
     for k, rx in LOG_PHASES.items():
-        m = rx.findall(text)
-        if not m:
+        if not (m := rx.findall(text)):
             continue
-        last = m[-1]
         if k == "weight_load_s":
-            out["weight_alloc_gib"], out[k] = float(last[0]), float(last[1])
+            out["weight_alloc_gib"], out[k] = float(m[-1][0]), float(m[-1][1])
         else:
-            out[k] = float(last)
+            out[k] = float(m[-1])
     return out
 
 
@@ -488,11 +461,10 @@ class Engine:
         t0 = time.monotonic()
         r = subprocess.run(launcher, env=env, capture_output=True, text=True, timeout=3600)
         t_healthy = time.monotonic() - t0
-        line = next((x for x in r.stdout.splitlines()[::-1] if x.startswith("{")), "{}")
-        rep = json.loads(line)
+        rep = corelab.last_json_line(r.stdout)
         if r.returncode != 0 or rep.get("healthy_after_s") is None:
             raise RuntimeError(f"engine {self.name} did not start: rc={r.returncode} "
-                               f"{line[:2000]} stderr={r.stderr[-2000:]}; log {self.log}")
+                               f"{json.dumps(rep)[:2000]} stderr={r.stderr[-2000:]}; log {self.log}")
         self.pid = rep["pid"]
         ttft = first_token_s(self.port, model)
         phases = log_phases(self.log)
@@ -522,10 +494,8 @@ class Engine:
     def kill(self):
         """SIGKILL the engine's whole session (API server, engine core, workers)."""
         if self.pid:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
     # -- calls into the running engine --
     def rpc(self, method, arg="{}", timeout=300):
@@ -536,25 +506,10 @@ class Engine:
         return post_json(self.port, "/reset_prefix_cache?reset_running_requests=true", "{}", 60)
 
     def healthy(self, timeout=0.5):
-        try:
-            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-            c.request("GET", "/health")
-            ok = c.getresponse().status == 200
-            c.close()
-            return ok
-        except OSError:
-            return False
+        return corelab.http_healthy(self.port, timeout=timeout)
 
 
-def post_json(port, path, body, timeout):
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    c.request("POST", path, body=body, headers={"Content-Type": "application/json"})
-    r = c.getresponse()
-    data = r.read()
-    c.close()
-    if r.status != 200:
-        raise RuntimeError(f"POST {path} on :{port}: {r.status} {data[:500]!r}")
-    return json.loads(data) if data else {}
+post_json = corelab.http_post_json
 
 
 PROMPTS = ["The capital of France is", "def fibonacci(n):",
@@ -574,27 +529,25 @@ def reference(port, model, max_tokens=16):
 
 
 def stream_first_token(port, model, prompt="Hello", max_tokens=4, timeout=30):
-    """(seconds to the first streamed token, served_by header) or raises."""
+    """(seconds to the first streamed token, served_by header, timestamp) or raises."""
     t0 = time.monotonic()
-    c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     body = json.dumps({"model": model, "prompt": prompt, "max_tokens": max_tokens,
                        "temperature": 0, "stream": True})
-    c.request("POST", "/v1/completions", body=body, headers={"Content-Type": "application/json"})
-    r = c.getresponse()
-    if r.status != 200:
-        raise RuntimeError(f"status {r.status}")
-    served = r.getheader("X-Served-By")
-    buf = b""
-    while True:
-        chunk = r.read1(65536)
-        if not chunk:
-            raise RuntimeError("stream ended before a token")
-        buf += chunk
-        if b'"text"' in buf:
-            t1 = time.monotonic()
-            r.read()
-            c.close()
-            return t1 - t0, served, t1
+    with contextlib.closing(http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)) as c:
+        c.request("POST", "/v1/completions", body=body, headers={"Content-Type": "application/json"})
+        r = c.getresponse()
+        if r.status != 200:
+            raise RuntimeError(f"status {r.status}")
+        served, buf = r.getheader("X-Served-By"), b""
+        while True:
+            chunk = r.read1(65536)
+            if not chunk:
+                raise RuntimeError("stream ended before a token")
+            buf += chunk
+            if b'"text"' in buf:
+                t1 = time.monotonic()
+                r.read()
+                return t1 - t0, served, t1
 
 
 def first_token_s(port, model):
@@ -791,6 +744,18 @@ class Pool:
                 self.failover("health", eng)
             time.sleep(0.05)
 
+    def _clear_taint_if_ok(self, eng: Engine, agree: dict):
+        if agree["ok"]:
+            with self.lock:
+                self.tainted.discard(eng.name)
+
+    def _finish_repair(self, eng: Engine, ev: str, **extra):
+        agree = self.check_integrity(eng)
+        self._clear_taint_if_ok(eng, agree)
+        rec = {"t": time.monotonic(), "ev": ev, "engine": eng.name, **extra, "digest_ok": agree["ok"]}
+        self.events.append(rec)
+        return rec
+
     # -- repairs (the side that does not serve) --
     def restore_holder(self, broken: Engine, good: Engine):
         """Re-copy broken's holder from good's over NCCL, reset broken's prefix cache, and check
@@ -806,14 +771,7 @@ class Pool:
         if not rep["ok"]:
             raise RuntimeError(f"restore copy failed: {rep}")
         broken.reset_prefix_cache()
-        agree = self.check_integrity(broken)
-        if agree["ok"]:
-            with self.lock:
-                self.tainted.discard(broken.name)
-        rec = {"t": time.monotonic(), "ev": "restore", "engine": broken.name,
-               "copy": rep, "digest_ok": agree["ok"]}
-        self.events.append(rec)
-        return rec
+        return self._finish_repair(broken, "restore", copy=rep)
 
     def respawn(self, eng: Engine, gmu, max_model_len):
         """Restart a dead engine leased from its (still resident) holder, then replay nothing:
@@ -822,14 +780,7 @@ class Pool:
         time.sleep(1.0)
         eng.pid = None
         rep = eng.start(self.model, self.python, gmu, max_model_len)
-        agree = self.check_integrity(eng)
-        if agree["ok"]:
-            with self.lock:
-                self.tainted.discard(eng.name)
-        rec = {"t": time.monotonic(), "ev": "respawn", "engine": eng.name, "start": rep,
-               "digest_ok": agree["ok"]}
-        self.events.append(rec)
-        return rec
+        return self._finish_repair(eng, "respawn", start=rep)
 
     # -- the accept gate --
     def evaluate(self, patch: Patch):
@@ -912,9 +863,7 @@ class Pool:
             self.pending = self.pending_engine = None
             self.ref_digest = patched_digest
         standby_agree = digests_agree(patched_digest, self.digest(standby))
-        if standby_agree["ok"]:
-            with self.lock:
-                self.tainted.discard(standby.name)
+        self._clear_taint_if_ok(standby, standby_agree)
         with self.router.drained():
             try:
                 self.ref = reference(active.port, self.model)
@@ -1070,44 +1019,37 @@ def demo(a):
         load = Load(pool.router.port, model)
         time.sleep(3)
         res["scenarios"] = sc = []
-        # 5a. process crash of the active engine
-        r = measure_fault(pool, load, "kill")
-        r["repair"] = pool.respawn(r_eng(pool, r["from"]), gmu, mml)
-        sc.append(r); save()
-        # 5b. weight corruption in the active holder (now S on H1): failover to H0, re-copy H1
-        r = measure_fault(pool, load, "corrupt")
-        r["repair"] = pool.restore_holder(r_eng(pool, r["from"]), pool.active)
-        sc.append(r); save()
+        def run_fault(kind, restore=False):
+            r = measure_fault(pool, load, kind)
+            victim_eng = r_eng(pool, r["from"])
+            r["repair"] = (pool.restore_holder(victim_eng, pool.active) if restore
+                           else pool.respawn(victim_eng, gmu, mml))
+            sc.append(r); save()
+
+        run_fault("kill")
+        run_fault("corrupt", restore=True)
         if not a.patches:
-            sc.append(measure_fault(pool, load, "cuda"))
-            sc[-1]["repair"] = pool.respawn(r_eng(pool, sc[-1]["from"]), gmu, mml)
+            run_fault("cuda")
             raise _Done
         # 5c. a rejected patch: standby takes over, patched holder restored
-        t_f = time.monotonic()
-        victim = pool.active
+        t_f, victim = time.monotonic(), pool.active
         ev = pool.evaluate(Patch("bad-zero-mlp", r"layers\.(1[0-9])\.mlp\.down_proj", "scale", 0.0))
         s = load.first_after(t_f, pool.active.name)
-        ev["fault_to_first_token_s"] = (s["t_first_token"] - t_f) if s else None
-        ev.update(correctness(pool))
-        ev["from"] = victim.name
+        ev.update(fault_to_first_token_s=(s["t_first_token"] - t_f) if s else None,
+                  from_=victim.name, **correctness(pool))
+        ev["from"] = ev.pop("from_")
         sc.append({"fault": "patch_rejected", **ev}); save()
         # 5d. bug (a): a passing patch left unaccepted, then another evaluate
-        e1 = pool.evaluate(GOOD[0])
-        res["accept_gate"] = {"first": e1}
-        save()
-        e2 = pool.evaluate(GOOD[1])
-        res["accept_gate"]["second"] = e2
-        save()
+        res["accept_gate"] = {"first": pool.evaluate(GOOD[0])}; save()
+        res["accept_gate"]["second"] = pool.evaluate(GOOD[1]); save()
         acc = pool.accept() if pool.pending else {"accepted": None, "why": "second not pending"}
-        res["accept_gate"].update({"accept": acc,
-                              "digest_after": {"active": pool.check_integrity()["ok"],
-                                               "standby": pool.check_integrity(pool.standby)["ok"]},
-                              "ledger": pool.ledger.ids})
-        save()
-        # 5e. sticky CUDA error in the active engine
-        r = measure_fault(pool, load, "cuda")
-        r["repair"] = pool.respawn(r_eng(pool, r["from"]), gmu, mml)
-        sc.append(r)
+        res["accept_gate"].update(
+            accept=acc,
+            digest_after={"active": pool.check_integrity()["ok"],
+                          "standby": pool.check_integrity(pool.standby)["ok"]},
+            ledger=pool.ledger.ids,
+        ); save()
+        run_fault("cuda")
         raise _Done
     except _Done:
         load.stop()
@@ -1147,34 +1089,29 @@ def r_eng(pool, name):
 def parser():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("copy-rank")
-    c.add_argument("--rank", type=int, required=True)
-    c.add_argument("--init", required=True)
-    demo_parser = sub.add_parser("demo")
-    for subparser in (c, sub.add_parser("copy"), demo_parser):
-        subparser.add_argument("--model", required=True)
+    c, cp, d = sub.add_parser("copy-rank"), sub.add_parser("copy"), sub.add_parser("demo")
+    for sp in (c, cp, d):
+        sp.add_argument("--model", required=True)
         # copy and copy-rank: unset means the holders were started without --max-model-len
-        subparser.add_argument("--max-model-len", type=int,
-                               default=4096 if subparser is demo_parser else None)
-        subparser.add_argument("--python", default=sys.executable)
-    cp = sub._name_parser_map["copy"]
-    cp.add_argument("--socket-dir", required=True)
-    cp.add_argument("--src-gpu", type=int, required=True)
-    cp.add_argument("--dst-gpu", type=int, required=True)
-    c.add_argument("--socket-dir", required=True)
-    d = sub._name_parser_map["demo"]
-    d.add_argument("--gpus", required=True, help="three GPUs: holder0/active, holder1/standby, cold")
-    d.add_argument("--work-dir", required=True)
-    d.add_argument("--gmu", type=float, default=0.35)
-    d.add_argument("--port-base", type=int, default=8751)
-    d.add_argument("--tol", type=float, default=0.05)
-    d.add_argument("--no-patches", dest="patches", action="store_false",
-                   help="skip the weight-patch scenarios (their targets are dense-model names)")
+        sp.add_argument("--max-model-len", type=int, default=4096 if sp is d else None)
+        sp.add_argument("--python", default=sys.executable)
+    for sp, flags in (
+        (c, (("--rank", dict(type=int, required=True)), ("--init", dict(required=True)),
+             ("--socket-dir", dict(required=True)))),
+        (cp, (("--socket-dir", dict(required=True)), ("--src-gpu", dict(type=int, required=True)),
+              ("--dst-gpu", dict(type=int, required=True)))),
+        (d, (("--gpus", dict(required=True, help="three GPUs: holder0/active, holder1/standby, cold")),
+             ("--work-dir", dict(required=True)), ("--gmu", dict(type=float, default=0.35)),
+             ("--port-base", dict(type=int, default=8751)), ("--tol", dict(type=float, default=0.05)),
+             ("--no-patches", dict(dest="patches", action="store_false",
+                                   help="skip the weight-patch scenarios (their targets are dense-model names)")))),
+    ):
+        for flag, kw in flags:
+            sp.add_argument(flag, **kw)
     return p
 
 
 def main(argv=None):
-    sys.path.insert(0, str(HERE))
     a = parser().parse_args(argv)
     if a.cmd == "copy-rank":
         return copy_rank(a)

@@ -438,6 +438,13 @@ class NativeUnitTests(unittest.TestCase):
                     "native": spec,
                 })
                 self.assertEqual(ok_hyb["outcome"], "committed", ok_hyb)
+                prep_timings = worker_side.prepare({"id": "txn-timings", "native": spec})
+                self.assertTrue(prep_timings["ok"], prep_timings)
+                self.assertEqual(
+                    set(prep_timings["native"]["timings"]),
+                    {"stage_s", "pch_s", "pch_cached", "compile_s", "link_s", "tu_s"},
+                )
+                worker_side.local("abort", {"txn": "txn-timings"})
                 self.assertEqual(sys.modules[f"{pkg}.ops"].activate(4), 34)
                 self.assertEqual(fake_torch.ops._C.fused_add_rms_norm(4), 34)
                 self.assertEqual(co.undo("txn-hyb")["status"], "undone")
@@ -543,6 +550,516 @@ class NativeUnitTests(unittest.TestCase):
             links2 = [c for c in calls_nvcc if "-shared" in c]
             self.assertTrue(all(c[0] == fake_nvcc for c in compiles2 + links2))
             self.assertTrue(any("reg.cu" in c for c in compiles2))
+
+    def test_stage_csrc_overlay_nested_edits_and_build_native(self):
+        """`_stage_csrc_overlay` and `build_native` symlink untouched siblings/subtrees, materialize
+        real copies for edits, leave `csrc_root` bytes/mtimes untouched, and reject `../` escapes."""
+        fake_torch, _, _ = _make_fake_torch()
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc_root = os.path.join(tmp, "csrc")
+            tree = {
+                "cuda_compat.h": "// compat header\n",
+                "attention/attention_kernels.cu": "// untouched attention kernel\n",
+                "quantization/fp8/common.cu": "// untouched fp8\n",
+                "libtorch_stable/ops.h": "// stable ops header\n",
+                "libtorch_stable/detail/helper.cuh": "// nested detail header\n",
+                "libtorch_stable/pos_encoding_kernels.cu": "// pos_encoding base\nvoid rotary_embedding() {}\n",
+                "libtorch_stable/activation_kernels.cu": "// activation base\nvoid silu_and_mul() {}\n",
+                "libtorch_stable/replaced_kernels.cu": "// old replaced file\n",
+            }
+            for rel, body in tree.items():
+                path = os.path.join(csrc_root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            # Snapshot bytes and mtime_ns of every file in csrc_root.
+            before_snap = {}
+            for rel in tree:
+                p = os.path.join(csrc_root, *rel.split("/"))
+                st = os.stat(p)
+                with open(p, "rb") as fh:
+                    before_snap[rel] = (fh.read(), st.st_mtime_ns)
+
+            # Direct `_stage_csrc_overlay` verification.
+            direct_stage = os.path.join(tmp, "direct_stage", "csrc")
+            pos_rel = "libtorch_stable/pos_encoding_kernels.cu"
+            act_rel = "libtorch_stable/activation_kernels.cu"
+            rep_rel = "libtorch_stable/replaced_kernels.cu"
+            new_rel = "new_dir/custom_kernel.cu"
+            N._stage_csrc_overlay(
+                csrc_root,
+                direct_stage,
+                [pos_rel, act_rel, rep_rel, new_rel],
+                source_rels={rep_rel, new_rel},
+            )
+            self.assertTrue(os.path.isdir(direct_stage) and not os.path.islink(direct_stage))
+            stable_dir = os.path.join(direct_stage, "libtorch_stable")
+            self.assertTrue(os.path.isdir(stable_dir) and not os.path.islink(stable_dir))
+            new_dir = os.path.join(direct_stage, "new_dir")
+            self.assertTrue(os.path.isdir(new_dir) and not os.path.islink(new_dir))
+
+            # All directories under csrc_root are real directories (never symlinks) so
+            # `#include "../..."` from any subdir stays inside `direct_stage`.
+            for sub_dir in (
+                "attention",
+                "quantization",
+                "quantization/fp8",
+                "libtorch_stable",
+                "libtorch_stable/detail",
+            ):
+                staged_d = os.path.join(direct_stage, *sub_dir.split("/"))
+                self.assertTrue(os.path.isdir(staged_d) and not os.path.islink(staged_d), f"expected real dir: {sub_dir}")
+
+            # Only untouched regular files are symlinks pointing to csrc_root.
+            for untouched in (
+                "cuda_compat.h",
+                "attention/attention_kernels.cu",
+                "quantization/fp8/common.cu",
+                "libtorch_stable/ops.h",
+                "libtorch_stable/detail/helper.cuh",
+            ):
+                staged_p = os.path.join(direct_stage, *untouched.split("/"))
+                self.assertTrue(os.path.islink(staged_p), f"expected symlink: {untouched}")
+                self.assertEqual(
+                    os.readlink(staged_p),
+                    os.path.realpath(os.path.join(csrc_root, *untouched.split("/"))),
+                )
+
+            # Edited targets are materialized regular files; `sources` targets are not created yet.
+            for edited in (pos_rel, act_rel):
+                staged_p = os.path.join(direct_stage, *edited.split("/"))
+                self.assertTrue(os.path.isfile(staged_p) and not os.path.islink(staged_p))
+            for src_rel in (rep_rel, new_rel):
+                staged_p = os.path.join(direct_stage, *src_rel.split("/"))
+                self.assertFalse(os.path.lexists(staged_p))
+
+            # `_apply_source_changes` refuses to mutate untouched symlinked files in `csrc_root`.
+            with self.assertRaises(ValueError):
+                N._apply_source_changes(direct_stage, {"edits": [["libtorch_stable/ops.h", "stable", "hacked"]]})
+            with self.assertRaises(ValueError):
+                N._apply_source_changes(direct_stage, {"sources": {"attention/attention_kernels.cu": "// pwn\n"}})
+
+            # Traversal in `_stage_csrc_overlay` raises ValueError.
+            for bad_rel in ("../escape.cu", "libtorch_stable/../../escape.cu", "/etc/passwd", "a\\b.cu"):
+                with self.assertRaises(ValueError):
+                    N._stage_csrc_overlay(csrc_root, os.path.join(tmp, "bad_stage"), [bad_rel])
+
+            # Full `build_native` with nested edits + source override + untouched compiled TU.
+            stage_observations = []
+            obs_lock = threading.Lock()
+            base_fake_run = _fake_nvcc_factory([])
+
+            def inspecting_run(cmd, cwd=None, **kw):
+                if "-c" in cmd:
+                    with obs_lock:
+                        take_snap = not stage_observations
+                        if take_snap:
+                            stage_observations.append(None)
+                    if take_snap:
+                        csrc_s = os.path.join(cwd, "csrc")
+                        contents = {}
+                        for rel in (pos_rel, act_rel, rep_rel):
+                            with open(os.path.join(csrc_s, *rel.split("/")), encoding="utf-8") as fh:
+                                contents[rel] = fh.read()
+                        stage_observations[0] = {
+                            "real_dirs": {
+                                rel: (
+                                    os.path.isdir(os.path.join(csrc_s, *rel.split("/")))
+                                    and not os.path.islink(os.path.join(csrc_s, *rel.split("/")))
+                                )
+                                for rel in ("attention", "quantization", "quantization/fp8", "libtorch_stable/detail")
+                            },
+                            "symlinks": {
+                                rel: os.path.islink(os.path.join(csrc_s, *rel.split("/")))
+                                for rel in (
+                                    "cuda_compat.h",
+                                    "attention/attention_kernels.cu",
+                                    "quantization/fp8/common.cu",
+                                    "libtorch_stable/ops.h",
+                                    "libtorch_stable/detail/helper.cuh",
+                                )
+                            },
+                            "real_files": {
+                                rel: (
+                                    os.path.isfile(os.path.join(csrc_s, *rel.split("/")))
+                                    and not os.path.islink(os.path.join(csrc_s, *rel.split("/")))
+                                )
+                                for rel in (pos_rel, act_rel, rep_rel)
+                            },
+                            "contents": contents,
+                        }
+                return base_fake_run(cmd, cwd=cwd, **kw)
+
+            spec = {
+                "csrc_root": csrc_root,
+                "build_root": os.path.join(tmp, "build_overlay"),
+                "files": [pos_rel, act_rel, "attention/attention_kernels.cu"],
+                "edits": [
+                    [pos_rel, "// pos_encoding base", "// pos_encoding fast"],
+                    [act_rel, "// activation base", "// activation fast"],
+                ],
+                "sources": {rep_rel: "// fresh replacement\n"},
+                "ops": {OP_NAME: {"fn": OP_NAME, "schema": OP_SCHEMA}},
+                "arch": "100",
+            }
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value="/usr/local/cuda/bin/nvcc"),
+                mock.patch.object(N, "find_gxx", return_value=None),
+                mock.patch.object(N.subprocess, "run", side_effect=inspecting_run),
+            ):
+                built = N.build_native(spec)
+                self.assertTrue(os.path.isfile(built["so"]))
+
+                # Unmodified-only build (no edits, no sources) also succeeds cleanly over symlinks.
+                untouched_spec = _native_spec(csrc_root, os.path.join(tmp, "build_untouched"), filename=pos_rel)
+                built_untouched = N.build_native(untouched_spec)
+                self.assertTrue(os.path.isfile(built_untouched["so"]))
+
+                # Traversal through build_native still raises ValueError.
+                with self.assertRaises(ValueError):
+                    N.build_native(_native_spec(csrc_root, os.path.join(tmp, "b_err"), edits=[["../escape.cu", "a", "b"]]))
+
+            self.assertEqual(len(stage_observations), 1)
+            obs = stage_observations[0]
+            self.assertTrue(all(obs["real_dirs"].values()), obs["real_dirs"])
+            self.assertTrue(all(obs["symlinks"].values()), obs["symlinks"])
+            self.assertTrue(all(obs["real_files"].values()), obs["real_files"])
+            self.assertIn("// pos_encoding fast", obs["contents"][pos_rel])
+            self.assertIn("// activation fast", obs["contents"][act_rel])
+            self.assertEqual(obs["contents"][rep_rel], "// fresh replacement\n")
+
+            # Every file in `csrc_root` retains identical bytes and mtime_ns after build + cleanup.
+            for rel, (orig_bytes, orig_mtime) in before_snap.items():
+                p = os.path.join(csrc_root, *rel.split("/"))
+                self.assertTrue(os.path.isfile(p) and not os.path.islink(p), f"missing/corrupted {rel}")
+                with open(p, "rb") as fh:
+                    self.assertEqual(fh.read(), orig_bytes, f"bytes changed for {rel}")
+                self.assertEqual(os.stat(p).st_mtime_ns, orig_mtime, f"mtime changed for {rel}")
+
+
+    def test_tu_threads_scaling(self):
+        self.assertEqual(N._tu_threads(16, 1), 16)
+        self.assertEqual(N._tu_threads(16, 2), 8)
+        self.assertEqual(N._tu_threads(16, 4), 4)
+        self.assertEqual(N._tu_threads(0, 2), 0)
+        self.assertEqual(N._tu_threads(1, 4), 1)
+
+    def test_multi_tu_threads_and_phase_timings(self):
+        fake_torch, _, _ = _make_fake_torch()
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc = _make_csrc(tmp, filename="libtorch_stable/a.cu", body="// a\n")
+            with open(os.path.join(csrc, "libtorch_stable/b.cu"), "w", encoding="utf-8") as fh:
+                fh.write("// b\n")
+            build_root = os.path.join(tmp, "build")
+            spec = {
+                "csrc_root": csrc,
+                "build_root": build_root,
+                "files": ["libtorch_stable/a.cu", "libtorch_stable/b.cu"],
+                "ops": {OP_NAME: {"fn": OP_NAME, "schema": OP_SCHEMA}},
+                "arch": "100",
+                "threads": 16,
+                "edits": [["libtorch_stable/a.cu", "// a", "// a v2"]],
+            }
+            calls = []
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value="/usr/local/cuda/bin/nvcc"),
+                mock.patch.object(N, "find_gxx", return_value="/usr/bin/g++"),
+                mock.patch.object(N.subprocess, "run", side_effect=_fake_nvcc_factory(calls)),
+            ):
+                built = N.build_native(spec)
+                cached = N.build_native(spec)
+
+            self.assertFalse(built["cached"])
+            nvcc_compiles = [c for c in calls if "-c" in c and c[0] == "/usr/local/cuda/bin/nvcc"]
+            self.assertEqual(len(nvcc_compiles), 2)
+            for cmd in nvcc_compiles:
+                self.assertIn("--threads=8", cmd)
+
+            timings = built["timings"]
+            self.assertIn("stage_s", timings)
+            self.assertIn("pch_s", timings)
+            self.assertIn("pch_cached", timings)
+            self.assertIn("compile_s", timings)
+            self.assertIn("link_s", timings)
+            self.assertEqual(
+                set(timings["tu_s"]),
+                {"csrc/libtorch_stable/a.cu", "csrc/libtorch_stable/b.cu", "reg.cpp"},
+            )
+
+            self.assertTrue(cached["cached"])
+            self.assertEqual(
+                cached["timings"],
+                {"stage_s": 0.0, "pch_s": 0.0, "pch_cached": False, "compile_s": 0.0, "link_s": 0.0, "tu_s": {}},
+            )
+
+    def test_reg_pch_cache_hit_miss_and_silent_fallback(self):
+        fake_torch, _, _ = _make_fake_torch()
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc = _make_csrc(tmp, body="// base\nvoid f() {}\n")
+            build_root = os.path.join(tmp, "build")
+            spec1 = _native_spec(csrc, build_root, edits=[["libtorch_stable/layernorm_kernels.cu", "// base", "// v1"]])
+            spec2 = _native_spec(csrc, build_root, edits=[["libtorch_stable/layernorm_kernels.cu", "// base", "// v2"]])
+            calls = []
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value="/usr/local/cuda/bin/nvcc"),
+                mock.patch.object(N, "find_gxx", return_value="/usr/bin/g++"),
+                mock.patch.object(N.subprocess, "run", side_effect=_fake_nvcc_factory(calls)),
+            ):
+                b1 = N.build_native(spec1)
+                b2 = N.build_native(spec2)
+
+            self.assertFalse(b1["timings"]["pch_cached"])
+            self.assertTrue(b2["timings"]["pch_cached"])
+            pch_builds = [c for c in calls if "c++-header" in c]
+            self.assertEqual(len(pch_builds), 1)
+            reg_compiles = [c for c in calls if "reg.cpp" in c]
+            self.assertEqual(len(reg_compiles), 2)
+            for cmd in reg_compiles:
+                self.assertIn("-include", cmd)
+                self.assertTrue(os.path.isfile(cmd[cmd.index("-include") + 1] + ".gch"))
+
+            # When PCH compile fails, build_native falls back cleanly without -include.
+            raw_calls = []
+            raw_delegate = _fake_nvcc_factory(raw_calls)
+
+            def fail_pch_only(cmd, cwd=None, **kw):
+                if "c++-header" in cmd:
+                    raw_calls.append(list(cmd))
+                    return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="pch fail")
+                return raw_delegate(cmd, cwd=cwd, **kw)
+
+            spec3 = _native_spec(csrc, os.path.join(tmp, "build-fail"), edits=[["libtorch_stable/layernorm_kernels.cu", "// base", "// v3"]])
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N, "find_nvcc", return_value="/usr/local/cuda/bin/nvcc"),
+                mock.patch.object(N, "find_gxx", return_value="/usr/bin/g++"),
+                mock.patch.object(N.subprocess, "run", side_effect=fail_pch_only),
+            ):
+                b3 = N.build_native(spec3)
+
+            self.assertTrue(os.path.isfile(b3["so"]))
+            self.assertFalse(b3["timings"]["pch_cached"])
+            reg_fail_cmd = next(c for c in raw_calls if "reg.cpp" in c)
+            self.assertNotIn("-include", reg_fail_cmd)
+
+    def test_stage_csrc_overlay_parent_header_visibility_from_subdir(self):
+        """Edited parent headers are visible via `#include "../..."` from untouched subdir files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            csrc_root = os.path.join(tmp, "csrc")
+            tree = {
+                "cuda_compat.h": "#define PARENT_VAL 1\n",
+                "attention/attention_kernels.cu": '#include "../cuda_compat.h"\nint v = PARENT_VAL;\n',
+                "libtorch_stable/ops.h": "#define OPS_VAL 10\n",
+                "libtorch_stable/detail/helper.cuh": '#include "../ops.h"\nint w = OPS_VAL;\n',
+            }
+            for rel, body in tree.items():
+                p = os.path.join(csrc_root, *rel.split("/"))
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write(body)
+
+            csrc_stage = os.path.join(tmp, "stage", "csrc")
+            spec = {
+                "edits": [
+                    ["cuda_compat.h", "PARENT_VAL 1", "PARENT_VAL 2"],
+                    ["libtorch_stable/ops.h", "OPS_VAL 10", "OPS_VAL 20"],
+                ]
+            }
+            N._stage_csrc_overlay(csrc_root, csrc_stage, ["cuda_compat.h", "libtorch_stable/ops.h"])
+            N._apply_source_changes(csrc_stage, spec)
+
+            # No directory inside csrc_stage may be a symlink.
+            for dirpath, dirnames, _ in os.walk(csrc_stage):
+                self.assertFalse(os.path.islink(dirpath), dirpath)
+                for d in dirnames:
+                    self.assertFalse(os.path.islink(os.path.join(dirpath, d)), d)
+
+            # Direct filesystem resolution of `../` from untouched subdirs reads edited copies.
+            for sub_file, rel_hdr, expected, orig in (
+                ("attention/attention_kernels.cu", "../cuda_compat.h", "PARENT_VAL 2", "PARENT_VAL 1"),
+                ("libtorch_stable/detail/helper.cuh", "../ops.h", "OPS_VAL 20", "OPS_VAL 10"),
+            ):
+                staged_sub = os.path.join(csrc_stage, *sub_file.split("/"))
+                self.assertTrue(os.path.islink(staged_sub))
+                resolved = os.path.join(os.path.dirname(staged_sub), rel_hdr)
+                with open(resolved, encoding="utf-8") as fh:
+                    self.assertIn(expected, fh.read())
+                with open(os.path.join(csrc_root, os.path.relpath(os.path.normpath(resolved), csrc_stage)), encoding="utf-8") as fh:
+                    self.assertIn(orig, fh.read())
+
+            # When host `g++` is present, verify real preprocessor `#include "../..."` output.
+            gxx = N.find_gxx()
+            if gxx:
+                for sub_file, expected_line in (
+                    ("attention/attention_kernels.cu", "int v = 2;"),
+                    ("libtorch_stable/detail/helper.cuh", "int w = 20;"),
+                ):
+                    proc = subprocess.run(
+                        [gxx, "-E", "-P", "-x", "c++", os.path.join(csrc_stage, *sub_file.split("/"))],
+                        capture_output=True,
+                        text=True,
+                        timeout=20,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertIn(expected_line, proc.stdout)
+
+    def test_reg_pch_thread_safe_tmp_and_torch_header_invalidation(self):
+        """`_ensure_reg_pch` isolates per-thread `tmp_gch` under `flock` and invalidates on
+        torch header stat or `torch.__version__` changes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            torch_root = os.path.join(tmp, "stage-torch")
+            torch_inc = os.path.join(torch_root, "include")
+            hdr_path = os.path.join(torch_inc, "torch", "csrc", "stable", "library.h")
+            os.makedirs(os.path.dirname(hdr_path), exist_ok=True)
+            with open(hdr_path, "w", encoding="utf-8") as fh:
+                fh.write("// torch stable library v1\n")
+
+            fake_gxx = os.path.join(tmp, "g++")
+            with open(fake_gxx, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(fake_gxx, 0o755)
+
+            fake_torch = types.ModuleType("torch")
+            fake_torch.__version__ = "2.11.0"
+            build_root = os.path.join(tmp, "build")
+            stage_dir = os.path.join(build_root, "k1", "stage-999")
+            gxx_flags = ["-std=c++20", f"-I{torch_inc}", "-I.", "-Icsrc", f"-I{stage_dir}/csrc"]
+
+            # 1) Thread A fails (TimeoutExpired) while Thread B waits on flock; Thread A's
+            # cleanup runs inside flock on its own tid-tagged tmp file and never deletes Thread B's.
+            tmp_outputs = []
+            tmp_lock = threading.Lock()
+            t_a_entered = threading.Event()
+            release_t_a = threading.Event()
+
+            def race_run(cmd, cwd=None, **kw):
+                out_path = cmd[cmd.index("-o") + 1]
+                with tmp_lock:
+                    idx = len(tmp_outputs)
+                    tmp_outputs.append(out_path)
+                if idx == 0:
+                    with open(out_path, "wb") as fh:
+                        fh.write(b"partial-a")
+                    t_a_entered.set()
+                    release_t_a.wait(timeout=5)
+                    raise subprocess.TimeoutExpired(cmd, 120)
+                # Thread B runs after Thread A exits its flock critical section: Thread A's tmp must be gone.
+                self.assertFalse(os.path.exists(tmp_outputs[0]), "Thread A failed to unlink tmp_gch before releasing flock")
+                with open(out_path, "wb") as fh:
+                    fh.write(b"gch-ok-b")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            results = [None, None]
+            errors = []
+
+            def run_slot(slot_idx):
+                try:
+                    results[slot_idx] = N._ensure_reg_pch(
+                        build_root, fake_gxx, gxx_flags, stable=True, stage_dir=stage_dir
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N.subprocess, "run", side_effect=race_run),
+            ):
+                ta = threading.Thread(target=run_slot, args=(0,))
+                tb = threading.Thread(target=run_slot, args=(1,))
+                ta.start()
+                self.assertTrue(t_a_entered.wait(timeout=5))
+                tb.start()
+                time.sleep(0.05)
+                release_t_a.set()
+                ta.join(10)
+                tb.join(10)
+
+            self.assertFalse(errors, errors)
+            self.assertIsNone(results[0][0])
+            self.assertIsNotNone(results[1][0])
+            self.assertTrue(os.path.isfile(results[1][0] + ".gch"))
+            self.assertEqual(len(tmp_outputs), 2)
+            self.assertNotEqual(tmp_outputs[0], tmp_outputs[1])
+
+            # 2) Same torch header + version hits cache; modifying header or __version__ invalidates.
+            def ok_run(cmd, cwd=None, **kw):
+                out_path = cmd[cmd.index("-o") + 1]
+                with open(out_path, "wb") as fh:
+                    fh.write(b"gch-fresh")
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with (
+                mock.patch.dict(sys.modules, {"torch": fake_torch}),
+                mock.patch.object(N.subprocess, "run", side_effect=ok_run),
+            ):
+                hpp_hit, _, cached_hit = N._ensure_reg_pch(
+                    build_root, fake_gxx, gxx_flags, stable=True, stage_dir=stage_dir
+                )
+                self.assertTrue(cached_hit)
+                self.assertEqual(hpp_hit, results[1][0])
+
+                # In-place header upgrade (different size + mtime_ns) produces a new PCH key.
+                with open(hdr_path, "w", encoding="utf-8") as fh:
+                    fh.write("// torch stable library v2 (upgraded header)\n")
+                hpp_hdr, _, cached_hdr = N._ensure_reg_pch(
+                    build_root, fake_gxx, gxx_flags, stable=True, stage_dir=stage_dir
+                )
+                self.assertFalse(cached_hdr)
+                self.assertNotEqual(hpp_hdr, hpp_hit)
+
+                # Changing torch.__version__ produces another distinct PCH key.
+                fake_torch.__version__ = "2.12.0"
+                hpp_ver, _, cached_ver = N._ensure_reg_pch(
+                    build_root, fake_gxx, gxx_flags, stable=True, stage_dir=stage_dir
+                )
+                self.assertFalse(cached_ver)
+                self.assertNotIn(hpp_ver, {hpp_hit, hpp_hdr})
+
+    def test_pch_portable_flag_filtering(self):
+        """`_filter_pch_portable_flags` handles paired `-I`/`-isystem` tokens and compares
+        resolved paths against `stage_dir` instead of matching `'/stage-'` substrings."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stage_dir = os.path.join(tmp, "build", "stage-123")
+            stage_csrc = os.path.join(stage_dir, "csrc")
+            external_stage_inc = os.path.join(tmp, "opt", "stage-prod", "torch", "include")
+            external_sys_inc = os.path.join(tmp, "opt", "stage-prod", "cuda", "include")
+            os.makedirs(stage_csrc, exist_ok=True)
+            os.makedirs(external_stage_inc, exist_ok=True)
+            os.makedirs(external_sys_inc, exist_ok=True)
+
+            raw_flags = [
+                "-std=c++20",
+                "-I.",
+                "-Icsrc",
+                "-Icsrc/libtorch_stable",
+                "-I", ".",
+                "-I", "csrc",
+                "-isystem", "csrc/sub",
+                f"-I{stage_dir}",
+                "-I", stage_csrc,
+                "-isystem", stage_csrc,
+                f"-isystem{stage_csrc}",
+                f"-I{external_stage_inc}",
+                "-I", external_stage_inc,
+                "-isystem", external_sys_inc,
+                f"-isystem{external_sys_inc}",
+                "-O1",
+            ]
+            filtered = N._filter_pch_portable_flags(raw_flags, stage_dir=stage_dir)
+            self.assertEqual(
+                filtered,
+                [
+                    "-std=c++20",
+                    f"-I{external_stage_inc}",
+                    "-I", external_stage_inc,
+                    "-isystem", external_sys_inc,
+                    f"-isystem{external_sys_inc}",
+                    "-O1",
+                ],
+            )
 
 
 if __name__ == "__main__":

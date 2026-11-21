@@ -25,72 +25,23 @@ in modules a refresh keeps, so `forget_registrations()` drops the entries whose 
 refreshed module before the re-import, the state a fresh process has before it imports the
 module. Entries from modules that were not refreshed stay, so a real duplicate still fails.
 """
-import ast, contextlib, os, re, sys, time
+import contextlib, json, os, sys, time
 
-
-def _resolve(mod, is_pkg, node):
-    """Absolute module names an import statement in module `mod` may load."""
-    if isinstance(node, ast.Import):
-        return [a.name for a in node.names]
-    base = node.module or ""
-    if node.level:
-        parts = mod.split(".") if is_pkg else mod.split(".")[:-1]
-        if node.level > 1:
-            parts = parts[:len(parts) - node.level + 1]
-        base = ".".join(parts + ([base] if base else []))
-    # "from pkg import name" loads pkg, and pkg.name when name is a submodule
-    return [base] + [f"{base}.{a.name}" for a in node.names if a.name != "*"]
-
-
-def _binding_imports(tree):
-    """Import statements that run at import time and bind names in the module or a class body
-    (module level, including inside if/try/with and class bodies). Imports inside a function run
-    on each call and look the module up in sys.modules then, so they see a refreshed module."""
-    todo = list(tree.body)
-    while todo:
-        node = todo.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            continue
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            yield node
-        todo.extend(ast.iter_child_nodes(node))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+import corelab  # noqa: F401,E402
+from fastrsi import hooks  # noqa: E402
+from fastrsi.op_guard import _norm_schema, op_redefine_guard  # noqa: E402
 
 
 def import_graph(prefixes=("vllm",), modules=None):
     """{module: set of loaded modules it imports at import time}, read from the source of every
     loaded module under `prefixes`."""
-    modules = sys.modules if modules is None else modules
-    graph = {}
-    for name, m in list(modules.items()):
-        f = getattr(m, "__file__", None)
-        if not (f and f.endswith(".py") and name.split(".")[0] in prefixes):
-            continue
-        try:
-            with open(f, "rb") as fh:
-                tree = ast.parse(fh.read(), f)
-        except (OSError, SyntaxError, ValueError):
-            continue
-        is_pkg = os.path.basename(f) == "__init__.py"
-        deps = set()
-        for node in _binding_imports(tree):
-            deps.update(d for d in _resolve(name, is_pkg, node) if d in modules and d != name)
-        graph[name] = deps
-    return graph
+    return hooks.import_graph(prefixes, modules=modules)
 
 
-def dependents(changed, graph):
-    """`changed` plus every module that imports one of them, directly or through others."""
-    rev = {}
-    for m, deps in graph.items():
-        for d in deps:
-            rev.setdefault(d, set()).add(m)
-    out, todo = set(changed), list(changed)
-    while todo:
-        for m in rev.get(todo.pop(), ()):
-            if m not in out:
-                out.add(m)
-                todo.append(m)
-    return out
+dependents = hooks.dependents
 
 
 def plan(changed_files, graph, modules=None, whole_above=100):
@@ -106,8 +57,7 @@ def plan(changed_files, graph, modules=None, whole_above=100):
     modules = sys.modules if modules is None else modules
     by_file = {}
     for name, m in list(modules.items()):
-        f = getattr(m, "__file__", None)
-        if f:
+        if (f := getattr(m, "__file__", None)):
             by_file.setdefault(f, []).append(name)
     changed, blocked = set(), []
     for f in changed_files:
@@ -122,131 +72,12 @@ def plan(changed_files, graph, modules=None, whole_above=100):
     drop, scope = dependents(changed, graph), "dependents"
     if len(drop) > whole_above:
         drop, scope = set(graph), "all"
-    return {"modules": sorted(drop), "changed": sorted(changed), "scope": scope,
-            "blocked": blocked}
+    return {"modules": sorted(drop), "changed": sorted(changed), "scope": scope, "blocked": blocked}
 
 
 def purge(names, modules=None):
-    """Drop modules so the next import reads their source again. Also removes each from its
-    parent package's attributes, where `import a.b` would otherwise still find the old one."""
-    modules = sys.modules if modules is None else modules
-    for n in names:
-        modules.pop(n, None)
-        parent, _, child = n.rpartition(".")
-        p = modules.get(parent)
-        if p is not None and child in getattr(p, "__dict__", {}):
-            try:
-                delattr(p, child)
-            except AttributeError:
-                pass
-    import importlib
-    importlib.invalidate_caches()
-
-
-def _norm_schema(schema):
-    """Arguments and returns of a schema, without the op name and with opaque class types
-    (dotted names, which the C++ schema shows as PyObject) unified."""
-    body = schema.split("(", 1)[-1]
-    return re.sub(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+", "PyObject", body).replace(" ", "")
-
-
-@contextlib.contextmanager
-def op_redefine_guard(report=None):
-    """While re-importing refreshed modules: `Library.define` of an op that already exists with
-    the same schema is skipped (its implementation is still replaced by `Library.impl`, which
-    overrides, and its fake impl by `Library._register_fake` with allow_override); a changed
-    schema raises with the op's name, since a running process cannot change an op's
-    signature. `report(event)` gets one dict per skipped define, replaced implementation, replaced
-    fake impl and re-registered opaque type. Use it through guard_for()."""
-    try:
-        from torch.library import Library
-        import torch
-    except ImportError:
-        yield
-        return
-    orig = Library.define
-    skipped = set()
-
-    def _emit(event):
-        if report is not None:
-            report(event)
-
-    def define(self, schema, *args, **kw):
-        name = schema.split("(", 1)[0].strip()
-        op, _, overload = name.partition(".")
-        qual = f"{self.ns}::{op}"
-        try:
-            old = str(torch._C._get_schema(qual, overload))
-        except RuntimeError:
-            return orig(self, schema, *args, **kw)
-        try:   # torch's own printing, so defaults compare alike ("0.0" prints as "0.")
-            new = str(torch._C.parse_schema(f"{self.ns}::{schema}"))
-        except RuntimeError:
-            new = schema
-        if _norm_schema(old) != _norm_schema(new):
-            raise RuntimeError(f"refresh: op {qual} changed its schema ({old} -> {schema}); "
-                               "a process cannot change an op's signature: restart the zygote")
-        skipped.add((self.ns, op))
-        _emit({"event": "zygote_op_redefined", "op": qual + (f".{overload}" if overload else ""),
-               "schema": old})
-        return name
-
-    orig_impl = Library.impl
-    import inspect
-    can_override = "allow_override" in inspect.signature(orig_impl).parameters
-
-    def impl(self, op_name, *args, **kw):
-        # Override only ops whose define was skipped above: those are the refreshed modules'
-        # re-registrations. Any other duplicate keeps torch's own behavior. (torch >= 2.9 has
-        # the flag; its default is False before 2.14 and True after.)
-        op = op_name.split(".", 1)[0] if isinstance(op_name, str) else None
-        if (self.ns, op) in skipped:
-            if can_override:
-                kw["allow_override"] = True
-            _emit({"event": "zygote_op_impl_replaced", "op": f"{self.ns}::{op_name}",
-                   "dispatch_key": kw.get("dispatch_key", args[1] if len(args) > 1 else "")})
-        return orig_impl(self, op_name, *args, **kw)
-
-    # vLLM's direct_register_custom_op also registers a fake (meta) impl through
-    # Library._register_fake, which refuses a second one ("already has an fake impl
-    # registered"). Same rule as impl: a re-registration of a skipped define replaces it.
-    orig_fake = getattr(Library, "_register_fake", None)
-    can_override_fake = (orig_fake is not None and "allow_override"
-                         in inspect.signature(orig_fake).parameters)
-
-    def register_fake(self, op_name, fn, _stacklevel=1, **kw):
-        op = op_name.split(".", 1)[0] if isinstance(op_name, str) else None
-        if (self.ns, op) in skipped:
-            if can_override_fake:
-                kw["allow_override"] = True
-            else:   # older torch: drop the old fake impl first
-                entry = torch._library.simple_registry.singleton.find(f"{self.ns}::{op_name}")
-                if entry.fake_impl.kernel is not None:
-                    entry.fake_impl.kernel = None
-            _emit({"event": "zygote_op_fake_replaced", "op": f"{self.ns}::{op_name}"})
-        return orig_fake(self, op_name, fn, _stacklevel + 1, **kw)
-    orig_opaque = getattr(torch._C, "_register_opaque_type", None)
-
-    def register_opaque(name, *args, **kw):
-        try:
-            return orig_opaque(name, *args, **kw)
-        except RuntimeError as e:
-            if "already registered" not in str(e):
-                raise
-            _emit({"event": "zygote_opaque_reregistered", "type": name})
-    Library.define, Library.impl = define, impl
-    if orig_fake is not None:
-        Library._register_fake = register_fake
-    if orig_opaque is not None:
-        torch._C._register_opaque_type = register_opaque
-    try:
-        yield
-    finally:
-        Library.define, Library.impl = orig, orig_impl
-        if orig_fake is not None:
-            Library._register_fake = orig_fake
-        if orig_opaque is not None:
-            torch._C._register_opaque_type = orig_opaque
+    """Drop modules so the next import reads their source again, unbinding parent attributes."""
+    hooks.purge_modules(names, modules=modules)
 
 
 # Python name registries that refuse a name twice, by module: {module: (dict attributes)}.
@@ -301,7 +132,6 @@ def guard_for(refresh_names, report=None):
 
 def print_event(event):
     """Report one guard event as a JSON line in the server log."""
-    import json
     print(json.dumps(event), flush=True)
 
 

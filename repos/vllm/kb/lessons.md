@@ -19,6 +19,7 @@ this is not a log. Framework lessons are in `docs/lessons.md`. "The replay" belo
 |---|---|---|
 | Re-importing an edited `layernorm` re-ran `@CustomOp.register("rms_norm")`, which refuses a known name: every forked server died ("Duplicate op name: rms_norm"). | Before the re-import, forget the refreshed modules' entries in vLLM's name registries (`NAME_REGISTRIES`). Registries outside that list still collide. | vllm-project/vllm#61323: two runs fell back to a plain restart (113 s, 195 s). Fixed in #52: the rerun forked fine (layernorm and 26 dependents refreshed). |
 | An edit to almost any module refreshes most of vLLM through the `vllm.config` / `vllm.platforms` import cycle. | Expect a core edit to cost a full re-import (+1.5–2.8 s); leaf edits refresh in milliseconds. | [costs.md](costs.md), zygote section. |
+| Starting `engine.py zygote` without `--kvplan` while calling `engine.py start --zygote ... --kvplan=...` omits `FASTRSI_KVPLAN_DIR` and the services path entry from the zygote's import environment, so `zygote_check` fails closed (`check: "env"`). | Pass `--kvplan=...` consistently to `engine.py zygote` whenever servers started from it will use `--kvplan`. | Observed on `2× B200` `TP=2` `--zygote --weights --kvplan` startup (`engine.py:engine_env`, resolved when `--kvplan` matched). |
 
 ## Undo and `at_base`
 

@@ -29,7 +29,6 @@ import argparse, copy, importlib.util, json, os, sys, time
 from pathlib import Path
 
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-os.environ.setdefault("VLLM_USE_V2_MODEL_RUNNER", "0")
 HERE = Path(__file__).resolve().parent
 
 
@@ -56,6 +55,8 @@ def tolist(x):
 
 
 def step_record(out):
+    if hasattr(out, "get_output"):
+        out = out.get_output()
     lp = out.logprobs
     return {"req_ids": list(out.req_ids), "sampled": [tolist(t) for t in out.sampled_token_ids],
             "logprob_ids": tolist(lp.logprob_token_ids) if lp is not None else None,
@@ -105,8 +106,10 @@ def main():
                "sliding_window": getattr(g.kv_cache_spec, "sliding_window", None),
                "block_size": g.kv_cache_spec.block_size}
               for g in runner.kv_cache_config.kv_cache_groups]
+    runner_kind = "v2" if getattr(runner, "input_batch", None) is None and getattr(runner, "req_states", None) is not None else "v1"
     res = {"model": a.model, "mode": a.mode, "module": a.module, "vllm": __import__("vllm").__version__,
-           "torch": torch.__version__, "gpu": torch.cuda.get_device_name(), "kv_cache_groups": groups,
+           "torch": torch.__version__, "gpu": torch.cuda.get_device_name(),
+           "runner_cls": type(runner).__name__, "runner_kind": runner_kind, "kv_cache_groups": groups,
            "num_kv_cache_tensors": len(runner.kv_cache_config.kv_cache_tensors),
            "attn_backend": attn_backend(runner),
            "clock": "time.perf_counter after torch.cuda.synchronize, ms", "capture_step": a.capture_step,
