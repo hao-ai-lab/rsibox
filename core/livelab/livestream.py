@@ -148,21 +148,21 @@ class PricedBrief:
 
 
 _UNIVERSAL_WEIGHTS = {
-    "r0": (0, 0),
-    "r0 swap": (0, 0),
-    "swap": (0, 0),
-    "live": (0, 0),
-    "live_swap": (0, 0),
-    "in_place": (0, 0),
-    "hot_swap": (0, 0),
-    "r10": (0, 0),
-    "r10 repair": (0, 0),
-    "repair": (0, 0),
-    "t1": (1, 1),
-    "r1": (1, 5),
-    "graph_recapture": (1, 5),
-    "recompile": (1, 5),
-    "compile_reset": (1, 5),
+    "r0": ("r0", 0, 0),
+    "r0 swap": ("r0", 0, 0),
+    "swap": ("r0", 0, 0),
+    "live": ("r0", 0, 0),
+    "live_swap": ("r0", 0, 0),
+    "in_place": ("r0", 0, 0),
+    "hot_swap": ("r0", 0, 0),
+    "r10": ("r10", 0, 0),
+    "r10 repair": ("r10", 0, 0),
+    "repair": ("r10", 0, 0),
+    "t1": ("t1", 1, 1),
+    "r1": ("r1", 1, 5),
+    "graph_recapture": ("r1", 1, 5),
+    "recompile": ("r1", 1, 5),
+    "compile_reset": ("r1", 1, 5),
 }
 _IFACE_BARE_WEIGHT = {"r2": 1, "r3": 2, "r4": 3}
 
@@ -188,9 +188,9 @@ def _resolve_route_spec(
             return {"raw": route_name, "norm": norm, "ladder": "interface",
                     "rung": rung, "weight": ROUTE_TIER_WEIGHTS.get(tok, w), "iface_weight": w}
         if tok in _UNIVERSAL_WEIGHTS:
-            w, iw = _UNIVERSAL_WEIGHTS[tok]
+            rung, w, iw = _UNIVERSAL_WEIGHTS[tok]
             return {"raw": route_name, "norm": norm, "ladder": "both",
-                    "rung": tok.split()[0], "weight": w, "iface_weight": iw}
+                    "rung": rung, "weight": w, "iface_weight": iw}
         if tok in _CONFLICTING_RUNGS:
             pmode = str((context or {}).get("process_mode") or
                         (context or {}).get("launch_mode") or "").strip().lower()
@@ -226,14 +226,34 @@ def _route_tier_weight(route_name: Any) -> int | None:
     return spec["weight"] if spec is not None else None
 
 
+def _conflict_rung(spec_a: dict[str, Any], spec_b: dict[str, Any]) -> str:
+    """Deterministic rung label for a conflict pair, independent of field order."""
+    if spec_a["rung"] == spec_b["rung"]:
+        return spec_a["rung"].upper()
+    in_a = spec_a["rung"] in _CONFLICTING_RUNGS
+    in_b = spec_b["rung"] in _CONFLICTING_RUNGS
+    if in_a and not in_b:
+        return spec_a["rung"].upper()
+    if in_b and not in_a:
+        return spec_b["rung"].upper()
+    return min(spec_a["rung"], spec_b["rung"]).upper()
+
+
 def _specs_conflict(spec_a: dict[str, Any], spec_b: dict[str, Any]) -> str | None:
     """Return a conflict description if two route specs disagree across conflicting rungs."""
     if spec_a["rung"] == spec_b["rung"] and spec_a["rung"] in _CONFLICTING_RUNGS:
         if spec_a["ladder"] != spec_b["ladder"]:
+            first, second = sorted(
+                (spec_a, spec_b),
+                key=lambda sp: (
+                    {"livestream": 0, "interface": 1, "ambiguous": 2}.get(sp["ladder"], 3),
+                    sp["norm"],
+                ),
+            )
             return (
-                f"conflicting definitions for rung {spec_a['rung'].upper()}: "
-                f"{spec_a['raw']!r} ({spec_a['ladder']}) vs "
-                f"{spec_b['raw']!r} ({spec_b['ladder']})"
+                f"conflicting definitions for rung {first['rung'].upper()}: "
+                f"{first['raw']!r} ({first['ladder']}) vs "
+                f"{second['raw']!r} ({second['ladder']})"
             )
     ladders = {spec_a["ladder"], spec_b["ladder"]}
     # Only interface tags on the conflicting subset (R2 drain, R3 cache, R4 rebuild, R1 recapture)
@@ -262,9 +282,20 @@ def _specs_conflict(spec_a: dict[str, Any], spec_b: dict[str, Any]) -> str | Non
 def detect_ladder_conflicts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Detect conflicts across `records` where the same protocol rung (e.g. R2/R3/R4)
     or step fields mix incompatible meanings from the livestream vs INTERFACE-v1 ladders."""
-    seen_rungs: dict[str, dict[str, str]] = {}
+    seen_specs: dict[tuple[str, str, str], dict[str, Any]] = {}
     conflicts: list[dict[str, Any]] = []
     seen_msgs: set[str] = set()
+
+    def _record_conflict(cid: str, spec_a: dict[str, Any], spec_b: dict[str, Any]) -> None:
+        msg = _specs_conflict(spec_a, spec_b)
+        if msg and msg not in seen_msgs:
+            seen_msgs.add(msg)
+            conflicts.append({
+                "check": "ladder_conflict",
+                "candidate_id": cid,
+                "rung": _conflict_rung(spec_a, spec_b),
+                "observed": msg,
+            })
 
     for idx, rec in enumerate(records):
         if not isinstance(rec, dict):
@@ -273,6 +304,11 @@ def detect_ladder_conflicts(records: list[dict[str, Any]]) -> list[dict[str, Any
         field_vals = [
             rec.get(k) for k in ("route", "actual_route", "tier", "mechanism", "predicted_route")
         ]
+        brief_val = rec.get("brief")
+        if isinstance(brief_val, PricedBrief):
+            field_vals.append(brief_val.predicted_route)
+        elif isinstance(brief_val, dict) and "predicted_route" in brief_val:
+            field_vals.append(brief_val.get("predicted_route"))
         mechs = rec.get("mechanisms")
         if isinstance(mechs, (list, tuple)):
             field_vals.extend(mechs)
@@ -281,33 +317,12 @@ def detect_ladder_conflicts(records: list[dict[str, Any]]) -> list[dict[str, Any
         ]
         for i in range(len(specs)):
             for j in range(i + 1, len(specs)):
-                msg = _specs_conflict(specs[i], specs[j])
-                if msg and msg not in seen_msgs:
-                    seen_msgs.add(msg)
-                    conflicts.append({
-                        "check": "ladder_conflict",
-                        "candidate_id": cid,
-                        "rung": specs[i]["rung"].upper(),
-                        "observed": msg,
-                    })
+                _record_conflict(cid, specs[i], specs[j])
         for s in specs:
-            rung = s["rung"]
-            if rung in _CONFLICTING_RUNGS and s["ladder"] in ("livestream", "interface"):
-                prev = seen_rungs.setdefault(rung, {})
-                prev.setdefault(s["ladder"], str(s["raw"]))
-                if len(prev) > 1:
-                    msg = (
-                        f"rung {rung.upper()} mixes {prev['livestream']!r} (livestream) and "
-                        f"{prev['interface']!r} (INTERFACE-v1) within the same run"
-                    )
-                    if msg not in seen_msgs:
-                        seen_msgs.add(msg)
-                        conflicts.append({
-                            "check": "ladder_conflict",
-                            "candidate_id": cid,
-                            "rung": rung.upper(),
-                            "observed": msg,
-                        })
+            for prev in seen_specs.values():
+                _record_conflict(cid, prev, s)
+        for s in specs:
+            seen_specs.setdefault((s["ladder"], s["rung"], s["norm"]), s)
     return conflicts
 
 

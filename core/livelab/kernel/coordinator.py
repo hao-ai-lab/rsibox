@@ -1241,6 +1241,11 @@ class Coordinator:
         self._lock = threading.Lock()
         self._in_rollback_gate = False
 
+    def _fanout(self, participants, fn):
+        if self.parallel_fanout:
+            return _fanout(participants, fn)
+        return [fn(p) for p in participants]
+
     def recovered(self):
         """After the lab respawned its participants: clear the poison, the lanes (a lane
         still stuck in a late call belonged to the old participant) and pending rollbacks."""
@@ -1423,7 +1428,7 @@ class Coordinator:
             return self._bounded(p, method, txn, deadline_at, missed)
         validate_deadline = commit_at   # never re-armed once passed (audit #19)
         for p, r in zip(self.participants,
-                        _fanout(self.participants, lambda p: call(p, "validate", validate_deadline))):
+                        self._fanout(self.participants, lambda p: call(p, "validate", validate_deadline))):
             res[p.name]["validate"] = r
         tl["vote"] = now()
         rollback = {"status": "not_needed", "participants": {}}
@@ -1431,7 +1436,7 @@ class Coordinator:
         if not all(res[p.name]["validate"]["ok"] for p in self.participants):
             abort_deadline = end_at   # never re-armed once passed (audit #19)
             for p, r in zip(self.participants,
-                            _fanout(self.participants, lambda p: call(p, "abort", abort_deadline))):
+                            self._fanout(self.participants, lambda p: call(p, "abort", abort_deadline))):
                 res[p.name]["abort"] = r
             out["outcome"] = "aborted"
         else:
@@ -1463,7 +1468,7 @@ class Coordinator:
                 abort_targets = [p for p in self.participants if p not in committed]
                 abort_deadline = end_at   # never re-armed once passed (audit #19)
                 for p, r in zip(abort_targets,
-                                _fanout(abort_targets, lambda p: call(p, "abort", abort_deadline))):
+                                self._fanout(abort_targets, lambda p: call(p, "abort", abort_deadline))):
                     res[p.name]["abort"] = r
                 for name, u in rollback["participants"].items():
                     if any(x.get("in_flight") for x in (u.get("ranks") or [u])):
@@ -1526,12 +1531,12 @@ class Coordinator:
             # phase 1: outside the gap, steps go on
             tl["prepare_start"] = now()
             for p, r in zip(self.participants,
-                            _fanout(self.participants, lambda p: _call(p, "prepare", plan))):
+                            self._fanout(self.participants, lambda p: _call(p, "prepare", plan))):
                 t["res"][p.name]["prepare"] = r
             tl["prepared"] = now()
             if not all(t["res"][p.name]["prepare"]["ok"] for p in self.participants):
                 for p, r in zip(self.participants,
-                                _fanout(self.participants, lambda p: _call(p, "abort", txn))):
+                                self._fanout(self.participants, lambda p: _call(p, "abort", txn))):
                     t["res"][p.name]["abort"] = r
                 self._done(txn, {"outcome": "aborted", "hashes": {}, "extra": [],
                                  "rollback": {"status": "not_needed", "participants": {}}})
@@ -1554,7 +1559,7 @@ class Coordinator:
                         t["cancelled"] = True
                 if t["cancelled"]:
                     for p, r in zip(self.participants,
-                                    _fanout(self.participants, lambda p: _call(p, "abort", txn))):
+                                    self._fanout(self.participants, lambda p: _call(p, "abort", txn))):
                         t["res"][p.name]["abort"] = r
                     self._done(txn, {"outcome": "aborted", "hashes": {},
                                      "rollback": {"status": "not_needed", "participants": {}},
@@ -1616,7 +1621,7 @@ class Coordinator:
         rank_hashes, ranks_agree = {}, {}
         if out["outcome"] == "committed":       # code hashes, read after the gap
             for p, r in zip(self.participants,
-                            _fanout(self.participants, lambda p: _call(p, "proof", txn))):
+                            self._fanout(self.participants, lambda p: _call(p, "proof", txn))):
                 # kept in the receipt: its findings (participant_missing, participant_failed)
                 # count like those of any other call
                 res[p.name]["proof"] = r
@@ -1706,7 +1711,7 @@ class Coordinator:
         now = self.clock
         res = {p.name: r for p, r in zip(
             self.participants,
-            _fanout(self.participants, lambda p: _call(p, "witness_check", txn)))}
+            self._fanout(self.participants, lambda p: _call(p, "witness_check", txn)))}
         fs = [{**f, "participant": n} for n, r in res.items() for f in r.get("findings", [])]
         witness, capture, abstained = {}, {}, []
         for n, r in res.items():
@@ -1765,7 +1770,7 @@ class Coordinator:
         {ok, participants: {name: reply}, poisoned, missing}."""
         res = {p.name: r for p, r in zip(
             self.participants,
-            _fanout(self.participants, lambda p: _call(p, "at_base", None)))}
+            self._fanout(self.participants, lambda p: _call(p, "at_base", None)))}
         ok = all(r["ok"] for r in res.values()) and not self.poison
         return F.ok(**{"ok": ok}, participants=res, poisoned=bool(self.poison),
                     findings=[f for r in res.values() for f in r.get("findings", [])])

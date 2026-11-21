@@ -314,6 +314,62 @@ class DashboardSummaryTest(unittest.TestCase):
         self.assertEqual(len(summary["restart_cost_ladder"]["ladder_conflicts"]), 1)
         self.assertEqual(summary["restart_cost_ladder"]["ladder_conflicts"][0]["rung"], "R2")
 
+    def test_ladder_conflict_handles_universal_aliases_brief_and_cross_record_mixing(self):
+        """Universal R1 aliases (`graph_recapture`, `recompile`, `compile_reset`) resolve to
+        canonical rung `r1` and conflict with bare R2/R3/R4 with order-independent rung labels;
+        cross-record ladder mixing across different rungs and `rec["brief"]` are detected by
+        `detect_ladder_conflicts` / `build_dashboard_summary`."""
+        clean_rec = {"verdict": "pass", "witness": {"op": 2}, "proven": True}
+        for alias in ("graph_recapture", "recompile", "compile_reset"):
+            spec = livestream._resolve_route_spec(alias)
+            self.assertEqual(spec["rung"], "r1", alias)
+            c_fwd = livestream.detect_ladder_conflicts(
+                [{**clean_rec, "route": alias, "predicted_route": "R2"}]
+            )
+            c_rev = livestream.detect_ladder_conflicts(
+                [{**clean_rec, "route": "R2", "predicted_route": alias}]
+            )
+            self.assertEqual(len(c_fwd), 1, alias)
+            self.assertEqual(len(c_rev), 1, alias)
+            self.assertEqual(c_fwd[0]["rung"], "R2")
+            self.assertEqual(c_rev[0]["rung"], "R2")
+
+        # Cross-record mixing across different rungs (worker_respawn + R3 cache)
+        cross_diff = livestream.build_dashboard_summary([
+            {**clean_rec, "candidate_id": "c1", "route": "worker_respawn",
+             "fresh_process_confirmed": True},
+            {**clean_rec, "candidate_id": "c2", "route": "R3 cache"},
+        ])
+        self.assertEqual(len(cross_diff["restart_cost_ladder"]["ladder_conflicts"]), 1)
+
+        # Cross-record ambiguous + interface mixing (bare R2 + R3 cache)
+        cross_amb = livestream.detect_ladder_conflicts([
+            {**clean_rec, "candidate_id": "c1", "route": "R2"},
+            {**clean_rec, "candidate_id": "c2", "route": "R3 cache"},
+        ])
+        self.assertEqual(len(cross_amb), 1)
+
+        # `brief.predicted_route` (dict and PricedBrief) inspected by detect_ladder_conflicts
+        brief_dict_rec = {
+            **clean_rec,
+            "candidate_id": "c_dict",
+            "route": "worker_respawn",
+            "fresh_process_confirmed": True,
+            "brief": {"candidate_id": "c_dict", "predicted_route": "R2 drain"},
+        }
+        brief_obj_rec = {
+            **clean_rec,
+            "candidate_id": "c_obj",
+            "route": "worker_respawn",
+            "fresh_process_confirmed": True,
+            "brief": livestream.PricedBrief(candidate_id="c_obj", predicted_route="R3 cache"),
+        }
+        self.assertEqual(len(livestream.detect_ladder_conflicts([brief_dict_rec])), 1)
+        self.assertEqual(
+            len(livestream.build_dashboard_summary([brief_obj_rec])["restart_cost_ladder"]["ladder_conflicts"]),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

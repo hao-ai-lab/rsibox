@@ -544,6 +544,96 @@ class FileNamespaceNegativeCacheTest(unittest.TestCase):
                 after_epoch = RP._CODE_EPOCH
         self.assertGreater(after_epoch, before_epoch)
 
+    def test_concurrent_load_during_and_after_scan_never_poisons_negative_cache(self):
+        """Inserting into `_ABSENT_FILES` happens inside the same `_ABSENT_LOCK` critical
+        section as `_ACTIVE_SCANS -= 1` (and before `_ACTIVE_SCANS` reaches 0), guarded by
+        `scan_ok`, so a concurrent code load or scan exception never permanently poisons the
+        negative cache."""
+        # 1. Deterministic lock-interleaving right as the scan releases `_ABSENT_LOCK`.
+        path_a = self._make_file("neg_race_window")
+        ns_a = {}
+        orig_lock = RP._ABSENT_LOCK
+        fired = {"done": False, "saw_scan_active": False}
+
+        class InterleavingLock:
+            def __enter__(self):
+                orig_lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                try:
+                    if RP._ACTIVE_SCANS > 0:
+                        fired["saw_scan_active"] = True
+                    trigger = (
+                        fired["saw_scan_active"]
+                        and not fired["done"]
+                        and RP._ACTIVE_SCANS == 0
+                    )
+                finally:
+                    orig_lock.release()
+                if trigger:
+                    fired["done"] = True
+                    exec(compile("def marker():\n    return 77\n", path_a, "exec"), ns_a)
+                return False
+
+        RP._ABSENT_LOCK = InterleavingLock()
+        try:
+            self.assertEqual(RP.file_namespace(path_a), (None, None))
+        finally:
+            RP._ABSENT_LOCK = orig_lock
+        self.assertTrue(fired["done"])
+        self.assertNotIn(path_a, RP._ABSENT_FILES)
+        name_a, mod_a = RP.file_namespace(path_a)
+        self.assertEqual(name_a, RP.file_module(path_a))
+        self.assertEqual(mod_a.marker(), 77)
+
+        # 2. Real two-thread concurrent load while `all_objects()` is mid-scan.
+        path_b = self._make_file("neg_race_thread")
+        ns_b = {}
+        entered_scan = threading.Event()
+        load_done = threading.Event()
+        prev_all_objects = RP.L.all_objects
+
+        def coordinated_all_objects():
+            entered_scan.set()
+            load_done.wait(timeout=5.0)
+            return []
+
+        def loader():
+            if entered_scan.wait(timeout=5.0):
+                exec(compile("def marker():\n    return 88\n", path_b, "exec"), ns_b)
+                load_done.set()
+
+        RP.L.all_objects = coordinated_all_objects
+        try:
+            th = threading.Thread(target=loader)
+            th.start()
+            try:
+                self.assertEqual(RP.file_namespace(path_b), (None, None))
+            finally:
+                th.join(timeout=5.0)
+        finally:
+            RP.L.all_objects = prev_all_objects
+        self.assertNotIn(path_b, RP._ABSENT_FILES)
+        name_b, mod_b = RP.file_namespace(path_b)
+        self.assertEqual(name_b, RP.file_module(path_b))
+        self.assertEqual(mod_b.marker(), 88)
+
+        # 3. Exception during scan leaves `_ACTIVE_SCANS == 0` and does NOT cache the path.
+        path_c = self._make_file("neg_race_exc")
+
+        def boom_all_objects():
+            raise RuntimeError("boom during scan")
+
+        RP.L.all_objects = boom_all_objects
+        try:
+            with self.assertRaisesRegex(RuntimeError, "boom during scan"):
+                RP.file_namespace(path_c)
+        finally:
+            RP.L.all_objects = prev_all_objects
+        self.assertEqual(RP._ACTIVE_SCANS, 0)
+        self.assertNotIn(path_c, RP._ABSENT_FILES)
+
 
 if __name__ == "__main__":
     unittest.main()

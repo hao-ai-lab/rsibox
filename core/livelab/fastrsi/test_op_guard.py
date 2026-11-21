@@ -214,6 +214,62 @@ class OpGuardTest(unittest.TestCase):
                 else:
                     sys.modules[k] = v
 
+    def test_split_module_impl_new_overload_and_qualified_schema(self):
+        """1. `define` with an already-qualified `ns::op(...)` schema strips `ns::` cleanly.
+        2. Split-module reload where `define` was NOT re-run still injects `allow_override=True`
+           for pre-existing ops in `impl` and `_register_fake`.
+        3. Skipping overload `myop.v1` does NOT force `allow_override=True` onto a brand-new
+           overload `myop.v2` defined inside the same guard."""
+        schemas = {
+            ("myns::myop", "v1"): "myns::myop.v1(Tensor x) -> Tensor",
+            ("myns::split_op", ""): "myns::split_op(Tensor x) -> Tensor",
+        }
+        fake_torch, fake_lib, Library, _, _, calls = _make_fake_torch(
+            schemas, fake_allow_override=True
+        )
+        saved = {k: sys.modules.get(k) for k in ("torch", "torch.library")}
+        sys.modules["torch"] = fake_torch
+        sys.modules["torch.library"] = fake_lib
+        events = []
+        try:
+            with op_redefine_guard(events.append):
+                lib = Library("myns")
+                # 1. Qualified schema matches existing `myop.v1` and is skipped cleanly.
+                self.assertEqual(lib.define("myns::myop.v1(Tensor x) -> Tensor"), "myop.v1")
+                # 2. Brand-new overload `myop.v2` delegates to orig define and tracks (ns, op, v2).
+                self.assertEqual(lib.define("myop.v2(Tensor x, int k) -> Tensor"), "myop.v2")
+                lib.impl("myop.v1", lambda x: x, "CUDA")
+                lib.impl("myop.v2", lambda x, k: x, "CUDA")
+                lib._register_fake("myop.v2", lambda x, k: x)
+                # 3. Split-module reload: `split_op` already exists, never defined in this guard.
+                lib.impl("split_op", lambda x: x, "CUDA")
+                lib._register_fake("split_op", lambda x: x)
+
+            self.assertEqual([e["event"] for e in events], [
+                "zygote_op_redefined",
+                "zygote_op_impl_replaced",
+                "zygote_op_impl_replaced",
+                "zygote_op_fake_replaced",
+            ])
+            self.assertEqual(events[0]["op"], "myns::myop.v1")
+            self.assertEqual(calls["define"][0][1], "myop.v2(Tensor x, int k) -> Tensor")
+            # impl calls: myop.v1 -> override True, myop.v2 -> override False, split_op -> True
+            self.assertEqual(
+                [(c[1], c[4]) for c in calls["impl"]],
+                [("myop.v1", True), ("myop.v2", False), ("split_op", True)],
+            )
+            # fake calls: myop.v2 -> override False, split_op -> override True
+            self.assertEqual(
+                [(c[1], c[4]) for c in calls["register_fake"]],
+                [("myop.v2", False), ("split_op", True)],
+            )
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    sys.modules.pop(k, None)
+                else:
+                    sys.modules[k] = v
+
 
 if __name__ == "__main__":
     unittest.main()

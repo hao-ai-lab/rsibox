@@ -218,24 +218,24 @@ def file_namespace(path):
             return None, None
         epoch = _CODE_EPOCH
         _ACTIVE_SCANS += 1
+    base, dicts, scan_ok = os.path.basename(path), {}, False
     try:
-        base, dicts = os.path.basename(path), {}
         for obj in L.all_objects():
             # type() rather than isinstance(): dead weakref proxies raise on isinstance
             if type(obj) is types.FunctionType and obj.__code__.co_filename.endswith(base) \
                     and os.path.realpath(obj.__code__.co_filename) == path:
                 dicts[id(obj.__globals__)] = obj.__globals__
+        scan_ok = True
     finally:
         with _ABSENT_LOCK:
+            if scan_ok and not dicts and _CODE_EPOCH == epoch:
+                _ABSENT_FILES.add(path)
+                _WATCHED_BASENAMES.add(base)
+                _WATCHED_BASENAME_BYTES.add(base.encode("utf-8", errors="surrogateescape"))
             _ACTIVE_SCANS -= 1
     if len(dicts) > 1:
         raise RuntimeError(f"{path} is loaded {len(dicts)} times in this process")
     if not dicts:
-        with _ABSENT_LOCK:
-            if _CODE_EPOCH == epoch:
-                _ABSENT_FILES.add(path)
-                _WATCHED_BASENAMES.add(base)
-                _WATCHED_BASENAME_BYTES.add(base.encode("utf-8", errors="surrogateescape"))
         return None, None
     globals_dict = next(iter(dicts.values()))
     globals_dict.setdefault("__file__", path)

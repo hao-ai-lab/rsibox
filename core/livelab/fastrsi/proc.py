@@ -112,6 +112,8 @@ def kill_tree(
 ) -> list[int]:
     """Signal `pid`'s descendants (children first), `pid` itself, and optionally its process
     group (safe when `pid` leads its own session via `setsid`). Returns signaled PIDs."""
+    if not pid or pid <= 0:
+        return []
     targets = list(reversed(descendants(pid, proc_root=proc_root))) + [pid]
     signaled: list[int] = []
     for target in targets:
@@ -164,6 +166,8 @@ def stop_tree(
 
 def pg_alive(pgid: int) -> bool:
     """True when process group `pgid` still has at least one member."""
+    if not pgid or pgid <= 0:
+        return False
     try:
         os.killpg(pgid, 0)
         return True
@@ -173,23 +177,34 @@ def pg_alive(pgid: int) -> bool:
         return True
 
 
-def stop_session(pid: int, grace: float = 10.0, reap=None) -> bool:
+def stop_session(
+    pid: int,
+    grace: float = 10.0,
+    reap=None,
+    *,
+    kill_grace: float | None = None,
+) -> bool:
     """Stop the session/process-group led by `pid` (`SIGTERM`, then `SIGKILL` after `grace` s)."""
+    if not pid or pid <= 0:
+        return False
     with contextlib.suppress(ProcessLookupError):
         if pid_alive(pid) and os.getpgid(pid) != pid:
             return False
     if not pg_alive(pid):
         return False
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    post_kill_wait = min(grace, 5.0) if kill_grace is None else kill_grace
+    for sig, wait_s in ((signal.SIGTERM, grace), (signal.SIGKILL, post_kill_wait)):
         kill_tree(pid, sig, include_pg=True)
-        deadline = time.monotonic() + grace
+        deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             if reap is not None:
                 reap()
             if not pg_alive(pid):
                 return True
             time.sleep(0.02)
-    return True
+    if reap is not None:
+        reap()
+    return not pg_alive(pid)
 
 
 def reap_all(
