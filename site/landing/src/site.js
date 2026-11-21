@@ -12,7 +12,7 @@
   if (hl && hr && window.dash) {
     const WLS = dash.data('race_workloads').data.slice().sort((a, b) => +a.order - +b.order);
     const RUNGS = dash.data('ladder_rungs').data, LAD = dash.data('eval_ladder').data;
-    const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen', verl: 'Offline probe', sglang: 'Targeted probe', miles: 'Recorded-rollout replay' };   // name of each engine's last measured rung
+    const LAST = { 'vllm-d8x32k': 'Targeted probe', megatron: 'Shorter warm-up', ref2va: 'Quick screen', verl: 'Recorded-rollout replay', sglang: 'Targeted probe', miles: 'Recorded-rollout replay' };   // name of each engine's last measured rung
     const PLAY = 4500, HOLD = 2500, TOTAL = PLAY + HOLD;   // ms: the animation, then the pause before the next engine
     let gen = 0, timer = null, cur = 0, paused = false, left = 0, since = 0;
     const later = (g, ms, fn) => setTimeout(() => { if (g === gen) fn(); }, ms);

@@ -265,3 +265,11 @@
 .fr-svg .row-none { font-family: var(--font-anthropic-sans); font-size: 13px; fill: var(--fr-muted); }
 .fr { --ph-swap_quality: color-mix(in oklab, #4f6fa8 45%, var(--color-bg)); }
 .fr-ph-swap_quality { background: var(--ph-swap_quality); }
+.fr { --ph-ray_init: color-mix(in oklab, #4e7ca8 80%, var(--color-fg)); }
+.fr-ph-ray_init { background: var(--ph-ray_init); }
+.fr { --ph-spawn_import: color-mix(in oklab, #b37d4e 75%, var(--color-fg)); }
+.fr-ph-spawn_import { background: var(--ph-spawn_import); }
+.fr { --ph-dataloader_init: color-mix(in oklab, #6d8c54 78%, var(--color-fg)); }
+.fr-ph-dataloader_init { background: var(--ph-dataloader_init); }
+.fr { --ph-trainer_init: color-mix(in oklab, #8b4c70 80%, var(--color-fg)); }
+.fr-ph-trainer_init { background: var(--ph-trainer_init); }

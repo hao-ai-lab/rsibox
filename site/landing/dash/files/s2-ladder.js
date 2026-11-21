@@ -18,7 +18,7 @@ dash.calc('ladder_totals', {
       o.seg[r.phase] = (o.seg[r.phase] || 0) + Number(r.seconds);
     });
     const rows = Object.values(by).sort((a, b) => (a.engine < b.engine ? -1 : a.engine > b.engine ? 1 : a.step - b.step));
-    const r2 = (v) => Math.round(v * 100) / 100;
+    const r2 = (v) => (v > 0 && v < 0.1 ? Math.round(v * 10000) / 10000 : Math.round(v * 100) / 100);
     const sum = (o, startupOnly) => Object.entries(o.seg).reduce((a, [p, v]) => a + (startupOnly && kind[p] === 'check' ? 0 : v), 0);
     return rows.map((r, i) => {
       const prev = i > 0 && rows[i - 1].engine === r.engine ? rows[i - 1] : null;
