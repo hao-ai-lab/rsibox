@@ -34,30 +34,51 @@ def op_redefine_guard(report=None):
         return
 
     orig = Library.define
-    skipped = set()
+    newly_defined = set()
 
     def _emit(event):
         if report is not None:
             report(event)
 
+    def _strip_ns(ns, text):
+        stripped = text.lstrip()
+        prefix = f"{ns}::"
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):]
+        return stripped
+
+    def _parse_op(ns, raw_name):
+        name = _strip_ns(ns, raw_name).strip()
+        op, _, overload = name.partition(".")
+        return op, overload
+
+    def _schema_exists(ns, op, overload):
+        try:
+            torch._C._get_schema(f"{ns}::{op}", overload)
+            return True
+        except RuntimeError:
+            return False
+
     def define(self, schema, *args, **kw):
-        name = schema.split("(", 1)[0].strip()
+        unqual_schema = _strip_ns(self.ns, schema)
+        name = unqual_schema.split("(", 1)[0].strip()
         op, _, overload = name.partition(".")
         qual = f"{self.ns}::{op}"
         try:
             old = str(torch._C._get_schema(qual, overload))
         except RuntimeError:
-            return orig(self, schema, *args, **kw)
+            res = orig(self, schema, *args, **kw)
+            newly_defined.add((self.ns, op, overload))
+            return res
         try:   # torch's own printing, so defaults compare alike ("0.0" prints as "0.")
-            new = str(torch._C.parse_schema(f"{self.ns}::{schema}"))
+            new = str(torch._C.parse_schema(f"{self.ns}::{unqual_schema}"))
         except RuntimeError:
-            new = schema
+            new = unqual_schema
         if _norm_schema(old) != _norm_schema(new):
             raise RuntimeError(
                 f"refresh: op {qual} changed its schema ({old} -> {schema}); "
                 "a process cannot change an op's signature: restart the zygote"
             )
-        skipped.add((self.ns, op))
         _emit({"event": "zygote_op_redefined",
                "op": qual + (f".{overload}" if overload else ""),
                "schema": old})
@@ -71,28 +92,36 @@ def op_redefine_guard(report=None):
         orig_fake is not None and "allow_override" in inspect.signature(orig_fake).parameters
     )
 
-    def _is_skipped(ns, op_name):
-        return (ns, op_name.split(".", 1)[0] if isinstance(op_name, str) else None) in skipped
+    def _should_override(ns, op_name):
+        if not isinstance(op_name, str):
+            return False, None
+        op, overload = _parse_op(ns, op_name)
+        qual_op = f"{ns}::{op}" + (f".{overload}" if overload else "")
+        if (ns, op, overload) in newly_defined:
+            return False, qual_op
+        return _schema_exists(ns, op, overload), qual_op
 
     def impl(self, op_name, *args, **kw):
-        if _is_skipped(self.ns, op_name):
+        override, qual_op = _should_override(self.ns, op_name)
+        if override:
             if can_override:
                 kw["allow_override"] = True
-            _emit({"event": "zygote_op_impl_replaced", "op": f"{self.ns}::{op_name}",
+            _emit({"event": "zygote_op_impl_replaced", "op": qual_op,
                    "dispatch_key": kw.get("dispatch_key", args[1] if len(args) > 1 else "")})
         return orig_impl(self, op_name, *args, **kw)
 
     def register_fake(self, op_name, fn, _stacklevel=1, **kw):
-        if _is_skipped(self.ns, op_name):
+        override, qual_op = _should_override(self.ns, op_name)
+        if override:
             if can_override_fake:
                 kw["allow_override"] = True
             else:
                 simple_reg = getattr(getattr(torch, "_library", None), "simple_registry", None)
                 if simple_reg is not None:
-                    entry = simple_reg.singleton.find(f"{self.ns}::{op_name}")
+                    entry = simple_reg.singleton.find(qual_op)
                     if entry.fake_impl.kernel is not None:
                         entry.fake_impl.kernel = None
-            _emit({"event": "zygote_op_fake_replaced", "op": f"{self.ns}::{op_name}"})
+            _emit({"event": "zygote_op_fake_replaced", "op": qual_op})
         return orig_fake(self, op_name, fn, _stacklevel + 1, **kw)
 
     def register_opaque(name, *args, **kw):

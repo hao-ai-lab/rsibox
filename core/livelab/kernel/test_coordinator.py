@@ -648,6 +648,47 @@ class ParallelFanoutTest(unittest.TestCase):
         self.assertNotEqual(observed["c0"], caller)
         self.assertNotEqual(observed["c1"], caller)
 
+    def test_parallel_fanout_false_runs_all_stages_serially(self):
+        """Setting `co.parallel_fanout = False` serializes all Coordinator and Session fanout
+        stages (`fingerprint`, `prepare`, `validate`, `proof`, `witness_check`, `at_base`, and
+        `abort`) without spawning worker threads."""
+        fanout_methods = ("prepare", "validate", "proof", "witness_check", "at_base", "fingerprint")
+        parts, engines, tracker = self._delayed_participants(
+            "serial_ok", count=4, delay_s=0.01, delay_methods=fanout_methods,
+        )
+        names = [p.name for p in parts]
+        co = C.Coordinator(parts, phase2_deadline_s=None)
+        co.parallel_fanout = False
+
+        sess = SS.Session(co, ["toy.engine"])
+        self.assertEqual(list(sess.expected[0].keys()), names)
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "base_hash": L.text_hash(ENG),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}}
+        res = co.run(plan)
+        self.assertEqual(res["outcome"], "committed", res)
+        self.assertEqual([e.step(3) for e in engines], [170] * 4)
+        self.assertTrue(co.prove(res["txn"])["ok"])
+        self.assertFalse(co.at_base()["ok"])
+        self.assertTrue(co.undo(res["txn"])["ok"])
+        for method in fanout_methods:
+            self.assertEqual(tracker["max_active"][method], 1, f"{method} fanned out when disabled")
+            self.assertEqual(tracker["order"][method], names)
+
+        for fail_stage in ("prepare", "validate"):
+            ab_parts, _, ab_tracker = self._delayed_participants(
+                f"serial_abort_{fail_stage}", count=4, delay_s=0.01,
+                delay_methods=("abort",), fail_method=(2, fail_stage),
+            )
+            ab_co = C.Coordinator(ab_parts, phase2_deadline_s=None)
+            ab_co.parallel_fanout = False
+            ab_res = ab_co.run(plan)
+            self.assertEqual(ab_res["outcome"], "aborted", ab_res)
+            self.assertEqual(ab_tracker["max_active"]["abort"], 1)
+            self.assertEqual(ab_tracker["order"]["abort"], [p.name for p in ab_parts])
+
     def test_concurrent_status_polling_never_steals_finisher_lock(self):
         """Input: multiple threads tightly polling `co.status(txn)` (including right at the
         window between `_done()` and `_finish()`) while `co.run()` and `Session.install()`

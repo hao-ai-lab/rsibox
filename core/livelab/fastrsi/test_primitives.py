@@ -174,6 +174,62 @@ class ProcTests(unittest.TestCase):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(json.loads(out.stdout.strip()), [True, True, 17], out.stderr)
 
+    def test_pg_alive_and_stop_session_guard_nonpositive_and_return_actual_state(self):
+        """`pg_alive`, `stop_session`, and `kill_tree` reject `<= 0` without signaling the
+        caller's own process group; `stop_session` caps post-SIGKILL wait and returns
+        `not pg_alive(pid)`."""
+        with mock.patch.object(proc.os, "killpg") as m_killpg, \
+                mock.patch.object(proc.os, "kill") as m_kill:
+            for bad in (0, -1, -os.getpgrp()):
+                self.assertFalse(proc.pg_alive(bad))
+                self.assertFalse(proc.stop_session(bad, grace=0.05))
+                self.assertEqual(proc.kill_tree(bad), [])
+            m_killpg.assert_not_called()
+            m_kill.assert_not_called()
+
+        # If process group stays alive even after SIGKILL, stop_session returns False and caps
+        # the post-SIGKILL wait window relative to `grace`.
+        signals_sent = []
+        clock = {"t": 100.0}
+
+        def fake_monotonic():
+            return clock["t"]
+
+        def fake_sleep(dt):
+            clock["t"] += 2.0
+
+        def fake_kill_tree(pid, sig, include_pg=True, proc_root="/proc"):
+            signals_sent.append((pid, sig, include_pg, clock["t"]))
+            return [pid]
+
+        with mock.patch.object(proc, "pid_alive", return_value=False), \
+                mock.patch.object(proc, "pg_alive", return_value=True), \
+                mock.patch.object(proc, "kill_tree", side_effect=fake_kill_tree), \
+                mock.patch.object(proc.time, "monotonic", side_effect=fake_monotonic), \
+                mock.patch.object(proc.time, "sleep", side_effect=fake_sleep):
+            ok = proc.stop_session(424242, grace=10.0)
+        self.assertFalse(ok)
+        self.assertEqual([s[1] for s in signals_sent], [proc.signal.SIGTERM, proc.signal.SIGKILL])
+        # SIGTERM ran for 10s (100 -> 110); SIGKILL was capped at 5s (110 -> 116 <= 110 + 6).
+        term_t, kill_t = signals_sent[0][3], signals_sent[1][3]
+        self.assertEqual(kill_t - term_t, 10.0)
+        self.assertLessEqual(clock["t"] - kill_t, 6.0)
+
+        # Real session-leader child stops cleanly and returns True.
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        try:
+            self.assertTrue(proc.pg_alive(child.pid))
+            self.assertTrue(proc.stop_session(child.pid, grace=2.0, reap=child.poll))
+            child.wait(timeout=3.0)
+            self.assertFalse(proc.pg_alive(child.pid))
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=3.0)
+
 
 class HooksAndHarnessTests(unittest.TestCase):
     def setUp(self):
@@ -437,6 +493,30 @@ class HarnessHelpersTests(unittest.TestCase):
         self.assertNotIn("gpkg.leaf", mods)
         self.assertFalse(hasattr(m_pkg, "leaf"))
         self.assertTrue(hasattr(m_pkg, "top"))
+
+    def test_purge_modules_preserves_non_module_attrs_and_resolve_import_clamps_level(self):
+        """`purge_modules` preserves non-module attributes on a parent package when the target
+        was not loaded (or was shadowed), and `_resolve_import` clamps `node.level` without
+        negative-slice wraparound."""
+        import ast
+        import types
+
+        m_pkg = types.ModuleType("upkg")
+        m_pkg.CONST = 123
+        sentinel = object()
+        m_pkg.shadow = sentinel
+        m_shadow = types.ModuleType("upkg.shadow")
+        mods = {"upkg": m_pkg, "upkg.shadow": m_shadow}
+
+        hooks.purge_modules(["upkg.CONST", "upkg.shadow"], mods)
+        self.assertEqual(m_pkg.CONST, 123)
+        self.assertIs(m_pkg.shadow, sentinel)
+        self.assertNotIn("upkg.shadow", mods)
+
+        over_bare = ast.parse("from .... import x").body[0]
+        self.assertEqual(hooks._resolve_import("a.b.c", False, over_bare), [])
+        over_mod = ast.parse("from ....sub import x").body[0]
+        self.assertEqual(hooks._resolve_import("a.b.c", False, over_mod), ["sub", "sub.x"])
 
 
 if __name__ == "__main__":

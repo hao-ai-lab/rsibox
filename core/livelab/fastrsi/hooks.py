@@ -172,8 +172,10 @@ def _resolve_import(mod: str, is_pkg: bool, node) -> list[str]:
     if node.level:
         parts = mod.split(".") if is_pkg else mod.split(".")[:-1]
         if node.level > 1:
-            parts = parts[: len(parts) - node.level + 1]
+            parts = parts[: max(0, len(parts) - node.level + 1)]
         base = ".".join(parts + ([base] if base else []))
+    if not base:
+        return []
     return [base] + [f"{base}.{a.name}" for a in node.names if a.name != "*"]
 
 
@@ -260,7 +262,8 @@ def purge_modules(names, modules=None, *, unlink_pyc: bool = False) -> list[str]
     dropped = list(names)
     for name in dropped:
         old = mods.pop(name, None)
-        unbind_module(mods, name, expected=old)
+        if old is not None:
+            unbind_module(mods, name, expected=old)
         if unlink_pyc:
             mod_file = getattr(old, "__file__", None)
             if mod_file:

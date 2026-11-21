@@ -706,7 +706,10 @@ def apply_child_runtime_affinity(env: dict[str, str] | None = None) -> dict:
         clamp_thread_pools(num_threads=1)
     rank_str = (src.get("LOCAL_RANK") or os.environ.get("LOCAL_RANK") or "").strip()
     vis_raw = src.get("CUDA_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or ""
-    visible = [tok.strip() for tok in vis_raw.split(",") if tok.strip().isdigit()]
+    visible = [
+        tok for raw in vis_raw.split(",")
+        if (tok := raw.strip()) and tok.lower() not in ("nodevfiles", "-1")
+    ]
     if rank_str.isdigit():
         return bind_rank_numa_and_cpus(int(rank_str))
     if len(visible) == 1:

@@ -829,6 +829,35 @@ class DriverCuTeAndAllGuards(unittest.TestCase):
             restore()
             forksafe.unpatch_child(loaded_torch.cuda, clear_env=report["nvml_env_set"])
 
+    def test_apply_child_runtime_affinity_accepts_single_uuid_and_skips_sentinels(self):
+        """`apply_child_runtime_affinity` binds logical device 0 when `CUDA_VISIBLE_DEVICES`
+        names a single GPU UUID (e.g. `GPU-a` / `MIG-a`) without `LOCAL_RANK`, while ignoring
+        sentinel values (`NoDevFiles`, `-1`) and multi-GPU lists."""
+        clean_env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("LOCAL_RANK", "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS")
+        }
+        clean_env["OMP_NUM_THREADS"] = "1"
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            for single_vis in ("GPU-a", "MIG-a", "0"):
+                with mock.patch.object(
+                    forksafe, "bind_rank_numa_and_cpus",
+                    return_value={"bound": True, "bound_cpus": [0], "numa_node": 0},
+                ) as m_bind:
+                    res = forksafe.apply_child_runtime_affinity(
+                        {"CUDA_VISIBLE_DEVICES": single_vis, "OMP_NUM_THREADS": "1"}
+                    )
+                    m_bind.assert_called_once_with(0)
+                    self.assertEqual(res["bound_cpus"], [0])
+
+            for skip_vis in ("NoDevFiles", "nodevfiles", "-1", "", "GPU-a,GPU-b"):
+                with mock.patch.object(forksafe, "bind_rank_numa_and_cpus") as m_bind:
+                    res = forksafe.apply_child_runtime_affinity(
+                        {"CUDA_VISIBLE_DEVICES": skip_vis, "OMP_NUM_THREADS": "1"}
+                    )
+                    m_bind.assert_not_called()
+                    self.assertEqual(res, {"bound_cpus": [], "numa_node": None})
+
 
 if __name__ == "__main__":
     unittest.main()
