@@ -12,10 +12,13 @@ Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t 
 import importlib
 import importlib.util
 import itertools
+import marshal
 import os
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 
@@ -303,6 +306,50 @@ class RayParticipantsTest(unittest.TestCase):
         self.assertEqual(coordinator.undo(out1["txn"])["status"], "undone")
         self.assertEqual(actor.call("score"), 4)
 
+    def test_unloaded_fans_out_across_actors_in_parallel(self):
+        """8 x 50 ms RayActorParticipant.loaded checks fan out concurrently (< 250 ms,
+        peak_in_flight >= 4) and report only modules loaded by no actor."""
+        name, module = self.module()
+        actors = [FakeActor(module.Worker) for _ in range(8)]
+        lock = threading.Lock()
+        state = {"in_flight": 0, "peak_in_flight": 0}
+
+        def slow_get(ref, _timeout_s):
+            with lock:
+                state["in_flight"] += 1
+                state["peak_in_flight"] = max(state["peak_in_flight"], state["in_flight"])
+            try:
+                time.sleep(0.05)
+                return ref
+            finally:
+                with lock:
+                    state["in_flight"] -= 1
+
+        participants = [RP.RayActorParticipant(f"w{i}", actor, get=slow_get)
+                        for i, actor in enumerate(actors)]
+        missing_mod = f"fastrsi_unloaded_test_{next(_n)}"
+        plan = {"modules": {
+            name: {"source": self.source},
+            missing_mod: {"source": REWARD},
+        }}
+        t0 = time.monotonic()
+        unloaded_mods = RP.unloaded(participants, plan)
+        elapsed = time.monotonic() - t0
+        self.assertEqual(unloaded_mods, [missing_mod])
+        self.assertGreaterEqual(state["peak_in_flight"], 4)
+        self.assertLess(elapsed, 0.25, f"RP.unloaded took {elapsed:.3f}s")
+
+        missing_path = os.path.join(self.dir, f"missing_{next(_n)}.py")
+        with open(missing_path, "w") as handle:
+            handle.write(REWARD)
+        file_mod = RP.file_module(missing_path)
+        fast_participant = RP.RayActorParticipant("w0_file", actors[0], get=lambda ref, _: ref)
+        file_unloaded = RP.unloaded([fast_participant], {"modules": {
+            name: {"source": self.source},
+            file_mod: {"file": missing_path, "source": REWARD},
+        }})
+        self.assertEqual(file_unloaded, [file_mod])
+
     @unittest.skipUnless(importlib.util.find_spec("ray"), "ray is not installed")
     def test_real_ray_actors_run_the_edit_and_undo(self):
         """Input: two real Ray actors (local cluster, 2 CPUs) of `@ray.remote class Worker`;
@@ -330,6 +377,172 @@ class RayParticipantsTest(unittest.TestCase):
         self.assertTrue(undo_res["ok"], undo_res)
         self.assertEqual(session.state(), "base", session.poisoned())
         self.assertEqual(ray.get([a.score.remote() for a in actors]), [4, 4])
+
+
+class FileNamespaceNegativeCacheTest(unittest.TestCase):
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="fastrsi-negcache-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        RP._clear_absent_cache()
+        self.addCleanup(RP._clear_absent_cache)
+        self.scan_count = 0
+        orig_all_objects = RP.L.all_objects
+
+        def counting_all_objects():
+            self.scan_count += 1
+            return orig_all_objects()
+
+        RP.L.all_objects = counting_all_objects
+        self.addCleanup(setattr, RP.L, "all_objects", orig_all_objects)
+
+    def _make_file(self, stem):
+        path = os.path.realpath(os.path.join(self.dir, f"{stem}_{next(_n)}.py"))
+        with open(path, "w") as handle:
+            handle.write("def marker():\n    return 42\n")
+        self.addCleanup(sys.modules.pop, RP.file_module(path), None)
+        return path
+
+    def test_repeat_miss_and_unrelated_code_load_avoid_rescan(self):
+        """(a) Repeat miss scans only once; (f) compiling/executing an unrelated .py file does
+        NOT evict the cached absent path."""
+        path = self._make_file("neg_absent")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+        other = self._make_file("neg_unrelated")
+        ns = {}
+        exec(compile("def other_fn():\n    return 1\n", other, "exec"), ns)
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+    def test_compile_exec_invalidates_and_finds_namespace(self):
+        """(b) compile() + exec() for `path` invalidates the negative cache and finds it."""
+        path = self._make_file("neg_compile")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+        ns = {}
+        exec(compile("def marker():\n    return 42\n", path, "exec"), ns)
+        name, mod = RP.file_namespace(path)
+        self.assertEqual(name, RP.file_module(path))
+        self.assertIsNotNone(mod)
+        self.assertEqual(mod.marker(), 42)
+        self.assertEqual(self.scan_count, 2)
+
+    def test_precompiled_exec_invalidates_via_exec_audit(self):
+        """(c) Pre-compiled code object executed later invalidates via the `exec` audit event."""
+        path = self._make_file("neg_precompiled")
+        code_obj = compile("def marker():\n    return 99\n", path, "exec")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+        ns = {}
+        exec(code_obj, ns)
+        name, mod = RP.file_namespace(path)
+        self.assertEqual(name, RP.file_module(path))
+        self.assertEqual(mod.marker(), 99)
+        self.assertEqual(self.scan_count, 2)
+
+    def test_code_replace_invalidates_via_code_new(self):
+        """(d) code.replace(co_filename=path) invalidates via the `code.__new__` audit event."""
+        path = self._make_file("neg_replace")
+        other = self._make_file("neg_replace_src")
+        base_code = compile("def marker():\n    return 7\n", other, "exec")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+        self.assertIn(path, RP._ABSENT_FILES)
+
+        # Replace co_filename on both module code and inner function code object.
+        new_consts = tuple(
+            c.replace(co_filename=path) if isinstance(c, types.CodeType) else c
+            for c in base_code.co_consts
+        )
+        rebound = base_code.replace(co_filename=path, co_consts=new_consts)
+        self.assertNotIn(path, RP._ABSENT_FILES)
+        ns = {}
+        exec(rebound, ns)
+        name, mod = RP.file_namespace(path)
+        self.assertEqual(name, RP.file_module(path))
+        self.assertEqual(mod.marker(), 7)
+        self.assertEqual(self.scan_count, 2)
+
+    def test_marshal_loads_invalidates_and_finds_namespace(self):
+        """(e) marshal.loads(marshal.dumps(code)) invalidates the cache before exec."""
+        path = self._make_file("neg_marshal")
+        raw = marshal.dumps(compile("def marker():\n    return 123\n", path, "exec"))
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+        self.assertIn(path, RP._ABSENT_FILES)
+
+        loaded_code = marshal.loads(raw)
+        self.assertNotIn(path, RP._ABSENT_FILES)
+        ns = {}
+        exec(loaded_code, ns)
+        name, mod = RP.file_namespace(path)
+        self.assertEqual(name, RP.file_module(path))
+        self.assertEqual(mod.marker(), 123)
+        self.assertEqual(self.scan_count, 2)
+
+    def test_sys_modules_registration_hits_fast_path_without_rescan(self):
+        """(g) Registering a module directly in sys.modules hits the fast path with 0 scans."""
+        path = self._make_file("neg_sysmod")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+        mod_name = f"fastrsi_direct_sysmod_{next(_n)}"
+        mod = types.ModuleType(mod_name)
+        mod.__file__ = path
+        sys.modules[mod_name] = mod
+        self.addCleanup(sys.modules.pop, mod_name, None)
+
+        found_name, found_mod = RP.file_namespace(path)
+        self.assertEqual((found_name, found_mod), (mod_name, mod))
+        self.assertEqual(self.scan_count, 1)
+
+    def test_ast_compile_preserves_negative_cache_and_exec_evicts_target(self):
+        """(h) CPython `compile(ast.AST, filename, 'exec')` emits filename=None in PEP 578;
+        it must NOT wipe unrelated cached misses, while `exec()` of the compiled target still
+        evicts via `co_filename`, and `_ACTIVE_SCANS` still protects mid-scan races."""
+        import ast
+        path = self._make_file("neg_ast_target")
+        unrelated = self._make_file("neg_ast_unrelated")
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+
+        # Compiling an AST for an unrelated file must not evict `path`.
+        unrelated_code = compile(ast.parse("def other():\n    return 1\n"), unrelated, "exec", dont_inherit=True)
+        self.assertIn(path, RP._ABSENT_FILES)
+        self.assertEqual(RP.file_namespace(path), (None, None))
+        self.assertEqual(self.scan_count, 1)
+        unrelated_ns = {}
+        exec(unrelated_code, unrelated_ns)
+        self.assertIn(path, RP._ABSENT_FILES)
+
+        # Compiling an AST for `path` keeps cache until `exec()`, which evicts via `co_filename`.
+        target_code = compile(ast.parse("def marker():\n    return 314\n"), path, "exec", dont_inherit=True)
+        self.assertIn(path, RP._ABSENT_FILES)
+        target_ns = {}
+        exec(target_code, target_ns)
+        self.assertNotIn(path, RP._ABSENT_FILES)
+        name, mod = RP.file_namespace(path)
+        self.assertEqual(name, RP.file_module(path))
+        self.assertEqual(mod.marker(), 314)
+        self.assertEqual(self.scan_count, 2)
+
+        # While `_ACTIVE_SCANS > 0`, even AST compile bumps `_CODE_EPOCH` so mid-scan races stay safe.
+        with RP._ABSENT_LOCK:
+            before_epoch = RP._CODE_EPOCH
+            RP._ACTIVE_SCANS += 1
+        try:
+            compile(ast.parse("x = 1\n"), unrelated, "exec", dont_inherit=True)
+        finally:
+            with RP._ABSENT_LOCK:
+                RP._ACTIVE_SCANS -= 1
+                after_epoch = RP._CODE_EPOCH
+        self.assertGreater(after_epoch, before_epoch)
 
 
 if __name__ == "__main__":

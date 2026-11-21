@@ -26,14 +26,60 @@ from . import locate as L
 import json
 
 
-def _split_commit(receipt):
+def _targeted_modules(plan, name, unit):
+    """Modules in `plan` targeting `unit` (respecting `'on'` role/name filters, else all)."""
+    if not isinstance(plan, dict):
+        return []
+    role = unit.get("role")
+    rank = unit.get("rank")
+    targeted = []
+    for mod_name, spec in (plan.get("modules") or {}).items():
+        on = spec.get("on") if isinstance(spec, dict) else None
+        if on is None:
+            targeted.append(mod_name)
+        elif role is not None:
+            if role in on:
+                targeted.append(mod_name)
+        elif name in on or (rank is not None and str(rank) in on):
+            targeted.append(mod_name)
+    return targeted
+
+
+def _fp_has_module(part_fp, mod_name, rank=None):
+    """True when `part_fp` records any live function for `mod_name` (or `<mod_name>#actor`)."""
+    if not part_fp:
+        return False
+    prefixes = (f"{mod_name}:", f"{mod_name}#actor:")
+    for k in part_fp:
+        if rank is not None:
+            r_prefix = f"rank{rank}/"
+            if k.startswith(r_prefix) and k[len(r_prefix):].startswith(prefixes):
+                return True
+        elif k.startswith(prefixes) or (k.startswith("rank") and "/" in k and
+                                        k.split("/", 1)[1].startswith(prefixes)):
+            return True
+    return False
+
+
+def _read_txn_receipt(co, res):
+    """Return `res["receipt"]`, waiting on a concurrent receipt finisher if needed."""
+    receipt = res.get("receipt")
+    if receipt is not None or not res.get("txn"):
+        return receipt
+    record = getattr(co, "txns", {}).get(res["txn"]) or {}
+    finisher = record.get("fin")
+    if finisher is not None and finisher.acquire(timeout=30):
+        finisher.release()
+    return record.get("rec")
+
+
+def _split_commit(receipt, plan=None, expected_fp=None):
     """Why a committed transaction cannot be recorded as the code every participant runs, or
     None. Never excused by an accept: a rank that did not switch must not become the expected
     state. Reasons: no receipt to read; commit_hashes.agree False (participants or ranks
-    differ, or a proof did not answer); or a participant (a rank, in a group) that staged
-    items at prepare and whose proof names none of them (no code hash of a swapped function,
-    no witness key of an item, added definitions included). A role that abstained, or
-    staged nothing (a plan of repair cells only), may show none."""
+    differ, or a proof did not answer); a participant falsely returning abstain=True or empty
+    staged={} without abstaining for a module targeting it; or a participant (a rank, in a
+    group) that staged items at prepare and whose proof names none of them."""
     if not receipt:
         return "no txn receipt to read the commit hashes from"
     if (receipt.get("commit_hashes") or {}).get("agree") is False:
@@ -42,18 +88,38 @@ def _split_commit(receipt):
         why = "; ".join(splits) or "a proof did not answer"
         return f"code hashes differ after commit: {why}"[:500]
     for name, reply in (receipt.get("participants") or {}).items():
-        prepared, proof = reply.get("prepare") or {}, reply.get("proof") or {}
+        prepared = reply.get("prepare") or {}
+        committed = reply.get("commit") or {}
+        proof = reply.get("proof") or {}
         proof_by_rank = {str(unit.get("rank")): unit for unit in proof.get("ranks") or ()}
+        commit_by_rank = {str(unit.get("rank")): unit for unit in committed.get("ranks") or ()}
+        part_fp = (expected_fp or {}).get(name) or {}
         for unit in prepared.get("ranks") or [prepared]:
-            if unit.get("abstain") or not unit.get("staged"):
-                continue
             rank = unit.get("rank") if prepared.get("ranks") else None
+            where = name if rank is None else f"{name} rank {rank}"
+            targeted_mods = _targeted_modules(plan, name, unit) if plan is not None else []
+            if unit.get("abstain"):
+                if targeted_mods:
+                    has_loaded = any(_fp_has_module(part_fp, mod, rank=rank)
+                                     for mod in targeted_mods)
+                    if not unit.get("absent") or has_loaded:
+                        return (f"{where} falsely abstained from targeted module(s) "
+                                f"{', '.join(targeted_mods)}")
+                continue
+            if not unit.get("staged"):
+                if targeted_mods:
+                    commit_unit = committed if rank is None else commit_by_rank.get(str(rank), {})
+                    prep_checks = {f.get("check") for f in (unit.get("findings") or ())}
+                    if ("removed_definition" not in prep_checks
+                            and (commit_unit.get("changes") or 0) <= 0):
+                        return (f"{where} returned empty staged={{}} without abstaining for "
+                                f"targeted module(s) {', '.join(targeted_mods)}")
+                continue
             shown = proof if rank is None else proof_by_rank.get(str(rank), {})
             # the proof names what the participant committed: code hashes of the swapped
             # functions, and witness keys of every staged item (added definitions too)
             committed_keys = set(shown.get("hashes") or {}) | set(shown.get("witness") or {})
             if not committed_keys & set(unit["staged"]):
-                where = name if rank is None else f"{name} rank {rank}"
                 return (f"{where} staged {len(unit['staged'])} item(s) but its proof names "
                         "none of them (no code hash, no witness key): it did not switch")
     return None
@@ -75,9 +141,15 @@ class Session:
     # -- fingerprints --------------------------------------------------------------------
     def _fingerprint(self):
         """{participant: {key: [hash, id]}}, or None when a participant does not answer."""
+        if getattr(self.co, "parallel_fanout", False):
+            replies = C._fanout(
+                self.co.participants,
+                lambda p: C._call(p, "fingerprint", self.modules),
+            )
+        else:
+            replies = [C._call(p, "fingerprint", self.modules) for p in self.co.participants]
         out = {}
-        for p in self.co.participants:
-            r = C._call(p, "fingerprint", self.modules)
+        for p, r in zip(self.co.participants, replies):
             if not r["ok"]:
                 return None
             out[p.name] = r["code"]
@@ -150,6 +222,7 @@ class Session:
                            "a known outcome", subject=res["txn"])
                 return {**res, "state": self.state()}
         if outcome == "committed":
+            before_fp = self.expected[-1] if self.expected else None
             fp = self._fingerprint()
             if fp is None:
                 self.fault("tampered", "a participant did not answer after commit",
@@ -157,22 +230,25 @@ class Session:
             # an in-doubt result carries no receipt, nor does one whose receipt another
             # thread (a status call) is finishing: wait for that finisher, then read the
             # receipt the coordinator kept
-            receipt = res.get("receipt")
-            record = getattr(self.co, "txns", {}).get(res["txn"]) or {}
-            finisher = record.get("fin")
-            if receipt is None and finisher is not None and finisher.acquire(timeout=30):
-                finisher.release()
-            receipt = receipt or record.get("rec")
-            split = _split_commit(receipt)
+            receipt = _read_txn_receipt(self.co, res)
+            split = _split_commit(receipt, plan=plan, expected_fp=before_fp)
             if split:
                 self.fault("ranks_disagree", split, "every participant and every rank runs "
                            "the code the commit installed", subject=res["txn"])
             self.stack.append(res["txn"])
             self.expected.append(fp)
         else:                                    # aborted or rolled back: base must hold
-            if outcome == "rolled_back" and res["receipt"]["rollback"]["status"] != "undone":
-                self.fault("undo_incomplete", "rollback of a failed commit was partial",
-                           "every committed participant undone")
+            if outcome == "rolled_back":
+                receipt = _read_txn_receipt(self.co, res)
+                rollback_status = ((receipt or {}).get("rollback") or {}).get("status")
+                if rollback_status != "undone":
+                    already = any(f.get("check") == "undo_incomplete" for f in self.poisoned())
+                    if not already:
+                        why = ("rollback receipt missing" if receipt is None else
+                               f"rollback status was {rollback_status!r}")
+                        self.fault("undo_incomplete",
+                                   f"rollback of a failed commit was partial ({why})",
+                                   "every committed participant undone")
             self.verify()
         return {**res, "outcome": outcome, "state": self.state()}
 
@@ -194,7 +270,8 @@ class Session:
             u = self.co.undo(t)
             results.append(u)
             if not u["ok"]:
-                self.fault("undo_incomplete", f"undo of {t}: {u['receipt']['status']}",
+                status_label = (u.get("receipt") or {}).get("status", u.get("status", "partial"))
+                self.fault("undo_incomplete", f"undo of {t}: {status_label}",
                            "undone on every participant", subject=t)
                 return F.not_ok("undo failed", self.poisoned(), undone=undone,
                                 results=results, state=self.state())

@@ -16,6 +16,7 @@ from . import coordinator as C
 from . import findings as F
 from . import locate as L
 from . import receipt as R
+from . import session as SS
 from . import toy
 from .test_detectors import temp_modules
 from .test_locate import ENG, at, edit, fresh
@@ -464,6 +465,291 @@ class ParticipantMissingTest(unittest.TestCase):
         empty_group.expected = [0, 1]
         empty_reply = C.expect_ranks(empty_group, "prepare", C.merge_ranks("prepare", []))
         self.assertIn("replies from none", empty_reply["findings"][0]["observed"])
+
+
+class ParallelFanoutTest(unittest.TestCase):
+
+    def _delayed_participants(self, tag, count=8, delay_s=0.05, delay_methods=(), fail_method=None):
+        """Build `count` CallParticipants backed by distinct toy modules with optional per-method delay."""
+        parts, engines, tracker = [], [], {"lock": threading.Lock(), "active": {}, "max_active": {}, "order": {}}
+        for idx in range(count):
+            pname = f"r{idx}"
+            mod_name, eng, _ = fresh(f"{tag}_{next(_n)}_{pname}")
+            lp = C.LocalParticipant(pname, alias={"toy": mod_name})
+            engines.append(eng.Engine())
+
+            def rpc(method, payload, lp=lp, idx=idx, pname=pname):
+                with tracker["lock"]:
+                    cur = tracker["active"].get(method, 0) + 1
+                    tracker["active"][method] = cur
+                    tracker["max_active"][method] = max(tracker["max_active"].get(method, 0), cur)
+                    tracker["order"].setdefault(method, []).append(pname)
+                try:
+                    if method in delay_methods:
+                        time.sleep(delay_s)
+                    if fail_method is not None and (idx, method) == fail_method:
+                        return F.not_ok(f"{pname} failed {method}")
+                    return getattr(lp, method)(payload)
+                finally:
+                    with tracker["lock"]:
+                        tracker["active"][method] -= 1
+
+            parts.append(C.CallParticipant(pname, rpc))
+        return parts, engines, tracker
+
+    def test_parallel_fanout_speedup_order_and_serial_commit_undo(self):
+        """8 x 100 ms non-local participants fan out concurrently (< 500 ms per stage) across
+        prepare, validate, proof, witness_check, at_base, and Session._fingerprint while
+        preserving exact participant order and keeping commit + undo strictly serial."""
+        fanout_methods = ("prepare", "validate", "proof", "witness_check", "at_base", "fingerprint")
+        parts, engines, tracker = self._delayed_participants(
+            "fanout_ok", count=8, delay_s=0.10, delay_methods=fanout_methods,
+        )
+        names = [p.name for p in parts]
+        co = C.Coordinator(parts, phase2_deadline_s=None)
+
+        t0 = time.monotonic()
+        sess = SS.Session(co, ["toy.engine"])
+        fp_s = time.monotonic() - t0
+        self.assertLess(fp_s, 0.50, f"Session._fingerprint took {fp_s:.3f}s")
+        self.assertEqual(list(sess.expected[0].keys()), names)
+
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "base_hash": L.text_hash(ENG),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}}
+        t0 = time.monotonic()
+        res = co.run(plan)
+        run_s = time.monotonic() - t0
+        self.assertEqual(res["outcome"], "committed", res)
+        self.assertLess(res["receipt"]["prepare_s"], 0.50, res["receipt"]["prepare_s"])
+        self.assertLess(res["receipt"]["gap_s"], 0.50, res["receipt"]["gap_s"])
+        # prepare + validate + proof = 3 fanned stages x 100ms (~300ms), well under serial 2.4s
+        self.assertLess(run_s, 1.30, f"run() took {run_s:.3f}s")
+        self.assertEqual(list(res["receipt"]["participants"].keys()), names)
+        self.assertEqual(list(res["receipt"]["commit_hashes"]["participants"].keys()), names)
+        self.assertEqual([e.step(3) for e in engines], [170] * 8)
+
+        t0 = time.monotonic()
+        proof = co.prove(res["txn"])
+        prove_s = time.monotonic() - t0
+        self.assertTrue(proof["ok"], proof)
+        self.assertLess(prove_s, 0.50, f"prove() took {prove_s:.3f}s")
+        self.assertEqual(list(proof["receipt"]["witness"].keys()), names)
+
+        t0 = time.monotonic()
+        ab = co.at_base()
+        ab_s = time.monotonic() - t0
+        self.assertFalse(ab["ok"])
+        self.assertLess(ab_s, 0.50, f"at_base() took {ab_s:.3f}s")
+        self.assertEqual(list(ab["participants"].keys()), names)
+
+        undo_res = co.undo(res["txn"])
+        self.assertTrue(undo_res["ok"], undo_res)
+        self.assertEqual([e.step(3) for e in engines], [17] * 8)
+
+        # Parallel stages observed real concurrency; commit & undo stayed strictly serial in order.
+        for method in fanout_methods:
+            self.assertGreater(tracker["max_active"][method], 1, f"{method} did not fan out")
+        self.assertEqual(tracker["max_active"]["commit"], 1)
+        self.assertEqual(tracker["max_active"]["undo"], 1)
+        self.assertEqual(tracker["order"]["commit"], names)
+        self.assertEqual(tracker["order"]["undo"], list(reversed(names)))
+
+    def test_parallel_fanout_abort_speedup_and_fault_parity(self):
+        """Phase-1 and phase-2 aborts fan out concurrently (< 500 ms for 8 x 100 ms) with exact
+        participant ordering and untouched base code."""
+        for fail_stage in ("prepare", "validate"):
+            parts, engines, tracker = self._delayed_participants(
+                f"fanout_abort_{fail_stage}", count=8, delay_s=0.10,
+                delay_methods=("abort",), fail_method=(5, fail_stage),
+            )
+            co = C.Coordinator(parts, phase2_deadline_s=None)
+            plan = {"modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "base_hash": L.text_hash(ENG),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }}}
+            t0 = time.monotonic()
+            res = co.run(plan)
+            elapsed = time.monotonic() - t0
+            self.assertEqual(res["outcome"], "aborted", (fail_stage, res))
+            self.assertLess(elapsed, 0.50, f"{fail_stage} abort took {elapsed:.3f}s")
+            self.assertEqual(list(res["receipt"]["participants"].keys()), [p.name for p in parts])
+            self.assertGreater(tracker["max_active"]["abort"], 1)
+            self.assertEqual([e.step(3) for e in engines], [17] * 8)
+
+    def test_parallel_validate_deadline_missed_is_thread_safe(self):
+        """Concurrent deadline misses across 8 participants record every participant once in
+        `missed` and `poison` without races."""
+        parts, _, _ = self._delayed_participants(
+            "fanout_dl", count=8, delay_s=0.25, delay_methods=("validate",),
+        )
+        co = C.Coordinator(parts, phase2_deadline_s=0.20)
+        plan = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "base_hash": L.text_hash(ENG),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}}
+        res = co.run(plan)
+        self.assertEqual(res["outcome"], "aborted", res)
+        self.assertLess(res["receipt"]["gap_s"], 0.25, res["receipt"]["gap_s"])
+        expected_names = [f"r{i}" for i in range(8)]
+        self.assertEqual(res["receipt"]["rollback"]["missed_deadline"], expected_names)
+        self.assertEqual(co.status(res["txn"])["missed"], expected_names)
+        poison_names = [f["participant"] for f in co.poison]
+        self.assertEqual(sorted(poison_names), expected_names)
+        self.assertEqual(len(poison_names), 8)
+
+    def test_all_local_participants_stay_on_caller_thread(self):
+        """All-LocalParticipant lists bypass ThreadPoolExecutor and run on the caller thread."""
+        caller = threading.get_ident()
+        seen_threads = []
+        locals_ = []
+        for idx in range(4):
+            mod_name, _, _ = fresh(f"local_sync_{next(_n)}_{idx}")
+            locals_.append(C.LocalParticipant(f"l{idx}", alias={"toy": mod_name}))
+        out = C._fanout(locals_, lambda p: (seen_threads.append(threading.get_ident()), p.name)[1])
+        self.assertEqual(out, ["l0", "l1", "l2", "l3"])
+        self.assertEqual(set(seen_threads), {caller})
+
+    def test_loop_bound_custom_participant_stays_on_caller_thread(self):
+        """A custom Participant subclass (like vLLM WorkerGroup) stays on the caller thread
+        both when paired with one CallParticipant and when mixed with multiple CallParticipants."""
+        caller = threading.get_ident()
+        observed = {}
+
+        class LoopBound(C.Participant):
+            name = "loop_bound"
+
+            def ping(self):
+                observed[self.name] = threading.get_ident()
+                return "loop"
+
+        lb = LoopBound()
+        c0 = C.CallParticipant("c0", lambda m, p: F.ok())
+        c1 = C.CallParticipant("c1", lambda m, p: F.ok())
+        self.assertEqual(C._fanout([lb, c0], lambda p: lb.ping() if p is lb else p.name),
+                         ["loop", "c0"])
+        self.assertEqual(observed["loop_bound"], caller)
+
+        observed.clear()
+
+        def probe(p):
+            if p is lb:
+                return lb.ping()
+            time.sleep(0.03)
+            observed[p.name] = threading.get_ident()
+            return p.name
+
+        self.assertEqual(C._fanout([lb, c0, c1], probe), ["loop", "c0", "c1"])
+        self.assertEqual(observed["loop_bound"], caller)
+        self.assertNotEqual(observed["c0"], caller)
+        self.assertNotEqual(observed["c1"], caller)
+
+    def test_concurrent_status_polling_never_steals_finisher_lock(self):
+        """Input: multiple threads tightly polling `co.status(txn)` (including right at the
+        window between `_done()` and `_finish()`) while `co.run()` and `Session.install()`
+        execute across repeated transactions. Expected: `co.status(txn)` never steals
+        `t['fin']` from `co.run()`, `co.run()` always returns the finalized `receipt`, and
+        `Session.install()` always ends `'edited'` with zero poison."""
+        from . import session as SS
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        name, _, _ = fresh("fin_stress")
+        lp = C.LocalParticipant("rank0", alias={"toy": name})
+
+        class YieldingDoneCoordinator(C.Coordinator):
+            def __init__(self, *args, **kw):
+                super().__init__(*args, **kw)
+                self.done_seen = threading.Event()
+                self.slow_finish = True
+
+            def _done(self, txn, out):
+                super()._done(txn, out)
+                self.done_seen.set()
+                if self.slow_finish:
+                    # Wide window after `t['done']=True` before `run()` enters `_finish()`
+                    time.sleep(0.02)
+
+        path = os.path.join(tmp, "r.jsonl")
+        co = YieldingDoneCoordinator([lp], R.ReceiptWriter(path), phase2_deadline_s=None)
+        sess = SS.Session(co, ["toy.engine"])
+        base_eng = ENG
+        cur_src = base_eng
+
+        for i in range(1, 11):
+            txn_id = f"race-{i}"
+            nxt_src = edit(cur_src,
+                           ("return y" if i == 1 else f"return y + {i - 1}",
+                            f"return y + {i}"))
+            plan = {"id": txn_id, "modules": {"toy.engine": {
+                "source": nxt_src,
+                "targets": [["Engine.step", at(nxt_src, "def step")]]}}}
+            stop = threading.Event()
+            seen_states = []
+
+            def poller():
+                while not stop.is_set():
+                    st = co.status(txn_id)
+                    if st.get("ok"):
+                        seen_states.append(st.get("state"))
+                    time.sleep(0.001)
+
+            co.done_seen.clear()
+            threads = [threading.Thread(target=poller, daemon=True) for _ in range(4)]
+            for th in threads:
+                th.start()
+            res = sess.install(plan)
+            stop.set()
+            for th in threads:
+                th.join(timeout=2.0)
+
+            self.assertEqual(res["outcome"], "committed", res)
+            self.assertEqual(res["state"], "edited", sess.poisoned())
+            self.assertIsNotNone(res.get("receipt"), f"iter {i} lost receipt to status()!")
+            self.assertTrue(res["written"]["ok"], res["written"])
+            self.assertEqual(co.poison, [])
+            cur_src = nxt_src
+
+    def test_partial_rollback_poisons_participant_and_coordinator(self):
+        """Input: a commit whose rollback cannot undo every change (`undo_incomplete` /
+        `repair_not_undoable`). Expected: `LocalParticipant` marks `at_base(poisoned=True)` and
+        refuses subsequent `prepare()` with `session_poisoned`; `Coordinator` appends
+        `undo_incomplete` to `co.poison` and refuses subsequent `co.run()` with
+        `session_poisoned`."""
+        box_cls = type("Box", (), {"val": 1})
+        box = box_cls()
+        name, _, _ = fresh("part_poison")
+        lp = C.LocalParticipant("core", alias={"toy": name}, scope={"box": box})
+        bad_plan = {
+            "id": "bad-rb",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 100")),
+                "targets": [["Engine.step", at(ENG, "def step")]]}},
+            "repairs": [{"cell": "box.val = 2\nraise RuntimeError('boom')\n", "declares": []}],
+        }
+        next_plan = {
+            "id": "after-rb",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]]}},
+        }
+        co = C.Coordinator([lp], phase2_deadline_s=None)
+        res = co.run(bad_plan)
+        self.assertEqual(res["outcome"], "rolled_back")
+        self.assertEqual(res["receipt"]["rollback"]["status"], "partial")
+        self.assertTrue(lp.at_base()["poisoned"])
+        self.assertTrue(any(f["check"] == "undo_incomplete" for f in co.poison), co.poison)
+
+        prep_after = lp.prepare(next_plan)
+        self.assertFalse(prep_after["ok"])
+        self.assertEqual([f["check"] for f in prep_after["findings"]], ["session_poisoned"])
+
+        run_after = co.run(next_plan)
+        self.assertEqual(run_after["outcome"], "refused")
+        self.assertEqual([f["check"] for f in run_after["findings"]], ["session_poisoned"])
 
 
 if __name__ == "__main__":

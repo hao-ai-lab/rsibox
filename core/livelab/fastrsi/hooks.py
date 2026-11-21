@@ -4,8 +4,12 @@ Fixes the `RecursionError` trap when multiple `sys.meta_path` hooks coexist (e.g
 adapter host hook, a live-reconfig agent hook, and an overlay finder): every finder here
 delegates ONLY to `sys.meta_path[idx + 1:]` (finders after itself), never back to index 0.
 """
+import ast
+import contextlib
+import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import linecache
 import os
 import sys
@@ -156,3 +160,112 @@ def install_overlay(root: str | None = None, *, files: dict[str, str] | None = N
         return None
     sys.meta_path.insert(0, finder)
     return finder
+
+
+# -- AST import graph and module-refresh purging -----------------------------------------
+
+
+def _resolve_import(mod: str, is_pkg: bool, node) -> list[str]:
+    if isinstance(node, ast.Import):
+        return [a.name for a in node.names]
+    base = node.module or ""
+    if node.level:
+        parts = mod.split(".") if is_pkg else mod.split(".")[:-1]
+        if node.level > 1:
+            parts = parts[: len(parts) - node.level + 1]
+        base = ".".join(parts + ([base] if base else []))
+    return [base] + [f"{base}.{a.name}" for a in node.names if a.name != "*"]
+
+
+def _binding_imports(tree):
+    todo = list(tree.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        todo.extend(ast.iter_child_nodes(node))
+
+
+def import_graph(prefixes, modules=None, texts=None, cache=None) -> dict[str, set[str]]:
+    """Return `{module: {loaded modules imported at import time}}` for loaded modules under `prefixes`."""
+    mods = sys.modules if modules is None else modules
+    overrides = texts or {}
+    graph: dict[str, set[str]] = {}
+    for name, mod in list(mods.items()):
+        path = getattr(mod, "__file__", None)
+        if not (path and path.endswith(".py") and name.split(".")[0] in prefixes):
+            continue
+        try:
+            src = overrides.get(name)
+            stamp = None
+            if src is None:
+                if cache is not None:
+                    st = os.stat(path)
+                    stamp = (name, st.st_size, st.st_mtime_ns)
+                    hit = cache.get(path)
+                    if hit and hit[0] == stamp:
+                        graph[name] = {d for d in hit[1] if d in mods and d != name}
+                        continue
+                with open(path, "rb") as handle:
+                    src = handle.read()
+            is_pkg = os.path.basename(path) == "__init__.py"
+            names = [
+                dep
+                for node in _binding_imports(ast.parse(src, path))
+                for dep in _resolve_import(name, is_pkg, node)
+            ]
+            if cache is not None and stamp is not None:
+                cache[path] = (stamp, names)
+        except (OSError, SyntaxError, ValueError):
+            continue
+        graph[name] = {d for d in names if d in mods and d != name}
+    return graph
+
+
+def dependents(changed, graph: dict[str, set[str]]) -> set[str]:
+    """Return `changed` plus every module in `graph` that transitively imports one of them."""
+    rev: dict[str, set[str]] = {}
+    for mod, deps in graph.items():
+        for dep in deps:
+            rev.setdefault(dep, set()).add(mod)
+    out, todo = set(changed), list(changed)
+    while todo:
+        for mod in rev.get(todo.pop(), ()):
+            if mod not in out:
+                out.add(mod)
+                todo.append(mod)
+    return out
+
+
+def unbind_module(modules, name: str, *, expected=None) -> None:
+    """Remove `name`'s attribute binding from its parent package in `modules`."""
+    parent_name, _, child = name.rpartition(".")
+    parent = modules.get(parent_name)
+    if parent is None:
+        return
+    if expected is not None:
+        if getattr(parent, child, None) is expected:
+            with contextlib.suppress(AttributeError):
+                delattr(parent, child)
+    elif child in getattr(parent, "__dict__", {}):
+        with contextlib.suppress(AttributeError):
+            delattr(parent, child)
+
+
+def purge_modules(names, modules=None, *, unlink_pyc: bool = False) -> list[str]:
+    """Drop `names` from `modules`, unbind from parent packages, optionally remove `.pyc`, and invalidate caches."""
+    mods = sys.modules if modules is None else modules
+    dropped = list(names)
+    for name in dropped:
+        old = mods.pop(name, None)
+        unbind_module(mods, name, expected=old)
+        if unlink_pyc:
+            mod_file = getattr(old, "__file__", None)
+            if mod_file:
+                with contextlib.suppress(OSError, ValueError, NotImplementedError):
+                    os.unlink(importlib.util.cache_from_source(mod_file))
+    if dropped:
+        importlib.invalidate_caches()
+    return dropped

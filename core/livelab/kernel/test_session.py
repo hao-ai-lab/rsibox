@@ -357,3 +357,144 @@ class StatusOneRoundTest(unittest.TestCase):
         self.assertEqual(len(calls) - before, 1)
         self.assertEqual(st["state"], "base")
         self.assertEqual(st["fingerprint"], SS.Session.digest({"p": {"m:f:1": ["h", 1]}}))
+
+
+class ReauditAbstainAndPoisonTest(unittest.TestCase):
+    """Covers #149 re-audit (false abstain / empty staged={}) and M-M7 poison checks."""
+
+    def test_separate_participant_false_abstain_and_empty_staged_poison(self):
+        """Input: separate participants [lp0, second] on a `toy.engine` edit. Case (a):
+        `second` falsely returns `abstain=True` (without `absent`); Case (b): `second` falsely
+        returns `abstain=True, absent=True` even though `expected_fp` proves `second` loaded
+        `toy.engine`; Case (c): `second` returns `staged={}` without `abstain=True`. Expected:
+        all three poison the session (`ranks_disagree`) and refuse subsequent installs with
+        `session_poisoned`."""
+        plan = {"accept": "all", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        for mode in ("false_abstain", "false_absent_abstain", "empty_staged"):
+            n0, _, _ = fresh(f"ab0_{mode}")
+            n1, eng1, _ = fresh(f"ab1_{mode}")
+            lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+            lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+
+            def dishonest(method, payload, lp1=lp1, mode=mode):
+                if method == "prepare":
+                    if mode == "false_abstain":
+                        return {"ok": True, "staged": {}, "abstain": True, "findings": []}
+                    if mode == "false_absent_abstain":
+                        return {"ok": True, "staged": {}, "abstain": True, "absent": True,
+                                "findings": []}
+                    return {"ok": True, "staged": {}, "findings": []}
+                if method in ("validate", "commit", "abort", "undo"):
+                    return {"ok": True, "findings": []}
+                if method == "proof":
+                    return {"ok": True, "findings": [], "hashes": {}, "witness": {}}
+                return getattr(lp1, method)(payload)
+
+            sess = SS.Session(
+                C.Coordinator([lp0, C.CallParticipant("r1", dishonest)], phase2_deadline_s=None),
+                ["toy.engine"],
+            )
+            res = sess.install(plan)
+            self.assertEqual((res["outcome"], res["state"]), ("committed", "poisoned"), mode)
+            self.assertIn("ranks_disagree", [f["check"] for f in sess.poisoned()], mode)
+            self.assertEqual(eng1.Engine().step(3), 17, mode)
+            again = sess.install(plan)
+            self.assertEqual([f["check"] for f in again["findings"]], ["session_poisoned"], mode)
+
+    def test_legitimate_absent_role_exclusion_and_repair_only_stay_edited(self):
+        """Positive controls: (a) RayActorParticipant-style `absent=True, abstain=True` when
+        the module is absent from that participant's fingerprint; (b) RoleEndpoint-style
+        `role='core'` abstaining when `on=['worker']`; (c) repair-only plan with `staged={}`.
+        Expected: all commit and end in `'edited'`, never `'poisoned'`."""
+        plan_mod = {"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 100")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}}
+        # (a) truly absent module in fingerprint -> abstain+absent allowed
+        n0, _, _ = fresh("legit_abs0")
+        lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+
+        def absent_actor(method, payload):
+            if method == "fingerprint":
+                return {"ok": True, "code": {}}
+            if method == "prepare":
+                return {"ok": True, "staged": {}, "abstain": True, "absent": True, "findings": []}
+            if method in ("validate", "commit", "abort", "undo"):
+                return {"ok": True, "abstain": True, "absent": True, "findings": []}
+            if method == "proof":
+                return {"ok": True, "abstain": True, "absent": True, "hashes": {}, "witness": {}}
+            return {"ok": True}
+
+        sess_a = SS.Session(
+            C.Coordinator([lp0, C.CallParticipant("actor1", absent_actor)], phase2_deadline_s=None),
+            ["toy.engine"],
+        )
+        res_a = sess_a.install(plan_mod)
+        self.assertEqual((res_a["outcome"], res_a["state"]), ("committed", "edited"), sess_a.poisoned())
+
+        # (b) Role-filtered plan `"on": ["worker"]` where `core` has `role="core"`
+        nw, _, _ = fresh("legit_role_w")
+        nc, _, _ = fresh("legit_role_c")
+        lpw = C.LocalParticipant("worker", alias={"toy": nw})
+        lpc = C.LocalParticipant("core", alias={"toy": nc})
+
+        def role_wrap(lp, role):
+            def call(method, payload):
+                if method == "prepare":
+                    mods = {m: s for m, s in (payload.get("modules") or {}).items()
+                            if role in s.get("on", [role])}
+                    if not mods:
+                        return {"ok": True, "staged": {}, "abstain": True, "role": role, "findings": []}
+                    reply = lp.prepare({**payload, "modules": mods})
+                    return {**reply, "role": role}
+                if method in ("validate", "commit", "abort", "undo") and role == "core":
+                    return {"ok": True, "abstain": True, "role": role, "findings": []}
+                if method == "proof" and role == "core":
+                    return {"ok": True, "abstain": True, "role": role, "hashes": {}, "witness": {}}
+                reply = getattr(lp, method)(payload)
+                return {**reply, "role": role}
+            return call
+
+        sess_b = SS.Session(
+            C.Coordinator([C.CallParticipant("worker", role_wrap(lpw, "worker")),
+                           C.CallParticipant("core", role_wrap(lpc, "core"))], phase2_deadline_s=None),
+            ["toy.engine"],
+        )
+        role_plan = {"modules": {"toy.engine": {**plan_mod["modules"]["toy.engine"], "on": ["worker"]}}}
+        res_b = sess_b.install(role_plan)
+        self.assertEqual((res_b["outcome"], res_b["state"]), ("committed", "edited"), sess_b.poisoned())
+
+        # (c) repair-only plan (`modules={}`) with empty `staged={}`
+        n_rep, _, _ = fresh("legit_rep")
+        box = type("Box", (), {"v": 1})()
+        sess_c = SS.Session(
+            C.Coordinator([C.LocalParticipant("r0", alias={"toy": n_rep}, scope={"box": box})],
+                          phase2_deadline_s=None),
+            ["toy.engine"],
+        )
+        res_c = sess_c.install({"repairs": [{"cell": "journal.set_attr(box, 'v', 2)", "declares": ["box"]}]})
+        self.assertEqual((res_c["outcome"], res_c["state"], box.v), ("committed", "edited", 2))
+
+    def test_in_doubt_rolled_back_partial_without_receipt_poisons_cleanly(self):
+        """Input: coordinator returns `outcome='in-doubt', receipt=None`, `status(txn)` resolves
+        to `outcome='rolled_back'` with no receipt. Expected: `Session.install()` handles missing
+        receipt without TypeError and poisons the session with `undo_incomplete`."""
+        n, _, _ = fresh("indoubt_rb")
+        co = C.Coordinator([C.LocalParticipant("r0", alias={"toy": n})], phase2_deadline_s=None)
+        real_run = co.run
+
+        def indoubt_run(plan, **kw):
+            co.txns["fake-id"] = {"done": True, "receipt": False}
+            return {"ok": False, "outcome": "in-doubt", "txn": "fake-id", "receipt": None}
+
+        co.run = indoubt_run
+        co.status = lambda txn=None: {"ok": True, "txn": txn, "state": "aborted",
+                                      "outcome": "rolled_back", "written": False}
+        _ = real_run
+        sess = SS.Session(co, ["toy.engine"])
+        res = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "targets": [["Engine.step", at(ENG, "def step")]]}}})
+        self.assertEqual((res["outcome"], res["state"]), ("rolled_back", "poisoned"))
+        self.assertIn("undo_incomplete", [f["check"] for f in sess.poisoned()])

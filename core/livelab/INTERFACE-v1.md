@@ -96,11 +96,11 @@ Signatures and plan format: `core/livelab/kernel/coordinator.py`.
 
 | Verb | Transaction | Returns |
 |---|---|---|
-| `install(patch)` | plan the patch, then one transaction | `id`, `outcome`, `codes` (blocking checks), `mechanisms` (recipes run), findings, seconds |
-| `check(workload)` | none; runs the workload in the warm engine, then proves every live transaction | `output`, `proven` (true, false, or null when nothing is live), witness counts per participant, findings, seconds |
-| `reset(kind)` | `state`: drain in-flight work (R2) and clear cached data (R3). `respawn`: restart the worker group from warm caches | what was reset, seconds |
-| `uninstall(id)` | undo `id` and every later transaction, newest first, each followed by its plan's undo resets | ids undone, state, seconds |
-| `status()` / `status(id)` | none | `base`, `edited` or `poisoned`; live ids; code fingerprint; poison findings / one transaction's host state |
+| `install(patch)` | plan the patch, then one transaction | `{ok, id, outcome, codes, mechanisms, findings, cost_s}` |
+| `check(workload=None)` | none; runs the workload in the warm engine, then proves every live transaction | `{ok, output, proven, witness, findings, cost_s}` (+ optional `abstained`; `proven` is `true`, `false` with `zero_witness`, or `null` at base) |
+| `reset(kind="state")` | `state`: drain in-flight work (R2) and clear volatile state (R3). `respawn`: restart the worker group from warm caches and clear poison | `{ok, reset, cost_s}` (`reset` is a non-empty list naming cleared state) |
+| `uninstall(id=None)` | undo `id` (or newest) and every later transaction, newest first, each followed by its plan's undo resets | `{ok, undone, state, cost_s}` |
+| `status()` / `status(id)` | none | `{ok, state, txns, fingerprint, poison}` (`base \| edited \| poisoned`) / one transaction's host state |
 
 A patch is `{"files": {module: full patched text}, "accept": [check], "undo_resets": [...]}`.
 The lab needs no planner: each participant's prepare finds the changed definitions (every

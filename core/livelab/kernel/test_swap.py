@@ -325,29 +325,135 @@ class SwapEdgeCaseTest(unittest.TestCase):
         live_keys = [k for k in linecache.cache if k.startswith(f"<fastrsi-live:{module_obj.__file__}#")]
         self.assertEqual(live_keys, [])
 
-    def test_a_method_added_to_or_removed_from_a_nested_class_is_refused(self):
-        """Input: `class Outer: class Inner: def f(self, x): return x + 1`; edits that (a) add
-        `Inner.helper` and make f call it, (b) remove a second method `Inner.g`. Expected:
-        stage blocks with an outside_changes finding that is not overridable and names the
-        method, so even accept="all" does not proceed; nothing is applied. Pain point: with
-        outside_changes accepted, the swap installed f calling self.helper, which the live
-        Inner never got: AttributeError on the next call. Not: editing an existing nested
-        method's body (a normal target)."""
-        base = ("class Outer:\n    class Inner:\n        def f(self, x):\n"
-                "            return x + 1\n\n        def g(self):\n            return 0\n")
-        added = base.replace("return x + 1", "return self.helper(x)\n\n"
-                             "        def helper(self, x):\n            return x + 10")
-        removed = base.replace("\n\n        def g(self):\n            return 0", "")
-        for new, member in ((added, "Outer.Inner.helper"), (removed, "Outer.Inner.g")):
-            name = f"kt_sw{next(_n)}"
-            (mod_obj,) = temp_modules(self, {name: base})
-            res = S.stage(name, new, "auto")
-            blocking = [finding for finding in res["findings"] if finding["check"] == "outside_changes"
-                        and not finding["overridable"]]
-            self.assertEqual(len(blocking), 1, res["findings"])
-            self.assertIn(member, blocking[0]["observed"])
-            self.assertFalse(F.decide(res["findings"], "all")["proceed"])
-            self.assertEqual(mod_obj.Outer.Inner().f(1), 2)
+    def test_nested_class_methods_and_nested_classes_can_be_added_edited_and_removed(self):
+        """Input: `class Outer: class Inner: ...` (and 3-level `Outer.Mid.Inner`). Expected:
+        (a) adding `Outer.Inner.helper` (calling `super()`/class constant), making `Inner.f`
+        call it, then chained editing `Outer.Inner.helper`; (b) removing `Outer.Inner.g` with
+        `removed_definition` accepted; (c) adding and removing a nested class `Outer.Extra` and
+        editing/adding a 3-level nested `Outer.Mid.Inner.h`; (d) `new_fields` detection on
+        `Outer.Inner`; (e) clean `undo` restoring every nested class and `at_base`."""
+        from . import coordinator as C
+
+        base = (
+            "class Base:\n"
+            "    def tag(self):\n"
+            "        return 100\n\n\n"
+            "class Outer:\n"
+            "    class Inner(Base):\n"
+            "        OFFSET = 10\n\n"
+            "        def __init__(self, v=1):\n"
+            "            self.v = v\n\n"
+            "        def f(self, x):\n"
+            "            return self.v + x + 1\n\n"
+            "        def g(self):\n"
+            "            return 0\n\n"
+            "    class Mid:\n"
+            "        class Deep:\n"
+            "            SCALE = 5\n\n"
+            "            def calc(self, x):\n"
+            "                return x\n"
+        )
+        # (a) Add Outer.Inner.helper (with class default + super()) & remove Outer.Inner.g,
+        # add Outer.Extra nested class, and add Outer.Mid.Deep.bonus
+        step1 = base.replace(
+            "        def f(self, x):\n"
+            "            return self.v + x + 1\n\n"
+            "        def g(self):\n"
+            "            return 0",
+            "        def f(self, x):\n"
+            "            return self.helper(x)\n\n"
+            "        def helper(self, x, bonus=OFFSET):\n"
+            "            return self.v + x + bonus + super().tag()",
+        ).replace(
+            "            def calc(self, x):\n"
+            "                return x",
+            "            def calc(self, x):\n"
+            "                return self.bonus(x)\n\n"
+            "            def bonus(self, x, s=SCALE):\n"
+            "                return x * s",
+        ) + (
+            "\n    class Extra:\n"
+            "        def run(self, x):\n"
+            "            return x + 7\n"
+        )
+        name = f"kt_sw{next(_n)}"
+        (mod_obj,) = temp_modules(self, {name: base})
+        part = C.LocalParticipant("core")
+
+        # Must require removed_definition for Outer.Inner.g, then proceed when accepted
+        refused = part.prepare({"id": "n0", "modules": {name: {"source": step1}}})
+        self.assertEqual((refused["ok"], [f["check"] for f in refused["findings"]]),
+                         (False, ["removed_definition"]))
+
+        prep1 = part.prepare({"id": "n1", "accept": ["removed_definition"],
+                              "modules": {name: {"source": step1}}})
+        self.assertTrue(prep1["ok"], prep1["findings"])
+        self.assertTrue(part.commit("n1")["ok"])
+        self.assertFalse(hasattr(mod_obj.Outer.Inner, "g"))
+        self.assertEqual(mod_obj.Outer.Inner(2).f(3), 2 + 3 + 10 + 100)
+        self.assertEqual(mod_obj.Outer.Extra().run(4), 11)
+        self.assertEqual(mod_obj.Outer.Mid.Deep().calc(6), 30)
+        # Qualnames of added nested definitions allow a subsequent live edit!
+        self.assertEqual(mod_obj.Outer.Inner.helper.__qualname__, "Outer.Inner.helper")
+        self.assertEqual(mod_obj.Outer.Mid.Deep.bonus.__qualname__, "Outer.Mid.Deep.bonus")
+
+        # (b) Chained edit to added nested method Outer.Inner.helper (with modified default!)
+        step2 = step1.replace(
+            "        def helper(self, x, bonus=OFFSET):\n"
+            "            return self.v + x + bonus + super().tag()",
+            "        def helper(self, x, bonus=OFFSET * 2):\n"
+            "            return self.v + x + bonus + super().tag()",
+        )
+        self.assertTrue(part.prepare({"id": "n2", "modules": {name: {"source": step2}}})["ok"])
+        self.assertTrue(part.commit("n2")["ok"])
+        self.assertEqual(mod_obj.Outer.Inner(2).f(3), 2 + 3 + 20 + 100)
+
+        # (c) Removing added nested class Outer.Extra on top
+        step3 = step2.replace(
+            "\n    class Extra:\n"
+            "        def run(self, x):\n"
+            "            return x + 7\n",
+            "",
+        )
+        self.assertTrue(part.prepare({"id": "n3", "accept": ["removed_definition"],
+                                      "modules": {name: {"source": step3}}})["ok"])
+        self.assertTrue(part.commit("n3")["ok"])
+        self.assertFalse(hasattr(mod_obj.Outer, "Extra"))
+
+        # (d) Undo n1 (cascades n2, n3) -> back at exact base
+        self.assertTrue(part.undo("n1")["ok"])
+        self.assertTrue(part.at_base()["ok"], part.at_base())
+        self.assertTrue(hasattr(mod_obj.Outer.Inner, "g"))
+        self.assertFalse(hasattr(mod_obj.Outer.Inner, "helper"))
+        self.assertFalse(hasattr(mod_obj.Outer, "Extra"))
+        self.assertEqual(mod_obj.Outer.Inner(2).f(3), 6)
+        self.assertEqual(mod_obj.Outer.Mid.Deep().calc(6), 6)
+
+    def test_nested_class_new_fields_detected(self):
+        """Input: `Outer.Inner.__init__` adds `self.extra = 1` and `Outer.Inner.f` reads it.
+        Expected: `new_fields` blocking finding names `Outer.Inner.f` and `Outer.Inner.extra`."""
+        base = (
+            "class Outer:\n"
+            "    class Inner:\n"
+            "        def __init__(self):\n"
+            "            self.x = 1\n"
+            "        def f(self):\n"
+            "            return self.x\n"
+        )
+        patched = base.replace(
+            "        def __init__(self):\n            self.x = 1",
+            "        def __init__(self):\n            self.x = 1\n            self.extra = 2",
+        ).replace(
+            "        def f(self):\n            return self.x",
+            "        def f(self):\n            return self.x + self.extra",
+        )
+        name = f"kt_sw{next(_n)}"
+        temp_modules(self, {name: base})
+        res = S.stage(name, patched, "auto")
+        nf = [f for f in res["findings"] if f["check"] == "new_fields"]
+        self.assertEqual(len(nf), 1, res["findings"])
+        self.assertEqual(nf[0]["subject"], f"{name}:Outer.Inner.extra")
+        self.assertIn("Outer.Inner.f", nf[0]["observed"])
 
 
 if __name__ == "__main__":

@@ -14,8 +14,9 @@ Provides shared, zero-dependency building blocks for FastRSI live labs:
 import os
 import sys
 
-from . import diffs
+from . import diffs, op_guard
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
+from .op_guard import op_redefine_guard
 from .harness import (
     PackageOverlay,
     SourceStack,
@@ -27,11 +28,21 @@ from .harness import (
     install_refusal,
     module_file,
     module_relpath,
+    plain_finding,
     read_module,
     resolve_patch_files,
     run_fresh_subprocess,
 )
-from .hooks import AfterImportHook, OverlayFinder, install_import_hook, install_overlay
+from .hooks import (
+    AfterImportHook,
+    OverlayFinder,
+    dependents,
+    import_graph,
+    install_import_hook,
+    install_overlay,
+    purge_modules,
+    unbind_module,
+)
 from .ipc import (
     MAX_SOCK_PATH,
     FileChannelServer,
@@ -52,12 +63,14 @@ from .proc import (
     direct_children,
     free_port,
     kill_tree,
+    pg_alive,
     pid_alive,
     port_in_use,
     ppid_map,
     reap_all,
     stat_ppid,
     stat_state,
+    stop_session,
     stop_tree,
 )
 
@@ -111,6 +124,7 @@ __all__ = [
     "bootstrap_livelab",
     "build_package_overlay",
     "check_failure",
+    "dependents",
     "descendants",
     "diff_paths",
     "diffs",
@@ -118,6 +132,7 @@ __all__ = [
     "edit_once",
     "file_channel_call",
     "free_port",
+    "import_graph",
     "inject_participant_fault",
     "install_import_hook",
     "install_overlay",
@@ -127,9 +142,14 @@ __all__ = [
     "module_file",
     "module_of_path",
     "module_relpath",
+    "op_guard",
+    "op_redefine_guard",
+    "pg_alive",
     "pid_alive",
+    "plain_finding",
     "port_in_use",
     "ppid_map",
+    "purge_modules",
     "read_json",
     "read_module",
     "reap_all",
@@ -139,7 +159,9 @@ __all__ = [
     "sock_path_error",
     "stat_ppid",
     "stat_state",
+    "stop_session",
     "stop_tree",
+    "unbind_module",
     "unix_json_call",
     "unix_json_stream",
 ]

@@ -171,3 +171,63 @@ class UndoCallTest(unittest.TestCase):
         self.assertEqual([f["check"] for f in u["findings"]], ["undo_incomplete"])
         self.assertIn("rebuild k2", u["findings"][0]["observed"])
         self.assertIn("kernel cache gone", u["findings"][0]["observed"])
+        self.assertTrue(j.poisoned)
+        self.assertEqual(len(j.entries), 1)
+        self.assertEqual(j.entries[0].name, "rebuild k2")
+
+    def test_on_undo_keyed_to_mark_epoch_and_marks_truncated(self):
+        """Input: txn1 with 0 entries + on_undo(cb1), then txn2 at the same position + entry +
+        on_undo(cb2); undo_to(m2), then undo_to(m1). Expected: undo_to(m2) runs ONLY cb2, slices
+        txn2 out of journal.marks while keeping txn1, and cb1 fires only on undo_to(m1)."""
+        d, events = {}, []
+        j = J.Journal()
+        m1 = j.mark("txn1")
+        j.on_undo(lambda: events.append("cb1"))
+        m2 = j.mark("txn2")
+        j.set_item(d, "x", 1)
+        j.on_undo(lambda: events.append("cb2"))
+        self.assertEqual(m1, m2)   # both at entry offset 0
+
+        u2 = j.undo_to(m2)
+        self.assertTrue(u2["ok"], u2)
+        self.assertEqual(events, ["cb2"])
+        self.assertEqual(d, {})
+        self.assertEqual(j.marks, [("txn1", m1)])
+
+        u1 = j.undo_to(m1)
+        self.assertTrue(u1["ok"], u1)
+        self.assertEqual(events, ["cb2", "cb1"])
+        self.assertEqual(j.marks, [])
+
+    def test_failing_invert_preserves_entry_poisons_and_supports_retry(self):
+        """Input: txn1 (clean), txn2 (one normal entry + one record_call whose inverse fails on
+        first attempt). Expected: first undo_to(m2) undoes the normal entry, preserves the failing
+        entry in `journal.entries`, sets `journal.poisoned=True`, and reports `undo_incomplete`;
+        retrying undo_to(m2) once the inverse stops raising completes cleanly and truncates m2."""
+        d, state = {}, {"fail": True, "calls": 0}
+
+        def flaky():
+            state["calls"] += 1
+            if state["fail"]:
+                raise RuntimeError("transient invert failure")
+
+        j = J.Journal()
+        m1 = j.mark("t1")
+        j.set_item(d, "base", 10)
+        m2 = j.mark("t2")
+        j.set_item(d, "tmp", 20)
+        j.record_call(flaky, "flaky_op")
+
+        u_fail = j.undo_to(m2)
+        self.assertFalse(u_fail["ok"])
+        self.assertEqual([f["check"] for f in u_fail["findings"]], ["undo_incomplete"])
+        self.assertTrue(j.poisoned)
+        self.assertEqual(d, {"base": 10})
+        self.assertEqual([e.name for e in j.entries], ["base", "flaky_op"])
+
+        state["fail"] = False
+        u_retry = j.undo_to(m2)
+        self.assertTrue(u_retry["ok"], u_retry)
+        self.assertEqual(u_retry["undone"], 1)
+        self.assertEqual([e.name for e in j.entries], ["base"])
+        self.assertEqual(j.marks, [("t1", m1)])

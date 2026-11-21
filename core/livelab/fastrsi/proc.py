@@ -142,24 +142,14 @@ def stop_tree(
         return True
     tree = [pid] + descendants(pid, proc_root=proc_root)
     for sig, wait_s in ((signal.SIGTERM, grace_s), (signal.SIGKILL, kill_grace_s)):
-        if sig == signal.SIGTERM:
-            for target in list(reversed(tree)):
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(target, sig)
-            if include_pg:
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pid, sig)
-        else:
-            all_targets = list(dict.fromkeys(
-                list(reversed(tree + descendants(pid, proc_root=proc_root)))
-            ))
-            for target in all_targets:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(target, sig)
-            if include_pg:
-                with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
-                    os.killpg(pid, sig)
-            tree = all_targets
+        if sig == signal.SIGKILL:
+            tree = list(dict.fromkeys(tree + descendants(pid, proc_root=proc_root)))
+        for target in reversed(tree):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(target, sig)
+        if include_pg:
+            with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+                os.killpg(pid, sig)
         deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             # Reap if any target is our direct child so zombies disappear promptly.
@@ -170,6 +160,36 @@ def stop_tree(
                 return True
             time.sleep(0.03)
     return not any(pid_alive(t, proc_root=proc_root) for t in tree)
+
+
+def pg_alive(pgid: int) -> bool:
+    """True when process group `pgid` still has at least one member."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def stop_session(pid: int, grace: float = 10.0, reap=None) -> bool:
+    """Stop the session/process-group led by `pid` (`SIGTERM`, then `SIGKILL` after `grace` s)."""
+    with contextlib.suppress(ProcessLookupError):
+        if pid_alive(pid) and os.getpgid(pid) != pid:
+            return False
+    if not pg_alive(pid):
+        return False
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        kill_tree(pid, sig, include_pg=True)
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            if reap is not None:
+                reap()
+            if not pg_alive(pid):
+                return True
+            time.sleep(0.02)
+    return True
 
 
 def reap_all(

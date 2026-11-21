@@ -220,13 +220,44 @@ _compile = compile          # `stage` has a parameter named compile
 
 
 LIVE_BODY = "__fastrsi_class_body__"
+SHELL_BODY = "__fastrsi_outer_body__"
 
 
-def _shell(name, body):
-    """A scratch class statement whose body reads the live class's names: its metaclass is
-    the `LIVE_BODY` name, which the live half binds to a `_LiveBody`."""
-    return ast.ClassDef(name, [], [ast.keyword("metaclass", ast.Name(LIVE_BODY, ast.Load()))],
-                        body, [], type_params=[])
+class _OuterShell:
+    """Placeholder metaclass for outer classes in a nested `_shell` chain so added nested
+    members and defaults compile with the exact dotted `co_qualname`."""
+
+    def __init__(self, inner_meta):
+        self.inner_meta = inner_meta
+
+    def __prepare__(self, name, bases, **kw):
+        return {SHELL_BODY: self, LIVE_BODY: self.inner_meta}
+
+    def __call__(self, name, bases, ns, **kw):
+        clean = {k: v for k, v in ns.items() if k not in (SHELL_BODY, LIVE_BODY)}
+        return type(name, bases, clean)
+
+
+def _shell(cls_path, body):
+    """A scratch class chain whose innermost class reads the live class's names (`LIVE_BODY`)
+    while preserving full dotted `co_qualname` across any enclosing classes (`SHELL_BODY`)."""
+    parts = cls_path.split(".")
+    inner = ast.ClassDef(parts[-1], [],
+                         [ast.keyword("metaclass", ast.Name(LIVE_BODY, ast.Load()))],
+                         body, [], type_params=[])
+    for outer_name in reversed(parts[:-1]):
+        inner = ast.ClassDef(outer_name, [],
+                             [ast.keyword("metaclass", ast.Name(SHELL_BODY, ast.Load()))],
+                             [inner], [], type_params=[])
+    return inner
+
+
+def _unwrap_shell(ns, cls_parts):
+    """Walk the scratch class namespace produced by `_shell` down to its innermost class."""
+    cur = ns[cls_parts[0]]
+    for part in cls_parts[1:]:
+        cur = cur.__dict__[part]
+    return cur
 
 
 class _LiveBody:
@@ -269,14 +300,13 @@ def _futures(tree):
 
 
 def _defaults_stub(q, node, futures=()):
-    """The def with an empty body, inside a scratch class named like the innermost class of
-    the qualname (same name mangling; a class body sees only its own class's names), whose
-    body reads the live class (`_shell`), compiled: running it in the module's globals
-    evaluates the new defaults as the live class body would."""
+    """The def with an empty body, inside a scratch class chain for the qualname's enclosing
+    classes whose innermost class reads the live class (`_shell`), compiled: running it in the
+    module's globals evaluates the new defaults as the live class body would."""
     stub = copy.deepcopy(node)
     stub.body, stub.decorator_list = [ast.Pass()], []
     parts = q.split(".")
-    body = [stub] if len(parts) == 1 else [_shell(parts[-2], [stub])]
+    body = [stub] if len(parts) == 1 else [_shell(".".join(parts[:-1]), [stub])]
     return _try_compile(ast.fix_missing_locations(ast.Module(list(futures) + body, [])),
                         "<defaults>")
 
@@ -286,11 +316,15 @@ def _defaults(mod, q, stub, imports=None):
     new `imports`, and for a method the live class's names (read-only, `_LiveBody`). Returns
     (defaults, kwdefaults) or raises."""
     parts = q.split(".")
-    cls = ".".join(parts[:-1])
+    cls_parts = parts[:-1]
+    cls = ".".join(cls_parts)
+    live_body = _LiveBody(_live_class(mod, cls), imports)
     ns = dict(imports or {})
-    ns[LIVE_BODY] = _LiveBody(_live_class(mod, cls), imports)
+    ns[LIVE_BODY] = live_body
+    if len(cls_parts) > 1:
+        ns[SHELL_BODY] = _OuterShell(live_body)
     exec(_raise(stub), mod.__dict__, ns)
-    obj = ns[parts[0]] if len(parts) == 1 else ns[parts[-2]].__dict__[parts[-1]]
+    obj = ns[parts[0]] if len(parts) == 1 else _unwrap_shell(ns, cls_parts).__dict__[parts[-1]]
     return obj.__defaults__, obj.__kwdefaults__
 
 
@@ -409,24 +443,33 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
                      "jit": _jit_decorator(bq[q][i]) or _jit_decorator(node), "jit_text": jt,
                      **({"reinit": ri} if ri is not None else {})})
 
-    # 2. added definitions: top-level ones, and methods of classes that exist in the base
-    added = []
-    base_top = {getattr(n, "name", None) for n in base_tree.body}
-    for n in tree.body:
-        if isinstance(n, (*_DEF, ast.ClassDef)) and n.name not in base_top:
-            added.append((n.name, None, n))
-        elif isinstance(n, ast.ClassDef) and n.name in base_top:
-            bnames = {getattr(m, "name", None) for b in base_tree.body
-                      if isinstance(b, ast.ClassDef) and b.name == n.name for m in b.body}
-            added += [(f"{n.name}.{m.name}", n.name, m) for m in n.body
-                      if isinstance(m, _DEF) and m.name not in bnames]
+    # 2. added definitions: functions and classes at module or any class nesting level
+    def _collect_added(base_body, patch_body, cls_path):
+        base_nodes = {}
+        for node in base_body:
+            name = getattr(node, "name", None)
+            if name is not None:
+                base_nodes.setdefault(name, []).append(node)
+        out = []
+        for node in patch_body:
+            if isinstance(node, (*_DEF, ast.ClassDef)):
+                q = f"{cls_path}.{node.name}" if cls_path else node.name
+                b_matches = base_nodes.get(node.name, ())
+                if not b_matches:
+                    out.append((q, cls_path or None, node))
+                elif isinstance(node, ast.ClassDef):
+                    b_classes = [b for b in b_matches if isinstance(b, ast.ClassDef)]
+                    if len(b_classes) == 1:
+                        out.extend(_collect_added(b_classes[0].body, node.body, q))
+        return out
+
+    added = _collect_added(base_tree.body, tree.body, "")
     for q, _, n in added:
         if isinstance(n, _DEF) and not _jit_decorator(n):   # a JIT kernel: launch hooks
             _inject(n, L.key_of(key_module, q, first_line(n)), undo)
 
     # 2b. removed definitions
     removed = removed_definitions(base_tree, tree)
-    nested = sorted(_nested_methods(base_tree) ^ _nested_methods(tree))
 
     # 4. top-level imports, compiled; the caller runs those the module lacks or that changed
     base_imports = {ast.dump(stmt) for stmt in base_tree.body
@@ -472,15 +515,17 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             r["nested_signature"] = (f"{ast.unparse(bnode.args)} -> {ast.unparse(pnode.args)}")
 
     # 6b. fields the new code reads that only the new __init__ sets (`new_fields`)
+    patch_classes = _class_map(tree)
     meths = {}
     for q, i in todo:
-        parts = q.split(".")
-        if len(parts) == 2 and isinstance(pq[q][i], _DEF):
-            meths.setdefault(parts[0], []).append(pq[q][i])
+        cls_path, dot, _ = q.rpartition(".")
+        if dot and cls_path in patch_classes and isinstance(pq[q][i], _DEF):
+            meths.setdefault(cls_path, []).append(pq[q][i])
     for q, cls_name, n in added:
         if cls_name is not None and isinstance(n, _DEF):
             meths.setdefault(cls_name, []).append(n)
-    new_fields = _new_fields(base_tree, tree, meths, filename) if meths else []
+    new_fields = _new_fields(base_tree, tree, meths, filename,
+                             patch_classes=patch_classes) if meths else []
 
     # 7. anything else changed? Last, because blanking edits the two trees (logged in undo).
     t = time.perf_counter()
@@ -491,22 +536,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
             "base_units": base_units, "new_units": new_units,
             "new_error": new_error, "line_map": line_map, "added": adds, "removed": removed,
             "imports": imports, "outside_changes": outside, "timings": timings,
-            "aliases": aliases, "new_fields": new_fields, "nested_changes": nested}
-
-
-def _nested_methods(tree):
-    """Qualnames of the methods of classes nested in a class (`Outer.Inner.m`): stage adds
-    and removes only top-level definitions and methods of top-level classes."""
-    out = set()
-
-    def walk(body, prefix, depth):
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                walk(node.body, f"{prefix}{node.name}.", depth + 1)
-            elif isinstance(node, _DEF) and depth >= 2:
-                out.add(prefix + node.name)
-    walk(tree.body, "", 0)
-    return out
+            "aliases": aliases, "new_fields": new_fields}
 
 
 def _defaults_key(node):
@@ -615,14 +645,30 @@ def _dataclass_fields(cls_def):
             and node.value is None}
 
 
-def _new_fields(base_tree, tree, meths, filename):
+def _class_map(tree):
+    """Map dotted class qualname -> ast.ClassDef across module and nested classes."""
+    out = {}
+
+    def walk(body, prefix):
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                q = f"{prefix}{node.name}"
+                out[q] = node
+                walk(node.body, f"{q}.")
+
+    walk(tree.body, "")
+    return out
+
+
+def _new_fields(base_tree, tree, meths, filename, patch_classes=None):
     """[{cls, field, readers, init_line}] for each attribute that a changed or added method
-    of a top-level class reads on `self`, that the edited __init__ / __post_init__ or a new
-    bare @dataclass field sets, and that no method of the base class sets nor the base class
-    body defines (a code swap does not run the patched class body; stage still skips a name
-    the live class has)."""
-    base_classes = {node.name: node for node in base_tree.body if isinstance(node, ast.ClassDef)}
-    patch_classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    of a class (top-level or nested) reads on `self`, that the edited __init__ / __post_init__
+    or a new bare @dataclass field sets, and that no method of the base class sets nor the base
+    class body defines (a code swap does not run the patched class body; stage still skips a
+    name the live class has)."""
+    base_classes = _class_map(base_tree)
+    if patch_classes is None:
+        patch_classes = _class_map(tree)
     out = []
     for cls_name, nodes in meths.items():
         base_cls, patch_cls = base_classes.get(cls_name), patch_classes.get(cls_name)
@@ -829,7 +875,7 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     # accept, apply deletes them through the journal.
     for q in a["removed"]:
         cls, _, name = q.rpartition(".")
-        owner = mod.__dict__ if not cls else getattr(mod, cls, None)
+        owner = mod.__dict__ if not cls else _live_class(mod, cls)
         present = owner is not None and (name in owner if isinstance(owner, dict)
                                          else name in vars(owner))
         if present:
@@ -865,7 +911,9 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
         for ad in a["added"]:
             if ad.get("error"):
                 raise _Failed(ad["error"])
-            owner = mod.__dict__ if ad["cls"] is None else getattr(mod, ad["cls"])
+            owner = mod.__dict__ if ad["cls"] is None else _live_class(mod, ad["cls"])
+            if owner is None:
+                raise _Failed(f"enclosing class {ad['cls']} is not live")
             st.pending_adds.append(ad)
             st.add_slots.append((owner, ad["name"]))
             if ad["def"]:
@@ -979,9 +1027,10 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
     # 6b. fields only the new __init__ sets, read by new code: live instances lack them.
     # No backfill here: the finding blocks and routes to T1 (rebuild the objects or restart).
     for nf in a.get("new_fields") or ():
-        cls = getattr(mod, nf["cls"], None)
+        cls = _live_class(mod, nf["cls"])
         x = nf["field"]
-        attr = f"_{nf['cls'].lstrip('_')}{x}" if x.startswith("__") and not x.endswith("__") \
+        cls_leaf = nf["cls"].rpartition(".")[2]
+        attr = f"_{cls_leaf.lstrip('_')}{x}" if x.startswith("__") and not x.endswith("__") \
             else x
         if not isinstance(cls, type) or hasattr(cls, attr):
             continue                       # a class-level default covers old instances
@@ -1015,12 +1064,6 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             fs.append(f)
 
     # 7. anything else changed? (compared by the analysis)
-    if a.get("nested_changes"):        # a swap cannot add or remove them: not overridable
-        fs.append({**F.finding(
-            "outside_changes", f"the edit adds or removes methods of a nested class: "
-            f"{', '.join(a['nested_changes'][:5])}; the live class would not get them (a new "
-            "call to one raises AttributeError)", "only top-level definitions and methods of "
-            "top-level classes added or removed", subject=kname), "overridable": False})
     if a["outside_changes"]:
         fs.append(F.finding("outside_changes", "the module differs outside the target bodies "
                             "(beyond added definitions and imports)",
@@ -1247,18 +1290,26 @@ def _dump_code(node):
 
 
 def removed_definitions(base_tree, tree):
-    """Qualnames the edit deletes: top-level functions and classes, and methods of top-level
-    classes that stay (a deleted class is reported once, not per method)."""
-    def defs(t):
+    """Qualnames the edit deletes: functions and classes at module or any class nesting
+    level whose enclosing class stays (a deleted class is reported once, not per member)."""
+    def defs(body, prefix=""):
         out = set()
-        for n in t.body:
+        for n in body:
             if isinstance(n, (*_DEF, ast.ClassDef)):
-                out.add(n.name)
-            if isinstance(n, ast.ClassDef):
-                out |= {f"{n.name}.{m.name}" for m in n.body if isinstance(m, _DEF)}
+                q = f"{prefix}{n.name}"
+                out.add(q)
+                if isinstance(n, ast.ClassDef):
+                    out |= defs(n.body, f"{q}.")
         return out
-    gone = defs(base_tree) - defs(tree)
-    return sorted(q for q in gone if "." not in q or q.split(".")[0] not in gone)
+
+    gone = defs(base_tree.body) - defs(tree.body)
+    out = []
+    for q in sorted(gone):
+        ancestors = q.split(".")
+        if any(".".join(ancestors[:i]) in gone for i in range(1, len(ancestors))):
+            continue
+        out.append(q)
+    return out
 
 
 def _nested(codes):
@@ -1305,6 +1356,21 @@ def _nested_in_order(code):
     return out
 
 
+def _walk_added_functions(obj, seen=None):
+    """Yield every function inside an added member or class (including nested classes)."""
+    if seen is None:
+        seen = set()
+    if isinstance(obj, type):
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        for member in vars(obj).values():
+            yield from _walk_added_functions(member, seen)
+        return
+    for fn_obj in _member_functions(obj):
+        yield fn_obj
+
+
 def closure_pairs(st):
     """{id(new nested code): (new code, old code or None)} for every code `apply` installs:
     the nested codes from which the new code makes function objects at run time (closures,
@@ -1333,13 +1399,8 @@ def closure_pairs(st):
     for fn, code, _, _ in st.swaps:
         pair(fn.__code__, code)
     for _, _, obj in st.adds:
-        if isinstance(obj, type):
-            for member in vars(obj).values():
-                for fn_obj in _member_functions(member):
-                    pair(None, fn_obj.__code__)
-        else:
-            for fn_obj in _member_functions(obj):
-                pair(None, fn_obj.__code__)
+        for fn_obj in _walk_added_functions(obj):
+            pair(None, fn_obj.__code__)
     return pairs
 
 
@@ -1367,13 +1428,8 @@ def _retarget_nested_filename(code, filename):
 
 
 def _retarget_added_nested(obj, filename):
-    if isinstance(obj, type):
-        for member in vars(obj).values():
-            for fn_obj in _member_functions(member):
-                fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
-    else:
-        for fn_obj in _member_functions(obj):
-            fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
+    for fn_obj in _walk_added_functions(obj):
+        fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
 
 
 def _build_adds(st, journal, ver_file=None):
@@ -1391,20 +1447,26 @@ def _build_adds(st, journal, ver_file=None):
     built = {}                         # class -> {name: member added so far}
     for ad in st.pending_adds:
         ns = dict(top)
-        if ad["cls"] is not None:      # decorators and defaults see the live class body
-            ns[LIVE_BODY] = _LiveBody(getattr(mod, ad["cls"]), top, built.get(ad["cls"]))
+        cls_name, name = ad["cls"], ad["name"]
+        if cls_name is not None:      # decorators and defaults see the live class body
+            cls_parts = cls_name.split(".")
+            live_body = _LiveBody(_live_class(mod, cls_name), top, built.get(cls_name))
+            ns[LIVE_BODY] = live_body
+            if len(cls_parts) > 1:
+                ns[SHELL_BODY] = _OuterShell(live_body)
         with JIT.seeded_lines(mod.__file__, st.source):    # @triton.jit reads its lines
             exec(_raise(ad), mod.__dict__, ns)
-        cls_name, name = ad["cls"], ad["name"]
         if cls_name is None:
+            obj = ns[name]
             if ver_file:
-                _retarget_added_nested(ns[name], ver_file)
-            top[name] = ns[name]       # a later added definition may use it
-            st.adds.append((mod.__dict__, name, ns[name]))
-            if ad["def"] and JIT.unwrap(ns[name])[0] is not None:
-                st.jit_adds.append((ns[name], ad["key"]))
+                _retarget_added_nested(obj, ver_file)
+            top[name] = obj       # a later added definition may use it
+            st.adds.append((mod.__dict__, name, obj))
+            if ad["def"] and JIT.unwrap(obj)[0] is not None:
+                st.jit_adds.append((obj, ad["key"]))
         else:
-            obj, cls = ns[cls_name].__dict__[name], getattr(mod, cls_name)
+            obj = _unwrap_shell(ns, cls_name.split(".")).__dict__[name]
+            cls = _live_class(mod, cls_name)
             if ver_file:
                 _retarget_added_nested(obj, ver_file)
             built.setdefault(cls_name, {})[name] = obj
@@ -1418,7 +1480,12 @@ def apply(st, journal, witness):
     error it undoes its own entries and returns not-ok. First it journals the nested-code
     pairs (`closure_pairs`), so undo, which runs last for it, also takes back closures the new
     code made while installed."""
+    if getattr(journal, "poisoned", False):
+        return F.not_ok("apply refused: journal poisoned", [
+            F.finding("session_poisoned", "journal has an incomplete undo or rollback",
+                      "a healthy journal")])
     start = len(journal.entries)
+    cb_start = len(getattr(journal, "_undo_callbacks", ()))
     g = st.mod.__dict__
     try:
         mod_file = getattr(st.mod, "__file__", None)
@@ -1486,6 +1553,7 @@ def apply(st, journal, witness):
         for owner, name in st.removes:     # only reached when removed_definition was accepted
             journal.delete(owner, name)
     except Exception as e:
-        u = journal.undo_to(start)
+        u = (journal._undo_apply(start, cb_start)
+             if hasattr(journal, "_undo_apply") else journal.undo_to(start))
         return F.not_ok(f"apply: {type(e).__name__}: {e}", u["findings"], undo=u)
     return F.ok(changes=len(journal.entries) - start)

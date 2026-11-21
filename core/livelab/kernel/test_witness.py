@@ -12,6 +12,8 @@ participant's hook, each through the journal. Toy arithmetic: see test_locate.py
 """
 import ast
 import gc
+import inspect
+import sys
 import threading
 import time
 import types
@@ -363,6 +365,91 @@ class CodeRestartWitnessTest(unittest.TestCase):
             self.assertEqual(W.collect_restart_witness(["scale"]), {"scale": 0}, first)
             self.assertEqual(W.collect_restart_witness([f"{mods[first].__name__}:scale"]),
                              {f"{mods[first].__name__}:scale": 2})
+
+    def test_uninstrument_module_functions_restores_all_targets_and_aliases(self):
+        """Input: module with top-level fn, cross-module alias, staticmethod, classmethod,
+        @property, and nested class method instrumented (and re-instrumented). Expected:
+        partial uninstrument removes only named targets while keeping remaining hooks live; full
+        uninstrument restores exact original callables/descriptors, rebinds cross-module aliases,
+        removes `__fastrsi_hit__` / `__fastrsi_restart_counts__`, and cleans global restart
+        registries."""
+        mod = types.ModuleType("kt_uninst_mod")
+        importer = types.ModuleType("kt_uninst_importer")
+        sys.modules[mod.__name__] = mod
+        sys.modules[importer.__name__] = importer
+        self.addCleanup(lambda: (sys.modules.pop(mod.__name__, None),
+                                 sys.modules.pop(importer.__name__, None)))
+        exec(
+            "def scale(x):\n    return x * 2\n\n"
+            "class Outer:\n"
+            "    @staticmethod\n    def sm(x):\n        return x + 1\n"
+            "    @classmethod\n    def cm(cls, x):\n        return x + 2\n"
+            "    @property\n    def prop(self):\n        return 99\n"
+            "    class Inner:\n        def step(self, x):\n            return x + 3\n",
+            mod.__dict__,
+        )
+        orig_scale = mod.scale
+        orig_sm = inspect.getattr_static(mod.Outer, "sm")
+        orig_cm = inspect.getattr_static(mod.Outer, "cm")
+        orig_prop = inspect.getattr_static(mod.Outer, "prop")
+        orig_inner_step = mod.Outer.Inner.step
+        importer.scale_alias = orig_scale
+
+        all_targets = ["scale", "Outer.sm", "Outer.cm", "Outer.prop", "Outer.Inner.step"]
+        W.instrument_module_functions(mod, all_targets)
+        # Re-instrumenting one target must not lose original provenance
+        W.instrument_module_functions(mod, ["scale"])
+        self.assertIsNot(mod.scale, orig_scale)
+        self.assertIs(importer.scale_alias, mod.scale)
+        self.assertEqual(importer.scale_alias(5), 10)
+        self.assertEqual(mod.Outer.sm(1), 2)
+        self.assertEqual(mod.Outer.cm(1), 3)
+        self.assertEqual(mod.Outer().prop, 99)
+        self.assertEqual(mod.Outer.Inner().step(4), 7)
+
+        # Partial uninstrumentation restores `scale` + alias, keeps `Outer.sm` active
+        removed_one = W.uninstrument_module_functions(mod, "scale")
+        self.assertEqual(list(removed_one), ["scale"])
+        self.assertIs(mod.scale, orig_scale)
+        self.assertIs(importer.scale_alias, orig_scale)
+        self.assertTrue(hasattr(mod, W.HIT))
+        mod.Outer.sm(10)
+        self.assertEqual(W.collect_restart_witness(mod), {"Outer.sm": 2, "Outer.cm": 1,
+                                                          "Outer.prop": 1, "Outer.Inner.step": 1})
+
+        # Uninstrument remaining targets -> restores all descriptors and cleans module/registries
+        removed_rest = W.uninstrument_module_functions(mod)
+        self.assertEqual(set(removed_rest), {"Outer.sm", "Outer.cm", "Outer.prop", "Outer.Inner.step"})
+        self.assertIs(inspect.getattr_static(mod.Outer, "sm"), orig_sm)
+        self.assertIs(inspect.getattr_static(mod.Outer, "cm"), orig_cm)
+        self.assertIs(inspect.getattr_static(mod.Outer, "prop"), orig_prop)
+        self.assertIs(mod.Outer.Inner.step, orig_inner_step)
+        self.assertFalse(hasattr(mod, W.HIT))
+        self.assertFalse(hasattr(mod, "__fastrsi_restart_counts__"))
+        self.assertNotIn(f"{mod.__name__}:scale", W._RESTART_INSTRUMENTED_TARGETS)
+        self.assertNotIn(f"{mod.__name__}:Outer.Inner.step", W._RESTART_INSTRUMENTED_TARGETS)
+        # Idempotent second call is a clean no-op
+        self.assertEqual(W.uninstrument_module_functions(mod), {})
+
+    def test_uninstrument_preserves_preexisting_hit_and_sibling_module_registry(self):
+        """Input: two modules both instrument `dup`, and module A had a prior `__fastrsi_hit__`.
+        Expected: uninstrumenting A restores A's prior `__fastrsi_hit__` and keeps B's wrapper
+        registered under `dup`."""
+        mod_a = types.ModuleType("kt_uninst_a")
+        mod_b = types.ModuleType("kt_uninst_b")
+        exec("def dup(x):\n    return x\n", mod_a.__dict__)
+        exec("def dup(x):\n    return x + 1\n", mod_b.__dict__)
+        prior_hit = lambda k: None
+        setattr(mod_a, W.HIT, prior_hit)
+        W.instrument_module_functions(mod_a, ["dup"])
+        wb = W.instrument_module_functions(mod_b, ["dup"])["dup"]
+        self.addCleanup(W.uninstrument_module_functions, mod_b)
+
+        W.uninstrument_module_functions(mod_a)
+        self.assertIs(getattr(mod_a, W.HIT), prior_hit)
+        mod_b.dup(1)
+        self.assertEqual(W.collect_restart_witness(["dup"]), {"dup": 1})
+        self.assertIs(W._RESTART_INSTRUMENTED_TARGETS.get("dup"), wb)
 
 
 if __name__ == "__main__":
