@@ -5,6 +5,7 @@ duplicated `LabUnderTest` verb plumbing (`install`, `check`, `reset`, `uninstall
 `live_text` stack tracking, witness/proof aggregation, poison-on-fault), multi-role abstain
 dispatch, and post-commit rebuild + bounded in-gap rollback across engines.
 """
+import contextlib
 import json
 import os
 import threading
@@ -23,17 +24,8 @@ from . import harness as H
 # -- Multi-role abstaining participant endpoint ------------------------------------------
 
 ENDPOINT_METHODS = (
-    "prepare",
-    "validate",
-    "commit",
-    "abort",
-    "undo",
-    "status",
-    "proof",
-    "witness_check",
-    "reset",
-    "at_base",
-    "fingerprint",
+    "prepare", "validate", "commit", "abort", "undo", "status",
+    "proof", "witness_check", "reset", "at_base", "fingerprint",
 )
 
 
@@ -143,16 +135,7 @@ class RecaptureCoordinator(C.StepGapCoordinator):
     """
 
     DEFAULT_RANK_FIELDS = (
-        "ok",
-        "error",
-        "seconds",
-        "captured",
-        "modes",
-        "wrappers",
-        "graphs",
-        "eager",
-        "memory",
-        "skipped",
+        "ok", "error", "seconds", "captured", "modes", "wrappers", "graphs", "eager", "memory", "skipped",
     )
 
     def __init__(
@@ -513,36 +496,21 @@ class BaseLab:
         t0 = time.perf_counter()
         with self.lock:
             if kind == "respawn":
-                try:
+                with contextlib.suppress(Exception):
                     self._stop_engine()
-                except Exception:
-                    pass
                 self._spawn()
-                return {
-                    "ok": not self.session.poisoned(),
-                    "reset": ["worker group", "session"],
-                    "cost_s": round(time.perf_counter() - t0, 6),
-                }
+                return {"ok": not self.session.poisoned(), "reset": ["worker group", "session"],
+                        "cost_s": round(time.perf_counter() - t0, 6)}
             try:
                 res = self._reset_state()
             except Exception as exc:
-                return {
-                    "ok": False,
-                    "error": f"{type(exc).__name__}: {exc}",
-                    "reset": [],
-                    "cost_s": round(time.perf_counter() - t0, 6),
-                }
-            if isinstance(res, dict):
-                return {
-                    "ok": bool(res.get("ok", True)),
-                    "reset": list(res.get("reset", [])),
-                    **{k: v for k, v in res.items() if k not in ("ok", "reset", "cost_s")},
-                    "cost_s": round(time.perf_counter() - t0, 6),
-                }
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "reset": [],
+                        "cost_s": round(time.perf_counter() - t0, 6)}
+            extra = {k: v for k, v in res.items() if k not in ("ok", "reset", "cost_s")} if isinstance(res, dict) else {}
             return {
-                "ok": True,
-                "reset": list(res),
-                "cost_s": round(time.perf_counter() - t0, 6),
+                "ok": bool(res.get("ok", True)) if isinstance(res, dict) else True,
+                "reset": list(res.get("reset", [])) if isinstance(res, dict) else list(res),
+                **extra, "cost_s": round(time.perf_counter() - t0, 6),
             }
 
     def uninstall(self, id: str | None = None) -> dict:
@@ -554,11 +522,8 @@ class BaseLab:
                 del self.live_text[-len(undone):]
                 self._after_uninstall(undone)
             return {
-                "ok": bool(res.get("ok")),
-                "undone": undone,
-                "state": self.session.state(),
-                "findings": list(res.get("findings", [])),
-                "cost_s": round(time.perf_counter() - t0, 6),
+                "ok": bool(res.get("ok")), "undone": undone, "state": self.session.state(),
+                "findings": list(res.get("findings", [])), "cost_s": round(time.perf_counter() - t0, 6),
             }
 
     def status(self) -> dict:
@@ -567,10 +532,8 @@ class BaseLab:
 
     def close(self) -> None:
         with self.lock:
-            try:
+            with contextlib.suppress(Exception):
                 self._stop_engine()
-            except Exception:
-                pass
 
     # -- conformance harness defaults ----------------------------------------------------
     def patches(self) -> dict:

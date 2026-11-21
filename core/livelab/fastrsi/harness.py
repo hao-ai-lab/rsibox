@@ -352,6 +352,11 @@ def install_refusal(
     return res
 
 
+def plain_finding(check: str, observed, expected, **extra) -> dict:
+    """Build a lightweight finding dictionary (`check`, `observed`, `expected`, plus optional fields)."""
+    return {"check": check, "observed": observed, "expected": expected, **extra}
+
+
 def check_failure(error: str | None, findings: list[dict], *, t0: float | None = None) -> dict:
     """Standardized failed `LabUnderTest.check()` reply."""
     res = {

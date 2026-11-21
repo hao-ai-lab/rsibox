@@ -3,16 +3,17 @@
 Every `repos/<engine>/livelab/` implements this. How is up to the engine; what is fixed here.
 Changing this file is a breaking change: bump the version and say so in the PR.
 
-## The four calls
+## The five verbs
+
+Every verb returns a plain dict with `cost_s` (seconds) and never raises (`conformance/lab.py`):
 
 | Call | Does | Returns |
 |---|---|---|
-| `install(patch)` | Stages and binds a change on every worker rank at once, refreshing only what it invalidates. Refuses unsupported edits before touching state. | install id, the mechanism used per function, or a refusal with its reason |
-| `check(workload)` | Runs a probe inside the warm engine | latency/throughput, output correctness vs base, **whether the patched path ran**, optional profiler trace, and the check's own cost in seconds |
-| `reset()` | Drains in-flight work and restores volatile state (caches, buffers, RNG, iterators) so the next check starts from the same state | which state was reset |
-| `uninstall()` | Reverts to base in place | proof that base invariants hold again |
-
-Plus `status()`: `base`, `edited` or `poisoned`.
+| `install(patch)` | Stages and binds a change (`files`, optional `accept`, `undo_resets`) on every worker rank at once, refreshing only what it invalidates. Refuses unsupported edits (`c6_refusal`: `patch_invalid`, `closure_changed`, `outside_changes`, `empty_change`) and poisoned labs (`session_poisoned`) before touching state. | `{ok, id, outcome, codes, mechanisms, findings, cost_s}` (`outcome`: `committed \| aborted \| rolled_back \| refused \| in-doubt`) |
+| `check(workload=None)` | Runs a probe inside the warm engine | `{ok, output, proven, witness, findings, cost_s}` (+ optional `abstained`); `output` is bit-exact JSON, `proven` is `True \| False \| None` (`False` with `zero_witness` if any involved edit missed execution; `None` at base) |
+| `reset(kind="state")` | `kind="state"`: drains in-flight work and restores volatile state (caches, buffers, RNG, iterators) so the next check starts from the same state. `kind="respawn"`: restarts the worker group from warm caches and clears poison (`c8_crash_and_hang`). | `{ok, reset, cost_s}` where `reset` is a non-empty list naming what state was cleared |
+| `uninstall(id=None)` | Reverts `id` (default newest) and any later edits in place, newest first | `{ok, undone, state, cost_s}` (`state`: `base \| edited \| poisoned`) |
+| `status()` | Reports live lab state and code identity digest per participant | `{ok, state, txns, fingerprint, poison}` (`state`: `base \| edited \| poisoned`) |
 
 ## How `install` refreshes (by function group)
 
@@ -72,11 +73,11 @@ aborted, undone, in-doubt); the record is written once the outcome is known.
 | `base_hash`, `patch_hash` | str | hash of the base sources, and of the patched sources plus repair cells |
 | `plan` | `{targets, predicted_resources, recipes, certainty, accept, undo_resets}` | what the planner predicted, the accepted check names, the resets an undo must run |
 | `actual_recipes` | [str] | recipes that ran (empty unless committed) |
-| `participants` | `{name: {prepare, validate, commit, abort, undo}}` | each call's `{"ok": bool, ...}` reply |
+| `participants` | `{name: {prepare, validate, commit, abort, undo, proof}}` | each call's `{"ok": bool, ...}` reply |
 | `commit_hashes` | `{participants: {name: {key: [hash]}}, agree}` | code hashes right after commit, and whether all participants agree |
 | `findings` | [finding + `participant`] | every finding of the transaction, in the findings schema |
 | `decisions` | `{accepted: [check], blocking: [check]}` | how the accept list was applied |
-| `outcome` | `committed` \| `aborted` \| `rolled_back` | all switched, none switched, or switched and undone in the same transaction |
+| `outcome` | `committed` \| `aborted` \| `rolled_back` \| `refused` | all switched, none switched, switched and undone, or refused while poisoned |
 | `timeline` | `{edit, prepare_start, prepared, gap_start, vote, committed, gap_end, txn_end}` | measured unix seconds |
 | `edit_to_run_s` | null | null here: nothing has run at commit; the `proof` record has the first execution |
 | `edit_to_commit_s` | float \| null | `committed - edit` (monotonic clock); null if nothing committed |
@@ -84,7 +85,7 @@ aborted, undone, in-doubt); the record is written once the outcome is known.
 | `prepare_s` | float | `prepared - prepare_start`: phase 1, while the engine steps |
 | `gap_s` | float \| null | `gap_end - gap_start`: phase 2, how long the engine's loop stalled |
 | `baseline_restart_s` | `{seconds, source}` \| null | the warm restart this transaction replaces |
-| `rollback` | `{status, participants}` | undo of a failed commit: `not_needed`, `undone` or `partial` |
+| `rollback` | `{status, participants, missed_deadline?}` | undo of a failed commit: `not_needed`, `undone` or `partial` |
 
 `proof`: what the workload showed after the transaction.
 

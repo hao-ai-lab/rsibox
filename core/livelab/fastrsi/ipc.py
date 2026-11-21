@@ -139,6 +139,11 @@ class UnixJsonServer:
                 conn.close()
             return
 
+        def close_conn():
+            for resource in (stream, conn):
+                with contextlib.suppress(OSError):
+                    resource.close()
+
         def reply(obj) -> bool:
             try:
                 stream.write((json.dumps(obj, default=str) + "\n").encode("utf-8"))
@@ -152,23 +157,17 @@ class UnixJsonServer:
                 )
                 return False
             finally:
-                for resource in (stream, conn):
-                    with contextlib.suppress(OSError):
-                        resource.close()
+                close_conn()
                 done.set()
 
         try:
             line = stream.readline()
             conn.settimeout(None)
         except OSError:
-            for resource in (stream, conn):
-                with contextlib.suppress(OSError):
-                    resource.close()
+            close_conn()
             return
         if not line:
-            for resource in (stream, conn):
-                with contextlib.suppress(OSError):
-                    resource.close()
+            close_conn()
             return
         try:
             req = json.loads(line)
@@ -247,11 +246,42 @@ def unix_json_stream(
                     break
 
 
-# -- File control channel (`ctl.json` + `reply/<seq>.json`) ------------------------------
+# -- File control channel & NFS-safe directory mailbox -----------------------------------
 
 
-class FileChannelServer:
+class _PollingServer:
+    """Shared daemon-thread lifecycle for polling IPC servers."""
+
+    _thread_name = "fastrsi-poll"
+
+    def _init_polling(self, poll_s: float, start: bool) -> None:
+        self.poll_s = poll_s
+        self._stop = threading.Event()
+        self._thread = None
+        if start:
+            self.start()
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True, name=self._thread_name)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.stop()
+
+
+class FileChannelServer(_PollingServer):
     """Polling server over `<root>/ctl.json` and `<root>/reply/<seq>.json`."""
+
+    _thread_name = "fastrsi-file-channel"
 
     def __init__(
         self,
@@ -265,22 +295,11 @@ class FileChannelServer:
     ):
         self.root = os.fspath(root)
         self._handler = handler
-        self.poll_s = poll_s
         self.ctl_path = os.path.join(self.root, ctl_name)
         self.reply_dir = os.path.join(self.root, reply_dir)
         os.makedirs(self.reply_dir, exist_ok=True)
-        self._stop = threading.Event()
         self._last = 0
-        self._thread = None
-        if start:
-            self.start()
-
-    def start(self) -> None:
-        if self._thread is None:
-            self._thread = threading.Thread(
-                target=self._run, daemon=True, name="fastrsi-file-channel"
-            )
-            self._thread.start()
+        self._init_polling(poll_s, start)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -298,17 +317,6 @@ class FileChannelServer:
                         reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
                     atomic_write_json(os.path.join(self.reply_dir, f"{seq}.json"), reply)
             self._stop.wait(self.poll_s)
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        self.stop()
 
 
 def file_channel_call(
@@ -355,12 +363,14 @@ def file_channel_call(
 # -- NFS-safe directory mailbox (`req-<id>.json` -> `resp-<id>.json`) --------------------
 
 
-class MailboxServer:
+class MailboxServer(_PollingServer):
     """NFS-safe directory mailbox server (`req-<id>.json` -> `.taken` -> `resp-<id>.json`).
 
     Accepts either a `queue.Queue` (queuing `(req, reply_fn)` like `UnixJsonServer`) or a
     callable `handler(req) -> dict`.
     """
+
+    _thread_name = "fastrsi-mailbox"
 
     def __init__(
         self,
@@ -372,19 +382,8 @@ class MailboxServer:
     ):
         self.root = os.fspath(root)
         self._sink = sink
-        self.poll_s = poll_s
         os.makedirs(self.root, exist_ok=True)
-        self._stop = threading.Event()
-        self._thread = None
-        if start:
-            self.start()
-
-    def start(self) -> None:
-        if self._thread is None:
-            self._thread = threading.Thread(
-                target=self._run, daemon=True, name="fastrsi-mailbox"
-            )
-            self._thread.start()
+        self._init_polling(poll_s, start)
 
     def _replier(self, rid: str):
         def reply(obj) -> bool:
@@ -432,17 +431,6 @@ class MailboxServer:
                 else:
                     self._sink.put((req, replier))
             self._stop.wait(self.poll_s)
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        self.stop()
 
 
 def mailbox_call(

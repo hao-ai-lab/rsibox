@@ -133,6 +133,43 @@ class CasesCatchMissingProperties(unittest.TestCase):
         self.assertCase("c0_repeatable", FakeLab, "pass")
         self.assertCase("c0_repeatable", FlakyCheck, "FAIL")
 
+    def test_c0_repeatable_rejects_noop_reset_and_supports_stateful_reset(self):
+        """Input: (a) a stateful lab whose `check()` advances volatile state and `reset()`
+        restores it; (b) a stateful lab whose `reset()` is a no-op; (c) a lab whose `reset()`
+        reports empty/missing `reset` state (`[]`, `None`). Expected: (a) passes; (b) and (c)
+        FAIL."""
+        class StatefulLab(FakeLab):
+            def __init__(self, receipts=None):
+                super().__init__(receipts)
+                self.volatile = 0
+
+            def check(self, workload=None):
+                r = super().check(workload)
+                r["output"] = {p: v + [self.volatile] for p, v in r["output"].items()}
+                self.volatile += 1
+                return r
+
+            def reset(self, kind="state"):
+                self.volatile = 0
+                return {"ok": True, "reset": ["volatile"], "cost_s": 0.0}
+
+        class StatefulNoOpReset(StatefulLab):
+            def reset(self, kind="state"):
+                return {"ok": True, "reset": ["volatile"], "cost_s": 0.0}
+
+        class EmptyResetList(FakeLab):
+            def reset(self, kind="state"):
+                return {"ok": True, "reset": [], "cost_s": 0.0}
+
+        class MissingResetField(FakeLab):
+            def reset(self, kind="state"):
+                return {"ok": True, "cost_s": 0.0}
+
+        self.assertCase("c0_repeatable", StatefulLab, "pass")
+        self.assertCase("c0_repeatable", StatefulNoOpReset, "FAIL")
+        self.assertCase("c0_repeatable", EmptyResetList, "FAIL")
+        self.assertCase("c0_repeatable", MissingResetField, "FAIL")
+
     def test_c1_noop_passes_an_identity_change_that_keeps_output(self):
         self.assertCase("c1_noop", FakeLab, "pass")
 

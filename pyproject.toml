@@ -15,7 +15,61 @@ dependencies = []
 fastrsi = "fastrsi.cli:main"
 rsibox = "rsibox.cli:main"
 
+# `core/livelab` is the shared import root (`PYTHONPATH=core/livelab`) used by
+# `fastrsi.cli`, `fastrsi.lab`, `forksafe`, `ray_participants`, and every engine
+# adapter under `repos/*/livelab/`, so exposing these top-level names is
+# intentional. Offline editable installs require standard PEP 517 isolation
+# opt-out (`pip install --no-build-isolation --no-deps -e .`).
+#
+# Setuptools `packages` globs every `*.py` file in a package directory via
+# `build_py.find_package_modules` and `exclude-package-data` only filters data
+# files, not Python modules. Keeping `packages = []` with `include-package-data`
+# disabled and enumerating runtime modules in `py-modules` (each package's
+# `__init__.py` is auto-included) excludes all `test_*.py` / `*_test.py` files
+# and `survey/fixture/` from built wheels and sdists (`scripts/test_packaging.py`
+# verifies this list stays in sync with `core/livelab`).
 [tool.setuptools]
 package-dir = { "" = "core/livelab" }
-packages = ["kernel", "kernel.toy", "conformance", "survey", "fastrsi", "rsibox"]
-py-modules = ["forksafe", "livestream", "ray_participants"]
+packages = []
+include-package-data = false
+py-modules = [
+  "forksafe",
+  "livestream",
+  "ray_participants",
+  "conformance.__main__",
+  "conformance.cases",
+  "conformance.lab",
+  "fastrsi.__main__",
+  "fastrsi.cli",
+  "fastrsi.diffs",
+  "fastrsi.harness",
+  "fastrsi.hooks",
+  "fastrsi.ipc",
+  "fastrsi.lab",
+  "fastrsi.op_guard",
+  "fastrsi.proc",
+  "kernel.coordinator",
+  "kernel.findings",
+  "kernel.jit",
+  "kernel.journal",
+  "kernel.locate",
+  "kernel.receipt",
+  "kernel.reinit",
+  "kernel.session",
+  "kernel.swap",
+  "kernel.toy.engine",
+  "kernel.toy.ops",
+  "kernel.toy_lab",
+  "kernel.witness",
+  "rsibox.__main__",
+  "rsibox.box",
+  "rsibox.cli",
+  "rsibox.client",
+  "rsibox.gvisor",
+  "rsibox.launch",
+  "rsibox.server",
+  "survey.__main__",
+  "survey.history",
+  "survey.rules",
+  "survey.scan",
+]

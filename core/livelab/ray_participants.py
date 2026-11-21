@@ -18,7 +18,7 @@ taken from the edit, so module-level functions stay with the module. A process t
 of the plan's modules abstains (`absent`, `abstain`). `RayActorParticipant` is the host's side.
 Workers must import this file as `ray_participants` with `kernel` beside it (PYTHONPATH).
 """
-import ast, hashlib, importlib, os, sys, types, uuid
+import ast, hashlib, importlib, os, sys, threading, types, uuid
 
 try:
     from kernel import coordinator as C, findings as F, locate as L
@@ -29,6 +29,112 @@ ACTOR = "#actor"
 _LOCAL = {}       # participant name -> LocalParticipant, in this process
 _ABSENT = {}      # participant name -> {txn: state} of transactions this process abstained from
 _STATE = {"commit": "committed", "abort": "aborted", "undo": "undone"}
+
+_ABSENT_LOCK = threading.RLock()
+_ABSENT_FILES: set[str] = set()
+_WATCHED_BASENAMES: set[str] = set()
+_WATCHED_BASENAME_BYTES: set[bytes] = set()
+_CODE_EPOCH: int = 0
+_ACTIVE_SCANS: int = 0
+_AUDIT_INSTALLED: bool = False
+_AUDIT_EVENTS = frozenset(("compile", "exec", "code.__new__", "marshal.loads"))
+
+
+def _rebuild_watched_locked():
+    _WATCHED_BASENAMES.clear()
+    _WATCHED_BASENAME_BYTES.clear()
+    for cached_path in _ABSENT_FILES:
+        base = os.path.basename(cached_path)
+        _WATCHED_BASENAMES.add(base)
+        _WATCHED_BASENAME_BYTES.add(base.encode("utf-8", errors="surrogateescape"))
+
+
+def _clear_absent_cache():
+    global _CODE_EPOCH
+    with _ABSENT_LOCK:
+        _CODE_EPOCH += 1
+        _ABSENT_FILES.clear()
+        _WATCHED_BASENAMES.clear()
+        _WATCHED_BASENAME_BYTES.clear()
+
+
+def _evict_matching_locked(*, base_str=None, base_bytes=None):
+    global _CODE_EPOCH
+    if base_str is None and base_bytes is None:
+        _CODE_EPOCH += 1
+        _ABSENT_FILES.clear()
+        _WATCHED_BASENAMES.clear()
+        _WATCHED_BASENAME_BYTES.clear()
+        return
+    removed = False
+    for cached_path in list(_ABSENT_FILES):
+        base = os.path.basename(cached_path)
+        if (base_str is not None and base == base_str) or (
+            base_bytes is not None and base.encode("utf-8", errors="surrogateescape") in base_bytes
+        ):
+            _ABSENT_FILES.discard(cached_path)
+            removed = True
+    if removed:
+        _CODE_EPOCH += 1
+        _rebuild_watched_locked()
+
+
+def _audit_code_load(event, args):
+    global _CODE_EPOCH
+    if event not in _AUDIT_EVENTS or (not _ABSENT_FILES and not _ACTIVE_SCANS):
+        return
+    with _ABSENT_LOCK:
+        if _ACTIVE_SCANS:
+            _CODE_EPOCH += 1
+        if not _ABSENT_FILES:
+            return
+        if event in ("compile", "code.__new__"):
+            filename = args[1] if len(args) > 1 else None
+            # CPython emits ("compile", ast.AST, None) before returning a CodeType; executing
+            # that code later still fires "exec" with args[0].co_filename, so keep cached misses.
+            if event == "compile" and filename is None and args and isinstance(args[0], ast.AST):
+                return
+            if isinstance(filename, str):
+                base = os.path.basename(filename)
+                if base in _WATCHED_BASENAMES:
+                    _evict_matching_locked(base_str=base)
+            elif isinstance(filename, bytes):
+                base_b = os.path.basename(filename)
+                if base_b in _WATCHED_BASENAME_BYTES:
+                    _evict_matching_locked(base_bytes={base_b})
+            else:
+                _evict_matching_locked()
+        elif event == "exec":
+            filename = getattr(args[0], "co_filename", None) if args else None
+            if isinstance(filename, str):
+                base = os.path.basename(filename)
+                if base in _WATCHED_BASENAMES:
+                    _evict_matching_locked(base_str=base)
+            elif isinstance(filename, bytes):
+                base_b = os.path.basename(filename)
+                if base_b in _WATCHED_BASENAME_BYTES:
+                    _evict_matching_locked(base_bytes={base_b})
+            else:
+                _evict_matching_locked()
+        elif event == "marshal.loads":
+            raw = args[0] if args else None
+            if isinstance(raw, (bytes, bytearray, memoryview)):
+                haystack = bytes(raw) if isinstance(raw, memoryview) else raw
+                hits = {b for b in _WATCHED_BASENAME_BYTES if b in haystack}
+                if hits:
+                    _evict_matching_locked(base_bytes=hits)
+            else:
+                _evict_matching_locked()
+
+
+def _ensure_audit_hook():
+    global _AUDIT_INSTALLED
+    if _AUDIT_INSTALLED:
+        return
+    with _ABSENT_LOCK:
+        if not _AUDIT_INSTALLED:
+            sys.addaudithook(_audit_code_load)
+            _AUDIT_INSTALLED = True
 
 
 def _digest(text):
@@ -97,20 +203,39 @@ def file_namespace(path):
     `sys.modules` entry, else a Namespace over its functions' globals registered under
     `file_module(path)`; (None, None) when this process never loaded it. Raises if the file's
     functions read several globals dicts (loaded twice): one swap would miss the others."""
+    global _ACTIVE_SCANS
     path = os.path.realpath(path)
     for name, module in list(sys.modules.items()):
         file = getattr(module, "__file__", None)
         if isinstance(file, str) and _real(file) == path:
             return name, module
-    base, dicts = os.path.basename(path), {}
-    for obj in L.all_objects():
-        # type() rather than isinstance(): dead weakref proxies raise on isinstance
-        if type(obj) is types.FunctionType and obj.__code__.co_filename.endswith(base) \
-                and os.path.realpath(obj.__code__.co_filename) == path:
-            dicts[id(obj.__globals__)] = obj.__globals__
+    with _ABSENT_LOCK:
+        if path in _ABSENT_FILES:
+            return None, None
+    _ensure_audit_hook()
+    with _ABSENT_LOCK:
+        if path in _ABSENT_FILES:
+            return None, None
+        epoch = _CODE_EPOCH
+        _ACTIVE_SCANS += 1
+    try:
+        base, dicts = os.path.basename(path), {}
+        for obj in L.all_objects():
+            # type() rather than isinstance(): dead weakref proxies raise on isinstance
+            if type(obj) is types.FunctionType and obj.__code__.co_filename.endswith(base) \
+                    and os.path.realpath(obj.__code__.co_filename) == path:
+                dicts[id(obj.__globals__)] = obj.__globals__
+    finally:
+        with _ABSENT_LOCK:
+            _ACTIVE_SCANS -= 1
     if len(dicts) > 1:
         raise RuntimeError(f"{path} is loaded {len(dicts)} times in this process")
     if not dicts:
+        with _ABSENT_LOCK:
+            if _CODE_EPOCH == epoch:
+                _ABSENT_FILES.add(path)
+                _WATCHED_BASENAMES.add(base)
+                _WATCHED_BASENAME_BYTES.add(base.encode("utf-8", errors="surrogateescape"))
         return None, None
     globals_dict = next(iter(dicts.values()))
     globals_dict.setdefault("__file__", path)
@@ -288,6 +413,6 @@ def unloaded(participants, plan):
     """Plan modules that no participant runs. Ask before `Coordinator.run`: a plan whose
     module every participant abstains from would commit and change nothing."""
     seen = set()
-    for participant in participants:
-        seen.update(participant.loaded(plan).get("loaded", ()))
+    for reply in C._fanout(participants, lambda p: p.loaded(plan)):
+        seen.update(reply.get("loaded", ()))
     return sorted(set(plan.get("modules") or {}) - seen)

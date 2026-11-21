@@ -10,7 +10,7 @@ on CPU now and against an engine adapter later.
 
 | Case | Passes only if |
 |---|---|
-| `c0_repeatable` | The workload gives the same output when nothing changes (3 checks, one after `reset`) |
+| `c0_repeatable` | The workload gives the same output across 3 checks with `reset()` calls between them, `reset()` clears non-empty state, and status stays `base` |
 | `c1_noop` | A change that keeps behavior installs, runs (witness), and leaves output bit-exact |
 | `c2_visible` | A visible edit changes output, and the witness fires on every participant |
 | `c3_fresh_equivalence` | The live edit's output (one edit, and a chain of 3) equals a fresh process started with that edit |

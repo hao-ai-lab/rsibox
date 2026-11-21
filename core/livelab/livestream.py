@@ -16,15 +16,21 @@ from typing import Any
 
 ROUTE_TIER_WEIGHTS = {
     "r0": 0,
+    "r0 swap": 0,
+    "swap": 0,
     "live": 0,
     "live_swap": 0,
     "in_place": 0,
     "hot_swap": 0,
     "r1": 1,
+    "r1 recapture": 1,
+    "recapture": 1,
     "graph_recapture": 1,
     "recompile": 1,
     "compile_reset": 1,
     "r2": 2,
+    "r2 drain": 1,
+    "drain": 1,
     "worker_respawn": 2,
     "fork": 2,
     "forked": 2,
@@ -32,16 +38,88 @@ ROUTE_TIER_WEIGHTS = {
     "zygote_refresh": 2,
     "fork_refresh": 2,
     "r3": 3,
+    "r3 cache": 1,
+    "cache": 1,
+    "cache_reset": 1,
     "code_restart": 3,
     "warm_restart": 3,
     "engine_restart": 3,
     "r4": 4,
+    "r4 rebuild": 1,
+    "engine_core_rebuild": 1,
     "cold_restart": 4,
     "full_restart": 4,
     "container_restart": 4,
+    "r5": 5,
+    "soft_restart": 5,
+    "r6": 6,
+    "weight_reload": 6,
+    "r7": 7,
+    "native_reload": 7,
+    "r8": 8,
+    "r8 snapshot": 8,
+    "snapshot": 8,
+    "r9": 9,
+    "r9 respawn": 9,
+    "respawn": 9,
     # the kernel's own names (INTERFACE-v1.md mechanisms, swap.py routes)
     "r10": 0,          # hand repair cell: in process, ms per call
+    "r10 repair": 0,
+    "repair": 0,
     "t1": 1,           # rebuild the objects in place (constructor edits, new fields)
+}
+
+# Explicit ladder provenance for conflict detection between livestream's 5-tier coarse
+# restart ladder (r2=worker_respawn, r3=code_restart, r4=cold_restart) and INTERFACE-v1's
+# mechanism table (R2=drain, R3=cache, R4=engine-core rebuild, R1=recapture at ~5s).
+_CONFLICTING_RUNGS = {
+    "r2": ("worker_respawn", "drain"),
+    "r3": ("code_restart", "cache"),
+    "r4": ("cold_restart", "engine_core_rebuild"),
+}
+_LIVESTREAM_RUNG_TAGS = {
+    "worker_respawn": ("r2", 2),
+    "fork": ("r2", 2),
+    "forked": ("r2", 2),
+    "zygote": ("r2", 2),
+    "zygote_refresh": ("r2", 2),
+    "fork_refresh": ("r2", 2),
+    "r2 worker_respawn": ("r2", 2),
+    "code_restart": ("r3", 3),
+    "warm_restart": ("r3", 3),
+    "engine_restart": ("r3", 3),
+    "r3 code_restart": ("r3", 3),
+    "cold_restart": ("r4", 4),
+    "full_restart": ("r4", 4),
+    "container_restart": ("r4", 4),
+    "r4 cold_restart": ("r4", 4),
+}
+_INTERFACE_RUNG_TAGS = {
+    # INTERFACE-v1.md cost order:
+    # R0/R10 (0) < T1 (1) < R2 drain 0.1ms (1) < R3 cache 1-2ms (2) < R4 rebuild 8-35ms (3)
+    # < R5 soft restart 1.4-2.2s (4) < R1 recapture 4.5-7.8s (5) < R6 (6) < R7 (7) < R8 (8) < R9 (9)
+    "t1": ("t1", 1),
+    "drain": ("r2", 1),
+    "r2 drain": ("r2", 1),
+    "cache": ("r3", 2),
+    "r3 cache": ("r3", 2),
+    "cache_reset": ("r3", 2),
+    "engine_core_rebuild": ("r4", 3),
+    "r4 rebuild": ("r4", 3),
+    "r5": ("r5", 4),
+    "soft_restart": ("r5", 4),
+    "r1 recapture": ("r1", 5),
+    "recapture": ("r1", 5),
+    "r6": ("r6", 6),
+    "weight_reload": ("r6", 6),
+    "r7": ("r7", 7),
+    "native_reload": ("r7", 7),
+    "r8": ("r8", 8),
+    "r8 snapshot": ("r8", 8),
+    "snapshot": ("r8", 8),
+    "r9": ("r9", 9),
+    "r9 respawn": ("r9", 9),
+    "respawn": ("r9", 9),
 }
 
 
@@ -69,17 +147,168 @@ class PricedBrief:
         )
 
 
-def _route_tier_weight(route_name: Any) -> int | None:
+_UNIVERSAL_WEIGHTS = {
+    "r0": (0, 0),
+    "r0 swap": (0, 0),
+    "swap": (0, 0),
+    "live": (0, 0),
+    "live_swap": (0, 0),
+    "in_place": (0, 0),
+    "hot_swap": (0, 0),
+    "r10": (0, 0),
+    "r10 repair": (0, 0),
+    "repair": (0, 0),
+    "t1": (1, 1),
+    "r1": (1, 5),
+    "graph_recapture": (1, 5),
+    "recompile": (1, 5),
+    "compile_reset": (1, 5),
+}
+_IFACE_BARE_WEIGHT = {"r2": 1, "r3": 2, "r4": 3}
+
+
+def _resolve_route_spec(
+    route_name: Any, context: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Resolve `route_name` into ladder provenance, rung key, and comparable tier weights."""
     if route_name is None:
         return None
-    normalized = str(route_name).strip().lower()
-    if normalized not in ROUTE_TIER_WEIGHTS and normalized.split():
-        normalized = normalized.split()[0]       # "R0 swap", "R10 repair": the protocol key
-    if normalized in ROUTE_TIER_WEIGHTS:
-        return ROUTE_TIER_WEIGHTS[normalized]
-    if normalized.startswith("r") and normalized[1:].isdigit():
-        return int(normalized[1:])
+    norm = " ".join(str(route_name).strip().lower().split())
+    if not norm:
+        return None
+    head = norm.split()[0]
+
+    def _from_token(tok: str) -> dict[str, Any] | None:
+        if tok in _LIVESTREAM_RUNG_TAGS:
+            rung, w = _LIVESTREAM_RUNG_TAGS[tok]
+            return {"raw": route_name, "norm": norm, "ladder": "livestream",
+                    "rung": rung, "weight": w, "iface_weight": None}
+        if tok in _INTERFACE_RUNG_TAGS:
+            rung, w = _INTERFACE_RUNG_TAGS[tok]
+            return {"raw": route_name, "norm": norm, "ladder": "interface",
+                    "rung": rung, "weight": ROUTE_TIER_WEIGHTS.get(tok, w), "iface_weight": w}
+        if tok in _UNIVERSAL_WEIGHTS:
+            w, iw = _UNIVERSAL_WEIGHTS[tok]
+            return {"raw": route_name, "norm": norm, "ladder": "both",
+                    "rung": tok.split()[0], "weight": w, "iface_weight": iw}
+        if tok in _CONFLICTING_RUNGS:
+            pmode = str((context or {}).get("process_mode") or
+                        (context or {}).get("launch_mode") or "").strip().lower()
+            is_forked = bool((context or {}).get("forked")) or pmode in (
+                "fork", "forked", "zygote"
+            )
+            if tok == "r2" and is_forked:
+                return {"raw": route_name, "norm": norm, "ladder": "livestream",
+                        "rung": tok, "weight": ROUTE_TIER_WEIGHTS[tok], "iface_weight": None}
+            return {"raw": route_name, "norm": norm, "ladder": "ambiguous",
+                    "rung": tok, "weight": ROUTE_TIER_WEIGHTS[tok],
+                    "iface_weight": _IFACE_BARE_WEIGHT[tok]}
+        if tok in ROUTE_TIER_WEIGHTS:
+            w = ROUTE_TIER_WEIGHTS[tok]
+            return {"raw": route_name, "norm": norm, "ladder": "both",
+                    "rung": tok, "weight": w, "iface_weight": w}
+        if tok.startswith("r") and tok[1:].isdigit():
+            w = int(tok[1:])
+            return {"raw": route_name, "norm": norm, "ladder": "interface",
+                    "rung": tok, "weight": w, "iface_weight": w}
+        return None
+
+    spec = _from_token(norm)
+    if spec is not None:
+        return spec
+    if head != norm:
+        return _from_token(head)
     return None
+
+
+def _route_tier_weight(route_name: Any) -> int | None:
+    spec = _resolve_route_spec(route_name)
+    return spec["weight"] if spec is not None else None
+
+
+def _specs_conflict(spec_a: dict[str, Any], spec_b: dict[str, Any]) -> str | None:
+    """Return a conflict description if two route specs disagree across conflicting rungs."""
+    if spec_a["rung"] == spec_b["rung"] and spec_a["rung"] in _CONFLICTING_RUNGS:
+        if spec_a["ladder"] != spec_b["ladder"]:
+            return (
+                f"conflicting definitions for rung {spec_a['rung'].upper()}: "
+                f"{spec_a['raw']!r} ({spec_a['ladder']}) vs "
+                f"{spec_b['raw']!r} ({spec_b['ladder']})"
+            )
+    ladders = {spec_a["ladder"], spec_b["ladder"]}
+    # Only interface tags on the conflicting subset (R2 drain, R3 cache, R4 rebuild, R1 recapture)
+    # conflict across ladders with livestream R2/R3/R4 (`R5..R9` remain heavier in both).
+    if ladders == {"livestream", "interface"}:
+        ls = spec_a if spec_a["ladder"] == "livestream" else spec_b
+        if_ = spec_b if ls is spec_a else spec_a
+        if if_["rung"] in _CONFLICTING_RUNGS or if_["norm"] in ("r1 recapture", "recapture"):
+            return (
+                f"incompatible ladder rungs: {ls['raw']!r} (livestream) "
+                f"vs {if_['raw']!r} (INTERFACE-v1)"
+            )
+    if "ambiguous" in ladders:
+        amb = spec_a if spec_a["ladder"] == "ambiguous" else spec_b
+        other = spec_b if amb is spec_a else spec_a
+        if (other["ladder"] == "interface" and other["rung"] in _CONFLICTING_RUNGS) or (
+            amb["rung"] in ("r2", "r3", "r4") and other["rung"] in ("r1", "t1")
+        ):
+            return (
+                f"ambiguous rung {amb['raw']!r} conflicts across ladders with "
+                f"{other['raw']!r}"
+            )
+    return None
+
+
+def detect_ladder_conflicts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Detect conflicts across `records` where the same protocol rung (e.g. R2/R3/R4)
+    or step fields mix incompatible meanings from the livestream vs INTERFACE-v1 ladders."""
+    seen_rungs: dict[str, dict[str, str]] = {}
+    conflicts: list[dict[str, Any]] = []
+    seen_msgs: set[str] = set()
+
+    for idx, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            continue
+        cid = str(rec.get("candidate_id") or f"record_{idx}")
+        field_vals = [
+            rec.get(k) for k in ("route", "actual_route", "tier", "mechanism", "predicted_route")
+        ]
+        mechs = rec.get("mechanisms")
+        if isinstance(mechs, (list, tuple)):
+            field_vals.extend(mechs)
+        specs = [
+            s for v in field_vals if (s := _resolve_route_spec(v, rec)) is not None
+        ]
+        for i in range(len(specs)):
+            for j in range(i + 1, len(specs)):
+                msg = _specs_conflict(specs[i], specs[j])
+                if msg and msg not in seen_msgs:
+                    seen_msgs.add(msg)
+                    conflicts.append({
+                        "check": "ladder_conflict",
+                        "candidate_id": cid,
+                        "rung": specs[i]["rung"].upper(),
+                        "observed": msg,
+                    })
+        for s in specs:
+            rung = s["rung"]
+            if rung in _CONFLICTING_RUNGS and s["ladder"] in ("livestream", "interface"):
+                prev = seen_rungs.setdefault(rung, {})
+                prev.setdefault(s["ladder"], str(s["raw"]))
+                if len(prev) > 1:
+                    msg = (
+                        f"rung {rung.upper()} mixes {prev['livestream']!r} (livestream) and "
+                        f"{prev['interface']!r} (INTERFACE-v1) within the same run"
+                    )
+                    if msg not in seen_msgs:
+                        seen_msgs.add(msg)
+                        conflicts.append({
+                            "check": "ladder_conflict",
+                            "candidate_id": cid,
+                            "rung": rung.upper(),
+                            "observed": msg,
+                        })
+    return conflicts
 
 
 def _role_group(label: str) -> str:
@@ -237,15 +466,44 @@ def cross_check_step_record(
             }
         )
 
-    # 3. silent_tier_escalation
+    # 3. silent_tier_escalation & ladder_conflict (reconciled livestream + INTERFACE-v1)
+    combined_for_conflict = dict(record)
+    if resolved_brief is not None:
+        combined_for_conflict["predicted_route"] = resolved_brief.predicted_route
+    for conflict in detect_ladder_conflicts([combined_for_conflict]):
+        issues.append(
+            {
+                "check": "ladder_conflict",
+                "candidate_id": candidate_id,
+                "severity": "blocking",
+                "rung": conflict["rung"],
+                "observed": conflict["observed"],
+                "expected": "consistent ladder semantics without conflicting R2/R3/R4 rungs",
+            }
+        )
+
     if resolved_brief is not None:
         actual_route = (
             record.get("route")
             or record.get("actual_route")
             or record.get("tier")
         )
-        predicted_weight = _route_tier_weight(resolved_brief.predicted_route)
-        actual_weight = _route_tier_weight(actual_route)
+        pred_spec = _resolve_route_spec(resolved_brief.predicted_route)
+        act_spec = _resolve_route_spec(actual_route, record)
+        use_iface = (
+            pred_spec is not None and act_spec is not None
+            and (pred_spec["ladder"] == "interface" or act_spec["ladder"] == "interface")
+        )
+
+        def _spec_weight(sp):
+            if sp is None:
+                return None
+            if use_iface and sp.get("iface_weight") is not None:
+                return sp["iface_weight"]
+            return sp["weight"]
+
+        predicted_weight = _spec_weight(pred_spec)
+        actual_weight = _spec_weight(act_spec)
         escalation_reason = (
             record.get("escalation_reason")
             or record.get("tier_escalation_reason")
@@ -279,7 +537,9 @@ def cross_check_step_record(
     is_forked_run = (
         bool(record.get("forked"))
         or process_mode in ("fork", "forked", "zygote")
-        or route_lower in ("fork", "forked", "zygote", "zygote_refresh", "fork_refresh")
+        or route_lower in (
+            "fork", "forked", "zygote", "zygote_refresh", "fork_refresh", "worker_respawn"
+        )
     )
     gain_metric = float(
         record.get("delta_pct")
@@ -403,6 +663,7 @@ def build_dashboard_summary(
     restart_cost_ladder = {
         "by_route": route_stats,
         "total_overhead_seconds": round(total_overhead_seconds, 6),
+        "ladder_conflicts": detect_ladder_conflicts(records),
     }
 
     hill_climb_ledger = {

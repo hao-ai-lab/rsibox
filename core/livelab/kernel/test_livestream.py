@@ -258,6 +258,62 @@ class DashboardSummaryTest(unittest.TestCase):
         summary = livestream.build_dashboard_summary([step, {**step, "standing_replay": True}])
         self.assertEqual(summary["standing_replay_summary"]["total_replays"], 1)
 
+    def test_interface_v1_route_names_and_ladder_conflict_detection(self):
+        """Input: INTERFACE-v1 mechanism names (`drain`, `cache`, `snapshot`, `recapture`,
+        `respawn`) and cross-ladder combinations between livestream (`r2`=worker_respawn,
+        `r3`=code_restart, `r4`=cold_restart) and INTERFACE-v1 (`R2`=drain, `R3`=cache,
+        `R4`=rebuild, `R1`=recapture). Expected: INTERFACE names resolve cleanly; `R2 drain`
+        -> `R1 recapture` is detected as `silent_tier_escalation`; mixing conflicting rungs
+        within a record, between brief and record, or across records in a dashboard run is
+        flagged with `ladder_conflict`; compatible escalations (`worker_respawn` -> `R9 respawn`)
+        do not raise false conflicts."""
+        for name in ("R0 swap", "drain", "R2 drain", "cache", "R3 cache",
+                     "recapture", "R1 recapture", "snapshot", "R8 snapshot",
+                     "respawn", "R9 respawn", "R10 repair"):
+            self.assertIsNotNone(livestream._route_tier_weight(name), name)
+
+        clean_rec = {"verdict": "pass", "witness": {"op": 2}, "proven": True}
+        brief = lambda r: livestream.PricedBrief(candidate_id="m5", predicted_route=r)
+
+        # True INTERFACE cost escalations (drain 0.1ms -> cache 1-2ms -> recapture 4.5-7.8s)
+        self.assertEqual(_checks({**clean_rec, "route": "R1 recapture"}, brief("R2 drain")),
+                         ["silent_tier_escalation"])
+        self.assertEqual(_checks({**clean_rec, "route": "R3 cache"}, brief("R2 drain")),
+                         ["silent_tier_escalation"])
+        self.assertEqual(_checks({**clean_rec, "route": "R1 recapture",
+                                  "escalation_reason": "graph invalidation"}, brief("R2 drain")), [])
+
+        # Compatible cross-ladder escalation (worker_respawn -> R9 respawn): no conflict
+        self.assertEqual(_checks({**clean_rec, "route": "R9 respawn"}, brief("worker_respawn")),
+                         ["silent_tier_escalation"])
+
+        # Cross-ladder conflicts: brief vs record
+        self.assertIn("ladder_conflict",
+                      _checks({**clean_rec, "route": "R2"}, brief("R2 drain")))
+        self.assertIn("ladder_conflict",
+                      _checks({**clean_rec, "route": "R2 drain"}, brief("worker_respawn")))
+        self.assertIn("ladder_conflict",
+                      _checks({**clean_rec, "route": "worker_respawn"}, brief("R3 cache")))
+        self.assertIn("ladder_conflict",
+                      _checks({**clean_rec, "route": "R1 recapture"}, brief("R2")))
+
+        # In-record conflicting fields (`R2` + `forked` vs `mechanism="drain"`, `R2` vs `R2 drain`)
+        in_rec_1 = {**clean_rec, "route": "R2", "process_mode": "forked", "mechanism": "drain",
+                    "fresh_process_confirmed": True}
+        self.assertIn("ladder_conflict", _checks(in_rec_1))
+        in_rec_2 = {**clean_rec, "route": "R2", "actual_route": "R2 drain"}
+        self.assertIn("ladder_conflict", _checks(in_rec_2))
+
+        # Cross-record run conflict detected by detect_ladder_conflicts & build_dashboard_summary
+        run_records = [
+            {**clean_rec, "candidate_id": "c1", "route": "R2", "process_mode": "forked",
+             "fresh_process_confirmed": True},
+            {**clean_rec, "candidate_id": "c2", "route": "R2 drain"},
+        ]
+        summary = livestream.build_dashboard_summary(run_records)
+        self.assertEqual(len(summary["restart_cost_ladder"]["ladder_conflicts"]), 1)
+        self.assertEqual(summary["restart_cost_ladder"]["ladder_conflicts"][0]["rung"], "R2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -317,6 +317,9 @@ def inject(node, key):
 
 _RESTART_INSTRUMENTED_TARGETS = {}
 _RESTART_BY_NAME = {}       # bare target name -> [wrapper per module]
+_RESTART_RECORDS = {}       # (id(module), target_name) -> provenance dict
+_RESTART_MODULE_META = {}   # id(module) -> {had_hit, prev_hit, module_hit, had_counts}
+_MISSING = object()
 
 
 def instrument_module_functions(module, function_names):
@@ -326,16 +329,31 @@ def instrument_module_functions(module, function_names):
 
     Returns a dictionary mapping each target name to its instrumented wrapper.
     """
+    mod_id = id(module)
+    mod_dict = getattr(module, "__dict__", None)
+    had_counts = (isinstance(mod_dict, dict) and "__fastrsi_restart_counts__" in mod_dict) or (
+        mod_dict is None and hasattr(module, "__fastrsi_restart_counts__")
+    )
     restart_counts = getattr(module, "__fastrsi_restart_counts__", None)
     if not isinstance(restart_counts, dict):
         restart_counts = {}
         setattr(module, "__fastrsi_restart_counts__", restart_counts)
+
+    if mod_id not in _RESTART_MODULE_META:
+        prev_hit = mod_dict.get(HIT, _MISSING) if isinstance(mod_dict, dict) else getattr(module, HIT, _MISSING)
+        _RESTART_MODULE_META[mod_id] = {
+            "had_hit": prev_hit is not _MISSING,
+            "prev_hit": prev_hit,
+            "had_counts": had_counts,
+            "module_hit": None,
+        }
 
     def module_hit(target_key):
         restart_counts[target_key] = restart_counts.get(target_key, 0) + 1
 
     trace_safe(module_hit)
     setattr(module, HIT, module_hit)
+    _RESTART_MODULE_META[mod_id]["module_hit"] = module_hit
 
     if isinstance(function_names, str):
         target_list = [function_names]
@@ -367,9 +385,13 @@ def instrument_module_functions(module, function_names):
             orig_callable = raw_attr.fget
         else:
             orig_callable = getattr(parent_obj, leaf_name)
+            raw_attr = orig_callable
 
+        existing = _RESTART_RECORDS.get((mod_id, target_name))
         if getattr(orig_callable, "__fastrsi_target__", None) == target_name:
             orig_callable = getattr(orig_callable, "__wrapped__", orig_callable)
+        saved_raw_attr = existing["orig_raw_attr"] if existing is not None else raw_attr
+        saved_orig_callable = existing["orig_callable"] if existing is not None else orig_callable
 
         restart_counts[target_name] = 0
 
@@ -387,24 +409,36 @@ def instrument_module_functions(module, function_names):
             wrapped_target.__fastrsi_hit__ = module_hit
             return wrapped_target
 
-        wrapper = make_wrapper(orig_callable, target_name)
+        wrapper = make_wrapper(saved_orig_callable, target_name)
         if descriptor_kind == "staticmethod":
             setattr(parent_obj, leaf_name, staticmethod(wrapper))
         elif descriptor_kind == "classmethod":
             setattr(parent_obj, leaf_name, classmethod(wrapper))
         elif descriptor_kind == "property":
-            setattr(parent_obj, leaf_name, raw_attr.getter(wrapper))
+            prev_prop = saved_raw_attr if isinstance(saved_raw_attr, property) else raw_attr
+            setattr(parent_obj, leaf_name, prev_prop.getter(wrapper))
         else:
             setattr(parent_obj, leaf_name, wrapper)
             if parent_obj is module:
+                prev_aliases = existing["wrapper"] if existing is not None else saved_orig_callable
                 for loaded_mod in list(sys.modules.values()):
                     loaded_dict = getattr(loaded_mod, "__dict__", None)
                     if isinstance(loaded_dict, dict):
                         for attr_key, attr_val in list(loaded_dict.items()):
-                            if attr_val is orig_callable:
+                            if attr_val is prev_aliases or attr_val is saved_orig_callable:
                                 loaded_dict[attr_key] = wrapper
 
         instrumented[target_name] = wrapper
+        _RESTART_RECORDS[(mod_id, target_name)] = {
+            "module": module,
+            "module_name": module_name,
+            "parent_obj": parent_obj,
+            "leaf_name": leaf_name,
+            "descriptor_kind": descriptor_kind,
+            "orig_raw_attr": saved_raw_attr,
+            "orig_callable": saved_orig_callable,
+            "wrapper": wrapper,
+        }
         # the bare name may be instrumented in several modules (one per rank): keep them all,
         # one per module; collect reads the smallest count (a module that never ran it: 0)
         same_name = [other for other in _RESTART_BY_NAME.get(target_name, ())
@@ -414,6 +448,96 @@ def instrument_module_functions(module, function_names):
         _RESTART_INSTRUMENTED_TARGETS[f"{module_name}:{target_name}"] = wrapper
 
     return instrumented
+
+
+def uninstrument_module_functions(module, function_names=None):
+    """Remove hooks installed by :func:`instrument_module_functions` from ``module``.
+
+    When ``function_names`` is ``None``, every instrumented target on ``module`` is restored;
+    otherwise only those named targets are restored. Restores original functions/descriptors,
+    rebinds alias globals in ``sys.modules`` back to the original callable, cleans up global
+    restart registries, and removes ``__fastrsi_hit__`` / ``__fastrsi_restart_counts__`` once no
+    instrumented targets remain on ``module``. Returns ``{target_name: restored_obj}``.
+    """
+    mod_id = id(module)
+    if function_names is None:
+        target_list = [name for (mid, name) in list(_RESTART_RECORDS) if mid == mod_id]
+    elif isinstance(function_names, str):
+        target_list = [function_names]
+    else:
+        target_list = list(function_names)
+
+    restored = {}
+    restart_counts = getattr(module, "__fastrsi_restart_counts__", None)
+    for target_name in target_list:
+        rec = _RESTART_RECORDS.pop((mod_id, target_name), None)
+        if rec is None:
+            continue
+        parent_obj = rec["parent_obj"]
+        leaf_name = rec["leaf_name"]
+        wrapper = rec["wrapper"]
+        orig_raw_attr = rec["orig_raw_attr"]
+        orig_callable = rec["orig_callable"]
+        descriptor_kind = rec["descriptor_kind"]
+        module_name = rec["module_name"]
+
+        try:
+            current = inspect.getattr_static(parent_obj, leaf_name)
+        except AttributeError:
+            current = getattr(parent_obj, leaf_name, _MISSING)
+
+        should_restore = (
+            current is wrapper
+            or (descriptor_kind in ("staticmethod", "classmethod")
+                and getattr(current, "__func__", None) is wrapper)
+            or (descriptor_kind == "property" and getattr(current, "fget", None) is wrapper)
+        )
+        if should_restore:
+            setattr(parent_obj, leaf_name, orig_raw_attr)
+
+        if descriptor_kind is None and parent_obj is module:
+            for loaded_mod in list(sys.modules.values()):
+                loaded_dict = getattr(loaded_mod, "__dict__", None)
+                if isinstance(loaded_dict, dict):
+                    for attr_key, attr_val in list(loaded_dict.items()):
+                        if attr_val is wrapper:
+                            loaded_dict[attr_key] = orig_callable
+
+        if isinstance(restart_counts, dict):
+            restart_counts.pop(target_name, None)
+
+        remaining_by_name = [other for other in _RESTART_BY_NAME.get(target_name, ())
+                             if other is not wrapper]
+        if remaining_by_name:
+            _RESTART_BY_NAME[target_name] = remaining_by_name
+        else:
+            _RESTART_BY_NAME.pop(target_name, None)
+
+        if _RESTART_INSTRUMENTED_TARGETS.get(f"{module_name}:{target_name}") is wrapper:
+            _RESTART_INSTRUMENTED_TARGETS.pop(f"{module_name}:{target_name}", None)
+        if _RESTART_INSTRUMENTED_TARGETS.get(target_name) is wrapper:
+            if remaining_by_name:
+                _RESTART_INSTRUMENTED_TARGETS[target_name] = remaining_by_name[-1]
+            else:
+                _RESTART_INSTRUMENTED_TARGETS.pop(target_name, None)
+
+        restored[target_name] = orig_raw_attr
+
+    still_instrumented = any(mid == mod_id for (mid, _) in _RESTART_RECORDS)
+    if not still_instrumented:
+        meta = _RESTART_MODULE_META.pop(mod_id, None)
+        if meta is not None:
+            if not meta["had_counts"] and isinstance(restart_counts, dict) and not restart_counts:
+                if hasattr(module, "__fastrsi_restart_counts__"):
+                    delattr(module, "__fastrsi_restart_counts__")
+            current_hit = getattr(module, HIT, _MISSING)
+            if current_hit is meta["module_hit"]:
+                if meta["had_hit"]:
+                    setattr(module, HIT, meta["prev_hit"])
+                else:
+                    delattr(module, HIT)
+
+    return restored
 
 
 def collect_restart_witness(targets):

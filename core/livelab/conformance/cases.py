@@ -63,21 +63,31 @@ def _installed(lab, patch, what):
 
 
 def c0_repeatable(lab):
-    """Passes only if: the workload gives the same output when nothing changes (3 checks,
-    one after reset). Proves: comparisons later in the suite are meaningful. Not: that the
-    output is right."""
+    """Passes only if: the workload gives the same output when nothing changes (3 checks with
+    state resets between them), `reset()` reports non-empty state cleared, and checks/resets
+    keep status base and code identity unchanged. Proves: comparisons later in the suite are
+    meaningful and `reset()` is active. Not: that the output is right."""
     out0, fp0 = _base(lab)
     outs = [out0]
-    for i in range(2):
-        if i == 1:
-            r = lab.reset()
-            expect(r["ok"], "reset succeeds", r.get("error"))
+    resets = []
+    for _ in range(2):
+        r = lab.reset()
+        expect(r.get("ok") is True, "reset succeeds", r.get("error"))
+        what = r.get("reset")
+        expect(
+            isinstance(what, (list, tuple)) and len(what) > 0
+            and all(isinstance(item, str) and item.strip() for item in what),
+            "reset reports non-empty state cleared", r,
+        )
+        resets.append(list(what))
         c = lab.check()
-        expect(c["ok"], "check runs", c.get("error"))
+        expect(c.get("ok") is True, "check runs", c.get("error"))
         outs.append(c["output"])
     expect(all(o == out0 for o in outs), "3 checks give one output", [_short(o) for o in outs])
-    expect(lab.status()["fingerprint"] == fp0, "checks change no code")
-    return [f"3 checks (one after reset {r['reset']}) gave {_short(out0)}"]
+    st = lab.status()
+    expect(st["state"] == "base" and st["fingerprint"] == fp0,
+           "checks and resets keep base state and code", (st.get("state"), st.get("fingerprint")))
+    return [f"3 checks (after resets {resets[-1]}) gave {_short(out0)}"]
 
 
 def c1_noop(lab):

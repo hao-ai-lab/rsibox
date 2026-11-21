@@ -400,54 +400,125 @@ def _restore_closures(entry):
     return out
 
 
+class _Mark(int):
+    """Journal entry offset tagged with a unique monotonic transaction mark ID."""
+
+    def __new__(cls, pos, mark_id):
+        obj = super().__new__(cls, pos)
+        obj.mark_id = mark_id
+        return obj
+
+
 class Journal:
     def __init__(self, name="local"):
         self.name = name
         self.entries = []
         self.marks = []          # [(label, position)]
         self.routes = []         # rebuild routes asked for by cells (`need_rebuild`)
-        self._undo_callbacks = []
+        self._undo_callbacks = []  # [(pos, epoch, callback)]
+        self._next_mark_id = 1
+        self._current_epoch = 0
+        self.poisoned = False
+        self.poison_findings = []
 
     # -- marks ---------------------------------------------------------------------------
     def mark(self, label=""):
         pos = len(self.entries)
-        self.marks.append((label, pos))
-        return pos
+        mark_id = self._next_mark_id
+        self._next_mark_id += 1
+        m = _Mark(pos, mark_id)
+        self.marks.append((label, m))
+        self._current_epoch = mark_id
+        return m
 
     def on_undo(self, callback):
-        """Register an auxiliary cleanup callback for the current mark position without adding
-        a visible journal entry (used to sync linecache across transactions)."""
-        self._undo_callbacks.append((len(self.entries), callback))
+        """Register an auxiliary cleanup callback for the current transaction mark epoch
+        without adding a visible journal entry (used to sync linecache across transactions)."""
+        self._undo_callbacks.append((len(self.entries), self._current_epoch, callback))
 
-    def undo_to(self, mark):
-        """Replay inverses back to `mark`, newest first. Never raises: an inverse that fails is
-        reported as an `undo_incomplete` finding and the rest still run."""
+    def _replay_entries_and_cbs(self, cut_pos, kept_cbs, run_cbs):
         errors, n, fs, info = [], 0, [], {}
-        while len(self.entries) > mark:
+        failed_entries = []
+        while len(self.entries) > cut_pos:
             e = self.entries.pop()
             try:
                 r = e.invert()
                 n += 1
             except Exception as ex:          # keep going: restore as much as possible
                 errors.append(f"{e.describe()}: {type(ex).__name__}: {ex}")
+                failed_entries.append(e)
                 continue
             if r:
                 fs += r.pop("findings", [])
                 for k, v in r.items():
                     info[k] = round(info.get(k, 0) + v, 6)
-        while self._undo_callbacks and self._undo_callbacks[-1][0] >= mark:
-            _, callback = self._undo_callbacks.pop()
+        if failed_entries:
+            self.entries.extend(reversed(failed_entries))
+        failed_cbs = []
+        for item in reversed(run_cbs):
+            _, _, callback = item
             try:
                 callback()
             except Exception as exc:
                 errors.append(f"on_undo: {type(exc).__name__}: {exc}")
-        self.marks = [(lab, p) for lab, p in self.marks if p <= mark]
+                failed_cbs.append(item)
+        if failed_cbs:
+            kept_cbs.extend(reversed(failed_cbs))
+        self._undo_callbacks = kept_cbs
+        return errors, n, fs, info, bool(failed_entries or failed_cbs)
+
+    def _finish_undo(self, errors, n, fs, info):
         if errors:
             fs.insert(0, F.finding("undo_incomplete", "; ".join(errors),
                                    "every inverse succeeds"))
         if fs:
+            self.poisoned = True
+            self.poison_findings.extend(fs)
             return F.not_ok("undo incomplete", fs, undone=n, **info)
         return F.ok(undone=n, **info)
+
+    def _undo_apply(self, entry_start, cb_start=0):
+        """Rollback helper for a single `swap.apply` failure without popping transaction marks."""
+        kept_cbs = self._undo_callbacks[:cb_start]
+        run_cbs = self._undo_callbacks[cb_start:]
+        errors, n, fs, info, _ = self._replay_entries_and_cbs(entry_start, kept_cbs, run_cbs)
+        return self._finish_undo(errors, n, fs, info)
+
+    def undo_to(self, mark):
+        """Replay inverses back to `mark`, newest first. Never raises: an inverse that fails is
+        preserved in `entries` and reported as `undo_incomplete`, poisoning the journal."""
+        if isinstance(mark, _Mark):
+            mark_idx = next(
+                (i for i, (_, p) in enumerate(self.marks)
+                 if getattr(p, "mark_id", None) == mark.mark_id),
+                None,
+            )
+            if mark_idx is None:
+                return F.ok(undone=0)
+            cut_pos = min(int(self.marks[mark_idx][1]), len(self.entries))
+            cut_id = mark.mark_id
+            kept_cbs = [it for it in self._undo_callbacks if it[1] < cut_id]
+            run_cbs = [it for it in self._undo_callbacks if it[1] >= cut_id]
+            errors, n, fs, info, kept_failed = self._replay_entries_and_cbs(
+                cut_pos, kept_cbs, run_cbs
+            )
+            self.marks = self.marks[:mark_idx + (1 if kept_failed else 0)]
+        else:
+            cut_pos = max(0, int(mark))
+            kept_cbs = [it for it in self._undo_callbacks if it[0] < cut_pos]
+            run_cbs = [it for it in self._undo_callbacks if it[0] >= cut_pos]
+            errors, n, fs, info, kept_failed = self._replay_entries_and_cbs(
+                cut_pos, kept_cbs, run_cbs
+            )
+            if kept_failed:
+                self.marks = [(lab, p) for lab, p in self.marks if p <= cut_pos]
+            else:
+                self.marks = [(lab, p) for lab, p in self.marks if p < cut_pos]
+        self._current_epoch = (
+            getattr(self.marks[-1][1], "mark_id", self._current_epoch)
+            if self.marks else 0
+        )
+        return self._finish_undo(errors, n, fs, info)
 
     def describe(self, since=0):
         return [e.describe() for e in self.entries[since:]]
@@ -508,11 +579,19 @@ class Journal:
             pairs = dict(pairs)
             cls_snapshots = ()
             if mod is not None:
-                cls_snapshots = tuple(
-                    (cls_obj, set(vars(cls_obj)))
-                    for cls_obj in vars(mod).values()
-                    if isinstance(cls_obj, type)
-                )
+                mod_name = getattr(mod, "__name__", None)
+                snaps, seen, stack = [], set(), [
+                    v for v in vars(mod).values() if isinstance(v, type)
+                ]
+                while stack:
+                    cls_obj = stack.pop()
+                    if id(cls_obj) in seen:
+                        continue
+                    seen.add(id(cls_obj))
+                    snaps.append((cls_obj, set(vars(cls_obj))))
+                    if cls_obj.__module__ == mod_name:
+                        stack.extend(v for v in vars(cls_obj).values() if isinstance(v, type))
+                cls_snapshots = tuple(snaps)
             module_keys = set(vars(mod)) if mod is not None else None
             triton_snapshot = _snapshot_triton_jit_registry(pairs, mod=mod)
             self.entries.append(Entry("closures", None, "closures",

@@ -404,6 +404,40 @@ class HarnessHelpersTests(unittest.TestCase):
         chk_no_cost = harness.check_failure("lost", [f])
         self.assertNotIn("cost_s", chk_no_cost)
 
+    def test_hooks_import_graph_dependents_and_purge_modules(self):
+        import types
+        tmp = tempfile.mkdtemp(prefix="fastrsi-hooks-graph-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        pkg = os.path.join(tmp, "gpkg")
+        os.makedirs(pkg)
+        with open(os.path.join(pkg, "__init__.py"), "w", encoding="utf-8") as fh:
+            fh.write("")
+        with open(os.path.join(pkg, "leaf.py"), "w", encoding="utf-8") as fh:
+            fh.write("VAL = 1\n")
+        with open(os.path.join(pkg, "mid.py"), "w", encoding="utf-8") as fh:
+            fh.write("from . import leaf\n")
+        with open(os.path.join(pkg, "top.py"), "w", encoding="utf-8") as fh:
+            fh.write("import gpkg.mid\n")
+        m_pkg = types.ModuleType("gpkg")
+        m_pkg.__file__ = os.path.join(pkg, "__init__.py")
+        m_leaf = types.ModuleType("gpkg.leaf")
+        m_leaf.__file__ = os.path.join(pkg, "leaf.py")
+        m_mid = types.ModuleType("gpkg.mid")
+        m_mid.__file__ = os.path.join(pkg, "mid.py")
+        m_top = types.ModuleType("gpkg.top")
+        m_top.__file__ = os.path.join(pkg, "top.py")
+        m_pkg.leaf, m_pkg.mid, m_pkg.top = m_leaf, m_mid, m_top
+        mods = {"gpkg": m_pkg, "gpkg.leaf": m_leaf, "gpkg.mid": m_mid, "gpkg.top": m_top}
+        cache = {}
+        graph = hooks.import_graph(("gpkg",), mods, cache=cache)
+        self.assertEqual(graph["gpkg.mid"], {"gpkg", "gpkg.leaf"})
+        self.assertEqual(graph["gpkg.top"], {"gpkg.mid"})
+        self.assertEqual(hooks.dependents({"gpkg.leaf"}, graph), {"gpkg.leaf", "gpkg.mid", "gpkg.top"})
+        hooks.purge_modules(["gpkg.leaf", "gpkg.mid"], mods)
+        self.assertNotIn("gpkg.leaf", mods)
+        self.assertFalse(hasattr(m_pkg, "leaf"))
+        self.assertTrue(hasattr(m_pkg, "top"))
+
 
 if __name__ == "__main__":
     unittest.main()

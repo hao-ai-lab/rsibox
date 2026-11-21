@@ -40,12 +40,21 @@ Contract:
 - unpatch puts back only functions this module patched, and returns their names.
 A zygote installs the guards before its imports, so every process it forks inherits them.
 """
-import ctypes, functools, gc, json, os, subprocess, sys, time
+import contextlib, ctypes, functools, gc, json, os, subprocess, sys, time
 
 COUNTS = {"get_device_capability": 0, "current_device": 0, "fallback": 0}
 PATCHED = ("get_device_capability", "current_device", "get_device_properties")
 LIBCUDA = "libcuda.so.1"
 _CUINIT = {}
+_NONE_AFFINITY = {"cpus": [], "numa_node": None, "source": "none"}
+
+
+def _read_text(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return ""
 
 
 def _nvml():
@@ -90,10 +99,8 @@ def nvml_visible(visible=None, nvml=None):
     except Exception:
         return None
     finally:
-        try:
+        with contextlib.suppress(Exception):
             nvml.nvmlShutdown()
-        except Exception:
-            pass
 
 
 def _index(device):
@@ -183,17 +190,8 @@ class Properties:
         return f"Properties({self.__dict__})"
 
 
-def _props_index(device):
-    """0 for None/"cuda", i for i, "cuda:i" or a cuda torch.device (index None -> 0), None
-    for anything else."""
-    return _index(device)
-
-
 def _probed_index(device_index, probed_visible):
-    """The probe's index for CUDA device `device_index` of this process: the same index while
-    CUDA_VISIBLE_DEVICES is what the probe saw, else the probe's index of the same physical
-    GPU (a forked child that set it to "1"); None when this process's GPU cannot be matched
-    by index (hidden, or named by UUID)."""
+    """The probe's index for CUDA device `device_index` of this process."""
     if device_index is None or os.environ.get("CUDA_VISIBLE_DEVICES") == probed_visible:
         return device_index
     physical = _resolve_physical_gpu_index(device_index)
@@ -207,14 +205,7 @@ def _probed_index(device_index, probed_visible):
 
 def install_properties(cuda, probe=None):
     """Make cuda.get_device_properties(i) answer, while CUDA is not initialized here, with the
-    values CUDA itself reported for device i in a short helper process (probe: a callable
-    returning the list of dicts; default a subprocess running PROPS_CODE with this
-    environment). Some imports read a value at module level (flashinfer's gdn kernels:
-    get_device_properties(0).multi_processor_count) and would otherwise initialize CUDA.
-    A process that changed CUDA_VISIBLE_DEVICES since the probe (a forked child) gets the
-    properties of its own physical GPU. Indices outside the probed devices, a GPU that cannot
-    be matched (hidden, or named by UUID), or calls after CUDA is initialized run the
-    original."""
+    values CUDA itself reported for device i in a short helper process."""
     orig = cuda.get_device_properties
     if getattr(orig, "_fastrsi_props", False):
         return {"installed": False, "why": "already installed"}
@@ -229,7 +220,7 @@ def install_properties(cuda, probe=None):
 
     def get_device_properties(device=None):
         if not cuda.is_initialized():
-            i = _probed_index(_props_index(device), probed_visible)
+            i = _probed_index(_index(device), probed_visible)
             if i is not None and 0 <= i < len(props):
                 return Properties(props[i])
         return orig(device)
@@ -481,52 +472,25 @@ def unpatch_child(cuda=None, clear_env: bool = False) -> dict:
 
 
 def _resolve_guard_capability(capability):
-    """Normalize `capability` for `install_all_guards` into `(cap_pair_or_None, cap_fn_or_None)`.
-
-    Accepts `None`, `(major, minor)`, `((major, minor), count)`, or a callable returning
-    any of those.
-    """
+    """Normalize `capability` for `install_all_guards` into `(cap_pair_or_None, cap_fn_or_None)`."""
     if capability is None:
         return None, None
-    if callable(capability):
-        val = capability()
-        if val is None:
-            return None, capability
-        if isinstance(val, (tuple, list)) and len(val) == 2 and isinstance(val[0], (tuple, list)):
-            pair = (int(val[0][0]), int(val[0][1]))
-            return pair, capability
-        pair = (int(val[0]), int(val[1]))
-        return pair, (lambda _pair=pair: (_pair, 1))
-    if isinstance(capability, (tuple, list)) and len(capability) == 2 and isinstance(capability[0], (tuple, list)):
-        pair = (int(capability[0][0]), int(capability[0][1]))
-        count = int(capability[1])
-        return pair, (lambda _pair=pair, _count=count: (_pair, _count))
-    pair = (int(capability[0]), int(capability[1]))
-    return pair, (lambda _pair=pair: (_pair, 1))
+    is_fn = callable(capability)
+    val = capability() if is_fn else capability
+    if val is None:
+        return None, capability
+    if isinstance(val, (tuple, list)) and len(val) == 2 and isinstance(val[0], (tuple, list)):
+        pair, count = (int(val[0][0]), int(val[0][1])), int(val[1])
+        return pair, (capability if is_fn else (lambda _p=pair, _c=count: (_p, _c)))
+    pair = (int(val[0]), int(val[1]))
+    return pair, (lambda _p=pair: (_p, 1))
 
 
 def install_all_guards(
-    cuda=None,
-    *,
-    capability=None,
-    nvml=None,
-    properties: bool = True,
-    probe=None,
-    triton: bool = True,
-    cuda_python: bool = True,
-    cute_dsl: bool = True,
-    import_torch: bool = False,
+    cuda=None, *, capability=None, nvml=None, properties: bool = True, probe=None,
+    triton: bool = True, cuda_python: bool = True, cute_dsl: bool = True, import_torch: bool = False,
 ):
-    """Install all pre-fork CUDA guards in the safe order before heavy ML imports.
-
-    When `import_torch=True` and `cuda is None`, imports `torch` after setting
-    `PYTORCH_NVML_BASED_CUDA_CHECK`, `CUTE_DSL_ARCH`, and the `cuda-python` `cuInit`
-    stub so `torch.cuda` guards can be installed before downstream ML imports.
-
-    Returns `(report, restore_triton)`: call `restore_triton()` after preloading imports
-    in the zygote, and call `unpatch_child(clear_env=report["nvml_env_set"])` in each
-    forked child.
-    """
+    """Install all pre-fork CUDA guards in the safe order before heavy ML imports."""
     nvml_env_set = "PYTORCH_NVML_BASED_CUDA_CHECK" not in os.environ
     if nvml_env_set:
         os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
@@ -538,12 +502,9 @@ def install_all_guards(
         report["cuda_python"] = guard_cuda_python(resolved_cap, nvml)
     if cuda is None:
         if import_torch and "torch" not in sys.modules:
-            try:
+            with contextlib.suppress(ImportError):
                 __import__("torch")
-            except ImportError:
-                pass
-        torch_mod = sys.modules.get("torch")
-        cuda = getattr(torch_mod, "cuda", None)
+        cuda = getattr(sys.modules.get("torch"), "cuda", None)
     if cuda is not None:
         report["torch_cuda"] = install(cuda, capability=cap_fn)
         if properties:
@@ -600,136 +561,70 @@ def _nvml_handle(nvml_module, physical):
 
 
 def _read_sysfs_pci_node(device_dir: str, source_label: str) -> dict | None:
-    cpulist_file = os.path.join(device_dir, "local_cpulist")
-    numa_file = os.path.join(device_dir, "numa_node")
-    cpus: list[int] = []
-    if os.path.isfile(cpulist_file):
-        try:
-            with open(cpulist_file, encoding="utf-8") as handle:
-                cpus = parse_cpulist(handle.read())
-        except OSError:
-            cpus = []
-    numa_node: int | None = None
-    if os.path.isfile(numa_file):
-        try:
-            with open(numa_file, encoding="utf-8") as handle:
-                raw_numa = handle.read().strip()
-            if raw_numa.isdigit() or (raw_numa[:1] in "+-" and raw_numa[1:].isdigit()):
-                parsed_numa = int(raw_numa)
-                numa_node = parsed_numa if parsed_numa >= 0 else None
-        except OSError:
-            numa_node = None
+    cpus = parse_cpulist(_read_text(os.path.join(device_dir, "local_cpulist")))
+    raw_numa = _read_text(os.path.join(device_dir, "numa_node")).strip()
+    numa_node = (
+        int(raw_numa)
+        if (raw_numa.isdigit() or (raw_numa[:1] in "+-" and raw_numa[1:].isdigit())) and int(raw_numa) >= 0
+        else None
+    )
     if not cpus and numa_node is None:
         return None
     return {"cpus": cpus, "numa_node": numa_node, "source": source_label}
 
 
-def detect_gpu_cpu_affinity(
-    device_index: int,
-    sysfs_root: str = "/sys/bus/pci/devices",
-) -> dict:
+def detect_gpu_cpu_affinity(device_index: int, sysfs_root: str = "/sys/bus/pci/devices") -> dict:
     """Detect the CPU affinity list and NUMA node for `device_index` without initializing CUDA."""
-    if device_index < 0:
-        return {"cpus": [], "numa_node": None, "source": "none"}
-    physical_index = _resolve_physical_gpu_index(device_index)
-    if physical_index is None:          # CUDA_VISIBLE_DEVICES does not list this device
-        return {"cpus": [], "numa_node": None, "source": "none"}
-    if sysfs_root == "/sys/bus/pci/devices":
-        nvml_module = _nvml()
-        if nvml_module is not None:
+    if device_index < 0 or (physical_index := _resolve_physical_gpu_index(device_index)) is None:
+        return dict(_NONE_AFFINITY)
+    if sysfs_root == "/sys/bus/pci/devices" and (nvml_module := _nvml()) is not None:
+        with contextlib.suppress(Exception):
+            nvml_module.nvmlInit()
             try:
-                nvml_module.nvmlInit()
-                try:
-                    handle = _nvml_handle(nvml_module, physical_index)
-                    sysfs_info = None
-                    if hasattr(nvml_module, "nvmlDeviceGetPciInfo") and os.path.isdir(sysfs_root):
-                        pci_info = nvml_module.nvmlDeviceGetPciInfo(handle)
-                        raw_bus = getattr(pci_info, "busId", b"")
-                        bus_text = (
-                            raw_bus.decode("utf-8", errors="ignore")
-                            if isinstance(raw_bus, bytes)
-                            else str(raw_bus)
-                        ).rstrip("\x00").strip().lower()
-                        candidate_bus_ids = [bus_text]
-                        if bus_text.startswith("00000000:"):
-                            candidate_bus_ids.append(bus_text[4:])
-                        for bus_id in candidate_bus_ids:
-                            candidate_dir = os.path.join(sysfs_root, bus_id)
-                            if os.path.isdir(candidate_dir):
-                                sysfs_info = _read_sysfs_pci_node(candidate_dir, "nvml_pci_sysfs")
-                                if sysfs_info and sysfs_info["cpus"]:
-                                    return sysfs_info
-                    if hasattr(nvml_module, "nvmlDeviceGetCpuAffinity"):
-                        cpu_total = os.cpu_count() or 64
-                        mask_words = max(1, (cpu_total + 63) // 64)
-                        affinity_masks = nvml_module.nvmlDeviceGetCpuAffinity(handle, mask_words)
-                        nvml_cpus: list[int] = []
-                        for word_idx, mask_val in enumerate(affinity_masks):
-                            word_int = int(mask_val)
-                            for bit_idx in range(64):
-                                if word_int & (1 << bit_idx):
-                                    nvml_cpus.append(word_idx * 64 + bit_idx)
-                        if nvml_cpus:
-                            return {
-                                "cpus": sorted(set(nvml_cpus)),
-                                "numa_node": sysfs_info["numa_node"] if sysfs_info else None,
-                                "source": "nvml",
-                            }
-                finally:
-                    try:
-                        nvml_module.nvmlShutdown()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+                handle, sysfs_info = _nvml_handle(nvml_module, physical_index), None
+                if hasattr(nvml_module, "nvmlDeviceGetPciInfo") and os.path.isdir(sysfs_root):
+                    raw_bus = getattr(nvml_module.nvmlDeviceGetPciInfo(handle), "busId", b"")
+                    bus_text = (raw_bus.decode("utf-8", errors="ignore") if isinstance(raw_bus, bytes) else str(raw_bus)).rstrip("\x00").strip().lower()
+                    for bus_id in (bus_text, *([bus_text[4:]] if bus_text.startswith("00000000:") else [])):
+                        cand = os.path.join(sysfs_root, bus_id)
+                        if os.path.isdir(cand):
+                            sysfs_info = _read_sysfs_pci_node(cand, "nvml_pci_sysfs")
+                            if sysfs_info and sysfs_info["cpus"]:
+                                return sysfs_info
+                if hasattr(nvml_module, "nvmlDeviceGetCpuAffinity"):
+                    mask_words = max(1, ((os.cpu_count() or 64) + 63) // 64)
+                    masks = nvml_module.nvmlDeviceGetCpuAffinity(handle, mask_words)
+                    nvml_cpus = sorted({w * 64 + b for w, m in enumerate(masks) for b in range(64) if int(m) & (1 << b)})
+                    if nvml_cpus:
+                        return {"cpus": nvml_cpus, "numa_node": sysfs_info["numa_node"] if sysfs_info else None, "source": "nvml"}
+            finally:
+                with contextlib.suppress(Exception):
+                    nvml_module.nvmlShutdown()
     if isinstance(physical_index, str):  # a UUID: only NVML maps it to a PCI device
-        return {"cpus": [], "numa_node": None, "source": "none"}
+        return dict(_NONE_AFFINITY)
     if sysfs_root and os.path.isdir(sysfs_root):
-        all_candidates: list[str] = []
-        nvidia_candidates: list[str] = []
+        all_candidates, nvidia_candidates = [], []
         try:
             entry_names = sorted(os.listdir(sysfs_root))
         except OSError:
             entry_names = []
         for entry_name in entry_names:
             entry_dir = os.path.join(sysfs_root, entry_name)
-            if not os.path.isdir(entry_dir):
-                continue
-            has_affinity_files = (
-                os.path.isfile(os.path.join(entry_dir, "local_cpulist"))
-                or os.path.isfile(os.path.join(entry_dir, "numa_node"))
-            )
-            if not has_affinity_files:
+            if not (os.path.isdir(entry_dir) and (os.path.isfile(os.path.join(entry_dir, "local_cpulist"))
+                                                  or os.path.isfile(os.path.join(entry_dir, "numa_node")))):
                 continue
             all_candidates.append(entry_dir)
-            vendor_file = os.path.join(entry_dir, "vendor")
-            class_file = os.path.join(entry_dir, "class")
-            try:
-                if os.path.isfile(vendor_file):
-                    with open(vendor_file, encoding="utf-8") as handle:
-                        vendor_val = handle.read().strip().lower()
-                else:
-                    vendor_val = ""
-                if os.path.isfile(class_file):
-                    with open(class_file, encoding="utf-8") as handle:
-                        class_val = handle.read().strip().lower()
-                else:
-                    class_val = ""
-            except OSError:
-                vendor_val, class_val = "", ""
+            vendor_val = _read_text(os.path.join(entry_dir, "vendor")).strip().lower()
+            class_val = _read_text(os.path.join(entry_dir, "class")).strip().lower()
             if vendor_val == "0x10de" and (not class_val or class_val.startswith("0x03")):
                 nvidia_candidates.append(entry_dir)
-        selected_dirs = nvidia_candidates if nvidia_candidates else all_candidates
-        target_index = (
-            physical_index
-            if 0 <= physical_index < len(selected_dirs)
-            else (device_index if 0 <= device_index < len(selected_dirs) else -1)
+        selected_dirs = nvidia_candidates or all_candidates
+        target_index = physical_index if 0 <= physical_index < len(selected_dirs) else (
+            device_index if 0 <= device_index < len(selected_dirs) else -1
         )
-        if target_index >= 0:
-            sysfs_result = _read_sysfs_pci_node(selected_dirs[target_index], "sysfs")
-            if sysfs_result is not None:
-                return sysfs_result
-    return {"cpus": [], "numa_node": None, "source": "none"}
+        if target_index >= 0 and (res := _read_sysfs_pci_node(selected_dirs[target_index], "sysfs")) is not None:
+            return res
+    return dict(_NONE_AFFINITY)
 
 
 def bind_rank_numa_and_cpus(
@@ -804,6 +699,21 @@ def clamp_thread_pools(num_threads: int = 1, clamp_compile_threads: bool = False
     }
 
 
+def apply_child_runtime_affinity(env: dict[str, str] | None = None) -> dict:
+    """Clamp default thread pools and bind GPU NUMA/CPUs for a freshly forked zygote child."""
+    src = env or {}
+    if not src.get("OMP_NUM_THREADS") and not os.environ.get("OMP_NUM_THREADS"):
+        clamp_thread_pools(num_threads=1)
+    rank_str = (src.get("LOCAL_RANK") or os.environ.get("LOCAL_RANK") or "").strip()
+    vis_raw = src.get("CUDA_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or ""
+    visible = [tok.strip() for tok in vis_raw.split(",") if tok.strip().isdigit()]
+    if rank_str.isdigit():
+        return bind_rank_numa_and_cpus(int(rank_str))
+    if len(visible) == 1:
+        return bind_rank_numa_and_cpus(0)
+    return {"bound_cpus": [], "numa_node": None}
+
+
 def freeze_gc_before_fork() -> dict:
     """Run a full generation-2 collection and freeze the heap before forking worker children."""
     collected = gc.collect(2)
@@ -853,18 +763,12 @@ def audit_system_environment(
             f"{total_threads} threads ({omp_threads} OMP_NUM_THREADS * {world_size} ranks)",
             f"<= {cpu_total} logical CPUs",
         ))
-    if not gc_frozen and thp_enabled_path and os.path.exists(thp_enabled_path):
-        try:
-            with open(thp_enabled_path, encoding="utf-8") as handle:
-                thp_text = handle.read()
-        except OSError:
-            thp_text = ""
-        if "[always]" in thp_text:
-            findings_list.append(_build_finding(
-                "thp_unfrozen_gc",
-                "transparent_hugepage/enabled has [always] with gc_frozen=False",
-                "gc.freeze() called before fork or transparent_hugepage set to madvise",
-            ))
+    if not gc_frozen and thp_enabled_path and "[always]" in _read_text(thp_enabled_path):
+        findings_list.append(_build_finding(
+            "thp_unfrozen_gc",
+            "transparent_hugepage/enabled has [always] with gc_frozen=False",
+            "gc.freeze() called before fork or transparent_hugepage set to madvise",
+        ))
     if require_imex and not os.path.exists(imex_path):
         findings_list.append(_build_finding(
             "imex_channel_missing",
