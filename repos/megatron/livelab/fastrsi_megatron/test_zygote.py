@@ -209,6 +209,167 @@ class Zygote(unittest.TestCase):
         full = sorted(os.sched_getaffinity(0))
         self.assertEqual(json.loads(Path(self.d, "r1.json").read_text())["cpus"], full)
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: /proc and child subreaper")
+    def test_zygote_leading_own_process_group_reaps_job_without_touching_pgrp_sibling(self):
+        """When the zygote leads its own process group (`os.getpgrp() == pid`), a failing job
+        and its `setsid()` orphans are reaped without signaling the zygote itself or an
+        unrelated sibling sharing the zygote's process group."""
+        sock2 = os.path.join(self.d, "z-pgrp.sock")
+        out2 = os.path.join(self.d, "pgrp-out")
+        os.makedirs(out2)
+        env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
+                   FASTRSI_ZYGOTE_FORKSAFE="0")
+        z_as_leader = (
+            "import json, os, subprocess, sys\n"
+            "os.setsid()\n"
+            "sib = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setpgid(0, os.getppid())\n"
+            "    os.execv(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "from fastrsi_megatron import zygote\n"
+            "print(json.dumps({'z_pid': os.getpid(), 'z_pgrp': os.getpgrp(),\n"
+            "                  'pre_sib': sib.pid, 'pgrp_other': pid}), flush=True)\n"
+            "try:\n"
+            f"    zygote.serve({sock2!r}, ['heavy'], forksafe=False)\n"
+            "finally:\n"
+            "    sib_alive = sib.poll() is None\n"
+            "    other_alive = True\n"
+            "    try:\n"
+            "        os.kill(pid, 0)\n"
+            "    except ProcessLookupError:\n"
+            "        other_alive = False\n"
+            "    sib.kill(); sib.wait()\n"
+            "    try:\n"
+            "        os.kill(pid, 9); os.waitpid(pid, 0)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    print(json.dumps({'sib_alive': sib_alive, 'other_alive': other_alive}), flush=True)\n"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", z_as_leader],
+                                stdout=subprocess.PIPE, text=True, env=env)
+        try:
+            meta = json.loads(proc.stdout.readline())
+            self.assertEqual(meta["z_pid"], meta["z_pgrp"])
+            ready = json.loads(proc.stdout.readline())
+            self.assertEqual(ready["event"], "ready")
+            req_orphan = {"argv": [os.path.join(self.d, "train.py")], "nproc": 1, "port": 29997,
+                          "entry": "script", "log_dir": out2,
+                          "env": {"OUT": out2, "ORPHAN": "1"}, "t0": time.time()}
+            evs_orphan = list(zygote.request(sock2, req_orphan))
+            self.assertEqual(evs_orphan[-1]["rc"], [0])
+            orphan = int(Path(out2, "orphan0").read_text())
+            deadline = time.time() + 10
+            while os.path.exists(f"/proc/{orphan}/stat") and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(os.path.exists(f"/proc/{orphan}/stat"))
+            req_fail = {"argv": [os.path.join(self.d, "train.py")], "nproc": 2, "port": 29997,
+                        "entry": "script", "log_dir": out2,
+                        "env": {"OUT": out2, "FAIL_RANK": "1", "HANG": "1"}, "t0": time.time()}
+            evs_fail = list(zygote.request(sock2, req_fail))
+            self.assertEqual(evs_fail[-1]["rc"], [-15, 7])
+            self.assertEqual([e["event"] for e in zygote.request(sock2, {"op": "ping"})], ["pong"])
+            self.assertEqual([e["event"] for e in zygote.request(sock2, {"op": "stop"})], ["stopped"])
+            summary = json.loads(proc.stdout.readline())
+            self.assertTrue(summary["sib_alive"])
+            self.assertTrue(summary["other_alive"])
+            self.assertEqual(proc.wait(10), 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(10)
+            proc.stdout.close()
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: /proc and child subreaper")
+    def test_job_started_helpers_are_reaped_while_prejob_helper_and_child_survive(self):
+        """A pre-job helper started by the zygote (and a child that helper spawns during the job)
+        survives `handle()`'s `reap_all(keep=before)`, while helpers/grandchildren started by a
+        rank during the job (in-group and `SIGTERM`-ignoring `setsid()`) are killed and reaped."""
+        sock3 = os.path.join(self.d, "z-helpers.sock")
+        out3 = os.path.join(self.d, "helpers-out")
+        os.makedirs(out3)
+        rank_script = os.path.join(self.d, "spawn_helpers.py")
+        Path(rank_script).write_text(
+            "import json, os, signal, subprocess, sys, time\n"
+            "in_grp = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "out_code = (\n"
+            "    'import os, signal, subprocess, sys, time\\n'\n"
+            "    'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'\n"
+            "    'gc = subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(60)\"], start_new_session=True)\\n'\n"
+            "    'with open(os.environ[\"GC_FILE\"], \"w\") as fh:\\n'\n"
+            "    '    fh.write(str(gc.pid))\\n'\n"
+            "    'time.sleep(60)\\n'\n"
+            ")\n"
+            "gc_file = os.path.join(os.environ['OUT'], 'grandchild.pid')\n"
+            "out_env = {**os.environ, 'GC_FILE': gc_file}\n"
+            "out_grp = subprocess.Popen([sys.executable, '-c', out_code], start_new_session=True, env=out_env)\n"
+            "while not os.path.exists(gc_file) or not os.path.getsize(gc_file):\n"
+            "    time.sleep(0.01)\n"
+            "with open(gc_file) as gfh:\n"
+            "    gc_pid = int(gfh.read())\n"
+            "with open(os.path.join(os.environ['OUT'], 'job_helpers.json'), 'w') as fh:\n"
+            "    json.dump({'in_grp': in_grp.pid, 'out_grp': out_grp.pid, 'grandchild': gc_pid}, fh)\n",
+            encoding="utf-8",
+        )
+        helper_code = (
+            "import os, subprocess, sys, time\n"
+            "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "with open(sys.argv[1], 'w') as fh:\n"
+            "    fh.write(f'{os.getpid()},{kid.pid}')\n"
+            "try:\n"
+            "    time.sleep(60)\n"
+            "finally:\n"
+            "    kid.kill(); kid.wait()\n"
+        )
+        z_runner = (
+            "import json, os, subprocess, sys, time\n"
+            "from fastrsi_megatron import zygote\n"
+            f"helper_pid_file = {os.path.join(out3, 'pre_helper.txt')!r}\n"
+            f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}, helper_pid_file])\n"
+            "while not os.path.exists(helper_pid_file) or not os.path.getsize(helper_pid_file):\n"
+            "    time.sleep(0.01)\n"
+            "try:\n"
+            f"    zygote.serve({sock3!r}, ['heavy'], forksafe=False)\n"
+            "finally:\n"
+            "    with open(helper_pid_file) as hfh:\n"
+            "        h_pid, hk_pid = [int(x) for x in hfh.read().split(',')]\n"
+            "    h_alive = helper.poll() is None\n"
+            "    hk_alive = os.path.exists(f'/proc/{hk_pid}/stat')\n"
+            "    helper.kill(); helper.wait()\n"
+            "    try:\n"
+            "        os.kill(hk_pid, 9)\n"
+            "    except ProcessLookupError:\n"
+            "        pass\n"
+            "    print(json.dumps({'h_alive': h_alive, 'hk_alive': hk_alive}), flush=True)\n"
+        )
+        env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
+                   FASTRSI_ZYGOTE_FORKSAFE="0")
+        proc = subprocess.Popen([sys.executable, "-c", z_runner],
+                                stdout=subprocess.PIPE, text=True, env=env)
+        try:
+            ready = json.loads(proc.stdout.readline())
+            self.assertEqual(ready["event"], "ready")
+            req = {"argv": [rank_script], "nproc": 1, "port": 29996,
+                   "entry": "script", "log_dir": out3, "env": {"OUT": out3}, "t0": time.time()}
+            evs = list(zygote.request(sock3, req))
+            self.assertEqual(evs[-1]["rc"], [0])
+            pids = json.loads(Path(out3, "job_helpers.json").read_text())
+            for name, pid in pids.items():
+                deadline = time.time() + 10
+                while os.path.exists(f"/proc/{pid}/stat") and time.time() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(os.path.exists(f"/proc/{pid}/stat"), f"{name} ({pid}) survived")
+            self.assertEqual([e["event"] for e in zygote.request(sock3, {"op": "stop"})], ["stopped"])
+            res = json.loads(proc.stdout.readline())
+            self.assertTrue(res["h_alive"])
+            self.assertTrue(res["hk_alive"])
+            self.assertEqual(proc.wait(10), 0)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(10)
+            proc.stdout.close()
+
 
 class Pieces(unittest.TestCase):
     def test_unpatch_puts_back_the_patched_cuda_functions(self):
@@ -500,6 +661,279 @@ class Pieces(unittest.TestCase):
         c.init = True
         with self.assertRaises(RuntimeError):
             c.get_device_properties(0)
+
+    def test_zygote_leading_own_process_group_excludes_self_and_pgrp_peers(self):
+        """When the zygote leads its own process group (`pgrp == pid`), `_children`, `_tree`,
+        and `kill_tree` match on parent PID, never matching the zygote itself or an unrelated
+        peer in the zygote's process group."""
+        from unittest import mock
+        lines = {1000: "1000 (python3) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 100",
+                 1500: "1500 (helper) S 1000 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 150",
+                 2001: "2001 (rank0) S 1000 2001 2001 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 200",
+                 4000: "4000 (sibling) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 400"}
+        with tempfile.TemporaryDirectory() as proc_dir:
+            for pid, line in lines.items():
+                os.makedirs(os.path.join(proc_dir, str(pid)))
+                Path(proc_dir, str(pid), "stat").write_text(line + "\n", encoding="utf-8")
+            self.assertEqual(zygote._children(1000, proc_dir), [1500, 2001])
+            self.assertEqual(zygote._tree(2001, proc_dir), [2001])
+            killed_pids, killed_pgs = [], []
+            with mock.patch.object(zygote.os, "kill", side_effect=lambda p, s: killed_pids.append((p, s))), \
+                 mock.patch.object(zygote.os, "killpg", side_effect=lambda g, s: killed_pgs.append((g, s))):
+                zygote.kill_tree(2001, proc_root=proc_dir)
+            self.assertEqual(killed_pids, [(2001, zygote.signal.SIGTERM)])
+            self.assertEqual(killed_pgs, [(2001, zygote.signal.SIGTERM)])
+
+    def test_zygote_as_pid_1_children_reap_and_sigterm_handling(self):
+        """As PID 1 (`/proc/1/stat` has `ppid == 0`), `_children(1)` excludes PID 1 itself,
+        `reap_all` kills and reaps job ranks/orphans without signaling PID 1, and `serve()`
+        installs (and restores) a `SIGTERM` handler when running as PID 1."""
+        import signal
+        from unittest import mock
+        lines = {1: "1 (zygote) S 0 1 1 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 1",
+                 2: "2 (rank0) S 1 2 2 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 20",
+                 3: "3 (guard) S 2 2 2 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 30",
+                 4: "4 (orphan) S 1 4 4 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 40"}
+        with tempfile.TemporaryDirectory() as proc_dir:
+            for pid, line in lines.items():
+                os.makedirs(os.path.join(proc_dir, str(pid)))
+                Path(proc_dir, str(pid), "stat").write_text(line + "\n", encoding="utf-8")
+            self.assertEqual(zygote._children(1, proc_dir), [2, 4])
+            self.assertEqual(zygote._tree(1, proc_dir), [1, 2, 4, 3])
+            killed, reaped_state = [], set()
+
+            def fake_kill(pid, sig):
+                killed.append(pid)
+
+            def fake_waitpid(pid, flags):
+                if pid in (2, 4) and pid not in reaped_state:
+                    reaped_state.add(pid)
+                    import shutil
+                    shutil.rmtree(os.path.join(proc_dir, str(pid)), ignore_errors=True)
+                    return pid, 0
+                raise ChildProcessError()
+
+            with mock.patch.object(zygote.os, "getpid", return_value=1), \
+                 mock.patch.object(zygote.os, "kill", side_effect=fake_kill), \
+                 mock.patch.object(zygote.os, "killpg"), \
+                 mock.patch.object(zygote.os, "waitpid", side_effect=fake_waitpid):
+                reaped = zygote.reap_all(timeout=1.0, keep=(), proc_root=proc_dir)
+            self.assertEqual(sorted(reaped), [2, 4])
+            self.assertNotIn(1, killed)
+            self.assertIn(3, killed)
+
+        # Verify serve() installs a SIGTERM exit handler when pid == 1 and restores it on stop.
+        with tempfile.TemporaryDirectory() as d:
+            sock = os.path.join(d, "pid1.sock")
+            installed = []
+            orig_signal = signal.signal
+
+            def spy_signal(sig, handler):
+                installed.append((sig, handler))
+                return orig_signal(sig, handler)
+
+            class FakeConn:
+                def __enter__(self):
+                    return self
+                def __exit__(self, *a):
+                    return False
+                def settimeout(self, t):
+                    pass
+                def makefile(self):
+                    import io
+                    return io.StringIO('{"op": "stop"}\n')
+                def sendall(self, data):
+                    pass
+
+            class FakeSock:
+                def bind(self, s):
+                    pass
+                def listen(self, n):
+                    pass
+                def accept(self):
+                    return FakeConn(), None
+                def close(self):
+                    pass
+
+            with mock.patch.object(zygote.os, "getpid", return_value=1), \
+                 mock.patch.object(zygote.os, "unlink"), \
+                 mock.patch.object(zygote, "preload", return_value={}), \
+                 mock.patch.object(zygote, "sources", return_value={}), \
+                 mock.patch.object(zygote.socket, "socket", return_value=FakeSock()), \
+                 mock.patch.object(zygote.signal, "getsignal", return_value=signal.SIG_DFL), \
+                 mock.patch.object(zygote.signal, "signal", side_effect=spy_signal), \
+                 mock.patch("sys.stdout", new_callable=lambda: __import__("io").StringIO()):
+                zygote.serve(sock, [], forksafe=False)
+            self.assertEqual(len(installed), 2)
+            self.assertEqual(installed[0][0], signal.SIGTERM)
+            self.assertTrue(callable(installed[0][1]))
+            self.assertEqual(installed[1], (signal.SIGTERM, signal.SIG_DFL))
+            with self.assertRaises(SystemExit) as se:
+                installed[0][1](signal.SIGTERM, None)
+            self.assertEqual(se.exception.code, 128 + signal.SIGTERM)
+
+    def test_proc_from_another_pid_namespace_translates_nspid_and_ignores_foreign_proc(self):
+        """When `/proc` belongs to an ancestor PID namespace (`NSpid` present), `_ppids`,
+        `_children`, and `_tree` translate only processes in our PID namespace (plus unshared
+        descendants) to local PIDs and exclude host/sibling processes. When `/proc` is from an
+        untranslatable foreign namespace, foreign PIDs are never returned or signaled."""
+        from unittest import mock
+        my_pid = os.getpid()
+
+        # 1. Ancestor-namespace /proc with NSpid + ns/pid:
+        with tempfile.TemporaryDirectory() as anc:
+            os.symlink("50000", os.path.join(anc, "self"))
+            entries = {
+                1: ("1", "0", "pid:[111]"),                               # host init
+                50000: (f"50000\t{my_pid}", "1", "pid:[999]"),             # zygote
+                50001: ("50001\t2001", "50000", "pid:[999]"),             # rank 0
+                50002: ("50002\t3005", "50001", "pid:[999]"),             # rank 0 child
+                50003: ("50003\t2001", "49999", "pid:[777]"),             # sibling ns collision
+                50004: ("50004\t3006\t1", "50001", "pid:[888]"),          # deeper unshared child
+                50005: ("50005\t4000", "1", "pid:[111]"),                 # unrelated host proc
+            }
+            for opid, (nspid, oppid, ns) in entries.items():
+                pdir = os.path.join(anc, str(opid))
+                os.makedirs(os.path.join(pdir, "ns"))
+                Path(pdir, "status").write_text(f"Pid:\t{opid}\nPPid:\t{oppid}\nNSpid:\t{nspid}\n",
+                                                encoding="utf-8")
+                os.symlink(ns, os.path.join(pdir, "ns", "pid"))
+            self.assertEqual(zygote._ppids(anc), {my_pid: 0, 2001: my_pid, 3005: 2001, 3006: 2001})
+            self.assertEqual(zygote._children(proc_root=anc), [2001])
+            self.assertEqual(zygote._tree(my_pid, proc_root=anc), [my_pid, 2001, 3005, 3006])
+
+        # 2. Untranslatable foreign /proc (colliding PIDs, no matching NSpid):
+        with tempfile.TemporaryDirectory() as foreign:
+            os.symlink("99999", os.path.join(foreign, "self"))
+            os.makedirs(os.path.join(foreign, "77777"))
+            Path(foreign, "77777", "stat").write_text(
+                f"77777 (host) S {my_pid} 77777 77777 0 -1\n", encoding="utf-8"
+            )
+            self.assertEqual(zygote._ppids(foreign), {})
+            self.assertEqual(zygote._children(proc_root=foreign), [])
+            self.assertEqual(zygote._tree(2001, proc_root=foreign), [2001])
+            killed, waited = [], []
+            with mock.patch.object(zygote.os, "kill", side_effect=lambda p, s: killed.append(p)), \
+                 mock.patch.object(zygote.os, "killpg"), \
+                 mock.patch.object(zygote.os, "waitpid",
+                                   side_effect=lambda p, f: (waited.append(p), (p, 0))[1] if p == 2001 else (_ for _ in ()).throw(ChildProcessError())):
+                reaped = zygote.reap_all(timeout=0.5, keep=(), proc_root=foreign, known=[2001])
+            self.assertNotIn(77777, killed)
+            self.assertNotIn(77777, waited)
+            self.assertEqual(killed, [2001])
+            self.assertEqual(reaped, [2001])
+
+        # 3. Real-procfs markers (`stat` file present) where `self` is absent (child-ns /proc):
+        with tempfile.TemporaryDirectory() as child_ns:
+            Path(child_ns, "stat").write_text("cpu 0 0 0 0\n", encoding="utf-8")
+            os.makedirs(os.path.join(child_ns, "1"))
+            Path(child_ns, "1", "stat").write_text(f"1 (other) S {my_pid} 1 1 0 -1\n", encoding="utf-8")
+            self.assertEqual(zygote._ppids(child_ns), {})
+            self.assertEqual(zygote._children(proc_root=child_ns), [])
+
+    def test_translated_ppids_without_ns_pid_isolates_sibling_namespace_collisions(self):
+        """When `/proc/self/ns/pid` is unreadable (`self_ns is None`), `_translated_ppids()`
+        seeds `outer_to_local` solely with `self` and translates only proven `ppid` descendants,
+        never admitting sibling-namespace processes whose local PID collides with `my_pid` or a rank."""
+        my_pid = os.getpid()
+        with tempfile.TemporaryDirectory() as anc:
+            os.symlink("50000", os.path.join(anc, "self"))
+            entries = {
+                1: ("1", "0"),                               # host init
+                50000: (f"50000\t{my_pid}", "1"),            # zygote (self)
+                50001: ("50001\t2001", "50000"),             # our rank 0
+                50002: ("50002\t3005", "50001"),             # our rank 0 child
+                50004: ("50004\t3006\t1", "50001"),          # our deeper unshared child
+                60000: (f"60000\t{my_pid}", "49999"),        # sibling ns colliding with my_pid
+                60001: ("60001\t20", "60000"),               # sibling ns child (must not appear as child of my_pid)
+                60002: ("60002\t2001", "49999"),             # sibling ns colliding with rank 0 local pid
+            }
+            for opid, (nspid, oppid) in entries.items():
+                pdir = os.path.join(anc, str(opid))
+                os.makedirs(pdir)
+                Path(pdir, "status").write_text(f"Pid:\t{opid}\nPPid:\t{oppid}\nNSpid:\t{nspid}\n",
+                                                encoding="utf-8")
+            self.assertEqual(zygote._ppids(anc), {my_pid: 0, 2001: my_pid, 3005: 2001, 3006: 2001})
+            self.assertEqual(zygote._children(proc_root=anc), [2001])
+            self.assertEqual(zygote._tree(my_pid, proc_root=anc), [my_pid, 2001, 3005, 3006])
+
+    def test_reap_unusable_proc_signals_all_targets_up_front_under_one_shared_deadline(self):
+        """`_reap_unusable_proc()` must `SIGKILL` all non-kept known ranks before waiting, and
+        bound waiting for stuck ranks to a single shared `timeout` rather than `len(known) * timeout`."""
+        from unittest import mock
+        events = []
+        now = [0.0]
+
+        def fake_kill(pid, sig):
+            events.append(("kill", pid, sig))
+
+        def fake_waitpid(pid, flags):
+            events.append(("wait", pid))
+            if pid == 2003:
+                return 2003, 0
+            if pid in (2001, 2004):
+                return 0, 0
+            raise ChildProcessError()
+
+        def fake_sleep(dt):
+            now[0] += dt
+
+        with tempfile.TemporaryDirectory() as foreign:
+            os.symlink("99999", os.path.join(foreign, "self"))
+            with mock.patch.object(zygote.os, "kill", side_effect=fake_kill), \
+                 mock.patch.object(zygote.os, "killpg"), \
+                 mock.patch.object(zygote.os, "waitpid", side_effect=fake_waitpid), \
+                 mock.patch.object(zygote.time, "monotonic", side_effect=lambda: now[0]), \
+                 mock.patch.object(zygote.time, "sleep", side_effect=fake_sleep):
+                reaped = zygote.reap_all(
+                    timeout=0.06, keep=(2002,), proc_root=foreign, known=[2001, 2002, 2003, 2004]
+                )
+        self.assertEqual(reaped, [2003])
+        kill_pids = [e[1] for e in events if e[0] == "kill"]
+        self.assertEqual(kill_pids, [2001, 2003, 2004])
+        first_wait = next(i for i, e in enumerate(events) if e[0] == "wait")
+        self.assertEqual([e[1] for e in events[:first_wait]], [2001, 2003, 2004])
+        self.assertLessEqual(now[0], 0.08)
+
+    def test_reap_all_refreshes_left_before_logging_reap_timeout(self):
+        """When the final child is reaped right as the deadline expires, `reap_all()` must
+        refresh `left` before logging `reap_timeout`, while still logging for truly stuck children."""
+        import shutil
+        from unittest import mock
+        lines = {1000: "1000 (zygote) S 1 1000 1000 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 1",
+                 2001: "2001 (rank0) S 1000 2001 2001 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 20"}
+        with tempfile.TemporaryDirectory() as proc_dir:
+            for pid, line in lines.items():
+                os.makedirs(os.path.join(proc_dir, str(pid)))
+                Path(proc_dir, str(pid), "stat").write_text(line + "\n", encoding="utf-8")
+
+            def reap_and_remove(pid, flags):
+                shutil.rmtree(os.path.join(proc_dir, str(pid)), ignore_errors=True)
+                return pid, 0
+
+            with mock.patch.object(zygote.os, "getpid", return_value=1000), \
+                 mock.patch.object(zygote.os, "kill"), \
+                 mock.patch.object(zygote.os, "killpg"), \
+                 mock.patch.object(zygote.os, "waitpid", side_effect=reap_and_remove), \
+                 mock.patch.object(zygote, "log") as log_mock:
+                reaped = zygote.reap_all(timeout=0.0, keep=(), proc_root=proc_dir)
+            self.assertEqual(reaped, [2001])
+            log_mock.assert_not_called()
+
+            # A child that does NOT exit by deadline still emits `reap_timeout`.
+            os.makedirs(os.path.join(proc_dir, "2002"))
+            Path(proc_dir, "2002", "stat").write_text(
+                "2002 (stuck) S 1000 2002 2002 0 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 21\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(zygote.os, "getpid", return_value=1000), \
+                 mock.patch.object(zygote.os, "kill"), \
+                 mock.patch.object(zygote.os, "killpg"), \
+                 mock.patch.object(zygote.os, "waitpid", return_value=(0, 0)), \
+                 mock.patch.object(zygote, "log") as log_mock:
+                reaped = zygote.reap_all(timeout=0.0, keep=(), proc_root=proc_dir)
+            self.assertEqual(reaped, [])
+            log_mock.assert_called_once_with("reap_timeout", left=[2002])
 
 
 if __name__ == "__main__":

@@ -324,7 +324,8 @@ class Lab:
             Path(sys.modules[m].__file__).read_text()
 
     def serve(self):
-        """Every rank: serve the gap until resume or exit."""
+        """Every rank: serve the gap until resume or exit (returns 'exit_failed' when exit ran
+        after or caused a failed round, so rank 0 does not barrier on the failed group)."""
         if self.rank != 0:
             while True:
                 try:
@@ -367,9 +368,14 @@ class Lab:
             if sent is False:
                 print(f"[fastrsi] client gone before the reply to {verb!r} "
                       f"({out['cost_s']} s); the lab serves on", flush=True)
-            if verb == "exit" or (verb == "resume" and out.get("ok")):
+            if verb == "exit":
                 server.close()
-                return verb
+                if not out.get("ok") or getattr(self.ranks, "failed", None):
+                    return "exit_failed"
+                return "exit"
+            if verb == "resume" and out.get("ok"):
+                server.close()
+                return "resume"
 
     def verb(self, verb, req):
         s = self._host()
@@ -406,9 +412,10 @@ class Lab:
                             why = f"module {name!r} has no readable source file ({type(error).__name__})"
                             break
             if why:
-                return {"ok": False, "id": None, "outcome": "refused", "codes": ["patch_invalid"],
-                        "mechanisms": [], "receipt": None, "not_loaded": missing, "findings": [F.finding(
-                            "patch_invalid", why, "modules the running job imported from source")]}
+                return {**harness.install_refusal(
+                    ["patch_invalid"],
+                    [F.finding("patch_invalid", why, "modules the running job imported from source")],
+                ), "receipt": None, "not_loaded": missing}
             if not s.poisoned():
                 self._track(s, list(files))
             plan = {"modules": modules, "accept": patch.get("accept", []),
@@ -432,8 +439,7 @@ class Lab:
                 err = "; ".join(f"rank {r.get('rank')}: {r.get('error')}" for r in rs
                                 if not r.get("ok"))
                 s.fault("participant_failed", f"check: {err}", "every rank finishes the check")
-                return {"ok": False, "error": err, "output": None, "proven": None,
-                        "witness": {}, "findings": list(s.poison)}
+                return harness.check_failure(err, list(s.poison))
             out = _merge_check_output(rs)
             golden = {"output_hash": L.text_hash(json.dumps(out, sort_keys=True))}
             proofs = [s.co.prove(t, golden=golden) for t in s.stack]
@@ -605,8 +611,10 @@ def install_hook(tr):
                                    "error": errs or None, "timings": lab.timings}, f)
                 dist.barrier(group=lab.ranks.group)
                 os._exit(0)
-            if lab.serve() == "exit":
-                dist.barrier(group=lab.ranks.group)
+            action = lab.serve()
+            if action in ("exit", "exit_failed"):
+                if action == "exit" and not getattr(lab.ranks, "failed", None):
+                    dist.barrier(group=lab.ranks.group)
                 os._exit(0)
         lab = box["lab"]
         a = (a[0], lab.replay(a[1])) + tuple(a[2:]) if len(a) > 1 else a

@@ -38,6 +38,10 @@ class RoundFailed(RuntimeError):
 
 BYTES_PER_READ = 1 << 30
 TAG_MSG_SIZE, TAG_MSG, TAG_REPLY_SIZE, TAG_REPLY = 1, 2, 3, 4
+# (work, tensor) of every send and receive rank 0 posted in a round that failed: kept at module
+# level so both live as long as the process even if Ranks is deleted, since gloo may still write
+# a late reply into the tensor.
+_KEPT_BUFFERS = []
 
 
 def _encode(obj):
@@ -78,9 +82,6 @@ class Ranks:
         self.group = dist.new_group(backend="gloo", timeout=timedelta(seconds=timeout_s))
         self.round_timeout_s = round_timeout_s
         self.failed = None
-        # (work, tensor) of every send and receive rank 0 posted in the round that failed: gloo
-        # may still write a late reply into the tensor, so both live as long as the process
-        self.abandoned = []
 
     # -- the other ranks ---------------------------------------------------------------
     def _recv(self, tag_size, tag_payload, source=0):
@@ -151,7 +152,7 @@ class Ranks:
                 replies.append(_decode(reply))
             return replies
         except Exception as error:              # any failure of a send or receive poisons
-            self.abandoned += posted            # never freed: a late reply may still land
+            _KEPT_BUFFERS.extend(posted)        # never freed: a late reply may still land
             self.failed = f"{msg.get('op')}: " + (
                 str(error) if isinstance(error, RoundFailed)
                 else f"{type(error).__name__}: {str(error)[:300]}")

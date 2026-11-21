@@ -47,13 +47,13 @@ Contract:
   for refreshed modules do not count. Cost (our 2026-11-07 run, Qwen3-14B architecture, TP 2): the
   re-import took 1.4 s, and the lab was ready 40.9 s after the request, against 78.8 s for torchrun.
 """
-import argparse, ast, ctypes, errno, gc, importlib, json, os, select, signal, socket, sys, time, traceback
+import argparse, ast, contextlib, ctypes, gc, importlib, json, os, select, signal, socket, sys, time, traceback
 
 # the framework's pre-fork CUDA guards (core/livelab/forksafe.py, on sys.path through the
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
 import forksafe
 from forksafe import PROPS_CODE, Properties, freeze_gc_before_fork  # noqa: F401
-from fastrsi import ipc, proc
+from fastrsi import hooks, ipc, proc
 
 START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
@@ -269,38 +269,25 @@ def clamp_pre_fork_threads(environ=os.environ):
 
 
 def quiesce_compile_pools_after_warmup():
-    """Reset torch's intra-op thread pool to 1 and shut down any active TorchInductor
-    AsyncCompile thread/process pools after preload or warmup compilation finishes.
-    This preserves fast multi-threaded torch.compile during warmup while ensuring zero
-    background compile threads or CPU thread contention during steady-state training steps."""
-    applied_torch_threads = None
+    """Reset torch's intra-op thread pool to 1 and shut down TorchInductor AsyncCompile pools."""
     torch_mod = sys.modules.get("torch")
-    if torch_mod is not None and hasattr(torch_mod, "set_num_threads"):
+    applied_torch_threads = 1 if (torch_mod is not None and hasattr(torch_mod, "set_num_threads")) else None
+    if applied_torch_threads:
         torch_mod.set_num_threads(1)
-        applied_torch_threads = 1
     inductor_config = sys.modules.get("torch._inductor.config")
     if inductor_config is not None and hasattr(inductor_config, "compile_threads"):
         inductor_config.compile_threads = 1
     pools_shutdown = []
-    async_compile_mod = sys.modules.get("torch._inductor.async_compile")
-    if async_compile_mod is not None:
-        targets = [async_compile_mod]
-        async_compile_cls = getattr(async_compile_mod, "AsyncCompile", None)
-        if async_compile_cls is not None:
-            targets.append(async_compile_cls)
+    if (ac := sys.modules.get("torch._inductor.async_compile")) is not None:
+        targets = [ac] + ([cls] if (cls := getattr(ac, "AsyncCompile", None)) is not None else [])
         for holder in targets:
             for attr_name in ("_pool", "_process_pool", "_compile_threads_pool"):
-                pool_obj = getattr(holder, attr_name, None)
-                if pool_obj is not None and hasattr(pool_obj, "shutdown"):
-                    try:
+                if (pool_obj := getattr(holder, attr_name, None)) is not None and hasattr(pool_obj, "shutdown"):
+                    with contextlib.suppress(Exception):
                         pool_obj.shutdown(wait=False)
-                        pools_shutdown.append(f"{ getattr(holder, '__name__', 'async_compile') }.{attr_name}")
-                    except Exception:
-                        pass
-                    try:
+                        pools_shutdown.append(f"{getattr(holder, '__name__', 'async_compile')}.{attr_name}")
+                    with contextlib.suppress(Exception):
                         setattr(holder, attr_name, None)
-                    except Exception:
-                        pass
     return {
         "torch_threads": applied_torch_threads,
         "compile_threads": getattr(inductor_config, "compile_threads", None),
@@ -360,25 +347,14 @@ def bind(req, local_rank):
 
 
 def set_threads(environ=os.environ):
-    """Apply OMP_NUM_THREADS to torch's intra-op pool and TORCHINDUCTOR_COMPILE_THREADS to
-    torch._inductor.config in a forked rank. OpenMP, torch, and TorchInductor read these
-    variables when they load in the zygote, so setting the environment variables after the
-    fork alone does not shrink already-initialized thread pools or config attributes."""
-    applied_omp_threads = None
-    torch_mod = sys.modules.get("torch")
-    omp_threads_str = environ.get("OMP_NUM_THREADS", "")
-    if torch_mod is not None and omp_threads_str.isdigit() and int(omp_threads_str) > 0:
-        applied_omp_threads = int(omp_threads_str)
-        torch_mod.set_num_threads(applied_omp_threads)
-    inductor_config = sys.modules.get("torch._inductor.config")
-    compile_threads_str = environ.get("TORCHINDUCTOR_COMPILE_THREADS", "")
-    if (
-        inductor_config is not None
-        and compile_threads_str.isdigit()
-        and int(compile_threads_str) > 0
-    ):
-        inductor_config.compile_threads = int(compile_threads_str)
-    return applied_omp_threads
+    """Apply OMP_NUM_THREADS and TORCHINDUCTOR_COMPILE_THREADS in a forked rank."""
+    applied = None
+    if (torch_mod := sys.modules.get("torch")) is not None and (omp := environ.get("OMP_NUM_THREADS", "")).isdigit() and int(omp) > 0:
+        applied = int(omp)
+        torch_mod.set_num_threads(applied)
+    if (cfg := sys.modules.get("torch._inductor.config")) is not None and (ct := environ.get("TORCHINDUCTOR_COMPILE_THREADS", "")).isdigit() and int(ct) > 0:
+        cfg.compile_threads = int(ct)
+    return applied
 
 
 def _guard(rank_pid):
@@ -419,20 +395,11 @@ def _supervised(zygote_pid):
 
 def drop_modules(req, here=None):
     """Code restart: forget the refreshed modules (and those under `here`, the script's folder)
-    so the next import loads them again, from the overlay where it has them. Each is also unbound
-    from its parent package when the parent stays loaded: `from pkg import sub` returns the
-    parent's attribute when it has one, which would be the old module. Returns the names."""
+    and unbind each from its parent package so the next import reloads from overlay/source."""
     drop = [name for name, module in list(sys.modules.items()) if refreshed(req, name)
             or (here and not name.startswith(KEEP_LOADED)
                 and os.path.abspath(getattr(module, "__file__", None) or "/").startswith(here))]
-    old = {name: sys.modules.pop(name, None) for name in drop}
-    for name, module in old.items():
-        parent_name, _, child = name.rpartition(".")
-        parent = sys.modules.get(parent_name)
-        if parent is not None and module is not None and getattr(parent, child, None) is module:
-            delattr(parent, child)
-    importlib.invalidate_caches()
-    return drop
+    return hooks.purge_modules(drop)
 
 
 def _child(req, local_rank, lsock, conn, zygote_pid=None):
@@ -494,17 +461,142 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
 stat_ppid = proc.stat_ppid
 
 
+def _read_nspid(status_path):
+    """Return `(nspid_list, ppid)` from Linux `/proc/<pid>/status`, or `(None, None)`."""
+    try:
+        with open(status_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None, None
+    nspid, ppid = None, None
+    for line in text.splitlines():
+        if line.startswith("NSpid:"):
+            parts = line.split()[1:]
+            if parts and all(part.isdigit() for part in parts):
+                nspid = [int(part) for part in parts]
+        elif line.startswith("PPid:"):
+            parts = line.split()[1:]
+            if parts and parts[0].isdigit():
+                ppid = int(parts[0])
+    return nspid, ppid
+
+
+def _is_procfs(proc_root):
+    """True when `proc_root` looks like a real procfs mount rather than a minimal test dir."""
+    if os.path.islink(os.path.join(proc_root, "self")):
+        return True
+    return any(os.path.exists(os.path.join(proc_root, name))
+               for name in ("stat", "uptime", "version"))
+
+
+def _translated_ppids(proc_root, my_pid):
+    """Translate `/proc` from an ancestor PID namespace into `{local_pid: local_ppid}` via
+    `NSpid` and `ns/pid`; return `{}` if `/proc` is from an incompatible PID namespace."""
+    self_nspid, _ = _read_nspid(os.path.join(proc_root, "self", "status"))
+    if not self_nspid or len(self_nspid) < 2 or self_nspid[-1] != my_pid:
+        return {}
+    ns_idx = len(self_nspid) - 1
+    try:
+        self_ns = os.readlink(os.path.join(proc_root, "self", "ns", "pid"))
+    except OSError:
+        self_ns = None
+    outer_to_local, outer_ppids, deeper, missing_ns = {}, {}, [], []
+    if self_ns is None:
+        outer_to_local[self_nspid[0]] = my_pid
+        outer_ppids[self_nspid[0]] = 0
+    for entry in os.listdir(proc_root):
+        if not entry.isdigit():
+            continue
+        outer_pid = int(entry)
+        nspid, ppid = _read_nspid(os.path.join(proc_root, entry, "status"))
+        if nspid is None or ppid is None or len(nspid) <= ns_idx:
+            continue
+        if self_ns is not None:
+            try:
+                entry_ns = os.readlink(os.path.join(proc_root, entry, "ns", "pid"))
+            except FileNotFoundError:
+                if len(nspid) == len(self_nspid):
+                    missing_ns.append((outer_pid, nspid[ns_idx], ppid))
+                elif len(nspid) > len(self_nspid):
+                    deeper.append((outer_pid, nspid[ns_idx], ppid))
+                continue
+            except OSError:
+                continue
+            if entry_ns == self_ns:
+                outer_to_local[outer_pid] = nspid[ns_idx]
+                outer_ppids[outer_pid] = ppid
+            elif len(nspid) > len(self_nspid):
+                deeper.append((outer_pid, nspid[ns_idx], ppid))
+        elif outer_pid != self_nspid[0]:
+            missing_ns.append((outer_pid, nspid[ns_idx], ppid))
+    # Include children whose parent is in our namespace if `ns/pid` vanished or they unshared.
+    candidates = missing_ns + deeper
+    changed = True
+    while changed and candidates:
+        changed, rest = False, []
+        for outer_pid, local_pid, ppid in candidates:
+            if ppid in outer_to_local:
+                outer_to_local[outer_pid] = local_pid
+                outer_ppids[outer_pid] = ppid
+                changed = True
+            else:
+                rest.append((outer_pid, local_pid, ppid))
+        candidates = rest
+    return {outer_to_local[opid]: outer_to_local.get(oppid, 0)
+            for opid, oppid in outer_ppids.items()}
+
+
 def _ppids(proc_root="/proc"):
+    """Return `{pid: ppid}` in our PID namespace (translating ancestor `/proc` via `NSpid`)."""
+    if not proc_root or not os.path.isdir(proc_root):
+        return proc.ppid_map(proc_root=proc_root)
+    self_path = os.path.join(proc_root, "self")
+    if os.path.islink(self_path):
+        try:
+            self_target = os.readlink(self_path)
+        except OSError:
+            return {}
+        if not self_target.isdigit():
+            return {}
+        my_pid = os.getpid()
+        if int(self_target) == my_pid:
+            self_nspid, _ = _read_nspid(os.path.join(proc_root, "self", "status"))
+            if not self_nspid or len(self_nspid) <= 1:
+                return proc.ppid_map(proc_root=proc_root)
+        return _translated_ppids(proc_root, my_pid)
+    if _is_procfs(proc_root):
+        return {}
     return proc.ppid_map(proc_root=proc_root)
 
 
 def _tree(pid, proc_root="/proc"):
-    return [pid] + proc.descendants(pid, proc_root=proc_root)
+    kids = {}
+    for child, parent in _ppids(proc_root=proc_root).items():
+        kids.setdefault(parent, []).append(child)
+    found, todo, seen = [pid], [pid], {pid}
+    while todo:
+        current = todo.pop(0)
+        for child in sorted(kids.get(current, ())):
+            if child not in seen:
+                seen.add(child)
+                found.append(child)
+                todo.append(child)
+    return found
 
 
-def kill_tree(pid, sig=signal.SIGTERM):
+def kill_tree(pid, sig=signal.SIGTERM, proc_root="/proc"):
     """Signal pid's process tree (children first) and its process group."""
-    return proc.kill_tree(pid, sig, include_pg=True)
+    targets = list(reversed(_tree(pid, proc_root=proc_root)))
+    signaled = []
+    for target in targets:
+        try:
+            os.kill(target, sig)
+            signaled.append(target)
+        except (ProcessLookupError, PermissionError):
+            pass
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pid, sig)
+    return signaled
 
 
 def _send(conn, obj):
@@ -530,13 +622,72 @@ def _client_gone(conn):
 
 def _children(parent_pid=None, proc_root="/proc"):
     """Our direct children (ranks, guards, orphans the subreaper took in), by parent pid."""
-    return proc.direct_children(parent_pid, proc_root=proc_root)
+    target = os.getpid() if parent_pid is None else parent_pid
+    return sorted(child for child, parent in _ppids(proc_root=proc_root).items() if parent == target)
 
 
-def reap_all(timeout=10.0, keep=()):
+def _reap_unusable_proc(timeout, keep_set, proc_root, known):
+    """Kill and reap known rank PIDs when `/proc` is from an untranslatable PID namespace."""
+    reaped = []
+    pending = []
+    for pid in known:
+        if pid in keep_set or pid in pending:
+            continue
+        kill_tree(pid, signal.SIGKILL, proc_root=proc_root)
+        pending.append(pid)
+    deadline = time.monotonic() + timeout
+    while pending:
+        still = []
+        for pid in pending:
+            try:
+                done, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                continue
+            if done:
+                reaped.append(done)
+            else:
+                still.append(pid)
+        pending = still
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    if not keep_set:
+        while True:
+            try:
+                done, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if not done:
+                break
+            reaped.append(done)
+    return reaped
+
+
+def reap_all(timeout=10.0, keep=(), proc_root="/proc", known=()):
     """Kill and reap non-kept direct children (ranks, guards, adopted orphans)."""
-    reaped = proc.reap_all(timeout=timeout, keep=keep)
-    left = [child for child in _children() if child not in set(keep)]
+    keep_set = set(keep)
+    me = os.getpid()
+    ppids = _ppids(proc_root=proc_root)
+    if proc_root and os.path.isdir(proc_root) and me not in ppids:
+        return _reap_unusable_proc(timeout, keep_set, proc_root, known)
+    reaped, killed = [], set()
+    deadline = time.monotonic() + timeout
+    left = sorted(child for child, parent in ppids.items() if parent == me and child not in keep_set)
+    while left:
+        for child in left:
+            if child not in killed:
+                kill_tree(child, signal.SIGKILL, proc_root=proc_root)
+                killed.add(child)
+            try:
+                pid, _ = os.waitpid(child, os.WNOHANG)
+            except ChildProcessError:
+                continue
+            if pid:
+                reaped.append(pid)
+        left = [child for child in _children(me, proc_root=proc_root) if child not in keep_set]
+        if not left or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
     if left:
         log("reap_timeout", left=left)
     return reaped
@@ -567,8 +718,10 @@ def handle(req, lsock, conn, src):
     if block:
         _send(conn, {"event": "refused", "findings": block})
         return
-    me, pids = os.getpid(), []
-    before = set(_children())                   # the zygote's own helpers: never reaped
+    me, pids, rc = os.getpid(), [], {}
+    # Pre-job helpers survive; the zygote starts no helpers of its own during a job, so any
+    # other child appearing under it is a job rank, guard, or adopted job helper/orphan.
+    before = set(_children())
     t0 = req.get("t0", time.time())
     try:
         for r in range(int(req["nproc"])):
@@ -579,7 +732,7 @@ def handle(req, lsock, conn, src):
         connected = _send(conn, {"event": "forked", "pids": pids, "findings": seen,
                                  "fork_s": round(time.time() - t0, 3), "mono": time.monotonic()})
         policy = req.get("on_client_gone", "kill")
-        rc, left, stopping = {}, set(pids), False
+        left, stopping = set(pids), False
         deadline = time.time() + float(req.get("timeout", 0) or 1e12)
         while left:
             if connected and _client_gone(conn):
@@ -608,7 +761,8 @@ def handle(req, lsock, conn, src):
             if left:
                 time.sleep(0.05)
     finally:
-        reaped = reap_all(keep=before)          # ranks left by an exception, guards, orphans
+        unreaped = [pid for idx, pid in enumerate(pids) if idx not in rc]
+        reaped = reap_all(keep=before, known=unreaped)  # ranks left by exception, guards, orphans
         if pids:
             log("job_reaped", ranks=pids, reaped=len(reaped))
     _send(conn, {"event": "exited", "rc": [rc.get(i) for i in range(len(pids))],
@@ -633,6 +787,10 @@ def serve(sock, mods, script=None, forksafe=True):
     listen_sock = socket.socket(socket.AF_UNIX)
     listen_sock.bind(sock)
     listen_sock.listen(4)
+    old_sigterm = None
+    if os.getpid() == 1 and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+        # Linux PID 1 ignores SIG_DFL SIGTERM; exit via SystemExit so handle() reaps ranks first.
+        old_sigterm = signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     import threading
     threads = {"native": len(os.listdir("/proc/self/task")) if os.path.isdir("/proc/self/task")
                else None, "python": [thread_obj.name for thread_obj in threading.enumerate()]}
@@ -641,30 +799,36 @@ def serve(sock, mods, script=None, forksafe=True):
                       "threads": threads, "gc_frozen": gc_frozen, "subreaper": subreaper,
                       "modules": len(sys.modules), "forksafe": forksafe_status, "took": took}),
           flush=True)
-    while True:
-        conn, _ = listen_sock.accept()
-        with conn:
-            try:                                # a bad request or a gone client must not kill the zygote
-                conn.settimeout(30)             # for the request line only
-                line = conn.makefile().readline()
-                conn.settimeout(None)
-                if not line:
-                    continue
-                request_data = json.loads(line)
-                if not isinstance(request_data, dict):
-                    raise ValueError(f"request must be a JSON object, got {type(request_data).__name__}")
-                if request_data.get("op") == "stop":
-                    _send(conn, {"event": "stopped"})
-                    break
-                if request_data.get("op") == "ping":
-                    _send(conn, {"event": "pong", "pid": os.getpid()})
-                    continue
-                handle(request_data, listen_sock, conn, src)
-            except Exception as exc:
-                log("bad_request", error=repr(exc))
-                _send(conn, {"event": "error", "error": repr(exc)})
-    listen_sock.close()
-    os.unlink(sock)
+    try:
+        while True:
+            conn, _ = listen_sock.accept()
+            with conn:
+                try:                            # a bad request or a gone client must not kill the zygote
+                    conn.settimeout(30)         # for the request line only
+                    with conn.makefile() as reader:
+                        line = reader.readline()
+                    conn.settimeout(None)
+                    if not line:
+                        continue
+                    request_data = json.loads(line)
+                    if not isinstance(request_data, dict):
+                        raise ValueError(f"request must be a JSON object, got {type(request_data).__name__}")
+                    if request_data.get("op") == "stop":
+                        _send(conn, {"event": "stopped"})
+                        break
+                    if request_data.get("op") == "ping":
+                        _send(conn, {"event": "pong", "pid": os.getpid()})
+                        continue
+                    handle(request_data, listen_sock, conn, src)
+                except Exception as exc:
+                    log("bad_request", error=repr(exc))
+                    _send(conn, {"event": "error", "error": repr(exc)})
+    finally:
+        if old_sigterm is not None:
+            signal.signal(signal.SIGTERM, old_sigterm)
+        listen_sock.close()
+        with contextlib.suppress(OSError):
+            os.unlink(sock)
 
 
 def request(sock, req, out=sys.stdout):

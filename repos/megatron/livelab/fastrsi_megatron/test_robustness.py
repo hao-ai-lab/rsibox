@@ -20,8 +20,9 @@ import unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.dirname(HERE))
-from fastrsi_megatron import client, gap, zygote  # noqa: E402
+LIVELAB_DIR = os.path.dirname(HERE)
+sys.path.insert(0, LIVELAB_DIR)
+from fastrsi_megatron import LIVELAB, client, gap, zygote  # noqa: E402
 
 try:
     import torch
@@ -66,6 +67,18 @@ def _wait(cond, timeout=15.0):
             return True
         time.sleep(0.05)
     return cond()
+
+
+def _sock_ready(path):
+    if not os.path.exists(path):
+        return False
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        try:
+            s.connect(path)
+            return True
+        except OSError:
+            return False
 
 
 def _raw(sock, data, timeout=10):
@@ -280,28 +293,36 @@ class LabServing(unittest.TestCase):
             sock = os.path.join(d, "lab.sock")
             out = {}
             with mock.patch.dict(os.environ, {"FASTRSI_SOCK": sock}):
-                t = threading.Thread(target=lambda: out.setdefault("ret", fx.lab.serve()))
+                t = threading.Thread(target=lambda: out.setdefault("ret", fx.lab.serve()), daemon=True)
                 t.start()
-                self.assertTrue(_wait(lambda: os.path.exists(sock)))
-                base = client.call(sock, {"verb": "check", "steps": 2}, 30)
-                self.assertTrue(base["ok"], base)
-                for line in (b"not json\n", b"[]\n", b'{"verb": 5}\n'):
-                    r = _raw(sock, line)
-                    self.assertFalse(r["ok"], line)
-                fx.slow = 0.5
-                with self.assertRaises(TimeoutError):
-                    client.call(sock, {"verb": "check", "steps": 2}, timeout=0.2)
-                c = socket.socket(socket.AF_UNIX)
-                c.connect(sock)
-                c.sendall(b'{"verb": "status"}\n')
-                c.close()
-                fx.slow = 0.0
-                st = client.call(sock, {"verb": "status"}, 30)
-                self.assertEqual(st.get("state"), "base", st)
-                again = client.call(sock, {"verb": "check", "steps": 2}, 30)
-                self.assertEqual(again["output"], base["output"])
-                self.assertTrue(client.call(sock, {"verb": "exit"}, 30)["ok"])
-                t.join(10)
+                try:
+                    self.assertTrue(_wait(lambda: _sock_ready(sock)))
+                    base = client.call(sock, {"verb": "check", "steps": 2}, 30)
+                    self.assertTrue(base["ok"], base)
+                    for line in (b"not json\n", b"[]\n", b'{"verb": 5}\n'):
+                        r = _raw(sock, line)
+                        self.assertFalse(r["ok"], line)
+                    fx.slow = 0.5
+                    with self.assertRaises(TimeoutError):
+                        client.call(sock, {"verb": "check", "steps": 2}, timeout=0.2)
+                    c = socket.socket(socket.AF_UNIX)
+                    c.connect(sock)
+                    c.sendall(b'{"verb": "status"}\n')
+                    c.close()
+                    fx.slow = 0.0
+                    st = client.call(sock, {"verb": "status"}, 30)
+                    self.assertEqual(st.get("state"), "base", st)
+                    again = client.call(sock, {"verb": "check", "steps": 2}, 30)
+                    self.assertEqual(again["output"], base["output"])
+                    self.assertTrue(client.call(sock, {"verb": "exit"}, 30)["ok"])
+                    t.join(10)
+                finally:
+                    if t.is_alive():
+                        try:
+                            client.call(sock, {"verb": "exit"}, 5)
+                        except OSError:
+                            pass
+                        t.join(5)
             self.assertFalse(t.is_alive())
             self.assertEqual(out.get("ret"), "exit")
 
@@ -356,7 +377,7 @@ class RanksRound(unittest.TestCase):
                                       daemon=True) for rank in range(2)]
         for proc in self.procs:
             proc.start()
-        self.assertTrue(_wait(lambda: os.path.exists(self.sock), 120), "lab never ready")
+        self.assertTrue(_wait(lambda: _sock_ready(self.sock), 120), "lab never ready")
         first = client.call(self.sock, {"verb": "status"}, 30)
         self.assertEqual(first["state"], "base", first)
 
@@ -449,6 +470,61 @@ class RanksRound(unittest.TestCase):
         self.assert_poisoned_by_a_failed_round()
         self.procs[1].join(10)
         self.assertEqual(self.procs[1].exitcode, 17)
+
+    def test_exit_after_failed_round_replies_not_ok_and_exits_without_barrier_hang(self):
+        """Real 2-rank gloo job running through install_hook: after rank 1 is lost and a round
+        fails, sending `exit` replies ok False and rank 0 exits 0 within seconds instead of
+        blocking on dist.barrier(group=lab.ranks.group) for the 7-day timeout."""
+        code = ("import os, socket, torch\n"
+                "from unittest import mock\n"
+                "from fastrsi_megatron import hook\n"
+                "from fastrsi_megatron.test_pieces import _MegatronLikeOptimizer, _Sched\n"
+                "rank = int(os.environ['RANK'])\n"
+                "os.environ.update(GLOO_SOCKET_IFNAME='lo0' if os.uname().sysname == 'Darwin' else 'lo',\n"
+                "                  FASTRSI_WARMUP='1', FASTRSI_CHECK_STEPS_MAX='2',\n"
+                "                  FASTRSI_CHECK_STEPS='1', FASTRSI_ROUND_TIMEOUT_S='2')\n"
+                "torch.distributed.init_process_group('gloo', rank=rank, world_size=2)\n"
+                "torch.manual_seed(0)\n"
+                "model = torch.nn.Sequential(torch.nn.Linear(8, 4))\n"
+                "class Tr:\n"
+                "    @staticmethod\n"
+                "    def train_step(fwd, it, models, opt, sched, *rest, **kw):\n"
+                "        models[0].zero_grad()\n"
+                "        loss = models[0](next(it)).square().mean()\n"
+                "        loss.backward(); opt.step(); sched.step(1)\n"
+                "        return ({'lm loss': loss.detach()}, False, False, False, 0, 1.0)\n"
+                "with mock.patch.object(hook.Lab, '_mb', return_value=1):\n"
+                "    hook.install_hook(Tr)\n"
+                "    Tr.train_step(None, iter([torch.randn(4, 8) for _ in range(8)]),\n"
+                "                  [model], _MegatronLikeOptimizer(model), _Sched(), iteration=0)\n")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        with tempfile.TemporaryDirectory() as folder:
+            sock = os.path.join(folder, "hook-exit.sock")
+            env_base = {**os.environ, "PYTHONPATH": os.path.dirname(HERE) + os.pathsep + LIVELAB_DIR,
+                        "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(port), "WORLD_SIZE": "2",
+                        "FASTRSI_SOCK": sock}
+            procs = [subprocess.Popen([sys.executable, "-c", code],
+                                      env={**env_base, "RANK": str(r)},
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     for r in range(2)]
+            try:
+                self.assertTrue(_wait(lambda: _sock_ready(sock), 60), "hook lab never ready")
+                self.assertEqual(client.call(sock, {"verb": "status"}, 20)["state"], "base")
+                self.assertTrue(client.call(sock, {"verb": "inject", "fault": "lost", "target": 1}, 20)["ok"])
+                st = client.call(sock, {"verb": "status"}, 20)
+                self.assertEqual(st["state"], "poisoned", st)
+                started = time.time()
+                ex = client.call(sock, {"verb": "exit"}, 10)
+                self.assertLess(time.time() - started, 5)
+                self.assertFalse(ex["ok"], ex)
+                self.assertEqual(procs[0].wait(10), 0)
+            finally:
+                for p in procs:
+                    if p.poll() is None:
+                        p.kill()
+                    p.wait(10)
 
 
 @unittest.skipUnless(torch is not None, "needs torch")
@@ -762,6 +838,220 @@ class ResetFailsClosed(unittest.TestCase):
         self.assertFalse(reply["ok"], reply)
         self.assertIsNone(reply["digest"])
         self.assertIn("meta", reply["error"])
+
+
+class KeptBuffersLifetime(unittest.TestCase):
+    """Kept buffers from a failed round live at module level (`gap._KEPT_BUFFERS`) for the
+    process lifetime rather than disappearing if the `Ranks` instance is deleted."""
+
+    def test_failed_round_buffers_persist_in_module_list_across_ranks_deletion(self):
+        import gc
+        import types
+        import weakref
+
+        class FakeTensor:
+            pass
+
+        class FakeWork:
+            def __init__(self, should_fail=False):
+                self.should_fail = should_fail
+
+            def wait(self, timeout=None):
+                if self.should_fail:
+                    raise RuntimeError("peer timed out")
+
+        created_tensors = []
+        created_works = []
+
+        class FakeTorch:
+            int64 = "int64"
+            uint8 = "uint8"
+
+            @staticmethod
+            def tensor(data, dtype=None):
+                t = FakeTensor()
+                created_tensors.append(t)
+                return t
+
+            @staticmethod
+            def frombuffer(buf, dtype=None):
+                t = FakeTensor()
+                created_tensors.append(t)
+                return t
+
+            @staticmethod
+            def zeros(n, dtype=None):
+                t = FakeTensor()
+                created_tensors.append(t)
+                return t
+
+            @staticmethod
+            def empty(n, dtype=None):
+                t = FakeTensor()
+                created_tensors.append(t)
+                return t
+
+        class FakeDist:
+            @staticmethod
+            def get_rank():
+                return 0
+
+            @staticmethod
+            def get_world_size():
+                return 2
+
+            @staticmethod
+            def new_group(backend=None, timeout=None):
+                return object()
+
+            @staticmethod
+            def isend(tensor, dst=None, group=None, tag=None):
+                w = FakeWork(should_fail=False)
+                created_works.append(w)
+                return w
+
+            @staticmethod
+            def irecv(tensor, src=None, group=None, tag=None):
+                w = FakeWork(should_fail=True)
+                created_works.append(w)
+                return w
+
+        fake_torch_pkg = types.ModuleType("torch")
+        fake_torch_pkg.int64 = FakeTorch.int64
+        fake_torch_pkg.uint8 = FakeTorch.uint8
+        fake_torch_pkg.tensor = FakeTorch.tensor
+        fake_torch_pkg.frombuffer = FakeTorch.frombuffer
+        fake_torch_pkg.zeros = FakeTorch.zeros
+        fake_torch_pkg.empty = FakeTorch.empty
+        fake_torch_pkg.distributed = FakeDist
+
+        before = len(gap._KEPT_BUFFERS)
+        try:
+            with mock.patch.dict(sys.modules, {"torch": fake_torch_pkg,
+                                               "torch.distributed": FakeDist}):
+                ranks = gap.Ranks(round_timeout_s=1.0)
+                ranks_ref = weakref.ref(ranks)
+                with self.assertRaises(gap.RoundFailed):
+                    ranks.round({"op": "status"}, lambda msg: {"ok": True})
+                self.assertFalse(hasattr(ranks, "abandoned"))
+            work_refs = [weakref.ref(w) for w in created_works]
+            tensor_refs = [weakref.ref(t) for t in created_tensors]
+            self.assertGreater(len(work_refs), 0)
+            self.assertGreater(len(tensor_refs), 0)
+            created_works.clear()
+            created_tensors.clear()
+            del ranks
+            gc.collect()
+            self.assertIsNone(ranks_ref(), "Ranks instance should be collected after del")
+            kept_slice = gap._KEPT_BUFFERS[before:]
+            self.assertEqual(len(kept_slice), len(work_refs))
+            for wr in work_refs:
+                self.assertIsNotNone(wr(), "posted work must remain alive in gap._KEPT_BUFFERS")
+            for tr in tensor_refs:
+                self.assertIsNotNone(tr(), "posted tensor must remain alive in gap._KEPT_BUFFERS")
+        finally:
+            del gap._KEPT_BUFFERS[before:]
+            gc.collect()
+
+
+class HookExitAfterFailedRound(unittest.TestCase):
+    """Pure unit tests for `hook.Lab.serve()` and `hook.install_hook()` on `exit`:
+    after a failed round (or when `exit` itself fails), `exit` replies ok False, `serve()`
+    returns `"exit_failed"`, and `install_hook()` skips `dist.barrier` and calls `os._exit(0)`."""
+
+    _SCRIPT = """import json, os, sys, tempfile, threading, types
+from unittest import mock
+if {use_stub}:
+    t = types.ModuleType('torch')
+    t.cuda = types.SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None, synchronize=lambda: None)
+    t.distributed = types.ModuleType('torch.distributed')
+    t.distributed.barrier = lambda group=None: None
+    t.is_tensor = lambda x: False
+    sys.modules['torch'] = t
+    sys.modules['torch.distributed'] = t.distributed
+from fastrsi_megatron import client, gap, hook
+
+def run_case(mode):
+    barrier_calls = []
+    exit_calls = []
+    raw_calls = []
+    serve_rets = []
+    class FakeRanks:
+        rank, world = 0, 2
+        group = object()
+        def __init__(self):
+            self.failed = 'prior failure' if mode == 'earlier_failed' else None
+        def round(self, msg, handle):
+            if mode == 'earlier_failed':
+                raise gap.RoundFailed('an earlier round failed: ' + self.failed)
+            if mode == 'exit_fails' and msg.get('op') == 'exit':
+                self.failed = 'exit: rank 1 lost'
+                raise gap.RoundFailed(self.failed)
+            return [handle(msg), {{'ok': True, 'rank': 1}}]
+    fake_ranks = FakeRanks()
+    class Tr:
+        @staticmethod
+        def train_step(*a, **k):
+            raw_calls.append(a)
+            return ({{'lm loss': 1.0}}, False, False, False, 0, 1.0)
+    with tempfile.TemporaryDirectory() as d:
+        sock = os.path.join(d, 'lab.sock')
+        ready = os.path.join(d, 'ready.json')
+        fake_lab = hook.Lab.__new__(hook.Lab)
+        fake_lab.ts, fake_lab.a, fake_lab.k = Tr.train_step, [], {{}}
+        fake_lab.model, fake_lab.optimizer, fake_lab.scheduler = None, None, None
+        fake_lab.ranks, fake_lab.rank = fake_ranks, 0
+        fake_lab.steps_max, fake_lab.default_steps, fake_lab.warmup = 2, 1, 1
+        fake_lab.faults, fake_lab.timings, fake_lab.setup_findings = {{}}, {{}}, []
+        fake_lab.local = hook.C.LocalParticipant('rank0', scope={{}})
+        fake_lab.host, fake_lab.replayed, fake_lab.batches = None, None, mock.Mock(items=None)
+        if mode == 'non_round_poison':
+            fake_lab._host().fault('tampered', 'hand edit', 'base')
+        orig_serve = fake_lab.serve
+        def traced_serve():
+            ret = orig_serve()
+            serve_rets.append(ret)
+            return ret
+        fake_lab.serve = traced_serve
+        with mock.patch.dict(os.environ, {{'FASTRSI_SOCK': sock, 'FASTRSI_READY': ready}}), \\
+             mock.patch.object(hook, 'Lab', return_value=fake_lab), \\
+             mock.patch.object(hook.dist, 'barrier', side_effect=lambda group=None: barrier_calls.append(group)), \\
+             mock.patch.object(hook.os, '_exit', side_effect=lambda code: (exit_calls.append(code), (_ for _ in ()).throw(SystemExit(code)))):
+            hook.install_hook(Tr)
+            def hit_exit():
+                import time
+                deadline = time.monotonic() + 10.0
+                while True:
+                    try:
+                        return client.call(sock, {{'verb': 'exit'}}, 10)
+                    except (FileNotFoundError, ConnectionRefusedError):
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
+            res_box = []
+            th = threading.Thread(target=lambda: res_box.append(hit_exit()), daemon=True)
+            th.start()
+            try:
+                Tr.train_step()
+            except SystemExit:
+                pass
+            th.join(10)
+            return {{'reply_ok': res_box[0]['ok'], 'serve_ret': serve_rets[0], 'barriers': len(barrier_calls), 'exits': exit_calls, 'raw_calls': len(raw_calls)}}
+
+print(json.dumps({{m: run_case(m) for m in ('earlier_failed', 'exit_fails', 'healthy', 'non_round_poison')}}))
+"""
+
+    def test_hook_exit_skips_barrier_only_when_round_failed(self):
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join([LIVELAB_DIR, LIVELAB])}
+        script = self._SCRIPT.format(use_stub="True" if torch is None else "False")
+        out = subprocess.run([sys.executable, "-W", "error::ResourceWarning", "-c", script],
+                             capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(res["earlier_failed"], {"reply_ok": False, "serve_ret": "exit_failed", "barriers": 0, "exits": [0], "raw_calls": 0})
+        self.assertEqual(res["exit_fails"], {"reply_ok": False, "serve_ret": "exit_failed", "barriers": 0, "exits": [0], "raw_calls": 0})
+        self.assertEqual(res["healthy"], {"reply_ok": True, "serve_ret": "exit", "barriers": 1, "exits": [0], "raw_calls": 0})
+        self.assertEqual(res["non_round_poison"], {"reply_ok": True, "serve_ret": "exit", "barriers": 1, "exits": [0], "raw_calls": 0})
 
 
 if __name__ == "__main__":
