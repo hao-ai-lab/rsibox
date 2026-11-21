@@ -139,3 +139,30 @@ In those cases:
    gh workflow enable cpu-tests.yml
    gh workflow enable pr-rules.yml
    ```
+
+---
+
+## CI Timing Comment on Every Pull Request
+
+`.github/workflows/ci-timing.yml` runs after `CPU tests` finishes on a pull request and writes one
+comment that says where the CI time went. It is updated in place on every push, so a pull request
+has one timing comment.
+
+| The comment shows | Source |
+|---|---|
+| Wall-clock from the first queue to the last job done, job count, total runner time | run and job timestamps |
+| Per workflow: result, wall-clock, longest queue | run record |
+| Per job, slowest first: result, runner, queued, ran, slowest step | job and step records |
+| Per job: every step of 2 s or more (collapsed) | step records |
+
+- **Resolution:** whole seconds per step, from the Actions API. A step is one test suite, so the
+  comment says which suite cost how much, not which test case.
+- **Trust:** the workflow is triggered by `workflow_run`, so it runs the script from the default
+  branch with a token that may write pull request comments, and never checks out pull request code.
+- **Cost:** one job of a few seconds per CI run. It runs no tests.
+- **By hand:** print the table for any commit, or post it:
+
+  ```bash
+  python3 .github/scripts/ci_timing_comment.py --repo hao-ai-lab/fastrsi --sha <sha>
+  gh workflow run ci-timing.yml -f sha=<sha> -f pr=<pr-number>
+  ```
