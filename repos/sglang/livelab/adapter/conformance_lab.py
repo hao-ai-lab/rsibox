@@ -21,25 +21,24 @@ class SglangConformanceLab(SglangLab):
         ap.add_argument("--port", type=int, default=None, help="engine port merged into extra kwargs")
         ap.add_argument("--work", default=None, help="scratch directory for temporary files (TMPDIR)")
         ap.add_argument("--disable-cuda-graph", action="store_true", help="disable CUDA graphs")
+        ap.add_argument("--fork-subprocs", action="store_true",
+                        help="fork SGLang scheduler/detokenizer subprocesses when host CUDA is clean")
+        ap.add_argument("--weight-cache-dir", default=None,
+                        help="connect SGLang to a live weight-cache daemon in this socket directory")
         ap.add_argument("--extra", default=None, help="JSON object of extra sglang.Engine kwargs")
         ap.add_argument("--check-timeout", type=float, default=None, help="workload check timeout (s)")
         ap.add_argument("--rpc-timeout", type=float, default=None, help="control RPC timeout (s)")
         ns = ap.parse_args(clean)
-        env = {}
-        if ns.model:
-            env["FASTRSI_SGLANG_MODEL"] = ns.model
-        if ns.tp is not None:
-            env["FASTRSI_SGLANG_TP"] = str(ns.tp)
-        if ns.mem_fraction is not None:
-            env["FASTRSI_SGLANG_MEM_FRACTION"] = str(ns.mem_fraction)
-        if ns.max_bs is not None:
-            env["FASTRSI_SGLANG_MAX_BS"] = str(ns.max_bs)
-        if ns.work:
-            env["TMPDIR"] = os.path.abspath(ns.work)
-        if ns.check_timeout is not None:
-            env["FASTRSI_SGLANG_CHECK_TIMEOUT"] = str(ns.check_timeout)
-        if ns.rpc_timeout is not None:
-            env["FASTRSI_SGLANG_RPC_TIMEOUT"] = str(ns.rpc_timeout)
+        spec = (("model", "FASTRSI_SGLANG_MODEL", False), ("tp", "FASTRSI_SGLANG_TP", False),
+                ("mem_fraction", "FASTRSI_SGLANG_MEM_FRACTION", False), ("max_bs", "FASTRSI_SGLANG_MAX_BS", False),
+                ("work", "TMPDIR", True), ("check_timeout", "FASTRSI_SGLANG_CHECK_TIMEOUT", False),
+                ("rpc_timeout", "FASTRSI_SGLANG_RPC_TIMEOUT", False))
+        env = {key: (os.path.abspath(str(val)) if is_p else str(val))
+               for attr, key, is_p in spec if (val := getattr(ns, attr)) is not None}
+        if ns.fork_subprocs:
+            env["FASTRSI_SGLANG_FORK_SUBPROCS"] = "1"
+        if ns.weight_cache_dir:
+            env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"] = os.path.abspath(str(ns.weight_cache_dir))
         extra = {}
         if ns.extra is not None:
             try:
@@ -57,18 +56,40 @@ class SglangConformanceLab(SglangLab):
             env["FASTRSI_SGLANG_EXTRA_ARGS"] = json.dumps(extra)
         return env
 
-    def __init__(self, receipts=None, rpc_timeout=None, check_timeout=None):
+    def __init__(self, receipts=None, rpc_timeout=None, check_timeout=None, fork_subprocs=None, weight_cache_dir=None):
         rpc_timeout = float(rpc_timeout if rpc_timeout is not None else os.environ.get("FASTRSI_SGLANG_RPC_TIMEOUT", "180.0"))
         check_timeout = float(check_timeout if check_timeout is not None else os.environ.get("FASTRSI_SGLANG_CHECK_TIMEOUT", "15.0"))
+        if fork_subprocs is None:
+            fork_subprocs = os.environ.get("FASTRSI_SGLANG_FORK_SUBPROCS", "").strip().lower() in ("1", "true", "yes")
+        else:
+            fork_subprocs = bool(fork_subprocs)
+        if weight_cache_dir is None:
+            raw_wc = os.environ.get("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", "").strip()
+        else:
+            raw_wc = os.fspath(weight_cache_dir).strip()
+        weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
         shared = SglangConformanceLab._shared
-        if shared is not None and not shared.dirty and shared.status().get("state") == "base":
+        if (shared is not None and getattr(shared, "engine", None) is not None
+                and not shared.dirty and shared.status().get("state") == "base"
+                and shared.fork_subprocs == fork_subprocs
+                and getattr(shared, "weight_cache_dir", None) == weight_cache_dir):
             self.__dict__.update(shared.__dict__)
             self.writer = self.co.writer = R.ReceiptWriter(receipts) if receipts else None
             self.reset("state")
             return
-        if shared is not None: shared._shutdown_engine()
+        if shared is not None:
+            SglangConformanceLab._shared = None
+            shared._shutdown_engine()
+        if fork_subprocs:
+            SglangLab._preload_fork_subprocs()
         asyncio.events._set_running_loop(None); _LOOPS.append(loop := asyncio.new_event_loop()); asyncio.set_event_loop(loop)
-        super().__init__(sglang_env_config(), (SAMPLER, TP_WORKER), receipts, rpc_timeout, check_timeout)
+        cfg = sglang_env_config()
+        kwargs = {"fork_subprocs": fork_subprocs}
+        if weight_cache_dir is not None:
+            from services import weights as wc
+            cfg = wc.client_config(cfg)
+            kwargs["weight_cache_dir"] = weight_cache_dir
+        super().__init__(cfg, (SAMPLER, TP_WORKER), receipts, rpc_timeout, check_timeout, **kwargs)
         SglangConformanceLab._shared = self
     def close(self):
         pass

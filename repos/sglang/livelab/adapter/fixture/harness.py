@@ -1,6 +1,9 @@
 """Conformance-only harness helpers (`fresh_check`, `inject`, and named patch suites)."""
+import ast
+import importlib.util
 import json
 import os
+import sys
 
 from fastrsi import harness as H
 from fastrsi.harness import edit_once
@@ -72,19 +75,56 @@ def toy_patches(base_fn, sampler_mod, logits_mod, norm_mod, runner_mod):
     }
 
 
+def _server_args_supports_decode_max_bs():
+    """Check `ServerArgs.cuda_graph_max_bs_decode` without importing `sglang` or `torch`."""
+    mod = sys.modules.get("sglang.srt.server_args")
+    if mod is not None:
+        sa = getattr(mod, "ServerArgs", None)
+        fields = set(getattr(sa, "__dataclass_fields__", ())) | set(getattr(sa, "__struct_fields__", ()))
+        return sa is not None and ("cuda_graph_max_bs_decode" in fields or hasattr(sa, "cuda_graph_max_bs_decode"))
+    candidates = []
+    try:
+        spec = importlib.util.find_spec("sglang")
+    except (ImportError, ValueError, AttributeError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        for loc in spec.submodule_search_locations:
+            candidates.append(os.path.join(loc, "srt", "server_args.py"))
+    for entry in sys.path:
+        candidates.append(os.path.join(entry or ".", "sglang", "srt", "server_args.py"))
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                tree = ast.parse(fh.read(), filename=path)
+        except (OSError, SyntaxError):
+            break
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "ServerArgs":
+                for stmt in node.body:
+                    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id == "cuda_graph_max_bs_decode":
+                        return True
+                    if isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "cuda_graph_max_bs_decode" for t in stmt.targets):
+                        return True
+                return False
+        break
+    try:
+        from sglang.srt.server_args import ServerArgs
+        fields = set(getattr(ServerArgs, "__dataclass_fields__", ())) | set(getattr(ServerArgs, "__struct_fields__", ()))
+        return "cuda_graph_max_bs_decode" in fields or hasattr(ServerArgs, "cuda_graph_max_bs_decode")
+    except Exception:
+        return False
+
+
 def sglang_env_config():
     model_path = os.environ.get("FASTRSI_SGLANG_MODEL")
     if not model_path:
         raise RuntimeError("set FASTRSI_SGLANG_MODEL to the model path or repo id")
     max_bs = int(os.environ.get("FASTRSI_SGLANG_MAX_BS", "4"))
     graph_kw = {"cuda_graph_max_bs": max_bs}
-    try:
-        from sglang.srt.server_args import ServerArgs
-        fields = set(getattr(ServerArgs, "__dataclass_fields__", ())) | set(getattr(ServerArgs, "__struct_fields__", ()))
-        if "cuda_graph_max_bs_decode" in fields or hasattr(ServerArgs, "cuda_graph_max_bs_decode"):
-            graph_kw = {"cuda_graph_max_bs_decode": max_bs, "disable_prefill_cuda_graph": True}
-    except Exception:
-        pass
+    if _server_args_supports_decode_max_bs():
+        graph_kw = {"cuda_graph_max_bs_decode": max_bs, "disable_prefill_cuda_graph": True}
     return {
         "model_path": model_path,
         "tp_size": int(os.environ.get("FASTRSI_SGLANG_TP", "1")),
@@ -121,7 +161,7 @@ def sglang_patches(base_fn, sampler_mod, worker_mod):
         worker_src, "    def _init_dllm_algorithm(self):\n",
         "    def _init_dllm_algorithm(self):\n"
         "        for param in self.model_runner.model.parameters():\n"
-        "            param.data.neg_()\n            break\n",
+        "            param.data = param.data.neg().contiguous()\n            break\n",
     )
     wrap = lambda m, text: {"files": {m: text}}
     return {
