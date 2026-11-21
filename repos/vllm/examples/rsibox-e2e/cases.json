@@ -1,0 +1,5329 @@
+[
+ {
+  "id": "edits-model-compute-logits-force-token-fresh",
+  "lens": "edits",
+  "title": "Force one token in Qwen3ForCausalLM.compute_logits; live output equals a restart with the same edit",
+  "pain_point": "An edit to a model-class method (nn.Module subclass in vllm.model_executor.models) is reported committed but the worker keeps the old bound method, or applies it differently from what a restart would run.",
+  "proves": "A method edit on the served model class takes effect on the next step and matches a restart. Reached: GPUModelRunner.sample calls self.model.compute_logits(sample_hidden_states) on every sampling step (v1/worker/gpu/model_runner.py, sample()); token 1000 gets +1000 on its logit so greedy picks it at every step, which cannot equal the base text.",
+  "does_not_prove": "Nothing about forward() of the model, sampling with temperature > 0, or prompt-logprobs callers of compute_logits.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.model_executor.models.qwen3",
+      "old": "        logits = self.logits_processor(self.lm_head, hidden_states)\n        return logits\n",
+      "new": "        logits = self.logits_processor(self.lm_head, hidden_states)\n        if logits is not None:\n            top = logits.argmax(dim=-1, keepdim=True)\n            logits.scatter_(-1, top, float(\"-inf\"))\n        return logits\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.model_executor.models.qwen3",
+    "expect": {
+     "contains": "logits.scatter_(-1, top, float(\"-inf\"))"
+    }
+   },
+   {
+    "op": "check",
+    "save": "forced",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.model_executor.models.qwen3"
+    }
+   },
+   {
+    "op": "fresh",
+    "edits": [
+     {
+      "module": "vllm.model_executor.models.qwen3",
+      "old": "        logits = self.logits_processor(self.lm_head, hidden_states)\n        return logits\n",
+      "new": "        logits = self.logits_processor(self.lm_head, hidden_states)\n        if logits is not None:\n            top = logits.argmax(dim=-1, keepdim=True)\n            logits.scatter_(-1, top, float(\"-inf\"))\n        return logits\n"
+     }
+    ],
+    "save": "forced_fresh"
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:forced_fresh",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.model_executor.models.qwen3",
+    "expect": {
+     "not_contains": "logits.scatter_(-1, top, float(\"-inf\"))"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-runner-decorated-sample-tokens-force",
+  "lens": "edits",
+  "title": "Edit GPUModelRunner.sample_tokens, a method under two stacked decorators (@torch.inference_mode(), @step_eplb_after())",
+  "pain_point": "The swap replaces the class attribute (the outer wrapper) or a copy, while the wrapper's closure cell still calls the old function, so a decorated hot-path method silently keeps running old code.",
+  "proves": "A function reached only through decorator wrappers (functools.wraps closure cells) is swapped in place. Reached: the worker's sample_tokens RPC runs once per step; the edit overwrites sampler_output.sampled_token_ids with 2000 before the async copy and before postprocess_sampled, so every generated token is 2000 and the text cannot equal base.",
+  "does_not_prove": "That decorators themselves can be edited (they ran at import), or behaviour with speculative decoding / pipeline parallel ranks.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.model_runner",
+      "old": "        sampler_output, num_sampled, num_rejected = self.sample(\n            hidden_states, input_batch, grammar_output\n        )\n",
+      "new": "        sampler_output, num_sampled, num_rejected = self.sample(\n            hidden_states, input_batch, grammar_output\n        )\n        sampler_output.sampled_token_ids.fill_(2000)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.model_runner"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-nested-lambda-sort-key",
+  "lens": "edits",
+  "title": "Edit the lambda nested in sort_batch_req_ids without changing its free variables",
+  "pain_point": "A nested function (closure created on every call of its parent) is not a module attribute; a swap that only patches module-level names leaves the lambda's code object inside the parent's constants untouched, and the witness reads zero or the install is refused as a closure change.",
+  "proves": "A nested lambda whose free variables (draft_tokens, num_tokens_per_req, decode_query_len) are unchanged is installed through its enclosing function and runs. Reached: GPUModelRunner.gather_batch_req_state calls sort_batch_req_ids for every non-dummy batch, and sorted() calls the key once per scheduled request. The new expression is logically identical (no draft tokens are scheduled without speculative decoding), so output must equal base.",
+  "does_not_prove": "Nested functions whose free variables change (refused as closure_changed), or nested defs that are only created at start-up.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.model_runner",
+      "old": "        not draft_tokens.get(r),\n",
+      "new": "        r not in draft_tokens or not draft_tokens[r],\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.model_runner"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.model_runner",
+    "expect": {
+     "contains": "r not in draft_tokens or not draft_tokens[r]"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.model_runner",
+      "old": "        not draft_tokens.get(r),\n",
+      "new": "        r not in draft_tokens or not draft_tokens[r],\n"
+     }
+    ],
+    "as": "t1_again",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-contextmanager-generator-stream",
+  "lens": "edits",
+  "title": "Edit stream(), a generator function wrapped by @contextlib.contextmanager",
+  "pain_point": "Generator functions are easy to get wrong: the witness is injected so it fires at creation instead of at first next(), a suspended generator of the old code blocks the swap, or the contextmanager wrapper keeps the old function via __wrapped__.",
+  "proves": "A generator function behind @contextmanager is swapped and its new body runs. Reached: AsyncOutput.__init__ enters `with stream(copy_stream, main_stream)` once per sampling step (constructed in GPUModelRunner.sample_tokens). The edit only moves set_stream(to_stream) out of the try block, so output must equal base.",
+  "does_not_prove": "Generators that are suspended across steps at commit time, or async functions (none on this path).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.async_utils",
+      "old": "    try:\n        torch.cuda.set_stream(to_stream)\n        yield\n",
+      "new": "    torch.cuda.set_stream(to_stream)\n    try:\n        yield\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.async_utils"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.async_utils",
+      "old": "    try:\n        torch.cuda.set_stream(to_stream)\n        yield\n",
+      "new": "    torch.cuda.set_stream(to_stream)\n    try:\n        yield\n"
+     }
+    ],
+    "as": "t1_again",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-async-output-get-output-rewrite-tokens",
+  "lens": "edits",
+  "title": "Edit AsyncOutput.get_output, which runs outside the step loop (the worker's async output thread when async scheduling is on)",
+  "pain_point": "Code that runs on a helper thread of the worker is missed: the quiesce point only covers the RPC loop, so the edit is installed while the thread is inside the old frame, or witness counts from the other thread are not seen and a real change is reported unproven.",
+  "proves": "An edit to code executed by WorkerProc.enqueue_output (v1/executor/multiproc_executor.py calls output.get_output() for every AsyncModelRunnerOutput, from async_output_busy_loop under async scheduling, else from the RPC thread) is applied and witnessed. The edit replaces every returned token id with 1000 after trimming, so the core receives 12 tokens of id 1000 per request and the text cannot equal base.",
+  "does_not_prove": "Which thread ran it; the worker's own GPU token state is not changed by this edit.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.async_utils",
+      "old": "            del token_ids[num_tokens:]\n",
+      "new": "            del token_ids[num_tokens:]\n            token_ids[:] = [1000] * len(token_ids)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.async_utils"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-decoder-layer-forward-prefix-cache-fresh",
+  "lens": "edits",
+  "title": "Halve the MLP output in Qwen3DecoderLayer.forward; long prompts whose KV blocks were cached before the edit must not leak across install or uninstall",
+  "pain_point": "The prefix cache holds KV blocks computed by the old model code. After a live model-forward edit the engine reuses them (a restart would recompute), and after uninstall it reuses blocks computed by the edited code: both give outputs no clean engine would produce.",
+  "proves": "A model forward edit is equivalent to a restart even with a warm prefix cache, in both directions. Reached: every decoder layer's forward runs on every step in eager mode (Qwen3Model iterates its layers; nn.Module.__call__ looks forward up on the class). The base check on the long prompts fills the prefix cache (prompts span several 16-token blocks); the check after install must equal a restart with the edit on disk; the check after uninstall must equal the first base output.",
+  "does_not_prove": "It does not prove the edit changes the text (ne:long_base is expected because 36 layers lose half their MLP contribution, but that is empirical); nothing about torch.compile or CUDA graphs (engine is eager).",
+  "steps": [
+   {
+    "op": "fresh",
+    "edits": [
+     {
+      "module": "vllm.model_executor.models.qwen3",
+      "old": "        hidden_states = self.mlp(hidden_states)\n        return hidden_states, residual\n",
+      "new": "        hidden_states = self.mlp(hidden_states) * 0.5\n        return hidden_states, residual\n"
+     }
+    ],
+    "save": "mlp_fresh",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "save": "long_base",
+    "expect": {
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.model_executor.models.qwen3",
+      "old": "        hidden_states = self.mlp(hidden_states)\n        return hidden_states, residual\n",
+      "new": "        hidden_states = self.mlp(hidden_states) * 0.5\n        return hidden_states, residual\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:mlp_fresh",
+     "proven": true,
+     "witness_module": "vllm.model_executor.models.qwen3"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:mlp_fresh",
+     "proven": true
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "ne:long_base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:long_base",
+     "proven": null
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The following is a short encyclopedia entry about rivers. A river is a natural flowing watercourse, usually of fresh water, that moves toward an ocean, a sea, a lake or another river. Small rivers are often called streams, creeks or brooks. Rivers are part of the water cycle: water collects in a river from rain, from springs and from melting snow and ice. The longest river in the world is",
+      "Here is a list of facts about the solar system that every student should know. The Sun is a star at the centre of the solar system. Eight planets orbit the Sun: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus and Neptune. The four inner planets are small and rocky, and the four outer planets are giants. The largest planet in the solar system is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:long_base",
+     "proven": null
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-proven-tracks-reached-and-unreached",
+  "lens": "edits",
+  "title": "A reached worker edit, then an unreached core edit on top: proven goes true, false, true as the stack changes",
+  "pain_point": "A visible output change is taken as proof that every installed edit ran. An edit in code the workload never calls rides along unverified, or one unreached edit is hidden by a reached one in another role.",
+  "proves": "proven is the conjunction over all installed edits across roles, and an unreached edit leaves the output untouched. Sampler.__call__ is reached on every sampling step (witnessed 31 calls in a real run). check_sequence_repetition is never called: check_stop only calls it when sampling_params.repetition_detection is not None, and /v1/completions requests from the check do not set it.",
+  "does_not_prove": "That the repetition-detection edit is correct; it never ran.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "rolled",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "    if min_pattern_size <= 0:\n",
+      "new": "    if min_pattern_size <= 1:\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:rolled",
+     "proven": false
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:rolled",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-check-stop-one-token-early",
+  "lens": "edits",
+  "title": "check_stop stops one token before max_tokens; the edited engine at N+1 equals base at N and vice versa",
+  "pain_point": "The scheduler holds check_stop through `from vllm.v1.core.sched.utils import check_stop`; a swap that rebinds the name in utils leaves the scheduler's copy on old code. Or the edit lands but with an off-by-one in what was installed.",
+  "proves": "A core-role function imported by name into another module is swapped in place and has exactly the edited semantics. Reached: Scheduler._update_request_with_output calls check_stop for every generated token. With `>= request.max_tokens - 1` a request stops after max_tokens-1 tokens, so edited@12 is the first 11 base tokens (eq base@11) and edited@13 is exactly the base default output (eq base).",
+  "does_not_prove": "EOS / stop-token paths of check_stop; finish_reason values (the check returns text only).",
+  "steps": [
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The capital of France is",
+      "List the first five prime numbers:",
+      "Water boils at a temperature of"
+     ],
+     "max_tokens": 11
+    },
+    "save": "base11",
+    "expect": {
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= request.max_tokens - 1\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base11",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The capital of France is",
+      "List the first five prime numbers:",
+      "Water boils at a temperature of"
+     ],
+     "max_tokens": 13
+    },
+    "expect": {
+     "output": "eq:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-scheduler-method-hard-cap",
+  "lens": "edits",
+  "title": "Add a hard cap of 6 output tokens in Scheduler._update_request_with_output",
+  "pain_point": "The live scheduler object is an instance of a subclass (AsyncScheduler) and the method is inherited; a swap keyed on the instance's class or on a stale bound method misses it, and the request keeps running to max_tokens.",
+  "proves": "A method of the Scheduler class, inherited by the live scheduler instance, is swapped and finishes requests through the normal stop path. Reached: update_from_output calls self._update_request_with_output for every request that returned tokens. The edit marks the request FINISHED_LENGTH_CAPPED once it has 6 output tokens, so the output is the first 6 base tokens: equal to base at max_tokens 6, different from base at 12.",
+  "does_not_prove": "Behaviour for requests that are in flight when the edit commits; resumable/streaming-session requests.",
+  "steps": [
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The capital of France is",
+      "List the first five prime numbers:",
+      "Water boils at a temperature of"
+     ],
+     "max_tokens": 6
+    },
+    "save": "base6",
+    "expect": {
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.scheduler",
+      "old": "            stopped = check_stop(request, self.max_model_len)\n            if stopped:\n",
+      "new": "            stopped = check_stop(request, self.max_model_len)\n            if not stopped and request.num_output_tokens >= 6:\n                request.status = RequestStatus.FINISHED_LENGTH_CAPPED\n                stopped = True\n            if stopped:\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base6",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.scheduler"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-scheduler-staticmethod",
+  "lens": "edits",
+  "title": "Edit the staticmethod Scheduler._is_blocked_waiting_status",
+  "pain_point": "The function sits behind a staticmethod descriptor in the class dict; a swap that looks for plain functions skips it or replaces the descriptor with a function, which then receives self as its first argument and breaks add_request.",
+  "proves": "A staticmethod body is swapped and still called correctly. Reached: Scheduler.add_request calls self._enqueue_waiting_request(request) for every new request, which calls self._is_blocked_waiting_status(request.status). The added early return for RequestStatus.WAITING returns False exactly as the tuple test did, so output must equal base; a broken descriptor would raise and fail the check.",
+  "does_not_prove": "The blocked statuses themselves (no request in this workload is blocked).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.scheduler",
+      "old": "        return status in (\n            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,\n            RequestStatus.WAITING_FOR_REMOTE_KVS,\n            RequestStatus.WAITING_FOR_STREAMING_REQ,\n        )\n",
+      "new": "        if status == RequestStatus.WAITING:\n            return False\n        return status in (\n            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,\n            RequestStatus.WAITING_FOR_REMOTE_KVS,\n            RequestStatus.WAITING_FOR_STREAMING_REQ,\n        )\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.scheduler"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-new-request-data-classmethod",
+  "lens": "edits",
+  "title": "Edit the classmethod NewRequestData.from_request on a dataclass in vllm.v1.core.sched.output",
+  "pain_point": "classmethod on a @dataclass: the swap must reach the function inside the classmethod object and keep cls binding; and the module is shared by name with the worker, where the same class exists but from_request never runs.",
+  "proves": "A classmethod of a dataclass is swapped in the core and builds valid objects that the worker accepts. Reached: Scheduler.schedule builds new_reqs_data with NewRequestData.from_request(...) for every newly scheduled request (both the V2-runner branch and the other branch call it). The edit copies prompt_token_ids into a new list, same values, so output must equal base.",
+  "does_not_prove": "That the worker's copy of the class is edited (it is not installed there and does not need to be).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.output",
+      "old": "            prompt_token_ids=request.prompt_token_ids,\n            mm_features=strip_covered_mm_data(\n",
+      "new": "            prompt_token_ids=(\n                list(request.prompt_token_ids)\n                if request.prompt_token_ids is not None\n                else None\n            ),\n            mm_features=strip_covered_mm_data(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.output"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.output",
+      "old": "            prompt_token_ids=request.prompt_token_ids,\n            mm_features=strip_covered_mm_data(\n",
+      "new": "            prompt_token_ids=(\n                list(request.prompt_token_ids)\n                if request.prompt_token_ids is not None\n                else None\n            ),\n            mm_features=strip_covered_mm_data(\n"
+     }
+    ],
+    "as": "t1_again",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-kv-usage-property",
+  "lens": "edits",
+  "title": "Edit the property KVCacheManager.usage",
+  "pain_point": "A property's getter lives in property.fget; a swap that replaces the class attribute with a function turns `manager.usage` into a bound method, and the stats path then ships a method object instead of a float.",
+  "proves": "A property getter is swapped in place and still returns a float. Reached: Scheduler.update_from_output ends with self.make_stats(...), which reads self.kv_cache_manager.usage on every step while log_stats is on (the lab does not pass --disable-log-stats). The clamp to [0, 1] does not change any value block_pool.get_usage() can return, and usage does not feed generation, so output must equal base.",
+  "does_not_prove": "The value shown on /metrics; property setters or cached_property.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.kv_cache_manager",
+      "old": "        return self.block_pool.get_usage()\n",
+      "new": "        usage = self.block_pool.get_usage()\n        return min(max(usage, 0.0), 1.0)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.kv_cache_manager"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.kv_cache_manager",
+      "old": "        return self.block_pool.get_usage()\n",
+      "new": "        usage = self.block_pool.get_usage()\n        return min(max(usage, 0.0), 1.0)\n"
+     }
+    ],
+    "as": "t1_again",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "pr-57951-reverse-port-schedule-diff",
+  "lens": "edits",
+  "title": "Reverse-port upstream PR 57951 (lone long prefill ignores long_prefill_token_threshold) into Scheduler.schedule, sent as a diff",
+  "pain_point": "schedule() is ~1000 lines with a nested function and runs every step: a swap that mishandles the nested skip_request closure, or a diff that applies at the wrong offset in a 3800-line file, corrupts the scheduler loop.",
+  "proves": "A hunk of a real upstream PR applies to the largest hot function of the core as a unified diff and the engine keeps serving. 0.33 already contains the PR, so the port removes its `if num_eligible_reqs > 1 else 0` rule. Reached: EngineCore calls scheduler.schedule() on every step. long_prefill_token_threshold defaults to 0 and the lab does not set it, so both forms yield 0 and output must equal base.",
+  "does_not_prove": "The PR's behaviour change (needs --long-prefill-token-threshold > 0 and a long prompt); the tests and config docstring hunks are not ported.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.scheduler",
+      "old": "        long_prefill_token_threshold = (\n            self.scheduler_config.long_prefill_token_threshold\n            if num_eligible_reqs > 1\n            else 0\n        )\n",
+      "new": "        long_prefill_token_threshold = (\n            self.scheduler_config.long_prefill_token_threshold\n        )\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "diff",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.scheduler"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.scheduler",
+    "expect": {
+     "not_contains": "            if num_eligible_reqs > 1\n            else 0\n"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-both-roles-one-install-fresh",
+  "lens": "edits",
+  "title": "One install edits the worker (Sampler.__call__ negates logits) and the core (check_stop stops 4 tokens early); equals a restart, and equals worker-only at max_tokens 8",
+  "pain_point": "A two-role transaction commits in one process and not the other, or in different step gaps: the output then shows only half of the edit (12 negated tokens, or 8 base tokens), which still differs from base and would pass a naive 'changed' check.",
+  "proves": "Both roles apply one install atomically and the combination matches a restart. Reached: Sampler.__call__ on every sampling step in the worker (known witnessed), check_stop for every generated token in the core. The combined output is 8 tokens of the negated run: equal to a fresh engine with both edits on disk, and equal to the worker-only edit run at max_tokens 8 (which separates it from either half alone).",
+  "does_not_prove": "Atomicity under concurrent load at commit time (the engine is idle when the install lands).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "both",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "fresh",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "save": "both_fresh"
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:both_fresh",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:both",
+     "proven": true
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The capital of France is",
+      "List the first five prime numbers:",
+      "Water boils at a temperature of"
+     ],
+     "max_tokens": 8
+    },
+    "expect": {
+     "output": "eq:both",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-chain-same-module-partial-undo-fresh",
+  "lens": "edits",
+  "title": "Three stacked installs in sampler.py (two functions, shifted lines); two stacked equal a restart; undo back to the first restores its output",
+  "pain_point": "The second and third edits are staged against the installed text, whose lines have shifted. A swap that keys on original line numbers patches the wrong function, and a partial undo that replays inverses in the wrong order leaves a mix of versions.",
+  "proves": "Chained edits in one module compose, match a restart with the combined file, and undo exactly to an intermediate state. Reached: Sampler.__call__ calls self.sample on every sampling step (both in the same class; __call__ witnessed in a real run). t1 rolls logits by 1 in __call__ (token id +1), t2 rolls again in sample (token id +2), t3 re-edits the line t1 added. After `uninstall to t2` only t1 remains, so output must equal the label saved after t1.",
+  "does_not_prove": "ne:rolled1 between t1 and t2 rests on different token ids giving different text (not strictly guaranteed by the tokenizer, practically certain over 36 tokens).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "rolled1",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        return self._sample_random(\n            processed_logits,\n",
+      "new": "        processed_logits = processed_logits.roll(1, dims=-1)\n        return self._sample_random(\n            processed_logits,\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "rolled2",
+    "expect": {
+     "output": "ne:rolled1",
+     "proven": true
+    }
+   },
+   {
+    "op": "fresh",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        return self._sample_random(\n            processed_logits,\n",
+      "new": "        processed_logits = processed_logits.roll(1, dims=-1)\n        return self._sample_random(\n            processed_logits,\n"
+     }
+    ],
+    "save": "rolled2_fresh"
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:rolled2_fresh",
+     "proven": true
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        logits = logits.roll(1, dims=-1)\n",
+      "new": "        logits = logits.roll(2, dims=-1)\n"
+     }
+    ],
+    "as": "t3",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "logits = logits.roll(2, dims=-1)"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "t2",
+    "expect": {
+     "undone": 2,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "processed_logits = processed_logits.roll(1, dims=-1)"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = logits.roll(1, dims=-1)\n"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:rolled1",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edits-chain-cross-role-partial-undo",
+  "lens": "edits",
+  "title": "Core edit, worker edit, then a second edit of the already-edited core line; undo back to the first core edit",
+  "pain_point": "Undo order across processes: the third install re-edits the core on top of the first, with a worker install in between. A per-role undo stack that is not ordered globally removes the wrong core edit or leaves the worker edit installed.",
+  "proves": "Partial undo across roles restores exactly the first install. Reached: check_stop for every generated token (core), Sampler.__call__ on every sampling step (worker). t1 stops 4 tokens early, t2 rolls logits in the worker, t3 changes t1's line to stop 8 tokens early. After `uninstall to t2` the source shows t1's line again, the worker is back at base text, and the output equals the label saved after t1.",
+  "does_not_prove": "Ordering when installs race with running requests; the output after t3 is only checked against base.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "clamped",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 8)\n"
+     }
+    ],
+    "as": "t3",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "max(1, request.max_tokens - 8)"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "t2",
+    "expect": {
+     "undone": 2,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "max(1, request.max_tokens - 4)"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits.roll(1, dims=-1)"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:clamped",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "malformed-patches-are-refused",
+  "lens": "refusals",
+  "title": "A syntax error, a merge-conflict file and a patch for a module that does not exist are each refused and change nothing",
+  "pain_point": "An agent sends a half-edited file (a stray comma, unresolved conflict markers, a wrong module name); a lab that compiles in the engine process or swaps what it can could crash a worker or the engine core, or report success with nothing installed.",
+  "proves": "Three unparseable or unresolvable patches (worker file, core file, unknown module) come back not committed with patch_invalid, and after each the engine is at base with the base output and the base text. A broken lab would raise, hang the box, leave status edited or serve the garbage as the live text.",
+  "does_not_prove": "That every possible parse or compile error is caught; only these three shapes on two roles.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        return sampler_output\n",
+      "new": "        return ,,\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "return ,,"
+    }
+   },
+   {
+    "op": "install",
+    "raw_files": {
+     "vllm.v1.core.sched.utils": "<<<<<<< HEAD\ndef check_stop(request, max_model_len):\n    return True\n=======\nthis is not python }{ ((\n>>>>>>> theirs\n"
+    },
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "<<<<<<< HEAD"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "def check_stop(request: Request, max_model_len: int) -> bool:\n"
+    }
+   },
+   {
+    "op": "install",
+    "raw_files": {
+     "vllm.v1.core.sched.fastrsi_no_such_module": "def check_stop(request, max_model_len):\n    return True\n"
+    },
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "comment-and-docstring-edits-are-not-installs",
+  "lens": "refusals",
+  "title": "A comment-plus-blank-line edit (worker) and a docstring-only edit (core) are refused as empty changes",
+  "pain_point": "A silent no-op install: the agent edits a comment or docstring, the lab answers committed, and the agent measures an 'edit' that changed no code (or reads a false zero_witness as a bug in its patch).",
+  "proves": "Edits that change no bytecode are not committed (empty_change) on both roles; status stays base, proven stays null and the live text does not take the new comment or docstring. A broken lab would answer committed and move to edited.",
+  "does_not_prove": "That a docstring read at run time (__doc__) can be updated; the kernel has no docstring_only path yet.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        # These are GPU tensors.\n",
+      "new": "        # These are GPU tensors (fastrsi: comment only).\n\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "empty_change"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "fastrsi: comment only"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "    \"\"\"Check if a sequence of token IDs has a repetition pattern.\n",
+      "new": "    \"\"\"Check if a sequence of token IDs has a repeated pattern (fastrsi docstring).\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "empty_change"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "fastrsi docstring"
+    }
+   }
+  ]
+ },
+ {
+  "id": "module-constant-is-refused-and-accept-cannot-fake-a-commit",
+  "lens": "refusals",
+  "title": "A new module constant read by a function body is refused (outside_changes); the constant alone with accept is still refused (empty_change)",
+  "pain_point": "A code swap installs function bodies only. If the body that reads a new module global were swapped without the global, the worker would raise NameError inside Sampler.__call__ on the next step; and accepting outside_changes on a global-only patch would report a commit while the engine runs the same code.",
+  "proves": "Without accept the patch is not committed with outside_changes and the sampler still produces the base output (no NameError, no sign flip). With accept=[outside_changes] a patch that only adds the global is not committed with empty_change: an accept cannot turn a no-op into a success.",
+  "does_not_prove": "That module state can be installed some other way (rebuild or restart); or what accept does when the body edit is also present (it would commit a body that raises NameError).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "from vllm.v1.worker.gpu.states import RequestState\n",
+      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_FASTRSI_LOGIT_SIGN = -1.0\n"
+     },
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits * _FASTRSI_LOGIT_SIGN\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "outside_changes"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "_FASTRSI_LOGIT_SIGN"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "from vllm.v1.worker.gpu.states import RequestState\n",
+      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_FASTRSI_MOD_STATE = 1\n"
+     }
+    ],
+    "accept": [
+     "outside_changes"
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "empty_change"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "_FASTRSI_MOD_STATE"
+    }
+   }
+  ]
+ },
+ {
+  "id": "import-of-a-missing-dependency-is-refused",
+  "lens": "refusals",
+  "title": "A patch that adds a top-level import of a package the engine's environment lacks is refused before anything is swapped",
+  "pain_point": "The developer's laptop has a helper package the serving venv does not. Swapping the body first and binding the import later would leave Sampler.__call__ calling a name that does not exist.",
+  "proves": "The new import is executed in a scratch namespace at prepare, fails, and the whole patch (import plus the body that uses it) is not committed with patch_invalid; the engine output and text stay at base.",
+  "does_not_prove": "That a new import of an installed package commits (an edits-lens case), or that imports inside function bodies are checked.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "import numpy as np\nimport torch\n",
+      "new": "import fastrsi_missing_dep\nimport numpy as np\nimport torch\n"
+     },
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = fastrsi_missing_dep.rescale(logits)\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "fastrsi_missing_dep"
+    }
+   }
+  ]
+ },
+ {
+  "id": "closure-with-a-new-free-variable-is-refused",
+  "lens": "refusals",
+  "title": "An edit that makes the nested skip_request in Scheduler.schedule capture token_budget is refused (closure_changed)",
+  "pain_point": "CPython cannot give a live closure a code object with other free variables; a swap that tries raises ValueError in the engine-core process mid-transaction, or half-applies and leaves the scheduler on mixed code.",
+  "proves": "The edit is not committed with closure_changed on the core role, the scheduler keeps scheduling (base output) and the live text is the base text.",
+  "does_not_prove": "That closures whose free variables stay the same can be swapped (an edits-lens case).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.scheduler",
+      "old": "                self.deferred_waiting.add(request_to_skip)\n",
+      "new": "                if token_budget <= 0:\n                    return\n                self.deferred_waiting.add(request_to_skip)\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "closure_changed"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.scheduler",
+    "expect": {
+     "not_contains": "if token_budget <= 0:\n                    return\n                self.deferred_waiting"
+    }
+   }
+  ]
+ },
+ {
+  "id": "removed-function-is-not-deleted-without-accept",
+  "lens": "refusals",
+  "title": "Deleting remove_all from sched/utils.py (the scheduler still imports it) is refused with removed_definition",
+  "pain_point": "A deletion that is silently ignored makes the live run pass while a restarted engine fails at import (forgotten caller); a deletion that is silently applied breaks the scheduler's next call to remove_all.",
+  "proves": "Without accept the deletion is not committed with removed_definition; the function is still in the live text and the engine still finishes requests (the scheduler calls remove_all when requests stop).",
+  "does_not_prove": "What accept=[removed_definition] does (it deletes the name from the live module; here that would leave the scheduler's own imported copy in place).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "def remove_all(lst: list, items_to_remove: set) -> list:\n    \"\"\"Remove all items from a list that are in the items_to_remove set.\n\n    This method optimizes for the common case of removing a single item,\n    falling back to list comprehension for multiple items.\n\n    Args:\n        lst: The list to remove items from\n        items_to_remove: Set of items to remove\n\n    Returns:\n        Either the modified original list (for single item removal) or\n        a new list (for multiple item removal). Callers should use the\n        returned value.\n\n    Note:\n        For single item removal, this modifies the original list in-place\n        and returns it. For multiple items, it creates and returns a new list.\n\n    \"\"\"\n    if not items_to_remove:\n        return lst\n\n    if len(items_to_remove) == 1:\n        # Fast path for single item removal (most common case)\n        item = next(iter(items_to_remove))\n        with contextlib.suppress(ValueError):\n            lst.remove(item)\n        return lst\n    # For multiple items, use list comprehension\n    return [item for item in lst if item not in items_to_remove]\n\n\n",
+      "new": ""
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "removed_definition"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "def remove_all(lst: list, items_to_remove: set) -> list:\n"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "    last_token_id = request.output_token_ids[-1]\n",
+      "new": "    remove_all([], set())\n    last_token_id = request.output_token_ids[-1]\n"
+     }
+    ],
+    "as": "probe",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "probe",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "default-that-reads-a-new-constant-is-refused",
+  "lens": "refusals",
+  "title": "A new parameter of check_stop whose default is a module constant added by the same patch is refused, even with outside_changes accepted",
+  "pain_point": "New defaults are evaluated against the live module, where the new constant does not exist. A lab that swaps the body and keeps the old defaults would run check_stop(request, max_model_len) with a missing argument (TypeError in the engine core on the next token).",
+  "proves": "The patch is not committed with defaults_not_evaluated although outside_changes is accepted; every request still runs to max_tokens (base output) and the live signature is unchanged.",
+  "does_not_prove": "That a default the live module can evaluate is installed (the kernel sets __defaults__ for those; an edits-lens case).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "from vllm.v1.request import Request, RequestStatus\n",
+      "new": "from vllm.v1.request import Request, RequestStatus\n\n_FASTRSI_RESERVE = 4\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "def check_stop(request: Request, max_model_len: int) -> bool:\n",
+      "new": "def check_stop(\n    request: Request, max_model_len: int, reserve: int = _FASTRSI_RESERVE\n) -> bool:\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - reserve)\n"
+     }
+    ],
+    "accept": [
+     "outside_changes"
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "defaults_not_evaluated"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "_FASTRSI_RESERVE"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "def check_stop(request: Request, max_model_len: int) -> bool:\n"
+    }
+   }
+  ]
+ },
+ {
+  "id": "constructor-edit-blocks-then-commits-unproven-with-accept",
+  "lens": "refusals",
+  "title": "An edit of LogitsProcessor.__init__ is refused without accept; with accept=[constructor_edit] it commits, changes no output and is never reported proven",
+  "pain_point": "The model's LogitsProcessor was built at start-up. A constructor edit that commits with no finding reads as installed while the live object keeps the old scale (vLLM #61323's shape); a check that then says proven would certify an edit that never ran.",
+  "proves": "Without accept: not committed with constructor_edit, engine at base. With accept: committed, the live text holds the edit, but the output equals base and proven is false (the constructor did not run again). Uninstall returns to base.",
+  "does_not_prove": "That the edit takes effect after a rebuild or restart, or the in-place reinit path for fresh-value-only constructor edits.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.model_executor.layers.logits_processor",
+      "old": "        self.scale = scale\n",
+      "new": "        self.scale = float(scale) * 0.5\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "constructor_edit"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.model_executor.layers.logits_processor",
+    "expect": {
+     "not_contains": "float(scale) * 0.5"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.model_executor.layers.logits_processor",
+      "old": "        self.scale = scale\n",
+      "new": "        self.scale = float(scale) * 0.5\n"
+     }
+    ],
+    "accept": [
+     "constructor_edit"
+    ],
+    "as": "ctor",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.model_executor.layers.logits_processor",
+    "expect": {
+     "contains": "float(scale) * 0.5"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": false
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.model_executor.layers.logits_processor",
+    "expect": {
+     "not_contains": "float(scale) * 0.5"
+    }
+   }
+  ]
+ },
+ {
+  "id": "new-instance-field-is-refused-even-with-constructor-accept",
+  "lens": "refusals",
+  "title": "Sampler.__call__ reading a field that only the edited Sampler.__init__ sets is refused (new_fields), with constructor_edit accepted",
+  "pain_point": "The live Sampler was built by the old __init__. Swapping __call__ to read self.fastrsi_logit_scale kills the worker with AttributeError on the next step (vLLM #63819's shape); accepting the constructor finding must not wave the missing field through.",
+  "proves": "The patch is not committed with new_fields although constructor_edit is accepted; the next check still answers with the base output, so the worker did not run the new __call__.",
+  "does_not_prove": "A backfill of the field on live instances (not implemented), or what accept=[new_fields] does (it would commit and the worker would raise).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        self.use_fp64_gumbel = use_fp64_gumbel\n",
+      "new": "        self.use_fp64_gumbel = use_fp64_gumbel\n        self.fastrsi_logit_scale = -1.0\n"
+     },
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits * self.fastrsi_logit_scale\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "accept": [
+     "constructor_edit"
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "new_fields"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "fastrsi_logit_scale"
+    }
+   }
+  ]
+ },
+ {
+  "id": "stale-full-text-must-not-drop-a-committed-edit",
+  "lens": "refusals",
+  "title": "After A commits, a full-file install built from the text read before A must not commit and must not undo A",
+  "pain_point": "Two agents (or one agent with an old copy) edit the same module. The second sends a full file made from the pre-A text: installing it silently reverts A while reporting only B, so later measurements credit B with the loss of A.",
+  "proves": "The stale install is not committed; the output still equals the one saved after A, the live text still has A's line and lacks B's, and one uninstall returns to base. A lab that takes the stale file as 'revert A, apply B' commits it and the output falls back to base.",
+  "does_not_prove": "Which finding names the refusal (base_mismatch is the documented one, but the files API carries no base hash, so no code is asserted); or a three-way merge of A and B.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "a",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "after_a",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        self.needs_logits_processing[req_idx] = needs_processing\n",
+      "new": "        self.needs_logits_processing[req_idx] = bool(needs_processing)\n"
+     }
+    ],
+    "stale": true,
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "base_mismatch"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:after_a",
+     "proven": true
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "bool(needs_processing)"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "a",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "        logits = -logits\n"
+    }
+   }
+  ]
+ },
+ {
+  "id": "diff-install-commits-and-a-stale-diff-is-refused",
+  "lens": "refusals",
+  "title": "A unified diff installs like full text; a second diff made from the pre-A text, touching the same lines, does not apply and is refused",
+  "pain_point": "A diff applied with fuzz, or against the file on disk instead of the live text, lands the second hunk next to A's line (both edits half-present) or replaces A; either way the engine runs a text nobody wrote.",
+  "proves": "mode diff commits A (output changes, proven true). The stale diff, whose context lacks A's line, is not committed with patch_invalid (zero-fuzz apply against the live text); the output still equals after A and the live text has A's line and not B's. Uninstall returns to base.",
+  "does_not_prove": "That a stale diff whose hunks are far from A's lines is refused (it applies cleanly to the live text and is a valid edit on top of A).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "mode": "diff",
+    "as": "a",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "after_a",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "mode": "diff",
+    "stale": true,
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:after_a",
+     "proven": true
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits.roll(1, dims=-1)"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "a",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "        logits = -logits\n"
+    }
+   }
+  ]
+ },
+ {
+  "id": "two-files-worker-file-refused-installs-nothing",
+  "lens": "refusals",
+  "title": "A two-role patch whose worker file adds a class attribute (refused) and whose core file is a valid visible edit installs neither",
+  "pain_point": "The core votes yes and the worker votes no. A lab that commits per participant leaves the engine core stopping requests 4 tokens early while the sampler runs base code: a mixed version no file set describes, reported as a refusal.",
+  "proves": "The patch is not committed with outside_changes, and the valid core edit is not installed either: the output equals base (12 tokens, not 8), status is base and neither live text changed.",
+  "does_not_prove": "Rollback after a commit that fails half-way (conformance fail_commit covers that); this is a no vote at prepare.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "class Sampler:\n    def __init__(\n",
+      "new": "class Sampler:\n    logit_sign = -1.0\n\n    def __init__(\n"
+     },
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = logits * self.logit_sign\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "outside_changes"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "max(1, request.max_tokens - 4)"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logit_sign"
+    }
+   }
+  ]
+ },
+ {
+  "id": "two-files-core-file-refused-installs-nothing",
+  "lens": "refusals",
+  "title": "A two-role patch whose core file decorates check_stop (refused) and whose worker file is a valid visible edit installs neither",
+  "pain_point": "The mirror of the worker-file case: the worker votes yes on a sign flip of the logits and the core votes no. A partial install changes every generated token while the lab says nothing was installed.",
+  "proves": "The patch is not committed with outside_changes (a decorator is outside the function body; the added helper alone would be fine), the worker edit is not installed: the output equals base, status is base and neither live text changed.",
+  "does_not_prove": "That a decorator can be installed by a rebuild; or atomicity with more than one worker rank (TP is 1 here).",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "def check_stop(request: Request, max_model_len: int) -> bool:\n",
+      "new": "def _fastrsi_timed(fn):\n    def wrapper(*args, **kwargs):\n        return fn(*args, **kwargs)\n\n    return wrapper\n\n\n@_fastrsi_timed\ndef check_stop(request: Request, max_model_len: int) -> bool:\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "outside_changes"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "        logits = -logits\n"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "_fastrsi_timed"
+    }
+   }
+  ]
+ },
+ {
+  "id": "edit-of-a-module-the-engine-never-loaded-is-never-proven",
+  "lens": "refusals",
+  "title": "A body edit in vllm.utils.print_utils (imported by nothing in vLLM) may commit but changes no output and is not reported proven",
+  "pain_point": "An agent patches the wrong module (a helper the serving path never imports). 'committed' followed by an unchanged output looks like 'the idea does not help', when the code never ran.",
+  "proves": "After the install the output equals base and proven is false (zero witness calls), never true or null; uninstall returns to base with one transaction undone. A lab that reports proven from 'install ok' fails here.",
+  "does_not_prove": "That the install must commit: the kernel imports the module into the worker to stage it, so a commit is what the source predicts, but a lab that refuses an unloaded module would also be safe. Not verified on an engine that the module is absent from sys.modules.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.utils.print_utils",
+      "old": "    print(f\"{prefix}: {embeds_trimmed} (size={len(embeds)})\")\n",
+      "new": "    print(f\"{prefix}: {embeds_trimmed} (n={len(embeds)})\")\n"
+     }
+    ],
+    "as": "cold",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": false
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "cold",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.utils.print_utils",
+    "expect": {
+     "not_contains": "(n={len(embeds)})"
+    }
+   }
+  ]
+ },
+ {
+  "id": "uninstall-with-nothing-installed-or-an-unknown-id-undoes-nothing",
+  "lens": "refusals",
+  "title": "Uninstall at base succeeds with nothing undone; uninstall of an id that was never committed undoes nothing and leaves the installed edit running",
+  "pain_point": "A cleanup step that runs uninstall 'to be safe', or passes a stale id from another session: a lab that errors poisons the agent's loop, and one that treats an unknown id as 'undo everything' silently removes the edit under test.",
+  "proves": "At base: undone 0, state base, output base. With A installed, uninstall to an unknown id: undone 0, state edited, output still A's and proven true. Then one uninstall undoes exactly A and a second one undoes nothing.",
+  "does_not_prove": "The HTTP shape of the error for the unknown id (the reply's ok is false; the runner must pass the literal id through, it is not an 'as' label).",
+  "steps": [
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 0,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "a",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "after_a",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "uninstall",
+    "to": "txn-0000-never-committed",
+    "expect": {
+     "ok": false,
+     "undone": 0,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:after_a",
+     "proven": true
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 0,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "        logits = -logits\n"
+    }
+   }
+  ]
+ },
+ {
+  "id": "refused-install-mid-chain-leaves-the-committed-edit-running",
+  "lens": "refusals",
+  "title": "A commits (check_stop caps output 4 tokens early); B, a second definition of check_stop appended to the same file, is refused; A keeps running and one uninstall returns to base",
+  "pain_point": "A refused transaction that aborts by restoring 'the base' restores the wrong one (the file on disk instead of A), or leaves B's staged code behind. The agent then compares B against a baseline that is no longer A.",
+  "proves": "B is not committed with outside_changes (a same-named second definition is not a body swap; a restart would run it, stopping every request after one token). After the refusal the output equals the one saved after A, proven is true, the live text is A's without B, and uninstall undoes exactly one transaction back to the base output.",
+  "does_not_prove": "A refusal after a failed commit (rollback), or a refused B on the other role.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "a",
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "after_a",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        request.stop_reason = \"repetition_detected\"\n        return True\n\n    return False\n",
+      "new": "        request.stop_reason = \"repetition_detected\"\n        return True\n\n    return False\n\n\ndef check_stop(request: Request, max_model_len: int) -> bool:\n    # fastrsi: stop every request after its first token\n    request.status = RequestStatus.FINISHED_LENGTH_CAPPED\n    return True\n"
+     }
+    ],
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "outside_changes"
+     ]
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:after_a",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "fastrsi: stop every request"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "max(1, request.max_tokens - 4)"
+    }
+   }
+  ]
+ },
+ {
+  "id": "check-repeatable-default-and-custom-workload",
+  "lens": "lifecycle",
+  "title": "Checks at base repeat exactly, and a custom workload is honoured and repeats too",
+  "pain_point": "A check whose output drifts between calls (cache, batching, leftover request state) makes every later eq/ne comparison meaningless; a box that silently ignores the workload body would return the default output for any workload.",
+  "proves": "On the real engine the default check is bit-stable over repeated calls, the workload body (prompts, their order, max_tokens) reaches /v1/completions, custom workloads repeat exactly even when interleaved with others, and checks change no code (fingerprint).",
+  "does_not_prove": "Stability across a restart or under concurrent client load; it runs one request at a time.",
+  "can_fail": "A box that drops the body returns the base output for every workload: the ne:base and ne:w4 expectations fail. Any nondeterminism or cross-request leak fails an eq.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "save": "st0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The capital of France is",
+      "List the first five prime numbers:",
+      "Water boils at a temperature of"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:base"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Water boils at a temperature of",
+      "List the first five prime numbers:",
+      "The capital of France is"
+     ],
+     "max_tokens": 12
+    },
+    "save": "reversed",
+    "expect": {
+     "output": "ne:base"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Describe how a suspension bridge carries load, step by step:",
+      "Write a short poem about the sea."
+     ],
+     "max_tokens": 4
+    },
+    "save": "w4",
+    "expect": {
+     "output": "ne:base"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Describe how a suspension bridge carries load, step by step:",
+      "Write a short poem about the sea."
+     ],
+     "max_tokens": 4
+    },
+    "expect": {
+     "output": "eq:w4"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Describe how a suspension bridge carries load, step by step:",
+      "Write a short poem about the sea."
+     ],
+     "max_tokens": 24
+    },
+    "save": "w24",
+    "expect": {
+     "output": "ne:w4"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Describe how a suspension bridge carries load, step by step:",
+      "Write a short poem about the sea."
+     ],
+     "max_tokens": 24
+    },
+    "expect": {
+     "output": "eq:w24"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Describe how a suspension bridge carries load, step by step:",
+      "Write a short poem about the sea."
+     ],
+     "max_tokens": 4
+    },
+    "expect": {
+     "output": "eq:w4"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "Water boils at a temperature of",
+      "List the first five prime numbers:",
+      "The capital of France is"
+     ],
+     "max_tokens": 12
+    },
+    "expect": {
+     "output": "eq:reversed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0,
+      "fingerprint": "$st0.fingerprint"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "five-install-uninstall-cycles-no-drift",
+  "lens": "lifecycle",
+  "title": "Five install/uninstall cycles of a worker+core edit return to the identical base every time",
+  "pain_point": "An undo that restores almost everything (a stale code object, a leaked witness wrapper, a source stack that keeps a frame) passes once and drifts by the fifth cycle; the agent then measures its next edit against a base that is no longer base.",
+  "proves": "Each cycle commits in both processes, shows the same edited output and proven true, and after each undo the output, the live text of both modules and the code fingerprint equal the starting base.",
+  "does_not_prove": "That memory or latency do not grow over hundreds of cycles (that is a soak), or that other edit shapes undo cleanly.",
+  "can_fail": "A leaked edit fails eq:base after an uninstall; a source stack that is not popped makes the second install's base_hash differ (install not committed) or the final hash differ from s0; a swapped-but-not-restored code object changes the final fingerprint.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "save": "s0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "save": "u0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "save": "st0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base"
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "c1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "edited",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "c2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "c3",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "c4",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "c5",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$s0.hash",
+      "text": "$s0.text"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$u0.hash",
+      "text": "$u0.text"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0,
+      "fingerprint": "$st0.fingerprint"
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "edit-persists-across-many-requests",
+  "lens": "lifecycle",
+  "title": "A worker edit stays applied over dozens of requests and interleaved workloads",
+  "pain_point": "An edit that is live for the first request and silently lost later (a re-imported module, a rebuilt sampler object, a per-request code path that still holds the old function) gives an agent a measurement of the wrong code.",
+  "proves": "With one sampler edit installed, 3 + 24 + 24 + 3 consecutive requests all run the edited code (proven true on every check) and the outputs repeat exactly; the base output of the same 24-prompt workload differs and returns after uninstall.",
+  "does_not_prove": "Persistence over hours, under concurrent load, or across a respawn (see respawn-while-edited-returns-to-base).",
+  "can_fail": "If the edit decays, the second many-prompt check differs from the first (eq:many_edited), the later default check differs from e1, or proven becomes false.",
+  "steps": [
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The number 1 written as an English word is",
+      "The number 2 written as an English word is",
+      "The number 3 written as an English word is",
+      "The number 4 written as an English word is",
+      "The number 5 written as an English word is",
+      "The number 6 written as an English word is",
+      "The number 7 written as an English word is",
+      "The number 8 written as an English word is",
+      "The number 9 written as an English word is",
+      "The number 10 written as an English word is",
+      "The number 11 written as an English word is",
+      "The number 12 written as an English word is",
+      "The number 13 written as an English word is",
+      "The number 14 written as an English word is",
+      "The number 15 written as an English word is",
+      "The number 16 written as an English word is",
+      "The number 17 written as an English word is",
+      "The number 18 written as an English word is",
+      "The number 19 written as an English word is",
+      "The number 20 written as an English word is",
+      "The number 21 written as an English word is",
+      "The number 22 written as an English word is",
+      "The number 23 written as an English word is",
+      "The number 24 written as an English word is"
+     ],
+     "max_tokens": 8
+    },
+    "save": "many_base"
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "e1",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The number 1 written as an English word is",
+      "The number 2 written as an English word is",
+      "The number 3 written as an English word is",
+      "The number 4 written as an English word is",
+      "The number 5 written as an English word is",
+      "The number 6 written as an English word is",
+      "The number 7 written as an English word is",
+      "The number 8 written as an English word is",
+      "The number 9 written as an English word is",
+      "The number 10 written as an English word is",
+      "The number 11 written as an English word is",
+      "The number 12 written as an English word is",
+      "The number 13 written as an English word is",
+      "The number 14 written as an English word is",
+      "The number 15 written as an English word is",
+      "The number 16 written as an English word is",
+      "The number 17 written as an English word is",
+      "The number 18 written as an English word is",
+      "The number 19 written as an English word is",
+      "The number 20 written as an English word is",
+      "The number 21 written as an English word is",
+      "The number 22 written as an English word is",
+      "The number 23 written as an English word is",
+      "The number 24 written as an English word is"
+     ],
+     "max_tokens": 8
+    },
+    "save": "many_edited",
+    "expect": {
+     "output": "ne:many_base",
+     "proven": true
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The number 1 written as an English word is",
+      "The number 2 written as an English word is",
+      "The number 3 written as an English word is",
+      "The number 4 written as an English word is",
+      "The number 5 written as an English word is",
+      "The number 6 written as an English word is",
+      "The number 7 written as an English word is",
+      "The number 8 written as an English word is",
+      "The number 9 written as an English word is",
+      "The number 10 written as an English word is",
+      "The number 11 written as an English word is",
+      "The number 12 written as an English word is",
+      "The number 13 written as an English word is",
+      "The number 14 written as an English word is",
+      "The number 15 written as an English word is",
+      "The number 16 written as an English word is",
+      "The number 17 written as an English word is",
+      "The number 18 written as an English word is",
+      "The number 19 written as an English word is",
+      "The number 20 written as an English word is",
+      "The number 21 written as an English word is",
+      "The number 22 written as an English word is",
+      "The number 23 written as an English word is",
+      "The number 24 written as an English word is"
+     ],
+     "max_tokens": 8
+    },
+    "expect": {
+     "output": "eq:many_edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:e1",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "workload": {
+     "prompts": [
+      "The number 1 written as an English word is",
+      "The number 2 written as an English word is",
+      "The number 3 written as an English word is",
+      "The number 4 written as an English word is",
+      "The number 5 written as an English word is",
+      "The number 6 written as an English word is",
+      "The number 7 written as an English word is",
+      "The number 8 written as an English word is",
+      "The number 9 written as an English word is",
+      "The number 10 written as an English word is",
+      "The number 11 written as an English word is",
+      "The number 12 written as an English word is",
+      "The number 13 written as an English word is",
+      "The number 14 written as an English word is",
+      "The number 15 written as an English word is",
+      "The number 16 written as an English word is",
+      "The number 17 written as an English word is",
+      "The number 18 written as an English word is",
+      "The number 19 written as an English word is",
+      "The number 20 written as an English word is",
+      "The number 21 written as an English word is",
+      "The number 22 written as an English word is",
+      "The number 23 written as an English word is",
+      "The number 24 written as an English word is"
+     ],
+     "max_tokens": 8
+    },
+    "expect": {
+     "output": "eq:many_base",
+     "proven": null
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "reset-state-keeps-edit-and-stack",
+  "lens": "lifecycle",
+  "title": "reset kind \"state\" clears engine state only: the edit, its transaction id, the live text and undo all survive",
+  "pain_point": "An agent resets volatile state between measurements; a reset that also drops the edit (or that leaves its own helper transaction on the journal so the later undo removes the wrong thing) corrupts the session without any error.",
+  "proves": "reset state (conformance_lab.py reset(), the non-respawn branch: a core-side repair cell calling reset_prefix_cache, committed and undone at once) leaves status edited with the same txn id, the same source hash and the same edited output with proven true, even when called twice in a row; the edit still undoes to base afterwards; at base the reset changes nothing; and reset writes no receipt.",
+  "does_not_prove": "That the prefix cache was really emptied: with VLLM_BATCH_INVARIANT=1 a cache hit and a miss give the same text, so the API cannot observe it.",
+  "can_fail": "A reset that undoes the edit gives eq:base / state base / proven null after it; a reset whose helper txn stays on the host journal makes the uninstall fail or poison; a reset that writes receipts breaks grew by 5.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "save": "r0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "capped",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "save": "u1",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 1,
+      "txns.0": "$t1.id",
+      "poison.#": 0
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$u1.hash"
+     }
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "contains": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:capped",
+     "proven": true,
+     "witness_module": "vllm.v1.core.sched.utils"
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:capped",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "receipts.-5.kind": "txn",
+      "receipts.-5.id": "$t1.id",
+      "receipts.-1.kind": "undo",
+      "receipts.-1.id": "$t1.id"
+     },
+     "grew": {
+      "receipts": {
+       "since": "r0",
+       "by": 5
+      }
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "respawn-while-edited-returns-to-base",
+  "lens": "lifecycle",
+  "title": "reset kind \"respawn\" while edited discards the edit: new engine from disk, state base, base text, empty stack",
+  "pain_point": "After a respawn the lab and the engine can disagree: the engine restarted from the files on disk (base) while the lab still lists the edit, serves the edited text, or reports edited. The next install is then built on text the engine does not run.",
+  "proves": "The defined behaviour: the edit does NOT survive. conformance_lab.py reset(), lines 475-487: line 476 empties _stack_files (the live text stack), 481-483 stop the server and start a new one with use_farm=False (the installed, unedited package), 486 calls session.recovered(); kernel/session.py recovered(), lines 207-219, sets stack and poison to empty and takes a new base fingerprint. So after respawn: status base with no txns, source equals the pre-edit text, check equals base with proven null, uninstall undoes nothing, no undo receipt is written for the lost edit, and the same edit installs again from the base text.",
+  "does_not_prove": "That the respawned engine is as fast as the first one, or that an edit could be replayed automatically (it is not; fresh_check does that, respawn does not).",
+  "can_fail": "A lab that keeps the stack reports edited or lists t1; one that keeps _stack_files serves the edited text and the re-install is refused with base_mismatch; an engine that restarted from an edited tree fails eq:base.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "save": "r0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "save": "s0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "save": "u0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "save": "edited",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "edited"
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "respawn"
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "ready",
+      "in_flight": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$s0.hash",
+      "text": "$s0.text"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$u0.hash"
+     }
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits = -logits"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.core.sched.utils",
+    "expect": {
+     "not_contains": "max(1, request.max_tokens - 4)"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 0,
+     "state": "base"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "receipts.-2.kind": "txn",
+      "receipts.-2.id": "$t1.id",
+      "receipts.-1.kind": "proof",
+      "receipts.-1.id": "$t1.id"
+     },
+     "grew": {
+      "receipts": {
+       "since": "r0",
+       "by": 2
+      }
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     },
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:edited",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "status-txn-ids-base-edited-base",
+  "lens": "lifecycle",
+  "title": "status walks base -> edited -> base with the transaction ids of the install replies, in stack order",
+  "pain_point": "An agent that cannot tell which of its edits are live (ids missing, in the wrong order, reused after an undo) undoes the wrong one or believes it is at base when it is not.",
+  "proves": "status.txns lists exactly the ids the install replies returned, oldest first; the fingerprint changes with every commit and returns to the earlier value after each undo; an unknown id undoes nothing; a new install after an undo gets a new id; uninstall at base is a no-op.",
+  "does_not_prove": "Anything about poisoned (see scenario-worker-killed-poison-then-respawn).",
+  "can_fail": "A status that reads a cached state shows the wrong txns.# after an uninstall; an id generator that reuses ids fails json_ne txns.1 vs $t2.id; a partial undo fails the fingerprint equality with st1 or st0.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "save": "st0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "save": "st1",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 1,
+      "txns.0": "$t1.id"
+     },
+     "json_ne": {
+      "fingerprint": "$st0.fingerprint"
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 2,
+      "txns.0": "$t1.id",
+      "txns.1": "$t2.id"
+     },
+     "json_ne": {
+      "fingerprint": "$st1.fingerprint",
+      "txns.1": "$t1.id"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/uninstall",
+    "token": "good",
+    "body": {
+     "id": "txn-does-not-exist"
+    },
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": false,
+      "undone.#": 0,
+      "state": "edited"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 2
+     }
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 1,
+      "txns.0": "$t1.id",
+      "fingerprint": "$st1.fingerprint"
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t3",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "edited",
+      "txns.#": 2,
+      "txns.0": "$t1.id",
+      "txns.1": "$t3.id"
+     },
+     "json_ne": {
+      "txns.1": "$t2.id"
+     }
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 2,
+     "state": "base"
+    },
+    "to": "t1"
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0,
+      "fingerprint": "$st0.fingerprint"
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 0,
+     "state": "base"
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "receipts-txn-proof-undo-in-order",
+  "lens": "lifecycle",
+  "title": "The receipts endpoint gains txn, proof and undo records in call order with the ids of the install replies",
+  "pain_point": "A result counts only with its receipt. Receipts that are missing, out of order, attributed to the wrong transaction, or that differ from what the install reply showed cannot back a claim.",
+  "proves": "Two stacked installs, one check and one uninstall-to-first append exactly six records: txn t1, txn t2, proof t1, proof t2 (one proof per installed edit, stack order), undo t2, undo t1 (newest first); the txn record is the one the install reply carried (same patch_hash, outcome committed); a check at base appends nothing.",
+  "does_not_prove": "That the receipt contents are true beyond these fields, or that the file cannot be edited on the host (the API has no write route; see http-surface-rejections-change-nothing).",
+  "can_fail": "A lab that writes proofs only for the newest edit gives 5 records; undo receipts in install order swap the last two ids; a proof written for a base check breaks the second grew by 6.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "save": "r0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.core.sched.utils",
+      "old": "        or request.num_output_tokens >= request.max_tokens\n",
+      "new": "        or request.num_output_tokens >= max(1, request.max_tokens - 4)\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 2,
+     "state": "base"
+    },
+    "to": "t1"
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "receipts.-6.kind": "txn",
+      "receipts.-6.id": "$t1.id",
+      "receipts.-6.outcome": "committed",
+      "receipts.-6.patch_hash": "$t1.receipt.patch_hash",
+      "receipts.-5.kind": "txn",
+      "receipts.-5.id": "$t2.id",
+      "receipts.-5.outcome": "committed",
+      "receipts.-5.patch_hash": "$t2.receipt.patch_hash",
+      "receipts.-4.kind": "proof",
+      "receipts.-4.id": "$t1.id",
+      "receipts.-3.kind": "proof",
+      "receipts.-3.id": "$t2.id",
+      "receipts.-2.kind": "undo",
+      "receipts.-2.id": "$t2.id",
+      "receipts.-2.status": "undone",
+      "receipts.-1.kind": "undo",
+      "receipts.-1.id": "$t1.id",
+      "receipts.-1.status": "undone"
+     },
+     "grew": {
+      "receipts": {
+       "since": "r0",
+       "by": 6
+      }
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "grew": {
+      "receipts": {
+       "since": "r0",
+       "by": 6
+      }
+     }
+    }
+   }
+  ]
+ },
+ {
+  "id": "events-record-every-call-in-order",
+  "lens": "lifecycle",
+  "title": "The events endpoint records each verb once, in order, with ok/outcome/id, and its sequence only grows",
+  "pain_point": "The event list is the box's only log of what an agent did to the engine. A missing refused install, a wrong ok, or a sequence that restarts makes `events?since=N` skip or repeat calls.",
+  "proves": "Seven verbs (check, install, check, refused install, reset, uninstall, status) produce exactly seven events after the snapshot, in that order; the committed install carries its id and outcome, the refused one ok false and the reply's outcome, the edited check proven true, the uninstall the undone id and state base; seq grows strictly; since=<last seq> returns nothing; info.events equals the last seq.",
+  "does_not_prove": "That events survive a daemon restart (the in-memory list does not; events.jsonl in the state folder is not read here).",
+  "can_fail": "A box that logs only successful calls gives 6 events and shifts every index; one that logs reads (source, info) gives more than 7; a since filter using >= returns the last event again.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "good",
+    "save": "i0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "ready"
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true
+    }
+   },
+   {
+    "op": "install",
+    "raw_files": {
+     "vllm.v1.core.sched.utils": "def broken(:\n"
+    },
+    "as": "bad",
+    "expect": {
+     "outcome": "not_committed",
+     "codes_include": [
+      "patch_invalid"
+     ]
+    }
+   },
+   {
+    "op": "reset",
+    "kind": "state"
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/events?since={i0.events}",
+    "token": "good",
+    "save": "ev",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "events.#": 7,
+      "events.0.verb": "check",
+      "events.0.ok": true,
+      "events.1.verb": "install",
+      "events.1.ok": true,
+      "events.1.outcome": "committed",
+      "events.1.id": "$t1.id",
+      "events.2.verb": "check",
+      "events.2.ok": true,
+      "events.2.proven": true,
+      "events.3.verb": "install",
+      "events.3.ok": false,
+      "events.3.outcome": "$bad.outcome",
+      "events.4.verb": "reset",
+      "events.4.ok": true,
+      "events.5.verb": "uninstall",
+      "events.5.ok": true,
+      "events.5.undone.#": 1,
+      "events.5.undone.0": "$t1.id",
+      "events.5.state": "base",
+      "events.6.verb": "status",
+      "events.6.ok": true,
+      "events.6.state": "base"
+     },
+     "strictly_increasing": "events.*.seq"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/events?since={ev.events.-1.seq}",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "events.#": 0
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "events": "$ev.events.-1.seq",
+      "in_flight": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/events?since=abc",
+    "token": "good",
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "source-live-text-and-hash-follow-stack",
+  "lens": "lifecycle",
+  "title": "source returns the text the engine runs now: it follows two stacked edits up and down, and its hash changes and returns",
+  "pain_point": "An agent builds its next patch from `source`. Found on a real engine: the vLLM lab keeps its text differently from the toy lab and `source` returned nothing. A source that lags one edit behind makes every later install a base_mismatch, or worse, silently reverts the earlier edit.",
+  "proves": "After each committed install the sampler text contains the new line and has a new hash; after the second edit the first line is gone; each uninstall restores the exact earlier text and hash; an untouched module keeps its hash throughout; an unknown module is answered ok false, not with text.",
+  "does_not_prove": "That the text equals the code objects in the engine (the check's witness and the status fingerprint cover that).",
+  "can_fail": "A source that reads the file on disk never contains the edit; one that is not popped on uninstall keeps the roll line; a hash computed over something other than the text returned fails the hash/text pairs.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "save": "s0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "module": "vllm.v1.worker.gpu.sample.sampler"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "save": "u0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true,
+      "module": "vllm.v1.core.sched.utils"
+     }
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits = -logits"
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        sampled, processed_logits = self.sample(\n",
+      "new": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = -logits\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "save": "s1",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     },
+     "json_ne": {
+      "hash": "$s0.hash",
+      "text": "$s0.text"
+     }
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.worker.gpu.sample.sampler",
+      "old": "        logits = -logits\n",
+      "new": "        logits = logits.roll(1, dims=-1)\n"
+     }
+    ],
+    "as": "t2",
+    "mode": "files",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "contains": "        logits = logits.roll(1, dims=-1)\n        sampled, processed_logits = self.sample(\n"
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits = -logits"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "save": "s2",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": true
+     },
+     "json_ne": {
+      "hash": "$s1.hash",
+      "text": "$s0.text"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json_ne": {
+      "hash": "$s0.hash"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.core.sched.utils",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$u0.hash"
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "ne:base",
+     "proven": true,
+     "witness_module": "vllm.v1.worker.gpu.sample.sampler"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "edited"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$s1.hash",
+      "text": "$s1.text"
+     }
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits.roll(1, dims=-1)"
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "hash": "$s0.hash",
+      "text": "$s0.text"
+     }
+    }
+   },
+   {
+    "op": "source",
+    "module": "vllm.v1.worker.gpu.sample.sampler",
+    "expect": {
+     "not_contains": "logits = -logits"
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.no_such_module_rsibox_e2e",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "ok": false,
+      "text": null,
+      "hash": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source",
+    "token": "good",
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ },
+ {
+  "id": "pr-62046-reverse-port-triton-kernel-unreached",
+  "lens": "edits",
+  "title": "A Triton kernel edit installs and undoes on real Triton (the rebuilt kernel is not launched by a greedy check)",
+  "pain_point": "A @triton.jit kernel runs what Triton compiled from its source text, not Python bytecode. A bytecode swap alone would report success and change nothing; and a kernel that is never launched must not be reported as proven.",
+  "proves": "A real PR hunk inside a Triton kernel installs (parameters and decorators unchanged, so the kernel is rebuilt in place) and is honestly reported unproven. 0.33 already has the PR, so the port removes `num_preceding += tl.sum(dmask.to(tl.float32))`. Not reached: the check is greedy; SamplingParams sets top_p=1.0 and top_k=0 when temperature < 1e-5, SamplingStates.get_top_k_top_p then returns (None, None) and apply_top_k_top_p never enters the Triton top-p path. The module is loaded in the worker (topk_topp_sampler imports it when Triton is present; the V2 runner requires Triton).",
+  "does_not_prove": "That the rebuilt kernel is correct or even compiles: nothing launches it. A top-p sampling request would be needed.",
+  "steps": [
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.sample.ops.topk_topp_triton",
+      "old": "            keep = keep & (~dmask | keep_dup)\n            num_preceding += tl.sum(dmask.to(tl.float32))\n",
+      "new": "            keep = keep & (~dmask | keep_dup)\n"
+     }
+    ],
+    "as": "t1",
+    "mode": "diff",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": false
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "install",
+    "edits": [
+     {
+      "module": "vllm.v1.sample.ops.topk_topp_triton",
+      "old": "            keep = keep & (~dmask | keep_dup)\n            num_preceding += tl.sum(dmask.to(tl.float32))\n",
+      "new": "            keep = keep & (~dmask | keep_dup)\n"
+     }
+    ],
+    "as": "t1_again",
+    "mode": "diff",
+    "stale": false,
+    "accept": [],
+    "expect": {
+     "outcome": "committed"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": false
+    }
+   },
+   {
+    "op": "uninstall",
+    "expect": {
+     "undone": 1,
+     "state": "base"
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   },
+   {
+    "op": "status",
+    "expect": {
+     "state": "base"
+    }
+   }
+  ]
+ },
+ {
+  "id": "http-surface-rejections-change-nothing",
+  "lens": "lifecycle",
+  "title": "On the real box, bad tokens (401), unknown routes and wrong methods (404) and non-object bodies (400) reach neither the lab nor the event list",
+  "pain_point": "The box holds a GPU engine that any local process can reach on a port. A request that gets past the token, a POST /v1/reset with a list body that still respawns a 150 s engine, or a POST /v1/close accepted without the token would each destroy a session.",
+  "proves": "With a wrong or missing token every route (reads, verbs, close) answers 401; GET on install/check/reset/uninstall/close, POST on status/receipts/events/source and unknown paths answer 404; list, string and non-JSON bodies answer 400; after all of them the event count is unchanged, the engine is still up, status is base with the same fingerprint and no txns, and a check equals base.",
+  "does_not_prove": "Transport security (plain HTTP on 127.0.0.1), rate limiting, or behaviour under malformed HTTP framing.",
+  "can_fail": "Any rejected request that reached the lab adds an event (info.events differs from i0), and an accepted close or reset makes the final status/check fail or time out.",
+  "steps": [
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "save": "st0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "good",
+    "save": "i0",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "ready"
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "wrong",
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "none",
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "none",
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false,
+      "pid": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/source?module=vllm.v1.worker.gpu.sample.sampler",
+    "token": "wrong",
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false,
+      "text": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/receipts",
+    "token": "none",
+    "expect": {
+     "http": 401,
+     "json": {
+      "receipts": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/events",
+    "token": "wrong",
+    "expect": {
+     "http": 401,
+     "json": {
+      "events": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/install",
+    "token": "wrong",
+    "body": {
+     "patch": {
+      "files": {
+       "vllm.v1.core.sched.utils": "x = 1\n"
+      }
+     }
+    },
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/check",
+    "token": "none",
+    "body": {},
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false,
+      "output": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/reset",
+    "token": "wrong",
+    "body": {
+     "kind": "respawn"
+    },
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/uninstall",
+    "token": "none",
+    "body": {},
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/close",
+    "token": "wrong",
+    "body": {},
+    "expect": {
+     "http": 401,
+     "json": {
+      "ok": false,
+      "state": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/nope",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v2/status",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status/extra",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/install",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/check",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false,
+      "output": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/reset",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/uninstall",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/close",
+    "token": "good",
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false,
+      "state": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/status",
+    "token": "good",
+    "body": {},
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/receipts",
+    "token": "good",
+    "body": {
+     "kind": "txn",
+     "id": "forged"
+    },
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/events",
+    "token": "good",
+    "body": {},
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/source",
+    "token": "good",
+    "body": {
+     "module": "vllm.v1.worker.gpu.sample.sampler",
+     "text": "x = 1\n"
+    },
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/exec",
+    "token": "good",
+    "body": {
+     "cmd": "id"
+    },
+    "expect": {
+     "http": 404,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/check",
+    "token": "good",
+    "body": [
+     1,
+     2
+    ],
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false,
+      "output": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/install",
+    "token": "good",
+    "body": "files",
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/reset",
+    "token": "good",
+    "body": [
+     "respawn"
+    ],
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/uninstall",
+    "token": "good",
+    "raw_body": "{not json",
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "POST",
+    "path": "/v1/close",
+    "token": "good",
+    "expect": {
+     "http": 400,
+     "json": {
+      "ok": false,
+      "state": null
+     }
+    },
+    "raw_body": "[]"
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/info",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "ready",
+      "events": "$i0.events",
+      "pid": "$i0.pid",
+      "in_flight": null
+     }
+    }
+   },
+   {
+    "op": "http",
+    "method": "GET",
+    "path": "/v1/status",
+    "token": "good",
+    "expect": {
+     "http": 200,
+     "json": {
+      "state": "base",
+      "txns.#": 0,
+      "poison.#": 0,
+      "fingerprint": "$st0.fingerprint"
+     }
+    }
+   },
+   {
+    "op": "check",
+    "expect": {
+     "output": "eq:base",
+     "proven": null
+    }
+   }
+  ]
+ }
+]
