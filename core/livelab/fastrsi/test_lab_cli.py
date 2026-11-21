@@ -564,8 +564,8 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["summary"]["engines_ok"], len(expected_engines))
         self.assertEqual(doc["summary"]["gpu_import_violations"], 0)
         by_name = {item["name"]: item for item in doc["labs"]}
-        self.assertIsNone(by_name["miles"]["real_spec"])
-        self.assertIsNone(by_name["miles"]["cli_launch"])
+        self.assertEqual(by_name["miles"]["real_spec"], "adapter.conformance_lab:MilesConformanceLab")
+        self.assertTrue(by_name["miles"]["cli_launch"])
         self.assertTrue(by_name["sglang"]["cli_launch"])
 
         buf_txt = io.StringIO()
@@ -819,7 +819,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("invalid JSON", err_ctl.getvalue())
 
     def test_real_engines_support_real_help_without_gpu_imports(self):
-        """Input: `fastrsi conformance <engine> --real -- --help` for all 5 real GPU engines.
+        """Input: `fastrsi conformance <engine> --real -- --help` for all 6 real GPU engines.
         Expected: exits 0, prints engine-specific help text, and leaves GPU runtime libraries
         (`torch`, etc.) unimported."""
         repo_root = os.path.dirname(os.path.dirname(LIVELAB))
@@ -837,7 +837,7 @@ class CliTests(unittest.TestCase):
             "raise SystemExit(rc)\n"
         )
         env = {**os.environ, "PYTHONPATH": LIVELAB}
-        for engine in ("vllm", "fastvideo", "megatron", "verl", "sglang"):
+        for engine in ("vllm", "fastvideo", "megatron", "verl", "sglang", "miles"):
             with self.subTest(engine=engine):
                 proc = subprocess.run(
                     [sys.executable, "-c", probe, engine, repo_root, ",".join(cli._GPU_RUNTIME_LIBS)],

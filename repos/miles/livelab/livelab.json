@@ -1,4 +1,4 @@
 {
   "toy": "adapter.toy_lab:ToyMilesLab",
-  "real": null
+  "real": "adapter.conformance_lab:MilesConformanceLab"
 }

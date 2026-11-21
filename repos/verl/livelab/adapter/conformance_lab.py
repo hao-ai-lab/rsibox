@@ -77,12 +77,10 @@ class VerlConformanceLab:
         ap.add_argument("--boot-timeout", type=float, default=None, help="seconds a (re)launch may take to ready.json")
         ns = ap.parse_args(clean)
         env = {"FASTRSI_VERL_GATE": str(Path(ns.gate).resolve()), "FASTRSI_VERL_REWARD": os.path.realpath(ns.reward)}
-        if ns.launch is not None:
-            env["FASTRSI_VERL_LAUNCH"] = ns.launch
-        if ns.check_timeout is not None:
-            env["FASTRSI_VERL_CHECK_TIMEOUT"] = str(ns.check_timeout)
-        if ns.boot_timeout is not None:
-            env["FASTRSI_VERL_BOOT_TIMEOUT"] = str(ns.boot_timeout)
+        for attr, key in (("launch", "FASTRSI_VERL_LAUNCH"), ("check_timeout", "FASTRSI_VERL_CHECK_TIMEOUT"),
+                          ("boot_timeout", "FASTRSI_VERL_BOOT_TIMEOUT")):
+            if (val := getattr(ns, attr)) is not None:
+                env[key] = str(val)
         return env
 
     def __init__(self, receipts=None, gate=None, launch=None, reward=None, check_timeout=None, boot_timeout=None):
@@ -197,6 +195,13 @@ class VerlConformanceLab:
         subprocess.run(["pkill", "-9", "-u", os.environ.get("USER", ""), "-f", _ORPHAN_PKILL_PATTERN], check=False)
         time.sleep(3.0)
 
+    def _wait_gpus_free(self, timeout_s):
+        deadline = time.monotonic() + timeout_s
+        while self._gpus_busy() and time.monotonic() < deadline:
+            time.sleep(1.0)
+        if self._gpus_busy():
+            self._pkill_orphans()
+
     def _kill_job(self, gate):
         job, pid = _JOBS.get(str(gate)), self._info(gate).get("pid")
         for sig in (signal.SIGTERM, signal.SIGKILL):
@@ -207,11 +212,7 @@ class VerlConformanceLab:
             if self._wait_gone(gate, 20):
                 break
         self._reap_job(gate)
-        deadline = time.monotonic() + 90
-        while self._gpus_busy() and time.monotonic() < deadline:
-            time.sleep(1.0)
-        if self._gpus_busy():
-            self._pkill_orphans()
+        self._wait_gpus_free(90)
         self._reap_job(gate)
 
     def _stop_job(self, gate=None):
@@ -229,11 +230,7 @@ class VerlConformanceLab:
             killed = True
         self._reap_job(gate)
         if not killed:
-            deadline = time.monotonic() + 60
-            while self._gpus_busy() and time.monotonic() < deadline:
-                time.sleep(1.0)
-            if self._gpus_busy():
-                self._pkill_orphans()
+            self._wait_gpus_free(60)
         self.costs["stop_s"] = round(time.time() - t0, 3)
 
     # -- requests & patch stack ----------------------------------------------------------
@@ -460,19 +457,18 @@ class VerlConformanceLab:
         t0, tmp = time.perf_counter(), tempfile.mkdtemp(prefix="verllab-fresh-")
         try:
             self._stop_job()
-            if not files:  # a fresh base: start it on the live gate and keep it as the live job
+            if files:
+                overlay, reward = self._overlay(tmp, files)
+                fresh = self.gate.with_name(self.gate.name + "-fresh")
+                self._start_job(fresh, reward=reward, pythonpath=overlay)
+                try:
+                    out = self._output(client.request(fresh, verb="check", steps=steps, timeout=self.check_timeout * steps))
+                finally:
+                    self._stop_job(fresh)
+                self._start_job(self.gate)
+            else:  # a fresh base: start it on the live gate and keep it as the live job
                 self._start_job(self.gate)
                 out = self._output(client.request(self.gate, verb="check", steps=steps, timeout=self.check_timeout * steps))
-                self._replay()
-                return {"ok": True, "output": out, "cost_s": round(time.perf_counter() - t0, 6)}
-            overlay, reward = self._overlay(tmp, files)
-            fresh = self.gate.with_name(self.gate.name + "-fresh")
-            self._start_job(fresh, reward=reward, pythonpath=overlay)
-            try:
-                out = self._output(client.request(fresh, verb="check", steps=steps, timeout=self.check_timeout * steps))
-            finally:
-                self._stop_job(fresh)
-            self._start_job(self.gate)
             self._replay()
             return {"ok": True, "output": out, "cost_s": round(time.perf_counter() - t0, 6)}
         except Exception as err:

@@ -9,7 +9,7 @@ Gate protocol (files in `$FASTRSI_RL_GATE`, served at `on_step_begin`, one reque
 import contextlib, copy, importlib.util, io, json, os, socket, sys, threading, time, types
 from pathlib import Path
 import ray_participants as RP
-from fastrsi import ipc
+from fastrsi import harness, ipc
 from kernel import coordinator as C, locate as L, receipt as R, session as SS
 from adapter import determinism, faults, settings, state as S0
 
@@ -54,12 +54,9 @@ def module_for_file(file_path, roots=()):
 
 def path_for_key(key):
     """The file behind a patch key: a path as given, or a module name's origin (None if neither)."""
-    if os.path.isfile(key):
-        return os.path.realpath(key)
     with contextlib.suppress(Exception):
-        spec = importlib.util.find_spec(key)
-        if spec and spec.origin and os.path.isfile(spec.origin):
-            return os.path.realpath(spec.origin)
+        if (found := harness.module_file(key)) and os.path.isfile(found):
+            return os.path.realpath(found)
     return None
 
 
