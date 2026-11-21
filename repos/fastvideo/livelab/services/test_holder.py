@@ -484,17 +484,26 @@ class HostExitTest(unittest.TestCase):
                     p.stdout.close()
                 p.wait()
 
+    @staticmethod
+    def host_waits_for_tracker():
+        """True when this interpreter stops and waits for the resource tracker at exit."""
+        from multiprocessing import resource_tracker
+        return hasattr(resource_tracker.ResourceTracker, "__del__")
+
     def test_a_daemon_a_spawned_child_executes_does_not_hang_the_host_at_exit(self):
         """Input: a host that runs multiprocessing's resource tracker spawns a child (as the lab
         spawns the holder); the child executes a 20 s daemon that keeps inherited fds open (as
         torch's file_system sharing starts torch_shm_manager) and returns. Expect: with
-        `_private_tracker_fd` the host exits at once; without it, on Linux with Python 3.12 (CI,
-        the GPU nodes' environment), it is still waiting after 10 s: the tracker's finalizer
-        waits for the tracker, which waits for its pipe to close (Python 3.14 on macOS does not
-        wait). Proves: the holder no longer hangs the lab host at exit. Not: torch itself (the
-        GPU run with the holder exits)."""
+        `_private_tracker_fd` the host exits at once; without it, on Linux with Python 3.12.10
+        or later (the GPU nodes' environment), it is still waiting after 10 s: the tracker's
+        finalizer waits for the tracker, which waits for its pipe to close. That finalizer
+        (`ResourceTracker.__del__`) arrived in 3.12.10; an older 3.12, such as a CI runner's
+        system python3, never waits, so the unfixed host exits at once there and only the first
+        assertion runs (Python 3.14 on macOS does not wait either). Proves: the holder no longer
+        hangs the lab host at exit. Not: torch itself (the GPU run with the holder exits)."""
         self.assertIsNotNone(self.run_host("fix"))
-        if sys.platform.startswith("linux") and sys.version_info[:2] == (3, 12):
+        if (sys.platform.startswith("linux") and sys.version_info[:2] == (3, 12)
+                and self.host_waits_for_tracker()):
             self.assertIsNone(self.run_host("nofix"))
 
 
