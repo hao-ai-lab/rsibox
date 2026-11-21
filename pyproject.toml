@@ -16,5 +16,5 @@ fastrsi = "fastrsi.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "core/livelab" }
-packages = ["kernel", "kernel.toy", "conformance", "survey", "fastrsi"]
+packages = ["kernel", "kernel.toy", "conformance", "survey", "fastrsi", "rsibox"]
 py-modules = ["forksafe", "livestream", "ray_participants"]
