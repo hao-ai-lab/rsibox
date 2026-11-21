@@ -20,3 +20,7 @@ reload_other,"Reload and other, not split",0.6,startup
 swap_reload_rewarm,"Swap, reload, re-warm",0.5,startup
 restore_state,Restore saved state,8.5,startup
 swap_quality,"Swap and quality gate, no re-warm",0.55,startup
+ray_init,"Ray placement, actors, and router",3.1,startup
+spawn_import,Child process spawn and re-import,3.2,startup
+dataloader_init,Tokenizer and dataloader init,3.4,startup
+trainer_init,FSDP trainer init and weight load,3.6,startup
