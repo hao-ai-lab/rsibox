@@ -4,6 +4,8 @@ import io
 import json
 import os
 import sys
+import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -225,6 +227,661 @@ class SglangAdapterTests(unittest.TestCase):
         )
         ms = next(iter(patches["refused"]["module_state"]["files"].values()))
         self.assertIn("bool(get_bool_env_var(", ms)
+        unreached_src = next(iter(patches["unreached"]["files"].values()))
+        self.assertNotIn("param.data.neg_()", unreached_src)
+        self.assertIn("param.data = param.data.neg().contiguous()", unreached_src)
+
+    def test_fork_subprocs_cli_flag_and_conformance_env(self):
+        """`--fork-subprocs` maps to `FASTRSI_SGLANG_FORK_SUBPROCS=1` and is omitted by default."""
+        from adapter import conformance_lab as clab_mod
+        from adapter import lab as lab_mod
+
+        default_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B"])
+        self.assertNotIn("FASTRSI_SGLANG_FORK_SUBPROCS", default_env)
+
+        fork_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B", "--fork-subprocs"])
+        self.assertEqual(fork_env["FASTRSI_SGLANG_FORK_SUBPROCS"], "1")
+
+        seen_flags = []
+
+        def fake_super_init(self_lab, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0,
+                            fork_subprocs=False, weight_cache_dir=None):
+            seen_flags.append(fork_subprocs)
+            self_lab.fork_subprocs = bool(fork_subprocs)
+            self_lab.weight_cache_dir = weight_cache_dir
+            self_lab.dirty = True
+
+        prev_shared = SglangConformanceLab._shared
+        prev_loops = len(clab_mod._LOOPS)
+
+        def cleanup():
+            SglangConformanceLab._shared = prev_shared
+            while len(clab_mod._LOOPS) > prev_loops:
+                loop = clab_mod._LOOPS.pop()
+                with contextlib.suppress(Exception):
+                    loop.close()
+
+        self.addCleanup(cleanup)
+        SglangConformanceLab._shared = None
+        with mock.patch.object(lab_mod.SglangLab, "__init__", fake_super_init):
+            with mock.patch.dict(os.environ, default_env, clear=False):
+                os.environ.pop("FASTRSI_SGLANG_FORK_SUBPROCS", None)
+                os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+                SglangConformanceLab()
+            SglangConformanceLab._shared = None
+            with mock.patch.dict(os.environ, fork_env, clear=False):
+                os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+                SglangConformanceLab()
+        self.assertEqual(seen_flags, [False, True])
+
+    def _make_stub_lab_class(self, observed):
+        import multiprocessing as mp
+        from multiprocessing.connection import Client
+        from adapter.lab import SglangLab
+
+        class _StubEngine:
+            run_scheduler_process_func = staticmethod(lambda *a, **k: None)
+
+            def __init__(self, **cfg):
+                observed.append({
+                    "default_method": mp.get_start_method(allow_none=True),
+                    "spawn_ctx": mp.get_context("spawn").get_start_method(),
+                    "numa_v2": os.environ.get("SGLANG_NUMA_BIND_V2"),
+                })
+                self._conn = Client(cfg["_sock_path"], "AF_UNIX")
+                self._conn.send({"rank": 0})
+
+            def shutdown(self):
+                with contextlib.suppress(OSError):
+                    self._conn.close()
+
+        class _StubLab(SglangLab):
+            def __init__(self, **kwargs):
+                super().__init__({"tp_size": 1}, (), rpc_timeout=2.0, check_timeout=1.0, **kwargs)
+
+            def engine_class(self):
+                self.config["_sock_path"] = self.sock_path
+                return _StubEngine
+
+        return _StubLab
+
+    def test_fork_subprocs_clean_parent_preloads_once_and_enables_fork(self):
+        """Clean parent preloads `SUBPROC_PRELOAD` once per process and enables fork before engine init."""
+        import multiprocessing as mp
+        import forksafe
+        from adapter import lab as lab_mod
+        from services import zygote as sgl_zygote
+
+        orig_state = dict(lab_mod._FORK_SUBPROCS_STATE)
+        orig_method = mp.get_start_method(allow_none=True)
+        orig_get_ctx = mp.get_context
+        orig_set_method = mp.set_start_method
+        orig_numa = os.environ.get("SGLANG_NUMA_BIND_V2")
+
+        def restore_globals():
+            lab_mod._FORK_SUBPROCS_STATE.clear()
+            lab_mod._FORK_SUBPROCS_STATE.update(orig_state)
+            mp.get_context = orig_get_ctx
+            mp.set_start_method = orig_set_method
+            mp.set_start_method(orig_method, force=True)
+            if orig_numa is None:
+                os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+            else:
+                os.environ["SGLANG_NUMA_BIND_V2"] = orig_numa
+
+        self.addCleanup(restore_globals)
+        lab_mod._FORK_SUBPROCS_STATE.update({"preloaded": False, "clear_nvml_env": False})
+        os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+
+        observed = []
+        stub_cls = self._make_stub_lab_class(observed)
+        with (
+            mock.patch.object(forksafe, "poison_reasons", return_value=[]),
+            mock.patch.object(forksafe, "cuda_initialized", return_value=False),
+            mock.patch.object(sgl_zygote, "install_guards", return_value=({"nvml_env_set": False}, lambda: None)) as m_guards,
+            mock.patch.object(sgl_zygote, "preload", return_value={}) as m_preload,
+            mock.patch.object(sgl_zygote, "enable_fork_subprocs", wraps=sgl_zygote.enable_fork_subprocs) as m_enable,
+        ):
+            lab1 = stub_cls(fork_subprocs=True)
+            try:
+                self.assertTrue(lab1.fork_subprocs)
+                self.assertEqual(lab1.fork_subprocs_fallback, [])
+                self.assertEqual(observed[-1], {"default_method": "fork", "spawn_ctx": "fork", "numa_v2": "0"})
+            finally:
+                lab1.close()
+
+            # Closing restores multiprocessing and SGLANG_NUMA_BIND_V2 cleanly.
+            self.assertIsNone(os.environ.get("SGLANG_NUMA_BIND_V2"))
+            self.assertEqual(mp.get_context("spawn").get_start_method(), "spawn")
+
+            # A second engine start in the same process reuses the one-time preload.
+            lab2 = stub_cls(fork_subprocs=True)
+            try:
+                self.assertEqual(lab2.fork_subprocs_fallback, [])
+                self.assertEqual(observed[-1], {"default_method": "fork", "spawn_ctx": "fork", "numa_v2": "0"})
+            finally:
+                lab2.close()
+
+        m_guards.assert_called_once()
+        m_preload.assert_called_once_with(sgl_zygote.SUBPROC_PRELOAD)
+        self.assertEqual(m_enable.call_count, 2)
+
+    def test_fork_subprocs_poisoned_parent_falls_back_cleanly(self):
+        """Non-empty `poison_reasons()` or preload CUDA init records fallback and stays on spawn."""
+        import forksafe
+        from adapter import lab as lab_mod
+        from services import zygote as sgl_zygote
+
+        orig_state = dict(lab_mod._FORK_SUBPROCS_STATE)
+        orig_numa = os.environ.get("SGLANG_NUMA_BIND_V2")
+
+        def restore_globals():
+            lab_mod._FORK_SUBPROCS_STATE.clear()
+            lab_mod._FORK_SUBPROCS_STATE.update(orig_state)
+            if orig_numa is None:
+                os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+            else:
+                os.environ["SGLANG_NUMA_BIND_V2"] = orig_numa
+
+        self.addCleanup(restore_globals)
+        lab_mod._FORK_SUBPROCS_STATE.update({"preloaded": False, "clear_nvml_env": False})
+        os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+
+        observed = []
+        stub_cls = self._make_stub_lab_class(observed)
+        reasons = ["CUDA driver initialized in the zygote (cuInit)"]
+        with (
+            mock.patch.object(forksafe, "poison_reasons", return_value=reasons),
+            mock.patch.object(sgl_zygote, "preload") as m_preload,
+            mock.patch.object(sgl_zygote, "enable_fork_subprocs") as m_enable,
+        ):
+            lab = stub_cls(fork_subprocs=True)
+            try:
+                self.assertTrue(lab.fork_subprocs)
+                self.assertEqual(lab.fork_subprocs_fallback, reasons)
+                self.assertEqual(observed[-1]["spawn_ctx"], "spawn")
+                self.assertIsNone(observed[-1]["numa_v2"])
+            finally:
+                lab.close()
+        m_preload.assert_not_called()
+        m_enable.assert_not_called()
+
+        # Preload raising SystemExit (CUDA init mid-preload) also falls back cleanly without raising.
+        with (
+            mock.patch.object(forksafe, "poison_reasons", side_effect=[[], ["torch CUDA runtime initialized"]]),
+            mock.patch.object(sgl_zygote, "install_guards", return_value=({"nvml_env_set": False}, lambda: None)),
+            mock.patch.object(sgl_zygote, "preload", side_effect=SystemExit("initialized CUDA")),
+            mock.patch.object(sgl_zygote, "enable_fork_subprocs") as m_enable2,
+        ):
+            lab_pre = stub_cls(fork_subprocs=True)
+            try:
+                self.assertEqual(lab_pre.fork_subprocs_fallback, ["torch CUDA runtime initialized"])
+                self.assertEqual(observed[-1]["spawn_ctx"], "spawn")
+                self.assertIsNone(observed[-1]["numa_v2"])
+            finally:
+                lab_pre.close()
+        m_enable2.assert_not_called()
+
+    def test_sglang_env_config_avoids_importing_sglang_via_ast_probe(self):
+        """`sglang_env_config()` reads `ServerArgs` fields via AST without importing `sglang`/`torch`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = os.path.join(tmp, "sglang", "srt")
+            os.makedirs(pkg, exist_ok=True)
+            with open(os.path.join(tmp, "sglang", "__init__.py"), "w", encoding="utf-8") as fh:
+                fh.write("raise AssertionError('sglang package must not be imported')\n")
+            with open(os.path.join(pkg, "server_args.py"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    "class ServerArgs:\n"
+                    "    cuda_graph_max_bs_decode: int = -1\n"
+                )
+            with (
+                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "4"}, clear=False),
+                mock.patch.dict(sys.modules),
+                mock.patch.object(sys, "path", [tmp, *sys.path]),
+            ):
+                for key in list(sys.modules):
+                    if key == "sglang" or key.startswith("sglang."):
+                        sys.modules.pop(key, None)
+                cfg = sglang_env_config()
+                self.assertEqual(cfg["cuda_graph_max_bs_decode"], 4)
+                self.assertTrue(cfg["disable_prefill_cuda_graph"])
+                self.assertNotIn("cuda_graph_max_bs", cfg)
+                self.assertNotIn("sglang", sys.modules)
+                self.assertNotIn("sglang.srt.server_args", sys.modules)
+
+            # Without `cuda_graph_max_bs_decode`, falls back to legacy `cuda_graph_max_bs`.
+            with open(os.path.join(pkg, "server_args.py"), "w", encoding="utf-8") as fh:
+                fh.write("class ServerArgs:\n    tp_size: int = 1\n")
+            with (
+                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "8"}, clear=False),
+                mock.patch.dict(sys.modules),
+                mock.patch.object(sys, "path", [tmp, *sys.path]),
+            ):
+                for key in list(sys.modules):
+                    if key == "sglang" or key.startswith("sglang."):
+                        sys.modules.pop(key, None)
+                cfg_legacy = sglang_env_config()
+                self.assertEqual(cfg_legacy["cuda_graph_max_bs"], 8)
+                self.assertNotIn("cuda_graph_max_bs_decode", cfg_legacy)
+
+        # Already-loaded `sys.modules['sglang.srt.server_args']` is respected directly.
+        fake_mod = types.ModuleType("sglang.srt.server_args")
+        fake_mod.ServerArgs = type("ServerArgs", (), {"cuda_graph_max_bs_decode": 4})
+        with (
+            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.dict(sys.modules, {"sglang.srt.server_args": fake_mod}),
+        ):
+            cfg_loaded = sglang_env_config()
+            self.assertEqual(cfg_loaded["cuda_graph_max_bs_decode"], 4)
+            self.assertTrue(cfg_loaded["disable_prefill_cuda_graph"])
+
+    def test_conformance_lab_preloads_fork_subprocs_before_env_config(self):
+        """`SglangConformanceLab(..., fork_subprocs=True)` installs preload guards before `sglang_env_config()`."""
+        import adapter.conformance_lab as clab_mod
+        from adapter import lab as lab_mod
+
+        prev_shared, prev_loops, order = SglangConformanceLab._shared, len(clab_mod._LOOPS), []
+
+        def cleanup():
+            SglangConformanceLab._shared = prev_shared
+            while len(clab_mod._LOOPS) > prev_loops:
+                loop = clab_mod._LOOPS.pop()
+                with contextlib.suppress(Exception):
+                    loop.close()
+
+        self.addCleanup(cleanup)
+        SglangConformanceLab._shared = None
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch.object(lab_mod.SglangLab, "_preload_fork_subprocs", side_effect=lambda: (order.append("preload") or (True, []))),
+            mock.patch.object(clab_mod, "sglang_env_config", side_effect=lambda: (order.append("env_config") or {"tp_size": 1})),
+            mock.patch.object(lab_mod.SglangLab, "__init__", side_effect=lambda self, *a, **kw: order.append("lab_init")),
+        ):
+            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+            SglangConformanceLab(fork_subprocs=True)
+        self.assertEqual(order, ["preload", "env_config", "lab_init"])
+
+
+    def test_weight_cache_dir_cli_flag_and_conformance_env(self):
+        """`--weight-cache-dir` sets `FASTRSI_SGLANG_WEIGHT_CACHE_DIR` and `weight_cache_mode='client'`."""
+        from adapter import conformance_lab as clab_mod
+        from adapter import lab as lab_mod
+
+        default_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B"])
+        self.assertNotIn("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", default_env)
+
+        wc_env = SglangConformanceLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B", "--weight-cache-dir", "/tmp/sgl-wc",
+        ])
+        self.assertEqual(wc_env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"], "/tmp/sgl-wc")
+
+        calls = []
+
+        def fake_super_init(self_lab, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0,
+                            fork_subprocs=False, weight_cache_dir=None):
+            calls.append((dict(config), fork_subprocs, weight_cache_dir))
+            self_lab.fork_subprocs = bool(fork_subprocs)
+            self_lab.weight_cache_dir = weight_cache_dir
+            self_lab.dirty = False
+            self_lab._state = "base"
+
+        prev_shared = SglangConformanceLab._shared
+        prev_loops = len(clab_mod._LOOPS)
+
+        def cleanup():
+            SglangConformanceLab._shared = prev_shared
+            while len(clab_mod._LOOPS) > prev_loops:
+                loop = clab_mod._LOOPS.pop()
+                with contextlib.suppress(Exception):
+                    loop.close()
+
+        self.addCleanup(cleanup)
+        SglangConformanceLab._shared = None
+        with (
+            mock.patch.object(lab_mod.SglangLab, "__init__", fake_super_init),
+            mock.patch.object(lab_mod.SglangLab, "status", return_value={"state": "base"}),
+            mock.patch.dict(os.environ, wc_env, clear=False),
+        ):
+            SglangConformanceLab()
+            # Mismatched weight_cache_dir must miss the cached `_shared` handle.
+            SglangConformanceLab._shared = types.SimpleNamespace(
+                engine=object(),
+                dirty=False,
+                status=lambda: {"state": "base"},
+                fork_subprocs=False,
+                weight_cache_dir="/tmp/other-wc",
+                _shutdown_engine=lambda: None,
+            )
+            SglangConformanceLab(weight_cache_dir="/tmp/sgl-wc-2/")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0].get("weight_cache_mode"), "client")
+        self.assertEqual(calls[0][2], os.path.abspath("/tmp/sgl-wc"))
+        self.assertEqual(calls[1][0].get("weight_cache_mode"), "client")
+        self.assertEqual(calls[1][2], os.path.abspath("/tmp/sgl-wc-2"))
+
+        rel_env = SglangConformanceLab.launch_environment([
+            "--model", "Qwen/Qwen3-8B", "--weight-cache-dir", "rel-wc/",
+        ])
+        self.assertEqual(rel_env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"], os.path.abspath("rel-wc"))
+
+    def test_sglang_lab_weight_cache_fails_closed_when_daemon_missing(self):
+        from adapter.lab import SglangLab
+        from services import weights as wc
+
+        started = []
+
+        class _StubLab(SglangLab):
+            def __init__(self):
+                super().__init__({"tp_size": 1}, (), rpc_timeout=1.0, check_timeout=1.0,
+                                 fork_subprocs=True, weight_cache_dir="/tmp/missing-wc")
+
+            def _prepare_fork_subprocs(self):
+                started.append("fork_subprocs")
+
+            def engine_class(self):
+                started.append("engine_class")
+                raise AssertionError("engine_class must not run when weight cache is missing")
+
+        fake_probe = {"ok": False, "sock_dir": "/tmp/missing-wc", "missing_ready": ["/tmp/missing-wc/r"]}
+        with mock.patch.object(wc, "probe", return_value=fake_probe):
+            with self.assertRaisesRegex(RuntimeError, "weight-cache daemon not ready"):
+                _StubLab()
+        self.assertEqual(started, [])
+
+    def test_sglang_lab_weight_cache_sets_env_before_fork_subprocs_and_restores_on_close(self):
+        from multiprocessing.connection import Client
+        from adapter.lab import SglangLab
+        from services import weights as wc
+
+        events = []
+
+        class _StubEngine:
+            run_scheduler_process_func = staticmethod(lambda *a, **k: None)
+
+            def __init__(self, **cfg):
+                events.append(("engine", cfg.get("weight_cache_mode"), os.environ.get(wc.SOCKET_ENV)))
+                self._conn = Client(cfg["_sock_path"], "AF_UNIX")
+                self._conn.send({"rank": 0})
+
+            def shutdown(self):
+                with contextlib.suppress(OSError):
+                    self._conn.close()
+
+        class _StubLab(SglangLab):
+            def __init__(self):
+                super().__init__({"tp_size": 1}, (), rpc_timeout=2.0, check_timeout=1.0,
+                                 fork_subprocs=True, weight_cache_dir="/tmp/sgl-live-wc")
+
+            def _prepare_fork_subprocs(self):
+                events.append(("fork_subprocs", os.environ.get(wc.SOCKET_ENV), os.environ.get(wc.READY_ENV)))
+                self.fork_subprocs_fallback = []
+
+            def engine_class(self):
+                self.config["_sock_path"] = self.sock_path
+                return _StubEngine
+
+        prev_sock = os.environ.pop(wc.SOCKET_ENV, None)
+        prev_ready = os.environ.pop(wc.READY_ENV, None)
+        self.addCleanup(lambda: prev_sock is not None and os.environ.__setitem__(wc.SOCKET_ENV, prev_sock))
+        self.addCleanup(lambda: prev_ready is not None and os.environ.__setitem__(wc.READY_ENV, prev_ready))
+
+        with mock.patch.object(wc, "probe", return_value={"ok": True, "matched_gpus": True}):
+            lab = _StubLab()
+        try:
+            want_env = wc.client_env("/tmp/sgl-live-wc")
+            self.assertEqual(
+                events[0],
+                ("fork_subprocs", want_env[wc.SOCKET_ENV], want_env[wc.READY_ENV]),
+            )
+            self.assertEqual(events[1], ("engine", "client", want_env[wc.SOCKET_ENV]))
+            self.assertNotIn("weight_cache_mode", lab.config)
+        finally:
+            lab.close()
+        self.assertIsNone(os.environ.get(wc.SOCKET_ENV))
+        self.assertIsNone(os.environ.get(wc.READY_ENV))
+
+    def test_sglang_lab_prepare_weight_cache_passes_tp_size(self):
+        from multiprocessing.connection import Client
+        from adapter.lab import SglangLab
+        from services import weights as wc
+
+        class _StubEngine:
+            run_scheduler_process_func = staticmethod(lambda *a, **k: None)
+
+            def __init__(self, **cfg):
+                self._conns = []
+                for rank in range(cfg["tp_size"]):
+                    c = Client(cfg["_sock_path"], "AF_UNIX")
+                    c.send({"rank": rank})
+                    self._conns.append(c)
+
+            def shutdown(self):
+                for c in self._conns:
+                    with contextlib.suppress(OSError):
+                        c.close()
+
+        class _StubLab(SglangLab):
+            def __init__(self):
+                super().__init__({"tp_size": 2}, (), rpc_timeout=2.0, check_timeout=1.0,
+                                 weight_cache_dir="/tmp/sgl-tp2-wc/")
+
+            def engine_class(self):
+                self.config["_sock_path"] = self.sock_path
+                return _StubEngine
+
+        with mock.patch.object(wc, "probe", return_value={"ok": True, "matched_gpus": True}) as m_probe:
+            lab = _StubLab()
+        try:
+            m_probe.assert_called_once_with(os.path.abspath("/tmp/sgl-tp2-wc"), tp_size=2)
+        finally:
+            lab.close()
+
+    def test_start_engine_failure_cleans_up_fork_env_listener_and_start_method(self):
+        import multiprocessing as mp
+        import forksafe
+        from adapter import lab as lab_mod
+        from services import weights as wc
+        from services import zygote as sgl_zygote
+
+        orig_state = dict(lab_mod._FORK_SUBPROCS_STATE)
+        orig_method = mp.get_start_method(allow_none=True)
+        orig_numa = os.environ.get("SGLANG_NUMA_BIND_V2")
+        prev_sock = os.environ.pop(wc.SOCKET_ENV, None)
+        prev_ready = os.environ.pop(wc.READY_ENV, None)
+
+        def restore_globals():
+            lab_mod._FORK_SUBPROCS_STATE.clear()
+            lab_mod._FORK_SUBPROCS_STATE.update(orig_state)
+            mp.set_start_method(orig_method, force=True)
+            if orig_numa is None:
+                os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+            else:
+                os.environ["SGLANG_NUMA_BIND_V2"] = orig_numa
+            if prev_sock is None:
+                os.environ.pop(wc.SOCKET_ENV, None)
+            else:
+                os.environ[wc.SOCKET_ENV] = prev_sock
+            if prev_ready is None:
+                os.environ.pop(wc.READY_ENV, None)
+            else:
+                os.environ[wc.READY_ENV] = prev_ready
+
+        self.addCleanup(restore_globals)
+        lab_mod._FORK_SUBPROCS_STATE.update({"preloaded": False, "clear_nvml_env": False})
+        os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+        mp.set_start_method(None, force=True)
+
+        created_socks = []
+
+        class _BoomEngine:
+            run_scheduler_process_func = staticmethod(lambda *a, **k: None)
+
+            def __init__(self, **_cfg):
+                raise RuntimeError("engine boom")
+
+        class _FailLab(lab_mod.SglangLab):
+            def __init__(self):
+                super().__init__({"tp_size": 1}, (), rpc_timeout=1.0, check_timeout=1.0,
+                                 fork_subprocs=True, weight_cache_dir="/tmp/sgl-fail-wc")
+
+            def engine_class(self):
+                created_socks.append(self.sock_path)
+                return _BoomEngine
+
+        with (
+            mock.patch.object(wc, "probe", return_value={"ok": True, "matched_gpus": True}),
+            mock.patch.object(forksafe, "poison_reasons", return_value=[]),
+            mock.patch.object(forksafe, "cuda_initialized", return_value=False),
+            mock.patch.object(sgl_zygote, "install_guards", return_value=({"nvml_env_set": False}, lambda: None)),
+            mock.patch.object(sgl_zygote, "preload", return_value={}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "engine boom"):
+                _FailLab()
+
+        # Start method restored back to None, mp unpatched, env vars restored, socket unlinked.
+        self.assertIsNone(mp.get_start_method(allow_none=True))
+        self.assertNotIn("get_context", mp.context._default_context.__dict__)
+        self.assertIsNone(os.environ.get("SGLANG_NUMA_BIND_V2"))
+        self.assertIsNone(os.environ.get(wc.SOCKET_ENV))
+        self.assertIsNone(os.environ.get(wc.READY_ENV))
+        self.assertEqual(len(created_socks), 1)
+        self.assertFalse(os.path.exists(created_socks[0]))
+
+        # `_prepare_fork_subprocs()` routes via `set_start_method("spawn", force=True)` so early CUDA
+        # after `_prepare_fork_subprocs()` falls back to `spawn` on `_default_context.get_context()`.
+        cuda_flag = {"init": False}
+        fallback_buf = io.StringIO()
+        lab_dummy = lab_mod.SglangLab.__new__(lab_mod.SglangLab)
+        lab_dummy._fork_subprocs_restore = None
+        lab_dummy.fork_subprocs_fallback = []
+        with (
+            mock.patch.object(forksafe, "poison_reasons", return_value=[]),
+            mock.patch.object(forksafe, "cuda_initialized", side_effect=lambda: cuda_flag["init"]),
+            contextlib.redirect_stdout(fallback_buf),
+        ):
+            self.assertTrue(lab_dummy._prepare_fork_subprocs())
+            try:
+                self.assertEqual(mp.get_start_method(), "fork")
+                cuda_flag["init"] = True
+                self.assertEqual(mp.context._default_context.get_context().get_start_method(), "spawn")
+            finally:
+                lab_dummy._fork_subprocs_restore()
+                lab_dummy._fork_subprocs_restore = None
+        self.assertIsNone(mp.get_start_method(allow_none=True))
+        self.assertIn("fork_subprocs_fallback", fallback_buf.getvalue())
+
+        # `_preload_fork_subprocs()` unpatches child + clears NVML env on SystemExit fallback.
+        lab_mod._FORK_SUBPROCS_STATE.update({"preloaded": False, "clear_nvml_env": False})
+        with (
+            mock.patch.object(forksafe, "poison_reasons", side_effect=[[], ["cuda poisoned"]]),
+            mock.patch.object(sgl_zygote, "install_guards", return_value=({"nvml_env_set": True}, lambda: None)),
+            mock.patch.object(sgl_zygote, "preload", side_effect=SystemExit("initialized CUDA")),
+            mock.patch.object(forksafe, "unpatch_child") as m_unpatch,
+        ):
+            ok, reasons = lab_mod.SglangLab._preload_fork_subprocs()
+        self.assertFalse(ok)
+        self.assertEqual(reasons, ["cuda poisoned"])
+        m_unpatch.assert_called_once_with(None, clear_env=True)
+
+    def test_conformance_lab_clears_shared_on_replacement_failure_and_requires_live_engine(self):
+        from adapter import conformance_lab as clab_mod
+        from adapter import lab as lab_mod
+
+        prev_shared = SglangConformanceLab._shared
+        prev_loops = len(clab_mod._LOOPS)
+
+        def cleanup():
+            SglangConformanceLab._shared = prev_shared
+            while len(clab_mod._LOOPS) > prev_loops:
+                loop = clab_mod._LOOPS.pop()
+                with contextlib.suppress(Exception):
+                    loop.close()
+
+        self.addCleanup(cleanup)
+
+        # Replacement init failure must leave `_shared = None`, never pointing to a shut-down lab.
+        shutdown_calls = []
+        SglangConformanceLab._shared = types.SimpleNamespace(
+            engine=object(),
+            dirty=False,
+            status=lambda: {"state": "base"},
+            fork_subprocs=False,
+            weight_cache_dir=None,
+            _shutdown_engine=lambda: shutdown_calls.append("shutdown"),
+        )
+        with (
+            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.object(lab_mod.SglangLab, "_preload_fork_subprocs", return_value=(True, [])),
+            mock.patch.object(lab_mod.SglangLab, "__init__", side_effect=RuntimeError("daemon missing")),
+        ):
+            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+            with self.assertRaisesRegex(RuntimeError, "daemon missing"):
+                SglangConformanceLab(fork_subprocs=True)
+        self.assertEqual(shutdown_calls, ["shutdown"])
+        self.assertIsNone(SglangConformanceLab._shared)
+
+        # Dead `_shared` with `engine=None` must not be reused even if flags match.
+        reinit_calls = []
+
+        def fake_init(self_lab, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0,
+                      fork_subprocs=False, weight_cache_dir=None):
+            reinit_calls.append(True)
+            self_lab.engine = object()
+            self_lab.dirty = False
+            self_lab.fork_subprocs = fork_subprocs
+            self_lab.weight_cache_dir = weight_cache_dir
+
+        SglangConformanceLab._shared = types.SimpleNamespace(
+            engine=None,
+            dirty=False,
+            status=lambda: {"state": "base"},
+            fork_subprocs=False,
+            weight_cache_dir=None,
+            _shutdown_engine=lambda: shutdown_calls.append("dead_shutdown"),
+        )
+        with (
+            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.object(lab_mod.SglangLab, "__init__", fake_init),
+        ):
+            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+            os.environ.pop("FASTRSI_SGLANG_FORK_SUBPROCS", None)
+            lab = SglangConformanceLab()
+        self.assertEqual(reinit_calls, [True])
+        self.assertIs(SglangConformanceLab._shared, lab)
+
+    def test_sglang_env_config_handles_pep660_editable_install_via_find_spec(self):
+        import importlib.abc
+        import importlib.machinery
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg_root = os.path.join(tmp, "editable_src", "sglang")
+            os.makedirs(os.path.join(pkg_root, "srt"), exist_ok=True)
+            with open(os.path.join(pkg_root, "__init__.py"), "w", encoding="utf-8") as fh:
+                fh.write("raise AssertionError('PEP 660 sglang package must not be imported')\n")
+            with open(os.path.join(pkg_root, "srt", "server_args.py"), "w", encoding="utf-8") as fh:
+                fh.write("class ServerArgs:\n    cuda_graph_max_bs_decode: int = -1\n")
+
+            class _EditableFinder(importlib.abc.MetaPathFinder):
+                def find_spec(self, fullname, path=None, target=None):
+                    if fullname == "sglang":
+                        spec = importlib.machinery.ModuleSpec("sglang", None, is_package=True)
+                        spec.submodule_search_locations = [pkg_root]
+                        return spec
+                    return None
+
+            finder = _EditableFinder()
+            with (
+                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "4"}, clear=False),
+                mock.patch.dict(sys.modules),
+                mock.patch.object(sys, "meta_path", [finder, *sys.meta_path]),
+            ):
+                for key in list(sys.modules):
+                    if key == "sglang" or key.startswith("sglang."):
+                        sys.modules.pop(key, None)
+                cfg = sglang_env_config()
+                self.assertEqual(cfg["cuda_graph_max_bs_decode"], 4)
+                self.assertTrue(cfg["disable_prefill_cuda_graph"])
+                self.assertNotIn("sglang", sys.modules)
 
 
 if __name__ == "__main__":

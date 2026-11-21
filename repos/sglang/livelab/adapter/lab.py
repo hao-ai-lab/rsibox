@@ -1,5 +1,5 @@
 """SglangLab: live-lab verbs over `fastrsi.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
-import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, threading
+import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
@@ -9,6 +9,8 @@ from kernel import coordinator as C, findings as F, locate as L
 
 EAGER_LAYERS = (".srt.layers.sampler", ".srt.layers.logits_processor")
 _counters = itertools.count(1)
+_FORK_SUBPROCS_LOCK = threading.Lock()
+_FORK_SUBPROCS_STATE = {"preloaded": False, "clear_nvml_env": False}
 
 def is_graph_module(module_name):
     return not module_name.endswith(EAGER_LAYERS) and (".srt.models." in module_name or ".srt.layers." in module_name)
@@ -16,9 +18,14 @@ def is_graph_module(module_name):
 class SglangLab(ConformanceHarness, BaseLab):
     name, scheduler_module, io_module = "sglang", "sglang.srt.managers.scheduler", "sglang.srt.managers.io_struct"
     threaded_check = True
-    def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0):
+    def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0, fork_subprocs=False,
+                 weight_cache_dir=None):
         self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
         self.engine, self.sock_path, self.ranks, self.rank_conns, self.rank_locks = None, None, 0, {}, {}
+        self.fork_subprocs, self.fork_subprocs_fallback, self._fork_subprocs_restore = bool(fork_subprocs), [], None
+        raw_wc = os.fspath(weight_cache_dir).strip() if weight_cache_dir else ""
+        self.weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
+        self._weight_cache_env_restore = None
         super().__init__(receipts=receipts, check_timeout=check_timeout, rpc_timeout=rpc_timeout)
     @property
     def dirty(self): return self._dirty
@@ -36,42 +43,154 @@ class SglangLab(ConformanceHarness, BaseLab):
                   "ignore_eos": bool(merged.get("ignore_eos", True))}
         tokens = [x.get("output_ids") or x["text"] for x in self.engine.generate(prompt=merged["prompts"], sampling_params=params)]
         return {"digest": hashlib.sha256(json.dumps(tokens).encode()).hexdigest()[:16], "tokens": tokens}
-    def _start_engine(self):
+    @staticmethod
+    def _preload_fork_subprocs():
+        import forksafe
+        from services import zygote as sgl_zygote
+
+        reasons = forksafe.poison_reasons()
+        if reasons:
+            return False, list(reasons)
+        with _FORK_SUBPROCS_LOCK:
+            if not _FORK_SUBPROCS_STATE["preloaded"]:
+                guards, restore_triton = sgl_zygote.install_guards(("torch", *sgl_zygote.SUBPROC_PRELOAD))
+                _FORK_SUBPROCS_STATE["clear_nvml_env"] = bool(guards.get("nvml_env_set"))
+                try:
+                    sgl_zygote.preload(sgl_zygote.SUBPROC_PRELOAD)
+                except SystemExit as exc:
+                    forksafe.unpatch_child(None, clear_env=_FORK_SUBPROCS_STATE["clear_nvml_env"])
+                    _FORK_SUBPROCS_STATE["clear_nvml_env"] = False
+                    return False, list(forksafe.poison_reasons() or [str(exc)])
+                except BaseException:
+                    forksafe.unpatch_child(None, clear_env=_FORK_SUBPROCS_STATE["clear_nvml_env"])
+                    _FORK_SUBPROCS_STATE["clear_nvml_env"] = False
+                    raise
+                finally:
+                    restore_triton()
+                _FORK_SUBPROCS_STATE["preloaded"] = True
+        return True, []
+
+    def _prepare_fork_subprocs(self):
+        import multiprocessing
+        from services import zygote as sgl_zygote
+
+        if self._fork_subprocs_restore is not None:
+            with contextlib.suppress(Exception):
+                self._fork_subprocs_restore()
+            self._fork_subprocs_restore = None
+
+        self.fork_subprocs_fallback = []
+        ok, reasons = self._preload_fork_subprocs()
+        if not ok:
+            self.fork_subprocs_fallback = reasons
+            return False
+
+        prev_method = multiprocessing.get_start_method(allow_none=True)
+        prev_numa = os.environ.get("SGLANG_NUMA_BIND_V2")
+        restore_mp = sgl_zygote.enable_fork_subprocs(
+            clear_nvml_env=_FORK_SUBPROCS_STATE["clear_nvml_env"]
+        )
+
+        def _cleanup():
+            if restore_mp is not None:
+                restore_mp()
+            with contextlib.suppress(RuntimeError, ValueError):
+                multiprocessing.set_start_method(prev_method, force=True)
+            if prev_numa is None:
+                os.environ.pop("SGLANG_NUMA_BIND_V2", None)
+            else:
+                os.environ["SGLANG_NUMA_BIND_V2"] = prev_numa
+
+        self._fork_subprocs_restore = _cleanup
+        multiprocessing.set_start_method("spawn", force=True)
+        os.environ["SGLANG_NUMA_BIND_V2"] = "0"
+        return True
+
+    def _restore_weight_cache_env(self):
+        if self._weight_cache_env_restore is not None:
+            with contextlib.suppress(Exception):
+                self._weight_cache_env_restore()
+            self._weight_cache_env_restore = None
+
+    def _prepare_weight_cache(self):
+        from services import weights as wc
         tp_size = int(self.config.get("tp_size", 1))
-        self.sock_path = ipc.short_sock_path("fsgl")
-        with contextlib.suppress(FileNotFoundError): os.unlink(self.sock_path)
-        listener, accepted, errors = Listener(self.sock_path, "AF_UNIX", backlog=max(8, tp_size * 2)), {}, []
+        res = wc.probe(self.weight_cache_dir, tp_size=tp_size)
+        finding = wc.daemon_finding(res, self.weight_cache_dir)
+        if finding is not None:
+            raise RuntimeError(f"weight-cache daemon not ready: {finding['observed']}")
+        self._restore_weight_cache_env()
+        cenv = wc.client_env(self.weight_cache_dir)
+        prev = {k: os.environ.get(k) for k in cenv}
+        os.environ.update(cenv)
+        def _restore():
+            for k, old in prev.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
+        self._weight_cache_env_restore = _restore
 
-        def accept_all():
-            try:
-                while len(accepted) < tp_size:
-                    conn = listener.accept()
-                    accepted[int(conn.recv()["rank"])] = conn
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                with contextlib.suppress(OSError): listener.close()
+    def _start_engine(self):
+        listener, accept_thread, accepted, errors = None, None, {}, []
+        try:
+            if self.weight_cache_dir:
+                self._prepare_weight_cache()
+            if self.fork_subprocs:
+                self._prepare_fork_subprocs()
+            tp_size = int(self.config.get("tp_size", 1))
+            self.sock_path = ipc.short_sock_path("fsgl")
+            with contextlib.suppress(FileNotFoundError): os.unlink(self.sock_path)
+            listener = Listener(self.sock_path, "AF_UNIX", backlog=max(8, tp_size * 2))
 
-        accept_thread = threading.Thread(target=accept_all, daemon=True)
-        accept_thread.start()
-        base_cls = self.engine_class()
-        entry = functools.partial(agent.run_scheduler_entry, self.sock_path, self.scheduler_module, base_cls.run_scheduler_process_func)
-        self.engine = type(base_cls)("_HookedEngine", (base_cls,), {"run_scheduler_process_func": staticmethod(entry)})(**self.config)
-        if hasattr(signal, "SIGQUIT"): signal.signal(signal.SIGQUIT, signal.SIG_IGN)
-        with contextlib.suppress(Exception): self.engine.tokenizer_manager._subprocess_watchdog.stop()
-        accept_thread.join(self.rpc_timeout)
-        if errors or len(accepted) != tp_size:
+            def accept_all():
+                try:
+                    while len(accepted) < tp_size:
+                        conn = listener.accept()
+                        accepted[int(conn.recv()["rank"])] = conn
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    with contextlib.suppress(OSError): listener.close()
+
+            accept_thread = threading.Thread(target=accept_all, daemon=True)
+            accept_thread.start()
+            base_cls = self.engine_class()
+            entry = functools.partial(agent.run_scheduler_entry, self.sock_path, self.scheduler_module, base_cls.run_scheduler_process_func)
+            if self.weight_cache_dir:
+                from services import weights as wc
+                engine_cfg = wc.client_config(self.config)
+            else:
+                engine_cfg = self.config
+            self.engine = type(base_cls)("_HookedEngine", (base_cls,), {"run_scheduler_process_func": staticmethod(entry)})(**engine_cfg)
+            if hasattr(signal, "SIGQUIT"): signal.signal(signal.SIGQUIT, signal.SIG_IGN)
+            with contextlib.suppress(Exception): self.engine.tokenizer_manager._subprocess_watchdog.stop()
+            accept_thread.join(self.rpc_timeout)
+            if errors or len(accepted) != tp_size:
+                raise RuntimeError(f"scheduler handshake failed: {errors or list(accepted)}")
+            self.ranks, self.rank_conns, self.dirty = tp_size, accepted, False
+            self.rank_locks, self.base_text, ver = {r: threading.Lock() for r in range(tp_size)}, {}, "0"
+            with contextlib.suppress(Exception): ver = importlib.metadata.version("sglang")
+            participants = [C.CallParticipant(f"rank{r}", lambda m, p, r=r: self.rank_call(r, m, p)) for r in range(tp_size)]
+            co = RecaptureCoordinator(participants, gap=self.at_gap, writer=self.writer, interface_version="1-draft",
+                                      engine={"name": self.name, "version": ver, "commit": None},
+                                      phase2_deadline_s=self.rpc_timeout, rebuild=self._rebuild_all_ranks,
+                                      post_commit_reset="state")
+            return co, self._init_modules
+        except BaseException:
+            if listener is not None:
+                with contextlib.suppress(AttributeError, OSError):
+                    listener._listener._socket.shutdown(socket.SHUT_RDWR)
+                with contextlib.suppress(OSError):
+                    listener.close()
+            if accept_thread is not None:
+                accept_thread.join(timeout=1.0)
+            for conn in list(accepted.values()):
+                with contextlib.suppress(OSError):
+                    conn.close()
+            accepted.clear()
             self._shutdown_engine()
-            raise RuntimeError(f"scheduler handshake failed: {errors or list(accepted)}")
-        self.ranks, self.rank_conns, self.dirty = tp_size, accepted, False
-        self.rank_locks, self.base_text, ver = {r: threading.Lock() for r in range(tp_size)}, {}, "0"
-        with contextlib.suppress(Exception): ver = importlib.metadata.version("sglang")
-        participants = [C.CallParticipant(f"rank{r}", lambda m, p, r=r: self.rank_call(r, m, p)) for r in range(tp_size)]
-        co = RecaptureCoordinator(participants, gap=self.at_gap, writer=self.writer, interface_version="1-draft",
-                                  engine={"name": self.name, "version": ver, "commit": None},
-                                  phase2_deadline_s=self.rpc_timeout, rebuild=self._rebuild_all_ranks,
-                                  post_commit_reset="state")
-        return co, self._init_modules
+            raise
     def _stop_engine(self):
         self._shutdown_engine()
     def rank_call(self, rank, method, payload=None, timeout=None):
@@ -150,6 +269,12 @@ class SglangLab(ConformanceHarness, BaseLab):
             self.engine = None
         if self.sock_path:
             with contextlib.suppress(OSError): os.unlink(self.sock_path)
+            self.sock_path = None
+        if self._fork_subprocs_restore is not None:
+            with contextlib.suppress(Exception):
+                self._fork_subprocs_restore()
+            self._fork_subprocs_restore = None
+        self._restore_weight_cache_env()
     def _build_plan(self, patch, live_map):
         modules = {name: {"source": new_src, "base_hash": L.text_hash(live_map.get(name) or self._base(name))}
                    for name, new_src in patch["files"].items()}

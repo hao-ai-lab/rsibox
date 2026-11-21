@@ -1,7 +1,8 @@
 """Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `fastrsi_gap`."""
-import importlib.util, linecache, os, queue, random, sys, threading
+import linecache, os, queue, random, sys, threading
 from multiprocessing.connection import Client
 from adapter import recapture as R1
+from fastrsi import harness
 from kernel import coordinator as C, findings as F
 
 GAP_METHODS = frozenset({"park", "validate", "commit", "undo", "recapture",
@@ -9,8 +10,7 @@ GAP_METHODS = frozenset({"park", "validate", "commit", "undo", "recapture",
 _STATE = {"participant": None, "recapture": None, "faults": {}, "hooks": [], "plans": {}, "gap_queue": queue.Queue()}
 
 def _origin(name):
-    spec = None if name in sys.modules else importlib.util.find_spec(name)
-    return getattr(sys.modules.get(name), "__file__", None) or (spec.origin if spec else None)
+    return getattr(sys.modules.get(name), "__file__", None) or harness.module_file(name)
 
 def _sync_lines(local_p, names):
     for name in names:
