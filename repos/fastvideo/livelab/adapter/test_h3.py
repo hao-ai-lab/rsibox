@@ -82,6 +82,11 @@ class H3LabClassTest(unittest.TestCase):
         plain_env = H3Lab.launch_environment(["--gpus", "4"])
         self.assertEqual(plain_env, {"FASTRSI_H3_GPUS": "4"})
 
+        empty_paths_env = H3Lab.launch_environment([
+            "--model", "", "--vae", "", "--config", "", "--golden", "", "--gpus", "0",
+        ])
+        self.assertEqual(empty_paths_env, {"FASTRSI_H3_GPUS": "0"})
+
         captured = {}
 
         def fake_lab(cfg, **kw):

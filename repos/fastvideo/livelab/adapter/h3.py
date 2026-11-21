@@ -46,6 +46,7 @@ WORKLOAD_ENV = {
     "FASTVIDEO_VSA_PTX_BLACKWELL": "0",
     "FASTVIDEO_STAGE_LOGGING": "1",
     "HF_HUB_OFFLINE": "1",
+    "TRITON_CACHE_AUTOTUNING": "1",
 }
 
 
@@ -182,32 +183,18 @@ class H3Lab(Shared):
     @staticmethod
     def launch_environment(argv):
         """Translate `fastrsi conformance fastvideo --real ...` flags into H3 environment vars."""
-        clean = list(argv)
-        if clean[:1] == ["--"]:
-            clean = clean[1:]
+        clean = list(argv)[1:] if list(argv)[:1] == ["--"] else list(argv)
         ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", allow_abbrev=False)
-        ap.add_argument("--model", default=None)
-        ap.add_argument("--vae", default=None)
-        ap.add_argument("--config", default=None)
-        ap.add_argument("--gpus", type=int, default=None)
-        ap.add_argument("--golden", default=None)
-        ap.add_argument("--check-timeout", type=float, default=None)
-        ap.add_argument("--zygote", action="store_true")
-        ap.add_argument("--holder", action="store_true")
+        for flag, kw in (("--model", {}), ("--vae", {}), ("--config", {}), ("--gpus", {"type": int}),
+                         ("--golden", {}), ("--check-timeout", {"type": float}),
+                         ("--zygote", {"action": "store_true"}), ("--holder", {"action": "store_true"})):
+            ap.add_argument(flag, **kw)
         ns = ap.parse_args(clean)
-        env = {}
-        if ns.model:
-            env["FASTH3_MODEL"] = os.path.abspath(ns.model)
-        if ns.vae:
-            env["FASTVIDEO_H3_VAE_NVFP4_DECODER"] = os.path.abspath(ns.vae)
-        if ns.config:
-            env["H3_CONFIG"] = os.path.abspath(ns.config)
-        if ns.gpus is not None:
-            env["FASTRSI_H3_GPUS"] = str(ns.gpus)
-        if ns.golden:
-            env["FASTRSI_H3_GOLDEN"] = os.path.abspath(ns.golden)
-        if ns.check_timeout is not None:
-            env["FASTRSI_H3_CHECK_TIMEOUT"] = str(ns.check_timeout)
+        spec = (("model", "FASTH3_MODEL", True), ("vae", "FASTVIDEO_H3_VAE_NVFP4_DECODER", True),
+                ("config", "H3_CONFIG", True), ("gpus", "FASTRSI_H3_GPUS", False),
+                ("golden", "FASTRSI_H3_GOLDEN", True), ("check_timeout", "FASTRSI_H3_CHECK_TIMEOUT", False))
+        env = {k: (os.path.abspath(str(v)) if is_p else str(v))
+               for attr, k, is_p in spec if (v := getattr(ns, attr)) is not None and (not is_p or v)}
         if ns.zygote:
             env["FASTRSI_H3_ZYGOTE"] = "1"
         if ns.holder:

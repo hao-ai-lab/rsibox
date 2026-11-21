@@ -25,7 +25,6 @@ Not covered (findings or a restart): native code (extension `.so`), torch op sch
 re-import would register again, code captured in CUDA graphs, and objects held outside the
 roots the caller passes (they keep the old class).
 """
-import ast
 import importlib
 import importlib.abc
 import importlib.util
@@ -35,6 +34,8 @@ import sys
 import time
 import types
 
+from fastrsi import harness, hooks
+
 _SKIP = {"_parameters", "_buffers", "_modules", "_non_persistent_buffers_set", "training",
          "_forward_hooks", "_forward_pre_hooks", "_backward_hooks", "_backward_pre_hooks",
          "_state_dict_hooks", "_state_dict_pre_hooks", "_load_state_dict_pre_hooks",
@@ -42,88 +43,18 @@ _SKIP = {"_parameters", "_buffers", "_modules", "_non_persistent_buffers_set", "
          "_forward_pre_hooks_with_kwargs", "_is_full_backward_hook"}
 _PRIMITIVE = (bool, int, float, complex, str, bytes, type(None))
 
-
-def finding(check, observed, expected):
-    return {"check": check, "observed": observed, "expected": expected}
+finding = harness.plain_finding
+_PARSED = {}   # file -> ((name, size, mtime_ns), names): parse once per process
 
 
 # -- 1. refresh -------------------------------------------------------------------------------
-def _resolve(mod, is_pkg, node):
-    if isinstance(node, ast.Import):
-        return [a.name for a in node.names]
-    base = node.module or ""
-    if node.level:
-        parts = mod.split(".") if is_pkg else mod.split(".")[:-1]
-        if node.level > 1:
-            parts = parts[:len(parts) - node.level + 1]
-        base = ".".join(parts + ([base] if base else []))
-    return [base] + [f"{base}.{a.name}" for a in node.names if a.name != "*"]
-
-
-def _binding_imports(tree):
-    todo = list(tree.body)
-    while todo:
-        node = todo.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            continue
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            yield node
-        todo.extend(ast.iter_child_nodes(node))
-
-
-_PARSED = {}   # file -> ((size, mtime_ns), names its binding imports may load): parse once per process
-
-
-def _imports_of(name, f, src=None):
-    is_pkg = os.path.basename(f) == "__init__.py"
-    if src is None:
-        st = os.stat(f)
-        stamp = (name, st.st_size, st.st_mtime_ns)
-        hit = _PARSED.get(f)
-        if hit and hit[0] == stamp:
-            return hit[1]
-        with open(f, "rb") as fh:
-            src = fh.read()
-    else:
-        stamp = None
-    names = [d for node in _binding_imports(ast.parse(src, f)) for d in _resolve(name, is_pkg, node)]
-    if stamp is not None:
-        _PARSED[f] = (stamp, names)
-    return names
-
-
 def import_graph(prefixes, modules=None, texts=None):
-    """{module: loaded modules it imports at import time} for loaded modules under `prefixes`.
-    `texts`: {module: source} read instead of the file (an edit not written to disk). Files are
-    parsed once per process and again only when their size or mtime changed (a first graph of
-    FastH3's 357 modules is most of a rebuild's re-import time)."""
-    modules = sys.modules if modules is None else modules
-    texts = texts or {}
-    graph = {}
-    for name, m in list(modules.items()):
-        f = getattr(m, "__file__", None)
-        if not (f and f.endswith(".py") and name.split(".")[0] in prefixes):
-            continue
-        try:
-            names = _imports_of(name, f, texts.get(name))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        graph[name] = {d for d in names if d in modules and d != name}
-    return graph
+    """{module: loaded modules it imports at import time} for loaded modules under `prefixes`."""
+    return hooks.import_graph(prefixes, modules=modules, texts=texts, cache=_PARSED)
 
 
-def dependents(changed, graph):
-    rev = {}
-    for m, deps in graph.items():
-        for d in deps:
-            rev.setdefault(d, set()).add(m)
-    out, todo = set(changed), list(changed)
-    while todo:
-        for m in rev.get(todo.pop(), ()):
-            if m not in out:
-                out.add(m)
-                todo.append(m)
-    return out
+dependents = hooks.dependents
+unbind = hooks.unbind_module
 
 
 class _TextLoader(importlib.abc.Loader):
@@ -138,8 +69,7 @@ class _TextLoader(importlib.abc.Loader):
 
 
 class TextFinder(importlib.abc.MetaPathFinder):
-    """Serves {module: source text} with the module's real file as its origin (so tracebacks,
-    `inspect` and Triton's source readers point at the right file)."""
+    """Serves {module: source text} with the module's real file as its origin."""
 
     def __init__(self, texts, origins):
         self.texts, self.origins = texts, origins
@@ -149,20 +79,9 @@ class TextFinder(importlib.abc.MetaPathFinder):
             return None
         origin = self.origins[name]
         is_pkg = os.path.basename(origin) == "__init__.py"
-        spec = importlib.util.spec_from_file_location(
+        return importlib.util.spec_from_file_location(
             name, origin, loader=_TextLoader(self.texts[name], origin),
             submodule_search_locations=[os.path.dirname(origin)] if is_pkg else None)
-        return spec
-
-
-def unbind(modules, n):
-    parent, _, child = n.rpartition(".")
-    p = modules.get(parent)
-    if p is not None and child in getattr(p, "__dict__", {}):
-        try:
-            delattr(p, child)
-        except AttributeError:
-            pass
 
 
 def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
@@ -192,10 +111,7 @@ def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
     old = {n: modules[n] for n in order}
     texts = {**{n: (kept or {})[n] for n in order if n in (kept or {})}, **files}
     origins = {n: old[n].__file__ for n in texts}
-    for n in order:
-        modules.pop(n)
-        unbind(modules, n)
-    importlib.invalidate_caches()
+    hooks.purge_modules(order, modules)
     finder = TextFinder(texts, origins)
     sys.meta_path.insert(0, finder)
     try:
@@ -203,11 +119,7 @@ def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
             if n not in modules:
                 importlib.import_module(n)
     except BaseException as e:
-        for n in order:                                       # put the old modules back
-            modules[n] = old[n]
-            parent, _, child = n.rpartition(".")
-            if parent in modules:
-                setattr(modules[parent], child, old[n])
+        restore(old, modules, clear_linecache=False)
         return {"ok": False, "refreshed": [], "old": {}, "seconds": round(time.perf_counter() - t0, 4),
                 "findings": [finding("refresh_failed", f"{type(e).__name__}: {e}",
                                      "the edited modules import")]}
@@ -220,7 +132,7 @@ def refresh(files, prefixes, modules=None, max_modules=200, kept=None):
             "seconds": round(time.perf_counter() - t0, 4)}
 
 
-def restore(old_modules, modules=None):
+def restore(old_modules, modules=None, clear_linecache: bool = True):
     """Put the modules `refresh` replaced back (an edit refused after its refresh)."""
     modules = sys.modules if modules is None else modules
     for n, m in old_modules.items():
@@ -228,9 +140,10 @@ def restore(old_modules, modules=None):
         parent, _, child = n.rpartition(".")
         if parent in modules:
             setattr(modules[parent], child, m)
-        f = getattr(m, "__file__", None)
-        if f:
-            linecache.cache.pop(f, None)
+        if clear_linecache:
+            f = getattr(m, "__file__", None)
+            if f:
+                linecache.cache.pop(f, None)
 
 
 def class_map(old_modules, modules=None):

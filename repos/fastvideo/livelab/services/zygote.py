@@ -35,13 +35,8 @@ import os
 import sys
 import time
 
-# the framework's pre-fork guards (core/livelab/forksafe.py; FASTRSI_LIVELAB overrides the
-# folder): the forkserver imports this module first, before the adapter package
-_LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
-    os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
-if _LIVELAB not in sys.path:
-    sys.path.insert(0, _LIVELAB)
-import forksafe  # noqa: E402
+import forksafe
+from fastrsi import hooks
 
 PREFIXES = ("fastvideo",)
 PRELOAD = ["torch", "fastvideo", "fastvideo.worker.multiproc_executor", "fastvideo.worker.gpu_worker",
@@ -83,36 +78,20 @@ def refresh_stale(prefixes=PREFIXES, modules=None):
     if stale:
         dropped = RB.dependents(set(stale), RB.import_graph(prefixes, modules))
         if dropped & set(prefixes):
-            # the edit reached the package root (FastVideo's __init__ imports the entry points,
-            # which import the loader): a partial re-import would register FastVideo's presets
-            # again into the registry module it kept ("Duplicate preset registration"). Drop the
-            # whole package, the state a fresh process starts from (~15 s of imports).
+            # the edit reached the package root: drop the whole package so registries start clean
             dropped |= {n for n in modules if n.split(".")[0] in prefixes}
         dropped = sorted(dropped)
-        for n in stale:
-            f = now[n][0]
-            try:
-                os.unlink(importlib.util.cache_from_source(f))
-            except OSError:
-                pass
-        for n in dropped:
-            modules.pop(n, None)
-            RB.unbind(modules, n)
-        importlib.invalidate_caches()
+        stale_set = set(stale)
+        hooks.purge_modules(stale, modules, unlink_pyc=True)
+        rest = [n for n in dropped if n not in stale_set]
+        if rest:
+            hooks.purge_modules(rest, modules, unlink_pyc=False)
     return {"stale": stale, "dropped": dropped, "blocked": blocked,
             "seconds": round(time.perf_counter() - t0, 4)}
 
 
-def _install_worker_hook(poison=None):
-    """Runs in the server: each forked child refreshes before it unpickles its process object.
-    `poison`: why a fork of this server cannot use CUDA; then every child raises at once
-    (fail closed: a worker group that cannot start, not workers that fail later).
-
-    The child's process object (target and kwargs: FastVideo's args, pipes) is unpickled by
-    `multiprocessing.spawn._main` right after `prepare()`. Refreshing inside the target would
-    be too late: the kwargs would already be instances of the old classes, which the
-    re-imported code does not recognize. So the hook wraps `spawn.prepare`: refresh, then (with
-    a holder) hook the loader the child will use, then unpickle."""
+def _install_worker_hook(poison=None, clear_nvml_env=False):
+    """Runs in the server: each forked child refreshes before it unpickles its process object."""
     import multiprocessing.spawn as SP
     orig = SP.prepare
 
@@ -120,18 +99,8 @@ def _install_worker_hook(poison=None):
         if poison:
             raise RuntimeError(f"[fastrsi-zygote] forked from a server whose forks cannot use CUDA: "
                                f"{poison}; restart the lab host")
-        if not os.environ.get("OMP_NUM_THREADS"):
-            forksafe.clamp_thread_pools(num_threads=1)
-        local_rank_str = os.environ.get("LOCAL_RANK", "").strip()
-        visible_gpu_ids = [
-            token.strip()
-            for token in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
-            if token.strip().isdigit()
-        ]
-        if local_rank_str.isdigit():
-            forksafe.bind_rank_numa_and_cpus(int(local_rank_str))
-        elif len(visible_gpu_ids) == 1:
-            forksafe.bind_rank_numa_and_cpus(0)
+        forksafe.unpatch_child(None, clear_env=clear_nvml_env)
+        forksafe.apply_child_runtime_affinity()
         rep = refresh_stale()
         if rep["stale"] or rep["blocked"]:
             print(f"[fastrsi-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
@@ -175,23 +144,94 @@ def poison_reasons():
 pin_cute_dsl_arch = forksafe.pin_cute_dsl_arch
 
 
+def _preset_torch_key():
+    """Pre-populate Inductor's `torch_key()` in the zygote so forked workers inherit it in RAM
+    without touching CUDA."""
+    if "torch" not in sys.modules or os.environ.get("FASTRSI_ZYGOTE_PRESET_TORCH_KEY", "1") == "0":
+        return None
+    if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
+        from services import jitcache
+        return jitcache.preset_torch_key()
+    t0 = time.perf_counter()
+    try:
+        from torch._inductor import codecache
+        codecache.torch_key()
+        return {"hit": False, "in_memory": True, "seconds": round(time.perf_counter() - t0, 4)}
+    except Exception as e:
+        return {"hit": False, "error": f"{type(e).__name__}: {e}",
+                "seconds": round(time.perf_counter() - t0, 4)}
+
+
+OPTIONAL_PRELOAD = (
+    "flashinfer",
+    "flashinfer.fp4_quantization",
+    "flashinfer.gemm",
+    "fastvideo.models.vaes.minimax_h3_nvfp4_decoder",
+)
+
+
+def _optional_preload_modules(default_enabled=True):
+    raw = os.environ.get("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD")
+    if raw is None:
+        return list(OPTIONAL_PRELOAD) if default_enabled else []
+    token = raw.strip().lower()
+    if token in ("1", "true", "yes"):
+        return list(OPTIONAL_PRELOAD)
+    if token in ("", "0", "false", "no", "off"):
+        return []
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
 def _serve():
     """In the forkserver: import the preload list without CUDA, snapshot, hook the workers.
     The poison check and the worker hook run however the preload ends (a preload that called
     cuInit and then raised poisons the forks as much as one that imported)."""
     t0 = time.perf_counter()
     error = None
+    optional_preloaded = []
+    clear_nvml_env = False
+    preload_modules = [m for m in os.environ.get("FASTRSI_ZYGOTE_PRELOAD", "").split(",") if m]
+    loaded_cuda = getattr(sys.modules.get("torch"), "cuda", None)
+    has_torch_cuda = (
+        loaded_cuda is not None
+        and hasattr(loaded_cuda, "get_device_properties")
+        and hasattr(loaded_cuda, "get_device_capability")
+    )
+    # Default OPTIONAL_PRELOAD drags in flashinfer -> torch -> cuInit; only enable it
+    # automatically when torch is part of the preload or already loaded with CUDA.
+    optional_modules = _optional_preload_modules(
+        default_enabled=("torch" in preload_modules or has_torch_cuda)
+    )
+    use_all_guards = (
+        (loaded_cuda is None and ("torch" in preload_modules or bool(optional_modules)))
+        or has_torch_cuda
+    )
     try:
         pin_cute_dsl_arch()
-        restore = forksafe.pin_triton_target()
+        if use_all_guards:
+            guard_report, restore = forksafe.install_all_guards(
+                properties=True, import_torch=(loaded_cuda is None)
+            )
+            clear_nvml_env = bool((guard_report or {}).get("nvml_env_set"))
+        else:
+            restore = forksafe.pin_triton_target()
         try:
-            for m in filter(None, os.environ.get("FASTRSI_ZYGOTE_PRELOAD", "").split(",")):
+            for m in preload_modules:
                 importlib.import_module(m)
+            for m in optional_modules:
+                try:
+                    importlib.import_module(m)
+                    optional_preloaded.append(m)
+                except Exception as opt_exc:
+                    print(f"[fastrsi-zygote] optional preload skipped {m}: "
+                          f"{type(opt_exc).__name__}: {opt_exc}",
+                          file=sys.stderr, flush=True)
         finally:
             restore()
     except Exception as e:          # workers still start (cold imports) unless poisoned below
         error = f"{type(e).__name__}: {e}"
         print(f"[fastrsi-zygote] preload failed: {error}", file=sys.stderr, flush=True)
+    torch_key = _preset_torch_key()
     poison = poison_reasons()
     if poison:
         print(f"[fastrsi-zygote] {poison}: forked workers cannot use CUDA; they refuse to start",
@@ -199,12 +239,13 @@ def _serve():
     try:
         snapshot()
     finally:
-        _install_worker_hook(poison)
+        _install_worker_hook(poison, clear_nvml_env=clear_nvml_env)
     if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
         forksafe.freeze_gc_before_fork()
     print(f"[fastrsi-zygote] server {os.getpid()} preloaded {len(_SNAPSHOT)} modules in "
           f"{time.perf_counter() - t0:.1f} s", file=sys.stderr, flush=True)
-    return {"poison": poison, "preload_error": error}
+    return {"poison": poison, "preload_error": error, "torch_key": torch_key,
+            "optional_preloaded": optional_preloaded}
 
 
 def enable(preload=None):

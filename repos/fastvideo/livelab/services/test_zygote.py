@@ -79,6 +79,38 @@ class ZygoteRefreshTest(unittest.TestCase):
         out = fork_and_read(self.child)
         self.assertEqual((out["stale"], out["dropped"], out["value"]), ([], [], 1))
 
+    def test_refresh_stale_unlinks_pyc_only_for_stale_files(self):
+        """`refresh_stale()` should unlink `.pyc` only for `stale` files, leaving unchanged
+        dependents' bytecode caches intact."""
+        import importlib.util
+
+        consts_py = os.path.join(self.dir, "zpkg", "consts.py")
+        user_py = os.path.join(self.dir, "zpkg", "user.py")
+        consts_pyc = importlib.util.cache_from_source(consts_py)
+        user_pyc = importlib.util.cache_from_source(user_py)
+        os.makedirs(os.path.dirname(consts_pyc), exist_ok=True)
+        for pyc in (consts_pyc, user_pyc):
+            with open(pyc, "wb") as fh:
+                fh.write(b"dummy-pyc")
+
+        time.sleep(0.01)
+        with open(consts_py, "w") as fh:
+            fh.write("VALUE = 2\n")
+
+        def run_child():
+            rep = Z.refresh_stale(prefixes=("zpkg",))
+            return {
+                **rep,
+                "consts_pyc_exists": os.path.exists(consts_pyc),
+                "user_pyc_exists": os.path.exists(user_pyc),
+            }
+
+        out = fork_and_read(run_child)
+        self.assertEqual(out["stale"], ["zpkg.consts"])
+        self.assertEqual(out["dropped"], ["zpkg.consts", "zpkg.user"])
+        self.assertFalse(out["consts_pyc_exists"])
+        self.assertTrue(out["user_pyc_exists"])
+
 
 FORKSERVER_DRIVER = """
 import importlib, json, multiprocessing as mp, os, sys, time
@@ -211,6 +243,8 @@ class ServeTest(unittest.TestCase):
         self.SP, self.prepare = SP, SP.prepare
         self.saved = (Z.LIBCUDA, Z.driver_initialized, dict(Z._SNAPSHOT))
         self.env = {k: os.environ.get(k) for k in ("FASTRSI_ZYGOTE_PRELOAD", "FASTRSI_ZYGOTE_GC_FREEZE",
+                                                   "FASTRSI_ZYGOTE_PRESET_TORCH_KEY",
+                                                   "FASTRSI_TORCH_KEY_CACHE",
                                                    "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")}
         os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastrsi_no_such_module"
         os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
@@ -251,6 +285,76 @@ class ServeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unreadable"):
             self.SP.prepare({})
 
+    def test_serve_presets_torch_key_without_cuda_poison(self):
+        """When torch is loaded, `_serve()` populates Inductor's `torch_key()` in memory or via
+        `jitcache.preset_torch_key()` without poisoning CUDA, and respects `FASTRSI_ZYGOTE_PRESET_TORCH_KEY=0`."""
+        import types
+        from unittest import mock
+        from services import jitcache
+
+        calls = []
+
+        class _TorchKey:
+            def __init__(self):
+                self.value = None
+
+            def __call__(self):
+                calls.append("torch_key")
+                self.value = b"\xab" * 16
+                return self.value
+
+            def set(self, val):
+                calls.append(("set", val))
+                self.value = val
+
+        tk = _TorchKey()
+        fake_torch = types.ModuleType("torch")
+        fake_torch.__file__ = __file__
+        fake_torch.__version__ = "2.9.0+test"
+        fake_torch.cuda = types.SimpleNamespace(is_initialized=lambda: False)
+        fake_inductor = types.ModuleType("torch._inductor")
+        fake_codecache = types.ModuleType("torch._inductor.codecache")
+        fake_codecache.torch_key = tk
+        fake_inductor.codecache = fake_codecache
+        fake_torch._inductor = fake_inductor
+
+        Z.driver_initialized = lambda: False
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
+        os.environ.pop("FASTRSI_TORCH_KEY_CACHE", None)
+        os.environ.pop("FASTRSI_ZYGOTE_PRESET_TORCH_KEY", None)
+        mods = {
+            "torch": fake_torch,
+            "torch._inductor": fake_inductor,
+            "torch._inductor.codecache": fake_codecache,
+        }
+        with mock.patch.dict(sys.modules, mods):
+            rep = Z._serve()
+            self.assertEqual(rep["poison"], [])
+            self.assertEqual(calls, ["torch_key"])
+            self.assertTrue(rep["torch_key"]["in_memory"])
+
+            # With FASTRSI_TORCH_KEY_CACHE set, delegates to jitcache.preset_torch_key().
+            calls.clear()
+            os.environ["FASTRSI_TORCH_KEY_CACHE"] = "/tmp/fake_torch_key.json"
+            with mock.patch.object(jitcache, "preset_torch_key",
+                                   return_value={"hit": True, "files": 2, "seconds": 0.001}) as preset:
+                rep_cached = Z._serve()
+                self.assertEqual(rep_cached["poison"], [])
+                preset.assert_called_once_with()
+                self.assertTrue(rep_cached["torch_key"]["hit"])
+
+            # Opt-out via FASTRSI_ZYGOTE_PRESET_TORCH_KEY=0 skips torch_key().
+            calls.clear()
+            os.environ["FASTRSI_ZYGOTE_PRESET_TORCH_KEY"] = "0"
+            rep_off = Z._serve()
+            self.assertEqual(rep_off["poison"], [])
+            self.assertIsNone(rep_off["torch_key"])
+            self.assertEqual(calls, [])
+
+        # Also verify h3.WORKLOAD_ENV defaults TRITON_CACHE_AUTOTUNING=1 without clobbering explicit 0.
+        from adapter import h3
+        self.assertEqual(h3.WORKLOAD_ENV["TRITON_CACHE_AUTOTUNING"], "1")
+
 
 def _child_poisoned(env):
     import subprocess
@@ -281,6 +385,252 @@ class ForkPoisonTest(unittest.TestCase):
         receipt of the zygote respawn covers those), or other CUDA calls."""
         self.assertTrue(_child_poisoned({"PYTORCH_NVML_BASED_CUDA_CHECK": "0"}))
         self.assertFalse(_child_poisoned({"PYTORCH_NVML_BASED_CUDA_CHECK": "1"}))
+
+
+class OptionalPreloadTest(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        self._orig_env = {
+            k: os.environ.get(k)
+            for k in (
+                "FASTRSI_ZYGOTE_PRELOAD",
+                "FASTRSI_ZYGOTE_OPTIONAL_PRELOAD",
+                "FASTRSI_ZYGOTE_GC_FREEZE",
+                "FASTRSI_ZYGOTE_PRESET_TORCH_KEY",
+            )
+        }
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        for k, v in self._orig_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_serve_preloads_available_optional_modules_and_skips_missing(self):
+        import types
+        from unittest import mock
+        from services import zygote
+
+        events = []
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(
+            is_initialized=lambda: False,
+            get_device_properties=lambda _idx=0: types.SimpleNamespace(multi_processor_count=148),
+            get_device_capability=lambda _idx=0: (10, 0),
+        )
+        fake_opt = types.ModuleType("_fastrsi_fake_opt_mod")
+
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+
+        def fake_restore():
+            events.append("restore")
+
+        def fake_install_all_guards(**kwargs):
+            events.append(("install_all_guards", kwargs.get("properties"), kwargs.get("import_torch")))
+            return {"nvml_env_set": True}, fake_restore
+
+        def fake_preset():
+            events.append("preset")
+            return None
+
+        def fake_poison():
+            events.append("poison")
+            return []
+
+        with (
+            mock.patch.dict(sys.modules, {"torch": fake_torch, "_fastrsi_fake_opt_mod": fake_opt}),
+            mock.patch.object(
+                zygote,
+                "OPTIONAL_PRELOAD",
+                ("_fastrsi_fake_opt_mod", "_fastrsi_missing_opt_mod"),
+            ),
+            mock.patch.object(zygote.forksafe, "install_all_guards", side_effect=fake_install_all_guards),
+            mock.patch.object(zygote, "_preset_torch_key", side_effect=fake_preset),
+            mock.patch.object(zygote, "poison_reasons", side_effect=fake_poison),
+            mock.patch.object(zygote, "snapshot"),
+            mock.patch.object(zygote, "_install_worker_hook") as hook_mock,
+        ):
+            res = zygote._serve()
+
+        self.assertIsNone(res["preload_error"])
+        self.assertEqual(res["poison"], [])
+        self.assertEqual(res["optional_preloaded"], ["_fastrsi_fake_opt_mod"])
+        self.assertEqual(events[0], ("install_all_guards", True, False))
+        self.assertLess(events.index("restore"), events.index("preset"))
+        self.assertLess(events.index("restore"), events.index("poison"))
+        hook_mock.assert_called_once_with([], clear_nvml_env=True)
+
+    def test_serve_respects_optional_preload_disable(self):
+        import importlib
+        from unittest import mock
+        from services import zygote
+
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
+        os.environ["FASTRSI_ZYGOTE_OPTIONAL_PRELOAD"] = "0"
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        seen = []
+
+        with (
+            mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_should_not_import",)),
+            mock.patch.object(zygote, "pin_cute_dsl_arch"),
+            mock.patch.object(zygote.forksafe, "pin_triton_target", return_value=lambda: None),
+            mock.patch.object(importlib, "import_module", side_effect=lambda m: seen.append(m)),
+            mock.patch.object(zygote, "_preset_torch_key", return_value=None),
+            mock.patch.object(zygote, "poison_reasons", return_value=[]),
+            mock.patch.object(zygote, "snapshot"),
+            mock.patch.object(zygote, "_install_worker_hook"),
+        ):
+            res = zygote._serve()
+
+        self.assertEqual(seen, [])
+        self.assertEqual(res["optional_preloaded"], [])
+        self.assertIsNone(res["preload_error"])
+
+    def test_worker_hook_prepare_calls_unpatch_child_before_affinity(self):
+        import multiprocessing.spawn as SP
+        from unittest import mock
+        from services import zygote
+
+        orig_prepare = SP.prepare
+        order = []
+
+        def fake_orig(data):
+            order.append("orig")
+            return data
+
+        def fake_unpatch(cuda=None, clear_env=False):
+            order.append(("unpatch", cuda, clear_env))
+            return {}
+
+        def fake_affinity():
+            order.append("affinity")
+
+        with (
+            mock.patch.object(SP, "prepare", side_effect=fake_orig),
+            mock.patch.object(zygote.forksafe, "unpatch_child", side_effect=fake_unpatch),
+            mock.patch.object(zygote.forksafe, "apply_child_runtime_affinity", side_effect=fake_affinity),
+            mock.patch.object(zygote, "refresh_stale", return_value={"stale": [], "blocked": []}),
+        ):
+            zygote._install_worker_hook(poison=None, clear_nvml_env=True)
+            self.assertTrue(getattr(SP.prepare, "_fastrsi", False))
+            out = SP.prepare({"worker": 1})
+
+        self.assertIs(SP.prepare, orig_prepare)
+        self.assertEqual(out, {"worker": 1})
+        self.assertEqual(order, [("unpatch", None, True), "affinity", "orig"])
+
+    def test_serve_skips_default_optional_preload_for_custom_preload_without_torch(self):
+        """Unset FASTRSI_ZYGOTE_OPTIONAL_PRELOAD with custom preload=["fastvideo.user"] must
+        skip default OPTIONAL_PRELOAD so lightweight preloads do not pull in flashinfer/torch."""
+        import importlib
+        from unittest import mock
+        from services import zygote
+
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastvideo.user"
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+        seen = []
+
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("torch", None)
+            with (
+                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_should_not_import",)),
+                mock.patch.object(zygote, "pin_cute_dsl_arch"),
+                mock.patch.object(zygote.forksafe, "install_all_guards") as guards_mock,
+                mock.patch.object(zygote.forksafe, "pin_triton_target", return_value=lambda: None) as triton_mock,
+                mock.patch.object(importlib, "import_module", side_effect=lambda m: seen.append(m)),
+                mock.patch.object(zygote, "_preset_torch_key", return_value=None),
+                mock.patch.object(zygote, "poison_reasons", return_value=[]),
+                mock.patch.object(zygote, "snapshot"),
+                mock.patch.object(zygote, "_install_worker_hook"),
+            ):
+                res = zygote._serve()
+
+        self.assertEqual(seen, ["fastvideo.user"])
+        self.assertEqual(res["optional_preloaded"], [])
+        self.assertIsNone(res["preload_error"])
+        guards_mock.assert_not_called()
+        triton_mock.assert_called_once_with()
+
+    def test_serve_guards_explicit_optional_preload_without_torch_in_preload(self):
+        """Explicit FASTRSI_ZYGOTE_OPTIONAL_PRELOAD="flashinfer" activates install_all_guards
+        even when "torch" is omitted from FASTRSI_ZYGOTE_PRELOAD."""
+        import importlib
+        from unittest import mock
+        from services import zygote
+
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastvideo.user"
+        os.environ["FASTRSI_ZYGOTE_OPTIONAL_PRELOAD"] = "flashinfer"
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        events = []
+
+        def fake_restore():
+            events.append("restore")
+
+        def fake_install_all_guards(**kwargs):
+            events.append(("install_all_guards", kwargs.get("properties"), kwargs.get("import_torch")))
+            return {"nvml_env_set": True}, fake_restore
+
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("torch", None)
+            with (
+                mock.patch.object(zygote, "pin_cute_dsl_arch"),
+                mock.patch.object(zygote.forksafe, "install_all_guards",
+                                  side_effect=fake_install_all_guards) as guards_mock,
+                mock.patch.object(importlib, "import_module",
+                                  side_effect=lambda m: events.append(("import", m))),
+                mock.patch.object(zygote, "_preset_torch_key", return_value=None),
+                mock.patch.object(zygote, "poison_reasons", return_value=[]),
+                mock.patch.object(zygote, "snapshot"),
+                mock.patch.object(zygote, "_install_worker_hook") as hook_mock,
+            ):
+                res = zygote._serve()
+
+        self.assertIsNone(res["preload_error"])
+        self.assertEqual(res["poison"], [])
+        self.assertEqual(res["optional_preloaded"], ["flashinfer"])
+        guards_mock.assert_called_once_with(properties=True, import_torch=True)
+        self.assertEqual(
+            events,
+            [("install_all_guards", True, True), ("import", "fastvideo.user"), ("import", "flashinfer"), "restore"],
+        )
+        hook_mock.assert_called_once_with([], clear_nvml_env=True)
+
+    def test_serve_enables_default_optional_preload_when_torch_in_preload(self):
+        """Unset FASTRSI_ZYGOTE_OPTIONAL_PRELOAD still runs default OPTIONAL_PRELOAD under
+        install_all_guards when "torch" is in FASTRSI_ZYGOTE_PRELOAD."""
+        import importlib
+        from unittest import mock
+        from services import zygote
+
+        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "torch,fastvideo.user"
+        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+        seen = []
+
+        with mock.patch.dict(sys.modules):
+            sys.modules.pop("torch", None)
+            with (
+                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_fake_opt_mod",)),
+                mock.patch.object(zygote, "pin_cute_dsl_arch"),
+                mock.patch.object(zygote.forksafe, "install_all_guards",
+                                  return_value=({"nvml_env_set": False}, lambda: None)) as guards_mock,
+                mock.patch.object(importlib, "import_module", side_effect=lambda m: seen.append(m)),
+                mock.patch.object(zygote, "_preset_torch_key", return_value=None),
+                mock.patch.object(zygote, "poison_reasons", return_value=[]),
+                mock.patch.object(zygote, "snapshot"),
+                mock.patch.object(zygote, "_install_worker_hook"),
+            ):
+                res = zygote._serve()
+
+        self.assertIsNone(res["preload_error"])
+        self.assertEqual(seen, ["torch", "fastvideo.user", "_fastrsi_fake_opt_mod"])
+        self.assertEqual(res["optional_preloaded"], ["_fastrsi_fake_opt_mod"])
+        guards_mock.assert_called_once_with(properties=True, import_torch=True)
 
 
 if __name__ == "__main__":
