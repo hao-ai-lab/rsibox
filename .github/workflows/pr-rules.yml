@@ -173,7 +173,7 @@ jobs:
             exit 0
           fi
           echo "Engines changed: ${engines:-none}; core/livelab changed: $([ -n "$core_livelab" ] && echo yes || echo no)"
-          HAS_ENGINE=$([ -n "$engines" ] && echo 1 || echo 0) printf '%s' "$PR_BODY" | python3 -c '
+          printf '%s' "$PR_BODY" | HAS_ENGINE=$([ -n "$engines" ] && echo 1 || echo 0) python3 -c '
           import os, re, sys
           body = re.sub(r"<!--.*?-->", "", sys.stdin.read().replace("\r", ""), flags=re.S)
           if os.environ.get("HAS_ENGINE") == "1":
