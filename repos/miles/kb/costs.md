@@ -76,3 +76,43 @@ Source: `2× B200` `Qwen3-0.6B` GSM8K GRPO (`parity_rm.parity_rm`, `1` SGLang ro
   - `c8_crash_and_hang` (`238.428 s`, respawns: crash `50.141 s`, hang `50.659 s`, lost `50.193 s`, tamper `50.091 s`).
   - `c9_soak` (`29.854 s`, `20` cycles: install median `0.0638 s`, undo median `0.0172 s`).
   - `c10_not_proven` (`111.592 s`, `proven False` with `['zero_witness']` on startup-only `setup_model_and_optimizer` `config.lr = config.lr * 5.0` while fresh subprocess diverged cleanly to `e2b8a46d3a18e787`).
+
+## 6. First-Class CLI `fastrsi conformance miles --real` (`MilesConformanceLab`, `2× B200`, `2026-11-19`)
+
+Source: `python3 -m fastrsi conformance miles --real` (`adapter.conformance_lab:MilesConformanceLab`, `livelab.json` `"real"` enabled, `6/6` real-GPU engines `cli_launch=yes`) inside `slimerl/slime:latest` on `2× B200` (`Qwen3-0.6B`, `parity_rm.parity_rm`, `check_timeout=20.0`, `rpc_timeout=60.0`):
+- **Result:** **`11/11` PASS**, `113` receipts (`43 txn`, `38 proof`, `32 undo`), `0 MiB × 8` teardown on `b200` (`median edit_to_commit_s 0.0419 s` / `median undo_s 0.0053 s`):
+  - `c0_repeatable` (`13.26 s`, `4872311a7182bf7b`), `c1_noop` (`8.062 s`, witness `[1]`), `c2_visible` (`7.973 s`, `4872311a7182bf7b -> 6a673f84cb0ddfc8`, witness `[1]`).
+  - `c3_fresh_equivalence` (`321.051 s`, bit-exact `live == fresh` on visible `6a673f84cb0ddfc8` & 3-chain `893da88d23d7f9d3`).
+  - `c4_uninstall` (`9.322 s`, undo `0.013525 s`), `c5_failed_install` (`10.263 s`), `c6_refusal` (`10.465 s`), `c7_chain` (`12.096 s`).
+  - `c8_crash_and_hang` (`238.569 s`, respawns: crash `47.415 s`, hang `47.279 s`, lost `47.307 s`, tamper `47.415 s`).
+  - `c9_soak` (`36.169 s`, `20` cycles: install median `0.0622 s`, undo median `0.0169 s`).
+  - `c10_not_proven` (`110.138 s`, `proven False` with `['zero_witness']`, base `4872311a7182bf7b` vs fresh `3112e92c2f60e8d1`).
+
+## 7. Unified Cold-vs-Warm Restart-Overhead Dissection & Live vs. Replay Ladder (`2× B200`, `2026-11-20`)
+
+Source: paired `2× NVIDIA B200` (GPUs `4, 5`, `0 MiB` exit) end-to-end instrumentation across `fresh_cold` (empty compile caches), `fresh_warm`, `live_full` (`MilesStepGate` + `Snapshot S0` `3.58 GB`), and `live_replay` (recorded `rollout0.pt`) on `Qwen3-0.6B` GSM8K GRPO (`parity_rm.parity_rm`, `1` SGLang rollout + `1` Megatron trainer, `243` spawned processes, `not_split = 0.000 s`).
+
+- **Parallel actor overlap (zero double-counting):** At `create_training_models`, Ray spawns `MegatronTrainRayActor` and `RolloutManager -> SGLangEngine` concurrently. `MegatronTrainRayActor` initializes in **`12.17 s` cold (`11.86 s` warm)** (`dist_init 0.31 s`, `setup_model_opt 0.54 s`, HF `load_ckpt 0.46 s`), finishing `~44.8 s` cold (`~21.6 s` warm) **before** `SGLangEngine` (`56.99 s` cold / `33.43 s` warm), so the SGLang boot dominates the critical path.
+- **Cold compile tax inside `fresh_cold` (`25.924 s` `jit_build`):** Clearing Inductor/Triton/FlashInfer/DeepGEMM caches inflates SGLang `Capture cuda graph bs [1, 2, 4, 8, 12, 16]` from **`0.70 s` warm to `21.96 s` cold** (`+21.260 s`) and Step-1 first-step JIT/warmup from **`2.385 s` warm (`3.072 s` Step 1 vs `0.687 s` steady) to `7.049 s` cold (`7.884 s` Step 1 vs `0.834 s` steady)** (`+4.664 s` across SGLang step-0 `+0.50 s` and Megatron/TE/cuDNN `+4.17 s`).
+
+| Arm / Rung | Total (`s`) | Speedup vs Cold | Critical-Path Phase Breakdown (`s`) |
+|---|---:|---:|---|
+| 1. `fresh_cold` (empty compile caches) | **`82.385 s`** | `1.0×` | `import_init 9.556` + `ray_init 22.210` + `spawn_import 11.207` + `weight_load 0.264` + `jit_build 25.924` + `cuda_graph_capture 0.700` + `engine_init 9.304` + `first_step 2.385` + `run_workload 0.834` (`boot_to_ready 74.501 s`, `step1 7.884 s`, `subproc_wall_s 89.360 s`) |
+| 2. `fresh_warm` (warm compile caches) | **`53.480 s`** | `1.5×` | `import_init 9.524` + `ray_init 21.423` + `spawn_import 10.751` + `weight_load 0.432` + `cuda_graph_capture 0.700` + `engine_init 7.578` + `first_step 2.385` + `run_workload 0.687` (`boot_to_ready 50.408 s`, `step1 3.072 s`, `subproc_wall_s 60.510 s`) |
+| 3. Derived peel `import_init` | `43.956 s` | `1.9×` | Row 2 minus `import_init` (`9.524 s`) |
+| 4. Derived peel `ray_init + spawn_import` | `11.782 s` | `7.0×` | Row 3 minus `ray_init` (`21.423 s`) and `spawn_import` (`10.751 s`) |
+| 5. Derived peel `weight_load + cuda_graph_capture` | `10.650 s` | `7.7×` | Row 4 minus `weight_load` (`0.432 s`) and `cuda_graph_capture` (`0.700 s`) |
+| 6. Derived peel `engine_init` | `3.072 s` | `26.8×` | Row 5 minus `engine_init` (`7.578 s`; leaves Step-1 warmup + step) |
+| 7. Live `R0` swap + `S0` restore + full GRPO step | **`0.890 s`** | **`92.6×`** | `live_install 0.0529` (`get_grpo_returns`, witness `1`) + `restore_state 0.2204` (`0.0967 s` trainer + `0.1237 s` sync) + `run_workload 0.6168` (`0.1966 gen + 0.2962 train + 0.1240 sync`; `undo 0.0157 s` bit-exact `w_post_undo == 2372e7ae7cac01a7`) |
+| 8. Live `R0` swap + `S0` + recorded-rollout replay | **`0.678 s`** | **`121.5×`** | `live_install 0.0529` + `restore_state 0.2240` (`0.0969 + 0.1271`) + `run_workload 0.4013` (`0.2730 train + 0.1284 sync`, skips SGLang generation) |
+
+## 8. Post-fanout & PEP 578 negative-cache full `11/11` `MilesConformanceLab` (`2× B200`, `2026-11-20`)
+
+Re-ran container tests (`repos/miles/livelab` **`15 passed, 11 subtests`**; `core/livelab` `test_ray_participants` + `test_coordinator` **`33 passed`**; `0` FastRSI `ResourceWarning`s) and full `python3 -m fastrsi conformance miles --real` inside `slimerl/slime:latest` on `2× B200` after `core/livelab` parallel `_fanout` + PEP 578 `file_namespace` negative cache (`0 MiB × 2` exit):
+- **Conformance:** **`11/11` PASS**, `113` receipts (`43` txn / `38` proof / `32` undo; total case sum `791.114 s`: `c0 13.344 s`, `c1 8.015 s`, `c2 8.022 s`, `c3 333.664 s` bit-exact, `c4 9.448 s`, `c5 11.225 s`, `c6 10.120 s`, `c7 12.183 s`, `c8 238.547 s` [`47.07–47.81 s` respawns], `c9 36.029 s`, `c10 110.517 s`).
+- **`c9_soak` & coordinator speedups vs prior serial baseline:** `c9` install median **`0.0622 -> 0.0536 s`** (**`1.160×`**), `c9` undo median **`0.0169 -> 0.0129 s`** (**`1.310×`**), `edit_to_commit_s` median (`37` committed txns) **`0.041859 -> 0.038396 s`** (**`1.090×`**), `gap_s` median **`0.010459 -> 0.008311 s`** (**`1.258×`**), and `undo_s` median (`32` undos) **`0.005291 -> 0.004624 s`** (**`1.144×`**).
+
+## 9. AST `compile()` negative cache & two-stage `2× B200` ladder (`2026-11-21`)
+
+- **AST `compile()` negative cache (`Qwen3-0.6B` GSM8K GRPO + `parity_rm`):** **`37.15×`** warm `status()` (`0.875 -> 0.0236 s`), `32` AST compiles with `0` wipes, **`11/11`** conformance, **`15/15`** container `pytest`.
+- **Two-stage `2× B200` ladder:** Cold **`102.58 s`** -> Warm **`72.27 s`** -> Stage 1 Live `MilesStepGate` + `S0` + `320`-trajectory (`40×8×512`) GRPO step **`14.07 s`** (**`7.3×`**: `0.0495 s` install + `0.424 s` `S0` + `13.60 s` step) -> Stage 2 `64`-trajectory (`8×8×512`) recorded-rollout Megatron replay + weight sync **`1.89 s`** (**`54.3×`**: `0.0511 s` install + `0.226 s` `S0` + `1.61 s` train/sync; bit-exact `S0`/undo/fresh).
