@@ -108,9 +108,48 @@ def _free_port():
         return s.getsockname()[1]
 
 
+_SHORT_BASE = None
+
+
+def _short_base_dir():
+    """Pick the shortest writable+executable directory for fake scripts and AF_UNIX sockets."""
+    global _SHORT_BASE
+    if _SHORT_BASE is not None:
+        return _SHORT_BASE
+    st_noexec = getattr(os, "ST_NOEXEC", 0)
+    for root in ("/dev/shm", "/tmp", tempfile.gettempdir()):
+        if not root or not os.path.isdir(root):
+            continue
+        if st_noexec and hasattr(os, "statvfs"):
+            try:
+                if os.statvfs(root).f_flag & st_noexec:
+                    continue
+            except OSError:
+                continue
+        probe = None
+        try:
+            fd, probe = tempfile.mkstemp(prefix=".exec", dir=root)
+            os.write(fd, b"#!/bin/sh\nexit 0\n")
+            os.close(fd)
+            os.chmod(probe, 0o700)
+            if subprocess.run([probe], capture_output=True, timeout=5).returncode == 0:
+                _SHORT_BASE = root
+                return _SHORT_BASE
+        except (OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            if probe is not None:
+                try:
+                    os.unlink(probe)
+                except OSError:
+                    pass
+    _SHORT_BASE = tempfile.gettempdir()
+    return _SHORT_BASE
+
+
 def _short_dir():
     """AF_UNIX paths are limited to 107 bytes; the default temp dir can be longer."""
-    return tempfile.mkdtemp(prefix="eng", dir="/dev/shm" if os.path.isdir("/dev/shm") else "/tmp")
+    return tempfile.mkdtemp(prefix="eng", dir=_short_base_dir())
 
 
 def _one_json_line(stdout):
@@ -316,6 +355,70 @@ def test_an_override_that_moves_the_model_is_a_finding():
     new = parse(vllm_args.override(base, patch))
     assert new["args"]["model"] == "N"
     assert vllm_args.override_finding(patch, parse(base), new) is None
+
+
+def test_override_finding_catches_non_model_and_tokenizer_arity_mismatches():
+    """M-M10: a merge keeping `model` unchanged still produces a finding when an untouched flag,
+    negated boolean, zero-arity bool in override, or tokenizer/parser arity mismatches."""
+    import argparse, vllm_args
+
+    code = {}
+    exec(STUB_PARSER["vllm/entrypoints/common/cli_args.py"].split("\n", 2)[2], code)
+    parser = code["make_arg_parser"](argparse.ArgumentParser(prog="vllm serve"))
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--served-model-name", nargs="+")
+    parser.add_argument("-ep", dest="enable_expert_parallel", action="store_true")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("-xb", "--extra-bool", action="store_true")
+    parser.add_argument("--no-extra-bool", action="store_false", dest="extra_bool")
+    parse = lambda argv: vllm_args.parse(argv, parser)
+
+    # Known short bool `-ep` + `--no-enable-expert-parallel` and negative integer `--seed -1`.
+    ep_merged = vllm_args.override(["M", "-ep", "--port", "8000"], ["--no-enable-expert-parallel"])
+    assert ep_merged == ["M", "--port", "8000"]
+    assert vllm_args.override_finding(["--no-enable-expert-parallel"],
+                                      parse(["M", "-ep", "--port", "8000"]),
+                                      parse(ep_merged)) is None
+    assert vllm_args.override(["M", "--seed", "-1"], ["--seed", "7"]) == ["M", "--seed", "7"]
+
+    # Untouched multi-value flag preserves identical (parser=2, tokenizer=1) arity pairs -> safe.
+    mv_base = ["M", "--served-model-name", "a", "b", "--port", "8000"]
+    mv_patch_safe = ["--port", "8001"]
+    mv_merged_safe = vllm_args.override(mv_base, mv_patch_safe)
+    assert vllm_args.override_finding(mv_patch_safe, parse(mv_base), parse(mv_merged_safe)) is None
+
+    # Overriding a multi-value flag whose tokenizer arity underestimated parser arity -> finding,
+    # even when the model is kept identical via `--model M`.
+    mv_patch_bad = ["--model", "M", "--served-model-name", "c"]
+    mv_merged_bad = vllm_args.override(mv_base, mv_patch_bad)
+    finding_mv = vllm_args.override_finding(mv_patch_bad, parse(mv_base), parse(mv_merged_bad))
+    assert finding_mv and finding_mv["check"] == "vllm_args_override"
+
+    # Untouched field / explicit option mutation while `model` stays identical -> finding.
+    old_p = parse(["M", "--port", "8000", "--max-model-len", "4096"])
+    tampered_new = parse(["M", "--port", "8001"])
+    finding_untouched = vllm_args.override_finding(["--port", "8001"], old_p, tampered_new)
+    assert finding_untouched and finding_untouched["check"] == "vllm_args_override"
+
+    # Unmapped short bool `-xb` negated with `--no-extra-bool`: `-xb` stays and wins / leaks.
+    xb_base = ["M", "-xb", "--port", "8000"]
+    xb_patch = ["--no-extra-bool"]
+    xb_old = parse(xb_base)
+    xb_new = parse(["M", "--port", "8000", "-xb", "--no-extra-bool"])
+    xb_new["args"] = {**xb_new["args"], "extra_bool": True}
+    xb_new["explicit_values"] = {**xb_new["explicit_values"], "extra_bool": True}
+    finding_neg = vllm_args.override_finding(xb_patch, xb_old, xb_new)
+    assert finding_neg and finding_neg["check"] == "vllm_args_override"
+
+    # Zero-arity bool in override followed by non-option token while model stays "M" -> finding,
+    # even when the parser still succeeds (`ok=True`, `model=="M"`).
+    bool_base = ["--model", "M", "--port", "8000"]
+    bool_patch = ["--trust-remote-code", "M"]
+    bool_merged = vllm_args.override(bool_base, bool_patch)
+    bool_old, bool_new = parse(bool_base), parse(bool_merged)
+    assert bool_new["ok"] and bool_new["args"]["model"] == "M"
+    finding_bool = vllm_args.override_finding(bool_patch, bool_old, bool_new)
+    assert finding_bool and finding_bool["check"] == "vllm_args_override"
 
 
 def test_a_reconfigure_value_vllm_cannot_run_is_a_finding():
@@ -939,6 +1042,96 @@ def test_stop_engine_stops_a_forked_engines_members_after_its_leader_exited():
             _stop(worker)
 
 
+def test_verified_members_accepts_recorded_marker_members_and_rejects_reused_pids(tmp_path):
+    """Input: a /proc tree where worker 2001 was forked without exec (no marker in its
+    exec-time environ) and recorded `(2001, start_time=500)` under `<marker>/.members/2001`,
+    worker 2002 has a stale `start_time=400` in `.members/2002` while `/proc/2002/stat` is
+    `600` (pid reused), and worker 2003 is recorded only in another marker directory.
+    Action: verified_members with `since=None`. Expect: `[2001]` only."""
+    marker = tmp_path / "live_a"
+    other_marker = tmp_path / "live_b"
+    proc_root = tmp_path / "proc"
+    for pid, start in ((2001, 500), (2002, 600), (2003, 700)):
+        pdir = proc_root / str(pid)
+        pdir.mkdir(parents=True)
+        (pdir / "stat").write_text(
+            f"{pid} (VLLM::Worker) S 1 2000 2000 " + " ".join(["0"] * 15) + f" {start} 0 0\n"
+        )
+        (pdir / "environ").write_bytes(b"PATH=/bin\0")
+    assert zygote.record_marker_member(str(marker), pid=2001, proc_root=str(proc_root)) is True
+    (marker / zygote.MARKER_MEMBERS_DIR / "2002").write_text("400\n")
+    assert zygote.record_marker_member(str(other_marker), pid=2003, proc_root=str(proc_root)) is True
+
+    assert engine.verified_members([2001, 2002, 2003], str(marker), proc_root=str(proc_root)) == [2001]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
+def test_zygote_forked_engine_records_launch_marker_and_stops_without_start_time():
+    """Input: a real zygote.py starts a forked server (`vllm.entrypoints.cli.main`) that forks a
+    worker process and exits. Action: verify `/proc/<worker>/environ` still lacks the launch
+    marker, then call `stop_engine(leader_pid, marker=marker)` WITHOUT `start_time`.
+    Expect: `stop_engine` verifies the worker via `<marker>/.members/<pid>` and stops it
+    (`stopped=True`, `how="members"`)."""
+    d = _short_dir()
+    sock, cache = os.path.join(d, "z.sock"), os.path.join(d, "c")
+    zpy = _script(d, "python", FAKE_PYTHON.replace('sys.modules["vllm"] = None\n', ""))
+    lib = Path(d, "lib")
+    cli_dir = lib / "vllm" / "entrypoints" / "cli"
+    cli_dir.mkdir(parents=True)
+    for pkg in (lib / "vllm", lib / "vllm" / "entrypoints", cli_dir):
+        (pkg / "__init__.py").touch()
+    (cli_dir / "main.py").write_text(
+        "import os, time\n"
+        "def main():\n"
+        "    pid = os.fork()\n"
+        "    if pid == 0:\n"
+        "        time.sleep(60)\n"
+        "        os._exit(0)\n"
+        "    print(f'WORKER={pid}', flush=True)\n"
+        "    os._exit(0)\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(lib) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    r = subprocess.run([sys.executable, ENGINE, "zygote", "--python", zpy, "--zygote", sock,
+                        "--cache-root", cache, "--log", os.path.join(d, "z.log")],
+                       capture_output=True, text=True, timeout=120, env=env)
+    rep = json.loads(r.stdout)
+    worker = None
+    leader_pid = None
+    try:
+        assert rep["ready"] is True, r.stdout + r.stderr + Path(d, "z.log").read_text()
+        a, _ = engine.parse(["start", "--zygote", sock, "--cache-root", cache,
+                             "--log", os.path.join(d, "s.log")])
+        req_env = engine.engine_env(a, env)
+        marker = req_env[engine.MARKER_ENV]
+        srv_log = os.path.join(d, "s.log")
+        reply = zygote.request(sock, ["vllm", "serve"], req_env, srv_log)
+        assert reply.get("ok") is True, reply
+        leader_pid = reply["pid"]
+        for _ in range(100):
+            if os.path.exists(srv_log):
+                txt = Path(srv_log).read_text()
+                for line in txt.splitlines():
+                    if line.startswith("WORKER="):
+                        worker = int(line.split("=", 1)[1])
+                        break
+            if worker is not None and zygote._exited(leader_pid):
+                break
+            time.sleep(0.05)
+        assert worker is not None and zygote._exited(leader_pid)
+        proc_env = Path(f"/proc/{worker}/environ").read_bytes().split(b"\0")
+        assert f"{engine.MARKER_ENV}={marker}".encode() not in proc_env
+        res = engine.stop_engine(leader_pid, grace=2, kill_wait=3, marker=marker)
+        assert res["stopped"] is True and res["how"] == "members", res
+        assert zygote._exited(worker)
+    finally:
+        if worker is not None:
+            _stop(worker)
+        if leader_pid is not None:
+            _stop(leader_pid)
+        _stop(rep["pid"])
+        shutil.rmtree(d, ignore_errors=True)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux-only: needs /proc/<pid> (engine.py and zygote read process state from /proc)")
 def test_stop_engine_never_signals_a_pid_another_process_holds_now():
     """Input: a live process whose start time differs from the one recorded at launch (the
@@ -1180,3 +1373,83 @@ def test_wait_healthy_fails_on_unhandled_traceback_and_engine_core_init_failure(
     core_log.write_text("RuntimeError: Engine core initialization failed. See root cause above.\n")
     assert engine.wait_healthy(18999, os.getpid(), str(core_log), timeout=5, poll=0.01) is None
     assert probed == []
+
+
+def test_corelab_shared_service_helpers(tmp_path):
+    """Shared stdlib helpers in corelab.py cover text reads, last JSON line extraction,
+    logged detached process spawning, HTTP health checks, and JSON POST."""
+    import http.server
+    import threading
+    import corelab
+
+    missing = tmp_path / "absent.log"
+    assert corelab.read_text(str(missing)) == ""
+    with pytest.raises(FileNotFoundError):
+        corelab.read_text(str(missing), missing_ok=False)
+
+    assert corelab.last_json_line('noise\n{"a": 1}\n{"b": 2}\ntrailer') == {"b": 2}
+    assert corelab.last_json_line("no json here") == {}
+
+    log = tmp_path / "sub" / "spawn.log"
+    p = corelab.spawn_logged([sys.executable, "-c", "print('hello_logged')"], str(log))
+    assert p.wait(timeout=10) == 0
+    assert "hello_logged" in corelab.read_text(str(log), missing_ok=False)
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200 if self.path == "/health" else 404)
+            self.end_headers()
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            if self.path == "/echo":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(raw)
+            else:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"boom")
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    port = srv.server_address[1]
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        assert corelab.http_healthy(port, timeout=2.0) is True
+        assert corelab.http_healthy(port, timeout=2.0, path="/missing") is False
+        assert corelab.http_post_json(port, "/echo", '{"ok": true}', timeout=2.0) == {"ok": True}
+        with pytest.raises(RuntimeError, match="500"):
+            corelab.http_post_json(port, "/fail", "{}", timeout=2.0)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=5)
+
+
+def test_corelab_http_healthy_catches_http_exception():
+    """Malformed HTTP responses (`http.client.HTTPException`) return False instead of crashing."""
+    import threading
+    import corelab
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def _send_garbage():
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(1024)
+                conn.sendall(b"NOT_HTTP_GARBAGE\r\n\r\n")
+
+        th = threading.Thread(target=_send_garbage, daemon=True)
+        th.start()
+        try:
+            assert corelab.http_healthy(port, timeout=2.0) is False
+        finally:
+            th.join(timeout=5)

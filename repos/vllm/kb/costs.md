@@ -225,7 +225,13 @@ Standalone 7-arm `layernorm_kernels.cu` compile-phase waterfall on B200 GPU 0 (`
 - `E_thin_fused_only_O2` (thin single-kernel TU stripping unrelated `rms_norm`): `8.596 s` (`ptxas 0.081 s` [`10.9×` vs `A`], `cicc 2.168 s`, `gcc 2.535 s`).
 - `H_thin_bf16_host_O0` (`BFloat16`-only thin TU): `8.321 s` (`pp 1.651 s + cudafe++ 2.813 s + gcc 2.389 s = 6.853 s` header/host floor).
 
-And the `52`-test real-GPU `livelab/services/` E2E suite (`test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`) passed `52/52` (`0` skipped) on B200 under `-W error::ResourceWarning`.
+And after consolidating shared HTTP, health, log-phase, tensor, and subprocess helpers across `livelab/services/` (`-265` net non-test LOC), the full B200 Linux test verification (`CUDA_VISIBLE_DEVICES=4,5`, `-W error::ResourceWarning`, `0 MiB` exit) passed **`134/134`** `livelab/services` tests (including **`52/52`** real-GPU E2E across `test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`), **`72/72`** `livelab/adapter` + `examples/live-edit-qwen3` tests, **`241/241`** `core/livelab` (`156/156` `unittest`), and **`8/8`** `fastrsi doctor` (`0` GPU import violations).
+
+Symlink-overlay staging & 3-family CUDA kernel verification (`native.py`, `2× B200` `TP=2`, `Qwen3-8B`, `FULL_DECODE_ONLY [1, 2, 4]`, `--kernel-config` `vllm_c`, `70 passed, 11 subtests` Linux `adapter` pytest, `0 MiB × 2` exit, zero `csrc` tree mutation):
+- **`_stage_csrc_overlay` vs `shutil.copytree` (`322` files / `48` dirs):** **`1.695–1.897 ms`** (`edit_mode`: `2` real dirs, `1` real `.cu` copy, `75` symlinks) and **`1.615–1.628 ms`** (`source_mode`) vs `12.395 ms` `copytree` (**`6.53×–7.67×` faster**).
+- **Kernel 1 (`libtorch_stable/layernorm_kernels.cu` -> `fused_add_rms_norm`, `sources`):** `epsilon = 0.25f` (`12.075 s` build, `0.647 s` `R1`, `13.831 s` total vs `50.795 s` fresh) and `PR #49750` (`12.015 s` build, `0.714 s` `R1`, **`13.808 s` total** vs `48.105 s` fresh, `live [576, 576]`, `capture [432, 432]`, **`cascade_undo_s 7.03 ms`**, `max |Δlogprob| = 0.0`).
+- **Kernel 2 (`libtorch_stable/pos_encoding_kernels.cu` -> `rotary_embedding`, `edits` real-copy overlay):** `5.239 s` build, `0.978 s` `R1`, **`7.293 s` total** vs `41.180 s` fresh (**`5.65×`**), `live [288, 288]`, `capture [216, 216]`, **`undo_s 3.20 ms`**, `max |Δlogprob| = 0.0`.
+- **Kernel 3 (`libtorch_stable/activation_kernels.cu` -> `silu_and_mul`, `edits` real-copy overlay):** `8.547 s` build, `0.734 s` `R1`, **`10.359 s` total** vs `46.292 s` fresh (**`4.47×`**), `live [288, 288]`, `capture [216, 216]`, **`undo_s 5.26 ms`**, `max |Δlogprob| = 0.0`.
 
 ## Live TP2 <-> EP2 by holder reshard (Qwen3.5-35B-A3B BF16, 2× B200, 2026-11-19)
 
@@ -352,6 +358,42 @@ pre-swap live `fcfs -> priority` (`max_num_seqs=2`, `apply_s 0.191 ms`, client `
 (`install 0.079163 s`, witnesses `Sampler.__call__` `31` / `check_stop` `29`), exact `undo`
 (`0.038081 s`, output restored to base), and post-swap live `fcfs <-> priority` (`0.260 ms` /
 `0.245 ms` apply, client `4.429 ms` / `2.375 ms`, HTTP `200`).
+
+A dedicated B200 GPU 0 run (`Qwen3-8B` TP=1, CUDA graphs enabled, `max_model_len=2048`,
+`enable_chunked_prefill=True`, `max_num_seqs=16`, `max_num_batched_tokens=4096`) also verified
+live `--max-num-batched-tokens` reconfiguration and multi-knob coexistence (`0 MiB` cleanup;
+`live_boot 123.03 s` with initial FlashInfer JIT, fresh `512` `35.08 s`):
+- Live `max_num_batched_tokens` `4096 -> 512`: `0.006432 s` apply (`0.035 ms` in-engine,
+  `0.362 ms` round-trip in engine, `6.4201 s` launcher); `1,316`-token prompt completed in
+  `0.1184 s` (`27` steps), bit-exact to a fresh `--max-num-batched-tokens 512` server
+  (`token_ids_exact: true`, `max |Δlogprob| = 0.0`).
+- Live restore to `4096` (`0.002332 s`, `0.022 ms` in-engine), simultaneous 3-knob update
+  (`--max-num-seqs 4 --max-num-batched-tokens 1024 --scheduling-policy priority`, `0.00441 s`
+  apply / `0.229 ms` in-engine, `priority=-1` HTTP `200`), and negative-control cap refusal
+  (`max_num_batched_tokens=8192 > 4096` refused with `ok: false` in `4.400 ms`, leaving live
+  limit at `1024`). Drain-aware stops completed in `0.879 s` / `0.797 s`.
+
+## `weights.py` TP=2 CUDA IPC + CUDA graphs + zygote & KV plan (`2× B200`, `2026-11-19`)
+
+Source: our `2× B200` `Qwen3-8B` TP=2 run (`--no-enforce-eager`, CUDA graphs enabled, `0 MiB × 2` teardown):
+
+| Path | `healthy_after_s` | First prompt / Gen | KV plan / Notes |
+|---|---:|---:|---|
+| Baseline disk start (CUDA graphs ON) | `43.58 s` | `0.1769 s` / `0.3544 s` | `load_weights_s 1.35 s`, `graph_capture [5.0, 5.0, 7.0, 7.0]`, VRAM `[82432, 82432] MiB` |
+| `weights.py` CUDA IPC (`--weights`, CUDA graphs ON) | `43.61 s` | `0.1689 s` / `0.3475 s` | `ipc_cache_mentions: 2` (`22.01 s` preload `[8986, 8986] MiB`, `probe 0.096 s`), **`max |Δlogprob| = 0.0`** |
+| `--zygote --fork --weights --kvplan` (Run 1, record) | `34.51 s` | `0.1496 s` / `0.325 s` | `zygote_start 8.51 s`, `fork_check.spawn_forced: false`, `kvplan measured: 2` (`6.670 / 6.674 s`), bit-exact |
+| `--zygote --fork --weights --kvplan` (Run 2, reuse) | **`29.49 s`** | `0.2333 s` / `0.4108 s` | **`kvplan reused: 2` (`0.003 / 0.003 s`)**, `fork_check.spawn_forced: false`, `graph_capture [7.0, 7.0]`, **`max |Δlogprob| = 0.0`** |
+
+## Native build host PCH, 2-TU parallel compile, and 2PC `prepare` timings (`B200`, `Qwen3-8B`)
+
+- **Host PCH caching (`_pch/reg.hpp.gch`):** `1.18–1.67 s -> 0.138 ms`, cutting `reg.cpp` compile **`2.19×`** (`0.668 -> 0.305 s`).
+- **2-TU `--threads=8` (`pos_encoding` + `activation`):** **`8.34–8.49 s`** build (**`1.65×`** vs sequential `13.79 s`, **`9.06 s`** edit-to-rebuilt).
+- **2PC `prepare` receipt `timings`:** Detailed compile/load/recapture timings forwarded inside 2PC `prepare` receipts (`max |Δlogprob| = 0.0`, **`3.10–3.42 ms`** warm undo).
+
+## V2 `GPUModelRunner` KV-cache snapshot replay (`1× B200`, `vllm 0.33.0`, `Qwen2.5-1.5B-Instruct`)
+
+- Verified V2 `GPUModelRunner` KV-cache snapshot replay on `1× B200` (`vllm 0.33.0`, `Qwen2.5-1.5B-Instruct`): **`16/16`** replayed steps token-identical & logprob-equal (`fresh["finals"] == replay["finals"]`, `restore_ms=1.47 ms`, `0 MiB` exit).
+- Linux container `pytest`: `137 passed, 4 skipped` (`core/livelab`: `248 passed, 2 skipped`).
 
 ## Not measured yet
 

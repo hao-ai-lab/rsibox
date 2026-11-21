@@ -264,3 +264,56 @@ def test_override_and_classify_reconfig_with_real_vllm_parser(parsed):
     assert tier2b_delta["subtier"] == "tier2b_weight_format"
     assert tier2b_delta["weights_compatible"] is False
     assert tier2b_delta["weight_format_fields"] == ["kv_cache_dtype"]
+
+
+def test_override_and_arity_checks_on_real_vllm_parser():
+    """M-M10 real-vLLM checks: `-ep` / `--no-enable-expert-parallel`, multi-value
+    `--kv-cache-dtype-skip-layers`, untouched vs overridden `--served-model-name`, and
+    zero-arity `--trust-remote-code` arity comparison against vLLM's own parser."""
+    script = r'''
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import vllm_args
+parser, _ = vllm_args.build()
+
+def run(base, patch):
+    old = vllm_args.parse(base, parser)
+    merged = vllm_args.override(base, patch)
+    new = vllm_args.parse(merged, parser)
+    return {
+        "old": old,
+        "merged": merged,
+        "new": new,
+        "finding": vllm_args.override_finding(patch, old, new),
+    }
+
+out = {
+    "ep_neg": run(["M", "-ep", "--port", "8000"], ["--no-enable-expert-parallel"]),
+    "skip_layers": run(["M", "--kv-cache-dtype-skip-layers", "l0", "l1", "--port", "8000"],
+                       ["--kv-cache-dtype-skip-layers", "l2"]),
+    "smn_untouched": run(["M", "--served-model-name", "a", "b", "--port", "8000"], ["--port", "8001"]),
+    "smn_overridden": run(["M", "--served-model-name", "a", "b", "--port", "8000"],
+                          ["--model", "M", "--served-model-name", "c"]),
+    "trc_swallow": run(["--model", "M", "--port", "8000"], ["--trust-remote-code", "M"]),
+}
+print(json.dumps(out))
+'''
+    r = subprocess.run([VLLM_PY, "-c", script, str(HERE)], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-3000:]
+    res = json.loads(r.stdout.strip().splitlines()[-1])
+
+    assert res["ep_neg"]["new"]["ok"] is True
+    assert res["ep_neg"]["finding"] is None
+
+    assert res["skip_layers"]["new"]["ok"] is True
+    assert res["skip_layers"]["merged"] == ["M", "--port", "8000", "--kv-cache-dtype-skip-layers", "l2"]
+    assert res["skip_layers"]["finding"] is None
+
+    assert res["smn_untouched"]["new"]["ok"] is True
+    assert res["smn_untouched"]["finding"] is None
+
+    assert res["smn_overridden"]["finding"] is not None
+    assert res["smn_overridden"]["finding"]["check"] == "vllm_args_override"
+
+    assert res["trc_swallow"]["finding"] is not None
+    assert res["trc_swallow"]["finding"]["check"] == "vllm_args_override"

@@ -29,7 +29,7 @@ Contract:
   (test_vllm_args.py checks this in a fresh process). Cost on our host: import 4.7-4.9 s, build
   0.16 s, parse 1 ms. The zygote has these imported already (zygote.py, request "parse").
 """
-import argparse, contextlib, dataclasses, enum, io, os, sys, time
+import argparse, contextlib, dataclasses, enum, io, os, re, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from live_reconfig import LIVE_FIELDS  # noqa: E402  (no vLLM import: cheap)
@@ -119,8 +119,10 @@ _FLAG_ALIASES = {
     "-tp": "--tensor-parallel-size",
     "-pp": "--pipeline-parallel-size",
     "-dp": "--data-parallel-size",
+    "-ep": "--enable-expert-parallel",
     "-q": "--quantization",
     "-cc": "--compilation-config",
+    "-sc": "--speculative-config",
     "-O": "--optimization-level",
 }
 _BOOL_DEFAULT_FALSE = {
@@ -130,15 +132,27 @@ _BOOL_DEFAULT_FALSE = {
     "--disable-log-stats",
 }
 _BOOL_FLAGS = _BOOL_DEFAULT_FALSE | {
+    "-ep",
     "--no-enforce-eager",
     "--no-enable-expert-parallel",
+    "--disable-expert-parallel",
     "--no-async-scheduling",
     "--enable-prefix-caching",
     "--no-enable-prefix-caching",
+    "--disable-prefix-caching",
     "--enable-chunked-prefill",
     "--no-enable-chunked-prefill",
     "--disable-chunked-prefill",
 }
+_MULTI_VALUE_FLAGS = {
+    "--cudagraph-capture-sizes",
+    "--kv-cache-dtype-skip-layers",
+}
+_NEGATIVE_NUM_RE = re.compile(r"^-(?:\d+\.?|\.\d)\d*(?:[eE][+-]?\d+)?$")
+
+
+def _is_option_token(token):
+    return token.startswith("-") and token != "-" and not _NEGATIVE_NUM_RE.match(token)
 
 
 def _normalize_value(value):
@@ -189,6 +203,71 @@ def build():
     return parser, {"import": round(t1 - t, 3), "build": round(time.time() - t1, 3)}
 
 
+def _lookup_action(parser, opt):
+    actions = getattr(parser, "_option_string_actions", None) or {}
+    if opt in actions:
+        return actions[opt]
+    if opt.startswith("--"):
+        dash = "--" + opt[2:].replace("_", "-")
+        if dash in actions:
+            return actions[dash]
+        under = "--" + opt[2:].replace("-", "_")
+        if under in actions:
+            return actions[under]
+    return None
+
+
+def _parser_consumed(argv, index, tok, act):
+    if "=" in tok or act.nargs == 0:
+        return 0
+    if act.nargs in (None, 1):
+        return 1 if index + 1 < len(argv) else 0
+    if act.nargs == "?":
+        if index + 1 < len(argv) and argv[index + 1] != "--" and not _is_option_token(argv[index + 1]):
+            return 1
+        return 0
+    if isinstance(act.nargs, int):
+        return min(act.nargs, max(0, len(argv) - index - 1))
+    j = index + 1
+    while j < len(argv) and argv[j] != "--" and not _is_option_token(argv[j]):
+        j += 1
+    return j - index - 1
+
+
+def _inspect_argv_with_parser(argv, parser, ns, args, explicit):
+    """Compare parser action arities against `_tokenize_argv` and capture explicit dest values."""
+    argv = list(argv)
+    _, _, spans = _tokenize_argv_spans(argv)
+    arities = {}
+    explicit_values = {f: args[f] for f in explicit if f in args}
+    index = 0
+    while index < len(argv):
+        tok = argv[index]
+        if tok == "--":
+            break
+        if not _is_option_token(tok):
+            index += 1
+            continue
+        opt = tok.split("=", 1)[0]
+        act = _lookup_action(parser, opt)
+        if act is None:
+            index += 1
+            continue
+        p_consumed = _parser_consumed(argv, index, tok, act)
+        t_consumed = spans.get(index, 0)
+        canon = _canonical_flag(tok)
+        entry = arities.setdefault(
+            canon, {"dest": act.dest, "nargs": str(act.nargs), "pairs": []}
+        )
+        entry["pairs"].append([p_consumed, t_consumed])
+        if act.dest and act.dest not in ("help", argparse.SUPPRESS):
+            explicit_values[act.dest] = _normalize_value(getattr(ns, act.dest, None))
+        index += 1 + p_consumed
+    if "model" in explicit:
+        explicit_values["model"] = args["model"]
+    return explicit_values, arities
+
+
 def parse(argv, parser=None):
     seconds = {}
     if parser is None:
@@ -219,8 +298,10 @@ def parse(argv, parser=None):
     if getattr(ns, "model_tag", None) is not None:         # serve.py: model_tag wins
         args["model"] = ns.model_tag
         explicit = sorted(set(explicit) | {"model"}, key=FIELDS.index)
+    explicit_values, arities = _inspect_argv_with_parser(argv, parser, ns, args, explicit)
     seconds["parse"] = round(time.time() - t, 4)
-    return {"ok": True, "args": args, "explicit": explicit, "seconds": seconds}
+    return {"ok": True, "args": args, "explicit": explicit,
+            "explicit_values": explicit_values, "arities": arities, "seconds": seconds}
 
 
 def _canonical_flag(token):
@@ -236,15 +317,16 @@ def _canonical_flag(token):
     return option
 
 
-def _tokenize_argv(argv):
-    """Split a `vllm serve` argv into (positional_model, [(canonical_opt, raw_tokens), ...])."""
+def _tokenize_argv_spans(argv):
+    """Split a `vllm serve` argv into `(positional_model, items, {opt_index: consumed})`."""
     model = None
     items = []
+    spans = {}
     index = 0
     argv = list(argv)
     while index < len(argv):
         token = argv[index]
-        if not token.startswith("-"):
+        if not _is_option_token(token):
             if model is None:
                 model = token
                 index += 1
@@ -252,6 +334,7 @@ def _tokenize_argv(argv):
             items.append((None, [token]))
             index += 1
             continue
+        opt_index = index
         option = token.split("=", 1)[0]
         normalized_opt = ("--" + option[2:].replace("_", "-")) if option.startswith("--") else option
         canonical_opt = _canonical_flag(token)
@@ -261,16 +344,23 @@ def _tokenize_argv(argv):
         else:
             chunk = [token]
             index += 1
-            while index < len(argv) and not argv[index].startswith("-"):
+            while index < len(argv) and not _is_option_token(argv[index]):
                 chunk.append(argv[index])
                 index += 1
-                if canonical_opt != "--cudagraph-capture-sizes":
+                if canonical_opt not in _MULTI_VALUE_FLAGS:
                     break
+        spans[opt_index] = len(chunk) - 1
         if canonical_opt == "--model" and len(chunk) >= 2:
             model = chunk[1] if "=" not in chunk[0] else chunk[0].split("=", 1)[1]
         elif canonical_opt == "--model" and "=" in chunk[0]:
             model = chunk[0].split("=", 1)[1]
         items.append((canonical_opt, chunk))
+    return model, items, spans
+
+
+def _tokenize_argv(argv):
+    """Split a `vllm serve` argv into (positional_model, [(canonical_opt, raw_tokens), ...])."""
+    model, items, _ = _tokenize_argv_spans(argv)
     return model, items
 
 
@@ -309,23 +399,138 @@ def override(base_argv, patch_argv):
     return merged_argv
 
 
+def _flag_to_fields(canon):
+    """Fallback field dest guesses for a canonical option when parser arities are absent."""
+    if not canon or not canon.startswith("--"):
+        return set()
+    base = canon[2:].replace("-", "_")
+    out = {base}
+    if base.startswith("enable_"):
+        out.add("disable_" + base[7:])
+    elif base.startswith("disable_"):
+        out.add("enable_" + base[8:])
+    if base == "kernel_config":
+        out.update(_KERNEL_CFG_FIELDS)
+    return out
+
+
+def _override_finding_payload(observed, expected):
+    return {
+        "check": "vllm_args_override",
+        "observed": observed,
+        "expected": expected,
+        "why": "the merge took a value of a neighbouring flag for another field or model, or dropped it",
+        "actions": ["put the model first or pass it as --model in the override",
+                    "start the engine again with its full argv (engine.py start)"],
+    }
+
+
 def override_finding(patch_argv, old_parsed, new_parsed):
-    """A `vllm_args_override` finding when the merged argv (override) would serve another model
-    than it should: the patch's (positional or --model), else the running engine's. None when
-    it matches. _tokenize_argv knows the arity of a few flags only, so a boolean flag right
-    before the positional model, or a flag with several values, can move or drop the model in
-    the merge; a reconfigure checks this before it stops the engine."""
-    patch_model, _ = _tokenize_argv(patch_argv)
-    want = patch_model if patch_model is not None else (old_parsed.get("args") or {}).get("model")
-    got = (new_parsed.get("args") or {}).get("model")
-    if got == want:
-        return None
-    return {"check": "vllm_args_override",
-            "observed": f"the merged argv would serve {got!r}",
-            "expected": f"{want!r} (the override's model, else the running engine's)",
-            "why": "the merge took a value of a neighbouring flag for the model, or dropped it",
-            "actions": ["put the model first or pass it as --model in the override",
-                        "start the engine again with its full argv (engine.py start)"]}
+    """A `vllm_args_override` finding when the merged argv (`override`) differs unexpectedly from
+    `old_parsed` and `patch_argv`: checks model identity, non-model `FIELDS` and `explicit`
+    flags, parser-level `explicit_values`, negated bool overrides, and tokenizer arity
+    differences between `old_parsed` and `new_parsed`."""
+    patch_model, patch_items = _tokenize_argv(patch_argv)
+    old_args = old_parsed.get("args") or {}
+    new_args = new_parsed.get("args") or {}
+    want = patch_model if patch_model is not None else old_args.get("model")
+    got = new_args.get("model")
+    if got != want:
+        return _override_finding_payload(
+            f"the merged argv would serve {got!r}",
+            f"{want!r} (the override's model, else the running engine's)",
+        )
+
+    old_arities = old_parsed.get("arities") or {}
+    new_arities = new_parsed.get("arities") or {}
+    patch_canons = {canon for canon, _ in patch_items if canon is not None}
+    has_config = "--config" in patch_canons
+    patch_dests = {"model"} if patch_model is not None else set()
+    for canon, chunk in patch_items:
+        if canon is None:
+            continue
+        info = new_arities.get(canon) or old_arities.get(canon)
+        if info and info.get("dest"):
+            patch_dests.add(info["dest"])
+            if info["dest"] == "kernel_config":
+                patch_dests.update(_KERNEL_CFG_FIELDS)
+        raw_opt = chunk[0].split("=", 1)[0]
+        raw_norm = ("--" + raw_opt[2:].replace("_", "-")) if raw_opt.startswith("--") else raw_opt
+        raw_info = new_arities.get(raw_norm) or old_arities.get(raw_norm)
+        if raw_info and raw_info.get("dest"):
+            patch_dests.add(raw_info["dest"])
+        patch_dests.update(_flag_to_fields(canon))
+
+    old_explicit = set(old_parsed.get("explicit") or ())
+    new_explicit = set(new_parsed.get("explicit") or ())
+    old_ev = old_parsed.get("explicit_values") or {}
+    new_ev = new_parsed.get("explicit_values") or {}
+
+    if not has_config:
+        for field_name in FIELDS:
+            if field_name in patch_dests:
+                continue
+            if old_args.get(field_name) != new_args.get(field_name) or (
+                (field_name in old_explicit) != (field_name in new_explicit)
+            ):
+                return _override_finding_payload(
+                    f"the merged argv altered untouched field {field_name!r}: "
+                    f"{old_args.get(field_name)!r} -> {new_args.get(field_name)!r}",
+                    "all flags outside the override remain identical to the running engine",
+                )
+        for dest in sorted(set(old_ev) | set(new_ev)):
+            if dest == "model_tag" or dest in patch_dests:
+                continue
+            if (dest in old_ev) != (dest in new_ev) or old_ev.get(dest) != new_ev.get(dest):
+                return _override_finding_payload(
+                    f"the merged argv altered untouched option {dest!r}: "
+                    f"{old_ev.get(dest)!r} -> {new_ev.get(dest)!r}",
+                    "all options outside the override remain identical to the running engine",
+                )
+
+    for canon, chunk in patch_items:
+        if canon is None:
+            continue
+        raw_opt = chunk[0].split("=", 1)[0]
+        norm_opt = ("--" + raw_opt[2:].replace("_", "-")) if raw_opt.startswith("--") else raw_opt
+        if norm_opt.startswith("--no-"):
+            info = new_arities.get(canon) or old_arities.get(canon)
+            cand_dests = ([info["dest"]] if info and info.get("dest") else []) + sorted(_flag_to_fields(canon))
+            for dest in cand_dests:
+                if new_args.get(dest) is True or new_ev.get(dest) is True:
+                    return _override_finding_payload(
+                        f"negation {raw_opt} did not take effect ({dest} stayed True)",
+                        f"{dest} set to False",
+                    )
+
+    for canon, old_info in old_arities.items():
+        old_pairs = old_info.get("pairs") or []
+        if not any(p != t for p, t in old_pairs):
+            continue
+        dest = old_info.get("dest")
+        if canon in patch_canons or (dest and dest in patch_dests):
+            return _override_finding_payload(
+                f"tokenizer arity mismatch on overridden option {canon} (dest={dest!r}): {old_pairs}",
+                "parser and tokenizer arities match for overridden options",
+            )
+        new_info = new_arities.get(canon)
+        if not new_info or (new_info.get("pairs") or []) != old_pairs:
+            return _override_finding_payload(
+                f"tokenizer arity shifted for option {canon} between old ({old_pairs}) and new "
+                f"({new_info.get('pairs') if new_info else None})",
+                "unchanged option arity preserved across merge",
+            )
+
+    for canon in patch_canons:
+        new_info = new_arities.get(canon)
+        if new_info and new_info.get("nargs") == "0":
+            pairs = new_info.get("pairs") or []
+            if any(p != t for p, t in pairs):
+                return _override_finding_payload(
+                    f"boolean option {canon} in override swallowed a neighbouring token (pairs={pairs})",
+                    "zero-arity option consumes zero arguments",
+                )
+    return None
 
 
 def _build_control_actions(changed, new_args):
@@ -358,48 +563,30 @@ def classify_reconfig(old_parsed, new_parsed):
         if field_name not in LAUNCHER_FIELDS
         and old_args.get(field_name) != new_args.get(field_name)
     }
-    reshard_fields = [field_name for field_name in RESHARD_FIELDS if field_name in changed]
-    weight_format_fields = [
-        field_name for field_name in WEIGHT_FORMAT_FIELDS if field_name in changed
-    ]
-    in_process_instant_fields = [
-        field_name for field_name in IN_PROCESS_INSTANT_FIELDS if field_name in changed
-    ]
-    in_process_graph_fields = [
-        field_name for field_name in IN_PROCESS_GRAPH_FIELDS if field_name in changed
-    ]
-    warm_restart_fields = [
-        field_name for field_name in changed
-        if field_name not in RESHARD_FIELDS
-        and field_name not in WEIGHT_FORMAT_FIELDS
-        and field_name not in IN_PROCESS_INSTANT_FIELDS
-        and field_name not in IN_PROCESS_GRAPH_FIELDS
-    ]
-    warm_ipc_fields = [
-        field_name for field_name in changed
-        if field_name not in RESHARD_FIELDS and field_name not in WEIGHT_FORMAT_FIELDS
-    ]
+    reshard_fields = [f for f in RESHARD_FIELDS if f in changed]
+    weight_format_fields = [f for f in WEIGHT_FORMAT_FIELDS if f in changed]
+    in_process_instant_fields = [f for f in IN_PROCESS_INSTANT_FIELDS if f in changed]
+    in_process_graph_fields = [f for f in IN_PROCESS_GRAPH_FIELDS if f in changed]
     weight_key_changed = reshard_fields + weight_format_fields
+    warm_ipc_fields = [f for f in changed if f not in weight_key_changed]
+    warm_restart_fields = [
+        f for f in warm_ipc_fields
+        if f not in IN_PROCESS_INSTANT_FIELDS and f not in IN_PROCESS_GRAPH_FIELDS
+    ]
     if not changed:
-        tier = "noop"
-        subtier = "noop"
-        in_process = True
+        tier, subtier, in_process = "noop", "noop", True
     elif weight_key_changed:
-        tier = "live_reshard_or_cold"
-        subtier = "tier2a_reshard" if reshard_fields else "tier2b_weight_format"
-        in_process = False
+        tier, subtier, in_process = (
+            "live_reshard_or_cold",
+            "tier2a_reshard" if reshard_fields else "tier2b_weight_format",
+            False,
+        )
     elif warm_restart_fields:
-        tier = "warm_weights_ipc"
-        subtier = "tier1_warm_ipc"
-        in_process = False
+        tier, subtier, in_process = "warm_weights_ipc", "tier1_warm_ipc", False
     elif in_process_graph_fields:
-        tier = "in_process_graph"
-        subtier = "tier1_in_process_graph"
-        in_process = True
+        tier, subtier, in_process = "in_process_graph", "tier1_in_process_graph", True
     else:
-        tier = "in_process_instant"
-        subtier = "tier1_in_process_instant"
-        in_process = True
+        tier, subtier, in_process = "in_process_instant", "tier1_in_process_instant", True
     live_fields = [f for f in changed if f in LIVE_FIELDS]
     if changed and in_process:
         # Only a delta made of LIVE_FIELDS has a consumer in the engine; the rest restarts.

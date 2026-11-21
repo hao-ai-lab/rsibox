@@ -212,33 +212,34 @@ class VllmLab:
                 norm.append(own[i])
                 i += 1
         ap = argparse.ArgumentParser(prog="fastrsi conformance vllm --real", allow_abbrev=False)
-        ap.add_argument("--model", default=None, help="model path or HuggingFace repo id")
-        ap.add_argument("--venv", default=None, help="vLLM virtualenv root")
-        ap.add_argument("--work", default=None, help="scratch directory for logs, caches and farm")
-        ap.add_argument("--port", type=int, default=None, help="live server port")
-        ap.add_argument("--tp", type=int, default=None, help="tensor-parallel worker count")
-        ap.add_argument("--extra", default=None, help="extra `vllm serve` flags string")
-        ap.add_argument("--check-timeout", type=float, default=None, help="HTTP / control timeout in seconds")
-        ap.add_argument("--no-share-gpu", action="store_true", help="keep live server running during fresh_check")
+        for flag, kw in (
+            ("--model", dict(default=None, help="model path or HuggingFace repo id")),
+            ("--venv", dict(default=None, help="vLLM virtualenv root")),
+            ("--work", dict(default=None, help="scratch directory for logs, caches and farm")),
+            ("--port", dict(type=int, default=None, help="live server port")),
+            ("--tp", dict(type=int, default=None, help="tensor-parallel worker count")),
+            ("--extra", dict(default=None, help="extra `vllm serve` flags string")),
+            ("--check-timeout", dict(type=float, default=None, help="HTTP / control timeout in seconds")),
+            ("--no-share-gpu", dict(action="store_true", help="keep live server running during fresh_check")),
+        ):
+            ap.add_argument(flag, **kw)
         ns = ap.parse_args(norm)
         env = {}
-        if ns.model:
-            env["FASTRSI_VLLM_MODEL"] = ns.model
-        if ns.venv:
-            env["FASTRSI_VLLM_VENV"] = os.path.abspath(ns.venv)
-        if ns.work:
-            env["FASTRSI_VLLM_WORK"] = os.path.abspath(ns.work)
-        if ns.port is not None:
-            env["FASTRSI_VLLM_PORT"] = str(ns.port)
-        if ns.tp is not None:
-            env["FASTRSI_VLLM_TP"] = str(ns.tp)
-        if ns.check_timeout is not None:
-            env["FASTRSI_VLLM_CHECK_TIMEOUT"] = str(ns.check_timeout)
+        for attr, key, xform in (
+            ("model", "FASTRSI_VLLM_MODEL", str),
+            ("venv", "FASTRSI_VLLM_VENV", os.path.abspath),
+            ("work", "FASTRSI_VLLM_WORK", os.path.abspath),
+            ("port", "FASTRSI_VLLM_PORT", str),
+            ("tp", "FASTRSI_VLLM_TP", str),
+            ("check_timeout", "FASTRSI_VLLM_CHECK_TIMEOUT", str),
+        ):
+            val = getattr(ns, attr)
+            if val is not None and (attr not in ("model", "venv", "work") or val):
+                env[key] = xform(val)
         if ns.no_share_gpu:
             env["FASTRSI_VLLM_SHARE_GPU"] = "0"
         if ns.extra is not None or tail:
-            tokens = (shlex.split(ns.extra) if ns.extra is not None else []) + tail
-            env["FASTRSI_VLLM_EXTRA"] = shlex.join(tokens)
+            env["FASTRSI_VLLM_EXTRA"] = shlex.join((shlex.split(ns.extra) if ns.extra is not None else []) + tail)
         return env
 
     def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None):
