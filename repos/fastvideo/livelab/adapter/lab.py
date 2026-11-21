@@ -202,21 +202,15 @@ class FastVideoLab(lab_base.BaseLab):
 
     def _force_stop_workers(self, grace_s=4.0, kill_grace_s=3.0):
         workers = list(getattr(getattr(self, "executor", None), "workers", ()) or ())
-        live = [w for w in workers if getattr(w, "proc", None) is not None and w.proc.is_alive()]
-        for w in live:
-            if w.proc.pid:
-                # Never killpg: workers forked from forkserver/spawn share the driver's pgrp.
-                proc.kill_tree(w.proc.pid, signal.SIGTERM, include_pg=False)
-        deadline = time.monotonic() + grace_s
-        for w in live:
-            w.proc.join(timeout=max(0.0, deadline - time.monotonic()))
-        still = [w for w in live if w.proc.is_alive()]
-        for w in still:
-            if w.proc.pid:
-                proc.kill_tree(w.proc.pid, signal.SIGKILL, include_pg=False)
-        kill_deadline = time.monotonic() + kill_grace_s
-        for w in still:
-            w.proc.join(timeout=max(0.0, kill_deadline - time.monotonic()))
+        for sig, wait_s in ((signal.SIGTERM, grace_s), (signal.SIGKILL, kill_grace_s)):
+            live = [w for w in workers if getattr(w, "proc", None) is not None and w.proc.is_alive()]
+            for w in live:
+                if w.proc.pid:
+                    # Never killpg: workers forked from forkserver/spawn share the driver's pgrp.
+                    proc.kill_tree(w.proc.pid, sig, include_pg=False)
+            deadline = time.monotonic() + wait_s
+            for w in live:
+                w.proc.join(timeout=max(0.0, deadline - time.monotonic()))
 
     def _stop_engine(self):
         dirty = bool(self._dirty or self.dirty is not None)
@@ -272,19 +266,15 @@ class FastVideoLab(lab_base.BaseLab):
                 self._clear_fault_file()
             if self.holder is not None:
                 from services import holder as H
-                try:
+                with contextlib.suppress(Exception):
                     H.call(self.holder_sock, {"op": "stop"}, timeout=10)
-                except Exception:
-                    pass
                 self.holder.join(10)
                 if self.holder.is_alive():
                     self.holder.kill()
                 self.holder = None
                 for path in (self.holder_sock, self.holder_sock + ".ready"):
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(path)
-                    except OSError:
-                        pass
                 if os.environ.get("FASTRSI_HOLDER_SOCK") == self.holder_sock:
                     del os.environ["FASTRSI_HOLDER_SOCK"]
 

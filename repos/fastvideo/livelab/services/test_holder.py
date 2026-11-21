@@ -41,7 +41,10 @@ class HolderTest(unittest.TestCase):
             with open(os.path.join(self.dir, "hpkg", n), "w") as f:
                 f.write(t)
         sys.path.insert(0, self.dir)
-        os.environ["PYTHONPATH"] = os.pathsep.join([self.dir, os.environ.get("PYTHONPATH", "")])
+        self._orig_pythonpath = os.environ.get("PYTHONPATH")
+        os.environ["PYTHONPATH"] = (
+            os.pathsep.join([self.dir, self._orig_pythonpath]) if self._orig_pythonpath else self.dir
+        )
         importlib.invalidate_caches()
         import hpkg.net
         torch.manual_seed(0)
@@ -58,6 +61,10 @@ class HolderTest(unittest.TestCase):
         for n in [n for n in sys.modules if n.split(".")[0] == "hpkg"]:
             del sys.modules[n]
         sys.path.remove(self.dir)
+        if self._orig_pythonpath is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = self._orig_pythonpath
 
     def deposit(self):
         files = H.stamp_files(self.net, prefixes=("hpkg.loader",))
@@ -120,6 +127,8 @@ class HolderTest(unittest.TestCase):
         and re-deposits; `scheduler` bypasses the holder (count 3). Proves: `install_loader_hook`
         redirects component loads through the holder and falls back to disk on a miss or stale
         stamp. Not: CUDA IPC tensor sharing (covered by the GPU receipt)."""
+        from unittest import mock
+
         loader_dir = os.path.join(self.dir, "fastvideo", "models", "loader")
         os.makedirs(loader_dir)
         for rel in (("fastvideo", "__init__.py"),
@@ -139,9 +148,13 @@ class HolderTest(unittest.TestCase):
                 "        torch.manual_seed(100 + PipelineComponentLoader.disk_loads)\n"
                 "        return Net()\n"
             )
-        importlib.invalidate_caches()
-        from fastvideo.models.loader import component_loader
-        try:
+        # Clear any pre-imported real `fastvideo*` modules inside patch.dict so our
+        # stub resolves cleanly and both sys.modules and original package attrs survive intact.
+        with mock.patch.dict(sys.modules):
+            for module_name in [name for name in sys.modules if name.split(".")[0] == "fastvideo"]:
+                del sys.modules[module_name]
+            importlib.invalidate_caches()
+            from fastvideo.models.loader import component_loader
             report = H.install_loader_hook(self.sock)
             first_model = component_loader.PipelineComponentLoader.load_module("transformer", self.dir, "diffusers", None)
             second_model = component_loader.PipelineComponentLoader.load_module("transformer", self.dir, "diffusers", None)
@@ -161,9 +174,6 @@ class HolderTest(unittest.TestCase):
             component_loader.PipelineComponentLoader.load_module("scheduler", self.dir, "diffusers", None)
             self.assertEqual(component_loader.PipelineComponentLoader.disk_loads, 3)
             self.assertEqual(len(report), 3)
-        finally:
-            for module_name in [name for name in sys.modules if name.split(".")[0] == "fastvideo"]:
-                del sys.modules[module_name]
 
     def test_shared_cpu_storages_survive_depositor_shm_manager_kill_and_keep_tied_views(self):
         """Input: a separate depositor process using `file_system` sharing deposits a module with
@@ -273,6 +283,175 @@ class HolderTest(unittest.TestCase):
             )
             self.assertEqual(out.returncode, 0, out.stderr[-2000:])
             self.assertEqual(out.stdout.strip(), "OK")
+
+    def test_concurrent_get_clients_do_not_block_on_unacked_client(self):
+        """Client 0 pauses before sending `"mapped"` ACK while clients 1..3 complete `get` immediately."""
+        import concurrent.futures
+        from multiprocessing.connection import Client
+        files = self.deposit()
+        st = H.stamp(files)
+        c0 = Client(self.sock, family="AF_UNIX")
+        try:
+            H._send(c0, {"op": "get", "key": "rank0:transformer", "stamp": st})
+            self.assertTrue(c0.poll(10))
+            r0 = H._recv(c0)
+            self.assertTrue(r0["ok"], r0)
+            # Client 0 holds connection open without sending "mapped" ACK yet.
+            t0 = time.perf_counter()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                futs = [pool.submit(H.call, self.sock,
+                                    {"op": "get", "key": "rank0:transformer", "stamp": st}, 10.0)
+                        for _ in range(3)]
+                replies = [f.result(timeout=10.0) for f in futs]
+            elapsed = time.perf_counter() - t0
+            self.assertTrue(all(r["ok"] for r in replies), replies)
+            self.assertLess(elapsed, 5.0)
+            H._send(c0, "mapped")
+        finally:
+            c0.close()
+
+    def test_non_leaf_requires_grad_tensor_round_trips_through_holder(self):
+        """A module holding a non-leaf `requires_grad=True` tensor (`x * 2`, like audio_vae)
+        deposits and fetches cleanly without raising `Cowardly refusing to serialize non-leaf tensor`."""
+        self.assertIn("audio_vae", H.DEFAULT_COMPONENTS)
+        x = torch.randn(4, 4, requires_grad=True)
+        self.net.non_leaf = x * 2
+        self.assertTrue(self.net.non_leaf.requires_grad)
+        self.assertFalse(self.net.non_leaf.is_leaf)
+        files = self.deposit()
+        r = H.call(self.sock, {"op": "get", "key": "rank0:transformer", "stamp": H.stamp(files)})
+        self.assertTrue(r["ok"], r)
+        fetched = r["module"]
+        self.assertTrue(torch.equal(fetched.non_leaf, self.net.non_leaf.detach()))
+        self.assertFalse(fetched.non_leaf.requires_grad)
+
+
+class _PicklableFakeGradTensor:
+    """Module-level stand-in tensor that mirrors PyTorch refusing non-leaf grad serialization."""
+
+    def __init__(self, values, requires_grad=False, is_leaf=True):
+        self.values = list(values)
+        self.requires_grad = requires_grad
+        self.is_leaf = is_leaf
+        self.device = type("_Dev", (), {"type": "cpu"})()
+
+    def detach(self):
+        return _PicklableFakeGradTensor(self.values, requires_grad=False, is_leaf=True)
+
+    def __reduce__(self):
+        if self.requires_grad and not self.is_leaf:
+            raise RuntimeError("Cowardly refusing to serialize non-leaf tensor")
+        return (_PicklableFakeGradTensor, (self.values, self.requires_grad, self.is_leaf))
+
+
+class ConcurrentServeAndNonLeafUnitTest(unittest.TestCase):
+    """Pure-Python tests of concurrent `serve()` and non-leaf tensor detaching (no torch needed)."""
+
+    def test_concurrent_get_clients_complete_while_client0_holds_mapped_ack(self):
+        import concurrent.futures
+        import shutil
+        import threading
+        import types
+        from multiprocessing.connection import Client
+        from unittest import mock
+
+        work = tempfile.mkdtemp(dir="/tmp", prefix="fvh-")
+        self.addCleanup(shutil.rmtree, work, True)
+        sock = os.path.join(work, "h.sock")
+        ready = sock + ".ready"
+        fake_torch = types.ModuleType("torch")
+        fake_torch.Tensor = _PicklableFakeGradTensor
+        fake_torch.UntypedStorage = type("_U", (), {})
+        fake_torch.storage = types.SimpleNamespace(TypedStorage=type("_T", (), {}))
+        fake_tmp = types.ModuleType("torch.multiprocessing")
+        fake_tmp.set_sharing_strategy = lambda _s: None
+        fake_torch.multiprocessing = fake_tmp
+
+        with mock.patch.dict(sys.modules, {"torch": fake_torch, "torch.multiprocessing": fake_tmp}), \
+                mock.patch.object(H, "_own", side_effect=lambda obj: obj):
+            srv = threading.Thread(target=H.serve, args=(sock, ready), daemon=True)
+            srv.start()
+            deadline = time.monotonic() + 5.0
+            while not os.path.exists(ready) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(os.path.exists(ready))
+            try:
+                st = {"files": {}, "weights": {}, "env": {}, "extra": None}
+                put_r = H.call(sock, {"op": "put", "key": "rank0:audio_vae",
+                                      "module": {"w": [1, 2, 3]}, "files": {}, "stamp": st})
+                self.assertTrue(put_r["ok"], put_r)
+
+                c0 = Client(sock, family="AF_UNIX")
+                try:
+                    H._send(c0, {"op": "get", "key": "rank0:audio_vae", "stamp": st})
+                    self.assertTrue(c0.poll(5.0))
+                    r0 = H._recv(c0)
+                    self.assertEqual(r0["module"], {"w": [1, 2, 3]})
+                    # Client 0 pauses BEFORE sending "mapped" ACK; clients 1..3 must complete at once.
+                    t0 = time.perf_counter()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                        futs = [pool.submit(H.call, sock,
+                                            {"op": "get", "key": "rank0:audio_vae", "stamp": st}, 5.0)
+                                for _ in range(3)]
+                        replies = [f.result(timeout=5.0) for f in futs]
+                    elapsed = time.perf_counter() - t0
+                    self.assertTrue(all(r["ok"] and r["module"] == {"w": [1, 2, 3]} for r in replies))
+                    self.assertLess(elapsed, 2.0, f"concurrent gets blocked: {elapsed:.3f}s")
+                    H._send(c0, "mapped")
+                finally:
+                    c0.close()
+            finally:
+                stop_r = H.call(sock, {"op": "stop"}, timeout=5.0)
+                self.assertTrue(stop_r["ok"], stop_r)
+                srv.join(timeout=5.0)
+                self.assertFalse(srv.is_alive())
+
+    def test_non_leaf_requires_grad_tensor_is_detached_and_audio_vae_in_default_components(self):
+        import types
+        from multiprocessing.reduction import ForkingPickler
+        from unittest import mock
+
+        self.assertEqual(H.DEFAULT_COMPONENTS, ("transformer", "text_encoder", "vae", "audio_vae"))
+        non_leaf = _PicklableFakeGradTensor([2.0, 4.0, 6.0], requires_grad=True, is_leaf=False)
+        with self.assertRaisesRegex(RuntimeError, "Cowardly refusing"):
+            ForkingPickler.dumps(non_leaf)
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.Tensor = _PicklableFakeGradTensor
+        fake_torch.UntypedStorage = type("_U", (), {})
+        fake_torch.storage = types.SimpleNamespace(TypedStorage=type("_T", (), {}))
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            raw = H._dumps({"audio_vae_buf": non_leaf})
+            restored = ForkingPickler.loads(raw)["audio_vae_buf"]
+        self.assertEqual(restored.values, [2.0, 4.0, 6.0])
+        self.assertFalse(restored.requires_grad)
+        self.assertTrue(restored.is_leaf)
+
+    def test_serve_closes_wake_pipe_when_unlink_fails(self):
+        """If `os.unlink(sock_path)` raises a non-FileNotFoundError OSError, `serve()` must still
+        close `wake_r` and `wake_w` so no file descriptors leak."""
+        import errno
+        from unittest import mock
+
+        created_fds = []
+        real_pipe = os.pipe
+
+        def spy_pipe():
+            fds = real_pipe()
+            created_fds.extend(fds)
+            return fds
+
+        with mock.patch.object(H, "_ipc"), \
+                mock.patch.object(H.os, "pipe", side_effect=spy_pipe), \
+                mock.patch.object(H.os, "unlink", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                H.serve("/tmp/does-not-matter.sock")
+
+        self.assertEqual(len(created_fds), 2)
+        for fd in created_fds:
+            with self.assertRaises(OSError) as ctx:
+                os.fstat(fd)
+            self.assertEqual(ctx.exception.errno, errno.EBADF)
 
 
 class OwnCpuStorageUnitTest(unittest.TestCase):
@@ -390,6 +569,61 @@ class OwnCpuStorageUnitTest(unittest.TestCase):
         # CUDA storage stays untouched by the CPU-only detachment path
         self.assertIs(owned.nested["cuda"]._storage, cuda_st)
         self.assertIs(owned.cycle, owned)
+
+    def test_own_synchronizes_all_unique_cuda_devices(self):
+        """`_own()` must call `torch.cuda.synchronize(dev)` once for every unique CUDA device
+        present in the owned module (not just the default current device), and skip sync for CPU-only."""
+        import contextlib
+        import types
+        from unittest import mock
+
+        class FakeDevice:
+            def __init__(self, dev_type, index=None):
+                self.type = dev_type
+                self.index = index
+
+            def __eq__(self, other):
+                return isinstance(other, FakeDevice) and (self.type, self.index) == (other.type, other.index)
+
+            def __hash__(self):
+                return hash((self.type, self.index))
+
+            def __repr__(self):
+                return f"FakeDevice({self.type!r}, {self.index!r})"
+
+        class FakeTensor:
+            def __init__(self, device):
+                self.device = device
+
+            def untyped_storage(self):
+                return types.SimpleNamespace(is_shared=lambda: False)
+
+            def __deepcopy__(self, memo):
+                return FakeTensor(self.device)
+
+        synced = []
+        fake_torch = types.ModuleType("torch")
+        fake_torch.Tensor = FakeTensor
+        fake_torch.no_grad = contextlib.nullcontext
+        fake_torch.cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            is_initialized=lambda: True,
+            synchronize=lambda dev=None: synced.append(dev),
+        )
+
+        multi_gpu_mod = types.SimpleNamespace(
+            a=FakeTensor(FakeDevice("cuda", 1)),
+            b=[FakeTensor(FakeDevice("cuda", 3)), FakeTensor(FakeDevice("cuda", 1))],
+            c={"t": FakeTensor(FakeDevice("cuda", 0)), "cpu": FakeTensor(FakeDevice("cpu"))},
+        )
+        cpu_only_mod = types.SimpleNamespace(x=FakeTensor(FakeDevice("cpu")))
+
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            H._own(multi_gpu_mod)
+            self.assertEqual(synced, [FakeDevice("cuda", 0), FakeDevice("cuda", 1), FakeDevice("cuda", 3)])
+            synced.clear()
+            H._own(cpu_only_mod)
+            self.assertEqual(synced, [])
 
 
 class StampFilesTest(unittest.TestCase):

@@ -245,5 +245,55 @@ class HeldStateTest(unittest.TestCase):
         self.assertIn("hcpkg.buf.BUF", rel["findings"][0]["observed"])
 
 
+class RefreshLinecacheTest(unittest.TestCase):
+    """Pure-Python tests of `rebuild.refresh()` / `rebuild.restore()` linecache handling."""
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp(prefix="rblc-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        os.makedirs(os.path.join(self.dir, "lcpkg"))
+        for name, text in (("__init__.py", ""), ("mod.py", "VAL = 0\n")):
+            with open(os.path.join(self.dir, "lcpkg", name), "w") as fh:
+                fh.write(text)
+        sys.path.insert(0, self.dir)
+        importlib.invalidate_caches()
+        import lcpkg.mod  # noqa: F401
+        self.origin = sys.modules["lcpkg.mod"].__file__
+
+    def tearDown(self):
+        import linecache
+        linecache.cache.pop(self.origin, None)
+        for name in [n for n in sys.modules if n.split(".")[0] == "lcpkg"]:
+            del sys.modules[name]
+        if self.dir in sys.path:
+            sys.path.remove(self.dir)
+
+    def test_failed_refresh_preserves_kept_linecache_while_restore_clears_by_default(self):
+        import linecache
+        v1 = "VAL = 1\n"
+        r1 = RB.refresh({"lcpkg.mod": v1}, prefixes=("lcpkg",))
+        self.assertTrue(r1["ok"], r1["findings"])
+        self.assertEqual(sys.modules["lcpkg.mod"].VAL, 1)
+        self.assertEqual(linecache.cache[self.origin][2], ["VAL = 1\n"])
+
+        prev_mod = sys.modules["lcpkg.mod"]
+        r2 = RB.refresh(
+            {"lcpkg.mod": "VAL = 2\nraise RuntimeError('boom')\n"},
+            prefixes=("lcpkg",),
+            kept={"lcpkg.mod": v1},
+        )
+        self.assertFalse(r2["ok"])
+        self.assertEqual(r2["findings"][0]["check"], "refresh_failed")
+        self.assertIs(sys.modules["lcpkg.mod"], prev_mod)
+        # Failed refresh must not evict the previously committed kept linecache entry.
+        self.assertIn(self.origin, linecache.cache)
+        self.assertEqual(linecache.cache[self.origin][2], ["VAL = 1\n"])
+
+        # Explicit restore() still clears linecache by default.
+        RB.restore({"lcpkg.mod": prev_mod})
+        self.assertNotIn(self.origin, linecache.cache)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,9 +22,10 @@ records where a root was first used and reports a finding when it is used from a
 (the 153-159 s rebuild), before the process pays it.
 """
 import hashlib
-import json
 import os
 import time
+
+from fastrsi import harness, ipc
 
 ROOTS = {"FLASHINFER_WORKSPACE_BASE": "flashinfer", "TRITON_CACHE_DIR": "triton",
          "TORCHINDUCTOR_CACHE_DIR": "inductor", "XDG_CACHE_HOME": "xdg"}
@@ -61,17 +62,16 @@ def check_root(root):
     root = os.path.realpath(root)
     os.makedirs(root, exist_ok=True)
     marker = os.path.join(root, MARKER)
-    try:
-        with open(marker) as f:
-            first = json.load(f).get("path")
-    except (OSError, ValueError):
-        with open(marker, "w") as f:
-            json.dump({"path": root, "t": time.time()}, f)
+    rec = ipc.read_json(marker)
+    if not isinstance(rec, dict):
+        ipc.atomic_write_json(marker, {"path": root, "t": time.time()})
         return []
+    first = rec.get("path")
     if first != root:
-        return [{"check": "jit_root_moved", "observed": f"cache root built at {first}, used at {root}",
-                 "expected": "a JIT cache root used from the path it was built at (FlashInfer "
-                             "rebuilds its NVFP4 modules after a move: 159 s measured)"}]
+        return [harness.plain_finding(
+            "jit_root_moved", f"cache root built at {first}, used at {root}",
+            "a JIT cache root used from the path it was built at (FlashInfer rebuilds its NVFP4 modules after a move: 159 s measured)",
+        )]
     return []
 
 
@@ -109,11 +109,7 @@ def preset_torch_key(path=None):
         top = os.path.dirname(torch.__file__)
         stamp, n = _stamp(top)
         stamp = f"{torch.__version__}:{top}:{stamp}"
-        try:
-            with open(path) as f:
-                rec = json.load(f)
-        except (OSError, ValueError):
-            rec = {}
+        rec = ipc.read_json(path) or {}
         if rec.get("stamp") == stamp:
             try:
                 codecache.torch_key.set(bytes.fromhex(rec["key"]))
@@ -121,11 +117,7 @@ def preset_torch_key(path=None):
                 pass
             return {"hit": True, "files": n, "seconds": round(time.perf_counter() - t0, 4)}
         key = codecache.torch_key()
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
-            json.dump({"stamp": stamp, "key": key.hex()}, f)
-        os.replace(tmp, path)
+        ipc.atomic_write_json(path, {"stamp": stamp, "key": key.hex()})
         return {"hit": False, "files": n, "seconds": round(time.perf_counter() - t0, 4)}
     except Exception as e:
         return {"hit": False, "error": f"{type(e).__name__}: {e}",

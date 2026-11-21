@@ -22,15 +22,20 @@ file). CPU tensors in the tree travel through shared memory (a copy, not pinned)
 
 Transport: `multiprocessing.connection` over a unix socket (no network port), ForkingPickler.
 """
+import contextlib
 import ctypes
 import hashlib
 import io
 import json
 import os
+import selectors
 import sys
+import threading
 import time
 
-DEFAULT_COMPONENTS = ("transformer", "text_encoder", "vae")   # audio_vae: a non-leaf grad tensor, not shareable
+from fastrsi import harness, ipc
+
+DEFAULT_COMPONENTS = ("transformer", "text_encoder", "vae", "audio_vae")
 STAMP_PREFIXES = ("fastvideo.models.loader", "fastvideo.layers.quantization")
 STAMP_ENV = ("FASTVIDEO_H3_ADALN_TABLE", "FASTVIDEO_H3_VAE_NVFP4_DECODER", "FASTVIDEO_ATTENTION_BACKEND",
              "FASTVIDEO_MINIMAX_H3_FUSIONS", "FASTVIDEO_H3_VSA_FP4", "FASTVIDEO_FA4")
@@ -38,9 +43,7 @@ OWN_PACKAGES = ("fastvideo",)   # packages whose modules beside a model class ar
 REQUEST_TIMEOUT_S = 10.0     # a connected client must send its request within this
 ACK_TIMEOUT_S = 120.0        # and acknowledge a served module (it maps the tensors) within this
 
-
-def finding(check, observed, expected):
-    return {"check": check, "observed": observed, "expected": expected}
+finding = harness.plain_finding
 
 
 def _file_hash(path):
@@ -157,14 +160,20 @@ def _own(module):
             memo[id(s)] = priv
             if (cdata := getattr(s, "_cdata", None)) is not None:
                 memo["torch"][cdata] = priv
+    for t in _walk_tensors(module, torch.Tensor):
+        if getattr(t, "requires_grad", False) and not getattr(t, "is_leaf", True):
+            memo[id(t)] = copy.deepcopy(t.detach(), memo)
     owned = copy.deepcopy(module, memo)       # the memo keeps tied tensors tied
-    post = {}
+    post, cuda_devs = {}, {}
     with torch.no_grad():
         for t in _walk_tensors(owned, torch.Tensor):
             if t.device.type == "cpu" and (s := t.untyped_storage()).is_shared():
                 t.data.set_(_private_cpu(torch, s, post), t.storage_offset(), t.size(), t.stride())
-    if torch.cuda.is_available() and torch.cuda.is_initialized():
-        torch.cuda.synchronize()
+            elif t.device.type == "cuda":
+                cuda_devs.setdefault(getattr(t.device, "index", None), t.device)
+    if cuda_devs and torch.cuda.is_available() and torch.cuda.is_initialized():
+        for _, dev in sorted(cuda_devs.items(), key=lambda kv: (-1 if kv[0] is None else kv[0])):
+            torch.cuda.synchronize(dev)
     return owned
 
 
@@ -217,12 +226,17 @@ def _dumps(obj):
     if torch is None:
         return bytes(ForkingPickler.dumps(obj))
 
-    untyped_cls = torch.UntypedStorage
-    typed_cls = torch.storage.TypedStorage
+    tensor_cls = getattr(torch, "Tensor", ())
+    untyped_cls = getattr(torch, "UntypedStorage", ())
+    typed_cls = getattr(getattr(torch, "storage", None), "TypedStorage", ())
     seen_cpu = {}
 
     class _HolderPickler(ForkingPickler):
         def reducer_override(self, item):
+            # Detach non-leaf grad tensors (e.g. audio_vae) so torch.multiprocessing.reductions
+            # never refuses them with "Cowardly refusing to serialize non-leaf tensor".
+            if isinstance(item, tensor_cls) and getattr(item, "requires_grad", False) and not getattr(item, "is_leaf", True):
+                return (_alias_untyped, (item.detach(),))
             # Serialize CPU storages inline so libshm never binds holder to depositor's shm manager.
             if isinstance(item, untyped_cls):
                 if item.device.type != "cpu":
@@ -256,65 +270,146 @@ def _recv(conn):
     return ForkingPickler.loads(conn.recv_bytes())
 
 
+def _poll_conn(conn, timeout, stop_event=None):
+    """Wait up to `timeout` s for readable data on `conn`, aborting promptly if `stop_event` sets."""
+    if stop_event is None:
+        return conn.poll(timeout)
+    deadline = time.monotonic() + timeout
+    while not stop_event.is_set():
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            return False
+        if conn.poll(min(0.1, rem)):
+            return True
+    return False
+
+
 def serve(sock_path, ready_path=None):
-    """Run the holder: one request per connection: {"op": "put"|"get"|"status"|"stop", ...}."""
+    """Run the holder: serve each client connection concurrently on a daemon worker thread."""
     _ipc()
     from multiprocessing.connection import Listener
     entries = {}
-    if os.path.exists(sock_path):
-        os.unlink(sock_path)
-    with Listener(sock_path, family="AF_UNIX") as ls:
-        if ready_path:
-            with open(ready_path, "w") as f:
-                json.dump({"pid": os.getpid(), "sock": sock_path}, f)
-        while True:
-            with ls.accept() as conn:
+    entries_lock = threading.Lock()
+    stop_event = threading.Event()
+    threads_lock = threading.Lock()
+    active_threads = set()
+    wake_r, wake_w = os.pipe()
+    wake_lock = threading.Lock()
+    wake_closed = False
+
+    def wake():
+        nonlocal wake_closed
+        with wake_lock:
+            if not wake_closed:
+                with contextlib.suppress(OSError):
+                    os.write(wake_w, b"1")
+
+    def serve_conn(conn):
+        cur = threading.current_thread()
+        try:
+            with conn:
                 try:
-                    if _handle(conn, entries) == "stop":
-                        return
+                    if _handle(conn, entries, lock=entries_lock, stop_event=stop_event) == "stop":
+                        stop_event.set()
+                        wake()
                 except Exception as e:                # one bad request never stops the holder
-                    try:
+                    with contextlib.suppress(Exception):
                         _send(conn, {"ok": False, "findings": [finding(
                             "holder_error", f"{type(e).__name__}: {e}", "the request served")]})
-                    except Exception:
-                        pass
+        finally:
+            with threads_lock:
+                active_threads.discard(cur)
+
+    try:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(sock_path)
+        with Listener(sock_path, family="AF_UNIX", backlog=16) as ls:
+            if ready_path:
+                ipc.atomic_write_json(ready_path, {"pid": os.getpid(), "sock": sock_path})
+            listen_sock = getattr(getattr(ls, "_listener", None), "_socket", None)
+            with selectors.DefaultSelector() as sel:
+                if listen_sock is not None:
+                    sel.register(listen_sock, selectors.EVENT_READ, data="listen")
+                    sel.register(wake_r, selectors.EVENT_READ, data="wake")
+                while not stop_event.is_set():
+                    if listen_sock is not None:
+                        try:
+                            events = sel.select()
+                        except (OSError, ValueError):
+                            break
+                        if stop_event.is_set() or not any(key.data == "listen" for key, _ in events):
+                            break
+                    try:
+                        conn = ls.accept()
+                    except OSError:
+                        break
+                    if stop_event.is_set():
+                        conn.close()
+                        break
+                    th = threading.Thread(target=serve_conn, args=(conn,), daemon=True,
+                                          name="fastrsi-holder-conn")
+                    with threads_lock:
+                        active_threads.add(th)
+                    th.start()
+        deadline = time.monotonic() + 2.0
+        with threads_lock:
+            joining = list(active_threads)
+        for th in joining:
+            th.join(timeout=max(0.0, deadline - time.monotonic()))
+    finally:
+        with wake_lock:
+            wake_closed = True
+            for fd in (wake_r, wake_w):
+                with contextlib.suppress(OSError):
+                    os.close(fd)
 
 
-def _handle(conn, entries):
-    """One request: put, get (stamp-checked), files, status or stop. The holder serves one
-    connection at a time: a client that sends nothing within REQUEST_TIMEOUT_S, or does not
-    acknowledge a get within ACK_TIMEOUT_S, is dropped so the next rank is served. Not bounded:
-    a client that stops in the middle of sending its request (`conn.recv` waits for the rest)."""
-    if not conn.poll(REQUEST_TIMEOUT_S):
+def _handle(conn, entries, lock=None, stop_event=None):
+    """One request: put, get (stamp-checked), files, status or stop. Only `entries` dict reads
+    and mutations hold `lock`; `_recv`, `_own`, `_send`, and the `"mapped"` ACK wait all run
+    unlocked so concurrent ranks never stall one another."""
+    guard = lock if lock is not None else contextlib.nullcontext()
+    if not _poll_conn(conn, REQUEST_TIMEOUT_S, stop_event=stop_event):
+        if stop_event is not None and stop_event.is_set():
+            return None
         raise TimeoutError(f"no request in {REQUEST_TIMEOUT_S} s")
     req = _recv(conn)
     op, key = req.get("op"), req.get("key")
     t0 = time.perf_counter()
     if op == "put":
-        entries[key] = {"stamp": req["stamp"], "module": _own(req["module"]),
-                        "files": req.get("files")}
+        owned = _own(req["module"])
+        entry = {"stamp": req["stamp"], "module": owned, "files": req.get("files")}
+        with guard:
+            entries[key] = entry
         _send(conn, {"ok": True, "op": op, "key": key, "seconds": round(time.perf_counter() - t0, 4)})
     elif op == "get":
-        e = entries.get(key)
+        with guard:
+            e = entries.get(key)
         if e is None:
             _send(conn, {"ok": False, "findings": [finding("holder_empty", f"no entry {key}",
                                                            "a deposit before the first get")]})
         else:
             diff = stamp_diff(e["stamp"], req["stamp"])
             if diff:
-                del entries[key]          # never serve it again
+                with guard:
+                    if entries.get(key) is e:
+                        del entries[key]          # never serve it again
                 _send(conn, {"ok": False, "findings": [finding(
                     "holder_stale", f"{key}: changed since the deposit: {diff[:8]}",
                     "the loader, quantization, model classes, weights and env unchanged")]})
             else:
                 _send(conn, {"ok": True, "module": e["module"], "files": e["files"]})
-                if conn.poll(ACK_TIMEOUT_S):  # the worker mapped the tensors
-                    _recv(conn)
+                if _poll_conn(conn, ACK_TIMEOUT_S, stop_event=stop_event):  # the worker mapped the tensors
+                    with contextlib.suppress(EOFError, OSError):
+                        _recv(conn)
     elif op == "files":
-        e = entries.get(key)
+        with guard:
+            e = entries.get(key)
         _send(conn, {"ok": e is not None, "files": e["files"] if e else None})
     elif op == "status":
-        _send(conn, {"ok": True, "keys": sorted(map(str, entries)), "pid": os.getpid()})
+        with guard:
+            keys = sorted(map(str, entries))
+        _send(conn, {"ok": True, "keys": keys, "pid": os.getpid()})
     elif op == "stop":
         _send(conn, {"ok": True})
         return "stop"
