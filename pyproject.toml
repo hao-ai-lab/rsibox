@@ -13,6 +13,7 @@ dependencies = []
 
 [project.scripts]
 fastrsi = "fastrsi.cli:main"
+rsibox = "rsibox.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "core/livelab" }

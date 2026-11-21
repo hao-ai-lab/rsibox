@@ -65,7 +65,7 @@ jobs:
         run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
       - name: Run the shared stdlib runtime kit tests (IPC, process trees, hooks, overlays, BaseLab 11/11, unified CLI)
         run: python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab -v
-      - name: Run the rsibox cases (the box daemon over real HTTP on the toy lab)
+      - name: Run the rsibox cases (the box daemon over real HTTP on the toy lab, a local launcher in real processes; Docker, gVisor and Slurm are checked as generated commands only)
         run: python3 -m unittest discover -s core/livelab/rsibox -t core/livelab -v
       - name: Run fastrsi doctor (core health + all engine registrations without eager GPU/torch imports)
         env:
