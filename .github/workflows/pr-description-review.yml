@@ -18,8 +18,9 @@ concurrency:
   group: description-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
   cancel-in-progress: true
 jobs:
-  checker:
-    name: Description checker rejects changed facts (golden cases)
+  docs-checker-selftest:
+    # Description checker rejects changed facts (golden cases)
+    name: "docs: Description checker self-test"
     if: github.event_name == 'pull_request'
     # Runs the PR's own code, so it gets a read-only token that checkout does not keep.
     permissions:
@@ -31,8 +32,9 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 .github/review/test_review.py -v
-  review:
-    name: Polish title and description via the review service, apply only if facts are kept
+  docs-description-polish:
+    # Polish title and description via the review service, apply only if facts are kept
+    name: "docs: Automated description polish"
     # Only on demand: a `/describe` comment on a PR by the repository owner, or a manual run.
     if: >-
       github.event_name == 'workflow_dispatch' ||

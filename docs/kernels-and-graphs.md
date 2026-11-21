@@ -92,15 +92,17 @@ swap.stage (live half, phase 1 prepare while engine steps continue)
   |           every transitive caller at any inlining depth across all loaded modules
   |        -> collect every Autotuner whose .cache wraps an affected JITFunction
   |        -> emit advisory "jit_rebuild" finding naming callers and autotuners
-  +-- 6. For any newly added @triton.jit function in the patch:
-         exec the def inside `with jit.seeded_lines(mod.__file__, source):` so
-         inspect.getsourcelines reads the patch text from linecache, not the disk file
+  +-- 6. Plan added definitions in st.pending_adds (no exec or linecache mutation in swap.stage)
   |
 swap.apply (phase 2 commit inside one step gap)
   |
-  +-- 7. journal.set_code swaps jf.fn.__code__ (keeps fingerprints, line maps, and chained
+  +-- 7. Seed linecache for mod_file (restored via journal.on_undo) and run _build_adds:
+  |        -> exec each added def inside `with JIT.seeded_lines(mod.__file__, st.source):`
+  |           so inspect.getsourcelines reads the patch text, not the disk file
+  |        -> collect added @triton.jit objects into st.jit_adds
+  +-- 8. journal.set_code swaps jf.fn.__code__ (keeps fingerprints, line maps, and chained
   |      edits working identically to plain functions)
-  +-- 8. jit.apply(plan, journal, witness, key):
+  +-- 9. jit.apply(plan, journal, witness, key):
   |        -> snapshot jf's (_src, raw_src, starting_line_number, def_file_line_number)
   |        -> snapshot (f, f.hash, dict(f.used_global_vals), shallow_copy(f.device_caches))
   |           for jf and every transitive caller in plan["affected"]
@@ -112,8 +114,10 @@ swap.apply (phase 2 commit inside one step gap)
   |             f.used_global_vals.clear()
   |             f.device_caches.clear()
   |        -> clear w.cache.clear() on every w in plan["tuners"]
-  |        -> append witness.arm(key, journal) to f.pre_run_hooks on every f in plan["affected"]
-  +-- 9. jit.arm_added attaches deduplicated pre_run_hooks for newly added @triton.jit helpers
+  |        -> _hook_into arms witness.arm and appends witness.arm_launch(key, label(f), journal)
+  |           (falling back to witness.arm if absent) to f.pre_run_hooks on every f in plan["affected"]
+  +-- 10. jit.arm_added(..., added=...) attaches deduplicated pre_run_hooks for newly added
+         @triton.jit helpers, matching rebuilt callers (re.findall(r"\w+", ...)) and added callers
 ```
 
 ### 1. Slicing clean source text before witness injection (`jit.text_of`)
@@ -154,7 +158,7 @@ A `@triton.jit` helper function (for example, an activation or block-reduction h
 
 - **No lazy-import side effects (`_dict_of`)**: Many ML packages install module-level `__getattr__` hooks (`LazyLoader`) that import heavy submodules or initialize device state on attribute access. `jit.scan()` reads `object.__getattribute__(mod, "__dict__")` on each module in `list(sys.modules.values())`, inspecting only already-bound dictionary values filtered by a per-type cache `_jit_like(type(v))`.
 - **Unwrapping wrapper chains (`jit.unwrap`)**: Follows `.fn` through up to 8 wrapper hops (`Autotuner -> Heuristics -> JITFunction`), recording both the leaf `JITFunction` and any outer wrapper whose `cache` attribute is a `dict`.
-- **Breadth-first AST resolution (`jit.callers_of` and `jit.calls`)**: Starting from `[jf]`, `callers_of` checks every discovered `JITFunction` `c`. `calls(caller, callee)` first runs a fast substring check (`callee.fn.__name__ in caller._src`); on a match, it parses `caller.parse()` (`ast.parse(caller._src)`) and resolves every `ast.Name` and dotted `ast.Attribute` load (`acts.act_fn`) against `caller.__globals__` merged with `caller.fn.__closure__` cells. If a resolved object (or its `unwrap(v)[0]`) is `callee`, `caller` is added to `affected` and queued so callers of callers at arbitrary depth are included.
+- **Breadth-first AST resolution (`jit.callers_of`, `jit.named`, and `jit.calls`)**: Starting from `[jit_fn]`, `callers_of` inspects every discovered `JITFunction` `candidate`. `named(candidate)` parses `candidate.parse()` directly—with no callee-name substring pre-filter, so import aliases (`from a import helper as act`) and module attributes (`acts.act_fn`) still match—and resolves every `ast.Name` and dotted `ast.Attribute` load (`ast.Load`) against `candidate.__globals__` merged with `candidate.fn.__closure__` cells, returning `{id(v), id(unwrap(v)[0]), ...}`. `callers_of` caches `named(candidate)` once per candidate across the BFS queue and fails closed by raising `jit.UnreadableKernel` (making `jit.plan` refuse rather than silently skip an unparseable candidate); `calls(caller, callee)` checks `id(callee) in named(caller)`. Whenever `id(current)` appears in a candidate's resolved ID set, that candidate is added to `out` and queued so callers of callers at arbitrary depth are included.
 
 ### 4. Snapshot and sub-millisecond zero-recompile undo (`jit.apply`)
 
@@ -183,8 +187,8 @@ Because the original `CompiledKernel` objects and autotuner `Config` choices wer
 
 When a patch introduces a brand-new `@triton.jit` function that does not exist in the file on disk, two things must happen:
 
-1. **Source lookup during `exec` (`jit.seeded_lines`)**: Executing `@triton.jit def bump(v): ...` in `swap.stage`'s scratch namespace calls `inspect.getsourcelines(bump)`, which looks up `mod.__file__` in Python's `linecache`. Without intervention, `linecache` reads the unedited disk file and either slices the wrong lines or raises `OSError` if the patch is longer than the file. `swap.stage` wraps `exec` in `with JIT.seeded_lines(mod.__file__, source):`, which temporarily sets `linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)` and restores the previous `linecache` entry on exit.
-2. **Witnessing an inlined added helper (`jit.arm_added`)**: Because the added function is a `@triton.jit` callable, `swap.analyze` does not inject `__fastrsi_hit__` into its body (`not _jit_decorator(n)`). At commit, `jit.arm_added(obj, key, plans, journal, witness)` attaches `witness.arm(key, journal)` to `jf.pre_run_hooks` **and** to every rebuilt kernel in `plans` whose new `_src` contains the added helper's name (plus all of that kernel's transitive callers in `p["affected"]`), deduplicating by `id(f)` so a single launch of an outer kernel that calls the helper multiple times increments the helper's witness key exactly once.
+1. **Source lookup during `exec` (`jit.seeded_lines`)**: Executing `@triton.jit def bump(v): ...` calls `inspect.getsourcelines(bump)`, which looks up `mod.__file__` in Python's `linecache`. Without intervention, `linecache` reads the unedited disk file and either slices the wrong lines or raises `OSError` if the patch is longer than the file. `swap.stage` leaves `linecache` and module namespaces untouched (`pending_adds` only); at commit time, `swap.apply` seeds `linecache` (with `journal.on_undo` restore) and invokes `_build_adds`, which wraps each scratch `exec` in `with JIT.seeded_lines(mod.__file__, st.source):`, temporarily setting `linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)` and restoring the previous entry on exit.
+2. **Witnessing an inlined added helper (`jit.arm_added`)**: Because the added function is a `@triton.jit` callable, `swap.analyze` does not inject `__fastrsi_hit__` into its body (`not _jit_decorator(n)`). At commit, `swap.apply` calls `jit.arm_added(obj, key, plans, journal, witness, added=[...])`. Starting with `jf`, it collects every `f` in `p["affected"]` for each plan `p` in `plans` whose new source `p["text"]["src"]` contains `jf.fn.__name__` as a word token (`re.findall(r"\w+", ...)`), plus transitive callers from `callers_of(jf, others)` among the other `@triton.jit` helpers in `added`, deduplicating by `id(f)`. `_hook_into` then registers `witness.arm(key, journal)` and appends a per-kernel `witness.arm_launch(key, label(f), journal)` hook (falling back to the shared `witness.arm` closure if `witness` has no `arm_launch`) to each kernel's `pre_run_hooks`, ensuring a single launch increments each key once and attributes proof to the launched kernel.
 
 ### Failure modes prevented by `kernel/jit.py`
 
@@ -195,7 +199,7 @@ When a patch introduces a brand-new `@triton.jit` function that does not exist i
 | Edited `@triton.jit` helper leaves cross-module caller on old binary | Caller kernel inlined the old helper at compile time; clearing only the helper leaves the caller's `device_caches` and `hash` intact (or reloads the old binary from the disk cache). | `jit.scan` + `jit.callers_of` walks the AST of every loaded `JITFunction` across `sys.modules` and invalidates all transitive callers at any depth. |
 | Rebinding a removed global raises `RuntimeError` in caller | Triton 3.5+ merges callee `used_global_vals` into the caller before computing `cache_key`; stale global entries survive on the caller. | `jit.invalidate` clears `used_global_vals` on both the target kernel and every transitive caller. |
 | Edited `@triton.jit` helper reports `zero_witness` despite running | Inlined helpers never execute `JITFunction.run` at launch; only the outer kernel's `pre_run_hooks` run. | `_hook_into` attaches the helper's witness hook to `pre_run_hooks` of the helper and of every transitive caller in `affected`. |
-| Added `@triton.jit` helper reads wrong source lines or raises `OSError` | `inspect.getsourcelines` reads `mod.__file__` from disk during `swap.stage`. | `jit.seeded_lines` seeds `linecache.cache[mod.__file__]` with the patched text for the duration of the scratch `exec`. |
+| Added `@triton.jit` helper reads wrong source lines or raises `OSError` | `inspect.getsourcelines` reads `mod.__file__` from disk during `_build_adds` in `swap.apply`. | `jit.seeded_lines` seeds `linecache.cache[mod.__file__]` with the patched text for the duration of the scratch `exec`. |
 | Parameter or `@triton.autotune` edit launches with stale signature/keys | Triton fixes `params`, `constexpr` indices, and autotuner `configs`/`keys` when constructing the wrapper objects. | `jit.text_of` compares parameter, return, and decorator ASTs and refuses the in-place rebuild with a blocking `jit_target` finding. |
 | Undo pays seconds of recompilation and re-autotuning | Naively re-running `jit.invalidate` on undo discards compiled kernels and benchmark winners. | `jit.apply` snapshots `device_caches` and `Autotuner.cache` before invalidation and restores the live `CompiledKernel` and `Config` objects via `journal.record_call`. |
 
@@ -300,7 +304,7 @@ class Witness:
         self._capture = 0           # nesting depth of `with witness.capture():`
 ```
 
-Every witness hit—whether from a swapped Python function calling `__fastrsi_hit__(key)` or from a rebuilt Triton kernel firing `f.pre_run_hooks` (armed via `witness.arm(key, journal)`)—calls `witness.hit(key)`:
+Every witness hit—whether from a swapped Python function calling `__fastrsi_hit__(key)` or from a rebuilt Triton kernel firing `f.pre_run_hooks` (armed via `witness.arm` / `witness.arm_launch`)—calls `witness.hit(key)`:
 
 ```python
 def _capturing(self):
@@ -554,7 +558,7 @@ Per `AGENTS.md`, the shared transaction kernel (`core/livelab/kernel/`) stays pu
 |---|---|---|
 | Bytecode swap (`fn.__code__`), closure pairing, and exact code undo | `core/livelab/kernel/swap.py`, `journal.py` | `stage`, `validate`, `apply`, `Journal.set_code`, `Journal.undo_to` |
 | In-place `@triton.jit` rebuild, cross-module transitive caller reset, `seeded_lines`, and zero-recompile undo | `core/livelab/kernel/jit.py` | `text_of`, `plan`, `apply`, `arm_added`, `seeded_lines` (duck-typed via `jit.NEED`) |
-| Two-ledger witness (`counts` vs. `capture_counts`), Dynamo constant marking, and `pre_run_hooks` arming | `core/livelab/kernel/witness.py` | `Witness(capturing=...)`, `with witness.capture():`, `witness.arm`, `witness.check`, `trace_safe` |
+| Two-ledger witness (`counts` vs. `capture_counts`), Dynamo constant marking, and `pre_run_hooks` arming | `core/livelab/kernel/witness.py` | `Witness(capturing=...)`, `with witness.capture():`, `witness.arm`, `witness.arm_launch`, `witness.check`, `trace_safe` |
 | Finding catalog (`jit_rebuild`, `jit_target`, `captured_target`, `captured_partly`, `zero_witness`, `running_frame`) | `core/livelab/kernel/findings.py` | `CATALOG`, `finding`, `decide` |
 | Static graph-boundary detection (`captured_target` / `captured_partly`) and stream-capture probe | `repos/<engine>/livelab/adapter/` (implemented for vLLM: `graphs.py`, `side.py`) | Engine `LocalParticipant(checks=[...], capturing=...)` hooks |
 | Recapture per cudagraph mode and batch descriptor in the step gap, with journaled undo | `repos/vllm/livelab/adapter/recapture.py` | Replaces the wrappers' entry dicts and dispatcher keys, captures under `with witness.capture():`, restores the base dicts on undo |

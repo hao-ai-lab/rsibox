@@ -66,7 +66,7 @@ seconds-long microbenchmark of the same collectives would have answered it first
   cache).
 - **Stay repo-specific.** Specialize to `repos/<engine>/` and its workload. Do not build
   cross-engine abstractions mid-loop and never import from another `repos/<other>/`
-  (`.github/workflows/pr-rules.yml` `cross-engine-imports`). Local duplication inside
+  (`.github/workflows/pr-rules.yml` `rule-cross-engine-imports`). Local duplication inside
   `repos/<engine>/` is fine while iterating; cross-repo extraction waits for an offline
   distillation pass between engine waves (`core/agents/toolsmith_distill.md`).
 - Verify the new or changed tool against a fresh process before handing it back.

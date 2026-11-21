@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-"""Poll hao-ai-lab/fastrsi and run the B200 CI once per new trusted head.
+"""Poll hao-ai-lab/fastrsi and run the Modal GPU CI once per new trusted head.
 
 Candidates are the head of main and the heads of open PRs whose head repository is
 hao-ai-lab/fastrsi itself (fork PRs are skipped here and refused again by the runner).
-Each candidate runs through Rack (`rack-run`, which supervises the job and records it),
-one at a time. A SHA with a final result in <work>/results/ is not rerun; a refusal or a runner error
-(before the last attempt) leaves a non-final result, so the SHA is tried again.
-A run that has not written a result after --max-wait seconds gets SIGTERM (the pid in
-<work>/active/<sha>.pid, if that process is still that runner) before the next one starts.
-That is best effort: what keeps two runs off the same GPU is the runner's GPU locks.
+A SHA with a final result in `<work>/results/` is not rerun; a refusal or a runner error
+before `--max-attempts` leaves a non-final result, so the SHA is tried again.
 
-    python3 b200_ci_loop.py --once            # one pass, print what it would run
-    python3 b200_ci_loop.py --interval 300    # loop; add --post to post statuses
-
-Not installed anywhere by default; see fastrsi-b200-ci.service.
+    python3 modal_ci_loop.py --once --dry-run   # list heads it would run
+    python3 modal_ci_loop.py --interval 300     # poll loop; add --post to post statuses
 """
 import argparse
 import json
 import os
+import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -33,8 +29,8 @@ def gh(path):
 
 
 def candidates():
-    main = gh(f"repos/{REPO}/branches/main")["commit"]["sha"]
-    out = [(main, None, "main")]
+    main_sha = gh(f"repos/{REPO}/branches/main")["commit"]["sha"]
+    out = [(main_sha, None, "main")]
     for pr in gh(f"repos/{REPO}/pulls?state=open&per_page=100"):
         head_repo = (pr["head"].get("repo") or {}).get("full_name")
         if head_repo != REPO:
@@ -45,7 +41,7 @@ def candidates():
 
 
 def is_final(result: Path) -> bool:
-    """A result written before attempts were counted has no "final" key and is final."""
+    """A result written before attempts were counted has no `final` key and is final."""
     try:
         return bool(json.loads(result.read_text()).get("final", True))
     except (OSError, ValueError, AttributeError):
@@ -53,18 +49,38 @@ def is_final(result: Path) -> bool:
 
 
 def runner_argv(a, sha, pr, work: Path) -> list:
-    argv = [sys.executable, str(HERE / "run_b200_ci.py"), "--sha", sha, "--work", str(work),
-            "--gpus", a.gpus, "--gpu-pool", a.gpu_pool, "--python", a.python,
-            "--quickstart-pythons", a.quickstart_pythons, "--stages", a.stages,
-            "--timeout", str(a.timeout), "--max-attempts", str(a.max_attempts),
-            # the runner stops itself first; the SIGTERM below is the fallback
-            "--deadline-seconds", str(max(60, a.max_wait - 60))]
+    argv = [
+        sys.executable,
+        str(HERE / "run_modal_ci.py"),
+        "--sha",
+        sha,
+        "--work",
+        str(work),
+        "--gpu",
+        a.gpu,
+        "--python",
+        a.python,
+        "--quickstart-pythons",
+        a.quickstart_pythons,
+        "--stages",
+        a.stages,
+        "--timeout",
+        str(a.timeout),
+        "--max-attempts",
+        str(a.max_attempts),
+        "--deadline-seconds",
+        str(max(60, a.max_wait - 60)),
+    ]
     if a.source:
         argv += ["--source", a.source]
     if pr:
         argv += ["--pr", str(pr)]
-    if a.vllm_python:
-        argv += ["--vllm-python", a.vllm_python]
+    if getattr(a, "vllm_model", ""):
+        argv += ["--vllm-model", a.vllm_model]
+    if getattr(a, "suites", ""):
+        argv += ["--suites", a.suites]
+    if getattr(a, "modal_cmd", ""):
+        argv += ["--modal-cmd", a.modal_cmd]
     if a.logs_url_base:
         argv += ["--logs-url-base", a.logs_url_base]
     if a.post:
@@ -90,11 +106,14 @@ def wait_run(work: Path, sha: str, since: float, seconds: float, poll: float) ->
 
 
 def is_runner(pid: int, sha: str) -> bool:
-    """True if `pid` is alive and its command line is run_b200_ci.py for `sha`. A runner that
-    was SIGKILLed leaves its pid file behind, and the pid may since belong to another
-    process: that one is never signalled."""
-    found = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
-    return found.returncode == 0 and "run_b200_ci.py" in found.stdout and sha in found.stdout
+    """True if `pid` is alive and its command line is run_modal_ci.py for `sha`."""
+    # -ww disables column-width truncation so long paths/flags never hide --sha.
+    found = subprocess.run(["ps", "-ww", "-o", "args=", "-p", str(pid)], capture_output=True, text=True)
+    if found.returncode != 0:
+        return False
+    cmdline = found.stdout
+    return (bool(re.search(r"(?:^|[/\s])run_modal_ci\.py(?:\s|$)", cmdline))
+            and bool(re.search(rf"(?:^|\s)--sha(?:=|\s+){re.escape(sha)}(?:\s|$)", cmdline)))
 
 
 def stop_run(work: Path, sha: str, since: float) -> bool:
@@ -116,17 +135,29 @@ def run_one(a, sha, pr):
     work = Path(a.work).expanduser()
     result = work / "results" / f"{sha}.json"
     argv = runner_argv(a, sha, pr, work)
-    launch = [str(Path(a.rack_run).expanduser()), "--agent", a.agent, "--title", f"b200-ci {sha[:12]}",
-              "--cluster", "b200", "--node", "b200", "--"] + argv
-    print("launch:", " ".join(launch), flush=True)
+    print("launch:", shlex.join(argv), flush=True)
     if a.dry_run:
         return False
     since = time.time() - 1
-    subprocess.run(launch, check=True)  # returns at once; rack-run supervises the job
-    done = wait_run(work, sha, since, a.max_wait, a.poll)
-    if not done:
-        print(f"no result for {sha} after {a.max_wait}s; stopping it", flush=True)
-        done = stop_run(work, sha, since) and wait_run(work, sha, since, 120, a.poll)
+    proc = subprocess.Popen(argv)
+    try:
+        deadline = time.time() + a.max_wait
+        while proc.poll() is None and not fresh(result, since):
+            if time.time() >= deadline:
+                break
+            time.sleep(a.poll)
+        if proc.poll() is None and not fresh(result, since):
+            print(f"no result for {sha} after {a.max_wait}s; stopping it", flush=True)
+            stopped = stop_run(work, sha, since)
+            if not stopped:
+                proc.terminate()
+            wait_run(work, sha, since, 120, a.poll)
+        proc.wait(timeout=30)
+        done = fresh(result, since)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        done = fresh(result, since)
     print(result.read_text() if done else f"no result for {sha}; tried again next pass", flush=True)
     return done
 
@@ -135,17 +166,16 @@ def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", default="~/fastrsi-ci")
     ap.add_argument("--source", default="", help="git URL to fetch branch heads from (runner default)")
-    ap.add_argument("--gpus", default="auto:2")
-    ap.add_argument("--gpu-pool", default="0,1,2,3")
+    ap.add_argument("--gpu", default=os.environ.get("MODAL_GPU", "L4"))
     ap.add_argument("--python", default="3.12")
     ap.add_argument("--quickstart-pythons", default="3.11,3.12")
-    ap.add_argument("--stages", default="cpu,gpu,quickstart")
+    ap.add_argument("--stages", default="gpu")
     ap.add_argument("--timeout", type=int, default=1200, help="per step, seconds")
     ap.add_argument("--max-attempts", type=int, default=3)
-    ap.add_argument("--vllm-python", default="")
+    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("FASTRSI_VLLM_MODEL", ""))
+    ap.add_argument("--suites", default="")
+    ap.add_argument("--modal-cmd", default="")
     ap.add_argument("--logs-url-base", default="")
-    ap.add_argument("--agent", default="claude")
-    ap.add_argument("--rack-run", default="~/.rack/bin/rack-run")
     ap.add_argument("--interval", type=int, default=300)
     ap.add_argument("--max-wait", type=int, default=3600)
     ap.add_argument("--poll", type=float, default=15, help=argparse.SUPPRESS)

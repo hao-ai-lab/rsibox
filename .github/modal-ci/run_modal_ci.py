@@ -1,33 +1,23 @@
 #!/usr/bin/env python3
-"""B200 CI: test one trusted commit of hao-ai-lab/fastrsi on the B200 machine.
+"""Modal GPU CI: test one trusted commit of hao-ai-lab/fastrsi on Modal GPUs.
 
-Stdlib only. Run it on B200, inside a Rack-supervised job (see README.md here):
+Stdlib only. Fetches branch heads (never refs/pull/*) into a bare mirror, refuses
+any SHA not contained on a branch of the repo (fork PRs), exports only that trusted
+SHA as a clean `git archive` tarball (zero GitHub tokens enter Modal containers),
+and invokes `.github/modal-ci/modal_app.py` to run the core + multi-engine suites
+in parallel with `vllm-services` on cached Modal GPU images.
 
-    ~/.rack/bin/rack-run --agent claude --title "b200-ci <sha>" --cluster b200 --node b200 -- \
-        python3 run_b200_ci.py --sha <sha> --gpus auto:2
+Optional stages `--stages cpu,gpu,quickstart` preserve local CPU/quickstart parity.
+Context posted with `--post`: `modal-gpu`.
 
-Steps: fetch branch heads (never refs/pull/*) into a mirror, refuse a SHA that no
-branch of the repo contains (fork PRs), check it out into a fresh run directory,
-build fresh virtualenvs, run
-
-  cpu         the cpu-tests.yml suites with no torch and no GPU (GitHub parity),
-  gpu         the same suites with torch + triton, FASTRSI_TEST_GPU=1, GPUs visible
-              and (optionally) a vLLM python, so the torch/GPU/vLLM cases run,
-  quickstart  the README quickstart block, verbatim, in a fresh venv,
-
-then write logs, summary.json, summary.md and the commit status it would post
-(context `b200-gpu`). It posts that status only with --post.
-
-Retries: <work>/results/<sha>.json says whether the result is final; the loop reruns a SHA
-until it is. A refusal (untrusted SHA, no free GPUs) is never final and posts no final
-status. A runner error before the SHA is verified (fetch) is never final; after that it is
-one attempt of --max-attempts, and only the last is final. A step cut by
---deadline-seconds or SIGTERM is a runner error. A test result is always final.
-Exit code: 0 success, 1 test failure, 2 infrastructure error or refusal.
+Retries: `<work>/results/<sha>.json` records `final`; the loop reruns a SHA until
+it is final. A refusal is never final. A runner error before trust is verified is
+never final and not counted; after trust it increments `attempts` up to
+`--max-attempts` before posting `error`.
+Exit code: 0 success, 1 test failure, 2 refusal or infrastructure error.
 """
 import argparse
 import datetime
-import fcntl
 import json
 import os
 import re
@@ -42,16 +32,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 REPO = "hao-ai-lab/fastrsi"
-CONTEXT = "b200-gpu"
+CONTEXT = "modal-gpu"
 HERE = Path(__file__).resolve().parent
-TORCH_SPEC = ["torch==2.9.1", "--index-url", "https://download.pytorch.org/whl/cu128",
-              "--extra-index-url", "https://pypi.org/simple"]
-GPU_EXTRA = ["pytest", "numpy", "nvidia-ml-py"]
-CPU_EXTRA = ["pytest"]  # cpu-tests.yml installs only pytest, and only for vllm-services
+CPU_EXTRA = ["pytest"]
 
 
 class Refused(Exception):
-    """Not run, and not a result: the SHA is not trusted or the GPUs are not free."""
+    """Not run, and not a result: the SHA or PR failed trust checks."""
 
 
 class Stopped(Exception):
@@ -59,8 +46,7 @@ class Stopped(Exception):
 
 
 class Deadline:
-    """Caps a whole run (--deadline-seconds). A step cut by it, or any later step, raises
-    Stopped, which is recorded as a runner error, never as a test result."""
+    """Caps a whole run (--deadline-seconds). A step cut by it raises Stopped."""
 
     def __init__(self, seconds: int):
         self.end = time.monotonic() + seconds if seconds else None
@@ -78,10 +64,7 @@ class Deadline:
 
 
 def run_group(argv, per_step: int, deadline: Deadline, **kw):
-    """Run one step in its own process group; return its exit code, or "timeout" when the
-    per-step timeout cut it. On a timeout, the run deadline, SIGTERM (Stopped) or any other
-    exception the whole group is killed, grandchildren included, before this returns or
-    raises. A process that leaves the group (setsid) is not covered."""
+    """Run one subprocess in its own process group; kill the whole group on timeout/signal."""
     proc = subprocess.Popen(argv, start_new_session=True, **kw)
     try:
         return proc.wait(timeout=deadline.timeout(per_step))
@@ -119,16 +102,15 @@ def sync_mirror(work: Path, source: str) -> Path:
     mirror = work / "mirror.git"
     if not mirror.exists():
         sh(["git", "init", "--quiet", "--bare", str(mirror)])
-    # Branch heads only. GitHub serves fork PR commits only under refs/pull/*, which we
-    # never fetch, so a fork PR head cannot enter this mirror through this fetch.
+    # Branch heads only. Fork PR commits live only under refs/pull/*, never fetched here.
     sh(["git", "-C", str(mirror), "fetch", "--quiet", "--prune", "--no-tags", source,
         "+refs/heads/*:refs/heads/*"])
     return mirror
 
 
 def trusted_branches(mirror: Path, sha: str) -> list:
-    r = sh(["git", "-C", str(mirror), "cat-file", "-e", sha + "^{commit}"], check=False,
-           capture_output=True)
+    r = sh(["git", "-C", str(mirror), "cat-file", "-e", sha + "^{commit}"],
+           check=False, capture_output=True)
     if r.returncode != 0:
         return []
     out = sh(["git", "-C", str(mirror), "branch", "--format=%(refname:short)", "--contains", sha],
@@ -137,7 +119,7 @@ def trusted_branches(mirror: Path, sha: str) -> list:
 
 
 def check_pr(pr: int, sha: str) -> dict:
-    """Same-repo PR whose head is exactly `sha`; refuses fork PRs."""
+    """Require same-repo PR whose head SHA equals `sha`; refuses fork PRs."""
     r = sh(["gh", "api", f"repos/{REPO}/pulls/{pr}"], capture_output=True)
     d = json.loads(r.stdout)
     head_repo = (d.get("head") or {}).get("repo") or {}
@@ -148,87 +130,143 @@ def check_pr(pr: int, sha: str) -> dict:
     return {"pr": pr, "head_ref": d["head"]["ref"], "base_ref": d["base"]["ref"]}
 
 
-# ---------------------------------------------------------------- GPUs
-
-def idle_gpus(nvidia_smi: str) -> list:
-    out = sh([nvidia_smi, "--query-gpu=index,memory.used,utilization.gpu",
-              "--format=csv,noheader,nounits"], capture_output=True).stdout
-    idle = []
-    for line in out.strip().splitlines():
-        idx, mem, util = [x.strip() for x in line.split(",")]
-        if int(mem) < 500 and int(util) == 0:
-            idle.append(idx)
-    return idle
+def export_archive(mirror: Path, sha: str, tarball: Path) -> Path:
+    tarball.parent.mkdir(parents=True, exist_ok=True)
+    sh(["git", "-C", str(mirror), "archive", "--format=tar.gz", "-o", str(tarball), sha])
+    return tarball
 
 
-def lock_gpu(lock_dir: Path, idx: str):
-    """An exclusive, non-blocking lock on one GPU index, or None if another run holds it.
-    The kernel drops the lock when the holder exits, however it exits."""
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    handle = open(lock_dir / f"gpu{idx}.lock", "w")
+# ---------------------------------------------------------------- Modal runner
+
+def resolve_modal_cmd(modal_cmd: str, uv: str) -> list[str]:
+    if modal_cmd.strip():
+        return shlex.split(modal_cmd)
+    on_path = shutil.which("modal")
+    if on_path:
+        return [on_path]
+    uv_bin = shutil.which(uv) if uv else None
+    if not uv_bin and uv and Path(uv).is_file():
+        uv_bin = uv
+    if uv_bin:
+        return [uv_bin, "run", "--no-project", "--with", "modal", "modal"]
+    raise RuntimeError("modal CLI not found (install modal or uv, or pass --modal-cmd)")
+
+
+def run_modal_gpu(
+    modal_cmd: list[str],
+    tarball: Path,
+    run_dir: Path,
+    gpu: str,
+    timeout: int,
+    deadline: Deadline,
+    vllm_model: str = "",
+    suites_csv: str = "",
+) -> tuple[dict, dict]:
+    """Invoke Modal GPU CI app on the trusted tarball and collect structured results + logs."""
+    modal_json = run_dir / "modal_results.json"
+    logs_dir = run_dir / "logs" / "gpu"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    modal_log_path = run_dir / "logs" / "modal-run.log"
+
+    remote_timeout = max(1800, min(7200, timeout * 3))
+    argv = [
+        *modal_cmd,
+        "run",
+        str(HERE / "modal_app.py"),
+        "--tarball-path",
+        str(tarball),
+        "--output-json",
+        str(modal_json),
+        "--gpu",
+        gpu,
+        "--timeout",
+        str(timeout),
+    ]
+    if vllm_model:
+        argv += ["--vllm-model", vllm_model]
+    if suites_csv:
+        argv += ["--suites", suites_csv]
+
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("FASTRSI_", "PYTHONPATH", "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API"))
+    }
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["FASTRSI_MODAL_GPU"] = gpu
+    env["FASTRSI_MODAL_TIMEOUT"] = str(remote_timeout)
+
+    t_stage = time.monotonic()
+    modal_timeout = max(timeout * 3, 2400)
+    with open(modal_log_path, "w") as mlog:
+        mlog.write("$ %s\n" % shlex.join(argv))
+        mlog.flush()
+        exit_code = run_group(
+            argv,
+            modal_timeout,
+            deadline,
+            env=env,
+            stdout=mlog,
+            stderr=subprocess.STDOUT,
+        )
+
+    if exit_code == "timeout":
+        raise RuntimeError(f"modal run timed out after {modal_timeout}s")
+    if not modal_json.exists():
+        tail = ""
+        try:
+            lines = [ln.strip() for ln in modal_log_path.read_text(errors="replace").splitlines() if ln.strip()]
+            if lines:
+                tail = f": {lines[-1][:160]}"
+        except OSError:
+            pass
+        raise RuntimeError(f"modal run exited {exit_code} without writing {modal_json.name}{tail}")
+
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        return None
-    return handle
+        data = json.loads(modal_json.read_text())
+    except ValueError as exc:
+        raise RuntimeError(f"invalid {modal_json.name}: {exc}") from exc
+
+    if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+        raise RuntimeError(f"malformed {modal_json.name}: missing steps list")
+    if data.get("infra_error"):
+        raise RuntimeError(str(data["infra_error"]))
+    if exit_code not in (0, 1):
+        raise RuntimeError(f"modal run exited {exit_code}")
+
+    steps = []
+    for raw_step in data["steps"]:
+        step = dict(raw_step)
+        log_text = step.pop("log_text", "")
+        log_path = logs_dir / f"{step['name']}.log"
+        log_path.write_text(log_text)
+        step["log"] = str(log_path.relative_to(run_dir))
+        steps.append(step)
+        print(
+            f"[gpu] {step['name']}: rc={step['rc']} {step.get('counts', {})} {step.get('seconds', 0)}s",
+            flush=True,
+        )
+
+    stage = {
+        "stage": "gpu",
+        "steps": steps,
+        "seconds": round(time.monotonic() - t_stage, 1),
+        "ok": bool(steps) and all(s["ok"] for s in steps),
+        "counts": totals(steps),
+    }
+    return stage, data.get("gpu_info", {})
 
 
-def pick_gpus(spec: str, pool: str, lock_dir: Path, nvidia_smi: str = "nvidia-smi"):
-    """`spec` is an explicit CUDA_VISIBLE_DEVICES value or auto:N. auto picks N idle GPUs,
-    only from `pool` (the indices this runner is allowed on the shared machine).
-    Returns (value, lock handles). Each chosen GPU is locked, so two runs never share one;
-    an auto pick is checked idle again after its lock is taken. Keep the handles open for
-    as long as the GPUs are in use."""
-    allowed = set(pool.split(",")) if pool else None
-    if not spec.startswith("auto"):
-        chosen = spec.split(",")
-        if allowed and not set(chosen) <= allowed:
-            raise Refused(f"--gpus {spec} is outside the allowed pool {pool}")
-        handles = []
-        for idx in chosen:
-            handle = lock_gpu(lock_dir, idx)
-            if handle is None:
-                for held in handles:
-                    held.close()
-                raise Refused(f"GPU {idx} is locked by another CI run")
-            handles.append(handle)
-        return spec, handles
-    want = int(spec.split(":", 1)[1]) if ":" in spec else 1
-    idle = [idx for idx in idle_gpus(nvidia_smi) if allowed is None or idx in allowed]
-    chosen, handles = [], []
-    for idx in idle:
-        if len(chosen) == want:
-            break
-        handle = lock_gpu(lock_dir, idx)
-        if handle is not None:
-            chosen.append(idx)
-            handles.append(handle)
-    still_idle = set(idle_gpus(nvidia_smi)) if chosen else set()
-    if len(chosen) < want or not set(chosen) <= still_idle:
-        for held in handles:
-            held.close()
-        raise Refused(f"need {want} idle, unlocked GPUs in pool {pool or 'all'}, found {chosen} "
-                      f"(idle: {idle})")
-    return ",".join(chosen), handles
-
-
-def check_still_idle(gpus: str, spec: str, nvidia_smi: str):
-    """Right before the gpu stage: an auto-picked GPU that someone outside CI started using
-    since it was picked (the cpu stage takes minutes) is a refusal, not a test failure."""
-    if spec.startswith("auto"):
-        busy = set(gpus.split(",")) - set(idle_gpus(nvidia_smi))
-        if busy:
-            raise Refused(f"GPUs {sorted(busy)} became busy before the gpu stage")
-
-
-# ---------------------------------------------------------------- envs
+# ---------------------------------------------------------------- optional CPU / quickstart
 
 def make_env(uv: str, path: Path, python: str, pkgs: list, log, deadline: Deadline) -> float:
     t0 = time.monotonic()
     commands = [[uv, "venv", "--quiet", "--python", python, str(path)]]
-    commands += [[uv, "pip", "install", "--quiet", "--python", str(path / "bin" / "python"), *group]
-                 for group in pkgs]
+    commands += [
+        [uv, "pip", "install", "--quiet", "--python", str(path / "bin" / "python"), *group]
+        for group in pkgs
+    ]
     for argv in commands:
         exit_code = run_group(argv, 1800, deadline, stdout=log, stderr=subprocess.STDOUT)
         if exit_code != 0:
@@ -236,10 +274,8 @@ def make_env(uv: str, path: Path, python: str, pkgs: list, log, deadline: Deadli
     return time.monotonic() - t0
 
 
-# ---------------------------------------------------------------- suites
-
-def suites(src: Path, py: str, res: Path):
-    """The cpu-tests.yml steps, in order. Each yields machine-readable results."""
+def cpu_suites(src: Path, py: str, res: Path):
+    """Local CPU parity suites."""
     uj = str(HERE / "unittest_json.py")
 
     def ut(name, s, t=None, p=None, cwd="."):
@@ -254,15 +290,20 @@ def suites(src: Path, py: str, res: Path):
         return {"name": name, "kind": "cmd", "argv": argv, "cwd": cwd, "env": env or {}}
 
     fv = str(src / "repos/fastvideo/livelab")
-    return [
+    steps = [
         ut("core-conformance-cases", "conformance", ".", cwd="core/livelab"),
         ut("core-kernel", "core/livelab/kernel", "core/livelab"),
         ut("core-forksafe", "core/livelab", p="test_forksafe.py"),
+        ut("core-fastrsi", "core/livelab/fastrsi", "core/livelab"),
+        ut("core-survey", "core/livelab/survey", "core/livelab"),
+        ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
+        cmd("core-doctor", [py, "-m", "fastrsi", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
         cmd("core-conformance-toylab", [py, "-m", "conformance", "--lab", "kernel.toy_lab:ToyLab"],
             cwd="core/livelab"),
+        ut("template-adapter", "template/livelab/adapter", "template/livelab"),
         ut("fastvideo-adapter", "repos/fastvideo/livelab/adapter", "repos/fastvideo/livelab"),
         ut("fastvideo-services", "repos/fastvideo/livelab/services", "repos/fastvideo/livelab"),
-        cmd("fastvideo-conformance-toylab",
+        cmd("fastvideo-conformance",
             [py, "-m", "conformance", "--lab", "adapter.toy_lab:ToyFastVideoLab"],
             cwd="core/livelab", env={"PYTHONPATH": fv}),
         ut("vllm-adapter", "repos/vllm/livelab/adapter", "repos/vllm/livelab"),
@@ -271,9 +312,25 @@ def suites(src: Path, py: str, res: Path):
                   f"--junitxml={res / 'vllm-services.xml'}", "repos/vllm/livelab/services"],
          "cwd": "."},
         ut("megatron-livelab", "repos/megatron/livelab/fastrsi_megatron", "repos/megatron/livelab"),
-        ut("megatron-tools", "repos/megatron/tools"),
-        ut("review-checkers", ".github/review", ".github/review"),
     ]
+    if (src / "repos/megatron/tools").is_dir():
+        steps.append(ut("megatron-tools", "repos/megatron/tools"))
+    steps += [
+        ut("verl-adapter", "repos/verl/livelab/adapter", "repos/verl/livelab"),
+        ut("verl-tools", "repos/verl/tools", "repos/verl"),
+        cmd("verl-conformance", [py, "-m", "fastrsi", "conformance", "verl"],
+            env={"PYTHONPATH": str(src / "core/livelab")}),
+        ut("miles-adapter", "repos/miles/livelab/adapter", "repos/miles/livelab"),
+        cmd("miles-conformance", [py, "-m", "fastrsi", "conformance", "miles"],
+            env={"PYTHONPATH": str(src / "core/livelab")}),
+        ut("sglang-adapter", "repos/sglang/livelab/adapter", "repos/sglang/livelab"),
+        ut("sglang-services", "repos/sglang/livelab/services", "repos/sglang/livelab"),
+        cmd("sglang-conformance", [py, "-m", "fastrsi", "conformance", "sglang"],
+            env={"PYTHONPATH": str(src / "core/livelab")}),
+        ut("review-checkers", ".github/review", ".github/review"),
+        ut("scripts-tests", "scripts", p="test_*.py"),
+    ]
+    return steps
 
 
 def parse_results(step, res: Path) -> list:
@@ -290,8 +347,8 @@ def parse_results(step, res: Path) -> list:
             outcome, detail = "passed", ""
             for child in tc:
                 if child.tag in ("failure", "error"):
-                    outcome, detail = ("failed" if child.tag == "failure" else "error"), \
-                        (child.get("message") or "")[:2000]
+                    outcome = "failed" if child.tag == "failure" else "error"
+                    detail = (child.get("message") or "")[:2000]
                 elif child.tag == "skipped":
                     xf = (child.get("type") or "") == "pytest.xfail"
                     outcome, detail = ("xfailed" if xf else "skipped"), child.get("message") or ""
@@ -302,16 +359,24 @@ def parse_results(step, res: Path) -> list:
 
 
 def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout: int,
-              deadline: Deadline) -> dict:
+              deadline: Deadline, suites_filter: set[str] | None = None) -> dict:
     res = run_dir / "results" / stage
     logs = run_dir / "logs" / stage
     res.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     out = {"stage": stage, "steps": []}
     t_stage = time.monotonic()
-    for step in suites(src, py, res):
+    steps = cpu_suites(src, py, res)
+    if suites_filter is not None:
+        known = {step["name"] for step in steps}
+        unknown = sorted(suites_filter - known)
+        if unknown:
+            raise ValueError(f"unknown suite(s): {', '.join(unknown)}")
+        steps = [step for step in steps if step["name"] in suites_filter]
+    for step in steps:
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("FASTRSI_", "PYTHON", "VIRTUAL_ENV"))}
+               if not k.startswith(("FASTRSI_", "PYTHON", "VIRTUAL_ENV",
+                                    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API", "MODAL_TOKEN_"))}
         env["PATH"] = str(Path(py).parent) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         env.update(env_extra)
         env.update(step.get("env", {}))
@@ -321,7 +386,7 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
             log.write("$ (cd %s && %s)\n" % (step["cwd"], shlex.join(step["argv"])))
             log.flush()
             exit_code = run_group(step["argv"], timeout, deadline, cwd=src / step["cwd"], env=env,
-                           stdout=log, stderr=subprocess.STDOUT)
+                                  stdout=log, stderr=subprocess.STDOUT)
         tests = parse_results(step, res)
         if step["kind"] == "cmd":
             tests = [{"id": step["name"], "outcome": "passed" if exit_code == 0 else "failed",
@@ -335,7 +400,7 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
                              "log": str(log_path.relative_to(run_dir)), "tests": tests})
         print(f"[{stage}] {step['name']}: rc={exit_code} {counts} {time.monotonic() - t0:.1f}s", flush=True)
     out["seconds"] = round(time.monotonic() - t_stage, 1)
-    out["ok"] = all(s["ok"] for s in out["steps"])
+    out["ok"] = bool(out["steps"]) and all(s["ok"] for s in out["steps"])
     out["counts"] = totals(out["steps"])
     return out
 
@@ -343,15 +408,13 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
 def totals(steps) -> dict:
     c = {}
     for s in steps:
-        for k, v in s["counts"].items():
+        for k, v in s.get("counts", {}).items():
             c[k] = c.get(k, 0) + v
     return c
 
 
 def quickstart_script(readme: str):
-    """Every ```sh or ```bash block of the `## Quickstart` section, in order, joined; None if
-    there is none. The section ends at the next `## ` heading, so a block further down the
-    README is never run as the quickstart."""
+    """Every ```sh or ```bash block of the `## Quickstart` section, in order, joined."""
     section = re.search(r"^## Quickstart\b.*?$(.*?)(?=^## |\Z)", readme, flags=re.S | re.M)
     if not section:
         return None
@@ -368,7 +431,6 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path, deadline: Deadlin
         log_path.write_text("no ```sh or ```bash block under ## Quickstart in README.md\n")
         return {"python": python, "ok": False, "rc": "no-block", "log": str(log_path.relative_to(run_dir))}
     venv = run_dir / "envs" / f"quickstart-{python}"
-    # Each Python gets its own clean clone: the block makes .venv/ in the tree it runs in.
     qsrc = run_dir / "envs" / f"quickstart-src-{python}"
     sh(["git", "clone", "--quiet", str(src), str(qsrc)])
     script = run_dir / f"quickstart-py{python}.sh"
@@ -376,16 +438,17 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path, deadline: Deadlin
                       (shlex.quote(str(venv)), shlex.quote(str(qsrc)), block))
     t0 = time.monotonic()
     with open(log_path, "w") as log:
-        # A plain `python -m venv` with pip, as a user would make it (no uv, no extras).
         r = subprocess.run([uv, "python", "find", "--no-project", python], capture_output=True, text=True)
         base = r.stdout.strip() or f"python{python}"
         exit_code = run_group([base, "-m", "venv", str(venv)], 600, deadline, stdout=log,
-                       stderr=subprocess.STDOUT)
+                              stderr=subprocess.STDOUT)
         if exit_code == 0:
-            env = {k: v for k, v in os.environ.items() if not k.startswith(("PYTHON", "FASTRSI_"))}
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("PYTHON", "FASTRSI_",
+                                        "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API", "MODAL_TOKEN_"))}
             env["CUDA_VISIBLE_DEVICES"] = ""
             exit_code = run_group(["bash", str(script)], 1800, deadline, stdout=log,
-                           stderr=subprocess.STDOUT, env=env, cwd=qsrc)
+                                  stderr=subprocess.STDOUT, env=env, cwd=qsrc)
     return {"python": python, "ok": exit_code == 0, "rc": exit_code, "seconds": round(time.monotonic() - t0, 1),
             "log": str(log_path.relative_to(run_dir))}
 
@@ -427,10 +490,29 @@ def post_status(sha: str, status: dict):
 
 
 def write_md(summary: dict, status: dict, path: Path):
-    L = [f"# b200-gpu CI {summary['sha'][:12]}", "",
-         f"- sha: `{summary['sha']}`", f"- trusted via branches: {', '.join(summary.get('branches', [])) or '-'}",
-         f"- host: {summary['host']}  GPUs: `{summary.get('gpus', '-')}`  python: {summary.get('python')}",
+    gpu_info = summary.get("gpu_info", {})
+    core_gi = gpu_info.get("core", {})
+    vllm_gi = gpu_info.get("vllm", {})
+    gi = core_gi or vllm_gi
+    gpu_desc = f"`{summary.get('gpu', '-')}`"
+    if gi.get("gpu_name"):
+        gpu_desc += f" ({gi['gpu_name']}, driver {gi.get('driver_version', '?')})"
+    L = [f"# modal-gpu CI {summary['sha'][:12]}", "",
+         f"- sha: `{summary['sha']}`",
+         f"- trusted via branches: {', '.join(summary.get('branches', [])) or '-'}",
+         f"- host: {summary['host']}  Modal GPU: {gpu_desc}  python: {summary.get('python')}",
          f"- started: {summary['started']}  wall: {summary.get('seconds')} s", ""]
+    if core_gi or vllm_gi:
+        for role, info in (("core", core_gi), ("vllm", vllm_gi)):
+            if info:
+                L.append(
+                    f"- {role} container: gpu={info.get('gpu_name', '?')} "
+                    f"driver={info.get('driver_version', '?')} "
+                    f"torch={info.get('torch_version', '?')} "
+                    f"cuda={info.get('cuda_version', '?')}"
+                    + (f" vllm={info['vllm_version']}" if info.get("vllm_version") else "")
+                )
+        L.append("")
     for name, st in summary.get("stages", {}).items():
         L += [f"## {name} ({'ok' if st['ok'] else 'FAILED'}, {st['seconds']} s): {fmt_counts(st['counts'])}", "",
               "| step | rc | passed | failed | error | skipped | s |", "|---|---|---|---|---|---|---|"]
@@ -455,7 +537,7 @@ def write_md(summary: dict, status: dict, path: Path):
         L += [f"- status to post: {posted['state'] + ': ' + posted['description'] if posted else 'none'}",
               f"- result record: `{json.dumps(summary['result_record'])}`",
               ""]
-    path.write_text("\n".join(L))
+    write_atomic(path, "\n".join(L))
 
 
 # ---------------------------------------------------------------- results
@@ -463,8 +545,12 @@ def write_md(summary: dict, status: dict, path: Path):
 def write_atomic(path: Path, text: str):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(text)
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def previous_attempts(result: Path) -> int:
@@ -475,17 +561,7 @@ def previous_attempts(result: Path) -> int:
 
 
 def settle(summary: dict, status: dict, result: Path, max_attempts: int):
-    """What this run leaves behind: (result record, status to post or None).
-
-    The loop reruns a SHA until its record is final:
-    - refused: not final, attempts unchanged. No final status; a pending status already
-      posted is updated to say the run will be retried.
-    - runner error before the SHA was verified as trusted (fetch, mirror): not final and not
-      counted, so an outage never retires a head.
-    - runner error after that: one more attempt; final (and its error status posted) only on
-      the last of max_attempts, otherwise the status stays pending.
-    - test result: final, with its status.
-    Nothing is posted for a SHA that was not verified as trusted (no pending posted)."""
+    """Return `(result_record, status_to_post_or_None)` implementing retry/finality rules."""
     trusted = summary.get("pending_posted", False)
     attempts = previous_attempts(result)
     record = {"run_dir": summary["run_dir"], "status": status, "attempts": attempts, "final": True}
@@ -519,13 +595,15 @@ def main(argv=None):
                     help="git URL or bundle to fetch branch heads from")
     ap.add_argument("--work", default=str(Path.home() / "fastrsi-ci"))
     ap.add_argument("--pr", type=int, help="also require this PR to be same-repo with head == sha (uses gh)")
-    ap.add_argument("--gpus", default="auto:2", help="CUDA_VISIBLE_DEVICES value, or auto:N idle GPUs")
-    ap.add_argument("--gpu-pool", default="0,1,2,3", help="GPU indices this runner may use (B200 split)")
-    ap.add_argument("--nvidia-smi", default="nvidia-smi", help=argparse.SUPPRESS)
+    ap.add_argument("--gpu", default=os.environ.get("MODAL_GPU", "L4"),
+                    help="Modal GPU spec (default: L4)")
     ap.add_argument("--python", default="3.12")
     ap.add_argument("--quickstart-pythons", default="3.11,3.12", help="requires-python is >=3.11")
-    ap.add_argument("--vllm-python", default="", help="python with vLLM for FASTRSI_VLLM_PYTHON (gpu stage)")
-    ap.add_argument("--stages", default="cpu,gpu,quickstart")
+    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("FASTRSI_VLLM_MODEL", ""),
+                    help="model path/id for FASTRSI_VLLM_MODEL (vllm-services E2E)")
+    ap.add_argument("--suites", default="", help="optional comma-separated suite filter for Modal GPU stage")
+    ap.add_argument("--stages", default="gpu", help="comma-separated stages: gpu (default), cpu, quickstart")
+    ap.add_argument("--modal-cmd", default="", help="override Modal CLI command (auto-detected if empty)")
     ap.add_argument("--uv", default=shutil.which("uv") or str(Path.home() / ".local/bin/uv"))
     ap.add_argument("--timeout", type=int, default=1200, help="per step, seconds")
     ap.add_argument("--deadline-seconds", type=int, default=0,
@@ -539,96 +617,139 @@ def main(argv=None):
 
     if not re.fullmatch(r"[0-9a-f]{40}", a.sha):
         sys.exit("--sha must be a full 40-hex commit id")
-    signal.signal(signal.SIGTERM, on_sigterm)
     work = Path(a.work).expanduser()
     started = now()
     run_id = f"{a.sha[:12]}-{started:%Y%m%dT%H%M%SZ}"
     run_dir = work / "runs" / run_id
     run_dir.mkdir(parents=True)
-    # The loop reads this to stop a run that outlived its wait (SIGTERM, handled above).
     pid_file = work / "active" / f"{a.sha}.pid"
-    write_atomic(pid_file, str(os.getpid()))
-    summary = {"sha": a.sha, "run_id": run_id, "run_dir": str(run_dir), "host": socket.gethostname(),
-               "python": a.python, "started": started.isoformat(timespec="seconds"),
-               "argv": sys.argv if argv is None else argv, "stages": {}}
+    summary = {
+        "sha": a.sha,
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "host": socket.gethostname(),
+        "gpu": a.gpu,
+        "python": a.python,
+        "started": started.isoformat(timespec="seconds"),
+        "argv": sys.argv if argv is None else argv,
+        "stages": {},
+    }
     t0 = time.monotonic()
     deadline = Deadline(a.deadline_seconds)
-    stages = a.stages.split(",")
-    gpu_locks = []
+    stages = [s.strip() for s in a.stages.split(",") if s.strip()]
+    suites_list = [s.strip() for s in a.suites.split(",") if s.strip()]
+    suites_filter = set(suites_list) if suites_list else None
+
+    signal.signal(signal.SIGTERM, on_sigterm)
+    write_atomic(pid_file, str(os.getpid()))
+    completed_run = False
+    stopped_during_finalize = False
+
+    def defer_sigterm(signum, frame):
+        nonlocal stopped_during_finalize
+        stopped_during_finalize = True
+
     try:
-        mirror = sync_mirror(work, a.source)
-        branches = trusted_branches(mirror, a.sha)
-        if not branches:
-            raise Refused(f"{a.sha[:12]} is on no branch of {REPO} (fork PR or unknown commit)")
-        summary["branches"] = branches
-        if a.pr:
-            summary["pr"] = check_pr(a.pr, a.sha)
-        if "gpu" in stages:
-            # Locked before anything is posted or built, and held until the run ends.
-            summary["gpus"], gpu_locks = pick_gpus(a.gpus, a.gpu_pool, work / "locks", a.nvidia_smi)
-        if a.post:
-            post_status(a.sha, {"state": "pending", "context": CONTEXT, "description": "running on B200"})
-            summary["pending_posted"] = True
-        src = run_dir / "src"
-        sh(["git", "clone", "--quiet", "--no-checkout", str(mirror), str(src)])
-        sh(["git", "-C", str(src), "-c", "advice.detachedHead=false", "checkout", "--quiet", a.sha])
-        envs = run_dir / "envs"
-        with open(run_dir / "env-setup.log", "w") as log:
-            if "cpu" in stages:
-                summary["cpu_env_s"] = round(make_env(a.uv, envs / "cpu", a.python, [CPU_EXTRA], log,
-                                                      deadline), 1)
+        try:
+            mirror = sync_mirror(work, a.source)
+            branches = trusted_branches(mirror, a.sha)
+            if not branches:
+                raise Refused(f"{a.sha[:12]} is on no branch of {REPO} (fork PR or unknown commit)")
+            summary["branches"] = branches
+            if a.pr:
+                summary["pr"] = check_pr(a.pr, a.sha)
+            if a.post:
+                post_status(a.sha, {"state": "pending", "context": CONTEXT,
+                                    "description": f"running on Modal ({a.gpu})"})
+                summary["pending_posted"] = True
+
+            src = run_dir / "src"
+            tarball = run_dir / "src.tar.gz"
             if "gpu" in stages:
-                summary["gpu_env_s"] = round(make_env(a.uv, envs / "gpu", a.python,
-                                                      [TORCH_SPEC, GPU_EXTRA], log, deadline), 1)
-        base_env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
-        if "cpu" in stages:
-            summary["stages"]["cpu"] = run_stage(
-                "cpu", src, str(envs / "cpu/bin/python"),
-                {**base_env, "CUDA_VISIBLE_DEVICES": "", "FASTRSI_VLLM_PYTHON": ""}, run_dir, a.timeout,
-                deadline)
-        if "gpu" in stages:
-            check_still_idle(summary["gpus"], a.gpus, a.nvidia_smi)
-            env = {**base_env, "CUDA_VISIBLE_DEVICES": summary["gpus"], "FASTRSI_TEST_GPU": "1"}
-            if a.vllm_python:
-                # The vLLM python may live in a user site; give it a shim that drops our isolation.
-                shim = run_dir / "vllm-python"
-                shim.write_text("#!/bin/sh\nunset PYTHONNOUSERSITE\nexec %s \"$@\"\n" % shlex.quote(a.vllm_python))
-                shim.chmod(0o755)
-                env["FASTRSI_VLLM_PYTHON"] = str(shim)
-                summary["vllm_python"] = a.vllm_python
-            summary["stages"]["gpu"] = run_stage("gpu", src, str(envs / "gpu/bin/python"), env, run_dir,
-                                                 a.timeout, deadline)
-        if "cpu" in stages and "gpu" in stages:
-            cpu = {t["id"]: t for s in summary["stages"]["cpu"]["steps"] for t in s["tests"]}
-            gpu = {t["id"]: t for s in summary["stages"]["gpu"]["steps"] for t in s["tests"]}
-            summary["newly_run"] = sorted((i, gpu[i]["outcome"]) for i, t in cpu.items()
-                                          if t["outcome"] == "skipped" and i in gpu
-                                          and gpu[i]["outcome"] != "skipped")
-            summary["still_skipped"] = sorted((i, t["detail"]) for i, t in gpu.items() if t["outcome"] == "skipped")
-        if "quickstart" in stages:
-            summary["quickstart"] = [quickstart(src, a.uv, version, run_dir, deadline)
-                                     for version in a.quickstart_pythons.split(",")]
-    except Refused as e:
-        summary["refused"] = str(e)
-    except Exception as e:  # infrastructure (or Stopped), not a test result
-        summary["infra_error"] = f"{type(e).__name__}: {e}"[:300]
+                export_archive(mirror, a.sha, tarball)
+            if "cpu" in stages or "quickstart" in stages:
+                sh(["git", "clone", "--quiet", "--no-checkout", str(mirror), str(src)])
+                sh(["git", "-C", str(src), "-c", "advice.detachedHead=false", "checkout", "--quiet", a.sha])
+
+            base_env = {"PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+            if "cpu" in stages:
+                envs = run_dir / "envs"
+                with open(run_dir / "env-setup.log", "w") as log:
+                    summary["cpu_env_s"] = round(make_env(a.uv, envs / "cpu", a.python, [CPU_EXTRA], log, deadline), 1)
+                summary["stages"]["cpu"] = run_stage(
+                    "cpu",
+                    src,
+                    str(envs / "cpu/bin/python"),
+                    {**base_env, "CUDA_VISIBLE_DEVICES": "", "FASTRSI_VLLM_PYTHON": "",
+                     "FASTRSI_VLLM_MODEL": "", "FASTRSI_GPU_E2E": "0"},
+                    run_dir,
+                    a.timeout,
+                    deadline,
+                    suites_filter=suites_filter,
+                )
+
+            if "gpu" in stages:
+                modal_cmd = resolve_modal_cmd(a.modal_cmd, a.uv)
+                gpu_stage, gpu_info = run_modal_gpu(
+                    modal_cmd,
+                    tarball,
+                    run_dir,
+                    a.gpu,
+                    a.timeout,
+                    deadline,
+                    vllm_model=a.vllm_model,
+                    suites_csv=a.suites,
+                )
+                summary["stages"]["gpu"] = gpu_stage
+                summary["gpu_info"] = gpu_info
+                if a.vllm_model:
+                    summary["vllm_model"] = a.vllm_model
+
+            if "cpu" in stages and "gpu" in stages:
+                cpu = {t["id"]: t for s in summary["stages"]["cpu"]["steps"] for t in s["tests"]}
+                gpu = {t["id"]: t for s in summary["stages"]["gpu"]["steps"] for t in s["tests"]}
+                summary["newly_run"] = sorted((i, gpu[i]["outcome"]) for i, t in cpu.items()
+                                              if t["outcome"] == "skipped" and i in gpu
+                                              and gpu[i]["outcome"] != "skipped")
+                summary["still_skipped"] = sorted((i, t["detail"]) for i, t in gpu.items() if t["outcome"] == "skipped")
+
+            if "quickstart" in stages:
+                summary["quickstart"] = [quickstart(src, a.uv, version, run_dir, deadline)
+                                         for version in a.quickstart_pythons.split(",")]
+            completed_run = True
+        except Refused as e:
+            summary["refused"] = str(e)
+        except Exception as e:
+            summary["infra_error"] = f"{type(e).__name__}: {e}"[:300]
+    except Stopped as e:
+        if not summary.get("refused") and not summary.get("infra_error"):
+            summary["infra_error"] = f"{type(e).__name__}: {e}"[:300]
     finally:
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        for handle in gpu_locks:
-            handle.close()
-        summary["seconds"] = round(time.monotonic() - t0, 1)
-        if not a.keep_envs:
-            shutil.rmtree(run_dir / "envs", ignore_errors=True)
-    status = build_status(summary, a.logs_url_base)
-    summary["status"] = status
-    result = work / "results" / f"{a.sha}.json"
-    record, to_post = settle(summary, status, result, a.max_attempts)
-    summary["result_record"] = record
-    summary["posted_status"] = to_post
-    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1))
-    write_md(summary, status, run_dir / "summary.md")
-    write_atomic(result, json.dumps(record))
-    pid_file.unlink(missing_ok=True)
+        # Defer SIGTERM until result records and summaries are persisted atomically.
+        signal.signal(signal.SIGTERM, defer_sigterm)
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        try:
+            if not a.keep_envs:
+                shutil.rmtree(run_dir / "envs", ignore_errors=True)
+                (run_dir / "src.tar.gz").unlink(missing_ok=True)
+            if (not completed_run and stopped_during_finalize
+                    and not summary.get("refused") and not summary.get("infra_error")):
+                summary["infra_error"] = "Stopped: stopped by SIGTERM"
+            summary["seconds"] = round(time.monotonic() - t0, 1)
+            status = build_status(summary, a.logs_url_base)
+            summary["status"] = status
+            result = work / "results" / f"{a.sha}.json"
+            record, to_post = settle(summary, status, result, a.max_attempts)
+            summary["result_record"] = record
+            summary["posted_status"] = to_post
+            write_atomic(run_dir / "summary.json", json.dumps(summary, indent=1))
+            write_md(summary, status, run_dir / "summary.md")
+            write_atomic(result, json.dumps(record))
+            pid_file.unlink(missing_ok=True)
+        finally:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
     print(f"run dir: {run_dir}")
     print("status for repos/%s/statuses/%s:" % (REPO, a.sha))
     print(json.dumps(status, indent=1))

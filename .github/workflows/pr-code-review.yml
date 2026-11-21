@@ -15,8 +15,9 @@ on:
         required: true
 permissions: {}
 jobs:
-  checker:
-    name: Code review checker keeps only diff-anchored findings and never approves (golden cases)
+  review-filter-selftest:
+    # Code review checker keeps only diff-anchored findings and never approves (golden cases)
+    name: "review: Filter self-test"
     if: github.event_name == 'pull_request'
     # Runs the PR's own code, so it gets a read-only token that checkout does not keep.
     permissions:
@@ -28,8 +29,9 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 .github/review/test_code_review.py -v
-  review:
-    name: Agent code review (agy, codex) via the review service, posted as one COMMENT review
+  review-code:
+    # Agent code review (agy, codex) via the review service, posted as one COMMENT review
+    name: "review: Automated code review"
     # Only on demand: a `/review` comment on a PR by the repository owner, or a manual run.
     if: >-
       github.event_name == 'workflow_dispatch' ||

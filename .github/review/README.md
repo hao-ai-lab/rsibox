@@ -83,7 +83,10 @@ needs GitHub access.
 review). Each job runs in a fresh empty directory with a minimal environment and a fresh HOME that
 holds only copies of the reviewer's credential files (never its real state directory with
 other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
-only system paths and its own binary, and write only the job directory. A refreshed
+only system paths (without `/run`, except specific DNS resolver files) and its own binary file
+(never its parent directory recursively; extra bundle directories require
+`FASTRSI_REVIEW_EXTRA_READ`), isolates `/dev/shm` per job via `--private-shm` (denying global
+`/dev/shm` if namespaces are unavailable), and lets it write only the job directory. A refreshed
 credential is copied back only if it is valid JSON for the same account and the real file was
 not changed meanwhile. Known limit: a prompt-injected reviewer that keeps the account fields
 can still write unusable tokens into its copy, which would log the host CLI out until you log

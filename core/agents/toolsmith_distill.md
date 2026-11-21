@@ -53,7 +53,7 @@ Every distillation lands as a stack of small PRs, one boundary per PR:
      (`core/agents/orchestrator.md` rule 13) and attach the receipt. CPU tests alone never close an
      engine adoption PR.
    - Keep `repos/<engine>/` free of any import or path reference to another `repos/<other>/`
-     (enforced by the `cross-engine-imports` check in `.github/workflows/pr-rules.yml`).
+     (enforced by the `rule-cross-engine-imports` check in `.github/workflows/pr-rules.yml`).
 3. **Promote cross-engine lessons (`docs/lessons.md`).**
    - When the same operational lesson has been measured in two or more engines'
      `repos/<engine>/kb/lessons.md`, promote the general principle (with each engine's numbers and

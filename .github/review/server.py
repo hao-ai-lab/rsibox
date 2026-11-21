@@ -17,12 +17,15 @@ Safety (the prompt carries untrusted PR text):
 - Each reviewer runs in a fresh empty directory with a minimal environment and a fresh HOME
   that holds only copies of its credential files (never its real state directory with other
   conversations, settings or plugins), under confine.py: Landlock lets it read only system
-  paths and its own binary, and write only the job directory. Tested: a prompt
-  telling agy to read a file elsewhere gets "permission denied", even with all agy tools
+  paths (without `/run`, except specific DNS resolver files) and its own binary file (never
+  its parent folder recursively), isolates `/dev/shm` per job via `--private-shm` (denying host
+  `/dev/shm` if namespaces are unavailable), and lets it write only the job directory. Tested:
+  a prompt telling agy to read a file elsewhere gets "permission denied", even with all agy tools
   approved. agy also runs with `--sandbox` and slash commands off; codex with its read-only
   sandbox and its shell, exec, web, browser, app and plugin tools disabled.
 - A reply or error that contains material from a secret file (the service token, the
-  reviewers' credentials, SSH keys) is withheld: the job errors without returning it.
+  reviewers' credentials, SSH keys), including obfuscated, split, escaped, reversed, base64,
+  or hex-encoded forms, is withheld: the job errors without returning it.
 - Only allow-listed kinds, engines and models; prompts up to 120 KB; 2 reviews at a time.
 
 Standard library only.
@@ -30,7 +33,8 @@ Standard library only.
   FASTRSI_REVIEW_TOKEN_FILE=~/.config/fastrsi-review/token AGY=/path/to/agy CODEX=/path/to/codex \
       python3 server.py --port 8792
 """
-import argparse, json, os, re, secrets, shutil, subprocess, sys, tempfile, threading, time
+import argparse, base64, json, os, re, secrets, shutil, subprocess, sys, tempfile, threading, time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -42,7 +46,8 @@ MODELS = {"agy": {"gemini-4-argon-high", "gemini-4-argon-medium"},     # never G
 EXPECT = {"pr-description": "<<<TITLE", "code-review": '"findings"'}
 MAX_PROMPT = 120_000          # one argv string is capped at 128 KiB on Linux (agy takes -p)
 KEEP_SECONDS = 24 * 3600
-SYSTEM_READ = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/run", "/proc/self", "/sys"]
+SYSTEM_READ = ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc/self", "/sys"]
+DNS_RUN_FILES = ("/run/systemd/resolve/stub-resolv.conf", "/run/systemd/resolve/resolv.conf")
 CODEX_DISABLE = ["shell_tool", "unified_exec", "apps", "plugins", "browser_use",
                  "browser_use_external", "computer_use", "in_app_browser", "web_search_request",
                  "web_search_cached", "standalone_web_search", "image_generation", "enable_mcp_apps"]
@@ -71,6 +76,18 @@ def validate(req):
     return None
 
 
+def _json_strings(obj, out):
+    if isinstance(obj, str):
+        if len(obj) >= 20:
+            out.add(obj)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            _json_strings(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _json_strings(v, out)
+
+
 def secret_strings(paths):
     """Long tokens from secret files: any of them in a reply means the reviewer read a secret."""
     out = set()
@@ -80,11 +97,158 @@ def secret_strings(paths):
         except OSError:
             continue
         out.update(t for t in re.split(r"[^A-Za-z0-9_\-+/=.]", text) if len(t) >= 20)
+        if text.lstrip().startswith(("{", "[")):
+            try:
+                _json_strings(json.loads(text), out)
+            except ValueError:
+                pass
+        for body in re.findall(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(.*?)-----END ", text, re.S):
+            joined = re.sub(r"\s+", "", body)
+            if len(joined) >= 20:
+                out.add(joined)
     return out
 
 
+def _decode_escapes(text):
+    if "\\" not in text:
+        return text
+    text = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), text)
+    text = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), text)
+    return text.replace("\\/", "/").replace("\\\\", "\\")
+
+
+_B64_STD_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+_B64_URL_RE = re.compile(r"[A-Za-z0-9_-]{16,}={0,2}")
+_HEX_SPAN_RE = re.compile(r"[0-9a-f]{16,}")
+_PRINTABLE_RUN_RE = re.compile(r"[\x20-\x7e\n\r\t]{12,}")
+
+
+def _decode_bytes_to_runs(raw_bytes):
+    runs = []
+    try:
+        s = raw_bytes.decode("utf-8")
+        if "\x00" not in s and len(s) >= 12:
+            runs.append(s)
+    except UnicodeDecodeError:
+        s = raw_bytes.decode("latin-1")
+    for run in _PRINTABLE_RUN_RE.findall(s):
+        if run not in runs:
+            runs.append(run)
+    return runs
+
+
+def _decoded_spans(unquoted, compact, compact_lower):
+    out, seen = [], set()
+
+    def _add_bytes(raw_bytes):
+        for run in _decode_bytes_to_runs(raw_bytes):
+            if run not in seen:
+                seen.add(run)
+                out.append(run)
+
+    b64_candidates = set()
+    for src in (unquoted, compact):
+        for rx in (_B64_STD_RE, _B64_URL_RE):
+            for m in rx.finditer(src):
+                b64_candidates.add(m.group(0))
+    for span in b64_candidates:
+        raw = span.rstrip("=")
+        for off in range(4):
+            sub = raw[off:]
+            if len(sub) < 16:
+                continue
+            rem = len(sub) % 4
+            if rem == 1:
+                sub = sub[:-1]
+                rem = 0
+            pad = sub + "=" * ((4 - rem) % 4)
+            decoded = None
+            try:
+                decoded = base64.b64decode(pad, validate=True)
+            except Exception:
+                if "-" in pad or "_" in pad:
+                    try:
+                        decoded = base64.urlsafe_b64decode(pad)
+                    except Exception:
+                        decoded = None
+            if decoded:
+                _add_bytes(decoded)
+
+    hex_candidates = set()
+    for src in (unquoted.lower(), compact_lower):
+        for m in _HEX_SPAN_RE.finditer(src):
+            hex_candidates.add(m.group(0))
+    for span in hex_candidates:
+        for off in (0, 1):
+            sub = span[off:]
+            if len(sub) % 2 == 1:
+                sub = sub[:-1]
+            if len(sub) < 16:
+                continue
+            try:
+                decoded = bytes.fromhex(sub)
+            except ValueError:
+                continue
+            _add_bytes(decoded)
+    return out
+
+
+def _secret_chunks(s):
+    if len(s) < 20 or s.startswith(("http://", "https://")):
+        return ()
+    chunks = [s[i:i + 16] for i in range(0, len(s) - 15, 8)]
+    if s[-16:] not in chunks:
+        chunks.append(s[-16:])
+    return chunks
+
+
 def leaks(reply, secrets_):
-    return any(s in reply for s in secrets_)
+    """True when `reply` appears to expose a secret, even if split, reversed, escaped, or
+    base64/hex encoded."""
+    if not reply:
+        return False
+    unesc = _decode_escapes(reply)
+    unquoted = urllib.parse.unquote(unesc)
+    texts = list(dict.fromkeys((reply, unesc, unquoted)))
+    compact = re.sub(r"\s+", "", unquoted)
+    compact_lower = compact.lower()
+    decoded = _decoded_spans(unquoted, compact, compact_lower)
+    all_texts = texts + decoded
+    alnums = list(dict.fromkeys(
+        a for a in (re.sub(r"[^A-Za-z0-9]+", "", t) for t in (unquoted, *decoded)) if a
+    ))
+    alnum_revs = [a[::-1] for a in alnums]
+    if any(re.search(r"-----BEGIN\s+[A-Z0-9 ]*PRIVATE\s+KEY-----", t) for t in all_texts):
+        return True
+    if any("BEGINPRIVATEKEY" in a or "BEGINRSAPRIVATEKEY" in a or "BEGINOPENSSHPRIVATEKEY" in a for a in alnums):
+        return True
+    if not secrets_:
+        return False
+    for s in secrets_:
+        if not s or len(s) < 20:
+            continue
+        rev = s[::-1]
+        if any(s in t or rev in t for t in all_texts):
+            return True
+        raw_bytes = s.encode("utf-8", errors="ignore")
+        b64 = base64.b64encode(raw_bytes).decode().rstrip("=")
+        b64_url = base64.urlsafe_b64encode(raw_bytes).decode().rstrip("=")
+        hx = raw_bytes.hex()
+        if b64 in compact or b64_url in compact or hx in compact_lower:
+            return True
+        s_alnum = re.sub(r"[^A-Za-z0-9]+", "", s)
+        if len(s_alnum) >= 16 and any(s_alnum in a or s_alnum in ar for a, ar in zip(alnums, alnum_revs)):
+            return True
+        for chunk in _secret_chunks(s):
+            chunk_rev = chunk[::-1]
+            if any(chunk in t or chunk_rev in t for t in all_texts):
+                return True
+            if chunk.encode("utf-8", errors="ignore").hex() in compact_lower:
+                return True
+            c_alnum = re.sub(r"[^A-Za-z0-9]+", "", chunk)
+            if len(c_alnum) >= 14 and any(c_alnum in a or c_alnum in ar for a, ar in zip(alnums, alnum_revs)):
+                return True
+    return False
 
 
 # Per engine: the state directory a reviewer needs and the only files copied into it. Each job
@@ -170,6 +334,46 @@ def copy_back(engine, pairs):
             os.replace(tmp, src)
 
 
+def system_read_paths():
+    """System paths readable inside Landlock without exposing `/run` recursively."""
+    paths = list(SYSTEM_READ)
+    for p in DNS_RUN_FILES:
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+    resolv = os.path.realpath("/etc/resolv.conf")
+    if resolv.startswith("/run/") and os.path.isfile(resolv) and resolv not in paths:
+        paths.append(resolv)
+    return paths
+
+
+def binary_read_paths(bin_path, path_env="/usr/bin:/bin"):
+    """Grant read+exec on the executable file itself (and its shebang interpreter file, if any),
+    never its parent folder recursively. Operators can opt extra package paths in via
+    FASTRSI_REVIEW_EXTRA_READ."""
+    exe = os.path.realpath(bin_path)
+    paths = [exe]
+    try:
+        with open(exe, "rb") as f:
+            head = f.read(256)
+    except OSError:
+        head = b""
+    if head.startswith(b"#!"):
+        line = head.splitlines()[0][2:].decode("utf-8", errors="ignore").strip()
+        parts = line.split()
+        if parts:
+            interp = parts[0]
+            if os.path.basename(interp) == "env" and len(parts) > 1:
+                resolved = shutil.which(parts[1], path=path_env)
+                if resolved:
+                    paths.append(os.path.realpath(resolved))
+            elif interp.startswith("/"):
+                paths.append(os.path.realpath(interp))
+    for extra in os.environ.get("FASTRSI_REVIEW_EXTRA_READ", "").split(":"):
+        if extra:
+            paths.append(os.path.realpath(os.path.expanduser(extra)))
+    return list(dict.fromkeys(paths))
+
+
 def command(engine, prompt, model, workdir, bins):
     """argv (confined) and stdin for one reviewer run."""
     exe = os.path.realpath(bins[engine])
@@ -188,8 +392,9 @@ def command(engine, prompt, model, workdir, bins):
         argv.append("-")           # the prompt comes on stdin (no argv size limit)
         stdin = prompt
     confine = [sys.executable, "-I", str(HERE / "confine.py"),
-               "--read", *SYSTEM_READ, os.path.dirname(exe),
-               "--write", workdir, "/dev/null", "/dev/shm", "--"]
+               "--private-shm",
+               "--read", *system_read_paths(), *binary_read_paths(exe),
+               "--write", workdir, "/dev/null", "--"]
     return confine + argv, stdin
 
 
@@ -326,7 +531,8 @@ def main():
     server.bins = {e: b for e, b in server.bins.items() if b}
     server.secret_files = [token_file, "~/.gemini/antigravity-cli/antigravity-oauth-token",
                            str(real_state("codex") / "auth.json"),
-                           *[str(p) for p in Path("~/.ssh").expanduser().glob("id_*")]]
+                           *[str(p) for p in Path("~/.ssh").expanduser().glob("id_*")
+                             if not p.name.endswith(".pub")]]
     server.secret_files += [p for p in os.environ.get("FASTRSI_REVIEW_SECRET_FILES", "").split(":") if p]
     server.pool = ThreadPoolExecutor(max_workers=2)
     log(f"listening on {args.host}:{args.port}, engines={server.bins}")
