@@ -14,7 +14,7 @@ Provides shared, zero-dependency building blocks for rsibox live labs:
 import os
 import sys
 
-from . import diffs, op_guard
+from . import diffs, op_guard, warm
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .op_guard import op_redefine_guard
 from .harness import (
@@ -164,4 +164,5 @@ __all__ = [
     "unbind_module",
     "unix_json_call",
     "unix_json_stream",
+    "warm",
 ]
