@@ -19,8 +19,8 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 # hook.py hosts the live-lab kernel from the framework's core/livelab, which importing the
-# package puts on sys.path (FASTRSI_LIVELAB overrides it)
-from fastrsi_megatron import LIVELAB, client, gap  # noqa: E402
+# package puts on sys.path (RSIBOX_LIVELAB overrides it)
+from rsibox_megatron import LIVELAB, client, gap  # noqa: E402
 
 try:
     import torch
@@ -43,13 +43,13 @@ class Overlay(unittest.TestCase):
             os.makedirs(os.path.join(d, "ov"))
             with open(os.path.join(d, "ov", "pkg.mod.py"), "w") as f:
                 f.write("def f():\n    return 2\n")
-            code = ("import fastrsi_megatron.overlay, pkg.mod as m, json; "
+            code = ("import rsibox_megatron.overlay, pkg.mod as m, json; "
                     "print(json.dumps([m.f(), m.f.__code__.co_filename]))")
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
                                                                 os.path.join(d, "src")])}
-            env.pop("FASTRSI_KERNEL", None)
+            env.pop("RSIBOX_KERNEL", None)
             on = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                                env={**env, "FASTRSI_OVERLAY": os.path.join(d, "ov")})
+                                env={**env, "RSIBOX_OVERLAY": os.path.join(d, "ov")})
             off = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                  env=env)
             self.assertEqual(json.loads(on.stdout), [2, orig], on.stderr)
@@ -73,7 +73,7 @@ class Overlay(unittest.TestCase):
             code = ("import inspect, json, linecache, sys, importlib.util\n"
                     "path = importlib.util.find_spec('pkg.mod').origin\n"
                     "linecache.getlines(path)\n"
-                    "from fastrsi_megatron import overlay\n"
+                    "from rsibox_megatron import overlay\n"
                     "overlay.install()\n"
                     "import pkg.mod as module\n"
                     "finders = [finder for finder in sys.meta_path\n"
@@ -82,8 +82,8 @@ class Overlay(unittest.TestCase):
                     "                  linecache.getline(path, 2), len(finders)]))\n")
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
                                                                 os.path.join(folder, "src")]),
-                   "FASTRSI_OVERLAY": os.path.join(folder, "ov")}
-            env.pop("FASTRSI_KERNEL", None)
+                   "RSIBOX_OVERLAY": os.path.join(folder, "ov")}
+            env.pop("RSIBOX_KERNEL", None)
             run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                 env=env)
             self.assertEqual(json.loads(run.stdout or "null"),
@@ -124,11 +124,11 @@ class Mailbox(unittest.TestCase):
 class ConformanceJob(unittest.TestCase):
     def test_killed_job_leaves_no_folder_or_socket_and_ports_are_fresh(self):
         """The conformance lab starts a job per spawn, respawn and fresh check (c8 alone respawns
-        four times): each left a fastrsi-mg-* folder and its socket behind, and every lab of one
+        four times): each left a rsibox-mg-* folder and its socket behind, and every lab of one
         process reused one fixed port. Input: a job `echo started; exec sleep 30` and a file at its
         socket path, then kill(). Expect: the process is gone, its folder and socket removed, the
         log tail read before; two _free_port() calls give bindable ports."""
-        from fastrsi_megatron import conformance_lab
+        from rsibox_megatron import conformance_lab
         job = conformance_lab._Job("echo started; exec sleep 30", {}, "test")
         open(job.sock, "w").close()
         deadline = time.time() + 10
@@ -223,7 +223,7 @@ class StartState(unittest.TestCase):
         Expect: both runs give the same losses bit for bit, and they equal a fresh optimizer's
         3 steps from the same initial weights (what a fresh process would compute). Without the
         zeroing, the second run starts with the warm-up's moments and differs."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         torch.manual_seed(0)
         x = torch.randn(8, 16)
         model = torch.nn.Sequential(torch.nn.Linear(16, 16), torch.nn.Tanh(), torch.nn.Linear(16, 4))
@@ -258,7 +258,7 @@ class StartState(unittest.TestCase):
         quantized tensor (what the snapshot did before) brings back the same values with a new
         scale (max / 127) and other codes, so a check would not start from the built weights.
         What it does not prove: that every quantized type keeps all its bytes in attributes."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         Q = _quantized_class()
         torch.manual_seed(0)
         data = torch.randint(-50, 51, (4, 8), dtype=torch.int8)
@@ -279,7 +279,7 @@ class StartState(unittest.TestCase):
     def test_unknown_state_is_reported_not_zeroed(self):
         """A state key that is not a fresh Adam's zero (here a master copy kept in the state)
         must come back as unknown and keep its value."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         model = torch.nn.Linear(4, 4)
         opt = _MegatronLikeOptimizer(model)
         model(torch.ones(1, 4)).sum().backward()
@@ -296,7 +296,7 @@ class StartState(unittest.TestCase):
         the keys in `observed`, n_unknown 2) that serializes to JSON, built without the kernel's
         catalog, which does not know this Megatron-only check. Does not run Lab._setup itself."""
         self.assertIn(LIVELAB, sys.path)
-        from fastrsi_megatron import hook
+        from rsibox_megatron import hook
         f = hook.unknown_state_finding(["opt0.state.3.master_param", "opt0.state.4.master_param"])
         self.assertEqual(f["check"], "optimizer_state_unknown")
         self.assertEqual(f["observed"],
@@ -313,7 +313,7 @@ class StartState(unittest.TestCase):
         records `optimizer_state_unknown` in `setup_findings`, and repeats the same warm-up losses on
         `_restore() + _steps()`."""
         from unittest import mock
-        from fastrsi_megatron import hook
+        from rsibox_megatron import hook
         torch.manual_seed(0)
         batches = [torch.randn(4, 8) for _ in range(6)]
         model = torch.nn.Linear(8, 4)
@@ -338,7 +338,7 @@ class StartState(unittest.TestCase):
             return ({"lm loss": loss.detach()}, False, False, False, 0, 1.25)
 
         fake_ranks = type("_FakeRanks", (), {"rank": 0, "world": 1})
-        env = {"FASTRSI_WARMUP": "2", "FASTRSI_CHECK_STEPS_MAX": "4", "FASTRSI_CHECK_STEPS": "2"}
+        env = {"RSIBOX_WARMUP": "2", "RSIBOX_CHECK_STEPS_MAX": "4", "RSIBOX_CHECK_STEPS": "2"}
         with mock.patch.dict(os.environ, env), \
              mock.patch.object(hook.G, "Ranks", return_value=fake_ranks()), \
              mock.patch.object(hook.Lab, "_mb", return_value=1):
@@ -373,7 +373,7 @@ class ConformanceLabDiffsTest(unittest.TestCase):
         ))
 
     def test_install_uninstall_and_fresh_check_resolve_stacked_unified_diffs(self):
-        from fastrsi_megatron import conformance_lab as CL
+        from rsibox_megatron import conformance_lab as CL
 
         with tempfile.TemporaryDirectory() as root:
             mlp_rel = CL.MLP.replace(".", "/") + ".py"
@@ -437,14 +437,14 @@ class ConformanceLabDiffsTest(unittest.TestCase):
             self.assertTrue(r3["ok"], r3)
             self.assertEqual(sent[-1]["patch"]["files"], {CL.MLP: mlp_v2})
 
-            # fresh_check resolves unified diff against disk (base) into FASTRSI_OVERLAY.
+            # fresh_check resolves unified diff against disk (base) into RSIBOX_OVERLAY.
             seen_overlay = {}
 
             class _FakeFreshJob:
                 def __init__(self, _cmd, env, _tag):
-                    ov_file = Path(env["FASTRSI_OVERLAY"], CL.MLP + ".py")
+                    ov_file = Path(env["RSIBOX_OVERLAY"], CL.MLP + ".py")
                     seen_overlay["mlp"] = ov_file.read_text(encoding="utf-8")
-                    Path(env["FASTRSI_FRESH"]).write_text(
+                    Path(env["RSIBOX_FRESH"]).write_text(
                         json.dumps({"ok": True, "output": {"loss": [1.0]}}), encoding="utf-8"
                     )
 
@@ -465,7 +465,7 @@ class ConformanceLabDiffsTest(unittest.TestCase):
                 self.assertFalse(fresh_bad["ok"])
 
     def test_fresh_check_retries_once_on_eaddrinuse_only(self):
-        from fastrsi_megatron import conformance_lab as CL
+        from rsibox_megatron import conformance_lab as CL
 
         lab = CL.MegatronLab.__new__(CL.MegatronLab)
         lab.cmd = "true"
@@ -489,7 +489,7 @@ class ConformanceLabDiffsTest(unittest.TestCase):
                     events.append({"port": env["PORT"], "killed": False})
                     self._idx = idx
                     if write_out:
-                        Path(env["FASTRSI_FRESH"]).write_text(
+                        Path(env["RSIBOX_FRESH"]).write_text(
                             json.dumps({"ok": True, "output": {"loss": [1.5]}}), encoding="utf-8"
                         )
 
@@ -588,7 +588,7 @@ class ConformanceLabDiffsTest(unittest.TestCase):
 class PipelineAndVppTest(unittest.TestCase):
     def test_merge_check_output_prefers_non_none_stage_and_frozen_batches_vpp(self):
         """PP > 1 takes loss/grad_norm from the stage that computed them; VPP lists replay cleanly."""
-        from fastrsi_megatron import hook, state
+        from rsibox_megatron import hook, state
 
         merged = hook._merge_check_output([
             {"ok": True, "rank": 0, "loss": [None, None], "grad_norm": [1.5, 1.4]},

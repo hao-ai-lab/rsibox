@@ -8,7 +8,7 @@ unchanged. Interface: `core/livelab/INTERFACE-v1.md` (draft).
 
 ```
 torchrun (one process per GPU, sessions of their own)
- └─ rank r: python -m fastrsi_megatron.run pretrain_gpt.py <megatron args>
+ └─ rank r: python -m rsibox_megatron.run pretrain_gpt.py <megatron args>
      run.py      wraps pretrain()'s phases with timestamps; train_step -> hook
      hook.py     at the first train step, every rank enters the lab:
                    freeze batches -> snapshot S0 -> warm-up steps -> restore S0, zero Adam -> S
@@ -40,7 +40,7 @@ conformance_lab.py   LabUnderTest for core/livelab/conformance
   started with an edit reaches the same S (conformance c3). State keys the lab does not know
   how to reset are a finding at start (`optimizer_state_unknown`), never zeroed silently.
 - **Poison:** a round is point-to-point messages between rank 0 and each rank; rank 0 waits for
-  each with a deadline, never in a collective. It waits at most `FASTRSI_ROUND_TIMEOUT_S` (default
+  each with a deadline, never in a collective. It waits at most `RSIBOX_ROUND_TIMEOUT_S` (default
   900 s) for its sends, and at most that long after its own part for the replies. A rank that has
   not answered by then (it exited, was killed, hangs, or is slower than rank 0 by more than the
   timeout) or a send or receive that fails fails the round and poisons the session
@@ -92,23 +92,23 @@ rebuild), optimizer construction, TE C++ code.
 ## Kernel location
 
 The kernel and the pre-fork guards are imported from `core/livelab` (`kernel/`,
-`forksafe.py`), which `fastrsi_megatron/__init__.py` puts on `sys.path`; `FASTRSI_LIVELAB` (or
-`FASTRSI_KERNEL`) names another folder.
+`forksafe.py`), which `rsibox_megatron/__init__.py` puts on `sys.path`; `RSIBOX_LIVELAB` (or
+`RSIBOX_KERNEL`) names another folder.
 
 ## Conformance
 
-`conformance_lab.py` is the `LabUnderTest`: it starts the job with `FASTRSI_LAB=1` in a session
+`conformance_lab.py` is the `LabUnderTest`: it starts the job with `RSIBOX_LAB=1` in a session
 of its own, drives it over the socket, and builds its patches from the running tree's
 `megatron/core/transformer/mlp.py` and `attention.py`. Faults are real: crash and lost make a
 rank's process exit, hang makes a rank sleep inside a train step, tamper rebinds a function's
 code outside the journal.
 
 ```sh
-# From the FastRSI checkout, in an allocated worker environment with Megatron installed:
-export FASTRSI_RUN="$(mktemp -d)"
+# From the rsibox checkout, in an allocated worker environment with Megatron installed:
+export RSIBOX_RUN="$(mktemp -d)"
 export PYTHONPATH="$PWD/repos/megatron/livelab${PYTHONPATH:+:$PYTHONPATH}"
-python -m fastrsi_megatron.conformance_lab --root "$MEGATRON_ROOT" --nproc 2 \
-  --receipts "$FASTRSI_RUN/transactions.jsonl" -- \
+python -m rsibox_megatron.conformance_lab --root "$MEGATRON_ROOT" --nproc 2 \
+  --receipts "$RSIBOX_RUN/transactions.jsonl" -- \
   --num-layers 2 --hidden-size 512 --num-attention-heads 8 --ffn-hidden-size 1536 \
   --tensor-model-parallel-size 2 --sequence-parallel --seq-length 128 \
   --max-position-embeddings 128 --normalization RMSNorm --swiglu --disable-bias-linear \
@@ -121,7 +121,7 @@ python -m fastrsi_megatron.conformance_lab --root "$MEGATRON_ROOT" --nproc 2 \
 In a container with the Python environment already on local storage, stage just the engine
 tree from the checkout with `bash repos/megatron/tools/stage_local.sh --tree-only "$MEGATRON_ROOT" "$LOCAL_SCRATCH"`.
 Use `"$LOCAL_SCRATCH/$(basename "$MEGATRON_ROOT")"` for `--root`. Mount the checkout and a writable output and cache directory.
-The existing `FASTRSI_MG_CMD` and `FASTRSI_MG_ROOT` entry point remains available to custom launchers.
+The existing `RSIBOX_MG_CMD` and `RSIBOX_MG_ROOT` entry point remains available to custom launchers.
 
 The 2026-11-19 deterministic runs used two layers, hidden size 512, sequence length 128 and
 three-step checks. Live edits matched fresh edited processes in loss and gradient norm. The
@@ -152,24 +152,24 @@ the first step. Use it when a candidate differs in launch flags or NCCL settings
 through the live lab (or a fresh `torchrun` with an overlay, which the zygote refuses).
 
 ```sh
-python -m fastrsi_megatron.zygote serve --sock S --script pretrain_gpt.py      # once
-FASTRSI_T0=$(date +%s.%N) python -m fastrsi_megatron.zygote start --sock S --nproc 4 --port P \
-    --log-dir D --cwd D --env FASTRSI_RUN=D [--env K=V ...] -- pretrain_gpt.py <megatron args>
+python -m rsibox_megatron.zygote serve --sock S --script pretrain_gpt.py      # once
+RSIBOX_T0=$(date +%s.%N) python -m rsibox_megatron.zygote start --sock S --nproc 4 --port P \
+    --log-dir D --cwd D --env RSIBOX_RUN=D [--env K=V ...] -- pretrain_gpt.py <megatron args>
 ```
 
 Contract: each rank gets torchrun's variables (OMP_NUM_THREADS=1 too, applied to torch's pool)
 and the request's, a session of its own, `D/rank<r>.log`, optionally a CPU list (`--cpus`), and
-torch.cuda's own functions back; it runs `fastrsi_megatron.run` (phases, lab hook) with FASTRSI_T0 = the request
+torch.cuda's own functions back; it runs `rsibox_megatron.run` (phases, lab hook) with RSIBOX_T0 = the request
 time. One rank exiting non-zero stops the others by PID tree. No rank or child of a rank outlives
 its job: the zygote is child subreaper and reaps every non-kept child (ranks, guards, job-started
 helpers, adopted orphans) by parent PID after each job while leaving pre-job helpers and their
 descendants untouched, handles `SIGTERM` cleanup when running as PID 1, translates ancestor-namespace
 `/proc` via `NSpid`/`ns/pid` without signaling foreign PIDs, never kills its own process group
 when leading one, ensures each rank dies with the zygote (PR_SET_PDEATHSIG), starts a
-`fastrsi-guard` process per rank to kill the rank's process group when the rank dies, and stops the
+`rsibox-guard` process per rank to kill the rank's process group when the rank dies, and stops the
 job when a client disconnects (`on_client_gone: "keep"` lets it run). A malformed request gets an `error` event; the zygote serves on. Findings refuse a request unless
 it accepts them: `stale` (an imported source file changed), `env` (a variable a library may
-read at import, such as NVTE_*, differs from the zygote's), `overlay` (FASTRSI_OVERLAY replaces a
+read at import, such as NVTE_*, differs from the zygote's), `overlay` (RSIBOX_OVERLAY replaces a
 module the zygote has imported).
 
 Keeping CUDA uninitialized: Megatron's import reaches three libraries that ask about the GPU at

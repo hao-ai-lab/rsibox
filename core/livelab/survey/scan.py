@@ -6,7 +6,7 @@ import subprocess
 
 from . import rules as R
 
-SCHEMA = "fastrsi-survey/1"
+SCHEMA = "rsibox-survey/1"
 LIMITS = [
     "Static: the scan cannot tell which functions a workload reaches. Shares are of the source "
     "tree, not of the code a run executes.",

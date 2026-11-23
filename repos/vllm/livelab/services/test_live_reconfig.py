@@ -31,7 +31,7 @@ class OtherHook(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, OtherHook())
 import vllm.v1.engine.core as core
-print("patched", getattr(core.EngineCoreProc, "_fastrsi_live_reconfig", False))
+print("patched", getattr(core.EngineCoreProc, "_rsibox_live_reconfig", False))
 '''
 
 
@@ -259,7 +259,7 @@ else:
     import live_reconfig as lr_mod
     lr_mod.install()
 
-from fastrsi import hooks
+from rsibox import hooks
 core_hooks = [f for f in sys.meta_path
               if isinstance(f, hooks.AfterImportHook) and f.module_name == "vllm.v1.engine.core"]
 assert len(core_hooks) == 1, f"expected 1 core import hook, got {{len(core_hooks)}}"
@@ -281,26 +281,26 @@ loop_thread.start()
 assert core.started.wait(5.0), "busy loop did not start"
 
 ctl_threads = [t.name for t in threading.enumerate()
-               if t.name in ("fastrsi-vllm-core-ctl", "fastrsi-kernel-host", "fastrsi-live-reconfig")]
-assert ctl_threads == ["fastrsi-vllm-core-ctl"], f"unexpected ctl threads: {{ctl_threads}}"
+               if t.name in ("rsibox-vllm-core-ctl", "rsibox-kernel-host", "rsibox-live-reconfig")]
+assert ctl_threads == ["rsibox-vllm-core-ctl"], f"unexpected ctl threads: {{ctl_threads}}"
 
-out = {{"channels": len(core._fastrsi_channel_mux._channels),
-       "patched_core": getattr(P, "_fastrsi_core_hook", False),
-       "patched_lr": getattr(P, "_fastrsi_live_reconfig", False)}}
+out = {{"channels": len(core._rsibox_channel_mux._channels),
+       "patched_core": getattr(P, "_rsibox_core_hook", False),
+       "patched_lr": getattr(P, "_rsibox_live_reconfig", False)}}
 
-if os.environ.get("FASTRSI_KERNEL_DIR"):
+if os.environ.get("RSIBOX_KERNEL_DIR"):
     from adapter import client
-    ping = client.send(os.environ["FASTRSI_KERNEL_DIR"], {{"op": "ping"}}, timeout=5.0)
+    ping = client.send(os.environ["RSIBOX_KERNEL_DIR"], {{"op": "ping"}}, timeout=5.0)
     assert ping.get("ok"), ping
     out["ping_ok"] = True
-if os.environ.get("FASTRSI_LIVE_RECONFIG_DIR"):
+if os.environ.get("RSIBOX_LIVE_RECONFIG_DIR"):
     import live_reconfig
-    r_set = live_reconfig.request(os.environ["FASTRSI_LIVE_RECONFIG_DIR"], "set",
+    r_set = live_reconfig.request(os.environ["RSIBOX_LIVE_RECONFIG_DIR"], "set",
                                   timeout=5.0, values={{"max_num_seqs": 4}})
     assert r_set.get("ok") and r_set["after"]["target_max_num_seqs"] == 4, r_set
-    r_st = live_reconfig.request(os.environ["FASTRSI_LIVE_RECONFIG_DIR"], "status", timeout=5.0)
+    r_st = live_reconfig.request(os.environ["RSIBOX_LIVE_RECONFIG_DIR"], "status", timeout=5.0)
     assert r_st.get("ok") and r_st["target_max_num_seqs"] == 4, r_st
-    assert live_reconfig.read_ready(os.environ["FASTRSI_LIVE_RECONFIG_DIR"]) is not None
+    assert live_reconfig.read_ready(os.environ["RSIBOX_LIVE_RECONFIG_DIR"]) is not None
     out["reconfig_ok"] = True
 
 stop.set()
@@ -315,7 +315,7 @@ def test_core_hook_all_env_modes_and_import_orders(tmp_path):
     """Input: real `vllm.v1.engine.core` import + `run_busy_loop` across kernel-only,
     reconfig-only, and BOTH-active (in both import orders). Expected: strictly 1 import hook,
     strictly 1 patch of `EngineCoreProc` (method identity invariant), strictly 1 control thread
-    (`fastrsi-vllm-core-ctl`), and every active channel answers."""
+    (`rsibox-vllm-core-ctl`), and every active channel answers."""
     import json
     import os
 
@@ -362,15 +362,15 @@ def test_core_hook_all_env_modes_and_import_orders(tmp_path):
     ]
     for idx, (mode, order, expected_channels, expect_lr) in enumerate(cases):
         env = {k: v for k, v in os.environ.items()
-               if k not in ("FASTRSI_KERNEL_DIR", "FASTRSI_LIVE_RECONFIG_DIR")}
+               if k not in ("RSIBOX_KERNEL_DIR", "RSIBOX_LIVE_RECONFIG_DIR")}
         if mode in ("kernel_only", "both"):
             kdir = tmp_path / f"k-{idx}"
             kdir.mkdir()
-            env["FASTRSI_KERNEL_DIR"] = str(kdir)
+            env["RSIBOX_KERNEL_DIR"] = str(kdir)
         if mode in ("reconfig_only", "both"):
             ldir = tmp_path / f"l-{idx}"
             ldir.mkdir()
-            env["FASTRSI_LIVE_RECONFIG_DIR"] = str(ldir)
+            env["RSIBOX_LIVE_RECONFIG_DIR"] = str(ldir)
         code = _COMPOSED_CHILD.format(
             livelab=livelab, services=str(HERE), pkgs=str(pkgs), mode=mode, order=order
         )
@@ -478,7 +478,7 @@ def test_core_hook_refuses_duplicate_control_dir(tmp_path, capsys):
     livelab = str(HERE.parent)
     if livelab not in sys.path:
         sys.path.insert(0, livelab)
-    from fastrsi import ipc
+    from rsibox import ipc
     from services import core_hook
 
     seen = []

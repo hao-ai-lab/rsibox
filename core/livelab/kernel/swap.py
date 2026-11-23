@@ -219,8 +219,8 @@ class _Deferred:
 _compile = compile          # `stage` has a parameter named compile
 
 
-LIVE_BODY = "__fastrsi_class_body__"
-SHELL_BODY = "__fastrsi_outer_body__"
+LIVE_BODY = "__rsibox_class_body__"
+SHELL_BODY = "__rsibox_outer_body__"
 
 
 class _OuterShell:
@@ -1492,7 +1492,7 @@ def apply(st, journal, witness):
         ver_file = None
         if mod_file and getattr(st, "source", None) is not None and hasattr(journal, "on_undo"):
             lines = st.source.splitlines(True)
-            ver_file = f"<fastrsi-live:{mod_file}#{L.text_hash(st.source)}>"
+            ver_file = f"<rsibox-live:{mod_file}#{L.text_hash(st.source)}>"
             prev_linecache = linecache.cache.get(mod_file)
             prev_ver = linecache.cache.get(ver_file)
             linecache.cache[mod_file] = (len(st.source), None, lines, mod_file)

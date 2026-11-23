@@ -13,7 +13,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-from fastrsi_megatron import zygote  # noqa: E402
+from rsibox_megatron import zygote  # noqa: E402
 
 HEAVY = "import os, time\nPID = os.getpid()\nT = time.time()\n"
 SCRIPT = """import heavy, json, os, sys
@@ -53,8 +53,8 @@ class Zygote(unittest.TestCase):
             f.write(SCRIPT)
         self.sock = os.path.join(self.d, "z.sock")
         env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
-                   FASTRSI_ZYGOTE_FORKSAFE="0")
-        self.z = subprocess.Popen([sys.executable, "-m", "fastrsi_megatron.zygote", "serve",
+                   RSIBOX_ZYGOTE_FORKSAFE="0")
+        self.z = subprocess.Popen([sys.executable, "-m", "rsibox_megatron.zygote", "serve",
                                    "--sock", self.sock, "--preload", "heavy"],
                                   stdout=subprocess.PIPE, text=True, env=env)
         self.addCleanup(self.z.stdout.close)
@@ -160,7 +160,7 @@ class Zygote(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_overlay_of_a_preloaded_module_is_refused(self):
-        """A fresh check of a code edit sets FASTRSI_OVERLAY; overlay.py can only replace a
+        """A fresh check of a code edit sets RSIBOX_OVERLAY; overlay.py can only replace a
         module before its first import, and the zygote imported `heavy` already. Input: an
         overlay dir with heavy.py. Expect: refused with an "overlay" finding naming heavy (a
         silent run of the unedited code is the failure this prevents); an overlay of a module
@@ -169,12 +169,12 @@ class Zygote(unittest.TestCase):
         os.makedirs(ov)
         with open(os.path.join(ov, "heavy.py"), "w") as f:
             f.write(HEAVY)
-        evs = self.start(env={"FASTRSI_OVERLAY": ov})
+        evs = self.start(env={"RSIBOX_OVERLAY": ov})
         self.assertEqual(evs[0]["event"], "refused")
         self.assertEqual(evs[0]["findings"][0]["kind"], "overlay")
         self.assertEqual(evs[0]["findings"][0]["modules"], ["heavy"])
         os.rename(os.path.join(ov, "heavy.py"), os.path.join(ov, "light.py"))
-        self.assertEqual(self.start(env={"FASTRSI_OVERLAY": ov})[-1]["rc"], [0, 0])
+        self.assertEqual(self.start(env={"RSIBOX_OVERLAY": ov})[-1]["rc"], [0, 0])
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux-only: needs os.sched_getaffinity and /proc (rank pinning, process tree)")
     def test_code_restart_reimports_the_refreshed_package_from_the_overlay(self):
@@ -187,10 +187,10 @@ class Zygote(unittest.TestCase):
         os.makedirs(ov)
         with open(os.path.join(ov, "heavy.py"), "w") as f:
             f.write("PID = -1\n")
-        ev = self.start(env={"FASTRSI_OVERLAY": ov})
+        ev = self.start(env={"RSIBOX_OVERLAY": ov})
         self.assertEqual(ev[0]["event"], "refused")
         self.assertEqual(ev[0]["findings"][0]["kind"], "overlay")
-        ev = self.start(env={"FASTRSI_OVERLAY": ov}, refresh=["heavy"])
+        ev = self.start(env={"RSIBOX_OVERLAY": ov}, refresh=["heavy"])
         self.assertEqual([e["event"] for e in ev], ["forked", "exited"], ev)
         self.assertEqual(ev[-1]["rc"], [0, 0])
         for r in (0, 1):
@@ -218,7 +218,7 @@ class Zygote(unittest.TestCase):
         out2 = os.path.join(self.d, "pgrp-out")
         os.makedirs(out2)
         env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
-                   FASTRSI_ZYGOTE_FORKSAFE="0")
+                   RSIBOX_ZYGOTE_FORKSAFE="0")
         z_as_leader = (
             "import json, os, subprocess, sys\n"
             "os.setsid()\n"
@@ -227,7 +227,7 @@ class Zygote(unittest.TestCase):
             "if pid == 0:\n"
             "    os.setpgid(0, os.getppid())\n"
             "    os.execv(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-            "from fastrsi_megatron import zygote\n"
+            "from rsibox_megatron import zygote\n"
             "print(json.dumps({'z_pid': os.getpid(), 'z_pgrp': os.getpgrp(),\n"
             "                  'pre_sib': sib.pid, 'pgrp_other': pid}), flush=True)\n"
             "try:\n"
@@ -323,7 +323,7 @@ class Zygote(unittest.TestCase):
         )
         z_runner = (
             "import json, os, subprocess, sys, time\n"
-            "from fastrsi_megatron import zygote\n"
+            "from rsibox_megatron import zygote\n"
             f"helper_pid_file = {os.path.join(out3, 'pre_helper.txt')!r}\n"
             f"helper = subprocess.Popen([sys.executable, '-c', {helper_code!r}, helper_pid_file])\n"
             "while not os.path.exists(helper_pid_file) or not os.path.getsize(helper_pid_file):\n"
@@ -343,7 +343,7 @@ class Zygote(unittest.TestCase):
             "    print(json.dumps({'h_alive': h_alive, 'hk_alive': hk_alive}), flush=True)\n"
         )
         env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
-                   FASTRSI_ZYGOTE_FORKSAFE="0")
+                   RSIBOX_ZYGOTE_FORKSAFE="0")
         proc = subprocess.Popen([sys.executable, "-c", z_runner],
                                 stdout=subprocess.PIPE, text=True, env=env)
         try:
@@ -421,7 +421,7 @@ class Pieces(unittest.TestCase):
         touches only its own children): a helper child, then a job child, then
         reap_all(keep={helper}). Expect: the job child reaped, the helper still running."""
         code = ("import json, os, signal, subprocess, sys, time\n"
-                "from fastrsi_megatron import zygote\n"
+                "from rsibox_megatron import zygote\n"
                 "sleep = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
                 "helper = subprocess.Popen(sleep)\n"
                 "finished = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(17)'])\n"
@@ -431,7 +431,7 @@ class Pieces(unittest.TestCase):
                 "alive = helper.poll() is None\n"
                 "helper.kill(); helper.wait()\n"
                 "print(json.dumps([job.pid in reaped, alive, finished.wait()]))\n")
-        env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
+        env = {**os.environ, "PYTHONPATH": os.path.dirname(HERE), "RSIBOX_ZYGOTE_FORKSAFE": "0"}
         out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
                              timeout=60)
         self.assertEqual(json.loads(out.stdout or "null"), [True, True, 17], out.stderr)
@@ -439,12 +439,12 @@ class Pieces(unittest.TestCase):
     def test_auto_numa_bind_returns_the_cpus_forksafe_bound(self):
         """forksafe.bind_rank_numa_and_cpus answers {"bound_cpus", "numa_node", "source"}; bind()
         read "bound" and "cpus", so an automatic NUMA pin always reported None. Input:
-        FASTRSI_ZYGOTE_AUTO_NUMA=1 and forksafe's answer for a GPU local to CPUs 0-3 (the sysfs
+        RSIBOX_ZYGOTE_AUTO_NUMA=1 and forksafe's answer for a GPU local to CPUs 0-3 (the sysfs
         read itself is forksafe's, tested in core/livelab). Expect: [0, 1, 2, 3]; with no CPUs
         found, None."""
         from unittest import mock
         answer = {"bound_cpus": [0, 1, 2, 3], "numa_node": 0, "source": "sysfs"}
-        with mock.patch.dict(os.environ, {"FASTRSI_ZYGOTE_AUTO_NUMA": "1"}), \
+        with mock.patch.dict(os.environ, {"RSIBOX_ZYGOTE_AUTO_NUMA": "1"}), \
                 mock.patch.object(zygote.forksafe, "bind_rank_numa_and_cpus", return_value=answer):
             self.assertEqual(zygote.bind({}, 0), [0, 1, 2, 3])
             answer.update(bound_cpus=[], source="none")
@@ -466,7 +466,7 @@ class Pieces(unittest.TestCase):
             with open(os.path.join(folder, "ov", "pkg.sub.py"), "w") as source:
                 source.write("VAL = 2\n")
             code = ("import json, sys, pkg, pkg.sub\n"
-                    "from fastrsi_megatron import overlay, zygote\n"
+                    "from rsibox_megatron import overlay, zygote\n"
                     "old = pkg\n"
                     "dropped = zygote.drop_modules({'refresh': ['pkg.sub']})\n"
                     "overlay.install()\n"
@@ -475,7 +475,7 @@ class Pieces(unittest.TestCase):
                     "                  sys.modules['pkg'] is old]))\n")
             env = {**os.environ, "PYTHONPATH": os.pathsep.join([os.path.dirname(HERE),
                                                                 os.path.join(folder, "src")]),
-                   "FASTRSI_OVERLAY": os.path.join(folder, "ov"), "FASTRSI_ZYGOTE_FORKSAFE": "0"}
+                   "RSIBOX_OVERLAY": os.path.join(folder, "ov"), "RSIBOX_ZYGOTE_FORKSAFE": "0"}
             out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                  env=env)
             self.assertEqual(json.loads(out.stdout or "null"), [True, 2, True], out.stderr)

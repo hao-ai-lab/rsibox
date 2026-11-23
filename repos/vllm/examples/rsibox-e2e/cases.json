@@ -1634,7 +1634,7 @@
    {
     "op": "install",
     "raw_files": {
-     "vllm.v1.core.sched.fastrsi_no_such_module": "def check_stop(request, max_model_len):\n    return True\n"
+     "vllm.v1.core.sched.rsibox_no_such_module": "def check_stop(request, max_model_len):\n    return True\n"
     },
     "expect": {
      "outcome": "not_committed",
@@ -1672,7 +1672,7 @@
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "        # These are GPU tensors.\n",
-      "new": "        # These are GPU tensors (fastrsi: comment only).\n\n"
+      "new": "        # These are GPU tensors (rsibox: comment only).\n\n"
      }
     ],
     "expect": {
@@ -1699,7 +1699,7 @@
     "op": "source",
     "module": "vllm.v1.worker.gpu.sample.sampler",
     "expect": {
-     "not_contains": "fastrsi: comment only"
+     "not_contains": "rsibox: comment only"
     }
    },
    {
@@ -1708,7 +1708,7 @@
      {
       "module": "vllm.v1.core.sched.utils",
       "old": "    \"\"\"Check if a sequence of token IDs has a repetition pattern.\n",
-      "new": "    \"\"\"Check if a sequence of token IDs has a repeated pattern (fastrsi docstring).\n"
+      "new": "    \"\"\"Check if a sequence of token IDs has a repeated pattern (rsibox docstring).\n"
      }
     ],
     "expect": {
@@ -1735,7 +1735,7 @@
     "op": "source",
     "module": "vllm.v1.core.sched.utils",
     "expect": {
-     "not_contains": "fastrsi docstring"
+     "not_contains": "rsibox docstring"
     }
    }
   ]
@@ -1754,12 +1754,12 @@
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "from vllm.v1.worker.gpu.states import RequestState\n",
-      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_FASTRSI_LOGIT_SIGN = -1.0\n"
+      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_RSIBOX_LOGIT_SIGN = -1.0\n"
      },
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "        sampled, processed_logits = self.sample(\n",
-      "new": "        logits = logits * _FASTRSI_LOGIT_SIGN\n        sampled, processed_logits = self.sample(\n"
+      "new": "        logits = logits * _RSIBOX_LOGIT_SIGN\n        sampled, processed_logits = self.sample(\n"
      }
     ],
     "expect": {
@@ -1786,7 +1786,7 @@
     "op": "source",
     "module": "vllm.v1.worker.gpu.sample.sampler",
     "expect": {
-     "not_contains": "_FASTRSI_LOGIT_SIGN"
+     "not_contains": "_RSIBOX_LOGIT_SIGN"
     }
    },
    {
@@ -1795,7 +1795,7 @@
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "from vllm.v1.worker.gpu.states import RequestState\n",
-      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_FASTRSI_MOD_STATE = 1\n"
+      "new": "from vllm.v1.worker.gpu.states import RequestState\n\n_RSIBOX_MOD_STATE = 1\n"
      }
     ],
     "accept": [
@@ -1825,7 +1825,7 @@
     "op": "source",
     "module": "vllm.v1.worker.gpu.sample.sampler",
     "expect": {
-     "not_contains": "_FASTRSI_MOD_STATE"
+     "not_contains": "_RSIBOX_MOD_STATE"
     }
    }
   ]
@@ -1844,12 +1844,12 @@
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "import numpy as np\nimport torch\n",
-      "new": "import fastrsi_missing_dep\nimport numpy as np\nimport torch\n"
+      "new": "import rsibox_missing_dep\nimport numpy as np\nimport torch\n"
      },
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "        sampled, processed_logits = self.sample(\n",
-      "new": "        logits = fastrsi_missing_dep.rescale(logits)\n        sampled, processed_logits = self.sample(\n"
+      "new": "        logits = rsibox_missing_dep.rescale(logits)\n        sampled, processed_logits = self.sample(\n"
      }
     ],
     "expect": {
@@ -1876,7 +1876,7 @@
     "op": "source",
     "module": "vllm.v1.worker.gpu.sample.sampler",
     "expect": {
-     "not_contains": "fastrsi_missing_dep"
+     "not_contains": "rsibox_missing_dep"
     }
    }
   ]
@@ -2024,12 +2024,12 @@
      {
       "module": "vllm.v1.core.sched.utils",
       "old": "from vllm.v1.request import Request, RequestStatus\n",
-      "new": "from vllm.v1.request import Request, RequestStatus\n\n_FASTRSI_RESERVE = 4\n"
+      "new": "from vllm.v1.request import Request, RequestStatus\n\n_RSIBOX_RESERVE = 4\n"
      },
      {
       "module": "vllm.v1.core.sched.utils",
       "old": "def check_stop(request: Request, max_model_len: int) -> bool:\n",
-      "new": "def check_stop(\n    request: Request, max_model_len: int, reserve: int = _FASTRSI_RESERVE\n) -> bool:\n"
+      "new": "def check_stop(\n    request: Request, max_model_len: int, reserve: int = _RSIBOX_RESERVE\n) -> bool:\n"
      },
      {
       "module": "vllm.v1.core.sched.utils",
@@ -2064,7 +2064,7 @@
     "op": "source",
     "module": "vllm.v1.core.sched.utils",
     "expect": {
-     "not_contains": "_FASTRSI_RESERVE"
+     "not_contains": "_RSIBOX_RESERVE"
     }
    },
    {
@@ -2190,7 +2190,7 @@
   "id": "new-instance-field-is-refused-even-with-constructor-accept",
   "lens": "refusals",
   "title": "Sampler.__call__ reading a field that only the edited Sampler.__init__ sets is refused (new_fields), with constructor_edit accepted",
-  "pain_point": "The live Sampler was built by the old __init__. Swapping __call__ to read self.fastrsi_logit_scale kills the worker with AttributeError on the next step (vLLM #63819's shape); accepting the constructor finding must not wave the missing field through.",
+  "pain_point": "The live Sampler was built by the old __init__. Swapping __call__ to read self.rsibox_logit_scale kills the worker with AttributeError on the next step (vLLM #63819's shape); accepting the constructor finding must not wave the missing field through.",
   "proves": "The patch is not committed with new_fields although constructor_edit is accepted; the next check still answers with the base output, so the worker did not run the new __call__.",
   "does_not_prove": "A backfill of the field on live instances (not implemented), or what accept=[new_fields] does (it would commit and the worker would raise).",
   "steps": [
@@ -2200,12 +2200,12 @@
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "        self.use_fp64_gumbel = use_fp64_gumbel\n",
-      "new": "        self.use_fp64_gumbel = use_fp64_gumbel\n        self.fastrsi_logit_scale = -1.0\n"
+      "new": "        self.use_fp64_gumbel = use_fp64_gumbel\n        self.rsibox_logit_scale = -1.0\n"
      },
      {
       "module": "vllm.v1.worker.gpu.sample.sampler",
       "old": "        sampled, processed_logits = self.sample(\n",
-      "new": "        logits = logits * self.fastrsi_logit_scale\n        sampled, processed_logits = self.sample(\n"
+      "new": "        logits = logits * self.rsibox_logit_scale\n        sampled, processed_logits = self.sample(\n"
      }
     ],
     "accept": [
@@ -2235,7 +2235,7 @@
     "op": "source",
     "module": "vllm.v1.worker.gpu.sample.sampler",
     "expect": {
-     "not_contains": "fastrsi_logit_scale"
+     "not_contains": "rsibox_logit_scale"
     }
    }
   ]
@@ -2541,7 +2541,7 @@
      {
       "module": "vllm.v1.core.sched.utils",
       "old": "def check_stop(request: Request, max_model_len: int) -> bool:\n",
-      "new": "def _fastrsi_timed(fn):\n    def wrapper(*args, **kwargs):\n        return fn(*args, **kwargs)\n\n    return wrapper\n\n\n@_fastrsi_timed\ndef check_stop(request: Request, max_model_len: int) -> bool:\n"
+      "new": "def _rsibox_timed(fn):\n    def wrapper(*args, **kwargs):\n        return fn(*args, **kwargs)\n\n    return wrapper\n\n\n@_rsibox_timed\ndef check_stop(request: Request, max_model_len: int) -> bool:\n"
      }
     ],
     "expect": {
@@ -2575,7 +2575,7 @@
     "op": "source",
     "module": "vllm.v1.core.sched.utils",
     "expect": {
-     "not_contains": "_fastrsi_timed"
+     "not_contains": "_rsibox_timed"
     }
    }
   ]
@@ -2792,7 +2792,7 @@
      {
       "module": "vllm.v1.core.sched.utils",
       "old": "        request.stop_reason = \"repetition_detected\"\n        return True\n\n    return False\n",
-      "new": "        request.stop_reason = \"repetition_detected\"\n        return True\n\n    return False\n\n\ndef check_stop(request: Request, max_model_len: int) -> bool:\n    # fastrsi: stop every request after its first token\n    request.status = RequestStatus.FINISHED_LENGTH_CAPPED\n    return True\n"
+      "new": "        request.stop_reason = \"repetition_detected\"\n        return True\n\n    return False\n\n\ndef check_stop(request: Request, max_model_len: int) -> bool:\n    # rsibox: stop every request after its first token\n    request.status = RequestStatus.FINISHED_LENGTH_CAPPED\n    return True\n"
      }
     ],
     "expect": {
@@ -2827,7 +2827,7 @@
     "op": "source",
     "module": "vllm.v1.core.sched.utils",
     "expect": {
-     "not_contains": "fastrsi: stop every request"
+     "not_contains": "rsibox: stop every request"
     }
    },
    {

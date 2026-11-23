@@ -6,7 +6,7 @@ Fixed target workload and verification contract for `repos/verl/`.
 
 - **Model**: `Qwen/Qwen3-0.6B` (dense causal LM), `bf16` actor/ref parameters with `fp32` Megatron
   master weights and distributed Adam.
-- **Trainer**: `verl.trainer.ppo.v1.trainer_sync:PPOTrainerSync` (`trainer.v1.trainer_mode=fastrsi`),
+- **Trainer**: `verl.trainer.ppo.v1.trainer_sync:PPOTrainerSync` (`trainer.v1.trainer_mode=rsibox`),
   Megatron-Core backend (`TP=1, PP=1, CP=1, DP=4`), `ppo_mini_batch_size=64`.
 - **Rollout**: 4 colocated vLLM replicas (`TP=1` each), `rollout.n=10` group responses per prompt,
   `train_batch_size=64` prompts -> **640 responses per RL step**.

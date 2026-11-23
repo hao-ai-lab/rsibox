@@ -1,5 +1,5 @@
 {
-  "schema": "fastrsi-survey-rules/1",
+  "schema": "rsibox-survey-rules/1",
   "engine": "fastvideo",
   "rules_version": "fastvideo-1.1",
   "upstream": {

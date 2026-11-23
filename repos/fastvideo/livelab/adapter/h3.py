@@ -12,16 +12,16 @@ The machine-specific inputs come from the environment, nothing else:
                                      (fast-8L), required: the workload decodes with it
     H3_CONFIG                        the example yaml (default: the one next to the imported
                                      fastvideo package, examples/inference/basic/)
-    FASTRSI_H3_GPUS                  ranks (default: the devices in CUDA_VISIBLE_DEVICES, else 1)
-    FASTRSI_H3_GOLDEN                optional uint8 frames .npy: adds psnr_vs_golden to checks
-    FASTRSI_H3_CHECK_TIMEOUT         seconds a check may take in the conformance lab (default 120
+    RSIBOX_H3_GPUS                  ranks (default: the devices in CUDA_VISIBLE_DEVICES, else 1)
+    RSIBOX_H3_GOLDEN                optional uint8 frames .npy: adds psnr_vs_golden to checks
+    RSIBOX_H3_CHECK_TIMEOUT         seconds a check may take in the conformance lab (default 120
                                      when --zygote or --holder is enabled, else 600; c8's injected
                                      hang outlasts it by 30 s, and fresh_check gets at least 1200 s).
                                      On a cold shared filesystem without zygote/holder, the first
                                      video after a respawn took 131 s and a fresh load >720 s
-    FASTRSI_H3_ZYGOTE                set to 1/true/yes to fork workers from a preloaded zygote
+    RSIBOX_H3_ZYGOTE                set to 1/true/yes to fork workers from a preloaded zygote
                                      (services/zygote.py) so respawns skip worker imports
-    FASTRSI_H3_HOLDER                set to 1/true/yes to keep loaded weights in a CUDA-IPC holder
+    RSIBOX_H3_HOLDER                set to 1/true/yes to keep loaded weights in a CUDA-IPC holder
                                      process (services/holder.py; implies zygote)
 
 `workload_env()` sets the workload's FastVideo flags (kb/workload.md) unless already set. Every
@@ -68,8 +68,8 @@ def workload_env():
 
 
 def default_gpus():
-    if os.environ.get("FASTRSI_H3_GPUS"):
-        return int(os.environ["FASTRSI_H3_GPUS"])
+    if os.environ.get("RSIBOX_H3_GPUS"):
+        return int(os.environ["RSIBOX_H3_GPUS"])
     vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     return len([x for x in vis.split(",") if x.strip()]) or 1
 
@@ -154,14 +154,14 @@ def _env_flag(name):
 
 def _make_h3(receipts):
     from adapter.lab import FastVideoLab
-    zygote = _env_flag("FASTRSI_H3_ZYGOTE")
-    holder = _env_flag("FASTRSI_H3_HOLDER")
-    raw_timeout = os.environ.get("FASTRSI_H3_CHECK_TIMEOUT")
+    zygote = _env_flag("RSIBOX_H3_ZYGOTE")
+    holder = _env_flag("RSIBOX_H3_HOLDER")
+    raw_timeout = os.environ.get("RSIBOX_H3_CHECK_TIMEOUT")
     default_timeout = 120.0 if (zygote or holder) else 600.0
     return FastVideoLab(
         h3_config(),
         receipts=receipts,
-        golden=os.environ.get("FASTRSI_H3_GOLDEN"),
+        golden=os.environ.get("RSIBOX_H3_GOLDEN"),
         check_timeout=float(raw_timeout) if raw_timeout else default_timeout,
         zygote=zygote,
         holder=holder,
@@ -182,21 +182,21 @@ class H3Lab(Shared):
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance fastvideo --real ...` flags into H3 environment vars."""
+        """Translate `rsibox conformance fastvideo --real ...` flags into H3 environment vars."""
         clean = list(argv)[1:] if list(argv)[:1] == ["--"] else list(argv)
-        ap = argparse.ArgumentParser(prog="fastrsi conformance fastvideo --real", allow_abbrev=False)
+        ap = argparse.ArgumentParser(prog="rsibox conformance fastvideo --real", allow_abbrev=False)
         for flag, kw in (("--model", {}), ("--vae", {}), ("--config", {}), ("--gpus", {"type": int}),
                          ("--golden", {}), ("--check-timeout", {"type": float}),
                          ("--zygote", {"action": "store_true"}), ("--holder", {"action": "store_true"})):
             ap.add_argument(flag, **kw)
         ns = ap.parse_args(clean)
         spec = (("model", "FASTH3_MODEL", True), ("vae", "FASTVIDEO_H3_VAE_NVFP4_DECODER", True),
-                ("config", "H3_CONFIG", True), ("gpus", "FASTRSI_H3_GPUS", False),
-                ("golden", "FASTRSI_H3_GOLDEN", True), ("check_timeout", "FASTRSI_H3_CHECK_TIMEOUT", False))
+                ("config", "H3_CONFIG", True), ("gpus", "RSIBOX_H3_GPUS", False),
+                ("golden", "RSIBOX_H3_GOLDEN", True), ("check_timeout", "RSIBOX_H3_CHECK_TIMEOUT", False))
         env = {k: (os.path.abspath(str(v)) if is_p else str(v))
                for attr, k, is_p in spec if (v := getattr(ns, attr)) is not None and (not is_p or v)}
         if ns.zygote:
-            env["FASTRSI_H3_ZYGOTE"] = "1"
+            env["RSIBOX_H3_ZYGOTE"] = "1"
         if ns.holder:
-            env["FASTRSI_H3_HOLDER"] = "1"
+            env["RSIBOX_H3_HOLDER"] = "1"
         return env

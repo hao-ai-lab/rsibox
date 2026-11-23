@@ -20,17 +20,17 @@ import traceback
 
 # the kernel lives in the framework's live-lab folder; the package __init__ adds it too, this
 # covers a worker that imports this module by path
-_LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+_LIVELAB = os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if _LIVELAB not in sys.path:
     sys.path.insert(0, _LIVELAB)
 
-from fastrsi import harness, ipc  # noqa: E402
+from rsibox import harness, ipc  # noqa: E402
 
 # rebuilt: {module: text} an in-place rebuild made the module's base (what it runs, not its file)
 _STATE = {"participant": None, "faults": {}, "hooks": [], "rebuilt": {}, "fault_path": None}
 
-if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
+if os.environ.get("RSIBOX_TORCH_KEY_CACHE"):
     # warm restart with path-stable caches: the worker imports this module at the session's first call, before the first
     # compile; preset Inductor's torch_key from disk (services/jitcache.py)
     from services import jitcache as _jitcache
@@ -118,7 +118,7 @@ def repl(worker, code):
     scope = {"worker": worker, "pipeline": getattr(worker, "pipeline", None),
              "participant": participant(worker), "out": None}
     try:
-        exec(compile(code, "<fastrsi-repl>", "exec"), scope)
+        exec(compile(code, "<rsibox-repl>", "exec"), scope)
         return {"ok": True, "out": repr(scope.get("out"))[:20000]}
     except Exception:
         return {"ok": False, "error": traceback.format_exc()[-4000:]}
@@ -335,7 +335,7 @@ def arm_fault_beacon(worker, path):
     target = worker if callable(getattr(worker, "execute_forward", None)) else getattr(worker, "pipeline", None)
     attr = "execute_forward" if target is worker else "forward"
     orig = getattr(target, attr, None) if target is not None else None
-    if not callable(orig) or getattr(orig, "_fastrsi_fault_guarded", False):
+    if not callable(orig) or getattr(orig, "_rsibox_fault_guarded", False):
         return {"ok": True, "armed": callable(orig)}
 
     def guarded(*args, **kwargs):
@@ -355,7 +355,7 @@ def arm_fault_beacon(worker, path):
                     pass
             raise
 
-    guarded._fastrsi_fault_guarded = True
+    guarded._rsibox_fault_guarded = True
     setattr(target, attr, guarded)
     return {"ok": True, "armed": True}
 

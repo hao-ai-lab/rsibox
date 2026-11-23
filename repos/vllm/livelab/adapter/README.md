@@ -9,7 +9,7 @@ needs one is a finding, not a silent swap.
 
 ## Contract
 
-- **Host** (`host.py`). Imported in the engine-core process with `FASTRSI_KERNEL_DIR=<dir>`, it
+- **Host** (`host.py`). Imported in the engine-core process with `RSIBOX_KERNEL_DIR=<dir>`, it
   patches `EngineCoreProc` so custom input-queue items run jobs on the busy-loop thread, and
   runs the kernel's `StepGapCoordinator` over two participants: the workers (`WorkerGroup`,
   every rank behind one `collective_rpc`) and the engine core (an `Endpoint` in its own
@@ -34,11 +34,11 @@ needs one is a finding, not a silent swap.
 - **Roles.** A plan module or repair cell runs only on the roles in its `"on"` list (default:
   all). A role with nothing to do abstains (votes yes, changes nothing) instead of vetoing with
   `empty_change`.
-- **Deadline.** Phase 2 has a deadline (`FASTRSI_KERNEL_PHASE2_DEADLINE`, default 5 s; 0 turns
+- **Deadline.** Phase 2 has a deadline (`RSIBOX_KERNEL_PHASE2_DEADLINE`, default 5 s; 0 turns
   it off). Each side runs its phase-2 calls on its own lane thread and answers by the
   deadline, so every rank replies and a late one is `deadline_missed` naming its rank; the
   kernel rolls the others back in the same gap and poisons the host. `collective_rpc` gets the
-  time left plus `FASTRSI_KERNEL_RPC_GRACE` (2 s) as a backstop timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
+  time left plus `RSIBOX_KERNEL_RPC_GRACE` (2 s) as a backstop timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
   refuses every call (`deadline_missed`) and the kernel poisons the host: undo only, then
   respawn. The same for a call from outside the loop (prepare, status) whose job the loop
   started but did not finish while the caller waited: it may still apply, so the group
@@ -102,11 +102,11 @@ needs one is a finding, not a silent swap.
 ## Run it
 
 The adapter on `PYTHONPATH` (`repos/vllm/livelab`; importing it puts the kernel's folder,
-`core/livelab` or `FASTRSI_LIVELAB`, on `sys.path`), a sitecustomize that imports
-`adapter.host` when `FASTRSI_KERNEL_DIR` is set, and:
+`core/livelab` or `RSIBOX_LIVELAB`, on `sys.path`), a sitecustomize that imports
+`adapter.host` when `RSIBOX_KERNEL_DIR` is set, and:
 
 ```
-FASTRSI_KERNEL_DIR=<dir> vllm serve <model> --distributed-executor-backend mp \
+RSIBOX_KERNEL_DIR=<dir> vllm serve <model> --distributed-executor-backend mp \
   --worker-extension-cls adapter.worker_ext.KernelWorkerExtension
 python3 -m adapter.client <dir> '{"op": "txn", "plan": {...}}'
 ```
@@ -119,11 +119,11 @@ python3 -m adapter.client <dir> '{"op": "txn", "plan": {...}}'
 `conformance_lab.py` exposes `VllmLab` (`LabUnderTest`) for `core/livelab/conformance`:
 
 ```
-FASTRSI_VLLM_MODEL=<model-path> FASTRSI_VLLM_VENV=<venv> FASTRSI_VLLM_WORK=<scratch-dir> \
+RSIBOX_VLLM_MODEL=<model-path> RSIBOX_VLLM_VENV=<venv> RSIBOX_VLLM_WORK=<scratch-dir> \
   PYTHONPATH=../../repos/vllm/livelab python3 -m conformance --lab adapter.conformance_lab:VllmLab
 ```
 
-`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp FASTRSI_VLLM_TP`, default 1, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
+`VllmLab` launches `vllm serve` via `services/engine.py start` (`-tp RSIBOX_VLLM_TP`, default 1, `--distributed-executor-backend mp`, `KernelWorkerExtension`), runs greedy `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts, edits both worker (`vllm.v1.worker.gpu.sample.sampler`, `vllm.model_executor.layers.logits_processor`) and engine-core (`vllm.v1.core.sched.utils`, `vllm.v1.core.sched.scheduler`) modules, and runs `fresh_check` from a private `.py` copy farm on `port + 1`. Note: running `engine.py start` together with `adapter.host` requires the `_After` import-finder recursion guard (`#144` + `#148`).
 
 A tensor-parallel completion has one HTTP response for the worker group. The harness
 formats that response as one output entry. Check the host ping’s `parallel.expected`

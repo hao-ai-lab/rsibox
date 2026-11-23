@@ -18,7 +18,7 @@ from tools import cli, replay_adv, rescore
 
 class OfflineProbesAndCliTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="fastrsi-verl-probes-")
+        self.tmp = tempfile.mkdtemp(prefix="rsibox-verl-probes-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_rescore_diffs_recorded_rollouts_in_sub_millisecond_cpu_pass(self):

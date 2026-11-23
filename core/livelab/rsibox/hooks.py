@@ -143,9 +143,9 @@ class OverlayFinder(importlib.abc.MetaPathFinder):
 
 
 def install_overlay(root: str | None = None, *, files: dict[str, str] | None = None):
-    """Install an `OverlayFinder` on `sys.meta_path` for `root` (default `FASTRSI_OVERLAY`)
+    """Install an `OverlayFinder` on `sys.meta_path` for `root` (default `RSIBOX_OVERLAY`)
     and/or inline `files`. Returns the finder, or None if neither has any overlays."""
-    resolved_root = root if root is not None else os.environ.get("FASTRSI_OVERLAY")
+    resolved_root = root if root is not None else os.environ.get("RSIBOX_OVERLAY")
     if resolved_root and not os.path.isdir(resolved_root):
         resolved_root = None
     if not resolved_root and not files:

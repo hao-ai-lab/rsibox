@@ -67,7 +67,7 @@ class SglangZygoteTests(unittest.TestCase):
         env.pop("CUTE_DSL_ARCH", None)
         env.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
         env.pop("CUDA_VISIBLE_DEVICES", None)
-        env.pop("FASTRSI_ZYGOTE_CC", None)
+        env.pop("RSIBOX_ZYGOTE_CC", None)
         if extra_env:
             env.update(extra_env)
         cmd = [sys.executable, str(ZYGOTE_PY), "serve", "--sock", self.sock_path, "--refresh", refresh]
@@ -248,9 +248,9 @@ class SglangZygoteTests(unittest.TestCase):
             "        'preload_facts': PRELOAD_FACTS,\n"
             "        'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),\n"
             "        'nvml_check_cleared': 'PYTORCH_NVML_BASED_CUDA_CHECK' not in os.environ,\n"
-            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_fastrsi_forksafe'),\n"
-            "        'cur_wrapped': hasattr(torch.cuda.current_device, '_fastrsi_forksafe'),\n"
-            "        'props_wrapped': hasattr(torch.cuda.get_device_properties, '_fastrsi_props'),\n"
+            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_rsibox_forksafe'),\n"
+            "        'cur_wrapped': hasattr(torch.cuda.current_device, '_rsibox_forksafe'),\n"
+            "        'props_wrapped': hasattr(torch.cuda.get_device_properties, '_rsibox_props'),\n"
             "    }\n"
             "    tmp = out_path + '.tmp'\n"
             "    open(tmp, 'w', encoding='utf-8').write(json.dumps(payload))\n"
@@ -560,8 +560,8 @@ class SglangZygoteTests(unittest.TestCase):
             "        'default_method': mp.get_start_method(),\n"
             "        'ctx_method': mp.get_context('spawn').get_start_method(),\n"
             "        'numa_bind_v2': os.environ.get('SGLANG_NUMA_BIND_V2'),\n"
-            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_fastrsi_forksafe'),\n"
-            "        'props_wrapped': hasattr(torch.cuda.get_device_properties, '_fastrsi_props'),\n"
+            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_rsibox_forksafe'),\n"
+            "        'props_wrapped': hasattr(torch.cuda.get_device_properties, '_rsibox_props'),\n"
             "    }\n"
             "    tmp = out_path + '.tmp'\n"
             "    open(tmp, 'w', encoding='utf-8').write(json.dumps(payload))\n"
@@ -615,9 +615,9 @@ class SglangZygoteTests(unittest.TestCase):
             "from sglang.srt.managers import detokenizer_manager, scheduler\n"
             "def _scheduler_worker(grand_path):\n"
             "    pre_init = torch.cuda.is_initialized()\n"
-            "    cap_wrapped = hasattr(torch.cuda.get_device_capability, '_fastrsi_forksafe')\n"
-            "    cur_wrapped = hasattr(torch.cuda.current_device, '_fastrsi_forksafe')\n"
-            "    props_wrapped = hasattr(torch.cuda.get_device_properties, '_fastrsi_props')\n"
+            "    cap_wrapped = hasattr(torch.cuda.get_device_capability, '_rsibox_forksafe')\n"
+            "    cur_wrapped = hasattr(torch.cuda.current_device, '_rsibox_forksafe')\n"
+            "    props_wrapped = hasattr(torch.cuda.get_device_properties, '_rsibox_props')\n"
             "    nvml_cleared = 'PYTORCH_NVML_BASED_CUDA_CHECK' not in os.environ\n"
             "    cuinit_res = list(driver.cuInit(0))\n"
             "    cap = list(torch.cuda.get_device_capability(0))\n"
@@ -642,8 +642,8 @@ class SglangZygoteTests(unittest.TestCase):
             "    os.replace(tmp, grand_path)\n"
             "def launch(out_path, grand_path):\n"
             "    # Parent ServerArgs checks must run under active forksafe guards (no CUDA init).\n"
-            "    parent_cap_wrapped = hasattr(torch.cuda.get_device_capability, '_fastrsi_forksafe')\n"
-            "    parent_props_wrapped = hasattr(torch.cuda.get_device_properties, '_fastrsi_props')\n"
+            "    parent_cap_wrapped = hasattr(torch.cuda.get_device_capability, '_rsibox_forksafe')\n"
+            "    parent_props_wrapped = hasattr(torch.cuda.get_device_properties, '_rsibox_props')\n"
             "    parent_cap = list(torch.cuda.get_device_capability(0))\n"
             "    parent_cur = torch.cuda.current_device()\n"
             "    parent_sms = torch.cuda.get_device_properties(0).multi_processor_count\n"
@@ -867,7 +867,7 @@ class SglangZygoteTests(unittest.TestCase):
             "    payload = {\n"
             "        'group_tag': parallel_state.GROUP_TAG,\n"
             "        'default_method': mp.get_start_method(),\n"
-            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_fastrsi_forksafe'),\n"
+            "        'cap_wrapped': hasattr(torch.cuda.get_device_capability, '_rsibox_forksafe'),\n"
             "        'numa_bind_v2': os.environ.get('SGLANG_NUMA_BIND_V2'),\n"
             "    }\n"
             "    tmp = out_path + '.tmp'\n"

@@ -1,11 +1,11 @@
 """Golden cases for reshard_live.py (live MoE TP <-> EP reshard between weight-holder groups).
 
 CPU only. The plan cases need nothing; the transpose cases need torch; the layout cases need a
-real vLLM (FASTRSI_VLLM_PYTHON, like test_vllm_args.py) because they run vLLM's own FlashInfer
+real vLLM (RSIBOX_VLLM_PYTHON, like test_vllm_args.py) because they run vLLM's own FlashInfer
 TRT-LLM weight conversion on CPU. None of them maps a real holder: the GPU path (IPC map, in-place
 write, byte comparison with a holder loaded from disk) is proved by the run in the PR receipt.
 
-Run: FASTRSI_VLLM_PYTHON=<vLLM venv python> python3 -m pytest \
+Run: RSIBOX_VLLM_PYTHON=<vLLM venv python> python3 -m pytest \
          repos/vllm/livelab/services/test_reshard_live.py -v
 """
 import importlib.util, inspect, json, os, subprocess, sys, textwrap
@@ -18,7 +18,7 @@ sys.path.insert(0, str(HERE))
 import reshard_live as RL  # noqa: E402
 
 HAS_TORCH = importlib.util.find_spec("torch") is not None
-VLLM_PY = os.environ.get("FASTRSI_VLLM_PYTHON") or \
+VLLM_PY = os.environ.get("RSIBOX_VLLM_PYTHON") or \
     (sys.executable if importlib.util.find_spec("vllm") else None)
 
 
@@ -200,7 +200,7 @@ LAYOUT_CASE = textwrap.dedent("""
 """)
 
 
-@pytest.mark.skipif(not VLLM_PY, reason="needs vLLM: run with FASTRSI_VLLM_PYTHON set to a vLLM "
+@pytest.mark.skipif(not VLLM_PY, reason="needs vLLM: run with RSIBOX_VLLM_PYTHON set to a vLLM "
                     "venv's python (CPU CI has no vLLM)")
 def test_trtllm_layout_reshard_is_byte_exact_and_naive_is_not():
     """Input: 4 Qwen3.5-shaped experts, stored as vLLM 0.33 stores them for the FlashInfer TRT-LLM
@@ -304,7 +304,7 @@ HOLDER_ARGV_CASE = textwrap.dedent("""
 """)
 
 
-@pytest.mark.skipif(not VLLM_PY, reason="needs vLLM (FASTRSI_VLLM_PYTHON)")
+@pytest.mark.skipif(not VLLM_PY, reason="needs vLLM (RSIBOX_VLLM_PYTHON)")
 def test_holder_argv_keeps_engine_args_only():
     """The target holder gets the engine's weight-relevant flags (by vLLM's EngineArgs parser),
     never its loader, worker class, memory budget or server flags: a holder started with

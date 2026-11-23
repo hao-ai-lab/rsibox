@@ -3,7 +3,7 @@
 The shared engine-agnostic runtime every engine's live lab builds on. No code
 for one engine lives here: each engine's adapter and restart services are in
 `repos/<engine>/livelab/`, which import the shared code from this folder (the engine packages
-put it on `sys.path`; `FASTRSI_LIVELAB` overrides the folder). Onboarding scaffold for a new
+put it on `sys.path`; `RSIBOX_LIVELAB` overrides the folder). Onboarding scaffold for a new
 engine: `template/`.
 
 - `INTERFACE.md`: the fixed verbs and receipt format (version 0). `INTERFACE-v1.md` is the
@@ -13,11 +13,11 @@ engine: `template/`.
 - `kernel/`: the transaction kernel (locate, journal, swap, witness, findings, two-phase
   coordinator, session, receipts), pure Python and importing no engine, with a toy engine and
   the toy lab (`kernel.toy_lab:ToyLab`) that passes c0-c10. See `kernel/README.md`.
-- `fastrsi/`: shared stdlib runtime kit built on `kernel/` and `forksafe.py`: `BaseLab`
+- `rsibox/`: shared stdlib runtime kit built on `kernel/` and `forksafe.py`: `BaseLab`
   (`LabUnderTest` base class), `RecaptureCoordinator`, `RoleEndpoint`, JSON IPC transports
   (`UnixJsonServer`, `FileChannelServer`, `MailboxServer`), cross-platform process-tree helpers
   (`proc.py`), stack-safe `MetaPathFinder` hooks & overlays (`hooks.py`), conformance harness
-  helpers (`harness.py`), and the unified CLI (`python3 -m fastrsi` / `fastrsi`).
+  helpers (`harness.py`), and the unified CLI (`python3 -m rsibox` / `rsibox`).
 - `rsibox/`: a live lab as a service: the box daemon (any `LabUnderTest` behind HTTP with a
   bearer token), its client and CLI (`python3 -m rsibox` / `rsibox`), and the launchers that
   start it locally, in Docker, under gVisor or as a Slurm job. See `rsibox/README.md`.
@@ -40,10 +40,10 @@ From here (CPU, standard library only; torch cases skip without torch):
 ```sh
 python3 -m unittest discover -s conformance -t . -v     # the cases fail labs that lack their property
 python3 -m unittest discover -s kernel -t . -v          # kernel golden tests on the toy engine
-python3 -m unittest discover -s fastrsi -t . -v         # stdlib runtime kit, BaseLab 11/11, CLI
+python3 -m unittest discover -s rsibox -t . -v         # stdlib runtime kit, BaseLab 11/11, CLI
 python3 -m unittest discover -s . -p 'test_forksafe.py' -v
 python3 -m unittest discover -s survey -t . -v          # survey golden tests on the fixture tree
 python3 -m unittest discover -s rsibox -t . -v          # box daemon over real HTTP on the toy lab
-python3 -m fastrsi list                                 # discover toy, template, and repo labs
-python3 -m fastrsi conformance toy                      # c0-c10 on the toy lab
+python3 -m rsibox list                                 # discover toy, template, and repo labs
+python3 -m rsibox conformance toy                      # c0-c10 on the toy lab
 ```

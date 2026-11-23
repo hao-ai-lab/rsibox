@@ -129,7 +129,7 @@ def install(cuda, capability=None):
     if not all(hasattr(cuda, attr_name) for attr_name in ("get_device_capability", "current_device",
                                                           "is_initialized")):
         return {"installed": False, "why": "this torch.cuda lacks the functions to patch"}
-    if getattr(cuda.get_device_capability, "_fastrsi_forksafe", False):
+    if getattr(cuda.get_device_capability, "_rsibox_forksafe", False):
         return {"installed": False, "why": "already installed"}
 
     @functools.lru_cache(maxsize=8)
@@ -164,8 +164,8 @@ def install(cuda, capability=None):
             COUNTS["fallback"] += 1
         return orig_cur()
 
-    get_device_capability._fastrsi_forksafe = True
-    current_device._fastrsi_forksafe = True
+    get_device_capability._rsibox_forksafe = True
+    current_device._rsibox_forksafe = True
     cuda.get_device_capability = get_device_capability
     cuda.current_device = current_device
     return {"installed": True}
@@ -207,7 +207,7 @@ def install_properties(cuda, probe=None):
     """Make cuda.get_device_properties(i) answer, while CUDA is not initialized here, with the
     values CUDA itself reported for device i in a short helper process."""
     orig = cuda.get_device_properties
-    if getattr(orig, "_fastrsi_props", False):
+    if getattr(orig, "_rsibox_props", False):
         return {"installed": False, "why": "already installed"}
     probed_visible = os.environ.get("CUDA_VISIBLE_DEVICES")    # what the probe saw
     try:
@@ -224,7 +224,7 @@ def install_properties(cuda, probe=None):
             if i is not None and 0 <= i < len(props):
                 return Properties(props[i])
         return orig(device)
-    get_device_properties._fastrsi_props = True
+    get_device_properties._rsibox_props = True
     get_device_properties.__wrapped__ = orig
     cuda.get_device_properties = get_device_properties
     return {"installed": True, "devices": len(props), "probe_s": round(time.time() - t, 2)}
@@ -245,7 +245,7 @@ def unpatch(cuda=None, clear_env=False):
         for name in PATCHED:
             f = getattr(cuda, name, None)
             if f is not None and hasattr(f, "__wrapped__") and (
-                    getattr(f, "_fastrsi_forksafe", False) or getattr(f, "_fastrsi_props", False)
+                    getattr(f, "_rsibox_forksafe", False) or getattr(f, "_rsibox_props", False)
                     or getattr(f, "__module__", "") == __name__):
                 setattr(cuda, name, f.__wrapped__)
                 out.append(name)
@@ -255,7 +255,7 @@ def unpatch(cuda=None, clear_env=False):
 
 
 def _parse_capability(text):
-    """(major, minor) from FASTRSI_ZYGOTE_CC: "10.0", "100" or "sm_100" (an arch suffix such
+    """(major, minor) from RSIBOX_ZYGOTE_CC: "10.0", "100" or "sm_100" (an arch suffix such
     as "sm_90a" is dropped)."""
     value = text.strip().lower()
     value = value[3:] if value.startswith("sm_") else value
@@ -265,42 +265,42 @@ def _parse_capability(text):
     elif value.isdigit() and len(value) >= 2:
         major, minor = value[:-1], value[-1]
     else:
-        raise ValueError(f"FASTRSI_ZYGOTE_CC={text!r}: expected a capability such as "
+        raise ValueError(f"RSIBOX_ZYGOTE_CC={text!r}: expected a capability such as "
                          "10.0, 100 or sm_100")
     return int(major), int(minor)
 
 
 def triton_capability(capability=None, nvml=None):
-    """The (major, minor) Triton should target: `capability` if given, else FASTRSI_ZYGOTE_CC
+    """The (major, minor) Triton should target: `capability` if given, else RSIBOX_ZYGOTE_CC
     ("10.0", "100", "sm_100"), else NVML: the capability every visible GPU shares, else the
     first visible GPU's (found by UUID when CUDA_VISIBLE_DEVICES names GPUs so). Raises
     RuntimeError when CUDA_VISIBLE_DEVICES hides every GPU or NVML cannot answer."""
     if capability is not None:
         major, minor = capability
         return int(major), int(minor)
-    cc = os.environ.get("FASTRSI_ZYGOTE_CC")
+    cc = os.environ.get("RSIBOX_ZYGOTE_CC")
     if cc:
         return _parse_capability(cc)
     vis = os.environ.get("CUDA_VISIBLE_DEVICES")
     if vis is not None and not vis.strip(", "):
         raise RuntimeError("CUDA_VISIBLE_DEVICES is empty: this process sees no GPU to "
-                           "target; set FASTRSI_ZYGOTE_CC")
+                           "target; set RSIBOX_ZYGOTE_CC")
     nvml = nvml or _nvml()
     cap = nvml_capability(vis, nvml)
     if cap is not None:
         return tuple(cap)
     if nvml is None:
-        raise RuntimeError("no NVML (pynvml) to read the GPU's capability; set FASTRSI_ZYGOTE_CC")
+        raise RuntimeError("no NVML (pynvml) to read the GPU's capability; set RSIBOX_ZYGOTE_CC")
     # mixed GPUs, or GPUs named by UUID: the first visible one is CUDA device 0 in the child
     first = _resolve_physical_gpu_index(0)
     if first is None:
-        raise RuntimeError(f"CUDA_VISIBLE_DEVICES={vis!r} names no GPU; set FASTRSI_ZYGOTE_CC")
+        raise RuntimeError(f"CUDA_VISIBLE_DEVICES={vis!r} names no GPU; set RSIBOX_ZYGOTE_CC")
     nvml.nvmlInit()
     try:
         return tuple(nvml.nvmlDeviceGetCudaComputeCapability(_nvml_handle(nvml, first)))
     except Exception as exc:
         raise RuntimeError(f"NVML could not read the capability of GPU {first!r}: "
-                           f"{type(exc).__name__}: {exc}; set FASTRSI_ZYGOTE_CC") from exc
+                           f"{type(exc).__name__}: {exc}; set RSIBOX_ZYGOTE_CC") from exc
     finally:
         nvml.nvmlShutdown()
 
@@ -310,14 +310,14 @@ def pin_triton_target(capability=None, nvml=None):
     the CUDA driver, which a module-level query would initialize. Call it before the imports
     and the returned restore() after them. Without Triton nothing is patched and restore()
     does nothing. With CUDA_VISIBLE_DEVICES empty (every GPU hidden) and no capability or
-    FASTRSI_ZYGOTE_CC given, nothing is patched either: the returned restore() has a
+    RSIBOX_ZYGOTE_CC given, nothing is patched either: the returned restore() has a
     `skipped` reason, also printed to stderr (triton_capability itself refuses that case)."""
     try:
         from triton.backends.compiler import GPUTarget
         from triton.backends.nvidia.driver import CudaDriver
     except Exception:
         return lambda: None
-    if capability is None and not os.environ.get("FASTRSI_ZYGOTE_CC") and \
+    if capability is None and not os.environ.get("RSIBOX_ZYGOTE_CC") and \
             os.environ.get("CUDA_VISIBLE_DEVICES") is not None and \
             not os.environ["CUDA_VISIBLE_DEVICES"].strip(", "):
         # every GPU hidden (a CPU-only process): no target to pin, and nothing to protect

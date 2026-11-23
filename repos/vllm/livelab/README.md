@@ -10,7 +10,7 @@ CUDA_VISIBLE_DEVICES=0 python repos/vllm/livelab conformance --model "$MODEL" --
 CUDA_VISIBLE_DEVICES=0,1 python repos/vllm/livelab conformance --model "$MODEL" --work "$WORK/tp2" --tp 2
 ```
 
-Conformance defaults to eager execution. `FASTRSI_VLLM_EXTRA` replaces the default serving
+Conformance defaults to eager execution. `RSIBOX_VLLM_EXTRA` replaces the default serving
 flags, including the CUDA graph capture sizes.
 Use `--receipts FILE` to keep transaction receipts and `--only c2_visible` for a single case.
 
@@ -18,7 +18,7 @@ vLLM live-lab integration built on the shared transaction kernel in `core/livela
 
 - The transaction kernel (`core/livelab/kernel/`, engine-agnostic, standard library only) handles
   staging, checks, receipts, and undo journals; importing `adapter` puts `core/livelab` on
-  `sys.path` (`FASTRSI_LIVELAB` overrides the folder).
+  `sys.path` (`RSIBOX_LIVELAB` overrides the folder).
 - `adapter/`: the kernel inside a live vLLM engine: the engine-core host (`host.py`), the
   worker/core transaction side (`side.py`), the worker extension (`worker_ext.py`), graph
   reachability (`graphs.py`), selective CUDA graph recapture (`recapture.py`), and the control

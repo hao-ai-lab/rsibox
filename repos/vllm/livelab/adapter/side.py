@@ -394,7 +394,7 @@ class Side(Endpoint):
                     Endpoint._dispatch(self, cancel_method, txn)
                     self._drop_watch(txn)
             threading.Thread(target=run, daemon=True,
-                             name=f"fastrsi-prepare-{payload['id']}").start()
+                             name=f"rsibox-prepare-{payload['id']}").start()
             return F.ok(started=True)
         if method == "prepare_poll":
             job = self._jobs.get(payload)

@@ -1,6 +1,6 @@
 """Stdlib JSON IPC transports shared across live-lab hosts, clients, and zygotes.
 
-Unifies the three transport shapes used across FastRSI engines:
+Unifies the three transport shapes used across rsibox engines:
 - **Unix domain sockets** (`UnixJsonServer`, `unix_json_call`, `unix_json_stream`):
   newline-delimited JSON over `AF_UNIX` with platform-aware `MAX_SOCK_PATH` validation
   (`sock_path_error`, `short_sock_path`).
@@ -32,12 +32,12 @@ def sock_path_error(sock_path: str) -> str | None:
     if length > MAX_SOCK_PATH:
         return (
             f"socket path too long for AF_UNIX ({length} bytes > {MAX_SOCK_PATH}): {abs_path}; "
-            "use a short path such as /tmp/fastrsi-<id>.sock"
+            "use a short path such as /tmp/rsibox-<id>.sock"
         )
     return None
 
 
-def short_sock_path(prefix: str = "fastrsi", suffix: str = ".sock", root: str | None = None) -> str:
+def short_sock_path(prefix: str = "rsibox", suffix: str = ".sock", root: str | None = None) -> str:
     """Return a unique, guaranteed-short `AF_UNIX` socket path under `/tmp` (or `root`)."""
     base = root or ("/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir())
     path = os.path.join(base, f"{prefix}-{os.getpid()}-{uuid.uuid4().hex[:8]}{suffix}")
@@ -115,7 +115,7 @@ class UnixJsonServer:
     def start(self) -> None:
         if self._thread is None:
             self._thread = threading.Thread(
-                target=self._accept_loop, daemon=True, name="fastrsi-unix-server"
+                target=self._accept_loop, daemon=True, name="rsibox-unix-server"
             )
             self._thread.start()
 
@@ -126,7 +126,7 @@ class UnixJsonServer:
             except OSError:
                 return
             threading.Thread(
-                target=self._serve_one, args=(conn,), daemon=True, name="fastrsi-unix-conn"
+                target=self._serve_one, args=(conn,), daemon=True, name="rsibox-unix-conn"
             ).start()
 
     def _serve_one(self, conn: socket.socket) -> None:
@@ -151,7 +151,7 @@ class UnixJsonServer:
                 return True
             except (OSError, ValueError) as exc:
                 print(
-                    f"[fastrsi-ipc] client gone before reply ({type(exc).__name__}: {exc})",
+                    f"[rsibox-ipc] client gone before reply ({type(exc).__name__}: {exc})",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -252,7 +252,7 @@ def unix_json_stream(
 class _PollingServer:
     """Shared daemon-thread lifecycle for polling IPC servers."""
 
-    _thread_name = "fastrsi-poll"
+    _thread_name = "rsibox-poll"
 
     def _init_polling(self, poll_s: float, start: bool) -> None:
         self.poll_s = poll_s
@@ -281,7 +281,7 @@ class _PollingServer:
 class FileChannelServer(_PollingServer):
     """Polling server over `<root>/ctl.json` and `<root>/reply/<seq>.json`."""
 
-    _thread_name = "fastrsi-file-channel"
+    _thread_name = "rsibox-file-channel"
 
     def __init__(
         self,
@@ -370,7 +370,7 @@ class MailboxServer(_PollingServer):
     callable `handler(req) -> dict`.
     """
 
-    _thread_name = "fastrsi-mailbox"
+    _thread_name = "rsibox-mailbox"
 
     def __init__(
         self,
@@ -392,7 +392,7 @@ class MailboxServer(_PollingServer):
                 return True
             except OSError as exc:
                 print(
-                    f"[fastrsi-ipc] mailbox reply {rid} not written ({exc})",
+                    f"[rsibox-ipc] mailbox reply {rid} not written ({exc})",
                     file=sys.stderr,
                     flush=True,
                 )

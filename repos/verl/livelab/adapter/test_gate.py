@@ -123,7 +123,7 @@ class InlineSourcesTest(unittest.TestCase):
         """Input: a request with one on-disk file and inline sources keyed by a module name
         (`json`) and by a file path. Expected: all three resolve to real paths with the right
         text; an unknown key raises `ValueError` (the gate reports `patch_invalid`)."""
-        tmp = tempfile.mkdtemp(prefix="fastrsi-gate-edits-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-gate-edits-")
         self.addCleanup(shutil.rmtree, tmp, True)
         f1, f2 = Path(tmp) / "a.py", Path(tmp) / "b.py"
         f1.write_text("A = 1\n", encoding="utf-8")
@@ -139,7 +139,7 @@ class InlineSourcesTest(unittest.TestCase):
     def test_tracked_modules_default_adds_the_reward_file(self):
         cfg = _Cfg({"reward": {"custom_reward_function": {"path": __file__}}})
         self.assertEqual(gate.tracked_modules(cfg, env={}), ["verl.trainer.ppo.core_algos", os.path.realpath(__file__)])
-        self.assertEqual(gate.tracked_modules(cfg, env={"FASTRSI_RL_TRACK": os.pathsep.join(["a.b", "c"])}), ["a.b", "c"])
+        self.assertEqual(gate.tracked_modules(cfg, env={"RSIBOX_RL_TRACK": os.pathsep.join(["a.b", "c"])}), ["a.b", "c"])
 
 
 class CrossHostGateClientTest(unittest.TestCase):
@@ -151,7 +151,7 @@ class CrossHostGateClientTest(unittest.TestCase):
         from adapter import client
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-gate-host-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-gate-host-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         self.assertFalse(client._job_died(tmp))
         (tmp / "gate.json").write_text(json.dumps({"pid": dead.pid, "host": "some-other-node"}), encoding="utf-8")
@@ -169,7 +169,7 @@ class CrossHostGateClientTest(unittest.TestCase):
         import time
         from adapter import client
 
-        gate_dir = Path(tempfile.mkdtemp(prefix="fastrsi-client-"))
+        gate_dir = Path(tempfile.mkdtemp(prefix="rsibox-client-"))
         self.addCleanup(shutil.rmtree, gate_dir, True)
         (gate_dir / "ready.json").write_text(json.dumps({"n": 3}), encoding="utf-8")
         (gate_dir / "req-3.json").write_text("{}", encoding="utf-8")
@@ -191,7 +191,7 @@ class CrossHostGateClientTest(unittest.TestCase):
 
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        dead_dir = Path(tempfile.mkdtemp(prefix="fastrsi-client-dead-"))
+        dead_dir = Path(tempfile.mkdtemp(prefix="rsibox-client-dead-"))
         self.addCleanup(shutil.rmtree, dead_dir, True)
         (dead_dir / "ready.json").write_text(json.dumps({"n": 0}), encoding="utf-8")
         (dead_dir / "gate.json").write_text(json.dumps({"pid": dead.pid}), encoding="utf-8")
@@ -240,7 +240,7 @@ class WitnessUninvolvedRolesTest(unittest.TestCase):
         witness = {"driver": {key: 1}, **{f"rollout{i}": {key: 0} for i in range(8)}, **{f"trainer{i}": {key: 0} for i in range(4)}}
         findings = [{"check": "zero_witness", "subject": key, "participant": f"rollout{i}"} for i in range(8)]
         proof = {"receipt": {"witness": witness, "findings": findings, "abstained": ["reward0"]}}
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-gate-witness-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-gate-witness-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         g = types.SimpleNamespace(_pending={"n": 7, "steps_run": 1, "t_seen": 0.0}, _gate=tmp,
                                   _session=types.SimpleNamespace(stack=["txn-1"]),
@@ -268,7 +268,7 @@ class AtomicTorchSaveTest(unittest.TestCase):
         import io
         from unittest import mock
 
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-atomic-save-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-atomic-save-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         dest = tmp / "steps" / "3" / "adv.pt"
         seen = []
@@ -296,7 +296,7 @@ class AtomicTorchSaveTest(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in dest.parent.iterdir()), ["adv.pt"])
 
     def test_flush_backfills_rollouts_written_after_log(self):
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-gate-backfill-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-gate-backfill-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         rdir = tmp / "rollouts"
         rdir.mkdir()

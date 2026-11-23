@@ -36,7 +36,7 @@ first training step completes:
 
 ## 3. Paired 2× B200 Receipt (`slime` / `MilesStepGate` + `miles 0.2.0` `PR #162`)
 
-Source: our 2026-11-19 paired live-swap run on `2× B200` (`Qwen3-0.6B` GSM8K GRPO, `1` SGLang rollout + `1` Megatron trainer via `MilesStepGate`, `slime` `miles`-lineage trainer stack; `fastrsi_megatron.state.Snapshot` `S0` over `3,576,299,520 B` / `3.33 GiB`).
+Source: our 2026-11-19 paired live-swap run on `2× B200` (`Qwen3-0.6B` GSM8K GRPO, `1` SGLang rollout + `1` Megatron trainer via `MilesStepGate`, `slime` `miles`-lineage trainer stack; `rsibox_megatron.state.Snapshot` `S0` over `3,576,299,520 B` / `3.33 GiB`).
 
 | Measurement | Wall Time | Breakdown / Notes |
 |---|---:|---|
@@ -51,7 +51,7 @@ Source: our 2026-11-19 paired live-swap run on `2× B200` (`Qwen3-0.6B` GSM8K GR
 
 ## 4. Non-Zero-Gradient `parity_rm` Receipt & `RealSlimeMilesLab` Conformance (`2× B200`, `2026-11-19`)
 
-Source: `2× B200` `Qwen3-0.6B` GSM8K GRPO (`1` SGLang rollout + `1` Megatron trainer via `MilesStepGate` + `fastrsi_megatron.state.Snapshot` `S0`) using `parity_rm` (non-zero reward variance so optimizer steps change weights on every base and edited check).
+Source: `2× B200` `Qwen3-0.6B` GSM8K GRPO (`1` SGLang rollout + `1` Megatron trainer via `MilesStepGate` + `rsibox_megatron.state.Snapshot` `S0`) using `parity_rm` (non-zero reward variance so optimizer steps change weights on every base and edited check).
 
 - **`slime` `weights_backuper` finding:** `MegatronTrainRayActor` defaults to `enable_weights_backuper=True`, backing up updated weights at the end of `train_actor()` and calling `self._switch_model("actor")` at the start of the next step (and reading `weights_backuper.get("actor")` inside `update_weights()`). Coupled `S0` restore must therefore refresh `actor.weights_backuper.backup("actor")` right after `MState.zero_new_state(...)` so subsequent replay steps train from `S0` rather than stale post-step weights.
 
@@ -77,9 +77,9 @@ Source: `2× B200` `Qwen3-0.6B` GSM8K GRPO (`parity_rm.parity_rm`, `1` SGLang ro
   - `c9_soak` (`29.854 s`, `20` cycles: install median `0.0638 s`, undo median `0.0172 s`).
   - `c10_not_proven` (`111.592 s`, `proven False` with `['zero_witness']` on startup-only `setup_model_and_optimizer` `config.lr = config.lr * 5.0` while fresh subprocess diverged cleanly to `e2b8a46d3a18e787`).
 
-## 6. First-Class CLI `fastrsi conformance miles --real` (`MilesConformanceLab`, `2× B200`, `2026-11-19`)
+## 6. First-Class CLI `rsibox conformance miles --real` (`MilesConformanceLab`, `2× B200`, `2026-11-19`)
 
-Source: `python3 -m fastrsi conformance miles --real` (`adapter.conformance_lab:MilesConformanceLab`, `livelab.json` `"real"` enabled, `6/6` real-GPU engines `cli_launch=yes`) inside `slimerl/slime:latest` on `2× B200` (`Qwen3-0.6B`, `parity_rm.parity_rm`, `check_timeout=20.0`, `rpc_timeout=60.0`):
+Source: `python3 -m rsibox conformance miles --real` (`adapter.conformance_lab:MilesConformanceLab`, `livelab.json` `"real"` enabled, `6/6` real-GPU engines `cli_launch=yes`) inside `slimerl/slime:latest` on `2× B200` (`Qwen3-0.6B`, `parity_rm.parity_rm`, `check_timeout=20.0`, `rpc_timeout=60.0`):
 - **Result:** **`11/11` PASS**, `113` receipts (`43 txn`, `38 proof`, `32 undo`), `0 MiB × 8` teardown on `b200` (`median edit_to_commit_s 0.0419 s` / `median undo_s 0.0053 s`):
   - `c0_repeatable` (`13.26 s`, `4872311a7182bf7b`), `c1_noop` (`8.062 s`, witness `[1]`), `c2_visible` (`7.973 s`, `4872311a7182bf7b -> 6a673f84cb0ddfc8`, witness `[1]`).
   - `c3_fresh_equivalence` (`321.051 s`, bit-exact `live == fresh` on visible `6a673f84cb0ddfc8` & 3-chain `893da88d23d7f9d3`).
@@ -108,7 +108,7 @@ Source: paired `2× NVIDIA B200` (GPUs `4, 5`, `0 MiB` exit) end-to-end instrume
 
 ## 8. Post-fanout & PEP 578 negative-cache full `11/11` `MilesConformanceLab` (`2× B200`, `2026-11-20`)
 
-Re-ran container tests (`repos/miles/livelab` **`15 passed, 11 subtests`**; `core/livelab` `test_ray_participants` + `test_coordinator` **`33 passed`**; `0` FastRSI `ResourceWarning`s) and full `python3 -m fastrsi conformance miles --real` inside `slimerl/slime:latest` on `2× B200` after `core/livelab` parallel `_fanout` + PEP 578 `file_namespace` negative cache (`0 MiB × 2` exit):
+Re-ran container tests (`repos/miles/livelab` **`15 passed, 11 subtests`**; `core/livelab` `test_ray_participants` + `test_coordinator` **`33 passed`**; `0` rsibox `ResourceWarning`s) and full `python3 -m rsibox conformance miles --real` inside `slimerl/slime:latest` on `2× B200` after `core/livelab` parallel `_fanout` + PEP 578 `file_namespace` negative cache (`0 MiB × 2` exit):
 - **Conformance:** **`11/11` PASS**, `113` receipts (`43` txn / `38` proof / `32` undo; total case sum `791.114 s`: `c0 13.344 s`, `c1 8.015 s`, `c2 8.022 s`, `c3 333.664 s` bit-exact, `c4 9.448 s`, `c5 11.225 s`, `c6 10.120 s`, `c7 12.183 s`, `c8 238.547 s` [`47.07–47.81 s` respawns], `c9 36.029 s`, `c10 110.517 s`).
 - **`c9_soak` & coordinator speedups vs prior serial baseline:** `c9` install median **`0.0622 -> 0.0536 s`** (**`1.160×`**), `c9` undo median **`0.0169 -> 0.0129 s`** (**`1.310×`**), `edit_to_commit_s` median (`37` committed txns) **`0.041859 -> 0.038396 s`** (**`1.090×`**), `gap_s` median **`0.010459 -> 0.008311 s`** (**`1.258×`**), and `undo_s` median (`32` undos) **`0.005291 -> 0.004624 s`** (**`1.144×`**).
 

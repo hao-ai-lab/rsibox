@@ -21,7 +21,7 @@ from .server import BOX_FILE
 
 LAUNCH_FILE = "launch.json"
 LIVELAB = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-REPO_IN_CONTAINER, STATE_IN_CONTAINER = "/fastrsi", "/rsibox-state"
+REPO_IN_CONTAINER, STATE_IN_CONTAINER = "/rsibox", "/rsibox-state"
 _DAEMONS = []
 
 

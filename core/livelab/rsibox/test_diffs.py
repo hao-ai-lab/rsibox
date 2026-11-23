@@ -1,7 +1,7 @@
-"""Tests for `fastrsi.diffs` against real `git diff` patch files and edge-case headers.
+"""Tests for `rsibox.diffs` against real `git diff` patch files and edge-case headers.
 
 Run from the repo root (pure CPU, read-only on `repos/*/patches`):
-    python3 -W error::ResourceWarning -m unittest discover -s core/livelab/fastrsi -t core/livelab -p "test_diffs.py" -v
+    python3 -W error::ResourceWarning -m unittest discover -s core/livelab/rsibox -t core/livelab -p "test_diffs.py" -v
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import unittest
 
-from fastrsi import diffs
+from rsibox import diffs
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MEGATRON_PATCH_DIR = REPO_ROOT / "repos" / "megatron" / "patches"

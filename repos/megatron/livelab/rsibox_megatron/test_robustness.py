@@ -22,7 +22,7 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIVELAB_DIR = os.path.dirname(HERE)
 sys.path.insert(0, LIVELAB_DIR)
-from fastrsi_megatron import LIVELAB, client, gap, zygote  # noqa: E402
+from rsibox_megatron import LIVELAB, client, gap, zygote  # noqa: E402
 
 try:
     import torch
@@ -105,8 +105,8 @@ class ZygoteSupervision(unittest.TestCase):
             f.write(TRAIN)
         self.sock = os.path.join(self.d, "z.sock")
         env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + self.d,
-                   FASTRSI_ZYGOTE_FORKSAFE="0")
-        self.z = subprocess.Popen([sys.executable, "-m", "fastrsi_megatron.zygote", "serve",
+                   RSIBOX_ZYGOTE_FORKSAFE="0")
+        self.z = subprocess.Popen([sys.executable, "-m", "rsibox_megatron.zygote", "serve",
                                    "--sock", self.sock, "--preload", "heavy"],
                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                   env=env)
@@ -217,8 +217,8 @@ class LabFixture:
     """A Lab on a CPU model with a one-rank gloo stand-in; check steps sleep `slow` seconds."""
 
     def __init__(self, tc, slow=0.0):
-        from fastrsi_megatron import hook
-        from fastrsi_megatron.test_pieces import _MegatronLikeOptimizer, _Sched
+        from rsibox_megatron import hook
+        from rsibox_megatron.test_pieces import _MegatronLikeOptimizer, _Sched
         self.hook = hook
         torch.manual_seed(0)
         self.batches = [torch.randn(4, 8) for _ in range(12)]
@@ -254,7 +254,7 @@ class LabFixture:
             def gather(self, r):
                 return [r]
         self.train_step = train_step
-        env = {"FASTRSI_WARMUP": "2", "FASTRSI_CHECK_STEPS_MAX": "4", "FASTRSI_CHECK_STEPS": "2"}
+        env = {"RSIBOX_WARMUP": "2", "RSIBOX_CHECK_STEPS_MAX": "4", "RSIBOX_CHECK_STEPS": "2"}
         with mock.patch.dict(os.environ, env), \
                 mock.patch.object(hook.G, "Ranks", return_value=Ranks()), \
                 mock.patch.object(hook.Lab, "_mb", return_value=1):
@@ -292,7 +292,7 @@ class LabServing(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             sock = os.path.join(d, "lab.sock")
             out = {}
-            with mock.patch.dict(os.environ, {"FASTRSI_SOCK": sock}):
+            with mock.patch.dict(os.environ, {"RSIBOX_SOCK": sock}):
                 t = threading.Thread(target=lambda: out.setdefault("ret", fx.lab.serve()), daemon=True)
                 t.start()
                 try:
@@ -329,13 +329,13 @@ class LabServing(unittest.TestCase):
 
 def _gloo_rank(rank, port, sock, outq):
     """One rank of a real 2-rank gloo job serving the lab on a CPU model (spawned)."""
-    from fastrsi_megatron import hook
-    from fastrsi_megatron.test_pieces import _MegatronLikeOptimizer, _Sched
+    from rsibox_megatron import hook
+    from rsibox_megatron.test_pieces import _MegatronLikeOptimizer, _Sched
     os.environ.update(GLOO_SOCKET_IFNAME="lo0" if sys.platform == "darwin" else "lo",
                       MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), RANK=str(rank),
-                      WORLD_SIZE="2", FASTRSI_SOCK=sock, FASTRSI_WARMUP="1",
-                      FASTRSI_CHECK_STEPS_MAX="2", FASTRSI_CHECK_STEPS="1",
-                      FASTRSI_ROUND_TIMEOUT_S="3", FASTRSI_HANG_S="5")
+                      WORLD_SIZE="2", RSIBOX_SOCK=sock, RSIBOX_WARMUP="1",
+                      RSIBOX_CHECK_STEPS_MAX="2", RSIBOX_CHECK_STEPS="1",
+                      RSIBOX_ROUND_TIMEOUT_S="3", RSIBOX_HANG_S="5")
     torch.distributed.init_process_group("gloo", rank=rank, world_size=2)
     torch.manual_seed(0)
     model = torch.nn.Sequential(torch.nn.Linear(8, 4))
@@ -361,7 +361,7 @@ def _gloo_rank(rank, port, sock, outq):
 class RanksRound(unittest.TestCase):
     """Real 2-rank gloo job, real lab, real socket (no numpy needed): a rank fault must reach the
     right rank; a rank that dies in a round must fail it on rank 0 within the round timeout (3 s
-    here, FASTRSI_ROUND_TIMEOUT_S) after rank 0's own part, not block it for the group's 7-day
+    here, RSIBOX_ROUND_TIMEOUT_S) after rank 0's own part, not block it for the group's 7-day
     timeout; and a healthy rank that answers long before rank 0 must not fail the round."""
 
     def setUp(self):
@@ -421,7 +421,7 @@ class RanksRound(unittest.TestCase):
         self.assertEqual(self.procs[1].exitcode, 18)
 
     def test_rank_answering_long_before_rank_0_does_not_fail_the_round(self):
-        """Input: rank 0 sleeps 5 s in its check step (hang fault, FASTRSI_HANG_S=5), rank 1
+        """Input: rank 0 sleeps 5 s in its check step (hang fault, RSIBOX_HANG_S=5), rank 1
         answers at once; round timeout 3 s. Expect: the check is ok with the loss of both
         steps, rank 1 still alive, status base. With replies on a 3 s gloo collective, rank 1
         raised "Timed out waiting 3000ms" out of serve() and rank 0 then hung."""
@@ -451,7 +451,7 @@ class RanksRound(unittest.TestCase):
         self.assert_poisoned_by_a_failed_round()
         # rank 1 either still blocks in its send or receive (gloo's macOS transport) or its
         # send or receive failed and it left with LOST_ROUND_EXIT (Linux): never a clean 0
-        from fastrsi_megatron import hook
+        from rsibox_megatron import hook
         exit_code = self.procs[1].exitcode
         self.assertIn(exit_code, (None, hook.LOST_ROUND_EXIT), f"rank 1 exit code {exit_code}")
 
@@ -477,12 +477,12 @@ class RanksRound(unittest.TestCase):
         blocking on dist.barrier(group=lab.ranks.group) for the 7-day timeout."""
         code = ("import os, socket, torch\n"
                 "from unittest import mock\n"
-                "from fastrsi_megatron import hook\n"
-                "from fastrsi_megatron.test_pieces import _MegatronLikeOptimizer, _Sched\n"
+                "from rsibox_megatron import hook\n"
+                "from rsibox_megatron.test_pieces import _MegatronLikeOptimizer, _Sched\n"
                 "rank = int(os.environ['RANK'])\n"
                 "os.environ.update(GLOO_SOCKET_IFNAME='lo0' if os.uname().sysname == 'Darwin' else 'lo',\n"
-                "                  FASTRSI_WARMUP='1', FASTRSI_CHECK_STEPS_MAX='2',\n"
-                "                  FASTRSI_CHECK_STEPS='1', FASTRSI_ROUND_TIMEOUT_S='2')\n"
+                "                  RSIBOX_WARMUP='1', RSIBOX_CHECK_STEPS_MAX='2',\n"
+                "                  RSIBOX_CHECK_STEPS='1', RSIBOX_ROUND_TIMEOUT_S='2')\n"
                 "torch.distributed.init_process_group('gloo', rank=rank, world_size=2)\n"
                 "torch.manual_seed(0)\n"
                 "model = torch.nn.Sequential(torch.nn.Linear(8, 4))\n"
@@ -504,7 +504,7 @@ class RanksRound(unittest.TestCase):
             sock = os.path.join(folder, "hook-exit.sock")
             env_base = {**os.environ, "PYTHONPATH": os.path.dirname(HERE) + os.pathsep + LIVELAB_DIR,
                         "MASTER_ADDR": "127.0.0.1", "MASTER_PORT": str(port), "WORLD_SIZE": "2",
-                        "FASTRSI_SOCK": sock}
+                        "RSIBOX_SOCK": sock}
             procs = [subprocess.Popen([sys.executable, "-c", code],
                                       env={**env_base, "RANK": str(r)},
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -535,9 +535,9 @@ class LostRound(unittest.TestCase):
         of 2, whose next receive raises the error gloo gives for a closed peer. Expect: exit code
         hook.LOST_ROUND_EXIT and one stderr line naming the error. Before: the exception left
         serve(), and the test worker on Linux exited 0."""
-        from fastrsi_megatron import hook
+        from rsibox_megatron import hook
         code = ("import sys\n"
-                "from fastrsi_megatron.test_robustness import LabFixture\n"
+                "from rsibox_megatron.test_robustness import LabFixture\n"
                 "class Gone:\n"
                 "    rank, world, group = 1, 2, None\n"
                 "    def bcast(self, msg=None):\n"
@@ -613,7 +613,7 @@ class InstallPatchModules(unittest.TestCase):
     def test_inject_target_names_one_rank_or_is_refused(self):
         """Input: targets None, 1, "1", "rank1", then "rank01", "rank2", "x", True, -1 on two
         ranks. Expect: None, 1, 1, 1, then a plain ValueError naming the valid targets."""
-        from fastrsi_megatron import hook
+        from rsibox_megatron import hook
         for target, rank in ((None, None), (1, 1), ("1", 1), ("rank1", 1)):
             self.assertEqual(hook.target_rank(target, 2), rank)
         for target in ("rank01", "rank2", "x", True, -1):
@@ -653,7 +653,7 @@ class ResetFailsClosed(unittest.TestCase):
         """Input: S taken; two steps move weights, Adam state, BatchNorm running stats (buffers),
         Python and numpy RNG and a grad scaler's scale. Expect: digest differs after the steps and
         equals S's after restore; the next Python/numpy draws equal those drawn right after S."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         fx = LabFixture(self)
 
         class Scaler:                           # Megatron's DynamicGradScaler state_dict shape
@@ -701,7 +701,7 @@ class ResetFailsClosed(unittest.TestCase):
         forks the tracker, restore again. Expect: the tracker state equals S's both times. Before
         the fix the second restore brought back the step's state (the snapshot's own dict had been
         written by fork); the GPU run's digest showed it as an `rng` difference."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
 
         class Tracker:                          # the semantics of megatron.core.tensor_parallel.random
             def __init__(self):
@@ -729,7 +729,7 @@ class ResetFailsClosed(unittest.TestCase):
         that the live optimizer lost (missing). Expect: ok False with the names, and the live
         weights untouched (fail closed, not a partial restore). Before the fix restore wrote the
         tensors it knew and reset answered ok True."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         fx = LabFixture(self)
         s = ST.Snapshot([fx.model], fx.opt, fx.sched)
         fx.lab._steps(1)
@@ -748,7 +748,7 @@ class ResetFailsClosed(unittest.TestCase):
         self.assertEqual(r["n_missing"], 1)
 
     def test_restore_with_a_changed_shape_fails(self):
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         fx = LabFixture(self)
         s = ST.Snapshot([fx.model], fx.opt, fx.sched)
         p = fx.opt.shard_fp32_from_float16_groups[0][0]
@@ -801,7 +801,7 @@ class ResetFailsClosed(unittest.TestCase):
         state.np set to None (the no-numpy path). Expect: both succeed and the tensor pieces are
         equal (rng differs: without numpy there is no numpy RNG state). Fails without the fix only
         where numpy is missing (torch-only), where the first digest is already the no-numpy one."""
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         fixture = LabFixture(self)
         with_numpy = ST.digest([fixture.model], fixture.opt, fixture.sched)
         with mock.patch.object(ST, "np", None):
@@ -816,7 +816,7 @@ class ResetFailsClosed(unittest.TestCase):
         size is a parameter, so no 4 GiB tensor is needed), and in one read. Expect: both equal
         sha256 of the same 10 bytes."""
         import hashlib
-        from fastrsi_megatron import state as ST
+        from rsibox_megatron import state as ST
         data = torch.arange(10, dtype=torch.uint8)
         want = hashlib.sha256(bytes(data.tolist())).hexdigest()
         with mock.patch.object(ST, "np", None):
@@ -969,7 +969,7 @@ if {use_stub}:
     t.is_tensor = lambda x: False
     sys.modules['torch'] = t
     sys.modules['torch.distributed'] = t.distributed
-from fastrsi_megatron import client, gap, hook
+from rsibox_megatron import client, gap, hook
 
 def run_case(mode):
     barrier_calls = []
@@ -1013,7 +1013,7 @@ def run_case(mode):
             serve_rets.append(ret)
             return ret
         fake_lab.serve = traced_serve
-        with mock.patch.dict(os.environ, {{'FASTRSI_SOCK': sock, 'FASTRSI_READY': ready}}), \\
+        with mock.patch.dict(os.environ, {{'RSIBOX_SOCK': sock, 'RSIBOX_READY': ready}}), \\
              mock.patch.object(hook, 'Lab', return_value=fake_lab), \\
              mock.patch.object(hook.dist, 'barrier', side_effect=lambda group=None: barrier_calls.append(group)), \\
              mock.patch.object(hook.os, '_exit', side_effect=lambda code: (exit_calls.append(code), (_ for _ in ()).throw(SystemExit(code)))):

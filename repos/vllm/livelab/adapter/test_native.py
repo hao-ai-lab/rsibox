@@ -18,7 +18,7 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest import mock
 
-from fastrsi import lab as lab_base
+from rsibox import lab as lab_base
 from kernel import coordinator as C
 from kernel import locate as L
 from kernel import toy
@@ -137,7 +137,7 @@ def _fake_cdll_factory(ops_ns, versioned_deltas, dlclose_calls):
             self.so_path = so_path
             self.mode = mode
             base = os.path.basename(so_path)
-            key = base.removeprefix("libfastrsi_").removesuffix(".so")
+            key = base.removeprefix("librsibox_").removesuffix(".so")
             delta = versioned_deltas.get(key, 100)
             setattr(ops_ns, f"_Cv{key}", types.SimpleNamespace(**{OP_NAME: lambda x, d=delta: x + d}))
 
@@ -452,7 +452,7 @@ class NativeUnitTests(unittest.TestCase):
                 self.assertEqual(sys.modules[f"{pkg}.ops"].activate(4), 5)
 
     def test_spec_key_tracks_env_arch_and_rejects_path_traversal(self):
-        """`FASTRSI_NATIVE_ARCH` participates in `spec_key`, and `/`/`.`/`..` escapes raise ValueError."""
+        """`RSIBOX_NATIVE_ARCH` participates in `spec_key`, and `/`/`.`/`..` escapes raise ValueError."""
         fake_torch, _, _ = _make_fake_torch()
         with tempfile.TemporaryDirectory() as tmp:
             csrc = _make_csrc(tmp, body="// base\nvoid f() {}\n")
@@ -460,12 +460,12 @@ class NativeUnitTests(unittest.TestCase):
             spec_auto = _native_spec(csrc, build_root)
             spec_auto["arch"] = "auto"
 
-            with mock.patch.dict(os.environ, {"FASTRSI_NATIVE_ARCH": "90a"}):
+            with mock.patch.dict(os.environ, {"RSIBOX_NATIVE_ARCH": "90a"}):
                 k_90a = N.spec_key(spec_auto)
-            with mock.patch.dict(os.environ, {"FASTRSI_NATIVE_ARCH": "100a"}):
+            with mock.patch.dict(os.environ, {"RSIBOX_NATIVE_ARCH": "100a"}):
                 k_100a = N.spec_key(spec_auto)
             with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("FASTRSI_NATIVE_ARCH", None)
+                os.environ.pop("RSIBOX_NATIVE_ARCH", None)
                 k_none = N.spec_key(spec_auto)
             self.assertEqual(len({k_90a, k_100a, k_none}), 3)
 

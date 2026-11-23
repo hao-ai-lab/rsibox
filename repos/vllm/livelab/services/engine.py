@@ -108,7 +108,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
 import forksafe  # noqa: E402
-from fastrsi import harness, ipc, proc  # noqa: E402  (stdlib only)
+from rsibox import harness, ipc, proc  # noqa: E402  (stdlib only)
 
 _finding = harness.plain_finding
 
@@ -157,7 +157,7 @@ def engine_env(a, base=None):
     # goes on the path ahead of site-packages, and each launch gets its own control folder.
     if not getattr(a, "live_dir", None):
         a.live_dir = str(Path(a.cache_root).resolve() / "engines" / "live" / uuid.uuid4().hex)
-    env["FASTRSI_LIVE_RECONFIG_DIR"] = a.live_dir
+    env["RSIBOX_LIVE_RECONFIG_DIR"] = a.live_dir
     paths = [p for p in (env.get("PYTHONPATH") or "").split(os.pathsep) if p and p != LIVE_SITE]
     env["PYTHONPATH"] = os.pathsep.join([LIVE_SITE] + paths)
     if a.kvplan is not None:
@@ -165,7 +165,7 @@ def engine_env(a, base=None):
         here = str(Path(__file__).resolve().parent)
         env["PYTHONPATH"] = os.pathsep.join([here] + ([env["PYTHONPATH"]]
                                                       if env.get("PYTHONPATH") else []))
-        env["FASTRSI_KVPLAN_DIR"] = kvplan_dir(a)
+        env["RSIBOX_KVPLAN_DIR"] = kvplan_dir(a)
     if a.fork:
         # The engine core and workers are forked, not spawned: they inherit the parent's
         # imports. vLLM falls back to spawn when the parent has initialized CUDA; fork_check()

@@ -118,7 +118,7 @@ NO_ACTOR = types.SimpleNamespace(__ray_call__=types.SimpleNamespace(
 class RayParticipantsTest(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="fastrsi-ray-")
+        self.dir = tempfile.mkdtemp(prefix="rsibox-ray-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         with open(os.path.join(self.dir, "fakeray.py"), "w") as handle:
             handle.write("from kernel.test_ray_participants import fake_remote as remote\n")
@@ -327,7 +327,7 @@ class RayParticipantsTest(unittest.TestCase):
 
         participants = [RP.RayActorParticipant(f"w{i}", actor, get=slow_get)
                         for i, actor in enumerate(actors)]
-        missing_mod = f"fastrsi_unloaded_test_{next(_n)}"
+        missing_mod = f"rsibox_unloaded_test_{next(_n)}"
         plan = {"modules": {
             name: {"source": self.source},
             missing_mod: {"source": REWARD},
@@ -382,7 +382,7 @@ class RayParticipantsTest(unittest.TestCase):
 class FileNamespaceNegativeCacheTest(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="fastrsi-negcache-")
+        self.dir = tempfile.mkdtemp(prefix="rsibox-negcache-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         RP._clear_absent_cache()
         self.addCleanup(RP._clear_absent_cache)
@@ -492,7 +492,7 @@ class FileNamespaceNegativeCacheTest(unittest.TestCase):
         self.assertEqual(RP.file_namespace(path), (None, None))
         self.assertEqual(self.scan_count, 1)
 
-        mod_name = f"fastrsi_direct_sysmod_{next(_n)}"
+        mod_name = f"rsibox_direct_sysmod_{next(_n)}"
         mod = types.ModuleType(mod_name)
         mod.__file__ = path
         sys.modules[mod_name] = mod

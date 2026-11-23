@@ -1,21 +1,21 @@
 """Run a Megatron pretrain script unchanged, with startup phase timestamps and, optionally,
 the live lab in its step gap.
 
-    torchrun ... -m fastrsi_megatron.run <pretrain_gpt.py> <megatron args>
+    torchrun ... -m rsibox_megatron.run <pretrain_gpt.py> <megatron args>
 
 Wraps the module globals `pretrain()` calls in megatron.training.training
 (initialize_megatron, setup_model_and_optimizer, build_train_valid_test_data_iterators,
-train_step) and writes $FASTRSI_RUN/phases.rank<r>.json: unix times of each phase boundary
-and, per train step outside the lab, its seconds, loss and grad norm. FASTRSI_T0 is the
-launcher's start time (so process start-up is counted). FASTRSI_LAB=1 opens the lab at the
-first train step (hook.py); FASTRSI_OVERLAY loads edited modules (overlay.py).
+train_step) and writes $RSIBOX_RUN/phases.rank<r>.json: unix times of each phase boundary
+and, per train step outside the lab, its seconds, loss and grad norm. RSIBOX_T0 is the
+launcher's start time (so process start-up is counted). RSIBOX_LAB=1 opens the lab at the
+first train step (hook.py); RSIBOX_OVERLAY loads edited modules (overlay.py).
 
-FASTRSI_STEP_DETAIL=K splits the first K train steps (synchronized, so a little slower): the
+RSIBOX_STEP_DETAIL=K splits the first K train steps (synchronized, so a little slower): the
 start of each microbatch's forward (after the previous microbatch's backward) and the optimizer
 step, as seconds from the step's start, under "detail" of each step. The first step's extra cost
 over a steady one then shows where it goes: the first microbatch (lazy communicators, kernel
 choice, compilation), the others, or the optimizer (Adam state).
-FASTRSI_EAGER_NCCL=1 passes device_id to torch.distributed.init_process_group, so NCCL
+RSIBOX_EAGER_NCCL=1 passes device_id to torch.distributed.init_process_group, so NCCL
 communicators are created at init (`init_done`) instead of inside the first step.
 """
 import json
@@ -24,14 +24,14 @@ import runpy
 import sys
 import time
 
-T = {"proc_start": float(os.environ.get("FASTRSI_T0", "0")) or None,
+T = {"proc_start": float(os.environ.get("RSIBOX_T0", "0")) or None,
      "driver_start": time.time()}
 from . import overlay  # noqa: E402,F401  (before any megatron import)
 import torch  # noqa: E402
 T["torch_imported"] = time.time()
 import megatron.training.training as tr  # noqa: E402
 T["megatron_imported"] = time.time()
-RUN = os.environ.get("FASTRSI_RUN", ".")
+RUN = os.environ.get("RSIBOX_RUN", ".")
 STEPS = []
 _sync = torch.cuda.synchronize if torch.cuda.is_available() else (lambda: None)
 
@@ -100,11 +100,11 @@ def _detailed(a, k, raw):
 
 
 def main():
-    if os.environ.get("FASTRSI_EAGER_NCCL") == "1":
+    if os.environ.get("RSIBOX_EAGER_NCCL") == "1":
         _eager_nccl()
     from . import zygote
-    detail = int(os.environ.get("FASTRSI_STEP_DETAIL", "0") or 0)
-    compile_warmup_steps = int(os.environ.get("FASTRSI_COMPILE_WARMUP_STEPS", "2") or 2)
+    detail = int(os.environ.get("RSIBOX_STEP_DETAIL", "0") or 0)
+    compile_warmup_steps = int(os.environ.get("RSIBOX_COMPILE_WARMUP_STEPS", "2") or 2)
     _wrap("initialize_megatron", "init_start", "init_done")
     _wrap("setup_model_and_optimizer", "model_opt_start", "model_opt_done")
     _wrap("build_train_valid_test_data_iterators", "data_start", "data_done")
@@ -138,7 +138,7 @@ def main():
         return r
     train_step.__wrapped__ = raw
     tr.train_step = train_step
-    if os.environ.get("FASTRSI_LAB") or os.environ.get("FASTRSI_FRESH"):
+    if os.environ.get("RSIBOX_LAB") or os.environ.get("RSIBOX_FRESH"):
         from . import hook
         hook.install_hook(tr)
     script = sys.argv[1]

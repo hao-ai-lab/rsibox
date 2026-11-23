@@ -1,5 +1,5 @@
 {
-  "schema": "fastrsi-survey-rules/1",
+  "schema": "rsibox-survey-rules/1",
   "engine": "vllm",
   "rules_version": "vllm-1.1",
   "upstream": {

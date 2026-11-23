@@ -26,8 +26,8 @@ def launch_command(overrides, gate_dir=None, trace_path=None, roots=None):
             rdir = next((str(Path(it.partition("=")[2]).resolve().parent) for it in overrides
                          if it.lstrip("+").startswith("reward.custom_reward_function.path=")), None)
             roots = [r for r in (vroot, rdir) if r]
-        env["FASTRSI_RL_GATE"], env["FASTRSI_RL_ROOTS"] = str(Path(gate_dir).resolve()), os.pathsep.join(roots)
-        argv += ["trainer.v1.trainer_mode=fastrsi", "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=adapter.hook.setup"]
+        env["RSIBOX_RL_GATE"], env["RSIBOX_RL_ROOTS"] = str(Path(gate_dir).resolve()), os.pathsep.join(roots)
+        argv += ["trainer.v1.trainer_mode=rsibox", "+ray_kwargs.ray_init.runtime_env.worker_process_setup_hook=adapter.hook.setup"]
     site = Path(sysconfig.get_paths()["purelib"]) / "nvidia"
     libs = [str(site / lib / "lib") for lib in ("cudnn", "nccl") if (site / lib / "lib").is_dir()]
     if libs:

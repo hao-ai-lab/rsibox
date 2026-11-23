@@ -20,14 +20,14 @@ import sys
 import time
 
 try:
-    from fastrsi import harness, ipc, proc
+    from rsibox import harness, ipc, proc
 except ImportError:  # pragma: no cover - direct CLI invocation without PYTHONPATH
     _CORE = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "core", "livelab")
     )
     if os.path.isdir(_CORE) and _CORE not in sys.path:
         sys.path.insert(0, _CORE)
-    from fastrsi import harness, ipc, proc
+    from rsibox import harness, ipc, proc
 
 _SAMPLE_UUID = "0" * 36
 SOCKET_ENV = "SGLANG_WEIGHT_CACHE_SOCKET_TEMPLATE"

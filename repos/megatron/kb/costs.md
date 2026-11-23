@@ -2,7 +2,7 @@
 
 Measured on 4× GB200 (aarch64), torch 2.13 + CUDA 13, Transformer Engine 2.18, megatron-core
 0.20 dev, code and Python environment on a network file system. Source: our 2026-11-07 runs
-(startup phases from `fastrsi_megatron/run.py`, lab calls from the lab's own `cost_s`). Every
+(startup phases from `rsibox_megatron/run.py`, lab calls from the lab's own `cost_s`). Every
 row names its run.
 
 ## Live and fresh checks on eight Qwen3-14B-shaped layers
@@ -84,7 +84,7 @@ install of the kept set on all 8 ranks 1.39 s (code) + 0.10 s (cell).
 Our 2026-11-07 runs on 4 GB200 (one node), 3 train steps, request (or process start) to the first train step done, from
 `phases.rank0.json`. "NFS" = Python environment and Megatron on the network file system; "local" = both copied to the
 node's RAM disk (`tools/stage_local.sh`); "zygote" = ranks forked from a process that has them imported
-(`livelab/fastrsi_megatron/zygote.py`).
+(`livelab/rsibox_megatron/zygote.py`).
 
 | Phase | 14B NFS | 14B local | 14B zygote | 32B NFS | 32B local | 32B zygote | Avoidable? How |
 |---|---|---|---|---|---|---|---|
@@ -117,14 +117,14 @@ transformers package alone 16.6 s), 19.3 s warm; wall 20.5-23.0 s warm; 11.6-12.
 
 ### The first train step
 
-`FASTRSI_STEP_DETAIL=2` (synchronized split, `run.py`): the first step's extra time over a steady one is in the first
+`RSIBOX_STEP_DETAIL=2` (synchronized split, `run.py`): the first step's extra time over a steady one is in the first
 microbatch (14B 3.8-5.7 s vs 0.28-0.33 s; 32B 5.1-7.0 s vs 0.42-0.48 s), the optimizer step (+0.5 s / +1.3-1.4 s: Adam state
 allocation, first grad-norm reduction) and the step's tail (+0.5 s / +1.0-1.3 s). A Python profile of rank 0's first step
 (14B, zygote; profiled step 11.3 s vs 5.4 s) attributes the excess to: NCCL communicator creation on first use (`all_reduce`
 1.1 s, `broadcast` 0.5 s, coalesced 0.2 s), cuDNN fused-attention plans (`fused_attn_fwd` + `bwd` 1.96 s vs 0.12 s),
 the first RMSNorm calls (1.72 s vs 0.23 s, caching-allocator growth lands here), and torch.compile'd functions the warm-up
 does not cover (1.6 s more in dynamo frames, 0.8 s of it waiting on compile workers). All of it is per process: a fork
-cannot inherit it (no CUDA in the zygote). Creating communicators at init (`FASTRSI_EAGER_NCCL=1`, `device_id`) moves
+cannot inherit it (no CUDA in the zygote). Creating communicators at init (`RSIBOX_EAGER_NCCL=1`, `device_id`) moves
 rather than removes it: init +3.0 s (14B) / +9-10 s (32B), first step -0.6 s / -2 to -4 s, net slower.
 
 What of the first step a cache on disk can keep (our 2026-11-07 runs, Qwen3-14B architecture TP 2 unless noted; single-layer
@@ -317,7 +317,7 @@ unit tests (`test_pieces.py`, incl. `PipelineAndVppTest`) passed 13/13 with torc
 Source: our 2026-11-19 NeMo 26.04.01 conformance run on four GB200s (8 layers, hidden 512, 8
 attention heads, `--tensor-model-parallel-size 2 --pipeline-model-parallel-size 2
 --num-layers-per-virtual-pipeline-stage 2 --sequence-parallel --global-batch-size 8
---deterministic-mode`, VPP2 interleaved chunks, 3-step checks via `fastrsi conformance megatron --real`).
+--deterministic-mode`, VPP2 interleaved chunks, 3-step checks via `rsibox conformance megatron --real`).
 
 | Case | Result | Seconds | Notes |
 |---|---|---:|---|

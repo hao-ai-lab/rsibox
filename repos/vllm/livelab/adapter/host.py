@@ -1,7 +1,7 @@
 """Engine-core host: kernel transactions inside vLLM's EngineCore busy loop (live code swap, and
 selective recapture of CUDA graphs in the commit's gap).
 
-Enable with FASTRSI_KERNEL_DIR=<dir> in the engine's environment, import this module early in
+Enable with RSIBOX_KERNEL_DIR=<dir> in the engine's environment, import this module early in
 every engine process (a sitecustomize does it), and add `--worker-extension-cls
 adapter.worker_ext.KernelWorkerExtension`. Lab use only: it runs code sent to it.
 
@@ -36,10 +36,10 @@ How a transaction runs (kernel `StepGapCoordinator`):
 - Phase 2 (validate, commit or abort, undo of a failed commit) is one job that runs only when
   no batch is in flight. While it waits, the loop schedules nothing new ("pause keep":
   `scheduler.has_requests` is shadowed to False while `batch_queue` drains).
-- Phase 2 has a deadline (FASTRSI_KERNEL_PHASE2_DEADLINE, default 5 s; `phase2_deadline_s` per
+- Phase 2 has a deadline (RSIBOX_KERNEL_PHASE2_DEADLINE, default 5 s; `phase2_deadline_s` per
   op; 0 turns it off). Every side answers its phase-2 calls by the deadline from its own lane
   (`deadline_missed` naming the late rank), and collective_rpc gets `timeout` = the time left
-  + FASTRSI_KERNEL_RPC_GRACE (default 2 s) as a backstop for a process that cannot answer at
+  + RSIBOX_KERNEL_RPC_GRACE (default 2 s) as a backstop for a process that cannot answer at
   all. A timeout leaves the late reply in the executor's
   response queue, where the next call would read it, so after one the worker group refuses
   every call (`deadline_missed`; respawn the engine) and the kernel poisons the host. The
@@ -65,7 +65,7 @@ import threading
 import time
 import traceback
 
-from fastrsi import hooks, lab as lab_base
+from rsibox import hooks, lab as lab_base
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import receipt as R
@@ -73,11 +73,11 @@ from services import core_hook
 
 from .side import Side
 
-TAG = "FASTRSI_KERNEL"
-DIR = os.environ.get("FASTRSI_KERNEL_DIR")
-GAP_TIMEOUT_S = float(os.environ.get("FASTRSI_KERNEL_GAP_TIMEOUT", "30"))
-PHASE2_DEADLINE_S = float(os.environ.get("FASTRSI_KERNEL_PHASE2_DEADLINE", "5")) or None
-RPC_GRACE_S = float(os.environ.get("FASTRSI_KERNEL_RPC_GRACE", "2"))
+TAG = "RSIBOX_KERNEL"
+DIR = os.environ.get("RSIBOX_KERNEL_DIR")
+GAP_TIMEOUT_S = float(os.environ.get("RSIBOX_KERNEL_GAP_TIMEOUT", "30"))
+PHASE2_DEADLINE_S = float(os.environ.get("RSIBOX_KERNEL_PHASE2_DEADLINE", "5")) or None
+RPC_GRACE_S = float(os.environ.get("RSIBOX_KERNEL_RPC_GRACE", "2"))
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
 _Job = core_hook.LoopJob
@@ -108,7 +108,7 @@ class WorkerGroup(C.Participant):
 
         def call():                       # in the loop; its TimeoutError is the RPC's own
             try:
-                return ex.collective_rpc("fastrsi_kernel", timeout=timeout,
+                return ex.collective_rpc("rsibox_kernel", timeout=timeout,
                                          args=(method, payload))
             except TimeoutError as e:
                 return e
@@ -186,7 +186,7 @@ def parallel(core):
 
 
 class RecaptureCoordinator(lab_base.RecaptureCoordinator):
-    """`fastrsi.lab.RecaptureCoordinator` plus vLLM's in-loop pending-rollback gate."""
+    """`rsibox.lab.RecaptureCoordinator` plus vLLM's in-loop pending-rollback gate."""
 
     def _queue_rollback_gate(self):
         gap_owner = getattr(self.gap, "__self__", None)
@@ -402,7 +402,7 @@ def _after_step(core, step_start, _result):
 
 
 def _on_loop_start(core):
-    root = DIR or os.environ.get("FASTRSI_KERNEL_DIR")
+    root = DIR or os.environ.get("RSIBOX_KERNEL_DIR")
     pc = getattr(getattr(core, "vllm_config", None), "parallel_config", None)
     if root and not _HOST and int(getattr(pc, "data_parallel_rank", 0) or 0) != 0:
         print(f"{TAG}: DP rank {pc.data_parallel_rank}: no host (DP rank 0 serves the "

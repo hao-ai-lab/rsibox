@@ -36,7 +36,7 @@ _MANAGERS: dict[int, "weakref.ref[NativeManager]"] = {}
 def find_nvcc() -> str:
     """Locate `nvcc` without requiring it on default `PATH`."""
     candidates = [
-        os.environ.get("FASTRSI_NVCC"),
+        os.environ.get("RSIBOX_NVCC"),
         shutil.which("nvcc"),
     ]
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
@@ -47,13 +47,13 @@ def find_nvcc() -> str:
     for path in candidates:
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return path
-    raise FileNotFoundError("nvcc not found (set FASTRSI_NVCC, CUDA_HOME, or install CUDA toolkit)")
+    raise FileNotFoundError("nvcc not found (set RSIBOX_NVCC, CUDA_HOME, or install CUDA toolkit)")
 
 
 def find_gxx() -> str | None:
     """Locate host `g++` for compiling/linking pure-C++ registration units without `nvcc`."""
     candidates = [
-        os.environ.get("FASTRSI_GXX"),
+        os.environ.get("RSIBOX_GXX"),
         shutil.which("g++"),
         "/usr/bin/g++",
     ]
@@ -98,7 +98,7 @@ def torch_paths() -> tuple[str, str]:
 
 def detect_arch(arch: str | None = "auto") -> list[str]:
     """Return nvcc `-gencode` arguments for `arch` (`'auto'`, `'100'`, `'100a'`, or `'compute_X,sm_Y'`)."""
-    spec = os.environ.get("FASTRSI_NATIVE_ARCH") or arch or "auto"
+    spec = os.environ.get("RSIBOX_NATIVE_ARCH") or arch or "auto"
     if spec == "auto":
         import torch
 
@@ -147,7 +147,7 @@ def spec_key(spec: dict) -> str:
             if os.path.isfile(path):
                 with open(path, "rb") as fh:
                     disk_hashes[rel] = hashlib.sha256(fh.read()).hexdigest()
-    arch = os.environ.get("FASTRSI_NATIVE_ARCH") or spec.get("arch") or "auto"
+    arch = os.environ.get("RSIBOX_NATIVE_ARCH") or spec.get("arch") or "auto"
     payload = {
         "files": files,
         "disk_hashes": disk_hashes,
@@ -359,7 +359,7 @@ def _ensure_reg_pch(
     Never raises: returns `(None, elapsed_s, False)` on disabled or failed PCH builds so
     `build_native` falls back seamlessly to plain header parsing.
     """
-    env_flag = os.environ.get("FASTRSI_NATIVE_REG_PCH", "1").strip().lower()
+    env_flag = os.environ.get("RSIBOX_NATIVE_REG_PCH", "1").strip().lower()
     if not enabled or not gxx or env_flag in ("0", "false", "no", "off"):
         return None, 0.0, False
 
@@ -446,11 +446,11 @@ def build_native(spec: dict) -> dict:
 
     key = spec_key(spec)
     build_root = spec.get("build_root") or os.environ.get(
-        "FASTRSI_NATIVE_BUILD_ROOT", f"/tmp/fastrsi-native-{os.getuid()}"
+        "RSIBOX_NATIVE_BUILD_ROOT", f"/tmp/rsibox-native-{os.getuid()}"
     )
     build_dir = os.path.join(build_root, key)
     os.makedirs(build_dir, exist_ok=True)
-    final_so = os.path.join(build_dir, f"libfastrsi_{key}.so")
+    final_so = os.path.join(build_dir, f"librsibox_{key}.so")
     lock_path = os.path.join(build_dir, "build.lock")
     use_cache = bool(spec.get("cache", True))
 
@@ -549,7 +549,7 @@ def build_native(spec: dict) -> dict:
                     tu_s[future_to_tu[fut]] = fut.result()
             compile_s = round(time.perf_counter() - t_compile, 6)
 
-            tmp_so = os.path.join(build_dir, f"libfastrsi_{key}.so.tmp.{os.getpid()}")
+            tmp_so = os.path.join(build_dir, f"librsibox_{key}.so.tmp.{os.getpid()}")
             with contextlib.suppress(OSError):
                 os.unlink(tmp_so)
             use_gxx_link = bool(gxx and cuda_lib)

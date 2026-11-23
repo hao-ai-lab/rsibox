@@ -23,7 +23,7 @@ repos/verl/
     costs.md                 4x GB200 startup anatomy, live step-gap timings, offline probes
     workload.md              Fixed GRPO GSM8K workload F(x) and correctness gate
     lessons.md               Ray @ray.remote class copy trap, file_namespace, coupled S0 sync
-    survey_rules.json        Static coverage rules (fastrsi-survey-rules/1: 71.8% functions live)
+    survey_rules.json        Static coverage rules (rsibox-survey-rules/1: 71.8% functions live)
   examples/
     grpo-gsm8k/
       reward_gsm8k.py        The custom reward the GPU runs load; also the conformance harness's edit target
@@ -31,7 +31,7 @@ repos/verl/
     README.md                Gate protocol, VerlLab, ToyVerlLab (CPU) and VerlConformanceLab (GPU) conformance
     adapter/
       __init__.py            Adds core/livelab to sys.path
-      gate.py                GateMixin + PPOTrainerFastRSISync step-gap Coordinator and the gate verbs
+      gate.py                GateMixin + PPOTrainerrsiboxSync step-gap Coordinator and the gate verbs
       conformance_lab.py     VerlConformanceLab: LabUnderTest over a real gated job (owns relaunch and fresh jobs)
       determinism.py         Per-sample vLLM seeds so a step after S0 reset resamples the same rollouts
       faults.py              Conformance fault injection inside one participant process

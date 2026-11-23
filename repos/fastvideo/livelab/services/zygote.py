@@ -19,7 +19,7 @@ The server must not touch the CUDA runtime (a forked child of such a process can
 At the pin two imports do: FastVideo calls `torch.cuda.is_available()` (the runtime, unless
 `PYTORCH_NVML_BASED_CUDA_CHECK=1`, which `enable` sets), and `fastvideo_kernel` asks Triton for
 the GPU target at module level, which the server answers from NVML while it imports
-(`forksafe.pin_triton_target`, FASTRSI_ZYGOTE_CC="10.0" to set it). CuTe DSL (flashinfer ->
+(`forksafe.pin_triton_target`, RSIBOX_ZYGOTE_CC="10.0" to set it). CuTe DSL (flashinfer ->
 cutlass) calls the driver's cuInit itself to find the arch unless CUTE_DSL_ARCH is set, which
 the server sets from the same capability (`pin_cute_dsl_arch`). After the preload the server
 checks both ways a fork is spoiled (`poison_reasons`: the driver's cuDeviceGetCount, torch's
@@ -36,7 +36,7 @@ import sys
 import time
 
 import forksafe
-from fastrsi import hooks
+from rsibox import hooks
 
 PREFIXES = ("fastvideo",)
 PRELOAD = ["torch", "fastvideo", "fastvideo.worker.multiproc_executor", "fastvideo.worker.gpu_worker",
@@ -97,20 +97,20 @@ def _install_worker_hook(poison=None, clear_nvml_env=False):
 
     def prepare(data):
         if poison:
-            raise RuntimeError(f"[fastrsi-zygote] forked from a server whose forks cannot use CUDA: "
+            raise RuntimeError(f"[rsibox-zygote] forked from a server whose forks cannot use CUDA: "
                                f"{poison}; restart the lab host")
         forksafe.unpatch_child(None, clear_env=clear_nvml_env)
         forksafe.apply_child_runtime_affinity()
         rep = refresh_stale()
         if rep["stale"] or rep["blocked"]:
-            print(f"[fastrsi-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
+            print(f"[rsibox-zygote] pid {os.getpid()} refreshed stale={rep['stale']} "
                   f"dropped={len(rep['dropped'])} blocked={rep['blocked']} in {rep['seconds']} s",
                   file=sys.stderr, flush=True)
-        if os.environ.get("FASTRSI_HOLDER_SOCK"):
+        if os.environ.get("RSIBOX_HOLDER_SOCK"):
             from services import holder
-            holder.install_loader_hook(os.environ["FASTRSI_HOLDER_SOCK"])
+            holder.install_loader_hook(os.environ["RSIBOX_HOLDER_SOCK"])
         return orig(data)
-    prepare._fastrsi = True
+    prepare._rsibox = True
     SP.prepare = prepare
 
 
@@ -147,9 +147,9 @@ pin_cute_dsl_arch = forksafe.pin_cute_dsl_arch
 def _preset_torch_key():
     """Pre-populate Inductor's `torch_key()` in the zygote so forked workers inherit it in RAM
     without touching CUDA."""
-    if "torch" not in sys.modules or os.environ.get("FASTRSI_ZYGOTE_PRESET_TORCH_KEY", "1") == "0":
+    if "torch" not in sys.modules or os.environ.get("RSIBOX_ZYGOTE_PRESET_TORCH_KEY", "1") == "0":
         return None
-    if os.environ.get("FASTRSI_TORCH_KEY_CACHE"):
+    if os.environ.get("RSIBOX_TORCH_KEY_CACHE"):
         from services import jitcache
         return jitcache.preset_torch_key()
     t0 = time.perf_counter()
@@ -171,7 +171,7 @@ OPTIONAL_PRELOAD = (
 
 
 def _optional_preload_modules(default_enabled=True):
-    raw = os.environ.get("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD")
+    raw = os.environ.get("RSIBOX_ZYGOTE_OPTIONAL_PRELOAD")
     if raw is None:
         return list(OPTIONAL_PRELOAD) if default_enabled else []
     token = raw.strip().lower()
@@ -190,7 +190,7 @@ def _serve():
     error = None
     optional_preloaded = []
     clear_nvml_env = False
-    preload_modules = [m for m in os.environ.get("FASTRSI_ZYGOTE_PRELOAD", "").split(",") if m]
+    preload_modules = [m for m in os.environ.get("RSIBOX_ZYGOTE_PRELOAD", "").split(",") if m]
     loaded_cuda = getattr(sys.modules.get("torch"), "cuda", None)
     has_torch_cuda = (
         loaded_cuda is not None
@@ -223,26 +223,26 @@ def _serve():
                     importlib.import_module(m)
                     optional_preloaded.append(m)
                 except Exception as opt_exc:
-                    print(f"[fastrsi-zygote] optional preload skipped {m}: "
+                    print(f"[rsibox-zygote] optional preload skipped {m}: "
                           f"{type(opt_exc).__name__}: {opt_exc}",
                           file=sys.stderr, flush=True)
         finally:
             restore()
     except Exception as e:          # workers still start (cold imports) unless poisoned below
         error = f"{type(e).__name__}: {e}"
-        print(f"[fastrsi-zygote] preload failed: {error}", file=sys.stderr, flush=True)
+        print(f"[rsibox-zygote] preload failed: {error}", file=sys.stderr, flush=True)
     torch_key = _preset_torch_key()
     poison = poison_reasons()
     if poison:
-        print(f"[fastrsi-zygote] {poison}: forked workers cannot use CUDA; they refuse to start",
+        print(f"[rsibox-zygote] {poison}: forked workers cannot use CUDA; they refuse to start",
               file=sys.stderr, flush=True)
     try:
         snapshot()
     finally:
         _install_worker_hook(poison, clear_nvml_env=clear_nvml_env)
-    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
+    if os.environ.get("RSIBOX_ZYGOTE_GC_FREEZE", "1") == "1":
         forksafe.freeze_gc_before_fork()
-    print(f"[fastrsi-zygote] server {os.getpid()} preloaded {len(_SNAPSHOT)} modules in "
+    print(f"[rsibox-zygote] server {os.getpid()} preloaded {len(_SNAPSHOT)} modules in "
           f"{time.perf_counter() - t0:.1f} s", file=sys.stderr, flush=True)
     return {"poison": poison, "preload_error": error, "torch_key": torch_key,
             "optional_preloaded": optional_preloaded}
@@ -252,12 +252,12 @@ def enable(preload=None):
     """Make FastVideo fork its workers from a preloaded forkserver (call in the lab host before
     building the first generator). Returns the preload list."""
     preload = [m for m in (preload or PRELOAD) if m != "services.zygote"]
-    preload += [m for m in os.environ.get("FASTRSI_ZYGOTE_EXTRA", "").split(",") if m and m not in preload]
+    preload += [m for m in os.environ.get("RSIBOX_ZYGOTE_EXTRA", "").split(",") if m and m not in preload]
     os.environ["FASTVIDEO_WORKER_MULTIPROC_METHOD"] = "forkserver"
     # FastVideo calls torch.cuda.is_available() at import; through the CUDA runtime that poisons
     # every later fork, through NVML it does not
     os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
-    os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ",".join(preload)
+    os.environ["RSIBOX_ZYGOTE_PRELOAD"] = ",".join(preload)
     try:
         from fastvideo import envs
         envs.FASTVIDEO_WORKER_MULTIPROC_METHOD.set("forkserver")
@@ -273,11 +273,11 @@ def in_forkserver():
 
 
 # the forkserver imports this module as its preload: it imports the rest itself (above)
-if in_forkserver() and os.environ.get("FASTRSI_ZYGOTE_PRELOAD"):
+if in_forkserver() and os.environ.get("RSIBOX_ZYGOTE_PRELOAD"):
     try:
         _serve()
     except Exception as e:                       # a broken zygote must not stop the server
-        print(f"[fastrsi-zygote] not serving: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        print(f"[rsibox-zygote] not serving: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         import multiprocessing.spawn as _spawn
-        if not getattr(_spawn.prepare, "_fastrsi", False):   # the poison check runs regardless
+        if not getattr(_spawn.prepare, "_rsibox", False):   # the poison check runs regardless
             _install_worker_hook(poison_reasons())

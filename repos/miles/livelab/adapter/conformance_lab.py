@@ -5,8 +5,8 @@ from pathlib import Path
 import adapter  # noqa: F401
 from adapter.lab import MilesLab
 from adapter.state import CoupledWeightReset, restore_trainer, snapshot_trainer
-from fastrsi import harness as H
-from fastrsi import proc as P
+from rsibox import harness as H
+from rsibox import proc as P
 
 PPO_MOD = "slime.utils.ppo_utils"
 LOSS_MOD = "slime.backends.megatron_utils.loss"
@@ -40,17 +40,17 @@ _DEFAULT_SLIME_ARGS = shlex.split(
     "--vocab-size 151936 --kv-channels 128 --qk-layernorm"
 )
 _ENV_SPEC = (
-    ("model", "FASTRSI_MILES_MODEL", False),
-    ("data", "FASTRSI_MILES_DATA", True),
-    ("custom_rm_path", "FASTRSI_MILES_CUSTOM_RM_PATH", False),
-    ("slime_root", "FASTRSI_MILES_SLIME_ROOT", True),
-    ("megatron_root", "FASTRSI_MILES_MEGATRON_ROOT", True),
-    ("extra_py_path", "FASTRSI_MILES_EXTRA_PY_PATH", False),
-    ("work", "FASTRSI_MILES_WORK", True),
-    ("ray_gpus", "FASTRSI_MILES_RAY_GPUS", False),
-    ("check_timeout", "FASTRSI_MILES_CHECK_TIMEOUT", False),
-    ("rpc_timeout", "FASTRSI_MILES_RPC_TIMEOUT", False),
-    ("boot_timeout", "FASTRSI_MILES_BOOT_TIMEOUT", False),
+    ("model", "RSIBOX_MILES_MODEL", False),
+    ("data", "RSIBOX_MILES_DATA", True),
+    ("custom_rm_path", "RSIBOX_MILES_CUSTOM_RM_PATH", False),
+    ("slime_root", "RSIBOX_MILES_SLIME_ROOT", True),
+    ("megatron_root", "RSIBOX_MILES_MEGATRON_ROOT", True),
+    ("extra_py_path", "RSIBOX_MILES_EXTRA_PY_PATH", False),
+    ("work", "RSIBOX_MILES_WORK", True),
+    ("ray_gpus", "RSIBOX_MILES_RAY_GPUS", False),
+    ("check_timeout", "RSIBOX_MILES_CHECK_TIMEOUT", False),
+    ("rpc_timeout", "RSIBOX_MILES_RPC_TIMEOUT", False),
+    ("boot_timeout", "RSIBOX_MILES_BOOT_TIMEOUT", False),
 )
 
 
@@ -164,7 +164,7 @@ def _build_fresh_overlay(files, dst):
 
 
 def _launch_slime_cluster(model, data, *, custom_rm_path=None, extra_args=None,
-                          pythonpath, num_gpus=2, rollout_pt=None, save_rollout=False, prog="fastrsi-miles"):
+                          pythonpath, num_gpus=2, rollout_pt=None, save_rollout=False, prog="rsibox-miles"):
     for entry in reversed(pythonpath.split(os.pathsep)):
         if entry and entry not in sys.path:
             sys.path.insert(0, entry)
@@ -257,7 +257,7 @@ def _parse_extra_args(raw):
     if text.startswith("["):
         parsed = json.loads(text)
         if not isinstance(parsed, list):
-            raise ValueError("FASTRSI_MILES_SLIME_ARGS must be a JSON list of strings")
+            raise ValueError("RSIBOX_MILES_SLIME_ARGS must be a JSON list of strings")
         return [str(x) for x in parsed]
     return shlex.split(text)
 
@@ -297,16 +297,16 @@ def _miles_patches(base_text):
 
 
 class MilesConformanceLab(MilesLab):
-    """Real-cluster `LabUnderTest` for `miles` / `THUDM/slime` (`fastrsi conformance miles --real`)."""
+    """Real-cluster `LabUnderTest` for `miles` / `THUDM/slime` (`rsibox conformance miles --real`)."""
 
     name = "miles"
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance miles --real -- ...` flags into `FASTRSI_MILES_*` env vars."""
+        """Translate `rsibox conformance miles --real -- ...` flags into `RSIBOX_MILES_*` env vars."""
         clean = list(argv)[1:] if list(argv)[:1] == ["--"] else list(argv)
         ap = argparse.ArgumentParser(
-            prog="fastrsi conformance miles --real",
+            prog="rsibox conformance miles --real",
             description="Run conformance against a real miles / slime Ray RL cluster.",
             allow_abbrev=False,
         )
@@ -330,7 +330,7 @@ class MilesConformanceLab(MilesLab):
         }
         extra = ns.slime_args[1:] if ns.slime_args[:1] == ["--"] else list(ns.slime_args)
         if extra:
-            env["FASTRSI_MILES_SLIME_ARGS"] = json.dumps(extra)
+            env["RSIBOX_MILES_SLIME_ARGS"] = json.dumps(extra)
         return env
 
     def __init__(self, receipts=None, *, model=None, data=None, custom_rm_path=None, slime_root=None,
@@ -338,28 +338,28 @@ class MilesConformanceLab(MilesLab):
                  check_timeout=None, rpc_timeout=None, boot_timeout=None, mode="sync",
                  runtime_factory=None, fresh_runner=None):
         env = os.environ
-        self.model = model if model is not None else env.get("FASTRSI_MILES_MODEL")
-        self.data = data if data is not None else env.get("FASTRSI_MILES_DATA")
-        self.custom_rm_path = custom_rm_path if custom_rm_path is not None else env.get("FASTRSI_MILES_CUSTOM_RM_PATH")
-        self.slime_root = slime_root if slime_root is not None else env.get("FASTRSI_MILES_SLIME_ROOT")
-        self.megatron_root = megatron_root if megatron_root is not None else env.get("FASTRSI_MILES_MEGATRON_ROOT")
-        self.extra_py_path = extra_py_path if extra_py_path is not None else env.get("FASTRSI_MILES_EXTRA_PY_PATH")
-        self.ray_gpus = int(ray_gpus if ray_gpus is not None else env.get("FASTRSI_MILES_RAY_GPUS", "2"))
-        self.slime_args = _parse_extra_args(slime_args if slime_args is not None else env.get("FASTRSI_MILES_SLIME_ARGS"))
-        self.boot_timeout = float(boot_timeout if boot_timeout is not None else env.get("FASTRSI_MILES_BOOT_TIMEOUT", "420.0"))
+        self.model = model if model is not None else env.get("RSIBOX_MILES_MODEL")
+        self.data = data if data is not None else env.get("RSIBOX_MILES_DATA")
+        self.custom_rm_path = custom_rm_path if custom_rm_path is not None else env.get("RSIBOX_MILES_CUSTOM_RM_PATH")
+        self.slime_root = slime_root if slime_root is not None else env.get("RSIBOX_MILES_SLIME_ROOT")
+        self.megatron_root = megatron_root if megatron_root is not None else env.get("RSIBOX_MILES_MEGATRON_ROOT")
+        self.extra_py_path = extra_py_path if extra_py_path is not None else env.get("RSIBOX_MILES_EXTRA_PY_PATH")
+        self.ray_gpus = int(ray_gpus if ray_gpus is not None else env.get("RSIBOX_MILES_RAY_GPUS", "2"))
+        self.slime_args = _parse_extra_args(slime_args if slime_args is not None else env.get("RSIBOX_MILES_SLIME_ARGS"))
+        self.boot_timeout = float(boot_timeout if boot_timeout is not None else env.get("RSIBOX_MILES_BOOT_TIMEOUT", "420.0"))
         self._fresh_runner = fresh_runner
-        work_cfg = work if work is not None else env.get("FASTRSI_MILES_WORK")
+        work_cfg = work if work is not None else env.get("RSIBOX_MILES_WORK")
         if work_cfg:
             self.work_dir = os.path.abspath(work_cfg); os.makedirs(self.work_dir, exist_ok=True); self._owns_work = False
         else:
-            self.work_dir = tempfile.mkdtemp(prefix="fastrsi-miles-"); self._owns_work = True
+            self.work_dir = tempfile.mkdtemp(prefix="rsibox-miles-"); self._owns_work = True
         self.rollout_pt = os.path.join(self.work_dir, "rollout0.pt")
         self._cluster = {
             "ray": None, "rollout_manager": None, "actor_model": None,
             "trainers": {}, "trainer0": None, "rollout_data_0": None,
         }
-        eff_check = float(check_timeout if check_timeout is not None else env.get("FASTRSI_MILES_CHECK_TIMEOUT", "15.0"))
-        eff_rpc = float(rpc_timeout if rpc_timeout is not None else env.get("FASTRSI_MILES_RPC_TIMEOUT", "60.0"))
+        eff_check = float(check_timeout if check_timeout is not None else env.get("RSIBOX_MILES_CHECK_TIMEOUT", "15.0"))
+        eff_rpc = float(rpc_timeout if rpc_timeout is not None else env.get("RSIBOX_MILES_RPC_TIMEOUT", "60.0"))
         opts = {"runtime_factory": runtime_factory} if callable(runtime_factory) else {}
         try:
             super().__init__(receipts=receipts, mode=mode, rpc_timeout=eff_rpc, check_timeout=eff_check, **opts)
@@ -380,7 +380,7 @@ class MilesConformanceLab(MilesLab):
             if attr != "work" and (val := getattr(self, attr, None)) is not None:
                 env[key] = str(val)
         if self.slime_args:
-            env["FASTRSI_MILES_SLIME_ARGS"] = json.dumps(self.slime_args)
+            env["RSIBOX_MILES_SLIME_ARGS"] = json.dumps(self.slime_args)
         return env
 
     def _shutdown_cluster(self):
@@ -398,7 +398,7 @@ class MilesConformanceLab(MilesLab):
         if callable(launcher := self.options.get("runtime_factory")):
             return launcher()
         if not self.model or not self.data:
-            raise ValueError("FASTRSI_MILES_MODEL and FASTRSI_MILES_DATA are required (--model / --data)")
+            raise ValueError("RSIBOX_MILES_MODEL and RSIBOX_MILES_DATA are required (--model / --data)")
         ray, rm, am, trainers, rollout_ref, _ = _launch_slime_cluster(
             self.model, self.data, custom_rm_path=self.custom_rm_path, extra_args=self.slime_args,
             pythonpath=self._pythonpath(), num_gpus=self.ray_gpus, rollout_pt=self.rollout_pt, save_rollout=True,
@@ -482,7 +482,7 @@ class MilesConformanceLab(MilesLab):
             {m: src for m, src in self.live_text[i].items() if src != self.live_text[i - 1].get(m)}
             for i in range(1, len(self.live_text))
         ]
-        tmp = tempfile.mkdtemp(prefix="fastrsi-miles-fresh-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-miles-fresh-")
         overlay = os.path.join(tmp, "overlay")
         stopped = False
         try:
@@ -535,15 +535,15 @@ def _run_fresh_mode(out_json, *, rollout_pt=None, overlay_dir=None):
     """Subprocess entrypoint for `MilesConformanceLab.fresh_check`."""
     t0, env = time.perf_counter(), os.environ
     py = build_pythonpath(
-        slime_root=env.get("FASTRSI_MILES_SLIME_ROOT"), megatron_root=env.get("FASTRSI_MILES_MEGATRON_ROOT"),
-        extra_py_path=env.get("FASTRSI_MILES_EXTRA_PY_PATH"), overlay_dir=overlay_dir,
+        slime_root=env.get("RSIBOX_MILES_SLIME_ROOT"), megatron_root=env.get("RSIBOX_MILES_MEGATRON_ROOT"),
+        extra_py_path=env.get("RSIBOX_MILES_EXTRA_PY_PATH"), overlay_dir=overlay_dir,
     )
     ray, _, am, trainers, rollout_ref, t_ready = _launch_slime_cluster(
-        env["FASTRSI_MILES_MODEL"], env["FASTRSI_MILES_DATA"],
-        custom_rm_path=env.get("FASTRSI_MILES_CUSTOM_RM_PATH"),
-        extra_args=_parse_extra_args(env.get("FASTRSI_MILES_SLIME_ARGS")),
-        pythonpath=py, num_gpus=int(env.get("FASTRSI_MILES_RAY_GPUS", "2")),
-        rollout_pt=rollout_pt, prog="fastrsi-miles-fresh",
+        env["RSIBOX_MILES_MODEL"], env["RSIBOX_MILES_DATA"],
+        custom_rm_path=env.get("RSIBOX_MILES_CUSTOM_RM_PATH"),
+        extra_args=_parse_extra_args(env.get("RSIBOX_MILES_SLIME_ARGS")),
+        pythonpath=py, num_gpus=int(env.get("RSIBOX_MILES_RAY_GPUS", "2")),
+        rollout_pt=rollout_pt, prog="rsibox-miles-fresh",
     )
     try:
         ray.get(am.async_train(0, rollout_ref))

@@ -1,6 +1,6 @@
-"""Packaging tests for root `pyproject.toml` (`fastrsi-livelab`).
+"""Packaging tests for root `pyproject.toml` (`rsibox`).
 
-Verifies PEP 621 metadata, `fastrsi = "fastrsi.cli:main"` entry point,
+Verifies PEP 621 metadata, `rsibox = "rsibox.cli:main"` entry point,
 complete coverage of `core/livelab` runtime modules, exclusion of all
 `test_*.py` / `*_test.py` files and survey fixtures from built artifacts,
 and clean isolated execution of the unpacked wheel.
@@ -27,8 +27,8 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 LIVELAB_DIR = REPO_ROOT / "core" / "livelab"
 
 RUNTIME_ROOT_MODULES = ("forksafe", "livestream", "ray_participants")
-RUNTIME_ROOT_PACKAGES = ("conformance", "fastrsi", "kernel", "rsibox", "survey")
-EXPECTED_PACKAGES = ("conformance", "fastrsi", "kernel", "kernel.toy", "rsibox", "survey")
+RUNTIME_ROOT_PACKAGES = ("conformance", "rsibox", "kernel", "rsibox", "survey")
+EXPECTED_PACKAGES = ("conformance", "rsibox", "kernel", "kernel.toy", "rsibox", "survey")
 EXPECTED_TOP_LEVEL = sorted((*RUNTIME_ROOT_MODULES, *RUNTIME_ROOT_PACKAGES))
 
 _HAS_SETUPTOOLS = importlib.util.find_spec("setuptools") is not None
@@ -110,7 +110,7 @@ def _run_python(code: str, *, cwd: Path, env: dict[str, str] | None = None) -> s
 
 class PackagingMetadataTests(unittest.TestCase):
     def test_pyproject_metadata_and_cli_entry_point(self):
-        """Input: root `pyproject.toml`. Expected: valid PEP 621 metadata, zero deps, `fastrsi` CLI script."""
+        """Input: root `pyproject.toml`. Expected: valid PEP 621 metadata, zero deps, `rsibox` CLI script."""
         with PYPROJECT_PATH.open("rb") as fh:
             data = tomllib.load(fh)
 
@@ -119,7 +119,7 @@ class PackagingMetadataTests(unittest.TestCase):
         self.assertEqual(build_sys["build-backend"], "setuptools.build_meta")
 
         proj = data["project"]
-        self.assertEqual(proj["name"], "fastrsi-livelab")
+        self.assertEqual(proj["name"], "rsibox")
         self.assertEqual(proj["version"], "0.1.0")
         self.assertTrue(proj["description"])
         self.assertEqual(proj["readme"], "README.md")
@@ -128,9 +128,9 @@ class PackagingMetadataTests(unittest.TestCase):
         self.assertEqual(proj["dependencies"], [])
 
         scripts = proj["scripts"]
-        self.assertEqual(scripts, {"fastrsi": "fastrsi.cli:main", "rsibox": "rsibox.cli:main"})
+        self.assertEqual(scripts, {"rsibox": "rsibox.cli:main", "rsibox": "rsibox.cli:main"})
 
-        for cli_path in (LIVELAB_DIR / "fastrsi" / "cli.py", LIVELAB_DIR / "rsibox" / "cli.py"):
+        for cli_path in (LIVELAB_DIR / "rsibox" / "cli.py", LIVELAB_DIR / "rsibox" / "cli.py"):
             cli_ast = ast.parse(cli_path.read_text(encoding="utf-8"), filename=str(cli_path))
             top_defs = {node.name for node in cli_ast.body if isinstance(node, ast.FunctionDef)}
             self.assertIn("main", top_defs, cli_path)
@@ -244,7 +244,7 @@ class SetuptoolsBuildTests(unittest.TestCase):
             self.assertTrue(any(n.endswith("/LICENSE") for n in sdist_names))
 
     @unittest.skipUnless(_HAS_BDIST_WHEEL, "bdist_wheel is not available")
-    def test_wheel_and_editable_exclude_tests_and_run_fastrsi_cli(self):
+    def test_wheel_and_editable_exclude_tests_and_run_rsibox_cli(self):
         """Input: built wheel and editable wheel in temp dir. Expected: 0 tests, isolated CLI passes."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -281,16 +281,16 @@ class SetuptoolsBuildTests(unittest.TestCase):
                 )
                 wheel_py = {n for n in wheel_names if n.endswith(".py")}
                 self.assertEqual(wheel_py, expected_py)
-                top_level = zf.read("fastrsi_livelab-0.1.0.dist-info/top_level.txt").decode("utf-8").splitlines()
+                top_level = zf.read("rsibox_livelab-0.1.0.dist-info/top_level.txt").decode("utf-8").splitlines()
                 self.assertEqual(sorted(top_level), EXPECTED_TOP_LEVEL)
-                entry_points = zf.read("fastrsi_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
-                self.assertIn("fastrsi = fastrsi.cli:main", entry_points)
+                entry_points = zf.read("rsibox_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
+                self.assertIn("rsibox = rsibox.cli:main", entry_points)
                 self.assertIn("rsibox = rsibox.cli:main", entry_points)
                 # setuptools >= 77 (PEP 639) writes dist-info/licenses/LICENSE;
                 # setuptools 64..76 writes dist-info/LICENSE directly.
                 self.assertTrue(
-                    "fastrsi_livelab-0.1.0.dist-info/licenses/LICENSE" in wheel_names
-                    or "fastrsi_livelab-0.1.0.dist-info/LICENSE" in wheel_names,
+                    "rsibox_livelab-0.1.0.dist-info/licenses/LICENSE" in wheel_names
+                    or "rsibox_livelab-0.1.0.dist-info/LICENSE" in wheel_names,
                     f"LICENSE missing from wheel dist-info: {wheel_names}",
                 )
 
@@ -300,8 +300,8 @@ class SetuptoolsBuildTests(unittest.TestCase):
                 self.assertEqual(len(pth_names), 1)
                 pth_target = Path(zf.read(pth_names[0]).decode("utf-8").strip()).resolve()
                 self.assertEqual(pth_target, (proj / "core" / "livelab").resolve())
-                ep = zf.read("fastrsi_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
-                self.assertIn("fastrsi = fastrsi.cli:main", ep)
+                ep = zf.read("rsibox_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
+                self.assertIn("rsibox = rsibox.cli:main", ep)
                 self.assertIn("rsibox = rsibox.cli:main", ep)
 
             strict_dir = proj / "build"
@@ -330,15 +330,15 @@ class SetuptoolsBuildTests(unittest.TestCase):
             }
             import_check = (
                 "import pathlib, kernel, kernel.toy, conformance, survey, "
-                "fastrsi, rsibox, forksafe, livestream, ray_participants\n"
+                "rsibox, rsibox, forksafe, livestream, ray_participants\n"
                 f"site = pathlib.Path({str(site_dir)!r}).resolve()\n"
-                "for mod in (kernel, kernel.toy, conformance, survey, fastrsi, rsibox, forksafe, livestream, ray_participants):\n"
+                "for mod in (kernel, kernel.toy, conformance, survey, rsibox, rsibox, forksafe, livestream, ray_participants):\n"
                 "    assert pathlib.Path(mod.__file__).resolve().is_relative_to(site), mod.__file__\n"
             )
             _run_python(import_check, cwd=tmp_path, env=clean_env)
 
             doc_proc = subprocess.run(
-                [sys.executable, "-m", "fastrsi", "doctor", "--repo-root", str(REPO_ROOT), "--json"],
+                [sys.executable, "-m", "rsibox", "doctor", "--repo-root", str(REPO_ROOT), "--json"],
                 cwd=str(tmp_path),
                 env=clean_env,
                 capture_output=True,
@@ -351,7 +351,7 @@ class SetuptoolsBuildTests(unittest.TestCase):
             self.assertEqual(Path(doc["livelab_root"]).resolve(), site_dir.resolve())
 
             conf_proc = subprocess.run(
-                [sys.executable, "-m", "fastrsi", "conformance", "toy", "--only", "c0_repeatable,c2_visible"],
+                [sys.executable, "-m", "rsibox", "conformance", "toy", "--only", "c0_repeatable,c2_visible"],
                 cwd=str(tmp_path),
                 env=clean_env,
                 capture_output=True,

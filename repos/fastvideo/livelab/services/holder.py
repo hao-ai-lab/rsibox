@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 
-from fastrsi import harness, ipc
+from rsibox import harness, ipc
 
 DEFAULT_COMPONENTS = ("transformer", "text_encoder", "vae", "audio_vae")
 STAMP_PREFIXES = ("fastvideo.models.loader", "fastvideo.layers.quantization")
@@ -347,7 +347,7 @@ def serve(sock_path, ready_path=None):
                         conn.close()
                         break
                     th = threading.Thread(target=serve_conn, args=(conn,), daemon=True,
-                                          name="fastrsi-holder-conn")
+                                          name="rsibox-holder-conn")
                     with threads_lock:
                         active_threads.add(th)
                     th.start()
@@ -440,7 +440,7 @@ def start(sock_path, ctx=None):
     ready = sock_path + ".ready"
     if os.path.exists(ready):
         os.unlink(ready)
-    p = ctx.Process(target=serve, args=(sock_path, ready), daemon=True, name="fastrsi-holder")
+    p = ctx.Process(target=serve, args=(sock_path, ready), daemon=True, name="rsibox-holder")
     p.start()
     t0 = time.time()
     while not os.path.exists(ready):
@@ -455,7 +455,7 @@ def install_loader_hook(sock_path, components=DEFAULT_COMPONENTS, report=None):
     """In a worker, before it loads: `PipelineComponentLoader.load_module` asks the holder for
     each component in `components` and loads from disk (then deposits) when refused."""
     from fastvideo.models.loader import component_loader as CL
-    env = os.environ.get("FASTRSI_HOLDER_COMPONENTS")
+    env = os.environ.get("RSIBOX_HOLDER_COMPONENTS")
     components = tuple(c for c in env.split(",") if c) if env else tuple(components)
     orig = CL.PipelineComponentLoader.__dict__["load_module"]
     orig = orig.__func__ if isinstance(orig, staticmethod) else orig
@@ -500,4 +500,4 @@ def install_loader_hook(sock_path, components=DEFAULT_COMPONENTS, report=None):
 
 
 def _log(ev):
-    print(f"[fastrsi-holder] pid {os.getpid()} {json.dumps(ev, default=str)[:1500]}", file=sys.stderr, flush=True)
+    print(f"[rsibox-holder] pid {os.getpid()} {json.dumps(ev, default=str)[:1500]}", file=sys.stderr, flush=True)

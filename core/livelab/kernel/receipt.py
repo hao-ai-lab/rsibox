@@ -31,7 +31,7 @@ import json
 import os
 import time
 
-SCHEMA = "fastrsi-receipt/proposed-v1"
+SCHEMA = "rsibox-receipt/proposed-v1"
 FIELDS = {
     "txn": ("schema", "kind", "id", "interface_version", "engine", "base_hash", "patch_hash",
             "plan", "actual_recipes", "participants", "commit_hashes", "findings", "decisions",

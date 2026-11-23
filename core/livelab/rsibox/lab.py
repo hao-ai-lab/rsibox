@@ -387,7 +387,7 @@ class BaseLab:
             except BaseException as exc:
                 box["error"] = exc
 
-        thread = threading.Thread(target=runner, daemon=True, name=f"fastrsi-{self.name}-check")
+        thread = threading.Thread(target=runner, daemon=True, name=f"rsibox-{self.name}-check")
         thread.start()
         thread.join(self.check_timeout)
         if thread.is_alive():

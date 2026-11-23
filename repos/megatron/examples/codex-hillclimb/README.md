@@ -37,7 +37,7 @@ Start a deterministic eager bf16 job with fp32 main gradients, TE linear layers 
 `--no-gradient-accumulation-fusion`. Once the lab is at base, run:
 
 ```sh
-python repos/megatron/examples/codex-hillclimb/te_wgrad.py --sock "$FASTRSI_SOCK"
+python repos/megatron/examples/codex-hillclimb/te_wgrad.py --sock "$RSIBOX_SOCK"
 ```
 
 The script installs the flag and a backward witness on each target weight. Each witness counts

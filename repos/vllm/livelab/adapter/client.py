@@ -10,12 +10,12 @@ import os
 import sys
 
 if not __package__:
-    _livelab = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+    _livelab = os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
     if _livelab not in sys.path:
         sys.path.insert(0, _livelab)
 
-from fastrsi import ipc  # noqa: E402
+from rsibox import ipc  # noqa: E402
 
 
 def send(root, cmd, timeout=300.0):

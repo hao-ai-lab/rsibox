@@ -6,7 +6,7 @@ at their step boundary (`crash`, `hang_s`) and RPC entry (`lost`).
 """
 import os
 
-from fastrsi import harness
+from rsibox import harness
 
 STATE = {}
 

@@ -8,7 +8,7 @@ key, as 3.5 does), compiled kernels in `device_caches` keyed by argument types (
 text), a disk cache keyed by `cache_key`, `pre_run_hooks` run on every launch, callees inlined
 at compile, and `Autotuner.cache`. "Compiling" builds a Python function from `_src`, so what
 a launch runs is what the text said at compile time. The real-Triton case at the end runs only
-when `FASTRSI_TEST_GPU=1` is set with triton and a GPU.
+when `RSIBOX_TEST_GPU=1` is set with triton and a GPU.
 
 Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
 """
@@ -91,7 +91,7 @@ class JITFunction:
 
     def _build(self):
         """What the device runs: a function made from _src now, callees inlined."""
-        assert "__fastrsi_hit__" not in self._src, "the witness call reached the kernel text"
+        assert "__rsibox_hit__" not in self._src, "the witness call reached the kernel text"
         me, inl = self, {}
 
         class Inline(ast.NodeTransformer):
@@ -497,7 +497,7 @@ class JitRebuildTest(unittest.TestCase):
 
 
 def _gpu():
-    if os.environ.get("FASTRSI_TEST_GPU") != "1":
+    if os.environ.get("RSIBOX_TEST_GPU") != "1":
         return False
     if importlib.util.find_spec("triton") is None or importlib.util.find_spec("torch") is None:
         return False
@@ -523,7 +523,7 @@ def launch(x):
 '''
 
 
-@unittest.skipUnless(_gpu(), "set FASTRSI_TEST_GPU=1 with triton and a GPU")
+@unittest.skipUnless(_gpu(), "set RSIBOX_TEST_GPU=1 with triton and a GPU")
 class RealTritonTest(unittest.TestCase):
 
     def test_real_kernel_edit_and_undo(self):

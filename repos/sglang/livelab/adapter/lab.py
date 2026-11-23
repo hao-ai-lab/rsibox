@@ -1,10 +1,10 @@
-"""SglangLab: live-lab verbs over `fastrsi.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
+"""SglangLab: live-lab verbs over `rsibox.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
 import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
-from fastrsi import ipc
-from fastrsi.lab import BaseLab, RecaptureCoordinator
+from rsibox import ipc
+from rsibox.lab import BaseLab, RecaptureCoordinator
 from kernel import coordinator as C, findings as F, locate as L
 
 EAGER_LAYERS = (".srt.layers.sampler", ".srt.layers.logits_processor")
@@ -222,7 +222,7 @@ class SglangLab(ConformanceHarness, BaseLab):
             errors[rank] = exc
     def at_gap(self, fn, timeout=None):
         wait_s, gap_id, io_ref = (timeout if timeout is not None else self.rpc_timeout), f"gap-{next(_counters)}", importlib.import_module(self.io_module)
-        req, chan = io_ref.RpcReqInput(method="fastrsi_gap", parameters={"gap_id": gap_id}), self.engine.send_to_rpc
+        req, chan = io_ref.RpcReqInput(method="rsibox_gap", parameters={"gap_id": gap_id}), self.engine.send_to_rpc
         (io_ref.sock_send if hasattr(io_ref, "sock_send") else lambda ch, r: (ch.send_pyobj if hasattr(ch, "send_pyobj") else ch.send)(r))(chan, req)
         parked, errors = self._fanout("park", gap_id, timeout=wait_s)
         if errors or not all(r.get("ok") for r in parked.values()):

@@ -12,13 +12,13 @@ import time
 from typing import Callable
 
 try:
-    from fastrsi import hooks, ipc
+    from rsibox import hooks, ipc
 except ImportError:
     _HERE = os.path.dirname(os.path.abspath(__file__))
     if _HERE not in sys.path:
         sys.path.insert(0, _HERE)
     import corelab  # noqa: F401,E402
-    from fastrsi import hooks, ipc  # noqa: E402
+    from rsibox import hooks, ipc  # noqa: E402
 
 TARGET_MODULE = "vllm.v1.engine.core"
 _PLUGINS: dict[str, "CorePlugin"] = {}
@@ -91,7 +91,7 @@ class _ChannelMux:
         for name, root, handler, poll_s in specs:
             abs_root = os.path.abspath(root)
             if abs_root in seen:
-                print(f"FASTRSI_CORE_HOOK: refusing duplicate control dir {abs_root!r} for "
+                print(f"RSIBOX_CORE_HOOK: refusing duplicate control dir {abs_root!r} for "
                       f"{name!r} (already owned by {seen[abs_root]!r})", file=sys.stderr, flush=True)
                 continue
             seen[abs_root] = name
@@ -126,7 +126,7 @@ class _ChannelMux:
     def start(self):
         if self._channels and self._thread is None:
             self._thread = threading.Thread(
-                target=self._run, daemon=True, name="fastrsi-vllm-core-ctl"
+                target=self._run, daemon=True, name="rsibox-vllm-core-ctl"
             )
             self._thread.start()
         return self._thread
@@ -153,7 +153,7 @@ def register(plugin: CorePlugin) -> None:
     _PLUGINS[plugin.name] = plugin
     mod = sys.modules.get(TARGET_MODULE)
     proc_cls = getattr(mod, "EngineCoreProc", None) if mod is not None else None
-    if proc_cls is not None and getattr(proc_cls, "_fastrsi_core_hook", False):
+    if proc_cls is not None and getattr(proc_cls, "_rsibox_core_hook", False):
         if plugin.on_patch is not None:
             plugin.on_patch(proc_cls)
 
@@ -161,7 +161,7 @@ def register(plugin: CorePlugin) -> None:
 def _patch_core(mod) -> None:
     """Idempotently wrap `EngineCoreProc` once across all registered plugins."""
     P = mod.EngineCoreProc
-    if getattr(P, "_fastrsi_core_hook", False):
+    if getattr(P, "_rsibox_core_hook", False):
         _notify_patch(P)
         return
     orig_handle, orig_step, orig_loop = (
@@ -207,7 +207,7 @@ def _patch_core(mod) -> None:
             if channel is not None:
                 specs.append((plugin.name, *channel))
         mux = _ChannelMux(specs)
-        self._fastrsi_channel_mux = mux
+        self._rsibox_channel_mux = mux
         mux.start()
         try:
             return orig_loop(self)
@@ -217,7 +217,7 @@ def _patch_core(mod) -> None:
     P._handle_client_request = _handle_client_request
     P._process_engine_step = _process_engine_step
     P.run_busy_loop = run_busy_loop
-    P._fastrsi_core_hook = True
+    P._rsibox_core_hook = True
     _notify_patch(P)
 
 

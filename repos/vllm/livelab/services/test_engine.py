@@ -588,7 +588,7 @@ def test_fork_check_reads_vllms_spawn_fallback():
     """Input: a server log where vLLM fell back to spawn, and one where it did not. Expect:
     spawn_forced and a fork finding for the first; none for the second, and fork_check reports
     only that signal (before: it also reported a count of a "spawned interpreter" line and a
-    FASTRSI_FORKSAFE "probe" that nothing on main prints or sets, so the count was always 0)."""
+    RSIBOX_FORKSAFE "probe" that nothing on main prints or sets, so the count was always 0)."""
     with tempfile.TemporaryDirectory() as d:
         bad, good = os.path.join(d, "bad.log"), os.path.join(d, "good.log")
         Path(bad).write_text("WARNING We must use the `spawn` multiprocessing start method. "
@@ -1307,7 +1307,7 @@ def test_kvplan_report_closes_log_file_without_resource_warning(tmp_path):
     followed by `gc.collect()`. Expect: parses the reuse count and emits zero ResourceWarnings."""
     import gc, warnings
     log = tmp_path / "serve.log"
-    log.write_text('INFO fastrsi kvplan: {"event": "reused", "seconds": 0.12}\n')
+    log.write_text('INFO rsibox kvplan: {"event": "reused", "seconds": 0.12}\n')
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ResourceWarning)
         rep = engine.kvplan_report(str(log))

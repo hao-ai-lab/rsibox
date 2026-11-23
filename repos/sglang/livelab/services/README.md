@@ -21,7 +21,7 @@ Every guard in `zygote.py` corresponds to a failure mode observed in sibling eng
   import time to detect the target architecture when `CUTE_DSL_ARCH` is unset. Any process
   that runs `cuInit` poisons `fork` for CUDA in all children. Before importing the preload
   list, `install_guards` resolves the GPU compute capability via `forksafe.triton_capability()`
-  (`FASTRSI_ZYGOTE_CC` or NVML, never the CUDA runtime/driver), sets `CUTE_DSL_ARCH` (for
+  (`RSIBOX_ZYGOTE_CC` or NVML, never the CUDA runtime/driver), sets `CUTE_DSL_ARCH` (for
   example `sm_100a`), and stubs `cuda.bindings.driver.cuInit` to return
   `CUDA_ERROR_NOT_INITIALIZED` until `child_main` restores it after `os.fork()`.
 - **(b) `forksafe` pre-import guards, child `unpatch`, and `CUDA_VISIBLE_DEVICES`

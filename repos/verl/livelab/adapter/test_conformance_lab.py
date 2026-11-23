@@ -86,7 +86,7 @@ class ConformanceHarnessTest(unittest.TestCase):
         """Input: two rollout dumps with the same (prompt, response, score, gt) rows in different
         order and different random uids. Expected: identical digests, and a changed score changes
         the digest; the step output carries the four metrics by their short names."""
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-rollouts-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-rollouts-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         rows = [{"input": "q1", "output": "#### 4", "score": 1.0, "gts": "4", "uid": "a1"}, {"input": "q2", "output": "no", "score": 0.0, "gts": "7", "uid": "b2"}]
         (tmp / "1.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
@@ -103,7 +103,7 @@ class ConformanceHarnessTest(unittest.TestCase):
         self.assertEqual(live, out)
 
     def test_launch_environment_maps_all_flags_and_strips_leading_separator(self):
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-cli-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-verl-cli-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         gate_dir = tmp / "gate"
         reward_py = tmp / "reward.py"
@@ -118,14 +118,14 @@ class ConformanceHarnessTest(unittest.TestCase):
             "--check-timeout", "420",
             "--boot-timeout", "2400",
         ])
-        self.assertEqual(env["FASTRSI_VERL_GATE"], str(gate_dir.resolve()))
-        self.assertEqual(env["FASTRSI_VERL_REWARD"], os.path.realpath(str(reward_py)))
-        self.assertEqual(env["FASTRSI_VERL_LAUNCH"], launch_cmd)
-        self.assertEqual(env["FASTRSI_VERL_CHECK_TIMEOUT"], "420.0")
-        self.assertEqual(env["FASTRSI_VERL_BOOT_TIMEOUT"], "2400.0")
+        self.assertEqual(env["RSIBOX_VERL_GATE"], str(gate_dir.resolve()))
+        self.assertEqual(env["RSIBOX_VERL_REWARD"], os.path.realpath(str(reward_py)))
+        self.assertEqual(env["RSIBOX_VERL_LAUNCH"], launch_cmd)
+        self.assertEqual(env["RSIBOX_VERL_CHECK_TIMEOUT"], "420.0")
+        self.assertEqual(env["RSIBOX_VERL_BOOT_TIMEOUT"], "2400.0")
 
         minimal = CL.VerlConformanceLab.launch_environment(["--gate", str(gate_dir), "--reward", str(reward_py)])
-        self.assertEqual(set(minimal), {"FASTRSI_VERL_GATE", "FASTRSI_VERL_REWARD"})
+        self.assertEqual(set(minimal), {"RSIBOX_VERL_GATE", "RSIBOX_VERL_REWARD"})
 
     def test_gpus_busy_scopes_nvidia_smi_to_cuda_visible_devices(self):
         lab = CL.VerlConformanceLab.__new__(CL.VerlConformanceLab)
@@ -157,7 +157,7 @@ class ConformanceHarnessTest(unittest.TestCase):
             )
 
     def test_overlay_handles_package_init_and_reward_and_reap_clears_jobs(self):
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-ov-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-verl-ov-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         pkg_root = tmp / "site"
         pkg = pkg_root / "verlovpkg"
@@ -210,13 +210,13 @@ class ConformanceHarnessTest(unittest.TestCase):
         fake_diffs = types.SimpleNamespace(
             apply=lambda d, cur: {"pkg.m": cur("pkg.m") + "# " + d}
         )
-        import fastrsi
-        with mock.patch.dict(sys.modules, {"fastrsi.diffs": fake_diffs}), \
-             mock.patch.object(fastrsi, "diffs", fake_diffs, create=True):
+        import rsibox
+        with mock.patch.dict(sys.modules, {"rsibox.diffs": fake_diffs}), \
+             mock.patch.object(rsibox, "diffs", fake_diffs, create=True):
             self.assertEqual(lab.files({"diff": "live"}, against="live"), {"pkg.m": "X = 1\n# live"})
             self.assertEqual(lab.files({"diff": "disk"}, against="disk"), {"pkg.m": "X = 0\n# disk"})
 
-        # End-to-end with real core/livelab/fastrsi/diffs.py (unmocked).
+        # End-to-end with real core/livelab/rsibox/diffs.py (unmocked).
         unified = (
             "--- a/pkg/m.py\n"
             "+++ b/pkg/m.py\n"
@@ -235,7 +235,7 @@ class ConformanceHarnessTest(unittest.TestCase):
         `_stop_job()` terminates and reaps the launcher cleanly."""
         import gc
 
-        tmp = Path(tempfile.mkdtemp(prefix="fastrsi-verl-cleanup-"))
+        tmp = Path(tempfile.mkdtemp(prefix="rsibox-verl-cleanup-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         self.addCleanup(CL._JOBS.clear)
 

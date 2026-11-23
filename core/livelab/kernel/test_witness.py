@@ -7,7 +7,7 @@ Run from the repo root:  python3 -m unittest discover -s core/livelab/kernel -t 
 These tests use the witness without the swap, so `install` below does by hand what the swap
 does for a witness: add the counter call to the new body (`witness.inject`),
 compile the module text (`inject` leaves the
-new name's location to `ast.fix_missing_locations`, as the swap's compile does), put the code on every live holder and bind `__fastrsi_hit__` to the
+new name's location to `ast.fix_missing_locations`, as the swap's compile does), put the code on every live holder and bind `__rsibox_hit__` to the
 participant's hook, each through the journal. Toy arithmetic: see test_locate.py.
 """
 import ast
@@ -94,7 +94,7 @@ class WitnessCountTest(unittest.TestCase):
         self.assertEqual(F.decide(r1["findings"])["proceed"], False)   # blocks until accepted
 
         self.assertTrue(j0.undo_to(mark0)["ok"])
-        self.assertIs(eng0.__fastrsi_hit__, W.stub)
+        self.assertIs(eng0.__rsibox_hit__, W.stub)
         self.assertEqual(w0.counts, {})
         e0.step(3)
         self.assertEqual(w0.counts, {})                   # the base code has no counter
@@ -371,7 +371,7 @@ class CodeRestartWitnessTest(unittest.TestCase):
         @property, and nested class method instrumented (and re-instrumented). Expected:
         partial uninstrument removes only named targets while keeping remaining hooks live; full
         uninstrument restores exact original callables/descriptors, rebinds cross-module aliases,
-        removes `__fastrsi_hit__` / `__fastrsi_restart_counts__`, and cleans global restart
+        removes `__rsibox_hit__` / `__rsibox_restart_counts__`, and cleans global restart
         registries."""
         mod = types.ModuleType("kt_uninst_mod")
         importer = types.ModuleType("kt_uninst_importer")
@@ -425,15 +425,15 @@ class CodeRestartWitnessTest(unittest.TestCase):
         self.assertIs(inspect.getattr_static(mod.Outer, "prop"), orig_prop)
         self.assertIs(mod.Outer.Inner.step, orig_inner_step)
         self.assertFalse(hasattr(mod, W.HIT))
-        self.assertFalse(hasattr(mod, "__fastrsi_restart_counts__"))
+        self.assertFalse(hasattr(mod, "__rsibox_restart_counts__"))
         self.assertNotIn(f"{mod.__name__}:scale", W._RESTART_INSTRUMENTED_TARGETS)
         self.assertNotIn(f"{mod.__name__}:Outer.Inner.step", W._RESTART_INSTRUMENTED_TARGETS)
         # Idempotent second call is a clean no-op
         self.assertEqual(W.uninstrument_module_functions(mod), {})
 
     def test_uninstrument_preserves_preexisting_hit_and_sibling_module_registry(self):
-        """Input: two modules both instrument `dup`, and module A had a prior `__fastrsi_hit__`.
-        Expected: uninstrumenting A restores A's prior `__fastrsi_hit__` and keeps B's wrapper
+        """Input: two modules both instrument `dup`, and module A had a prior `__rsibox_hit__`.
+        Expected: uninstrumenting A restores A's prior `__rsibox_hit__` and keeps B's wrapper
         registered under `dup`."""
         mod_a = types.ModuleType("kt_uninst_a")
         mod_b = types.ModuleType("kt_uninst_b")

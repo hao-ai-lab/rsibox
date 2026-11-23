@@ -56,18 +56,18 @@ class LocalLauncher(unittest.TestCase):
 
 
 class Plans(unittest.TestCase):
-    SPEC = {"lab": "vllm", "real": True, "state": "/shared/box1", "repo": "/src/fastrsi",
-            "env": {"FASTRSI_VLLM_MODEL": "/models/m"}}
+    SPEC = {"lab": "vllm", "real": True, "state": "/shared/box1", "repo": "/src/rsibox",
+            "env": {"RSIBOX_VLLM_MODEL": "/models/m"}}
 
     def test_docker_overrides_the_image_entrypoint_and_mounts_repo_and_state(self):
         """Found on a real engine: serving images set their own entrypoint, which swallowed ours."""
         argv = L.plan({**self.SPEC, "launcher": "docker", "image": "img", "gpus": "device=0",
                        "runtime": "runsc"})["argv"]
         self.assertEqual(argv[argv.index("--entrypoint") + 1:][:5], ["python3", "img", "-u", "-m", "rsibox"])
-        self.assertIn("/src/fastrsi:/fastrsi:ro", argv)
+        self.assertIn("/src/rsibox:/rsibox:ro", argv)
         self.assertIn("/shared/box1:/rsibox-state", argv)
         self.assertEqual(argv[argv.index("--runtime") + 1], "runsc")
-        self.assertIn("PYTHONPATH=/fastrsi/core/livelab", argv)
+        self.assertIn("PYTHONPATH=/rsibox/core/livelab", argv)
         self.assertNotIn("--privileged", argv)
 
     def test_nested_gvisor_wraps_the_daemon_and_binds_the_state_folder(self):
@@ -85,7 +85,7 @@ class Plans(unittest.TestCase):
         self.assertEqual(lines[0], "#!/bin/bash")
         self.assertIn("#SBATCH --gres=gpu:1", lines)
         self.assertIn("#SBATCH --output=/shared/box1/slurm-%j.log", lines)
-        self.assertLess(lines.index("source env.sh"), lines.index("export FASTRSI_VLLM_MODEL=/models/m"))
+        self.assertLess(lines.index("source env.sh"), lines.index("export RSIBOX_VLLM_MODEL=/models/m"))
         self.assertTrue(lines[-1].startswith("exec python3 -u -m rsibox serve --lab vllm --state /shared/box1 "
                                              "--bind 0.0.0.0"), lines[-1])
         self.assertEqual(what["argv"], ["sbatch", "--parsable", "/shared/box1/rsibox.sbatch"])

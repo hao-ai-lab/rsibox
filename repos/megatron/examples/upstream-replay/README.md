@@ -23,7 +23,7 @@ lab runs (`megatron-core` 0.20 dev, upstream commit ae76c60e6). Source: our 2026
 4. If committed, run one 4-step check from the start state. Compare loss with the base, and read the
    per-function witness: did each changed function run?
 5. If refused, do a **code restart**: start a fresh candidate job with the changed modules as an import overlay
-   (`FASTRSI_OVERLAY`), run one 8-step check from the same seed and start state, and compare loss with
+   (`RSIBOX_OVERLAY`), run one 8-step check from the same seed and start state, and compare loss with
    the base. A fresh process has no swap to witness, so a code restart shows "no regression", not "proven".
 
 ## Records

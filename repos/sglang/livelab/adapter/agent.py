@@ -1,8 +1,8 @@
-"""Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `fastrsi_gap`."""
+"""Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `rsibox_gap`."""
 import linecache, os, queue, random, sys, threading
 from multiprocessing.connection import Client
 from adapter import recapture as R1
-from fastrsi import harness
+from rsibox import harness
 from kernel import coordinator as C, findings as F
 
 GAP_METHODS = frozenset({"park", "validate", "commit", "undo", "recapture",
@@ -119,7 +119,7 @@ def rpc(scheduler, method, payload=None):
         _sync_lines(local_p, {m for names in _STATE["plans"].values() for m in names})
     return reply
 
-def fastrsi_gap(scheduler, gap_id=""):
+def rsibox_gap(scheduler, gap_id=""):
     _drain_overlap(scheduler)
     while True:
         method, payload, box, done = _STATE["gap_queue"].get()
@@ -155,7 +155,7 @@ def _control_loop(scheduler, conn):
 
 def run_scheduler_entry(sock_path, scheduler_module_name, real_entry, *args, **kwargs):
     scheduler_cls = __import__(scheduler_module_name, fromlist=["Scheduler"]).Scheduler
-    if not getattr(scheduler_cls, "_fastrsi_hooked", False):
+    if not getattr(scheduler_cls, "_rsibox_hooked", False):
         orig_init = scheduler_cls.__init__
         def hooked_init(self, *a, **k):
             orig_init(self, *a, **k)
@@ -164,11 +164,11 @@ def run_scheduler_entry(sock_path, scheduler_module_name, real_entry, *args, **k
             conn.send({"rank": int(_rank(self)), "pid": os.getpid()})
             threading.Thread(target=_control_loop, args=(self, conn), daemon=True).start()
 
-        scheduler_cls.__init__, scheduler_cls.fastrsi_gap, scheduler_cls._fastrsi_hooked = hooked_init, fastrsi_gap, True
+        scheduler_cls.__init__, scheduler_cls.rsibox_gap, scheduler_cls._rsibox_hooked = hooked_init, rsibox_gap, True
     try:
         return real_entry(*args, **kwargs)
     except SystemExit:
         raise
     except BaseException as exc:
-        print(f"fastrsi scheduler exited on {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        print(f"rsibox scheduler exited on {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         os._exit(1)

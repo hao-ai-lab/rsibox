@@ -943,7 +943,7 @@ def _fanout(participants, fn):
     sync_idx = [i for i in range(len(items)) if not _can_fanout(items[i])]
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(_FANOUT_WORKERS, len(async_idx)),
-        thread_name_prefix="fastrsi-fanout",
+        thread_name_prefix="rsibox-fanout",
     ) as pool:
         futures = [(i, pool.submit(fn, items[i])) for i in async_idx]
         for i in sync_idx:
@@ -1124,7 +1124,7 @@ class Lane:
         self._q = queue.SimpleQueue()
         self._lock = threading.Lock()
         self.pending, self.late = 0, False
-        threading.Thread(target=self._run, daemon=True, name=f"fastrsi-lane-{name}").start()
+        threading.Thread(target=self._run, daemon=True, name=f"rsibox-lane-{name}").start()
 
     def _run(self):
         while True:

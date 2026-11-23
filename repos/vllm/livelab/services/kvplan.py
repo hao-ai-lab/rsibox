@@ -8,14 +8,14 @@ which later steps read) in a plan file after a measured start. The next start wi
 ident returns it without profiling; the KV cache then has exactly the same size.
 
 How it is installed: engine.py passes `--worker-cls kvplan.KVPlanWorker` (vLLM's own hook for a
-custom worker class) with this folder on PYTHONPATH and FASTRSI_KVPLAN_DIR set. KVPlanWorker is
+custom worker class) with this folder on PYTHONPATH and RSIBOX_KVPLAN_DIR set. KVPlanWorker is
 vLLM's GPU Worker with determine_available_memory wrapped; importing this module does not import
 vLLM or torch until KVPlanWorker is asked for.
 
 Contract:
-- Plan file: <FASTRSI_KVPLAN_DIR>/<key>.json, key = hash of ident(): vLLM version, config hash,
+- Plan file: <RSIBOX_KVPLAN_DIR>/<key>.json, key = hash of ident(): vLLM version, config hash,
   load format (the config hash leaves it out, but resident weights change what is free), rank,
-  world size, GPU name and total memory, requested memory, FASTRSI_KVPLAN_SALT.
+  world size, GPU name and total memory, requested memory, RSIBOX_KVPLAN_SALT.
 - Reuse needs the same key and free GPU memory at start that holds this engine's budget:
   at least as much as when measured, or at least `requested_memory` (vLLM's budget for the
   engine's own allocations: gpu_memory_utilization x total, minus weights a holder process
@@ -23,7 +23,7 @@ Contract:
   matters with resident weights: a holder group of another parallel config (the way back of a
   TP <-> EP reshard) takes memory outside the budget, and the engine fits all the same.
   Otherwise the worker logs a finding and profiles as usual. A miss next to plans of other
-  configs names the fields that differ (finding "kvplan_mismatch"). FASTRSI_KVPLAN_FORCE=1
+  configs names the fields that differ (finding "kvplan_mismatch"). RSIBOX_KVPLAN_FORCE=1
   reuses despite less free memory.
 - A plan holds a positive KV size only. A measurement of zero or less (vLLM then fails this
   start with "No available memory for the cache blocks") is not recorded, and a plan file that
@@ -33,13 +33,13 @@ Contract:
   has collectives, and one rank skipping it would hang the others. When torch.distributed is
   initialized but the ranks cannot agree (no vLLM world group), every rank profiles (finding
   "kvplan_no_agreement"): no rank decides alone.
-- Every outcome is one log line, `fastrsi kvplan: {json}` (with the seconds the step took) or
-  `fastrsi kvplan finding: {json}`. engine.py counts them (kvplan_report).
+- Every outcome is one log line, `rsibox kvplan: {json}` (with the seconds the step took) or
+  `rsibox kvplan finding: {json}`. engine.py counts them (kvplan_report).
 
 What moves: kernels the profile run would JIT-compile are compiled at their first use instead
 (warmup, or the first request in eager mode).
 Risk: an edit that changes activation memory but not the config reuses a stale size. Set
-FASTRSI_KVPLAN_SALT (for example to the patch hash) when an edit touches the forward pass.
+RSIBOX_KVPLAN_SALT (for example to the patch hash) when an edit touches the forward pass.
 """
 import functools, hashlib, json, logging, os, sys, time
 from pathlib import Path
@@ -48,12 +48,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import corelab  # noqa: F401,E402
-from fastrsi import ipc  # noqa: E402
+from rsibox import ipc  # noqa: E402
 
 ATTRS = ("available_kv_cache_memory_bytes", "total_consumed", "peak_activation_memory",
          "cudagraph_memory_estimate")
-TAG = "fastrsi kvplan"
-log = logging.getLogger("vllm.fastrsi.kvplan")   # under vllm.*: vLLM's handler prints INFO
+TAG = "rsibox kvplan"
+log = logging.getLogger("vllm.rsibox.kvplan")   # under vllm.*: vLLM's handler prints INFO
 
 
 def _say(event, finding=False, **kw):
@@ -76,7 +76,7 @@ def ident(worker):
             "load_format": str(cfg.load_config.load_format),
             "rank": worker.rank, "world_size": worker.parallel_config.world_size,
             "gpu": name, "gpu_total": total, "requested": int(worker.requested_memory),
-            "salt": os.environ.get("FASTRSI_KVPLAN_SALT", "")}
+            "salt": os.environ.get("RSIBOX_KVPLAN_SALT", "")}
 
 
 def key(idn):
@@ -174,7 +174,7 @@ def fits(free, rec, requested):
     engine's budget `requested` (part of the key), so free memory that holds the budget is
     enough, even when it is less than at the measurement (another holder group resident)."""
     return (free >= rec["init_free"] or free >= requested
-            or os.environ.get("FASTRSI_KVPLAN_FORCE") == "1")
+            or os.environ.get("RSIBOX_KVPLAN_FORCE") == "1")
 
 
 def wrap(orig):
@@ -182,9 +182,9 @@ def wrap(orig):
     @functools.wraps(orig)
     def determine_available_memory(self, *a, **k):
         t0 = time.perf_counter()
-        plan_dir = os.environ.get("FASTRSI_KVPLAN_DIR")
+        plan_dir = os.environ.get("RSIBOX_KVPLAN_DIR")
         if self.cache_config.kv_cache_memory_bytes or not plan_dir:
-            why = "kv_cache_memory_bytes given" if plan_dir else "FASTRSI_KVPLAN_DIR unset"
+            why = "kv_cache_memory_bytes given" if plan_dir else "RSIBOX_KVPLAN_DIR unset"
             r = orig(self, *a, **k)
             _say("profiled", finding=not plan_dir, why=why,
                  seconds=round(time.perf_counter() - t0, 3))
@@ -227,7 +227,7 @@ def wrap(orig):
                  requested=int(self.requested_memory),
                  why="less free GPU memory than when the plan was measured, and less than "
                      "the engine's budget (requested_memory); profiling",
-                 actions=["FASTRSI_KVPLAN_FORCE=1 reuses it (risk: OOM at the first large "
+                 actions=["RSIBOX_KVPLAN_FORCE=1 reuses it (risk: OOM at the first large "
                           "batch)", "free the GPU memory held by other processes"])
         elif rec is not None:
             _say("kvplan_rank_disagrees", finding=True, key=key(idn), rank=idn["rank"],

@@ -16,7 +16,7 @@ The engine on PYTHONPATH must be the base FastVideo (no patch applied). Steps, o
    hit `CompilationError ... StopIteration` on lazily-built Triton kernels when later swaps
    shifted lines above an earlier builder, and undoing a cached Triton 3.5+ builder hit
    `closure_not_restored` (`undo_incomplete`). Both are now fixed in `core/livelab/kernel/`:
-   `swap.py` pins per-version `<fastrsi-live:...>` `linecache` keys on nested code objects, and
+   `swap.py` pins per-version `<rsibox-live:...>` `linecache` keys on nested code objects, and
    `journal.py` evicts/restores `triton.runtime.jit._triton_jit_function_registry` entries and
    clears `defaultdict.default_factory = None` cycles on undo (verified on 1x GB200: 02-08
    stacked with no intermediate video ran bit-exact in 4.14 s vs 6.01 s base and undid 7/7 in

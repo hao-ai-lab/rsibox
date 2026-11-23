@@ -33,7 +33,7 @@ A Qwen3-32B-architecture run (64 layers, FFN 25600, 64 heads) is the 2-node targ
 
 ## Probe and full evaluation
 
-Both run inside the live lab (`livelab/fastrsi_megatron/hook.py`), from the same start state S:
+Both run inside the live lab (`livelab/rsibox_megatron/hook.py`), from the same start state S:
 initial weights, Adam moments and step counters at zero, scheduler at step 0, fixed RNG, and
 the same frozen batches. So two checks of the same code start from the same point.
 

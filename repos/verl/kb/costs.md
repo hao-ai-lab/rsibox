@@ -37,7 +37,7 @@ B; read ratios within one batch only. The site's facts (`site/facts/engines.json
 | Offline `tools.rescore` on 640 recorded responses | **0.83-0.86 ms** | `score_ms` |
 | Offline `tools.replay_adv` on 640 recorded trajectories | **16-29 ms** | `compute_ms` (estimator only; import and `torch.load` are outside) |
 
-With the per-sample seeds (`FASTRSI_RL_SEED_PER_SAMPLE=1`, 32 prompts x 8 samples), five checks after coupled `S0`
+With the per-sample seeds (`RSIBOX_RL_SEED_PER_SAMPLE=1`, 32 prompts x 8 samples), five checks after coupled `S0`
 resets gave the same `critic/score/mean 0.12890625`, `critic/advantages/max 2.4748666`, `actor/pg_loss 0.0084084`
 and the same rollout digest every time; a live `x2.0` advantage edit doubled `advantages/max` to `4.9497333` and
 `pg_loss` to `0.0168168` on the very same rollouts; a reward `x2` doubled `score/mean` to `0.2578125`. The job had
@@ -113,7 +113,7 @@ caches once (`57.4 s -> 104.6 s`); with path-stable caches, node-local startup i
 |---:|---:|---:|---:|---:|---:|---:|
 | 6.0 s | 4.9 s | 6.0 s | 0.3 s | 8.1 s | 1.4 s | **26.8 s** |
 
-## 4. Static Coverage Survey (`fastrsi-survey/1` on `volcengine/verl@975f063b`)
+## 4. Static Coverage Survey (`rsibox-survey/1` on `volcengine/verl@975f063b`)
 
 Command:
 ```sh
@@ -133,7 +133,7 @@ cd core/livelab && python3 -m survey scan \
 
 ### 0.2 Batch A re-verification after adapter refactor (4x GB200, 2026-11-19)
 
-Post-refactor `VerlConformanceLab` (`fastrsi conformance verl --real`, 21 participants: driver, 8 reward, 8 agent-loop, 4 FSDP trainer ranks, `train_batch_size=32`, `rollout.n=8`, per-sample seeds) re-ran `11/11` cases in **6879.773 s** total case time with **113** receipts (`43` txn, `38` proof, `32` undo; median `edit_to_commit_s` **1.216 s**, median `undo_s` **44.77 ms**, `c9_soak` install median **8.1093 s**, uninstall median **6.6840 s**, `0` `ResourceWarning`s, immediate `@atexit` `0 MiB × 4`).
+Post-refactor `VerlConformanceLab` (`rsibox conformance verl --real`, 21 participants: driver, 8 reward, 8 agent-loop, 4 FSDP trainer ranks, `train_batch_size=32`, `rollout.n=8`, per-sample seeds) re-ran `11/11` cases in **6879.773 s** total case time with **113** receipts (`43` txn, `38` proof, `32` undo; median `edit_to_commit_s` **1.216 s**, median `undo_s` **44.77 ms**, `c9_soak` install median **8.1093 s**, uninstall median **6.6840 s**, `0` `ResourceWarning`s, immediate `@atexit` `0 MiB × 4`).
 
 ### 0.3 Batch B CUDA-graph re-verification (`Megatron-Core` and `FSDP`, `4× GB200`, `2026-11-19`)
 
@@ -153,7 +153,7 @@ Running the same `Qwen3-0.6B` GSM8K `640`-response (`TBS=64, N=10`, `21` warm pa
 
 ### 0.5 Full `fsdp_cg` `11/11` Conformance (`enforce_eager=False`) & `mcore_det_v2` `unfused` Probe (`4× GB200`)
 
-- **Full `11/11` `FSDP + CUDA graphs` (`enforce_eager=False`, `full_determinism=False`, `VLLM_BATCH_INVARIANT=1`, `FASTRSI_RL_SEED_PER_SAMPLE=1`, `21` participants, `TBS=32`, `N=8`, `0 MiB × 4` exit):**
+- **Full `11/11` `FSDP + CUDA graphs` (`enforce_eager=False`, `full_determinism=False`, `VLLM_BATCH_INVARIANT=1`, `RSIBOX_RL_SEED_PER_SAMPLE=1`, `21` participants, `TBS=32`, `N=8`, `0 MiB × 4` exit):**
   - Passed **`11/11`** in **`5,792.1 s`** total wall (`5,704.0 s` 11-case sum; down from `6,844–6,880 s` eager, with steady `gen 4.18 s` and `verdict_s ~26.5 s`), writing **`113` receipts** (`43` txn, `38` proof, `32` undo; median `edit_to_commit_s 1.2231 s`, median `undo_s 0.045 s`):
   - `c0_repeatable` (`136.780 s`, bit-exact `score_mean 0.109375`, `adv_max 2.4748666286468506`, `pg_loss 0.016291`, rollout `0b1dafd8ad4dbad6`), `c1_noop` (`89.634 s`), `c2_visible` (`82.243 s`, `pg_loss 0.016291 -> 0.032583`, witness `[1]`).
   - `c3_fresh_equivalence` (`1,102.893 s`, bit-exact `live == fresh` on visible & 3-chain), `c4_uninstall` (`151.478 s`, `7.227662 s` uninstall), `c5_failed_install` (`193.763 s`), `c6_refusal` (`234.141 s`), `c7_chain` (`300.341 s`).
@@ -164,7 +164,7 @@ Running the same `Qwen3-0.6B` GSM8K `640`-response (`TBS=64, N=10`, `21` warm pa
 
 ### 0.6 Unified cold-vs-warm `fsdp_cg` restart-overhead dissection (`4× GB200`, `2026-11-20`)
 
-Source: paired `4× GB200` (`Qwen3-0.6B` GSM8K GRPO, `train_batch_size=32`, `rollout.n=8`, `256` responses/step, `enforce_eager=False`, `full_determinism=False`, `VLLM_BATCH_INVARIANT=1`, `FASTRSI_RL_SEED_PER_SAMPLE=1`, `21` gate participants, `0 MiB × 4` teardown) phase dissection across `fresh_cold` (empty compile caches, `253` subprocesses), `fresh_warm` (`251` subprocesses), live `core_algos` swap + coupled `S0` reset, and offline `tools.cli replay-adv` (`not_split = 0.000 s`).
+Source: paired `4× GB200` (`Qwen3-0.6B` GSM8K GRPO, `train_batch_size=32`, `rollout.n=8`, `256` responses/step, `enforce_eager=False`, `full_determinism=False`, `VLLM_BATCH_INVARIANT=1`, `RSIBOX_RL_SEED_PER_SAMPLE=1`, `21` gate participants, `0 MiB × 4` teardown) phase dissection across `fresh_cold` (empty compile caches, `253` subprocesses), `fresh_warm` (`251` subprocesses), live `core_algos` swap + coupled `S0` reset, and offline `tools.cli replay-adv` (`not_split = 0.000 s`).
 
 - **Pre-Step-1 lazy actor spawn (`24.426 s` cold / `23.868 s` warm):** Between `trainer_fit_begin` (`244.636 s` cold / `128.004 s` warm) and `on_step_begin` (`269.065 s` / `151.872 s`), `8 AgentLoopWorkerTQ` actors spawn, import `verl`/`torch`, and load `RLHFDataset`, plus `GateMixin._ensure_session()` synchronizes the 21 participants; `verl`'s `marked_timer("step")` wraps this window inside `timing_s/step` (`53.26 s` cold / `52.30 s` warm). Inside boot, `gate.on_init_end()` (`S0` capture + file snapshot) accounts for `1.169 s` cold (`0.576 s` warm), so cold restart excluding gate `S0` init is `296.780 s` (`297.949 s` raw wall).
 - **Cold compile tax inside 4× vLLM `EngineCore` (`89.161 s` `jit_build`):** `profile_run` `torch.compile` drops `50.668 -> 11.945 s` (`-38.724 s`), piecewise `capture_model_1` drops `42.912 -> 4.150 s` (`-38.762 s`), and `compile_or_warm_up_model` drops `17.865 -> 6.190 s` (`-11.675 s`), while warm `FULL_AND_PIECEWISE` graph capture remains `7.708 s` (`4.150 s` pass 1 + `3.558 s` pass 2). Step 1 still pays `3.321 s` (`3.186 s` warm) of Triton `_topk_log_softmax_kernel` JIT/warmup over steady `25.566 s` (`25.265 s` warm) steps.

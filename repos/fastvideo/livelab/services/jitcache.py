@@ -25,11 +25,11 @@ import hashlib
 import os
 import time
 
-from fastrsi import harness, ipc
+from rsibox import harness, ipc
 
 ROOTS = {"FLASHINFER_WORKSPACE_BASE": "flashinfer", "TRITON_CACHE_DIR": "triton",
          "TORCHINDUCTOR_CACHE_DIR": "inductor", "XDG_CACHE_HOME": "xdg"}
-MARKER = ".fastrsi-jit-root"
+MARKER = ".rsibox-jit-root"
 
 
 def stage_root(src, dst):
@@ -52,7 +52,7 @@ def env_for(root):
     root = os.path.realpath(root)
     env = {k: os.path.join(root, sub) for k, sub in ROOTS.items()}
     env["TRITON_CACHE_AUTOTUNING"] = "1"
-    env["FASTRSI_TORCH_KEY_CACHE"] = os.path.join(root, "torch_key.json")
+    env["RSIBOX_TORCH_KEY_CACHE"] = os.path.join(root, "torch_key.json")
     return env
 
 
@@ -99,7 +99,7 @@ def _stamp(top):
 def preset_torch_key(path=None):
     """Preset Inductor's `torch_key()` from `path` when the torch sources are unchanged, or
     compute it and store it there. Returns {"hit", "seconds", "files"}; never raises."""
-    path = path or os.environ.get("FASTRSI_TORCH_KEY_CACHE")
+    path = path or os.environ.get("RSIBOX_TORCH_KEY_CACHE")
     if not path:
         return {"hit": False, "seconds": 0.0, "skipped": "no cache path"}
     t0 = time.perf_counter()

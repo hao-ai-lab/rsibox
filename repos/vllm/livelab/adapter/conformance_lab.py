@@ -1,19 +1,19 @@
 """VllmLab: a real vLLM server behind the conformance harness (LabUnderTest).
 
-Starts `vllm serve` through `services/engine.py start` with `FASTRSI_KERNEL_DIR`, a
+Starts `vllm serve` through `services/engine.py start` with `RSIBOX_KERNEL_DIR`, a
 `sitecustomize.py` importing `adapter.host`, and `adapter.worker_ext.KernelWorkerExtension`
 (`--distributed-executor-backend mp`). Control uses `adapter.client.send`; `check` runs greedy
 `/v1/completions` (`temperature=0`, `seed=0`) on fixed prompts and returns generated texts.
 
 Environment variables (no hostnames or paths in code):
-- `FASTRSI_VLLM_MODEL` (required): model path or name served as `m`.
-- `FASTRSI_VLLM_VENV`: venv root (`bin/python`, `bin/vllm`, site-packages; default `sys.prefix`).
-- `FASTRSI_VLLM_WORK`: scratch dir for logs, caches, channels and source farm (default tempdir).
-- `FASTRSI_VLLM_PORT`: live port (default `18500`; `fresh_check` uses `port + 1`).
-- `FASTRSI_VLLM_TP`: tensor-parallel worker count (default 1).
-- `FASTRSI_VLLM_EXTRA`: extra `vllm serve` flags (default `--seed 0 --gpu-memory-utilization 0.35
+- `RSIBOX_VLLM_MODEL` (required): model path or name served as `m`.
+- `RSIBOX_VLLM_VENV`: venv root (`bin/python`, `bin/vllm`, site-packages; default `sys.prefix`).
+- `RSIBOX_VLLM_WORK`: scratch dir for logs, caches, channels and source farm (default tempdir).
+- `RSIBOX_VLLM_PORT`: live port (default `18500`; `fresh_check` uses `port + 1`).
+- `RSIBOX_VLLM_TP`: tensor-parallel worker count (default 1).
+- `RSIBOX_VLLM_EXTRA`: extra `vllm serve` flags (default `--seed 0 --gpu-memory-utilization 0.35
   --enforce-eager --max-model-len 2048 --disable-flashinfer-autotune`).
-- `FASTRSI_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
+- `RSIBOX_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
 """
 import argparse
 import atexit
@@ -30,7 +30,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from fastrsi import harness
+from rsibox import harness
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -49,7 +49,7 @@ PROMPTS = ("The capital of France is", "List the first five prime numbers:", "Wa
 WORKLOAD = {"prompts": list(PROMPTS), "max_tokens": 12}
 DEFAULT_EXTRA = ("--seed 0 --gpu-memory-utilization 0.35 --enforce-eager --max-model-len 2048 "
                  "--disable-flashinfer-autotune")
-HOOK_SITE = "import os\nif os.environ.get('FASTRSI_KERNEL_DIR'):\n    import adapter.host\n"
+HOOK_SITE = "import os\nif os.environ.get('RSIBOX_KERNEL_DIR'):\n    import adapter.host\n"
 _seq = itertools.count(1)
 
 
@@ -185,11 +185,11 @@ class VllmLab:
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance vllm --real ...` flags into `FASTRSI_VLLM_*` env vars.
+        """Translate `rsibox conformance vllm --real ...` flags into `RSIBOX_VLLM_*` env vars.
 
-        Accepts both `fastrsi conformance vllm --real --model M [-- <serve flags>]` and
-        `fastrsi conformance vllm --real -- --model M [-- <serve flags>]`, as well as
-        `fastrsi conformance vllm --real -- <serve flags>` when `FASTRSI_VLLM_MODEL` is preset.
+        Accepts both `rsibox conformance vllm --real --model M [-- <serve flags>]` and
+        `rsibox conformance vllm --real -- --model M [-- <serve flags>]`, as well as
+        `rsibox conformance vllm --real -- <serve flags>` when `RSIBOX_VLLM_MODEL` is preset.
         """
         argv = list(argv)
         known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
@@ -211,7 +211,7 @@ class VllmLab:
             else:
                 norm.append(own[i])
                 i += 1
-        ap = argparse.ArgumentParser(prog="fastrsi conformance vllm --real", allow_abbrev=False)
+        ap = argparse.ArgumentParser(prog="rsibox conformance vllm --real", allow_abbrev=False)
         for flag, kw in (
             ("--model", dict(default=None, help="model path or HuggingFace repo id")),
             ("--venv", dict(default=None, help="vLLM virtualenv root")),
@@ -226,41 +226,41 @@ class VllmLab:
         ns = ap.parse_args(norm)
         env = {}
         for attr, key, xform in (
-            ("model", "FASTRSI_VLLM_MODEL", str),
-            ("venv", "FASTRSI_VLLM_VENV", os.path.abspath),
-            ("work", "FASTRSI_VLLM_WORK", os.path.abspath),
-            ("port", "FASTRSI_VLLM_PORT", str),
-            ("tp", "FASTRSI_VLLM_TP", str),
-            ("check_timeout", "FASTRSI_VLLM_CHECK_TIMEOUT", str),
+            ("model", "RSIBOX_VLLM_MODEL", str),
+            ("venv", "RSIBOX_VLLM_VENV", os.path.abspath),
+            ("work", "RSIBOX_VLLM_WORK", os.path.abspath),
+            ("port", "RSIBOX_VLLM_PORT", str),
+            ("tp", "RSIBOX_VLLM_TP", str),
+            ("check_timeout", "RSIBOX_VLLM_CHECK_TIMEOUT", str),
         ):
             val = getattr(ns, attr)
             if val is not None and (attr not in ("model", "venv", "work") or val):
                 env[key] = xform(val)
         if ns.no_share_gpu:
-            env["FASTRSI_VLLM_SHARE_GPU"] = "0"
+            env["RSIBOX_VLLM_SHARE_GPU"] = "0"
         if ns.extra is not None or tail:
-            env["FASTRSI_VLLM_EXTRA"] = shlex.join((shlex.split(ns.extra) if ns.extra is not None else []) + tail)
+            env["RSIBOX_VLLM_EXTRA"] = shlex.join((shlex.split(ns.extra) if ns.extra is not None else []) + tail)
         return env
 
     def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None):
         self.receipts = receipts
-        self.check_timeout = float(check_timeout or os.environ.get("FASTRSI_VLLM_CHECK_TIMEOUT", "30"))
+        self.check_timeout = float(check_timeout or os.environ.get("RSIBOX_VLLM_CHECK_TIMEOUT", "30"))
         self._backend, self._fault_txns, self._pending_inject, self._stack_files = backend, [], None, []
         if backend is not None:
             self.base_text = dict(base_texts)
             self.bridge = HostBridge(self._ctl)
             self.session = SS.Session(self.bridge, MODULES)
             return
-        self.model = os.environ["FASTRSI_VLLM_MODEL"]
-        self.venv = os.environ.get("FASTRSI_VLLM_VENV") or sys.prefix
+        self.model = os.environ["RSIBOX_VLLM_MODEL"]
+        self.venv = os.environ.get("RSIBOX_VLLM_VENV") or sys.prefix
         self.python_bin, self.vllm_bin = os.path.join(self.venv, "bin", "python"), os.path.join(self.venv, "bin", "vllm")
         self.site = _site_packages(self.venv)
-        self.port = int(os.environ.get("FASTRSI_VLLM_PORT", "18500"))
-        self.tp = int(os.environ.get("FASTRSI_VLLM_TP", "1"))
-        self.extra = shlex.split(os.environ.get("FASTRSI_VLLM_EXTRA", DEFAULT_EXTRA))
-        self.share_gpu = os.environ.get("FASTRSI_VLLM_SHARE_GPU", "1") != "0"
-        work_env = os.environ.get("FASTRSI_VLLM_WORK")
-        self.work_dir = os.path.abspath(work_env) if work_env else tempfile.mkdtemp(prefix="fastrsi-vllm-")
+        self.port = int(os.environ.get("RSIBOX_VLLM_PORT", "18500"))
+        self.tp = int(os.environ.get("RSIBOX_VLLM_TP", "1"))
+        self.extra = shlex.split(os.environ.get("RSIBOX_VLLM_EXTRA", DEFAULT_EXTRA))
+        self.share_gpu = os.environ.get("RSIBOX_VLLM_SHARE_GPU", "1") != "0"
+        work_env = os.environ.get("RSIBOX_VLLM_WORK")
+        self.work_dir = os.path.abspath(work_env) if work_env else tempfile.mkdtemp(prefix="rsibox-vllm-")
         self.livelab_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.engine_py = os.path.join(self.livelab_root, "services", "engine.py")
         self.hooks_dir = os.path.join(self.work_dir, "hooks")
@@ -305,7 +305,7 @@ class VllmLab:
         log_path = os.path.join(self.work_dir, f"engine-{tag}-{run_id}.log")
         py_parts = [self.hooks_dir, self.livelab_root] + ([self.farm_dir] if use_farm else [])
         py_parts += [os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []
-        env = {**os.environ, "FASTRSI_KERNEL_DIR": kernel_dir, "PYTHONPATH": os.pathsep.join(py_parts),
+        env = {**os.environ, "RSIBOX_KERNEL_DIR": kernel_dir, "PYTHONPATH": os.pathsep.join(py_parts),
                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
                "VLLM_BATCH_INVARIANT": os.environ.get("VLLM_BATCH_INVARIANT", "1")}
         cmd = [
@@ -337,7 +337,7 @@ class VllmLab:
                        timeout=120.0)
             ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
             # Older callers can still select TP through arbitrary extra serve flags.
-            _check_topology(ping, self.tp if "FASTRSI_VLLM_TP" in os.environ else None)
+            _check_topology(ping, self.tp if "RSIBOX_VLLM_TP" in os.environ else None)
         except BaseException:
             srv.stop()
             raise
@@ -540,7 +540,7 @@ class VllmLab:
                               "                _ = token_budget\n"
                               "                self.deferred_waiting.add(request_to_skip)\n")
         lproc_state = _edit(lproc, "logger = init_logger(__name__)\n",
-                            "logger = init_logger(__name__)\n_FASTRSI_MOD_STATE = 1\n")
+                            "logger = init_logger(__name__)\n_RSIBOX_MOD_STATE = 1\n")
         p = lambda **files: {"files": dict(files)}  # noqa: E731
         return {
             "noop": p(**{SAMPLER: s_noop, SCHED_UTILS: u_noop}),

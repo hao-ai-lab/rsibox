@@ -155,7 +155,7 @@ class HistoryTest(unittest.TestCase):
             with open(fns) as f:
                 rows = [json.loads(line) for line in f]
         self.assertEqual((d["schema"], d["ruleset_version"], d["engine_rules_version"], d["scan_date"]),
-                         ("fastrsi-survey/1", "1.1", "toy-1", "2026-01-01"))
+                         ("rsibox-survey/1", "1.1", "toy-1", "2026-01-01"))
         self.assertEqual(sum(r["kind"] == "function" for r in rows), d["functions"]["total"])
         self.assertNotIn(tmp, json.dumps(d))
 

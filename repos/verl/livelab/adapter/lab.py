@@ -3,8 +3,8 @@ import os
 
 import ray_participants as RP
 from adapter import LIVELAB
-from fastrsi import harness
-from fastrsi.lab import BaseLab
+from rsibox import harness
+from rsibox.lab import BaseLab
 from kernel import coordinator as C, findings as F, locate as L
 
 
@@ -44,7 +44,7 @@ class VerlLab(BaseLab):
             gap=lambda job: job(),
             writer=self.writer,
             interface_version="1-draft",
-            engine={"name": self.name, "version": None, "commit": os.environ.get("FASTRSI_ENGINE_COMMIT")},
+            engine={"name": self.name, "version": None, "commit": os.environ.get("RSIBOX_ENGINE_COMMIT")},
             phase2_deadline_s=self.rpc_timeout,
         )
         self.coordinator = co

@@ -5,8 +5,8 @@ import json
 import os
 import sys
 
-from fastrsi import harness as H
-from fastrsi.harness import edit_once
+from rsibox import harness as H
+from rsibox.harness import edit_once
 
 GREEDY = "batch_next_token_ids = torch.argmax(logits, -1)"
 
@@ -118,21 +118,21 @@ def _server_args_supports_decode_max_bs():
 
 
 def sglang_env_config():
-    model_path = os.environ.get("FASTRSI_SGLANG_MODEL")
+    model_path = os.environ.get("RSIBOX_SGLANG_MODEL")
     if not model_path:
-        raise RuntimeError("set FASTRSI_SGLANG_MODEL to the model path or repo id")
-    max_bs = int(os.environ.get("FASTRSI_SGLANG_MAX_BS", "4"))
+        raise RuntimeError("set RSIBOX_SGLANG_MODEL to the model path or repo id")
+    max_bs = int(os.environ.get("RSIBOX_SGLANG_MAX_BS", "4"))
     graph_kw = {"cuda_graph_max_bs": max_bs}
     if _server_args_supports_decode_max_bs():
         graph_kw = {"cuda_graph_max_bs_decode": max_bs, "disable_prefill_cuda_graph": True}
     return {
         "model_path": model_path,
-        "tp_size": int(os.environ.get("FASTRSI_SGLANG_TP", "1")),
-        "mem_fraction_static": float(os.environ.get("FASTRSI_SGLANG_MEM_FRACTION", "0.25")),
+        "tp_size": int(os.environ.get("RSIBOX_SGLANG_TP", "1")),
+        "mem_fraction_static": float(os.environ.get("RSIBOX_SGLANG_MEM_FRACTION", "0.25")),
         **graph_kw,
         "random_seed": 0,
         "log_level": "error",
-        **json.loads(os.environ.get("FASTRSI_SGLANG_EXTRA_ARGS") or "{}"),
+        **json.loads(os.environ.get("RSIBOX_SGLANG_EXTRA_ARGS") or "{}"),
     }
 
 

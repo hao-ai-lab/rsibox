@@ -20,8 +20,8 @@ from adapter import conformance_lab as CL
 from adapter import gate as G
 from adapter import state as S
 from conformance import cases as CC
-from fastrsi import harness as H
-from fastrsi import proc as P
+from rsibox import harness as H
+from rsibox import proc as P
 import ray_participants as RP
 
 _PPO_SRC = '''import torch
@@ -194,18 +194,18 @@ class MilesConformanceLabTest(unittest.TestCase):
             "--boot-timeout", "600",
             "--", "--num-layers", "12", "--lr", "2e-4",
         ])
-        self.assertEqual(env["FASTRSI_MILES_MODEL"], "Qwen/Qwen3-0.6B")
-        self.assertEqual(env["FASTRSI_MILES_DATA"], os.path.abspath("/tmp/prompts.jsonl"))
-        self.assertEqual(env["FASTRSI_MILES_CUSTOM_RM_PATH"], "my_rm.score")
-        self.assertEqual(env["FASTRSI_MILES_SLIME_ROOT"], os.path.abspath("/tmp/slime"))
-        self.assertEqual(env["FASTRSI_MILES_MEGATRON_ROOT"], os.path.abspath("/tmp/megatron"))
-        self.assertEqual(env["FASTRSI_MILES_EXTRA_PY_PATH"], "/tmp/extra1:/tmp/extra2")
-        self.assertEqual(env["FASTRSI_MILES_WORK"], os.path.abspath("/tmp/miles-work"))
-        self.assertEqual(env["FASTRSI_MILES_RAY_GPUS"], "4")
-        self.assertEqual(env["FASTRSI_MILES_CHECK_TIMEOUT"], "25.0")
-        self.assertEqual(env["FASTRSI_MILES_RPC_TIMEOUT"], "90.0")
-        self.assertEqual(env["FASTRSI_MILES_BOOT_TIMEOUT"], "600.0")
-        self.assertEqual(json.loads(env["FASTRSI_MILES_SLIME_ARGS"]), ["--num-layers", "12", "--lr", "2e-4"])
+        self.assertEqual(env["RSIBOX_MILES_MODEL"], "Qwen/Qwen3-0.6B")
+        self.assertEqual(env["RSIBOX_MILES_DATA"], os.path.abspath("/tmp/prompts.jsonl"))
+        self.assertEqual(env["RSIBOX_MILES_CUSTOM_RM_PATH"], "my_rm.score")
+        self.assertEqual(env["RSIBOX_MILES_SLIME_ROOT"], os.path.abspath("/tmp/slime"))
+        self.assertEqual(env["RSIBOX_MILES_MEGATRON_ROOT"], os.path.abspath("/tmp/megatron"))
+        self.assertEqual(env["RSIBOX_MILES_EXTRA_PY_PATH"], "/tmp/extra1:/tmp/extra2")
+        self.assertEqual(env["RSIBOX_MILES_WORK"], os.path.abspath("/tmp/miles-work"))
+        self.assertEqual(env["RSIBOX_MILES_RAY_GPUS"], "4")
+        self.assertEqual(env["RSIBOX_MILES_CHECK_TIMEOUT"], "25.0")
+        self.assertEqual(env["RSIBOX_MILES_RPC_TIMEOUT"], "90.0")
+        self.assertEqual(env["RSIBOX_MILES_BOOT_TIMEOUT"], "600.0")
+        self.assertEqual(json.loads(env["RSIBOX_MILES_SLIME_ARGS"]), ["--num-layers", "12", "--lr", "2e-4"])
 
     def test_ray_init_kwargs_disables_lowercase_otel_and_system_config(self):
         py = CL.build_pythonpath(
@@ -239,7 +239,7 @@ class MilesConformanceLabTest(unittest.TestCase):
         core_livelab = repo_root / "core" / "livelab"
         probe = (
             "import sys\n"
-            "from fastrsi import cli\n"
+            "from rsibox import cli\n"
             "before = set(sys.modules)\n"
             "try:\n"
             "    rc = cli.main(['conformance', 'miles', '--real', '--repo-root', sys.argv[1], '--', '--help'])\n"
@@ -256,7 +256,7 @@ class MilesConformanceLabTest(unittest.TestCase):
             capture_output=True, text=True, env=env, timeout=30,
         )
         self.assertEqual(proc.returncode, 0, f"stdout={proc.stdout} stderr={proc.stderr}")
-        self.assertIn("fastrsi conformance miles --real", proc.stdout)
+        self.assertIn("rsibox conformance miles --real", proc.stdout)
         self.assertIn("--model", proc.stdout)
         self.assertIn("--data", proc.stdout)
 
@@ -368,7 +368,7 @@ class MilesConformanceLabTest(unittest.TestCase):
         self.assertIn("unknown_state", bad)
 
     def test_conformance_lab_fake_runtime_passes_all_11_conformance_cases(self):
-        tmp_pkg = tempfile.mkdtemp(prefix="fastrsi-miles-fakeslime-")
+        tmp_pkg = tempfile.mkdtemp(prefix="rsibox-miles-fakeslime-")
         self.addCleanup(shutil.rmtree, tmp_pkg, True)
         for rel, content in (
             ("slime/__init__.py", ""),
@@ -631,7 +631,7 @@ class MilesConformanceLabTest(unittest.TestCase):
 
                 # Direct zero_new_state() with an unknown key must also leave exp_avg/step untouched.
                 if case == "unknown_opt_key":
-                    zeroed, unknown = actor._fastrsi_s0.zero_new_state()
+                    zeroed, unknown = actor._rsibox_s0.zero_new_state()
                     self.assertEqual(zeroed, [])
                     self.assertEqual(unknown, ["opt0.state.0.unknown_buf"])
                     self.assertEqual(exp_avg._data, [3.0, 4.0])
@@ -838,8 +838,8 @@ class MilesConformanceLabTest(unittest.TestCase):
             try:
                 self.assertEqual(sorted(lab.runtime["train_actors"]), ["trainer0", "trainer1"])
                 self.assertEqual(sorted(lab._cluster["trainers"]), ["trainer0", "trainer1"])
-                self.assertTrue(hasattr(train_actors[0], "_fastrsi_s0"))
-                self.assertTrue(hasattr(train_actors[1], "_fastrsi_s0"))
+                self.assertTrue(hasattr(train_actors[0], "_rsibox_s0"))
+                self.assertTrue(hasattr(train_actors[1], "_rsibox_s0"))
                 self.assertIn(17.5, ray_state["get_timeouts"])
 
                 # Run one step -> both trainers mutated and reflected in combined digest.
@@ -919,7 +919,7 @@ class MilesConformanceLabTest(unittest.TestCase):
         self.assertEqual(events["spawn"], 1)
 
         # 3) Timeout in fresh subprocess kills entire process group (including grandchild) and respawns once.
-        tmp_pid_dir = tempfile.mkdtemp(prefix="fastrsi-miles-pgtest-")
+        tmp_pid_dir = tempfile.mkdtemp(prefix="rsibox-miles-pgtest-")
         self.addCleanup(shutil.rmtree, tmp_pid_dir, True)
         grandchild_pid_file = os.path.join(tmp_pid_dir, "grandchild.pid")
         spawner_code = (
@@ -960,8 +960,8 @@ class MilesConformanceLabTest(unittest.TestCase):
 
     def test_m6_multi_package_overlay_inject_timeout_and_atomic_rollout_cache(self):
         # 1) _build_fresh_overlay groups files by top-level package (slime + megatron).
-        tmp_src = tempfile.mkdtemp(prefix="fastrsi-miles-pkgs-")
-        tmp_dst = tempfile.mkdtemp(prefix="fastrsi-miles-ov-")
+        tmp_src = tempfile.mkdtemp(prefix="rsibox-miles-pkgs-")
+        tmp_dst = tempfile.mkdtemp(prefix="rsibox-miles-ov-")
         self.addCleanup(shutil.rmtree, tmp_src, True)
         self.addCleanup(shutil.rmtree, tmp_dst, True)
         for rel, content in (
@@ -1005,7 +1005,7 @@ class MilesConformanceLabTest(unittest.TestCase):
                 lab.close()
 
         # 3) Atomic rollout0.pt save & stale cache invalidation across different model/data.
-        work = tempfile.mkdtemp(prefix="fastrsi-miles-rollout-")
+        work = tempfile.mkdtemp(prefix="rsibox-miles-rollout-")
         self.addCleanup(shutil.rmtree, work, True)
         rollout_pt = os.path.join(work, "rollout0.pt")
         with mock.patch.object(CL.time, "sleep", lambda _s: None):

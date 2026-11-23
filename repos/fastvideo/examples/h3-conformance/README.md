@@ -64,7 +64,7 @@ FlashInfer build. The same day on 2 ranks: 11/11 again (c3 chain of 3 live == fr
 
 ## 4 GPUs (4 ranks, SP4)
 
-Our 2026-11-19 run via `python3 -m fastrsi conformance fastvideo --real -- --gpus 4` (108 receipts,
+Our 2026-11-19 run via `python3 -m rsibox conformance fastvideo --real -- --gpus 4` (108 receipts,
 1989.1 s case sum, all 4 ranks witnessing every edit):
 
 ```
@@ -87,7 +87,7 @@ c10_not_proven        pass     63.0    proven False, findings ['zero_witness', '
 
 ## 2 GPUs with `--zygote --holder` (SP2, targeted recovery & soak)
 
-Our 2026-11-19 targeted run (`fastrsi conformance fastvideo --real --only c0_repeatable,c2_visible,c4_uninstall,c8_crash_and_hang,c9_soak -- --gpus 2 --zygote --holder`, `66` receipts, `5/5`, `0 MiB` after shutdown):
+Our 2026-11-19 targeted run (`rsibox conformance fastvideo --real --only c0_repeatable,c2_visible,c4_uninstall,c8_crash_and_hang,c9_soak -- --gpus 2 --zygote --holder`, `66` receipts, `5/5`, `0 MiB` after shutdown):
 
 ```
 case               result  seconds  evidence

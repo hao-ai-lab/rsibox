@@ -4,23 +4,23 @@ The lab is a client of the gate protocol (`gate.py` via `adapter/client.py`): ev
 request file on the gate directory, served by the trainer at its step gap. It owns the job's
 lifetime through a launch command, so `reset("respawn")` and `fresh_check` really restart the job.
 
-Environment (or constructor arguments / `fastrsi conformance verl --real -- ...`):
-  FASTRSI_VERL_GATE           gate directory of the live job (shared with the trainer)
-  FASTRSI_VERL_LAUNCH         shell command that starts a gated job and exits when it exits; it reads
+Environment (or constructor arguments / `rsibox conformance verl --real -- ...`):
+  RSIBOX_VERL_GATE           gate directory of the live job (shared with the trainer)
+  RSIBOX_VERL_LAUNCH         shell command that starts a gated job and exits when it exits; it reads
                               `$GATE` (gate dir) and `$REWARD` (custom reward file) and inherits
                               `$PYTHONPATH` (a fresh process with a patched module gets an overlay first)
-  FASTRSI_VERL_REWARD         the custom reward file the job loads (patched by the conformance edits)
-  FASTRSI_VERL_CHECK_TIMEOUT  seconds one check may take (default 300; also the hang budget)
-  FASTRSI_VERL_BOOT_TIMEOUT   seconds a (re)launch may take to `ready.json` (default 1800)
+  RSIBOX_VERL_REWARD         the custom reward file the job loads (patched by the conformance edits)
+  RSIBOX_VERL_CHECK_TIMEOUT  seconds one check may take (default 300; also the hang budget)
+  RSIBOX_VERL_BOOT_TIMEOUT   seconds a (re)launch may take to `ready.json` (default 1800)
 
 Output of a check: `{"steps": [{"score_mean", "adv_max", "adv_min", "pg_loss", "rollouts"}]}` per
 RL step after a coupled S0 reset; `rollouts` is a digest of the step's dumped (prompt, response,
 score, ground truth) rows; `pg_loss` is rounded to 1e-6 (see `ROUND`). Bit-exact repeats need
 `rollout.full_determinism=True` and the per-sample seeds of `determinism.py`
-(`FASTRSI_RL_SEED_PER_SAMPLE=1`).
+(`RSIBOX_RL_SEED_PER_SAMPLE=1`).
 
 Run via the unified CLI:
-    python3 -m fastrsi conformance verl --real -- --gate G --launch CMD --reward FILE
+    python3 -m rsibox conformance verl --real -- --gate G --launch CMD --reward FILE
 or `python3 -m tools.cli conformance --gate G --launch CMD --reward FILE` from `repos/verl`.
 """
 import argparse
@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 from adapter import client, gate as G
-from fastrsi import harness, ipc, proc
+from rsibox import harness, ipc, proc
 from kernel import findings as F
 
 CORE = "verl.trainer.ppo.core_algos"
@@ -67,29 +67,29 @@ class VerlConformanceLab:
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance verl --real -- ...` flags into `FASTRSI_VERL_*` env vars."""
+        """Translate `rsibox conformance verl --real -- ...` flags into `RSIBOX_VERL_*` env vars."""
         clean = list(argv)[1:] if list(argv)[:1] == ["--"] else list(argv)
-        ap = argparse.ArgumentParser(prog="fastrsi conformance verl --real", allow_abbrev=False)
+        ap = argparse.ArgumentParser(prog="rsibox conformance verl --real", allow_abbrev=False)
         ap.add_argument("--gate", required=True, help="gate directory shared with the gated verl job")
         ap.add_argument("--reward", required=True, help="custom reward .py file the job loads")
         ap.add_argument("--launch", default=None, help="shell command starting the gated job on $GATE with $REWARD")
         ap.add_argument("--check-timeout", type=float, default=None, help="seconds one check step may take")
         ap.add_argument("--boot-timeout", type=float, default=None, help="seconds a (re)launch may take to ready.json")
         ns = ap.parse_args(clean)
-        env = {"FASTRSI_VERL_GATE": str(Path(ns.gate).resolve()), "FASTRSI_VERL_REWARD": os.path.realpath(ns.reward)}
-        for attr, key in (("launch", "FASTRSI_VERL_LAUNCH"), ("check_timeout", "FASTRSI_VERL_CHECK_TIMEOUT"),
-                          ("boot_timeout", "FASTRSI_VERL_BOOT_TIMEOUT")):
+        env = {"RSIBOX_VERL_GATE": str(Path(ns.gate).resolve()), "RSIBOX_VERL_REWARD": os.path.realpath(ns.reward)}
+        for attr, key in (("launch", "RSIBOX_VERL_LAUNCH"), ("check_timeout", "RSIBOX_VERL_CHECK_TIMEOUT"),
+                          ("boot_timeout", "RSIBOX_VERL_BOOT_TIMEOUT")):
             if (val := getattr(ns, attr)) is not None:
                 env[key] = str(val)
         return env
 
     def __init__(self, receipts=None, gate=None, launch=None, reward=None, check_timeout=None, boot_timeout=None):
         env = os.environ
-        self.gate = Path(gate or env["FASTRSI_VERL_GATE"]).resolve()
-        self.launch = launch or env.get("FASTRSI_VERL_LAUNCH")
-        self.reward = os.path.realpath(reward or env["FASTRSI_VERL_REWARD"])
-        self.check_timeout = float(check_timeout or env.get("FASTRSI_VERL_CHECK_TIMEOUT", 300))
-        self.boot_timeout = float(boot_timeout or env.get("FASTRSI_VERL_BOOT_TIMEOUT", 1800))
+        self.gate = Path(gate or env["RSIBOX_VERL_GATE"]).resolve()
+        self.launch = launch or env.get("RSIBOX_VERL_LAUNCH")
+        self.reward = os.path.realpath(reward or env["RSIBOX_VERL_REWARD"])
+        self.check_timeout = float(check_timeout or env.get("RSIBOX_VERL_CHECK_TIMEOUT", 300))
+        self.boot_timeout = float(boot_timeout or env.get("RSIBOX_VERL_BOOT_TIMEOUT", 1800))
         self.receipts, self.poison, self.stack_patches, self.costs = receipts, [], [], {}
         self._live_stack = [{}]
         self._receipts_offset = self._receipt_size()
@@ -123,7 +123,7 @@ class VerlConformanceLab:
         if (self.gate / "ready.json").exists() and self._alive():
             return
         if not self.launch:
-            raise RuntimeError(f"{self.gate}: no live gated job and no FASTRSI_VERL_LAUNCH to start one")
+            raise RuntimeError(f"{self.gate}: no live gated job and no RSIBOX_VERL_LAUNCH to start one")
         self._start_job(self.gate)
 
     def _start_job(self, gate, reward=None, pythonpath=None):
@@ -449,7 +449,7 @@ class VerlConformanceLab:
     def fresh_check(self, patch, workload=None):
         steps = int((workload or {}).get("steps", 1))
         if not self.launch:
-            return {"ok": False, "error": "no FASTRSI_VERL_LAUNCH: cannot start a fresh job", "output": None}
+            return {"ok": False, "error": "no RSIBOX_VERL_LAUNCH: cannot start a fresh job", "output": None}
         try:
             files = self.files(patch, against="disk")
         except ValueError as err:

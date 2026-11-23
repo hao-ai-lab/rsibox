@@ -184,7 +184,7 @@ class HolderTest(unittest.TestCase):
         import json
         import signal
         import subprocess
-        from fastrsi import proc as proc_util
+        from rsibox import proc as proc_util
 
         mod_path = os.path.join(self.dir, "hpkg", "shared_mod.py")
         with open(mod_path, "w", encoding="utf-8") as fh:

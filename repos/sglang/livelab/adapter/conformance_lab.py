@@ -11,9 +11,9 @@ class SglangConformanceLab(SglangLab):
 
     @staticmethod
     def launch_environment(argv):
-        """Translate `fastrsi conformance sglang --real ...` flags into `FASTRSI_SGLANG_*` env vars."""
+        """Translate `rsibox conformance sglang --real ...` flags into `RSIBOX_SGLANG_*` env vars."""
         clean = [tok for tok in argv if tok != "--"]
-        ap = argparse.ArgumentParser(prog="fastrsi conformance sglang --real", allow_abbrev=False)
+        ap = argparse.ArgumentParser(prog="rsibox conformance sglang --real", allow_abbrev=False)
         ap.add_argument("--model", default=None, help="model path or HuggingFace repo id")
         ap.add_argument("--tp", type=int, default=None, help="tensor-parallel size")
         ap.add_argument("--mem-fraction", type=float, default=None, help="static GPU memory fraction")
@@ -29,16 +29,16 @@ class SglangConformanceLab(SglangLab):
         ap.add_argument("--check-timeout", type=float, default=None, help="workload check timeout (s)")
         ap.add_argument("--rpc-timeout", type=float, default=None, help="control RPC timeout (s)")
         ns = ap.parse_args(clean)
-        spec = (("model", "FASTRSI_SGLANG_MODEL", False), ("tp", "FASTRSI_SGLANG_TP", False),
-                ("mem_fraction", "FASTRSI_SGLANG_MEM_FRACTION", False), ("max_bs", "FASTRSI_SGLANG_MAX_BS", False),
-                ("work", "TMPDIR", True), ("check_timeout", "FASTRSI_SGLANG_CHECK_TIMEOUT", False),
-                ("rpc_timeout", "FASTRSI_SGLANG_RPC_TIMEOUT", False))
+        spec = (("model", "RSIBOX_SGLANG_MODEL", False), ("tp", "RSIBOX_SGLANG_TP", False),
+                ("mem_fraction", "RSIBOX_SGLANG_MEM_FRACTION", False), ("max_bs", "RSIBOX_SGLANG_MAX_BS", False),
+                ("work", "TMPDIR", True), ("check_timeout", "RSIBOX_SGLANG_CHECK_TIMEOUT", False),
+                ("rpc_timeout", "RSIBOX_SGLANG_RPC_TIMEOUT", False))
         env = {key: (os.path.abspath(str(val)) if is_p else str(val))
                for attr, key, is_p in spec if (val := getattr(ns, attr)) is not None}
         if ns.fork_subprocs:
-            env["FASTRSI_SGLANG_FORK_SUBPROCS"] = "1"
+            env["RSIBOX_SGLANG_FORK_SUBPROCS"] = "1"
         if ns.weight_cache_dir:
-            env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"] = os.path.abspath(str(ns.weight_cache_dir))
+            env["RSIBOX_SGLANG_WEIGHT_CACHE_DIR"] = os.path.abspath(str(ns.weight_cache_dir))
         extra = {}
         if ns.extra is not None:
             try:
@@ -53,18 +53,18 @@ class SglangConformanceLab(SglangLab):
         if ns.disable_cuda_graph:
             extra["disable_cuda_graph"] = True
         if ns.extra is not None or extra:
-            env["FASTRSI_SGLANG_EXTRA_ARGS"] = json.dumps(extra)
+            env["RSIBOX_SGLANG_EXTRA_ARGS"] = json.dumps(extra)
         return env
 
     def __init__(self, receipts=None, rpc_timeout=None, check_timeout=None, fork_subprocs=None, weight_cache_dir=None):
-        rpc_timeout = float(rpc_timeout if rpc_timeout is not None else os.environ.get("FASTRSI_SGLANG_RPC_TIMEOUT", "180.0"))
-        check_timeout = float(check_timeout if check_timeout is not None else os.environ.get("FASTRSI_SGLANG_CHECK_TIMEOUT", "15.0"))
+        rpc_timeout = float(rpc_timeout if rpc_timeout is not None else os.environ.get("RSIBOX_SGLANG_RPC_TIMEOUT", "180.0"))
+        check_timeout = float(check_timeout if check_timeout is not None else os.environ.get("RSIBOX_SGLANG_CHECK_TIMEOUT", "15.0"))
         if fork_subprocs is None:
-            fork_subprocs = os.environ.get("FASTRSI_SGLANG_FORK_SUBPROCS", "").strip().lower() in ("1", "true", "yes")
+            fork_subprocs = os.environ.get("RSIBOX_SGLANG_FORK_SUBPROCS", "").strip().lower() in ("1", "true", "yes")
         else:
             fork_subprocs = bool(fork_subprocs)
         if weight_cache_dir is None:
-            raw_wc = os.environ.get("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", "").strip()
+            raw_wc = os.environ.get("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", "").strip()
         else:
             raw_wc = os.fspath(weight_cache_dir).strip()
         weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None

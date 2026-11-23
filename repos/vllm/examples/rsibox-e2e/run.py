@@ -9,7 +9,7 @@ leaks an edit fails itself and is undone (uninstall to base, then `reset respawn
 next one starts.
 
 `fresh` steps start a second engine from a copy of the vLLM sources with the edit on disk (a
-restart) through the local launcher, so they need `--fresh-state` and the same `FASTRSI_VLLM_*`
+restart) through the local launcher, so they need `--fresh-state` and the same `RSIBOX_VLLM_*`
 environment the box was started with. They are skipped, and reported as skipped, without it.
 
 Prints one line per case and writes every reply it judged to `--out`.
@@ -293,9 +293,9 @@ class Runner:
                 text = handle.read()
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(apply_edits(text, [e for e in step["edits"] if e["module"] == module], self.where))
-        env = {k: v for k, v in os.environ.items() if k.startswith(("FASTRSI_VLLM_", "CUDA_", "HF_", "VLLM_"))}
-        env.update(PYTHONPATH=farm, FASTRSI_VLLM_WORK=os.path.join(root, "work"),
-                   FASTRSI_VLLM_PORT=str(int(os.environ.get("FASTRSI_VLLM_PORT", "18500")) + 20))
+        env = {k: v for k, v in os.environ.items() if k.startswith(("RSIBOX_VLLM_", "CUDA_", "HF_", "VLLM_"))}
+        env.update(PYTHONPATH=farm, RSIBOX_VLLM_WORK=os.path.join(root, "work"),
+                   RSIBOX_VLLM_PORT=str(int(os.environ.get("RSIBOX_VLLM_PORT", "18500")) + 20))
         state = os.path.join(root, "box")
         record = L.up({"launcher": "local", "lab": "vllm", "real": True, "state": state, "env": env, "repo": REPO})
         try:
