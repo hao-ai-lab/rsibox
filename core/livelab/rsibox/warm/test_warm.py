@@ -4,15 +4,19 @@ Pure CPU / stdlib tests — no GPU, torch, vLLM, or Dynamo install required.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
+import struct
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 LIVELAB_DIR = Path(__file__).resolve().parents[2]
 if str(LIVELAB_DIR) not in sys.path:
@@ -34,14 +38,34 @@ from rsibox.warm import (  # noqa: E402
     run_snapshot_lifecycle,
     stamp_diff,
 )
-from rsibox.warm.dynamo_gms import long_socket_path_finding, socket_name  # noqa: E402
+from rsibox.warm.dynamo_gms import (  # noqa: E402
+    _GET_RUNTIME_STATE_FRAME,
+    long_socket_path_finding,
+    resolve_target_gpus,
+    socket_name,
+)
+
+
+def _encode_runtime_state_reply(state: str, committed: bool) -> bytes:
+    """Minimal MsgPack frame matching `GetRuntimeStateResponse` (`state`, `committed`)."""
+    st_b = state.encode("utf-8")
+    payload = (
+        b"\x82"
+        + b"\xa5state"
+        + bytes([0xA0 | len(st_b)]) + st_b
+        + b"\xa9committed"
+        + (b"\xc3" if committed else b"\xc2")
+    )
+    return struct.pack("!I", len(payload)) + payload
 
 
 class _UnixSocketGuard:
-    """Minimal AF_UNIX listener for probing tests (accepts and closes cleanly)."""
+    """AF_UNIX listener simulating either a bare socket or a GMSRPCServer runtime-state probe."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, gms_state: tuple[str, bool] | None = None):
         self.path = path
+        self.gms_state = gms_state
+        self.received_frames: list[bytes] = []
         self._stop = threading.Event()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -60,7 +84,17 @@ class _UnixSocketGuard:
                 conn, _ = self._sock.accept()
             except OSError:
                 continue
-            conn.close()
+            with conn:
+                if self.gms_state is not None:
+                    conn.settimeout(0.5)
+                    try:
+                        data = conn.recv(64)
+                        if data:
+                            self.received_frames.append(data)
+                            if data == _GET_RUNTIME_STATE_FRAME:
+                                conn.sendall(_encode_runtime_state_reply(*self.gms_state))
+                    except OSError:
+                        pass
 
     def close(self) -> None:
         self._stop.set()
@@ -105,28 +139,92 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertFalse(pr.ok)
         self.assertEqual(pr.finding["check"], "gms_socket_path")
 
-    def test_probe_succeeds_when_all_gpu_tag_sockets_answer_and_stamp_matches(self):
+    def test_resolve_target_gpus_handles_empty_visible_uuids_and_tp(self):
+        nvml = [(0, "GPU-000"), (4, "GPU-444"), (5, "GPU-555")]
+        # CUDA_VISIBLE_DEVICES="" means zero GPUs (never fall back to all host GPUs).
+        self.assertIsNone(resolve_target_gpus(visible_devices="", nvml_query=lambda: nvml))
+        # Physical indices and UUIDs map cleanly to (phys_idx, uuid).
+        self.assertEqual(
+            resolve_target_gpus(visible_devices="4,5", tp=2, nvml_query=lambda: nvml),
+            [(4, "GPU-444"), (5, "GPU-555")],
+        )
+        self.assertEqual(
+            resolve_target_gpus(gpus=["GPU-555"], nvml_query=lambda: nvml),
+            [(5, "GPU-555")],
+        )
+        # Unset visible_devices slices to tp.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+            self.assertEqual(
+                resolve_target_gpus(tp=2, nvml_query=lambda: nvml),
+                [(0, "GPU-000"), (4, "GPU-444")],
+            )
+            self.assertIsNone(resolve_target_gpus(tp=4, nvml_query=lambda: nvml))
+
+    def test_bare_metal_nonzero_cuda_visible_devices_emits_mismatch_finding(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
+            store = DynamoGmsStore(
+                socket_dir=tmp,
+                target_resolver=lambda *a, **k: [(4, "GPU-444")],
+            )
+            pr = store.probe(visible_devices="4")
+            self.assertFalse(pr.ok)
+            self.assertEqual(pr.finding["check"], "gms_v0_visible_devices_mismatch")
+
+            # Container-isolated callers can explicitly opt in.
+            store_ok = DynamoGmsStore(
+                socket_dir=tmp,
+                allow_remapped_visible_devices=True,
+                target_resolver=lambda *a, **k: [(4, "GPU-444")],
+            )
+            pr2 = store_ok.probe(visible_devices="4")
+            self.assertEqual(pr2.finding["check"], "dynamo_gms_daemon")
+
+    def test_probe_uses_msgpack_runtime_state_and_fails_closed_on_uncommitted_ro_and_missing_stamp(self):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
             uuid = "GPU-11111111-2222-3333-4444-555555555555"
-            guards = [_UnixSocketGuard(os.path.join(tmp, socket_name(uuid, tag))) for tag in GMS_TAGS]
+            w_guard = _UnixSocketGuard(
+                os.path.join(tmp, socket_name(uuid, "weights")), gms_state=("empty", False)
+            )
+            kv_guard = _UnixSocketGuard(
+                os.path.join(tmp, socket_name(uuid, "kv_cache")), gms_state=("empty", False)
+            )
             try:
-                store = DynamoGmsStore(socket_dir=tmp, uuid_resolver=lambda *a, **k: [uuid])
-                pr = store.probe(gpus=[uuid])
-                self.assertTrue(pr.ok, pr.to_dict())
-                self.assertEqual(len(pr.sockets), 2)
+                # RW_OR_RO store succeeds against an EMPTY GMS server with zero wire errors.
+                rw_store = DynamoGmsStore(socket_dir=tmp, uuid_resolver=lambda *a, **k: [uuid])
+                pr_rw = rw_store.probe(gpus=[uuid])
+                self.assertTrue(pr_rw.ok, pr_rw.to_dict())
+                self.assertIn(_GET_RUNTIME_STATE_FRAME, w_guard.received_frames)
 
+                # RO store fails closed when weights socket reports committed=False!
+                ro_store = DynamoGmsStore(
+                    socket_dir=tmp, read_only=True, uuid_resolver=lambda *a, **k: [uuid]
+                )
+                pr_ro_empty = ro_store.probe(gpus=[uuid])
+                self.assertFalse(pr_ro_empty.ok)
+                self.assertEqual(pr_ro_empty.finding["check"], "dynamo_gms_not_committed")
+
+                # Once committed, RO probe passes.
+                w_guard.gms_state = ("committed", True)
+                self.assertTrue(ro_store.probe(gpus=[uuid]).ok)
+
+                # Missing stamp must FAIL CLOSED when expected_stamp is requested.
                 stamp = {"files": {"model": "abc"}, "weights": {}, "env": {}, "extra": None}
-                store.write_stamp(stamp)
-                self.assertTrue(store.probe(gpus=[uuid], expected_stamp=stamp).ok)
+                pr_missing_stamp = rw_store.probe(gpus=[uuid], expected_stamp=stamp)
+                self.assertFalse(pr_missing_stamp.ok)
+                self.assertEqual(pr_missing_stamp.stale_keys, ("stamp_missing",))
+                self.assertEqual(pr_missing_stamp.finding["check"], "dynamo_gms_stale")
 
+                # Writing matching stamp passes; drifting stamp fails closed.
+                rw_store.write_stamp(stamp)
+                self.assertTrue(rw_store.probe(gpus=[uuid], expected_stamp=stamp).ok)
                 drifted = {"files": {"model": "xyz"}, "weights": {}, "env": {}, "extra": None}
-                stale_pr = store.probe(gpus=[uuid], expected_stamp=drifted)
+                stale_pr = rw_store.probe(gpus=[uuid], expected_stamp=drifted)
                 self.assertFalse(stale_pr.ok)
                 self.assertEqual(stale_pr.stale_keys, ("files:model",))
-                self.assertEqual(stale_pr.finding["check"], "dynamo_gms_stale")
             finally:
-                for g in guards:
-                    g.close()
+                w_guard.close()
+                kv_guard.close()
 
     def test_probe_reports_missing_sockets_cleanly(self):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
@@ -136,6 +234,19 @@ class DynamoGmsStoreTests(unittest.TestCase):
             self.assertFalse(pr.ok)
             self.assertEqual(len(pr.missing), 2)
             self.assertEqual(pr.finding["check"], "dynamo_gms_daemon")
+
+    def test_stop_reaps_owned_children_promptly_without_zombie_stall(self):
+        store = DynamoGmsStore(socket_dir="/tmp")
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        store._owned_procs.append(child)
+        t0 = time.monotonic()
+        store.stop()
+        elapsed = time.monotonic() - t0
+        self.assertIsNotNone(child.poll(), "child process was not reaped")
+        self.assertLess(elapsed, 2.0, f"stop() stalled for {elapsed:.2f}s waiting on zombie")
 
     def test_launch_delta_vllm_and_conflicts(self):
         store = DynamoGmsStore(
@@ -159,21 +270,25 @@ class DynamoGmsStoreTests(unittest.TestCase):
             {"gms_read_only": True, "gms_ro_connect_timeout_ms": 5000},
         )
 
-        # Explicit conflicting load_format and worker_cls must emit structured findings.
+        # Explicit conflicting load_format, worker_cls, and model_loader_extra_config emit findings.
         conflict = store.launch_delta(
             engine="vllm",
-            explicit_flags={"load_format", "worker_cls"},
-            explicit_values={"load_format": "ipc_cache", "worker_cls": "kvplan.KVPlanWorker"},
+            explicit_flags={"load_format", "worker_cls", "model_loader_extra_config"},
+            explicit_values={
+                "load_format": "ipc_cache",
+                "worker_cls": "kvplan.KVPlanWorker",
+                "model_loader_extra_config": {"gms_read_only": False},
+            },
         )
         self.assertFalse(conflict.ok)
         checks = {f["check"] for f in conflict.findings}
-        self.assertEqual(checks, {"gms_load_format", "gms_worker_cls"})
+        self.assertEqual(checks, {"gms_load_format", "gms_worker_cls", "gms_loader_extra_config"})
 
     def test_launch_delta_sglang_and_fastvideo_and_unsupported(self):
         store = DynamoGmsStore(socket_dir="/tmp/gms-test", read_only=False)
         sgl = store.launch_delta(engine="sglang")
         self.assertTrue(sgl.ok)
-        self.assertEqual(sgl.args, ("--load-format", "gms"))
+        self.assertEqual(sgl.args, ())
 
         fv = store.launch_delta(engine="fastvideo")
         self.assertTrue(fv.ok)
@@ -185,7 +300,7 @@ class DynamoGmsStoreTests(unittest.TestCase):
 
 
 class SnapshotContractAndRecoveryTests(unittest.TestCase):
-    def test_snapshot_lifecycle_happy_path(self):
+    def test_snapshot_lifecycle_clears_stale_restore_complete_and_succeeds(self):
         events: list[str] = []
 
         class _FakeHooks:
@@ -202,16 +317,18 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
                 events.append(f"resume:{receipt.token}")
                 return {"ok": True, "reattached": ["weights", "kv_cache"]}
 
-        with tempfile.TemporaryDirectory(prefix="snap-") as tmp:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="snap-") as tmp:
             ctrl = Path(tmp)
-            # Plant a stale ready-for-snapshot to verify it is cleared before warmup.
+            # Plant stale sentinels (including restore-complete!) to verify Step 1 clears them.
             (ctrl / "ready-for-snapshot").write_text("stale", encoding="utf-8")
+            (ctrl / "restore-complete").write_text("stale", encoding="utf-8")
 
             def agent_side():
-                # Wait for freshly written ready-for-snapshot after quiesce.
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
                     if (ctrl / "ready-for-snapshot").exists() and "quiesce" in events:
+                        # Stale restore-complete must have been removed before waiting!
+                        assert not (ctrl / "restore-complete").exists()
                         (ctrl / "restore-complete").write_text("ok\n", encoding="utf-8")
                         return
                     time.sleep(0.01)
@@ -228,6 +345,29 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             self.assertEqual(events, ["warmup", "quiesce", "resume:tok-1"])
             self.assertTrue((ctrl / "fastvideo-restore-ready").exists())
 
+    def test_snapshot_lifecycle_cleans_ready_sentinel_on_timeout_and_rejects_bad_name(self):
+        class _OkHooks:
+            mutability = "readonly_weights"
+
+            def warmup_for_snapshot(self) -> None:
+                return None
+
+            def quiesce_for_snapshot(self) -> QuiesceReceipt:
+                return QuiesceReceipt(ok=True)
+
+            def resume_after_restore(self, receipt: QuiesceReceipt) -> dict:
+                return {"ok": True}
+
+        with self.assertRaises(ValueError):
+            DynamoK8sSnapshotDriver(engine_name="../escape")
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="snap-") as tmp:
+            res = run_snapshot_lifecycle(
+                _OkHooks(), engine_name="vllm", control_dir=tmp, wait_timeout_s=0.05, poll_s=0.01
+            )
+            self.assertFalse(res.ok)
+            self.assertFalse((Path(tmp) / "ready-for-snapshot").exists())
+
     def test_snapshot_lifecycle_fails_closed_when_quiesce_fails(self):
         class _FailingHooks:
             mutability = "mutable_step_state"
@@ -241,14 +381,13 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             def resume_after_restore(self, receipt: QuiesceReceipt) -> dict:
                 raise AssertionError("resume must not run when quiesce fails")
 
-        with tempfile.TemporaryDirectory(prefix="snap-") as tmp:
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="snap-") as tmp:
             res = run_snapshot_lifecycle(_FailingHooks(), engine_name="megatron", control_dir=tmp)
             self.assertFalse(res.ok)
             self.assertFalse((Path(tmp) / "ready-for-snapshot").exists())
             self.assertFalse((Path(tmp) / "megatron-restore-ready").exists())
 
-    def test_base_lab_delegates_respawn_to_recovery_driver(self):
-        import contextlib
+    def test_base_lab_recovery_drivers_fail_closed_and_skip_replenish_on_failed_promote(self):
         from kernel import coordinator as C
 
         calls: list[str] = []
@@ -267,26 +406,39 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             def _run_workload(self, workload):
                 return {"ok": True}
 
-        promoted: list[str] = []
+        # 1. StandbyShadowDriver: failed promote skips replenish & handles reserved keys safely.
+        replenished: list[str] = []
+        bad_driver = StandbyShadowDriver(
+            promote_fn=lambda lab, store: {"ok": False, "driver": "override", "reason": "bad"},
+            replenish_fn=lambda lab, store: replenished.append("called"),
+        )
+        lab = _DummyLab(weight_store=DiskStore(), recovery_driver=bad_driver)
+        res_bad = lab.reset("respawn")
+        self.assertFalse(res_bad["ok"])
+        self.assertEqual(res_bad["driver"], "standby_shadow")
+        self.assertEqual(replenished, [])
 
-        def promote(lab, store):
-            promoted.append(store.name if store else "none")
-            lab._spawn()
-            return {"ok": True, "reset": ["shadow promoted"]}
+        # 2. StandbyShadowDriver: successful promote invokes replenish.
+        good_driver = StandbyShadowDriver(
+            promote_fn=lambda lab, store: (lab._spawn(), {"ok": True, "reset": ["shadow promoted"]})[1],
+            replenish_fn=lambda lab, store: replenished.append("ok"),
+        )
+        lab.recovery_driver = good_driver
+        res_good = lab.reset("respawn")
+        self.assertTrue(res_good["ok"])
+        self.assertEqual(replenished, ["ok"])
 
-        driver = StandbyShadowDriver(promote_fn=promote)
-        lab = _DummyLab(weight_store=DiskStore(), recovery_driver=driver)
-        res = lab.reset("respawn")
-        self.assertTrue(res["ok"])
-        self.assertEqual(res["driver"], "standby_shadow")
-        self.assertEqual(promoted, ["none"])
-        self.assertEqual(calls, ["start", "stop", "start"])
-
-        # DefaultRespawnDriver also works cleanly
-        lab.recovery_driver = DefaultRespawnDriver()
-        res2 = lab.reset("respawn")
-        self.assertTrue(res2["ok"])
-        self.assertEqual(res2["driver"], "default_respawn")
+        # 3. DefaultRespawnDriver: fails closed when WeightStore probe fails (does NOT respawn).
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
+            broken_store = DynamoGmsStore(
+                socket_dir=tmp, uuid_resolver=lambda *a, **k: ["GPU-00000000-0000-0000-0000-000000000000"]
+            )
+            lab.weight_store = broken_store
+            lab.recovery_driver = DefaultRespawnDriver()
+            before = list(calls)
+            res_fail = lab.reset("respawn")
+            self.assertFalse(res_fail["ok"])
+            self.assertEqual(calls, before, "DefaultRespawnDriver must not stop/spawn on failed store probe")
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class RecoveryDriver(Protocol):
 
 
 class DefaultRespawnDriver:
-    """Default respawn path: stop the worker group, optionally verify `WeightStore`, respawn."""
+    """Default respawn path: verify `WeightStore` (fail closed), stop worker group, respawn."""
 
     name = "default_respawn"
 
@@ -70,11 +70,22 @@ class DefaultRespawnDriver:
         reason: str = "reset_respawn",
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
-        with contextlib.suppress(Exception):
-            lab._stop_engine()
         store_probe = None
         if store is not None and store.name != "none":
-            store_probe = store.probe()
+            tp = getattr(lab, "tp", None)
+            store_probe = store.probe(tp=tp)
+            if not store_probe.ok:
+                return {
+                    "ok": False,
+                    "reset": [],
+                    "driver": self.name,
+                    "reason": reason,
+                    "error": store_probe.error or f"weight store {store.name!r} probe failed",
+                    "weight_store": store_probe.to_dict(),
+                    "cost_s": round(time.perf_counter() - t0, 6),
+                }
+        with contextlib.suppress(Exception):
+            lab._stop_engine()
         lab._spawn()
         out: dict[str, Any] = {
             "ok": not lab.session.poisoned(),
@@ -117,14 +128,16 @@ class StandbyShadowDriver:
         with contextlib.suppress(Exception):
             lab._stop_engine()
         promoted = self._promote_fn(lab, store) or {}
-        if self._replenish_fn is not None:
-            self._replenish_fn(lab, store)
+        promote_cost_s = round(time.perf_counter() - t0, 6)
         ok = bool(promoted.get("ok", True)) and not lab.session.poisoned()
+        if ok and self._replenish_fn is not None:
+            self._replenish_fn(lab, store)
+        reserved = {"ok", "reset", "driver", "reason", "cost_s"}
         return {
             "ok": ok,
-            "reset": list(promoted.get("reset", ["shadow promoted", "session"])),
+            "reset": list(promoted.get("reset", ["shadow promoted", "session"])) if ok else [],
             "driver": self.name,
             "reason": reason,
-            "cost_s": round(time.perf_counter() - t0, 6),
-            **{k: v for k, v in promoted.items() if k not in ("ok", "reset", "cost_s")},
+            "cost_s": promote_cost_s,
+            **{k: v for k, v in promoted.items() if k not in reserved},
         }

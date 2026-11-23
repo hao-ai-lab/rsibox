@@ -1,35 +1,43 @@
 """Optional NVIDIA Dynamo GPU Memory Service (GMS) `WeightStore` backend (stdlib only).
 
-Integrates `ai-dynamo/dynamo`'s standalone `gpu_memory_service` (CUDA VMM out-of-process
+Integrates `ai-dynamo/dynamo`'s standalone `gpu_memory_service` V0 (CUDA VMM out-of-process
 weight ownership and cross-process RO sharing) into RSIBox without hard-binding RSIBox to
 Dynamo, PyTorch, or Kubernetes.
 
 Socket layout mirrors `gpu_memory_service/common/utils.py`:
-- Directory: `GMS_SOCKET_DIR` (or `tempfile.gettempdir()` when unset).
+- Directory: `GMS_SOCKET_DIR` (defaults to `/tmp` when available to stay under `AF_UNIX` limits).
 - Per-GPU sockets: `gms_{gpu_uuid}_{tag}.sock` for `tag in ("weights", "kv_cache")`.
 
 Key guarantees:
-- Pure Python stdlib at import time; never imports `torch` or `gpu_memory_service`.
-- Enforces `AF_UNIX` `MAX_SOCK_PATH` before spawning any GMS server.
-- Supports both externally managed GMS servers (K8s sidecar / host daemon) and
-  RSIBox-managed local GMS servers (`ensure_ready()` / `stop()`), cleaning up only
-  daemons started by this store instance.
-- Preserves RSIBox's staleness stamp guard (optional JSON stamp file) so edits to a
-  model loader or quantization path refuse stale GMS weights rather than silently reading them.
+- Pure Python stdlib at import time; never imports `torch`, `msgspec`, or `gpu_memory_service`.
+- Enforces `AF_UNIX` `MAX_SOCK_PATH` on both sample and resolved UUID paths before starting.
+- Probes GMS sockets with the lock-free MsgPack `GetRuntimeStateRequest` frame so real GMS
+  servers reply cleanly with zero `Handshake recv error` logs and expose `committed` state
+  (failing fast when `read_only=True` against an uncommitted `EMPTY` GMS layout).
+- Strips `CUDA_VISIBLE_DEVICES` when spawning per-GPU V0 GMS servers by physical NVML index,
+  spawns servers only for GPUs with missing sockets, reaps owned `Popen` children cleanly
+  without zombie stalls, and fails closed when bare-metal `CUDA_VISIBLE_DEVICES` remaps
+  logical ordinals away from NVML physical indices (which GMS V0's `get_socket_path` ignores).
+- Preserves RSIBox's staleness stamp guard (failing closed when `expected_stamp` is supplied
+  and the stamp file is missing, malformed, or drifted).
 """
 from __future__ import annotations
 
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from rsibox import harness, ipc, proc
+try:
+    from .. import harness, ipc, proc
+except ImportError:  # pragma: no cover - fallback if imported outside package root
+    from rsibox import harness, ipc, proc  # type: ignore[no-redef]
+
 from .types import LaunchDelta, StoreProbe, stamp_diff
 from .weight_store import register_weight_store
 
@@ -37,12 +45,21 @@ GMS_TAGS: tuple[str, ...] = ("weights", "kv_cache")
 GMS_VLLM_LOAD_FORMAT = "gms"
 GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 GMS_SGLANG_LOAD_FORMAT = "gms"
+DEFAULT_RO_CONNECT_TIMEOUT_MS = 10_000
 _SAMPLE_UUID = "GPU-00000000-0000-0000-0000-000000000000"
+
+# Exact length-prefixed MsgPack wire frame for `GetRuntimeStateRequest()`
+# (`gpu_memory_service.common.protocol.wire._frame_message(GetRuntimeStateRequest())`).
+# Handled pre-lock by `GMSRPCServer._do_handshake()` with zero server error logs.
+_GET_RUNTIME_STATE_FRAME = b"\x00\x00\x00 \x81\xa4type\xb9get_runtime_state_request"
 
 
 def default_socket_dir() -> str:
-    """Default GMS socket directory matching `gpu_memory_service.common.utils`."""
-    return os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+    """Default GMS socket directory (prefers `/tmp` to stay within `AF_UNIX` path caps)."""
+    env_dir = os.environ.get("GMS_SOCKET_DIR")
+    if env_dir:
+        return env_dir
+    return "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
 
 
 def socket_name(gpu_uuid: str, tag: str = "weights") -> str:
@@ -53,21 +70,91 @@ def socket_name(gpu_uuid: str, tag: str = "weights") -> str:
 def long_socket_path_finding(
     socket_dir: str,
     tags: Sequence[str] = GMS_TAGS,
+    uuids: Sequence[str] = (),
 ) -> dict[str, Any] | None:
     """Return a `gms_socket_path` finding if any GMS socket path exceeds `AF_UNIX` limits."""
     base = os.path.abspath(socket_dir)
-    for tag in tags:
-        cand = os.path.join(base, socket_name(_SAMPLE_UUID, tag))
-        err = ipc.sock_path_error(cand)
-        if err:
-            return harness.plain_finding(
-                "gms_socket_path",
-                err,
-                f"a GMS socket dir short enough that `{socket_name('<uuid>', tag)}` fits {ipc.MAX_SOCK_PATH} bytes",
-                why="GMS server binds per-GPU Unix sockets named by GPU UUID and tag; paths above AF_UNIX limits fail at bind time",
-                actions=["use a short --gms-socket-dir such as /tmp/rsibox-gms"],
-            )
+    check_uuids = tuple(uuids) if uuids else (_SAMPLE_UUID,)
+    for uuid in check_uuids:
+        for tag in tags:
+            cand = os.path.join(base, socket_name(uuid, tag))
+            err = ipc.sock_path_error(cand)
+            if err:
+                return harness.plain_finding(
+                    "gms_socket_path",
+                    err,
+                    f"a GMS socket dir short enough that `{socket_name('<uuid>', tag)}` fits {ipc.MAX_SOCK_PATH} bytes",
+                    why="GMS server binds per-GPU Unix sockets named by GPU UUID and tag; paths above AF_UNIX limits fail at bind time",
+                    actions=["use a short --gms-socket-dir such as /tmp/rsibox-gms"],
+                )
     return None
+
+
+def _query_nvml_gpus() -> list[tuple[int, str]] | None:
+    """Query `(physical_nvml_index, uuid)` for every GPU visible to `nvidia-smi`."""
+    cmd = ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"]
+    try:
+        out = subprocess.check_output(cmd, text=True, timeout=15, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pairs: list[tuple[int, str]] = []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1]:
+            pairs.append((int(parts[0]), parts[1]))
+    return pairs or None
+
+
+def resolve_target_gpus(
+    gpus: Sequence[str] = (),
+    *,
+    visible_devices: str | None = None,
+    tp: int | None = None,
+    nvml_query: Callable[[], list[tuple[int, str]] | None] = _query_nvml_gpus,
+) -> list[tuple[int, str]] | None:
+    """Resolve target GPUs into `(physical_nvml_index, gpu_uuid)` pairs.
+
+    Correctly distinguishes an explicit empty `CUDA_VISIBLE_DEVICES=""` (0 visible GPUs -> None)
+    from unset `CUDA_VISIBLE_DEVICES` (all host GPUs). Supports both integer indices and
+    `GPU-...` / `MIG-...` UUIDs.
+    """
+    explicit_items: list[str] | None = None
+    if gpus:
+        explicit_items = [str(g).strip() for g in gpus if str(g).strip()]
+        if not explicit_items:
+            return None
+    else:
+        raw = os.environ.get("CUDA_VISIBLE_DEVICES") if visible_devices is None else visible_devices
+        if raw is not None:
+            if not raw.strip():
+                return None  # CUDA_VISIBLE_DEVICES="" means zero visible GPUs
+            explicit_items = [x.strip() for x in raw.split(",") if x.strip()]
+
+    nvml = nvml_query()
+    if explicit_items is None:
+        if not nvml:
+            return None
+        resolved = list(nvml)
+    else:
+        by_idx = {str(idx): (idx, uuid) for idx, uuid in (nvml or ())}
+        by_uuid = {uuid: (idx, uuid) for idx, uuid in (nvml or ())}
+        resolved = []
+        for pos, item in enumerate(explicit_items):
+            if item in by_idx:
+                resolved.append(by_idx[item])
+            elif item in by_uuid:
+                resolved.append(by_uuid[item])
+            elif item.startswith(("GPU-", "MIG-")) and nvml is None:
+                # Allow UUID-only probing in CPU tests without nvidia-smi.
+                resolved.append((pos, item))
+            else:
+                return None
+
+    if tp is not None:
+        if tp <= 0 or len(resolved) < tp:
+            return None
+        resolved = resolved[:tp]
+    return resolved or None
 
 
 def resolve_gpu_uuids(
@@ -76,78 +163,181 @@ def resolve_gpu_uuids(
     visible_devices: str | None = None,
     tp: int | None = None,
 ) -> list[str] | None:
-    """Resolve NVML GPU UUIDs (`GPU-...`) for target GPUs.
+    """Resolve NVML GPU UUIDs (`GPU-...`) for target GPUs (or None if unavailable)."""
+    targets = resolve_target_gpus(gpus, visible_devices=visible_devices, tp=tp)
+    return [uuid for _, uuid in targets] if targets else None
 
-    Accepts explicit `GPU-...` / `MIG-...` UUIDs directly, or queries `nvidia-smi` for
-    device indices from `gpus` or `visible_devices` (`CUDA_VISIBLE_DEVICES`).
-    Returns `None` if `nvidia-smi` fails or fewer than `tp` GPUs are visible.
+
+def _visible_devices_remap_finding(
+    targets: Sequence[tuple[int, str]],
+    visible_devices: str | None,
+) -> dict[str, Any] | None:
+    """Detect bare-metal `CUDA_VISIBLE_DEVICES` ordinal != physical NVML index under GMS V0.
+
+    In upstream `gpu_memory_service` V0 (`common/utils.py:get_socket_path`), workers pass their
+    logical CUDA device ordinal (`0..tp-1`) to `pynvml.nvmlDeviceGetHandleByIndex(device)`,
+    which ignores `CUDA_VISIBLE_DEVICES` on bare-metal hosts. If `CUDA_VISIBLE_DEVICES=4,5`,
+    logical device `0` dials physical GPU 0's socket instead of GPU 4's.
     """
-    items = [str(g).strip() for g in gpus if str(g).strip()]
-    if not items:
-        raw = os.environ.get("CUDA_VISIBLE_DEVICES") if visible_devices is None else visible_devices
-        if raw is not None and raw.strip():
-            items = [x.strip() for x in raw.split(",") if x.strip()]
-        elif tp is not None and tp > 0:
-            items = [str(i) for i in range(tp)]
-    if tp is not None and items and len(items) < tp:
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES") if visible_devices is None else visible_devices
+    if not raw or not raw.strip():
         return None
-    if tp is not None and items:
-        items = items[:tp]
-
-    if items and all(item.startswith(("GPU-", "MIG-")) for item in items):
-        return items
-
-    cmd = ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]
-    if items:
-        cmd.extend(["-i", ",".join(items)])
-    try:
-        out = subprocess.check_output(cmd, text=True, timeout=15, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.SubprocessError):
+    mismatches = [
+        f"logical cuda:{logical} -> physical GPU {phys} ({uuid})"
+        for logical, (phys, uuid) in enumerate(targets)
+        if phys != logical
+    ]
+    if not mismatches:
         return None
-    uuids = [line.strip() for line in out.splitlines() if line.strip()]
-    if not uuids:
-        return None
-    if tp is not None and len(uuids) < tp:
-        return None
-    return uuids[:tp] if tp is not None else uuids
+    return harness.plain_finding(
+        "gms_v0_visible_devices_mismatch",
+        f"bare-metal CUDA_VISIBLE_DEVICES={raw!r} remaps {', '.join(mismatches)}",
+        "container-isolated GPU indices starting at 0, or physical GPUs 0..tp-1 under GMS V0",
+        why="upstream gpu_memory_service V0 get_socket_path(local_rank) queries pynvml by "
+            "logical ordinal (ignoring CUDA_VISIBLE_DEVICES on bare-metal), so workers would dial "
+            "physical GPU 0..tp-1 sockets instead of the visible GPUs",
+        actions=[
+            "run inside a container with `--gpus device=...` (so NVML renumbers visible GPUs to 0..tp-1) and pass allow_remapped_visible_devices=True",
+            "or use physical GPUs starting at 0 with GMS V0",
+            "or switch --weights-backend to ipc_cache/none on bare-metal non-zero GPUs",
+        ],
+        risk="workers silently attach to the wrong physical GPU's GMS socket or hang",
+    )
 
 
-def _resolve_device_indices(gpus: Sequence[str] = (), visible_devices: str | None = None) -> list[int]:
-    items = [str(g).strip() for g in gpus if str(g).strip()]
-    if not items:
-        raw = os.environ.get("CUDA_VISIBLE_DEVICES") if visible_devices is None else visible_devices
-        if raw:
-            items = [x.strip() for x in raw.split(",") if x.strip()]
-    indices: list[int] = []
-    for item in items:
-        if item.isdigit():
-            indices.append(int(item))
-    return indices or [0]
+# -- Pure-stdlib MsgPack mini-decoder for `GetRuntimeStateResponse` ----------------------
 
 
-def _socket_answers(path: str, timeout_s: float = 1.0) -> bool:
-    """True when an `AF_UNIX` socket at `path` accepts a connection (non-locking pre-handshake)."""
+def _decode_msgpack(buf: bytes, pos: int = 0) -> tuple[Any, int]:
+    """Minimal pure-stdlib MsgPack decoder sufficient for GMS runtime-state maps."""
+    b = buf[pos]
+    pos += 1
+    if b <= 0x7F:
+        return b, pos
+    if b >= 0xE0:
+        return b - 256, pos
+    if 0xA0 <= b <= 0xBF:
+        n = b & 0x1F
+        return buf[pos : pos + n].decode("utf-8", errors="replace"), pos + n
+    if 0x80 <= b <= 0x8F:
+        return _decode_msgpack_map(buf, pos, b & 0x0F)
+    if 0x90 <= b <= 0x9F:
+        return _decode_msgpack_array(buf, pos, b & 0x0F)
+    if b == 0xC0:
+        return None, pos
+    if b == 0xC2:
+        return False, pos
+    if b == 0xC3:
+        return True, pos
+    if b in (0xC4, 0xC5, 0xC6):
+        fmt = {0xC4: "!B", 0xC5: "!H", 0xC6: "!I"}[b]
+        sz = struct.calcsize(fmt)
+        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
+        pos += sz
+        return buf[pos : pos + n], pos + n
+    if b == 0xCA:
+        (val,) = struct.unpack("!f", buf[pos : pos + 4])
+        return val, pos + 4
+    if b == 0xCB:
+        (val,) = struct.unpack("!d", buf[pos : pos + 8])
+        return val, pos + 8
+    if b in (0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3):
+        fmt = {
+            0xCC: "!B", 0xCD: "!H", 0xCE: "!I", 0xCF: "!Q",
+            0xD0: "!b", 0xD1: "!h", 0xD2: "!i", 0xD3: "!q",
+        }[b]
+        sz = struct.calcsize(fmt)
+        (val,) = struct.unpack(fmt, buf[pos : pos + sz])
+        return val, pos + sz
+    if b in (0xD9, 0xDA, 0xDB):
+        fmt = {0xD9: "!B", 0xDA: "!H", 0xDB: "!I"}[b]
+        sz = struct.calcsize(fmt)
+        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
+        pos += sz
+        return buf[pos : pos + n].decode("utf-8", errors="replace"), pos + n
+    if b in (0xDC, 0xDD):
+        fmt = "!H" if b == 0xDC else "!I"
+        sz = struct.calcsize(fmt)
+        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
+        return _decode_msgpack_array(buf, pos + sz, n)
+    if b in (0xDE, 0xDF):
+        fmt = "!H" if b == 0xDE else "!I"
+        sz = struct.calcsize(fmt)
+        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
+        return _decode_msgpack_map(buf, pos + sz, n)
+    raise ValueError(f"unsupported msgpack byte 0x{b:02x}")
+
+
+def _decode_msgpack_array(buf: bytes, pos: int, count: int) -> tuple[list[Any], int]:
+    out = []
+    for _ in range(count):
+        val, pos = _decode_msgpack(buf, pos)
+        out.append(val)
+    return out, pos
+
+
+def _decode_msgpack_map(buf: bytes, pos: int, count: int) -> tuple[dict[Any, Any], int]:
+    out: dict[Any, Any] = {}
+    for _ in range(count):
+        k, pos = _decode_msgpack(buf, pos)
+        v, pos = _decode_msgpack(buf, pos)
+        out[k] = v
+    return out, pos
+
+
+def _recv_exact(sock: socket.socket, n: int) -> bytes | None:
+    chunks = bytearray()
+    while len(chunks) < n:
+        part = sock.recv(n - len(chunks))
+        if not part:
+            return None
+        chunks.extend(part)
+    return bytes(chunks)
+
+
+def _probe_gms_socket(path: str, timeout_s: float = 1.0) -> tuple[bool, dict[str, Any] | None]:
+    """Probe a GMS Unix socket using lock-free `GetRuntimeStateRequest`.
+
+    Returns `(True, state_dict)` against a real `GMSRPCServer` (zero server error logs),
+    `(True, None)` if a minimal listener accepts and closes without speaking GMS wire protocol,
+    and `(False, None)` if the socket does not exist or refuses connections.
+    """
     if not os.path.exists(path):
-        return False
+        return False, None
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout_s)
         try:
             sock.connect(path)
-            return True
         except OSError:
-            return False
+            return False, None
+        try:
+            sock.sendall(_GET_RUNTIME_STATE_FRAME)
+            hdr = _recv_exact(sock, 4)
+            if not hdr:
+                return True, None
+            (length,) = struct.unpack("!I", hdr)
+            if length <= 0 or length > (1 << 20):
+                return True, None
+            payload = _recv_exact(sock, length)
+            if not payload:
+                return True, None
+            parsed, _ = _decode_msgpack(payload, 0)
+            return True, parsed if isinstance(parsed, dict) else None
+        except (OSError, ValueError, IndexError, struct.error):
+            return True, None
 
 
 class DynamoGmsStore:
-    """`WeightStore` backed by NVIDIA Dynamo's `gpu_memory_service` (GMS).
+    """`WeightStore` backed by NVIDIA Dynamo's `gpu_memory_service` (GMS V0).
 
     Supports:
-    - `engine="vllm"`: injects `--load-format gms`, `--worker-cls ...:GMSWorker`,
+    - `engine="vllm"`: injects `--load-format gms`, `--worker-cls ...GMSWorker`,
       optional `--model-loader-extra-config` (`gms_read_only`, `gms_ro_connect_timeout_ms`),
       and `GMS_SOCKET_DIR` / `DYN_GMS_SCRATCH_KV_ENABLED`.
-    - `engine="sglang"`: injects `--load-format gms`, `GMS_SOCKET_DIR`, and RO config.
-    - `engine="torch_module"` (e.g. FastVideo / generic PyTorch): injects `GMS_SOCKET_DIR`
-      and `RSIBOX_GMS_MODE` so modules can bind via `gpu_memory_service.client.torch.module`.
+    - `engine="sglang"`: injects `GMS_SOCKET_DIR` and GMS config consumed via
+      `gpu_memory_service.integrations.sglang.setup_gms()` + `declare_resolution()`.
+    - `engine="torch_module"` / `"fastvideo"`: injects `GMS_SOCKET_DIR` and `RSIBOX_GMS_MODE`
+      for `gpu_memory_service.client.torch.module.materialize_module_from_gms`.
     """
 
     name = "dynamo_gms"
@@ -160,27 +350,51 @@ class DynamoGmsStore:
         read_only: bool = False,
         ro_connect_timeout_ms: int | None = None,
         scratch_kv: bool = False,
-        use_v1: bool = False,
+        allow_remapped_visible_devices: bool = False,
         device_type: str = "cuda",
         python: str | None = None,
         extra_pythonpath: Sequence[str] = (),
         log_dir: str | None = None,
         stamp_path: str | None = None,
         uuid_resolver: Callable[..., list[str] | None] | None = None,
+        target_resolver: Callable[..., list[tuple[int, str]] | None] | None = None,
     ):
         self.socket_dir = os.path.abspath(socket_dir or default_socket_dir())
         self.tags = tuple(tags) if tags else GMS_TAGS
         self.read_only = bool(read_only)
-        self.ro_connect_timeout_ms = ro_connect_timeout_ms
+        self.ro_connect_timeout_ms = (
+            ro_connect_timeout_ms
+            if ro_connect_timeout_ms is not None
+            else (DEFAULT_RO_CONNECT_TIMEOUT_MS if self.read_only else None)
+        )
         self.scratch_kv = bool(scratch_kv)
-        self.use_v1 = bool(use_v1)
+        self.allow_remapped_visible_devices = bool(allow_remapped_visible_devices)
         self.device_type = str(device_type)
         self.python = python or sys.executable
         self.extra_pythonpath = tuple(str(p) for p in extra_pythonpath if p)
         self.log_dir = log_dir
         self.stamp_path = stamp_path or os.path.join(self.socket_dir, "rsibox_gms_stamp.json")
         self._uuid_resolver = uuid_resolver
-        self._owned_pids: list[int] = []
+        self._target_resolver = target_resolver
+        self._owned_procs: list[subprocess.Popen] = []
+
+    def _resolve_targets(
+        self,
+        *,
+        gpus: Sequence[str] = (),
+        visible_devices: str | None = None,
+        tp: int | None = None,
+    ) -> list[tuple[int, str]] | None:
+        if self._target_resolver is not None:
+            return self._target_resolver(gpus, visible_devices=visible_devices, tp=tp)
+        if self._uuid_resolver is not None:
+            uuids = self._uuid_resolver(gpus, visible_devices=visible_devices, tp=tp)
+            return [(i, u) for i, u in enumerate(uuids)] if uuids else None
+        # Allow unittest.mock.patch("rsibox.warm.dynamo_gms.resolve_gpu_uuids", ...)
+        if resolve_gpu_uuids is not _ORIG_RESOLVE_GPU_UUIDS:
+            uuids = resolve_gpu_uuids(gpus, visible_devices=visible_devices, tp=tp)
+            return [(i, u) for i, u in enumerate(uuids)] if uuids else None
+        return resolve_target_gpus(gpus, visible_devices=visible_devices, tp=tp)
 
     def socket_paths(
         self,
@@ -190,13 +404,12 @@ class DynamoGmsStore:
         tp: int | None = None,
     ) -> list[str] | None:
         """Expected per-(GPU, tag) GMS Unix socket paths, or None if GPUs cannot be identified."""
-        resolver = self._uuid_resolver or resolve_gpu_uuids
-        uuids = resolver(gpus, visible_devices=visible_devices, tp=tp)
-        if not uuids:
+        targets = self._resolve_targets(gpus=gpus, visible_devices=visible_devices, tp=tp)
+        if not targets:
             return None
         return [
             os.path.join(self.socket_dir, socket_name(uuid, tag))
-            for uuid in uuids
+            for _, uuid in targets
             for tag in self.tags
         ]
 
@@ -219,7 +432,7 @@ class DynamoGmsStore:
         expected_stamp: dict[str, Any] | None = None,
         connect_timeout_s: float = 1.0,
     ) -> StoreProbe:
-        """Probe whether every target `(gpu, tag)` GMS socket answers and matches any stamp."""
+        """Probe every target `(gpu, tag)` GMS socket, RO commit state, and optional stamp."""
         t0 = time.monotonic()
         path_finding = long_socket_path_finding(self.socket_dir, self.tags)
         if path_finding is not None:
@@ -231,8 +444,8 @@ class DynamoGmsStore:
                 finding=path_finding,
             )
 
-        paths = self.socket_paths(gpus=gpus, visible_devices=visible_devices, tp=tp)
-        if paths is None:
+        targets = self._resolve_targets(gpus=gpus, visible_devices=visible_devices, tp=tp)
+        if not targets:
             err = (
                 f"cannot resolve GPU UUIDs for Dynamo GMS probe "
                 f"(gpus={list(gpus)!r}, tp={tp!r}, visible={visible_devices!r})"
@@ -256,7 +469,50 @@ class DynamoGmsStore:
                 finding=finding,
             )
 
-        missing = tuple(p for p in paths if not _socket_answers(p, timeout_s=connect_timeout_s))
+        resolved_path_finding = long_socket_path_finding(
+            self.socket_dir, self.tags, [u for _, u in targets]
+        )
+        if resolved_path_finding is not None:
+            return StoreProbe(
+                ok=False,
+                backend=self.name,
+                seconds=time.monotonic() - t0,
+                error=resolved_path_finding["observed"],
+                finding=resolved_path_finding,
+            )
+
+        if not self.allow_remapped_visible_devices:
+            remap_finding = _visible_devices_remap_finding(targets, visible_devices)
+            if remap_finding is not None:
+                return StoreProbe(
+                    ok=False,
+                    backend=self.name,
+                    seconds=time.monotonic() - t0,
+                    error=remap_finding["observed"],
+                    finding=remap_finding,
+                )
+
+        tagged_paths = [
+            (tag, os.path.join(self.socket_dir, socket_name(uuid, tag)))
+            for _, uuid in targets
+            for tag in self.tags
+        ]
+        paths = [path for _, path in tagged_paths]
+        missing: list[str] = []
+        uncommitted_weights: list[str] = []
+        for tag, path in tagged_paths:
+            alive, state = _probe_gms_socket(path, timeout_s=connect_timeout_s)
+            if not alive:
+                missing.append(path)
+                continue
+            if (
+                self.read_only
+                and tag == "weights"
+                and isinstance(state, dict)
+                and state.get("committed") is False
+            ):
+                uncommitted_weights.append(path)
+
         if missing:
             finding = harness.plain_finding(
                 "dynamo_gms_daemon",
@@ -274,54 +530,76 @@ class DynamoGmsStore:
                 ok=False,
                 backend=self.name,
                 sockets=tuple(paths),
-                missing=missing,
+                missing=tuple(missing),
                 seconds=time.monotonic() - t0,
                 error=finding["observed"],
                 finding=finding,
             )
 
-        stale: tuple[str, ...] = ()
+        if uncommitted_weights:
+            finding = harness.plain_finding(
+                "dynamo_gms_not_committed",
+                f"GMS weights socket(s) are EMPTY / uncommitted: {', '.join(uncommitted_weights)}",
+                "committed GMS weights layout before launching a read-only (`--gms-read-only`) worker",
+                why="a read-only GMS client cannot load from disk and will block or time out waiting for a writer to commit",
+                actions=[
+                    "boot a writer without --gms-read-only first so it loads and commits weights into GMS",
+                    "or drop --gms-read-only to use RW_OR_RO mode",
+                ],
+                risk="worker hangs or times out in GMSWorker.init_device",
+            )
+            return StoreProbe(
+                ok=False,
+                backend=self.name,
+                sockets=tuple(paths),
+                seconds=time.monotonic() - t0,
+                error=finding["observed"],
+                finding=finding,
+            )
+
         if expected_stamp is not None:
             recorded = self.read_stamp()
-            if recorded is not None:
-                stale = stamp_diff(recorded, expected_stamp)
-                if stale:
-                    finding = harness.plain_finding(
-                        "dynamo_gms_stale",
-                        f"GMS cached weights stamp differs on: {', '.join(stale)}",
-                        "GMS weights committed under the current loader/model/env stamp",
-                        why="edits to model loader, quantization, or checkpoint invalidates resident GMS weights",
-                        actions=[
-                            "restart GMS server or clear committed layout before reloading",
-                            "or launch without --gms-read-only so a fresh RW writer republishes",
-                        ],
-                    )
-                    return StoreProbe(
-                        ok=False,
-                        backend=self.name,
-                        sockets=tuple(paths),
-                        stale_keys=stale,
-                        seconds=time.monotonic() - t0,
-                        error=finding["observed"],
-                        finding=finding,
-                    )
+            stale = stamp_diff(recorded, expected_stamp)
+            if stale:
+                finding = harness.plain_finding(
+                    "dynamo_gms_stale",
+                    f"GMS cached weights stamp mismatch ({', '.join(stale)})",
+                    "GMS weights committed under the current loader/model/env stamp",
+                    why="missing or drifted stamp means resident GMS weights cannot be trusted for the current loader/checkpoint/env",
+                    actions=[
+                        "restart GMS server or clear committed layout and reload with an RW writer",
+                        "record the current stamp via DynamoGmsStore.write_stamp() after committing",
+                    ],
+                )
+                return StoreProbe(
+                    ok=False,
+                    backend=self.name,
+                    sockets=tuple(paths),
+                    stale_keys=stale,
+                    seconds=time.monotonic() - t0,
+                    error=finding["observed"],
+                    finding=finding,
+                )
 
         return StoreProbe(
             ok=True,
             backend=self.name,
             sockets=tuple(paths),
-            stale_keys=stale,
             seconds=time.monotonic() - t0,
         )
 
-    def _gms_env(self) -> dict[str, str]:
+    def _gms_server_env(self) -> dict[str, str]:
+        """Child environment for `python -m gpu_memory_service --device <phys_idx>`.
+
+        Strips `CUDA_VISIBLE_DEVICES` so CUDA driver device ordinals match physical NVML
+        indices (`--device <phys_idx>`).
+        """
         env = dict(os.environ)
+        env.pop("CUDA_VISIBLE_DEVICES", None)
         env["GMS_SOCKET_DIR"] = self.socket_dir
-        if self.use_v1:
-            env["DYN_GMS_USE_V1"] = "true"
         if self.extra_pythonpath:
             existing = env.get("PYTHONPATH", "")
-            parts = [*self.extra_pythonpath, *([existing] if existing else [])]
+            parts = [*([existing] if existing else []), *self.extra_pythonpath]
             env["PYTHONPATH"] = os.pathsep.join(parts)
         return env
 
@@ -333,23 +611,35 @@ class DynamoGmsStore:
         tp: int | None = None,
         timeout_s: float = 30.0,
     ) -> StoreProbe:
-        """Reuse an already-running GMS server, or launch one local GMS server per target GPU."""
+        """Reuse already-running GMS servers, and spawn local GMS servers only for missing GPUs."""
         t0 = time.monotonic()
         first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp)
-        if first.ok or not first.matched_gpus or (first.finding and first.finding.get("check") == "gms_socket_path"):
+        if first.ok or not first.matched_gpus:
+            return first
+        if first.finding and first.finding.get("check") != "dynamo_gms_daemon":
+            return first
+
+        targets = self._resolve_targets(gpus=gpus, visible_devices=visible_devices, tp=tp)
+        if not targets:
+            return first
+
+        missing_set = set(first.missing)
+        devices_to_start = [
+            phys_idx
+            for phys_idx, uuid in targets
+            if any(os.path.join(self.socket_dir, socket_name(uuid, tag)) in missing_set for tag in self.tags)
+        ]
+        if not devices_to_start:
             return first
 
         os.makedirs(self.socket_dir, exist_ok=True)
         log_root = self.log_dir or self.socket_dir
         os.makedirs(log_root, exist_ok=True)
-        env = self._gms_env()
-        devices = _resolve_device_indices(gpus, visible_devices=visible_devices)
-        if tp is not None and len(devices) > tp:
-            devices = devices[:tp]
+        env = self._gms_server_env()
 
         started: list[tuple[int, subprocess.Popen]] = []
         try:
-            for dev in devices:
+            for dev in devices_to_start:
                 cmd = [
                     self.python,
                     "-m",
@@ -362,8 +652,7 @@ class DynamoGmsStore:
                 for tag in self.tags:
                     cmd.extend(["--tag", tag])
                 log_path = os.path.join(log_root, f"gms-server-gpu{dev}.log")
-                log_fh = open(log_path, "ab")
-                try:
+                with open(log_path, "ab") as log_fh:
                     child = subprocess.Popen(
                         cmd,
                         env=env,
@@ -372,10 +661,8 @@ class DynamoGmsStore:
                         stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
-                finally:
-                    log_fh.close()
                 started.append((dev, child))
-                self._owned_pids.append(child.pid)
+                self._owned_procs.append(child)
 
             deadline = time.monotonic() + float(timeout_s)
             while time.monotonic() < deadline:
@@ -387,22 +674,27 @@ class DynamoGmsStore:
                             f"(see {os.path.join(log_root, f'gms-server-gpu{dev}.log')})"
                         )
                 pr = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, connect_timeout_s=0.3)
-                if pr.ok:
+                if pr.ok or (pr.finding and pr.finding.get("check") == "dynamo_gms_not_committed"):
+                    # In read_only mode, sockets are alive even before a writer commits.
                     return StoreProbe(
-                        ok=True,
+                        ok=pr.ok,
                         backend=self.name,
                         sockets=pr.sockets,
                         seconds=time.monotonic() - t0,
+                        error=pr.error,
+                        finding=pr.finding,
                     )
                 time.sleep(0.2)
 
             raise TimeoutError(f"GMS server sockets did not become ready within {timeout_s:.1f}s")
-        except Exception as exc:
-            # Never leave half-started GMS daemons holding GPU resources.
+        except BaseException as exc:
+            # Never leave half-started GMS daemons or unreaped zombies holding GPU resources.
             for _, child in started:
-                proc.stop_session(child.pid, grace=3.0)
-                if child.pid in self._owned_pids:
-                    self._owned_pids.remove(child.pid)
+                self._stop_child(child, grace=3.0)
+                if child in self._owned_procs:
+                    self._owned_procs.remove(child)
+            if not isinstance(exc, Exception):
+                raise
             finding = harness.plain_finding(
                 "dynamo_gms_start_failed",
                 str(exc),
@@ -430,6 +722,43 @@ class DynamoGmsStore:
             cfg["gms_ro_connect_timeout_ms"] = int(self.ro_connect_timeout_ms)
         return cfg
 
+    def _check_explicit_extra_config(
+        self,
+        explicit_flags: set[str] | frozenset[str],
+        vals: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Fail closed when explicit `model_loader_extra_config` contradicts required GMS keys."""
+        req = self.extra_loader_config()
+        if not req or "model_loader_extra_config" not in explicit_flags:
+            return None
+        raw = vals.get("model_loader_extra_config")
+        if isinstance(raw, str):
+            try:
+                cfg = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                cfg = {}
+        elif isinstance(raw, dict):
+            cfg = raw
+        else:
+            cfg = {}
+        mismatches = [
+            f"{k}={cfg.get(k)!r} (expected {v!r})"
+            for k, v in req.items()
+            if cfg.get(k) != v
+        ]
+        if not mismatches:
+            return None
+        return harness.plain_finding(
+            "gms_loader_extra_config",
+            f"explicit --model-loader-extra-config conflicts with GMS settings: {', '.join(mismatches)}",
+            f"include {json.dumps(req)} in --model-loader-extra-config, or omit --model-loader-extra-config",
+            why="ignoring --gms-read-only or timeout settings would silently launch a writer or hang indefinitely",
+            actions=[
+                "update --model-loader-extra-config to include the required gms_* keys",
+                "or omit --model-loader-extra-config so RSIBox injects it",
+            ],
+        )
+
     def launch_delta(
         self,
         *,
@@ -448,8 +777,6 @@ class DynamoGmsStore:
         env: dict[str, str] = {"GMS_SOCKET_DIR": self.socket_dir}
         if self.scratch_kv:
             env["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-        if self.use_v1:
-            env["DYN_GMS_USE_V1"] = "true"
         if self.extra_pythonpath:
             env["RSIBOX_GMS_PYTHONPATH"] = os.pathsep.join(self.extra_pythonpath)
 
@@ -485,26 +812,32 @@ class DynamoGmsStore:
             elif "worker_cls" not in explicit_flags:
                 args.extend(["--worker-cls", GMS_VLLM_WORKER_CLS])
 
-            extra_cfg = self.extra_loader_config()
-            if extra_cfg and "model_loader_extra_config" not in explicit_flags:
-                args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
+            extra_conflict = self._check_explicit_extra_config(explicit_flags, vals)
+            if extra_conflict is not None:
+                findings.append(extra_conflict)
+            else:
+                extra_cfg = self.extra_loader_config()
+                if extra_cfg and "model_loader_extra_config" not in explicit_flags:
+                    args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
 
         elif engine == "sglang":
-            if "load_format" in explicit_flags and vals.get("load_format") != GMS_SGLANG_LOAD_FORMAT:
+            if "load_format" in explicit_flags and vals.get("load_format") not in (GMS_SGLANG_LOAD_FORMAT, None):
                 findings.append(
                     harness.plain_finding(
                         "gms_load_format",
-                        f"--weights-backend dynamo_gms and explicit --load-format {vals.get('load_format')!r}",
-                        f"--load-format {GMS_SGLANG_LOAD_FORMAT}, or omit --load-format",
-                        why="Dynamo GMS integrates with SGLang via `--load-format gms`",
-                        actions=["drop --load-format", "or switch --weights-backend"],
+                        f"--weights-backend dynamo_gms and explicit load_format={vals.get('load_format')!r}",
+                        "omit load_format (SglangLab wires GMSModelLoader via setup_gms + declare_resolution)",
+                        why="stock SGLang rejects string load_format='gms' unless bound through gpu_memory_service.integrations.sglang.setup_gms",
+                        actions=["omit load_format from SglangLab config", "or use weight_store=None"],
                     )
                 )
-            elif "load_format" not in explicit_flags:
-                args.extend(["--load-format", GMS_SGLANG_LOAD_FORMAT])
-            extra_cfg = self.extra_loader_config()
-            if extra_cfg and "model_loader_extra_config" not in explicit_flags:
-                args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
+            extra_conflict = self._check_explicit_extra_config(explicit_flags, vals)
+            if extra_conflict is not None:
+                findings.append(extra_conflict)
+            else:
+                extra_cfg = self.extra_loader_config()
+                if extra_cfg and "model_loader_extra_config" not in explicit_flags:
+                    args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
 
         elif engine in ("torch_module", "fastvideo"):
             env["RSIBOX_GMS_MODE"] = "ro" if self.read_only else "rw_or_ro"
@@ -527,12 +860,22 @@ class DynamoGmsStore:
             findings=tuple(findings),
         )
 
+    @staticmethod
+    def _stop_child(child: subprocess.Popen, grace: float = 5.0) -> None:
+        proc.stop_session(child.pid, grace=grace, reap=child.poll)
+        try:
+            child.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=2.0)
+
     def stop(self) -> None:
-        """Stop every GMS server process spawned by this instance (leaves external sidecars alone)."""
-        pids = list(self._owned_pids)
-        self._owned_pids.clear()
-        for pid in pids:
-            proc.stop_session(pid, grace=5.0)
+        """Stop and reap every GMS server process spawned by this instance (leaves external sidecars alone)."""
+        procs = list(self._owned_procs)
+        self._owned_procs.clear()
+        for child in procs:
+            self._stop_child(child, grace=5.0)
 
 
+_ORIG_RESOLVE_GPU_UUIDS = resolve_gpu_uuids
 register_weight_store("dynamo_gms", lambda **kw: DynamoGmsStore(**kw))

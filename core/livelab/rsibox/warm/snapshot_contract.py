@@ -16,6 +16,8 @@ modifying `ai-dynamo/snapshot` or hard-binding RSIBox to Kubernetes.
 from __future__ import annotations
 
 import os
+import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,7 @@ from .weight_store import WeightStore
 ENV_SNAPSHOT_CONTROL_DIR = "SNAPSHOT_CONTROL_DIR"
 SENTINEL_READY = "ready-for-snapshot"
 SENTINEL_RESTORE_COMPLETE = "restore-complete"
+_ENGINE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -66,11 +69,23 @@ class SnapshotLifecycleResult:
         return out
 
 
+def _validate_engine_name(engine_name: str) -> str:
+    if not engine_name or not _ENGINE_NAME_RE.match(engine_name) or ".." in engine_name:
+        raise ValueError(
+            f"invalid snapshot engine_name {engine_name!r}: expected [A-Za-z0-9][A-Za-z0-9._-]{{0,63}}"
+        )
+    return engine_name
+
+
 def _atomic_touch(path: Path, payload: str = "ok\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _wait_for_sentinel(path: Path, *, timeout_s: float | None, poll_s: float) -> bool:
@@ -95,12 +110,15 @@ def run_snapshot_lifecycle(
     """Execute the `ai-dynamo/snapshot` Workload Contract around `hooks`.
 
     Follows the contract's load-bearing invariants:
-    1. Clear stale `ready-for-snapshot` and `<engine>-restore-ready` before warming up.
+    1. Clear stale `ready-for-snapshot`, `restore-complete`, and `<engine>-restore-ready`
+       before initializing/warming up so a reused control directory never resumes prematurely.
     2. Warm up so lazy CUDA contexts, autotuning, and CUDA graphs enter the checkpoint.
     3. Quiesce and park disposable memory; NEVER write `ready-for-snapshot` if quiesce fails.
-    4. Atomically write `ready-for-snapshot`, then block until `restore-complete` appears.
+    4. Atomically write `ready-for-snapshot`, then block until `restore-complete` appears
+       (removing `ready-for-snapshot` on timeout so an agent never checkpoints an abandoned wait).
     5. Resume (`resume_after_restore`) and atomically write `<engine>-restore-ready`.
     """
+    _validate_engine_name(engine_name)
     raw_dir = control_dir if control_dir is not None else os.environ.get(ENV_SNAPSHOT_CONTROL_DIR)
     if not raw_dir:
         raise ValueError(
@@ -114,6 +132,7 @@ def run_snapshot_lifecycle(
 
     # Step 1 (MUST): clear stale sentinels before initializing/warming up.
     ready_file.unlink(missing_ok=True)
+    restore_complete_file.unlink(missing_ok=True)
     restore_ready_file.unlink(missing_ok=True)
 
     # Step 2 (SHOULD): run at least one real step so CUDA graphs / JIT enter the snapshot.
@@ -147,6 +166,7 @@ def run_snapshot_lifecycle(
     )
     wait_restore_s = time.monotonic() - t2
     if not restored:
+        ready_file.unlink(missing_ok=True)
         return SnapshotLifecycleResult(
             ok=False,
             engine=engine_name,
@@ -205,7 +225,7 @@ class DynamoK8sSnapshotDriver:
         wait_timeout_s: float | None = None,
         poll_s: float = 0.05,
     ):
-        self.engine_name = engine_name
+        self.engine_name = _validate_engine_name(engine_name)
         self.control_dir = control_dir
         self.wait_timeout_s = wait_timeout_s
         self.poll_s = poll_s

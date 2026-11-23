@@ -27,6 +27,8 @@ class WeightStore(Protocol):
         self,
         *,
         gpus: Sequence[str] = (),
+        visible_devices: str | None = None,
+        tp: int | None = None,
         timeout_s: float = 300.0,
     ) -> StoreProbe:
         """Start or verify the backing weight daemon so workers can attach without disk I/O."""
@@ -36,6 +38,8 @@ class WeightStore(Protocol):
         self,
         *,
         gpus: Sequence[str] = (),
+        visible_devices: str | None = None,
+        tp: int | None = None,
         expected_stamp: dict[str, Any] | None = None,
     ) -> StoreProbe:
         """Fast preflight check for liveness and optional staleness stamp match."""
@@ -66,6 +70,8 @@ class DiskStore:
         self,
         *,
         gpus: Sequence[str] = (),
+        visible_devices: str | None = None,
+        tp: int | None = None,
         timeout_s: float = 300.0,
     ) -> StoreProbe:
         return StoreProbe(ok=True, backend=self.name)
@@ -74,6 +80,8 @@ class DiskStore:
         self,
         *,
         gpus: Sequence[str] = (),
+        visible_devices: str | None = None,
+        tp: int | None = None,
         expected_stamp: dict[str, Any] | None = None,
     ) -> StoreProbe:
         return StoreProbe(ok=True, backend=self.name)
