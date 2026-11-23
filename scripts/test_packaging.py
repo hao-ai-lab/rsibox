@@ -281,16 +281,16 @@ class SetuptoolsBuildTests(unittest.TestCase):
                 )
                 wheel_py = {n for n in wheel_names if n.endswith(".py")}
                 self.assertEqual(wheel_py, expected_py)
-                top_level = zf.read("rsibox_livelab-0.1.0.dist-info/top_level.txt").decode("utf-8").splitlines()
+                top_level = zf.read("rsibox-0.1.0.dist-info/top_level.txt").decode("utf-8").splitlines()
                 self.assertEqual(sorted(top_level), EXPECTED_TOP_LEVEL)
-                entry_points = zf.read("rsibox_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
+                entry_points = zf.read("rsibox-0.1.0.dist-info/entry_points.txt").decode("utf-8")
                 self.assertIn("rsibox = rsibox.cli:main", entry_points)
                 self.assertIn("rsibox = rsibox.cli:main", entry_points)
                 # setuptools >= 77 (PEP 639) writes dist-info/licenses/LICENSE;
                 # setuptools 64..76 writes dist-info/LICENSE directly.
                 self.assertTrue(
-                    "rsibox_livelab-0.1.0.dist-info/licenses/LICENSE" in wheel_names
-                    or "rsibox_livelab-0.1.0.dist-info/LICENSE" in wheel_names,
+                    "rsibox-0.1.0.dist-info/licenses/LICENSE" in wheel_names
+                    or "rsibox-0.1.0.dist-info/LICENSE" in wheel_names,
                     f"LICENSE missing from wheel dist-info: {wheel_names}",
                 )
 
@@ -300,7 +300,7 @@ class SetuptoolsBuildTests(unittest.TestCase):
                 self.assertEqual(len(pth_names), 1)
                 pth_target = Path(zf.read(pth_names[0]).decode("utf-8").strip()).resolve()
                 self.assertEqual(pth_target, (proj / "core" / "livelab").resolve())
-                ep = zf.read("rsibox_livelab-0.1.0.dist-info/entry_points.txt").decode("utf-8")
+                ep = zf.read("rsibox-0.1.0.dist-info/entry_points.txt").decode("utf-8")
                 self.assertIn("rsibox = rsibox.cli:main", ep)
                 self.assertIn("rsibox = rsibox.cli:main", ep)
 
