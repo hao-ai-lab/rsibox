@@ -19,14 +19,20 @@ class SglangLab(ConformanceHarness, BaseLab):
     name, scheduler_module, io_module = "sglang", "sglang.srt.managers.scheduler", "sglang.srt.managers.io_struct"
     threaded_check = True
     def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0, fork_subprocs=False,
-                 weight_cache_dir=None):
+                 weight_cache_dir=None, weight_store=None, recovery_driver=None):
         self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
         self.engine, self.sock_path, self.ranks, self.rank_conns, self.rank_locks = None, None, 0, {}, {}
         self.fork_subprocs, self.fork_subprocs_fallback, self._fork_subprocs_restore = bool(fork_subprocs), [], None
         raw_wc = os.fspath(weight_cache_dir).strip() if weight_cache_dir else ""
         self.weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
         self._weight_cache_env_restore = None
-        super().__init__(receipts=receipts, check_timeout=check_timeout, rpc_timeout=rpc_timeout)
+        super().__init__(
+            receipts=receipts,
+            check_timeout=check_timeout,
+            rpc_timeout=rpc_timeout,
+            weight_store=weight_store,
+            recovery_driver=recovery_driver,
+        )
     @property
     def dirty(self): return self._dirty
     @dirty.setter
@@ -131,10 +137,45 @@ class SglangLab(ConformanceHarness, BaseLab):
                     os.environ[k] = old
         self._weight_cache_env_restore = _restore
 
+    def _prepare_weight_store(self):
+        """Prepare an optional pluggable `rsibox.warm.WeightStore` (e.g. `DynamoGmsStore`)."""
+        store = self.weight_store
+        if store is None or getattr(store, "name", "none") == "none":
+            return None
+        tp_size = int(self.config.get("tp_size", 1))
+        pr = store.probe(tp=tp_size)
+        if not pr.ok:
+            raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
+        explicit = {k for k in ("load_format", "model_loader_extra_config") if k in self.config}
+        delta = store.launch_delta(engine="sglang", explicit_flags=explicit, explicit_values=self.config)
+        if not delta.ok:
+            raise RuntimeError(f"weight store ({store.name}) config conflict: {delta.findings[0]['observed']}")
+        if delta.env:
+            self._restore_weight_cache_env()
+            prev = {k: os.environ.get(k) for k in delta.env}
+            os.environ.update(delta.env)
+            def _restore():
+                for k, old in prev.items():
+                    if old is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = old
+            self._weight_cache_env_restore = _restore
+        merged = dict(self.config)
+        if store.name == "dynamo_gms":
+            merged.setdefault("load_format", "gms")
+            extra_cfg = store.extra_loader_config()
+            if extra_cfg and "model_loader_extra_config" not in merged:
+                merged["model_loader_extra_config"] = extra_cfg
+        return merged
+
     def _start_engine(self):
         listener, accept_thread, accepted, errors = None, None, {}, []
         try:
-            if self.weight_cache_dir:
+            gms_cfg = None
+            if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
+                gms_cfg = self._prepare_weight_store()
+            elif self.weight_cache_dir:
                 self._prepare_weight_cache()
             if self.fork_subprocs:
                 self._prepare_fork_subprocs()
@@ -157,7 +198,9 @@ class SglangLab(ConformanceHarness, BaseLab):
             accept_thread.start()
             base_cls = self.engine_class()
             entry = functools.partial(agent.run_scheduler_entry, self.sock_path, self.scheduler_module, base_cls.run_scheduler_process_func)
-            if self.weight_cache_dir:
+            if gms_cfg is not None:
+                engine_cfg = gms_cfg
+            elif self.weight_cache_dir:
                 from services import weights as wc
                 engine_cfg = wc.client_config(self.config)
             else:
