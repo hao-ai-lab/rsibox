@@ -259,6 +259,11 @@ class VllmLab:
         self.tp = int(os.environ.get("RSIBOX_VLLM_TP", "1"))
         self.extra = shlex.split(os.environ.get("RSIBOX_VLLM_EXTRA", DEFAULT_EXTRA))
         self.share_gpu = os.environ.get("RSIBOX_VLLM_SHARE_GPU", "1") != "0"
+        self.weights_backend = os.environ.get("RSIBOX_VLLM_WEIGHTS_BACKEND", "").strip()
+        self.gms_socket_dir = os.environ.get("RSIBOX_VLLM_GMS_SOCKET_DIR", "").strip()
+        self.gms_pythonpath = os.environ.get("RSIBOX_VLLM_GMS_PYTHONPATH", "").strip()
+        self.gms_read_only = os.environ.get("RSIBOX_VLLM_GMS_READ_ONLY", "0") in ("1", "true", "yes")
+        self.gms_scratch_kv = os.environ.get("RSIBOX_VLLM_GMS_SCRATCH_KV", "0") in ("1", "true", "yes")
         work_env = os.environ.get("RSIBOX_VLLM_WORK")
         self.work_dir = os.path.abspath(work_env) if work_env else tempfile.mkdtemp(prefix="rsibox-vllm-")
         self.livelab_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -311,7 +316,23 @@ class VllmLab:
         cmd = [
             self.python_bin, self.engine_py, "start", "--cache-root", self.cache_root,
             "--log", log_path, "--vllm", self.vllm_bin,
-            f"--kvplan={os.path.join(self.work_dir, 'kvplan')}", "--timeout", "900", "--",
+        ]
+        if self.weights_backend == "dynamo_gms":
+            cmd += ["--weights-backend", "dynamo_gms"]
+            if self.gms_socket_dir:
+                cmd += ["--gms-socket-dir", self.gms_socket_dir]
+            if self.gms_pythonpath:
+                cmd += ["--gms-pythonpath", self.gms_pythonpath]
+            if self.gms_read_only:
+                cmd += ["--gms-read-only"]
+            if self.gms_scratch_kv:
+                cmd += ["--gms-scratch-kv"]
+        else:
+            cmd += [f"--kvplan={os.path.join(self.work_dir, 'kvplan')}"]
+            if self.weights_backend == "ipc_cache":
+                cmd += ["--weights-backend", "ipc_cache"]
+        cmd += [
+            "--timeout", "900", "--",
             self.model, "--port", str(port), "--served-model-name", "m", "-tp", str(self.tp),
             "--distributed-executor-backend", "mp",
             "--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension", *self.extra,
