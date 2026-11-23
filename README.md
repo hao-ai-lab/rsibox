@@ -11,7 +11,7 @@
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` lets coding agents and engineers test edits inside a running ML engine (vLLM, SGLang, Megatron-LM, FastVideo, veRL, miles) without restarting — with execution proof and instant rollback.
+`rsibox` is a live hot-reload sandbox for ML systems agents and engineers. Every edit to a serving or training engine normally pays a multi-minute restart to reload weights and rebuild CUDA graphs; `rsibox` hot-reloads Python, Triton, CUDA graphs, and C++/CUDA directly into the warm process so you iterate in seconds with execution proof and instant rollback.
 
 ## Quickstart
 
