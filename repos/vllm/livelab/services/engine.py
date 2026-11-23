@@ -110,10 +110,13 @@ import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
 import forksafe  # noqa: E402
 from rsibox import harness, ipc, proc  # noqa: E402  (stdlib only)
 from rsibox.warm import (  # noqa: E402  (stdlib only)
+    ENV_GMS_DEVICE_UUID_MAP,
     DynamoGmsStore,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
+    build_device_uuid_map,
 )
+from rsibox.warm.dynamo_gms import resolve_target_gpus  # noqa: E402  (stdlib only)
 
 _finding = harness.plain_finding
 
@@ -167,6 +170,15 @@ def _apply_gms_env(a, env):
             if entry not in cur:
                 cur.append(entry)
         env["PYTHONPATH"] = os.pathsep.join(cur)
+    vis = env.get("CUDA_VISIBLE_DEVICES")
+    if vis is not None and vis.strip():
+        targets = resolve_target_gpus(visible_devices=vis)
+        if targets and any(logical != phys for logical, (phys, _) in enumerate(targets)):
+            env[ENV_GMS_DEVICE_UUID_MAP] = json.dumps(build_device_uuid_map(targets))
+        else:
+            env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
+    else:
+        env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
 
 
 def engine_env(a, base=None):
@@ -186,6 +198,7 @@ def engine_env(a, base=None):
         env["PYTHONPATH"] = os.pathsep.join([here] + ([env["PYTHONPATH"]]
                                                       if env.get("PYTHONPATH") else []))
         env["RSIBOX_KVPLAN_DIR"] = kvplan_dir(a)
+    env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
     explicit_backend = getattr(a, "weights_backend", "") or ""
     if explicit_backend == "dynamo_gms" or (
         not explicit_backend
@@ -274,7 +287,7 @@ def weights_backend(a, v=None):
     return "none"
 
 
-def gms_store(a):
+def gms_store(a, *, allow_remapped=False):
     """Build the `DynamoGmsStore` configured by launcher flags."""
     sock_dir = getattr(a, "gms_socket_dir", "") or getattr(a, "weights_socket_dir", "") or None
     extra_py = [p for p in (getattr(a, "gms_pythonpath", "") or "").split(os.pathsep) if p]
@@ -283,6 +296,7 @@ def gms_store(a):
         read_only=bool(getattr(a, "gms_read_only", False)),
         scratch_kv=bool(getattr(a, "gms_scratch_kv", False)),
         extra_pythonpath=extra_py,
+        allow_remapped_visible_devices=allow_remapped,
     )
 
 
@@ -512,7 +526,7 @@ def preflight(a, v, env):
     found, rep = [], {}
     backend = weights_backend(a, v)
     if backend == "dynamo_gms":
-        pr = gms_store(a).probe(
+        pr = gms_store(a, allow_remapped=bool(env.get(ENV_GMS_DEVICE_UUID_MAP))).probe(
             visible_devices=env.get("CUDA_VISIBLE_DEVICES"),
             tp=v["args"]["tensor_parallel_size"],
         )

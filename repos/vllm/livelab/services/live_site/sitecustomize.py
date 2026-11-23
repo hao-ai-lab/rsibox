@@ -18,6 +18,44 @@ if os.environ.get("RSIBOX_LIVE_RECONFIG_DIR"):
     finally:
         sys.path.remove(os.path.dirname(_here))
 
+if os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"):
+    try:
+        import json as _json
+        import tempfile as _tempfile
+        from gpu_memory_service.common import utils as _gms_utils
+
+        _raw_map = _json.loads(os.environ["RSIBOX_GMS_DEVICE_UUID_MAP"])
+        _int_map = {int(k): str(v) for k, v in _raw_map.items() if str(v)} if isinstance(_raw_map, dict) else {}
+        if _int_map:
+            _cache = getattr(_gms_utils, "_uuid_cache", None)
+            if isinstance(_cache, dict):
+                _cache.update(_int_map)
+            _orig_get = getattr(_gms_utils, "_rsibox_orig_get_socket_path", _gms_utils.get_socket_path)
+            _orig_inv = getattr(_gms_utils, "_rsibox_orig_invalidate_uuid_cache", _gms_utils.invalidate_uuid_cache)
+            _gms_utils._rsibox_orig_get_socket_path = _orig_get
+            _gms_utils._rsibox_orig_invalidate_uuid_cache = _orig_inv
+            _gms_utils._rsibox_device_uuid_map = dict(_int_map)
+
+            def _rsibox_get_socket_path(device, tag="weights"):
+                _m = getattr(_gms_utils, "_rsibox_device_uuid_map", None) or {}
+                _u = _m.get(device)
+                if _u is not None:
+                    _d = os.environ.get("GMS_SOCKET_DIR") or _tempfile.gettempdir()
+                    return os.path.join(_d, f"gms_{_u}_{tag}.sock")
+                return _orig_get(device, tag)
+
+            def _rsibox_invalidate():
+                _orig_inv()
+                _c = getattr(_gms_utils, "_uuid_cache", None)
+                _m = getattr(_gms_utils, "_rsibox_device_uuid_map", None)
+                if isinstance(_c, dict) and isinstance(_m, dict):
+                    _c.update(_m)
+
+            _gms_utils.get_socket_path = _rsibox_get_socket_path
+            _gms_utils.invalidate_uuid_cache = _rsibox_invalidate
+    except Exception:  # noqa: BLE001 - never stop the engine from starting
+        pass
+
 for _entry in sys.path:
     _cand = os.path.join(_entry or os.getcwd(), "sitecustomize.py")
     if os.path.abspath(os.path.dirname(_cand)) == _here or not os.path.isfile(_cand):

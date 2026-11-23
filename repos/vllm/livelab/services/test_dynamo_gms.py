@@ -361,6 +361,38 @@ class EngineDynamoGmsTests(unittest.TestCase):
         self.assertEqual(env["RSIBOX_VLLM_GMS_READ_ONLY"], "1")
         self.assertEqual(env["RSIBOX_VLLM_GMS_SCRATCH_KV"], "1")
 
+    def test_bare_metal_remapped_cuda_visible_devices_exports_uuid_map_and_passes_preflight(self):
+        u4 = "GPU-44444444-4444-4444-4444-444444444444"
+        u5 = "GPU-55555555-5555-5555-5555-555555555555"
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
+            guards = [
+                _MockGmsSock(os.path.join(tmp, socket_name(u, tag)), committed=True)
+                for u in (u4, u5)
+                for tag in GMS_TAGS
+            ]
+            try:
+                a, _ = engine.parse([
+                    "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+                    "--weights-backend", "dynamo_gms", "--gms-socket-dir", tmp,
+                    "--", "m", "-tp", "2",
+                ])
+                v = _parsed(explicit=("model", "tensor_parallel_size"), tensor_parallel_size=2)
+                with (
+                    mock.patch("engine.resolve_target_gpus", return_value=[(4, u4), (5, u5)]),
+                    mock.patch("rsibox.warm.dynamo_gms.resolve_target_gpus", return_value=[(4, u4), (5, u5)]),
+                ):
+                    env = engine.engine_env(a, base={"PATH": "/usr/bin", "CUDA_VISIBLE_DEVICES": "4,5"})
+                    self.assertEqual(
+                        json.loads(env["RSIBOX_GMS_DEVICE_UUID_MAP"]),
+                        {"0": u4, "1": u5},
+                    )
+                    found, rep = engine.preflight(a, v, env)
+                    self.assertEqual(found, [])
+                    self.assertTrue(rep["gms_probe"]["ok"])
+            finally:
+                for g in guards:
+                    g.close()
+
     def test_legacy_weights_flag_stays_ipc_cache(self):
         a, vargv = engine.parse([
             "start", "--cache-root", "/tmp/c", "--log", "/tmp/l", "--weights", "--", "m",
