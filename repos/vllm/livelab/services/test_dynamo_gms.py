@@ -1,13 +1,17 @@
-"""Unit tests for pluggable Dynamo GMS support in `repos/vllm/livelab/services/engine.py`.
+"""Unit tests for pluggable Dynamo GMS support in `repos/vllm/livelab/services/engine.py`
+and `VllmLab.launch_environment()`.
 
 CPU-only tests (no GPU, vLLM, or Dynamo installation required). Verifies flag wiring,
-conflict findings, GMS socket preflight probing, and zero regression on `--weights` (`ipc_cache`).
+PYTHONPATH ordering, conflict findings, Tier-2 reconfig protection, `/proc` fallback
+recovery, `_inherit_launcher` backend switching, MsgPack GMS socket preflight probing,
+and zero regression on `--weights` (`ipc_cache`).
 """
 from __future__ import annotations
 
 import json
 import os
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -16,10 +20,13 @@ from pathlib import Path
 from unittest import mock
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
+LIVELAB_ROOT = HERE.parent
+for _p in (str(HERE), str(LIVELAB_ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import engine  # noqa: E402
+from adapter.conformance_lab import VllmLab  # noqa: E402
 from rsibox.warm import GMS_TAGS, GMS_VLLM_LOAD_FORMAT, GMS_VLLM_WORKER_CLS  # noqa: E402
 from rsibox.warm.dynamo_gms import socket_name  # noqa: E402
 
@@ -38,9 +45,25 @@ def _parsed(explicit=(), **overrides):
     return {"ok": True, "args": args, "explicit": list(explicit)}
 
 
-class _UnixSock:
-    def __init__(self, path: str):
+def _pack_runtime_state(committed: bool) -> bytes:
+    """Minimal MsgPack map: {"type": "get_runtime_state_response", "committed": bool}."""
+    parts = [b"\x82"]
+    for key, val in (("type", "get_runtime_state_response"), ("committed", committed)):
+        kb = key.encode("utf-8")
+        parts.append(bytes([0xA0 | len(kb)]) + kb)
+        if isinstance(val, bool):
+            parts.append(b"\xc3" if val else b"\xc2")
+        else:
+            vb = val.encode("utf-8")
+            parts.append(bytes([0xA0 | len(vb)]) + vb)
+    payload = b"".join(parts)
+    return struct.pack(">I", len(payload)) + payload
+
+
+class _MockGmsSock:
+    def __init__(self, path: str, *, committed: bool = True):
         self.path = path
+        self.committed = committed
         self._stop = threading.Event()
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._sock.bind(path)
@@ -55,7 +78,17 @@ class _UnixSock:
                 conn, _ = self._sock.accept()
             except OSError:
                 continue
-            conn.close()
+            try:
+                conn.settimeout(0.5)
+                hdr = conn.recv(4)
+                if len(hdr) == 4:
+                    n = struct.unpack(">I", hdr)[0]
+                    _ = conn.recv(n)
+                    conn.sendall(_pack_runtime_state(self.committed))
+            except OSError:
+                pass
+            finally:
+                conn.close()
 
     def close(self):
         self._stop.set()
@@ -66,7 +99,7 @@ class _UnixSock:
 
 
 class EngineDynamoGmsTests(unittest.TestCase):
-    def test_serve_cmd_and_env_inject_dynamo_gms_flags(self):
+    def test_serve_cmd_and_env_inject_dynamo_gms_flags_without_shadowing_live_site(self):
         a, vargv = engine.parse([
             "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
             "--weights-backend", "dynamo_gms",
@@ -89,12 +122,17 @@ class EngineDynamoGmsTests(unittest.TestCase):
         self.assertIn("--worker-extension-cls", cmd)
         self.assertIn("adapter.worker_ext.KernelWorkerExtension", cmd)
         cfg_idx = cmd.index("--model-loader-extra-config")
-        self.assertEqual(json.loads(cmd[cfg_idx + 1]), {"gms_read_only": True})
+        self.assertEqual(
+            json.loads(cmd[cfg_idx + 1]),
+            {"gms_read_only": True, "gms_ro_connect_timeout_ms": 10000},
+        )
 
-        env = engine.engine_env(a, base={"PATH": "/usr/bin"})
+        env = engine.engine_env(a, base={"PATH": "/usr/bin", "PYTHONPATH": "/tmp/hooks:/tmp/farm"})
         self.assertEqual(env["GMS_SOCKET_DIR"], os.path.abspath("/tmp/gms"))
         self.assertEqual(env["DYN_GMS_SCRATCH_KV_ENABLED"], "1")
-        self.assertIn("/opt/gms-overlay", env["PYTHONPATH"].split(os.pathsep))
+        py_parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(py_parts[0], engine.LIVE_SITE)
+        self.assertLess(py_parts.index("/tmp/farm"), py_parts.index("/opt/gms-overlay"))
 
     def test_conflicts_emit_structured_findings(self):
         # 1. --weights + --weights-backend dynamo_gms
@@ -125,7 +163,110 @@ class EngineDynamoGmsTests(unittest.TestCase):
         )
         self.assertIn("gms_load_format", {f["check"] for f in f3})
 
-    def test_preflight_probes_gms_sockets_and_fails_fast_when_missing(self):
+        # 4. --gms-read-only + explicit --model-loader-extra-config missing gms_read_only
+        a4, _ = engine.parse([
+            "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend", "dynamo_gms", "--gms-read-only",
+            "--gms-socket-dir", "/tmp/gms", "--", "m",
+        ])
+        f4 = engine.argv_findings(
+            a4, _parsed(explicit=("model", "model_loader_extra_config"), model_loader_extra_config={"foo": 1})
+        )
+        self.assertIn("gms_loader_extra_config", {f["check"] for f in f4})
+
+        # 5. --weights-backend ipc_cache enforces weights_load_format & weights_fallback too
+        a5, _ = engine.parse([
+            "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend", "ipc_cache", "--", "m",
+        ])
+        f5 = engine.argv_findings(
+            a5,
+            _parsed(
+                explicit=("model", "load_format", "model_loader_extra_config"),
+                load_format="safetensors",
+                model_loader_extra_config={"fallback": True},
+            ),
+        )
+        checks5 = {f["check"] for f in f5}
+        self.assertIn("weights_load_format", checks5)
+        self.assertIn("weights_fallback", checks5)
+
+    def test_reconfig_findings_guards_tier2_changes_for_dynamo_gms(self):
+        a, _ = engine.parse([
+            "reconfigure", "--pid", "123", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend", "dynamo_gms", "--gms-socket-dir", "/tmp/gms",
+        ])
+        v = _parsed(explicit=("model",))
+        reconfig = {
+            "tier": "tier2",
+            "weights_compatible": False,
+            "weight_key_changed": ["model"],
+            "changed": {"model": ("A", "B")},
+        }
+        findings = engine.reconfig_findings(a, v, reconfig)
+        self.assertEqual([f["check"] for f in findings], ["weights_reconfig_tier2"])
+
+        a.weights_accept_reconfig = True
+        self.assertEqual(engine.reconfig_findings(a, v, reconfig), [])
+
+    def test_load_engine_state_proc_fallback_recovers_gms_fields(self):
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="proc-") as tmp:
+            pid_dir = Path(tmp) / "4242"
+            pid_dir.mkdir()
+            cmdline = [
+                "/usr/bin/vllm", "serve", "m", "--port", "18500",
+                "--host", "127.0.0.1",
+                "--load-format", GMS_VLLM_LOAD_FORMAT,
+                "--worker-cls", GMS_VLLM_WORKER_CLS,
+                "--model-loader-extra-config", json.dumps({"gms_read_only": True}),
+            ]
+            (pid_dir / "cmdline").write_bytes("\0".join(cmdline).encode())
+            (pid_dir / "environ").write_bytes(
+                b"GMS_SOCKET_DIR=/tmp/gms-test\0DYN_GMS_SCRATCH_KV_ENABLED=1\0"
+            )
+            st = engine.load_engine_state(os.path.join(tmp, "cache"), 4242, proc_root=tmp)
+            self.assertIsNotNone(st)
+            self.assertEqual(st["vargv"], ["m", "--port", "18500"])
+            self.assertEqual(st["launcher"]["weights_backend"], "dynamo_gms")
+            self.assertTrue(st["launcher"]["gms_read_only"])
+            self.assertTrue(st["launcher"]["gms_scratch_kv"])
+            self.assertEqual(st["launcher"]["gms_socket_dir"], "/tmp/gms-test")
+
+    def test_inherit_launcher_handles_equals_syntax_and_backend_switches(self):
+        # Switch from saved --weights (ipc_cache) to --weights-backend=dynamo_gms
+        raw1 = [
+            "reconfigure", "--pid", "1", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend=dynamo_gms", "--gms-socket-dir=/tmp/b",
+        ]
+        a1, _ = engine.parse(raw1)
+        engine._inherit_launcher(
+            a1,
+            {"weights": True, "weights_backend": "", "gms_socket_dir": "/tmp/a", "kvplan": ""},
+            raw1,
+        )
+        self.assertFalse(a1.weights)
+        self.assertEqual(a1.weights_backend, "dynamo_gms")
+        self.assertEqual(a1.gms_socket_dir, "/tmp/b")
+        self.assertIsNone(a1.kvplan)
+
+        # Switch from saved dynamo_gms to --weights-backend=none drops gms_* inheritance
+        raw2 = [
+            "reconfigure", "--pid", "1", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend=none",
+        ]
+        a2, _ = engine.parse(raw2)
+        engine._inherit_launcher(
+            a2,
+            {"weights": False, "weights_backend": "dynamo_gms", "gms_socket_dir": "/tmp/a", "gms_read_only": True},
+            raw2,
+        )
+        self.assertEqual(a2.weights_backend, "none")
+        self.assertEqual(a2.gms_socket_dir, "")
+        self.assertFalse(a2.gms_read_only)
+        env2 = engine.engine_env(a2, base={"PATH": "/usr/bin"})
+        self.assertNotIn("GMS_SOCKET_DIR", env2)
+
+    def test_preflight_probes_gms_sockets_and_fails_closed_on_uncommitted_ro(self):
         uuid = "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
             a, _ = engine.parse([
@@ -133,21 +274,48 @@ class EngineDynamoGmsTests(unittest.TestCase):
                 "--weights-backend", "dynamo_gms", "--gms-socket-dir", tmp, "--", "m",
             ])
             v = _parsed(explicit=("model",))
-            with mock.patch("rsibox.warm.dynamo_gms.resolve_gpu_uuids", return_value=[uuid]):
+            with mock.patch("rsibox.warm.dynamo_gms.resolve_target_gpus", return_value=[(0, uuid)]):
                 found, rep = engine.preflight(a, v, {"CUDA_VISIBLE_DEVICES": "0"})
                 self.assertEqual(len(found), 1)
                 self.assertEqual(found[0]["check"], "dynamo_gms_daemon")
                 self.assertFalse(rep["gms_probe"]["ok"])
 
-                # Start both weights and kv_cache listeners -> preflight passes.
-                guards = [_UnixSock(os.path.join(tmp, socket_name(uuid, tag))) for tag in GMS_TAGS]
+                # Start uncommitted listeners: RW_OR_RO passes, --gms-read-only fails closed.
+                guards = [
+                    _MockGmsSock(os.path.join(tmp, socket_name(uuid, tag)), committed=False)
+                    for tag in GMS_TAGS
+                ]
                 try:
                     found2, rep2 = engine.preflight(a, v, {"CUDA_VISIBLE_DEVICES": "0"})
                     self.assertEqual(found2, [])
                     self.assertTrue(rep2["gms_probe"]["ok"])
+
+                    a_ro, _ = engine.parse([
+                        "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+                        "--weights-backend", "dynamo_gms", "--gms-read-only",
+                        "--gms-socket-dir", tmp, "--", "m",
+                    ])
+                    found3, rep3 = engine.preflight(a_ro, v, {"CUDA_VISIBLE_DEVICES": "0"})
+                    self.assertEqual([f["check"] for f in found3], ["dynamo_gms_not_committed"])
+                    self.assertFalse(rep3["gms_probe"]["ok"])
                 finally:
                     for g in guards:
                         g.close()
+
+    def test_vllm_lab_launch_environment_translates_gms_flags(self):
+        env = VllmLab.launch_environment([
+            "--model", "m",
+            "--weights-backend", "dynamo_gms",
+            "--gms-socket-dir", "/tmp/gms",
+            "--gms-pythonpath", "/opt/gms",
+            "--gms-read-only",
+            "--gms-scratch-kv",
+        ])
+        self.assertEqual(env["RSIBOX_VLLM_WEIGHTS_BACKEND"], "dynamo_gms")
+        self.assertEqual(env["RSIBOX_VLLM_GMS_SOCKET_DIR"], os.path.abspath("/tmp/gms"))
+        self.assertEqual(env["RSIBOX_VLLM_GMS_PYTHONPATH"], "/opt/gms")
+        self.assertEqual(env["RSIBOX_VLLM_GMS_READ_ONLY"], "1")
+        self.assertEqual(env["RSIBOX_VLLM_GMS_SCRATCH_KV"], "1")
 
     def test_legacy_weights_flag_stays_ipc_cache(self):
         a, vargv = engine.parse([

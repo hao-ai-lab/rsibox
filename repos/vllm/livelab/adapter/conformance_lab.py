@@ -193,7 +193,9 @@ class VllmLab:
         """
         argv = list(argv)
         known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
-                      "--check-timeout", "--no-share-gpu", "-h", "--help"}
+                      "--check-timeout", "--no-share-gpu",
+                      "--weights-backend", "--gms-socket-dir", "--gms-pythonpath",
+                      "--gms-read-only", "--gms-scratch-kv", "-h", "--help"}
         if argv[:1] == ["--"] and len(argv) > 1:
             first_opt = argv[1].split("=", 1)[0]
             if first_opt in known_opts or "--" in argv[1:]:
@@ -221,6 +223,11 @@ class VllmLab:
             ("--extra", dict(default=None, help="extra `vllm serve` flags string")),
             ("--check-timeout", dict(type=float, default=None, help="HTTP / control timeout in seconds")),
             ("--no-share-gpu", dict(action="store_true", help="keep live server running during fresh_check")),
+            ("--weights-backend", dict(choices=["none", "ipc_cache", "dynamo_gms"], default=None, help="pluggable resident weights backend")),
+            ("--gms-socket-dir", dict(default=None, help="Dynamo GMS socket directory")),
+            ("--gms-pythonpath", dict(default=None, help="extra PYTHONPATH containing gpu_memory_service")),
+            ("--gms-read-only", dict(action="store_true", help="attach Dynamo GMS weights read-only")),
+            ("--gms-scratch-kv", dict(action="store_true", help="enable Dynamo GMS Scratch-KV mode")),
         ):
             ap.add_argument(flag, **kw)
         ns = ap.parse_args(norm)
@@ -232,12 +239,19 @@ class VllmLab:
             ("port", "RSIBOX_VLLM_PORT", str),
             ("tp", "RSIBOX_VLLM_TP", str),
             ("check_timeout", "RSIBOX_VLLM_CHECK_TIMEOUT", str),
+            ("weights_backend", "RSIBOX_VLLM_WEIGHTS_BACKEND", str),
+            ("gms_socket_dir", "RSIBOX_VLLM_GMS_SOCKET_DIR", os.path.abspath),
+            ("gms_pythonpath", "RSIBOX_VLLM_GMS_PYTHONPATH", str),
         ):
             val = getattr(ns, attr)
-            if val is not None and (attr not in ("model", "venv", "work") or val):
+            if val is not None and (attr not in ("model", "venv", "work", "gms_socket_dir") or val):
                 env[key] = xform(val)
         if ns.no_share_gpu:
             env["RSIBOX_VLLM_SHARE_GPU"] = "0"
+        if ns.gms_read_only:
+            env["RSIBOX_VLLM_GMS_READ_ONLY"] = "1"
+        if ns.gms_scratch_kv:
+            env["RSIBOX_VLLM_GMS_SCRATCH_KV"] = "1"
         if ns.extra is not None or tail:
             env["RSIBOX_VLLM_EXTRA"] = shlex.join((shlex.split(ns.extra) if ns.extra is not None else []) + tail)
         return env
@@ -262,8 +276,8 @@ class VllmLab:
         self.weights_backend = os.environ.get("RSIBOX_VLLM_WEIGHTS_BACKEND", "").strip()
         self.gms_socket_dir = os.environ.get("RSIBOX_VLLM_GMS_SOCKET_DIR", "").strip()
         self.gms_pythonpath = os.environ.get("RSIBOX_VLLM_GMS_PYTHONPATH", "").strip()
-        self.gms_read_only = os.environ.get("RSIBOX_VLLM_GMS_READ_ONLY", "0") in ("1", "true", "yes")
-        self.gms_scratch_kv = os.environ.get("RSIBOX_VLLM_GMS_SCRATCH_KV", "0") in ("1", "true", "yes")
+        self.gms_read_only = os.environ.get("RSIBOX_VLLM_GMS_READ_ONLY", "0").strip().lower() in ("1", "true", "yes")
+        self.gms_scratch_kv = os.environ.get("RSIBOX_VLLM_GMS_SCRATCH_KV", "0").strip().lower() in ("1", "true", "yes")
         work_env = os.environ.get("RSIBOX_VLLM_WORK")
         self.work_dir = os.path.abspath(work_env) if work_env else tempfile.mkdtemp(prefix="rsibox-vllm-")
         self.livelab_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -281,7 +295,9 @@ class VllmLab:
         self.server_key = (self.model, self.venv, self.port, self.work_dir, self.tp,
                            tuple(self.extra), os.environ.get("CUDA_VISIBLE_DEVICES"),
                            os.environ.get("VLLM_USE_V2_MODEL_RUNNER"),
-                           os.environ.get("VLLM_BATCH_INVARIANT"))
+                           os.environ.get("VLLM_BATCH_INVARIANT"),
+                           self.weights_backend, self.gms_socket_dir,
+                           self.gms_pythonpath, self.gms_read_only, self.gms_scratch_kv)
         shared = VllmLab._shared
         if (shared is not None and shared.key == self.server_key and shared.alive()
                 and self._server_at_base(shared)):
@@ -317,7 +333,10 @@ class VllmLab:
             self.python_bin, self.engine_py, "start", "--cache-root", self.cache_root,
             "--log", log_path, "--vllm", self.vllm_bin,
         ]
-        if self.weights_backend == "dynamo_gms":
+        # Ground-truth farm runs (`use_farm=True`) always load fresh from disk so
+        # loader/quantization patches are never bypassed by committed resident weights.
+        active_backend = "" if use_farm else self.weights_backend
+        if active_backend == "dynamo_gms":
             cmd += ["--weights-backend", "dynamo_gms"]
             if self.gms_socket_dir:
                 cmd += ["--gms-socket-dir", self.gms_socket_dir]
@@ -329,7 +348,7 @@ class VllmLab:
                 cmd += ["--gms-scratch-kv"]
         else:
             cmd += [f"--kvplan={os.path.join(self.work_dir, 'kvplan')}"]
-            if self.weights_backend == "ipc_cache":
+            if active_backend == "ipc_cache":
                 cmd += ["--weights-backend", "ipc_cache"]
         cmd += [
             "--timeout", "900", "--",
