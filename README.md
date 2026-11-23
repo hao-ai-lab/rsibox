@@ -3,8 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="#quickstart"><b>Quickstart</b></a> ·
-  <a href="#using-rsibox-with-coding-agents"><b>For Agents</b></a> ·
+  <a href="#quick-start"><b>Quick Start</b></a> ·
   <a href="docs/engines.md"><b>Engines &amp; Benchmarks</b></a> ·
   <a href="docs/mechanisms.md"><b>Mechanisms</b></a> ·
   <a href="CONTRIBUTING.md"><b>Contributing</b></a> ·
@@ -13,70 +12,61 @@
 
 `rsibox` is a live hot-reload sandbox for ML systems agents and engineers. Every edit to a serving or training engine normally pays a multi-minute restart to reload weights and rebuild CUDA graphs; `rsibox` hot-reloads Python, Triton, CUDA graphs, and C++/CUDA directly into the warm process so you iterate in seconds with execution proof and instant rollback.
 
-## Quickstart
+## Quick Start
 
-Requires Python 3.11+ (CPU-only, zero third-party dependencies for the core runtime and toy labs):
+Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
 
-```sh
+```bash
 git clone https://github.com/hao-ai-lab/rsibox.git && cd rsibox
 python3 -m venv .venv && . .venv/bin/activate && pip install -e .
 
-# 1. Verify environment and run the 11-case conformance suite on the toy lab (~1.5 s)
-fastrsi doctor
+# Run the live-swap verification check on the toy lab (~1.5 s)
 fastrsi conformance toy
 
-# 2. Start a live rsibox sandbox, run a check, and shut it down
+# Start a live sandbox, run a check, and shut it down
 rsibox up --launcher local --lab toy --state /tmp/rsibox-toy
-export RSIBOX=/tmp/rsibox-toy/box.json
-rsibox status
-rsibox check
+RSIBOX=/tmp/rsibox-toy/box.json rsibox check
 rsibox down --state /tmp/rsibox-toy
 ```
 
-## Using `rsibox` with Coding Agents
-
-Point Claude Code, Codex, Cursor, or Antigravity at this repository:
+To use `rsibox` from Claude Code, Codex, Cursor, or Antigravity, point your agent at [`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) and [`AGENTS.md`](AGENTS.md):
 
 ```text
 Read core/agents/livelab_overview.md and AGENTS.md, start an rsibox for <engine>,
-and iterate on <target optimization> using install -> check -> uninstall without restarting the engine.
+and iterate on <optimization> with rsibox install -> check -> uninstall without restarting.
 ```
 
-Agents drive any engine through one CLI (`RSIBOX` points to the box file; exit code `0` = ok, `2` = refused/aborted with the required restart boundary, `1` = error):
+## Hot-Reload Guarantees
 
-```sh
-rsibox up --launcher local|docker|gvisor|slurm --lab <engine> [--real] --state <dir>
-rsibox install --diff edit.patch        # atomic swap across all ranks (or refuse cleanly)
-rsibox check                            # run probe; returns timing, output diff, and witness counts
-rsibox uninstall                        # journaled revert to base with identity proof
-rsibox reset --kind state|respawn       # restore caches/RNG, or respawn if poisoned
-rsibox down --state <dir>
-```
+| Guarantee | What It Enforces |
+| :--- | :--- |
+| **[Atomic step-gap swap](docs/mechanisms.md)** | Stages edits while the engine runs and commits across all ranks together between steps. |
+| **[Witness execution proof](core/livelab/INTERFACE.md)** | Counts calls on every rank so silent no-op edits (`zero_witness`) fail instead of passing. |
+| **[Journaled rollback](docs/mechanisms.md)** | Logs every mutation's inverse; `uninstall` restores exact code objects and verifies base identity. |
+| **[Explicit restart boundaries](docs/kernels-and-graphs.md)** | Refuses unsafe edits before touching state and names the cheapest warm tier (Triton, CUDA graph recapture, `.cu` reload, or zygote + CUDA IPC). |
+| **[Live-swap verification check](core/livelab/conformance/README.md)** | Verifies repeatability, parity with fresh restart, crash/hang poisoning, and repeated undo stability. |
 
-Ready-to-use agent prompts live in [`core/agents/`](core/agents/) (`livelab_overview.md`, `developer.md`, `orchestrator.md`, `toolsmith_offline.md`).
+See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CPU tests, and [`core/agents/`](core/agents/) for ready-to-use agent prompts.
 
-## How It Works
+## Supported Engines & Highlights
 
-1. **Atomic step-gap swap:** Edits are staged while the engine runs and committed across all ranks in the gap between steps.
-2. **Witness proof:** Every edited function counts calls on every rank, catching silent no-op edits (`zero_witness`) instead of reporting them as passing.
-3. **Journaled undo:** Every mutation logs its inverse; `uninstall` restores exact code objects and verifies code identity against base.
-4. **Explicit restart boundaries:** Edits that cannot be swapped in place are refused before mutating state, naming the cheapest warm boundary (Triton rebuild, selective CUDA graph recapture, C++/CUDA reload, or zygote + CUDA IPC).
+- **Serving (**`vLLM`**,** `SGLang`**):** Live Python, Triton, V1/V2 CUDA graph recapture, and C++/CUDA `.cu` hot-reload — up to **95×** faster on vLLM (`228 s → 2.4–23.6 s`) and **176×** on SGLang (`66.4 s → 0.38–1.77 s`).
+- **Training & Video (**`Megatron-LM`**,** `FastVideo`**):** Multi-GPU TP/DP/PP/VPP2 and SP4 live swaps + zygote/IPC weight holders — 82-iteration Megatron hill-climb without restarts and up to **92×** faster FastVideo checks.
+- **RL Post-Training (**`veRL`**,** `miles`**):** 21-actor Ray live swaps with coupled `S0` reset — up to **93×** faster on miles (`82.4 s → 0.89 s`) and **8.2×** live / `12.6 ms` offline replay on veRL.
 
-## Documentation
+Full engine tables, hardware receipts, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
 
-| Document | Contents |
-|---|---|
-| **[Engines & Benchmarks](docs/engines.md)** | Supported engines (vLLM, SGLang, Megatron-LM, FastVideo, veRL, miles), GPU speedups, per-engine docs, and repository layout |
-| **[Mechanisms & Conformance](docs/mechanisms.md)** | Restart boundaries (Python, Triton, CUDA graphs, C++/CUDA, zygote + IPC), 11 conformance guarantees, limits, and full CPU test suite |
-| **[Lab Interface](core/livelab/INTERFACE.md)** | Formal `install` / `check` / `reset` / `uninstall` / `status` contract |
-| **[Kernels & CUDA Graphs](docs/kernels-and-graphs.md)** | Design notes on live Triton/CUDA kernel swaps and selective graph recapture |
-| **[Agent & Contributor Rules](AGENTS.md)** | Full workflow rules for coding agents and contributors (see also [`CONTRIBUTING.md`](CONTRIBUTING.md)) |
+## Contributors
+
+<p>
+  <a href="https://github.com/GindaChen"><img src="https://github.com/GindaChen.png?size=112" width="56" alt="Junda Chen" title="Junda Chen (@GindaChen)"></a>
+</p>
 
 ## Citation
 
 ```bibtex
 @misc{rsibox2026,
-  title        = {rsibox (FastRSI): Live Hot-Swap Sandbox for ML Engines},
+  title        = {rsibox: Live Hot-Reload Sandbox for ML Engines},
   author       = {Hao AI Lab},
   year         = {2026},
   howpublished = {\url{https://github.com/hao-ai-lab/rsibox}}

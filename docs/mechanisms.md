@@ -16,11 +16,11 @@ When an edit cannot be swapped in place, `rsibox` refuses before mutating state 
 
 See [`docs/kernels-and-graphs.md`](kernels-and-graphs.md) for the deeper kernel and CUDA graph design.
 
-## Lab interface & 11 conformance guarantees
+## Lab interface & live-swap verification check
 
 Every engine adapter implements [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md): `install(patch)`, `check(workload)`, `reset()`, `uninstall()`, and `status()` (`base`, `edited`, or `poisoned`).
 
-The 11 conformance cases ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) verify:
+The live-swap verification check ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) verifies:
 
 - **c0–c2:** Repeatable workload; no-op edit stays bit-exact; visible edit changes output and fires witnesses on every rank.
 - **c3:** Live-edited output (and a chain of 3 edits) matches a fresh process started with the edit.
