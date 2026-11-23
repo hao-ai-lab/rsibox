@@ -3,7 +3,7 @@ import json, multiprocessing as mp, os, subprocess, sys, threading, types
 import adapter
 from adapter.lab import MilesLab
 from adapter.state import CoupledWeightReset, EpochDataBuffer
-from fastrsi import harness as H
+from rsibox import harness as H
 import ray_participants as RP
 
 OPS, ROLLOUT, TRAINER = "adapter.toymiles.ops", "adapter.toymiles.rollout", "adapter.toymiles.trainer"

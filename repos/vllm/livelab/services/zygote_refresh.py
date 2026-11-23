@@ -31,8 +31,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import corelab  # noqa: F401,E402
-from fastrsi import hooks  # noqa: E402
-from fastrsi.op_guard import _norm_schema, op_redefine_guard  # noqa: E402
+from rsibox import hooks  # noqa: E402
+from rsibox.op_guard import _norm_schema, op_redefine_guard  # noqa: E402
 
 
 def import_graph(prefixes=("vllm",), modules=None):

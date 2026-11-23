@@ -307,16 +307,16 @@ class TrainerStateSnapshot:
 
 
 def snapshot_trainer(actor):
-    """Capture S0 state onto `actor._fastrsi_s0` for in-place coupled resets."""
-    snap = actor._fastrsi_s0 = TrainerStateSnapshot(
+    """Capture S0 state onto `actor._rsibox_s0` for in-place coupled resets."""
+    snap = actor._rsibox_s0 = TrainerStateSnapshot(
         actor.model, actor.optimizer, getattr(actor, "opt_param_scheduler", None)
     )
     return {"take_s": snap.take_s, "restored": snap.restored, "bytes": snap.bytes}
 
 
 def restore_trainer(actor, tag="actor", allow_extra=True):
-    """Restore `actor._fastrsi_s0`, zero lazy Adam state, and refresh `weights_backuper`."""
-    res = (snap := actor._fastrsi_s0).restore(allow_extra=allow_extra)
+    """Restore `actor._rsibox_s0`, zero lazy Adam state, and refresh `weights_backuper`."""
+    res = (snap := actor._rsibox_s0).restore(allow_extra=allow_extra)
     if not res["ok"]:
         return res
     zeroed, unknown = snap.zero_new_state()

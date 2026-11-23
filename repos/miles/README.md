@@ -30,7 +30,7 @@ loops.
 
 | Layer / File | Owner | Non-Test Python LOC | Test Python LOC | Reused `core/livelab/` Primitives |
 |---|---|---:|---:|---|
-| `livelab/adapter/__init__.py` | `repos/miles` | `10` | `0` | `FASTRSI_LIVELAB` path bootstrap |
+| `livelab/adapter/__init__.py` | `repos/miles` | `10` | `0` | `RSIBOX_LIVELAB` path bootstrap |
 | `livelab/adapter/gate.py` | `repos/miles` | `116` | `0` | `StepGapCoordinator`, `RayActorParticipant`, `actor_view`, `file_namespace`, `unloaded` |
 | `livelab/adapter/state.py` | `repos/miles` | `76` | `0` | `EpochDataBuffer` (`code_epoch` drain) + `CoupledWeightReset` (`S0` + rollout sync) |
 | `livelab/adapter/lab.py` | `repos/miles` | `135` | `0` | `Session`, `ReceiptWriter`, `LabUnderTest` (`MilesLab`) |

@@ -38,7 +38,7 @@ import argparse, hashlib, json, os, re, socket, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corelab  # noqa: F401,E402  (core/livelab on sys.path)
-from fastrsi import harness, proc  # noqa: E402
+from rsibox import harness, proc  # noqa: E402
 
 READY = re.compile(r"Weight cache daemon READY")
 MAX_SOCK_PATH = 107     # Linux sun_path is 108 bytes with the trailing NUL

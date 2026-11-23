@@ -1,8 +1,8 @@
-"""Golden tests for `core/livelab/fastrsi/` low-level stdlib primitives:
+"""Golden tests for `core/livelab/rsibox/` low-level stdlib primitives:
 `ipc`, `proc`, `hooks`, `harness`, and `bootstrap_livelab`.
 
 Run from the repo root:
-    python3 -m unittest discover -s core/livelab/fastrsi -p 'test_primitives.py' -t core/livelab -v
+    python3 -m unittest discover -s core/livelab/rsibox -p 'test_primitives.py' -t core/livelab -v
 """
 import importlib
 import itertools
@@ -20,8 +20,8 @@ import time
 import unittest
 from unittest import mock
 
-import fastrsi
-from fastrsi import diffs, harness, hooks, ipc, proc
+import rsibox
+from rsibox import diffs, harness, hooks, ipc, proc
 
 LIVELAB = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SEQ = itertools.count(1)
@@ -29,7 +29,7 @@ _SEQ = itertools.count(1)
 
 class IpcTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="fastrsi-ipc-")
+        self.tmp = tempfile.mkdtemp(prefix="rsibox-ipc-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_unix_socket_callback_and_queue_modes_and_path_limit(self):
@@ -158,7 +158,7 @@ class ProcTests(unittest.TestCase):
         the kept exited child's status (17) is not stolen by `waitpid(-1)`."""
         script = (
             "import json, subprocess, sys, time\n"
-            "from fastrsi import proc\n"
+            "from rsibox import proc\n"
             "slp = [sys.executable, '-c', 'import time; time.sleep(60)']\n"
             "helper = subprocess.Popen(slp)\n"
             "finished = subprocess.Popen([sys.executable, '-c', 'raise SystemExit(17)'])\n"
@@ -233,7 +233,7 @@ class ProcTests(unittest.TestCase):
 
 class HooksAndHarnessTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="fastrsi-hooks-")
+        self.tmp = tempfile.mkdtemp(prefix="rsibox-hooks-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_stacked_import_hooks_and_overlay_compose_without_recursion(self):
@@ -241,7 +241,7 @@ class HooksAndHarnessTests(unittest.TestCase):
         package module on disk.
         Expected: no RecursionError; the module loads the overlaid text with original
         `co_filename` and populated `linecache`, and both callbacks fire after `exec_module`."""
-        pkg = f"fastrsi_hook_pkg_{next(_SEQ)}"
+        pkg = f"rsibox_hook_pkg_{next(_SEQ)}"
         pkg_dir = os.path.join(self.tmp, pkg)
         os.makedirs(pkg_dir)
         with open(os.path.join(pkg_dir, "__init__.py"), "w", encoding="utf-8") as fh:
@@ -337,14 +337,14 @@ class HooksAndHarnessTests(unittest.TestCase):
         self.assertEqual(res["output"], 15)
 
     def test_bootstrap_livelab_resolves_path_without_mutating_environ(self):
-        """Input: call `bootstrap_livelab` when `FASTRSI_LIVELAB` is unset.
+        """Input: call `bootstrap_livelab` when `RSIBOX_LIVELAB` is unset.
         Expected: resolves `core/livelab` on `sys.path` and leaves `os.environ` untouched."""
-        clean_env = {k: v for k, v in os.environ.items() if k != "FASTRSI_LIVELAB"}
+        clean_env = {k: v for k, v in os.environ.items() if k != "RSIBOX_LIVELAB"}
         with mock.patch.dict(os.environ, clean_env, clear=True):
-            resolved = fastrsi.bootstrap_livelab(__file__)
+            resolved = rsibox.bootstrap_livelab(__file__)
             self.assertEqual(resolved, os.path.abspath(LIVELAB))
             self.assertIn(resolved, sys.path)
-            self.assertNotIn("FASTRSI_LIVELAB", os.environ)
+            self.assertNotIn("RSIBOX_LIVELAB", os.environ)
 
 
 class DiffsTests(unittest.TestCase):
@@ -392,7 +392,7 @@ class DiffsTests(unittest.TestCase):
 
 class HarnessHelpersTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="fastrsi-harness-")
+        self.tmp = tempfile.mkdtemp(prefix="rsibox-harness-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
     def test_append_jsonl_writes_lines_and_optionally_suppresses_errors(self):
@@ -462,7 +462,7 @@ class HarnessHelpersTests(unittest.TestCase):
 
     def test_hooks_import_graph_dependents_and_purge_modules(self):
         import types
-        tmp = tempfile.mkdtemp(prefix="fastrsi-hooks-graph-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-hooks-graph-")
         self.addCleanup(shutil.rmtree, tmp, True)
         pkg = os.path.join(tmp, "gpkg")
         os.makedirs(pkg)

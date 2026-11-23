@@ -1,4 +1,4 @@
-// Section 3, #model-speed: FastRSI's speedup over Baseline as the model gets faster (replay of the logged runs),
+// Section 3, #model-speed: rsibox's speedup over Baseline as the model gets faster (replay of the logged runs),
 
 // Datasets: replay_hours, race_workloads (labels); fig2_breakdown only for the ≈49 tok/s footnote in the HTML. Calcs: speed_stops, replay_compare.
 
@@ -21,16 +21,16 @@ dash.calc('speed_stops', {
 
 dash.calc('replay_compare', {
   inputs: ['replay_hours'],
-  title: "FastRSI's speedup over Baseline at each model speed",
-  description: "Per system and model speed-up: both replayed run lengths and FastRSI's speedup, Baseline hours divided by FastRSI hours.",
+  title: "rsibox's speedup over Baseline at each model speed",
+  description: "Per system and model speed-up: both replayed run lengths and rsibox's speedup, Baseline hours divided by rsibox hours.",
   fn: (replay_hours) => {
     const h = {};
-    replay_hours.forEach((r) => { ((h[r.system] = h[r.system] || { codex: {}, fastrsi: {} })[r.arm])[r.stop] = Number(r.hours); });
+    replay_hours.forEach((r) => { ((h[r.system] = h[r.system] || { codex: {}, rsibox: {} })[r.arm])[r.stop] = Number(r.hours); });
     const out = [];
     Object.keys(h).forEach((system) => {
-      const c = h[system].codex, f = h[system].fastrsi;
+      const c = h[system].codex, f = h[system].rsibox;
       Object.keys(c).map(Number).sort((a, b) => a - b).forEach((s) => {
-        out.push({ key: system + '.' + s, system, stop: s, codex_h: c[s], fastrsi_h: f[s], speedup: Math.round((c[s] / f[s]) * 1000) / 1000 });
+        out.push({ key: system + '.' + s, system, stop: s, codex_h: c[s], rsibox_h: f[s], speedup: Math.round((c[s] / f[s]) * 1000) / 1000 });
       });
     });
     return out;
@@ -138,7 +138,7 @@ dash.calc('replay_compare', {
     });
   });
 
-  // Headline chart: FastRSI's speedup over Baseline vs model speed, one line per system.
+  // Headline chart: rsibox's speedup over Baseline vs model speed, one line per system.
   dash.draw('speed-chart', {
     mount(el) {
       const legend = FR.el('ul', 'fr-keys fr-sys-keys', null, el);
@@ -178,7 +178,7 @@ dash.calc('replay_compare', {
       const endW = Math.ceil(FR.textW(svg, '1.52×', 'end')) + 12;
       const mr = endW;
       const x = (f) => ml + f * (W - ml - mr);
-      svg.setAttribute('aria-label', "FastRSI's speedup over Baseline as model speed grows: " + sys.map((s) => {
+      svg.setAttribute('aria-label', "rsibox's speedup over Baseline as model speed grows: " + sys.map((s) => {
         const a = cmp[s.system + '.' + ss[0].stop], b = cmp[s.system + '.' + ss[ss.length - 1].stop];
         return `${s.w ? s.w.engine_label : s.system} ${a ? a.speedup.toFixed(2) : '?'}× to ${b ? b.speedup.toFixed(2) : '?'}×`;
       }).join('; ') + '.');
@@ -248,8 +248,8 @@ dash.calc('replay_compare', {
             const hh = FR.el('span', 'tm', null, l);
             hh.append(' (Baseline ');
             FR.mark(FR.el('span', 'tv', Number(k.codex_h).toFixed(2), hh), 'replay_compare', 'codex_h', { key: k.key });
-            hh.append(' h, FastRSI ');
-            FR.mark(FR.el('span', 'tv', Number(k.fastrsi_h).toFixed(2), hh), 'replay_compare', 'fastrsi_h', { key: k.key });
+            hh.append(' h, rsibox ');
+            FR.mark(FR.el('span', 'tv', Number(k.rsibox_h).toFixed(2), hh), 'replay_compare', 'rsibox_h', { key: k.key });
             hh.append(' h)');
           });
         });
@@ -276,7 +276,7 @@ dash.calc('replay_compare', {
       th.append(' ');
       sysLabel(th, s);
       FR.el('td', 'n codex', Number(r.codex_h).toFixed(2), tr);
-      FR.el('td', 'n fastrsi', Number(r.fastrsi_h).toFixed(2), tr);
+      FR.el('td', 'n rsibox', Number(r.rsibox_h).toFixed(2), tr);
       FR.el('td', 'n', r.speedup.toFixed(2) + '×', tr);
     });
   });

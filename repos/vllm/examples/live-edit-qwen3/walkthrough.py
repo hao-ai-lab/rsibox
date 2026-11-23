@@ -177,7 +177,7 @@ class Run:
         site = os.path.join(self.work, "site")
         os.makedirs(site, exist_ok=True)
         with open(os.path.join(site, "sitecustomize.py"), "w") as f:
-            f.write("import os\nif os.environ.get('FASTRSI_KERNEL_DIR'):\n"
+            f.write("import os\nif os.environ.get('RSIBOX_KERNEL_DIR'):\n"
                     "    import adapter.host\n")
         self.pythonpath = os.pathsep.join([self.src, LIVELAB, site])
         if not self.phases.intersection(("fresh", "live")):
@@ -212,11 +212,11 @@ class Run:
         if adapter:
             shutil.rmtree(self.ctl, ignore_errors=True)
             os.makedirs(self.ctl)
-            env["FASTRSI_KERNEL_DIR"] = self.ctl
+            env["RSIBOX_KERNEL_DIR"] = self.ctl
             env["PYTHONPATH"] += os.pathsep + os.path.dirname(os.path.abspath(__file__))
             cmd += ["--worker-extension-cls", "walkthrough_worker.KernelWorkerExtension"]
         else:
-            env.pop("FASTRSI_KERNEL_DIR", None)
+            env.pop("RSIBOX_KERNEL_DIR", None)
         t0 = time.monotonic()
         with open(os.path.join(self.work, f"serve-{tag}.log"), "w") as log:
             self.proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=log,

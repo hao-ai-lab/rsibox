@@ -2,7 +2,7 @@
 import os
 import time
 
-from fastrsi import harness as H
+from rsibox import harness as H
 
 
 def _install_forward_fault(scheduler, fault, hang_s, rank_name):

@@ -2,18 +2,18 @@
 <link rel="stylesheet" href="fr.css">
 <div class="fr">
   <header class="fr-head" id="top">
-    <h1 class="fr-title">FastRSI: Unblock the evaluation bottleneck for RSI</h1>
-    <p class="fr-lede"><b>TLDR: FastRSI is an agentic framework that reduce evaluation overhead to accelerate RSI. </b>FastRSI first make a system <b>"live-editable" </b>such that changing a few lines of code in-place do not need to restart the engine. Then, FastRSI encourage agent to develop "<b>targeted probes</b>" so that a cheaper but verifiably stable evaluation can deliver strong signal of improvement. We show that FastRSI reaches final result <b class="fr-num" data-draw="lede-min" data-source="race_sooner" data-field="ratio">—</b> – <b class="fr-num" data-draw="lede-max" data-source="race_sooner" data-field="ratio">—</b> sooner when provided to ML system tasks, and show even better speedup as the token generation speeds up.</p>
+    <h1 class="fr-title">rsibox: Unblock the evaluation bottleneck for RSI</h1>
+    <p class="fr-lede"><b>TLDR: rsibox is an agentic framework that reduce evaluation overhead to accelerate RSI. </b>rsibox first make a system <b>"live-editable" </b>such that changing a few lines of code in-place do not need to restart the engine. Then, rsibox encourage agent to develop "<b>targeted probes</b>" so that a cheaper but verifiably stable evaluation can deliver strong signal of improvement. We show that rsibox reaches final result <b class="fr-num" data-draw="lede-min" data-source="race_sooner" data-field="ratio">—</b> – <b class="fr-num" data-draw="lede-max" data-source="race_sooner" data-field="ratio">—</b> sooner when provided to ML system tasks, and show even better speedup as the token generation speeds up.</p>
     <ul class="fr-arms" aria-label="The two sides">
       <li><span class="fr-sw fr-sw-codex"></span>Baseline</li>
-      <li><span class="fr-sw fr-sw-fast"></span>FastRSI</li>
+      <li><span class="fr-sw fr-sw-fast"></span>rsibox</li>
     </ul>
   </header>
 
   <!-- Section 1: race -->
   <section class="fr-sec" id="sooner" aria-labelledby="sooner-h">
     <h2 class="fr-h2" id="sooner-h">Agents reach the same result sooner</h2>
-    <p class="fr-sub">We compare FastRSI against a basic codex agent, using GPT 6 Astra (high). The two agents configuration run over the same hardware for 2~3 times, and taking the best trajectory as the main one to highlight in the trace. Each point on the stair case line is a valid improvement verified post-hoc. </p>
+    <p class="fr-sub">We compare rsibox against a basic codex agent, using GPT 6 Astra (high). The two agents configuration run over the same hardware for 2~3 times, and taking the best trajectory as the main one to highlight in the trace. Each point on the stair case line is a valid improvement verified post-hoc. </p>
     <div class="fr-card" id="race-card">
       <div class="fr-picker" role="group" aria-label="Workload" data-draw="race-picker" data-source="race_workloads"></div>
       <div class="fr-player">
@@ -41,7 +41,7 @@
   <!-- Section 2: evaluation ladder -->
   <section class="fr-sec" id="eval-time" aria-labelledby="eval-time-h">
     <h2 class="fr-h2" id="eval-time-h">Where the minutes per check actually go</h2>
-    <p class="fr-sub">FastRSI wins the race by stripping away the setup and measurement tax on every turn. Each row peels off one layer of overhead from the bar above it, and the blue label shows total speedup over Baseline.</p>
+    <p class="fr-sub">rsibox wins the race by stripping away the setup and measurement tax on every turn. Each row peels off one layer of overhead from the bar above it, and the blue label shows total speedup over Baseline.</p>
     <div class="fr-card" id="ladder-card">
       <div class="fr-ladder-top">
         <div class="fr-picker" role="group" aria-label="Engine" data-draw="ladder-picker" data-source="race_workloads"></div>
@@ -60,8 +60,8 @@
 
   <!-- Section 3: model speed -->
   <section class="fr-sec" id="model-speed" aria-labelledby="model-speed-h">
-    <h2 class="fr-h2" id="model-speed-h">Why faster models make FastRSI's lead even larger</h2>
-    <p class="fr-sub">How many times faster FastRSI finishes the same work: Baseline's hours divided by FastRSI's hours to replay each logged run with the model generating faster and everything else fixed. Restarting per check soon hits a floor, so FastRSI's lead grows as the model gets faster.</p>
+    <h2 class="fr-h2" id="model-speed-h">Why faster models make rsibox's lead even larger</h2>
+    <p class="fr-sub">How many times faster rsibox finishes the same work: Baseline's hours divided by rsibox's hours to replay each logged run with the model generating faster and everything else fixed. Restarting per check soon hits a floor, so rsibox's lead grows as the model gets faster.</p>
     <div class="fr-card" id="speed-card">
       <div class="fr-speed-ctl">
         <label class="fr-ctl-lbl" for="speed-slider">Model generation speed</label>
@@ -74,7 +74,7 @@
       <div class="fr-speedup" id="speedup-chart" data-draw="speed-chart" data-source="replay_compare race_workloads">—</div>
       <div class="fr-tablewrap">
         <table class="fr-table" id="speed-table" data-source="replay_compare" data-row-key="key">
-          <thead><tr><th>System</th><th data-field="codex_h">Baseline, h</th><th data-field="fastrsi_h">FastRSI, h</th><th data-field="speedup">FastRSI speedup</th></tr></thead>
+          <thead><tr><th>System</th><th data-field="codex_h">Baseline, h</th><th data-field="rsibox_h">rsibox, h</th><th data-field="speedup">rsibox speedup</th></tr></thead>
           <tbody data-draw="speed-table"></tbody>
         </table>
       </div>

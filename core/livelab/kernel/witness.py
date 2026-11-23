@@ -1,7 +1,7 @@
 """Witness: count calls of swapped code, keyed `module:qualname:firstline`.
 
-The swap injects `__fastrsi_hit__("<key>")` as the first statement of each new body (after
-the docstring). `__fastrsi_hit__` is a global of the
+The swap injects `__rsibox_hit__("<key>")` as the first statement of each new body (after
+the docstring). `__rsibox_hit__` is a global of the
 module, bound to the participant's `Witness.hook` (a plain function that calls `hit`); the
 swap binds it through the journal. Undo never deletes the global: code that Dynamo transformed
 or a graph captured while the edit was installed may still name it, and a deleted global killed
@@ -43,7 +43,7 @@ import types
 from . import findings as F
 from .locate import _FROZEN_GENS, all_objects, sliced
 
-HIT = "__fastrsi_hit__"
+HIT = "__rsibox_hit__"
 
 
 DEVICE_PROBE = ("calls during capture prove the graph holds the new code, not that a replay "
@@ -60,7 +60,7 @@ class Witness:
         self.probe_errors = {}      # calls whose `capturing` probe raised: never live
         self.first_hit = {}         # key -> time.monotonic() of its first live call
         self.first_hit_wall = {}    # the same on the wall clock (other hosts)
-        self.hook = _hook(self)     # what the swap binds as __fastrsi_hit__
+        self.hook = _hook(self)     # what the swap binds as __rsibox_hit__
         trace_safe(self.hook)
 
     def _capturing(self):
@@ -194,14 +194,14 @@ def launch_key(key, label):
 
 
 def stub(key):
-    """What `__fastrsi_hit__` is bound to after undo: counts nothing, raises nothing."""
+    """What `__rsibox_hit__` is bound to after undo: counts nothing, raises nothing."""
     return None
 
 
 def _hook(witness):
-    def __fastrsi_hit__(key):
+    def __rsibox_hit__(key):
         witness.hit(key)
-    return __fastrsi_hit__
+    return __rsibox_hit__
 
 
 def trace_safe(fn):
@@ -324,20 +324,20 @@ _MISSING = object()
 
 def instrument_module_functions(module, function_names):
     """Wrap named functions or `class.method` targets on `module` with a lightweight
-    `__fastrsi_hit__` call counter (preserving `functools.wraps` metadata) for
-    code-restart runs (`FASTRSI_OVERLAY` or zygote `--refresh`).
+    `__rsibox_hit__` call counter (preserving `functools.wraps` metadata) for
+    code-restart runs (`RSIBOX_OVERLAY` or zygote `--refresh`).
 
     Returns a dictionary mapping each target name to its instrumented wrapper.
     """
     mod_id = id(module)
     mod_dict = getattr(module, "__dict__", None)
-    had_counts = (isinstance(mod_dict, dict) and "__fastrsi_restart_counts__" in mod_dict) or (
-        mod_dict is None and hasattr(module, "__fastrsi_restart_counts__")
+    had_counts = (isinstance(mod_dict, dict) and "__rsibox_restart_counts__" in mod_dict) or (
+        mod_dict is None and hasattr(module, "__rsibox_restart_counts__")
     )
-    restart_counts = getattr(module, "__fastrsi_restart_counts__", None)
+    restart_counts = getattr(module, "__rsibox_restart_counts__", None)
     if not isinstance(restart_counts, dict):
         restart_counts = {}
-        setattr(module, "__fastrsi_restart_counts__", restart_counts)
+        setattr(module, "__rsibox_restart_counts__", restart_counts)
 
     if mod_id not in _RESTART_MODULE_META:
         prev_hit = mod_dict.get(HIT, _MISSING) if isinstance(mod_dict, dict) else getattr(module, HIT, _MISSING)
@@ -388,7 +388,7 @@ def instrument_module_functions(module, function_names):
             raw_attr = orig_callable
 
         existing = _RESTART_RECORDS.get((mod_id, target_name))
-        if getattr(orig_callable, "__fastrsi_target__", None) == target_name:
+        if getattr(orig_callable, "__rsibox_target__", None) == target_name:
             orig_callable = getattr(orig_callable, "__wrapped__", orig_callable)
         saved_raw_attr = existing["orig_raw_attr"] if existing is not None else raw_attr
         saved_orig_callable = existing["orig_callable"] if existing is not None else orig_callable
@@ -399,14 +399,14 @@ def instrument_module_functions(module, function_names):
             @functools.wraps(func_obj)
             def wrapped_target(*args, **kwargs):
                 module_hit(registered_name)
-                wrapped_target.__fastrsi_calls__ = restart_counts[registered_name]
+                wrapped_target.__rsibox_calls__ = restart_counts[registered_name]
                 return func_obj(*args, **kwargs)
 
-            wrapped_target.__fastrsi_target__ = registered_name
-            wrapped_target.__fastrsi_module__ = module_name
-            wrapped_target.__fastrsi_calls__ = 0
-            wrapped_target.__fastrsi_counts__ = restart_counts
-            wrapped_target.__fastrsi_hit__ = module_hit
+            wrapped_target.__rsibox_target__ = registered_name
+            wrapped_target.__rsibox_module__ = module_name
+            wrapped_target.__rsibox_calls__ = 0
+            wrapped_target.__rsibox_counts__ = restart_counts
+            wrapped_target.__rsibox_hit__ = module_hit
             return wrapped_target
 
         wrapper = make_wrapper(saved_orig_callable, target_name)
@@ -442,7 +442,7 @@ def instrument_module_functions(module, function_names):
         # the bare name may be instrumented in several modules (one per rank): keep them all,
         # one per module; collect reads the smallest count (a module that never ran it: 0)
         same_name = [other for other in _RESTART_BY_NAME.get(target_name, ())
-                     if getattr(other, "__fastrsi_module__", None) != module_name]
+                     if getattr(other, "__rsibox_module__", None) != module_name]
         _RESTART_BY_NAME[target_name] = same_name + [wrapper]
         _RESTART_INSTRUMENTED_TARGETS[target_name] = wrapper
         _RESTART_INSTRUMENTED_TARGETS[f"{module_name}:{target_name}"] = wrapper
@@ -456,7 +456,7 @@ def uninstrument_module_functions(module, function_names=None):
     When ``function_names`` is ``None``, every instrumented target on ``module`` is restored;
     otherwise only those named targets are restored. Restores original functions/descriptors,
     rebinds alias globals in ``sys.modules`` back to the original callable, cleans up global
-    restart registries, and removes ``__fastrsi_hit__`` / ``__fastrsi_restart_counts__`` once no
+    restart registries, and removes ``__rsibox_hit__`` / ``__rsibox_restart_counts__`` once no
     instrumented targets remain on ``module``. Returns ``{target_name: restored_obj}``.
     """
     mod_id = id(module)
@@ -468,7 +468,7 @@ def uninstrument_module_functions(module, function_names=None):
         target_list = list(function_names)
 
     restored = {}
-    restart_counts = getattr(module, "__fastrsi_restart_counts__", None)
+    restart_counts = getattr(module, "__rsibox_restart_counts__", None)
     for target_name in target_list:
         rec = _RESTART_RECORDS.pop((mod_id, target_name), None)
         if rec is None:
@@ -528,8 +528,8 @@ def uninstrument_module_functions(module, function_names=None):
         meta = _RESTART_MODULE_META.pop(mod_id, None)
         if meta is not None:
             if not meta["had_counts"] and isinstance(restart_counts, dict) and not restart_counts:
-                if hasattr(module, "__fastrsi_restart_counts__"):
-                    delattr(module, "__fastrsi_restart_counts__")
+                if hasattr(module, "__rsibox_restart_counts__"):
+                    delattr(module, "__rsibox_restart_counts__")
             current_hit = getattr(module, HIT, _MISSING)
             if current_hit is meta["module_hit"]:
                 if meta["had_hit"]:
@@ -543,7 +543,7 @@ def uninstrument_module_functions(module, function_names=None):
 def collect_restart_witness(targets):
     """Collect per-target execution call counts from instrumented code-restart targets."""
     if isinstance(targets, types.ModuleType):
-        return dict(getattr(targets, "__fastrsi_restart_counts__", {}))
+        return dict(getattr(targets, "__rsibox_restart_counts__", {}))
 
     if isinstance(targets, dict):
         collected = {}
@@ -559,33 +559,33 @@ def collect_restart_witness(targets):
                     if isinstance(val, (staticmethod, classmethod))
                     else val
                 )
-                counts_map = getattr(unwrapped, "__fastrsi_counts__", None)
+                counts_map = getattr(unwrapped, "__rsibox_counts__", None)
                 if isinstance(counts_map, dict) and key in counts_map:
                     collected[key] = int(counts_map[key])
                 else:
-                    collected[key] = int(getattr(unwrapped, "__fastrsi_calls__", 0))
+                    collected[key] = int(getattr(unwrapped, "__rsibox_calls__", 0))
         return collected
 
     collected = {}
     for item in targets:
         if isinstance(item, types.ModuleType):
-            for key, count in getattr(item, "__fastrsi_restart_counts__", {}).items():
+            for key, count in getattr(item, "__rsibox_restart_counts__", {}).items():
                 collected[key] = collected.get(key, 0) + int(count)
         elif isinstance(item, tuple) and len(item) == 2 and isinstance(
             item[0], types.ModuleType
         ):
             mod_obj, target_name = item
-            counts_map = getattr(mod_obj, "__fastrsi_restart_counts__", {})
+            counts_map = getattr(mod_obj, "__rsibox_restart_counts__", {})
             collected[target_name] = int(counts_map.get(target_name, 0))
         elif isinstance(item, str):
             wrappers = _RESTART_BY_NAME.get(item) or [
                 one for one in (_RESTART_INSTRUMENTED_TARGETS.get(item),) if one is not None]
             counts = []
             for wrapper in wrappers:
-                target_name = getattr(wrapper, "__fastrsi_target__", item)
-                counts_map = getattr(wrapper, "__fastrsi_counts__", {})
+                target_name = getattr(wrapper, "__rsibox_target__", item)
+                counts_map = getattr(wrapper, "__rsibox_counts__", {})
                 counts.append(int(
-                    counts_map.get(target_name, getattr(wrapper, "__fastrsi_calls__", 0))))
+                    counts_map.get(target_name, getattr(wrapper, "__rsibox_calls__", 0))))
             collected[item] = min(counts) if counts else 0
         else:
             unwrapped = (
@@ -595,14 +595,14 @@ def collect_restart_witness(targets):
             )
             target_name = getattr(
                 unwrapped,
-                "__fastrsi_target__",
+                "__rsibox_target__",
                 getattr(unwrapped, "__qualname__", getattr(unwrapped, "__name__", repr(unwrapped))),
             )
-            counts_map = getattr(unwrapped, "__fastrsi_counts__", None)
+            counts_map = getattr(unwrapped, "__rsibox_counts__", None)
             if isinstance(counts_map, dict) and target_name in counts_map:
                 collected[target_name] = int(counts_map[target_name])
             else:
-                collected[target_name] = int(getattr(unwrapped, "__fastrsi_calls__", 0))
+                collected[target_name] = int(getattr(unwrapped, "__rsibox_calls__", 0))
     return collected
 
 

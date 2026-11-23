@@ -1,4 +1,4 @@
-"""Per-sample vLLM sampling seeds, for checks that must be bit-exact (`FASTRSI_RL_SEED_PER_SAMPLE=1`).
+"""Per-sample vLLM sampling seeds, for checks that must be bit-exact (`RSIBOX_RL_SEED_PER_SAMPLE=1`).
 
 verl's `rollout.full_determinism` gives every request on a replica the *same* seed
 (`vllm_async_server.generate`: `seed = replica_rank + rollout.seed`), so a group's `n` samples
@@ -20,7 +20,7 @@ def seed_for(base, trajectory, session_id):
 def seed_agent_loops(host, base_seed):
     cls = type(host)
     orig = cls._run_agent_loop
-    if getattr(orig, "_fastrsi_seeded", None) == int(base_seed):
+    if getattr(orig, "_rsibox_seeded", None) == int(base_seed):
         return {"ok": True, "pid": os.getpid(), "already": True}
 
     async def seeded(self, sampling_params, trajectory, *args, **kwargs):
@@ -28,6 +28,6 @@ def seed_agent_loops(host, base_seed):
         params["seed"] = seed_for(base_seed, trajectory, kwargs.get("session_id", 0))
         return await orig(self, params, trajectory, *args, **kwargs)
 
-    seeded._fastrsi_seeded, seeded._fastrsi_orig = int(base_seed), orig
+    seeded._rsibox_seeded, seeded._rsibox_orig = int(base_seed), orig
     cls._run_agent_loop = seeded
     return {"ok": True, "pid": os.getpid(), "base_seed": int(base_seed)}

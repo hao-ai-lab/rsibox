@@ -24,10 +24,10 @@ from . import server as S
 
 
 def _resolve(lab, real):
-    """`module:Class` as given, or a name `fastrsi list` knows. Returns the spec."""
+    """`module:Class` as given, or a name `rsibox list` knows. Returns the spec."""
     if ":" in lab:
         return lab
-    from fastrsi import cli as fcli
+    from . import lab_cli as fcli
     spec, extra = fcli.resolve_lab(lab, real=real)
     if extra and extra not in sys.path:
         sys.path.insert(0, extra)
@@ -141,12 +141,23 @@ def _call(a):
     return 0 if reply.get("ok") else 1
 
 
+_LAB_COMMANDS = frozenset(("list", "conformance", "survey", "ctl", "doctor"))
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="rsibox", description="A live lab as a service.")
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] in _LAB_COMMANDS:
+        from . import lab_cli
+        return lab_cli.main(raw)
+    ap = argparse.ArgumentParser(
+        prog="rsibox",
+        description="A live lab as a service.",
+        epilog="Lab commands: list, conformance, survey, ctl, doctor (run 'rsibox <cmd> --help').",
+    )
     sub = ap.add_subparsers(dest="command", required=True)
 
     def lab_args(p):
-        p.add_argument("--lab", required=True, help="module:Class, or a name `fastrsi list` knows")
+        p.add_argument("--lab", required=True, help="module:Class, or a name `rsibox list` knows")
         p.add_argument("--real", action="store_true", help="for a name: the real-engine lab, not the toy")
         p.add_argument("--state", required=True, help="folder for the box file, events and receipts")
         p.add_argument("--bind", default=None)
@@ -161,7 +172,7 @@ def main(argv=None):
     lab_args(p)
     p.add_argument("--launcher", required=True, choices=("local", "docker", "gvisor", "slurm"))
     p.add_argument("--python", default=None)
-    p.add_argument("--repo", default=None, help="the FastRSI checkout (default: this one)")
+    p.add_argument("--repo", default=None, help="the rsibox checkout (default: this one)")
     p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE")
     p.add_argument("--wait", type=float, default=120.0, help="seconds to wait for the box file")
     p.add_argument("--dry-run", action="store_true")

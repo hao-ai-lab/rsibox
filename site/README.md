@@ -1,4 +1,4 @@
-# FastRSI site
+# rsibox site
 
 The public site: a home page that argues the case top to bottom.
 Static files, no dependencies, no build tools beyond Python 3.
@@ -30,7 +30,7 @@ The home page's case studies read three files in `facts/`:
 
 | File | What it holds |
 |---|---|
-| `case-timing.json` | Measured edit-to-check-result time per case, for a plain restart and for FastRSI, with the phases that add up to each total. Written by `python3 site/facts/make-case-timing.py <cases dir> ...` from the measurement tables. |
+| `case-timing.json` | Measured edit-to-check-result time per case, for a plain restart and for rsibox, with the phases that add up to each total. Written by `python3 site/facts/make-case-timing.py <cases dir> ...` from the measurement tables. |
 | `case-copy.json` | The four text blocks per case, keyed by pull request number or agent-edit id. |
 | `pr-diffs/` | The upstream diff of each replayed pull request (non-test files). |
 

@@ -4,7 +4,7 @@
 Two halves, one file:
 
 - **Agent** (engine-core process). Loaded by `live_site/sitecustomize.py` when
-  FASTRSI_LIVE_RECONFIG_DIR=<dir> is in the engine's environment (engine.py sets both). It
+  RSIBOX_LIVE_RECONFIG_DIR=<dir> is in the engine's environment (engine.py sets both). It
   patches `vllm.v1.engine.core.EngineCoreProc` as that module is imported:
   - `run_busy_loop` starts a control thread and writes `<dir>/ready.json` {pid, api_pid, boot,
     live_fields, dp_size}. Only DP rank 0 of a DP=1 engine serves the channel.
@@ -42,11 +42,11 @@ if _HERE not in sys.path:
 if _ROOT not in sys.path:
     sys.path.append(_ROOT)
 import corelab  # noqa: F401,E402  (core/livelab on sys.path)
-from fastrsi import hooks, ipc  # noqa: E402
+from rsibox import hooks, ipc  # noqa: E402
 from services import core_hook  # noqa: E402
 
-TAG = "FASTRSI_LIVE_RECONFIG"
-ENV = "FASTRSI_LIVE_RECONFIG_DIR"
+TAG = "RSIBOX_LIVE_RECONFIG"
+ENV = "RSIBOX_LIVE_RECONFIG_DIR"
 POLICY_FILE = "policy.json"
 LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy")
 _AGENT = []
@@ -243,7 +243,7 @@ def _on_loop_start(core):
 
 
 def _on_patch(proc_cls):
-    proc_cls._fastrsi_live_reconfig = True
+    proc_cls._rsibox_live_reconfig = True
 
 
 def _register_core_plugin():
@@ -264,7 +264,7 @@ def _patch_core(mod):
 def _patch_api_entry(mod, cls_names, method_name):
     for cls_name in cls_names:
         cls = getattr(mod, cls_name, None)
-        if cls is None or getattr(cls, "_fastrsi_live_policy", False):
+        if cls is None or getattr(cls, "_rsibox_live_policy", False):
             continue
         orig = getattr(cls, method_name, None)
         if orig is None:
@@ -276,7 +276,7 @@ def _patch_api_entry(mod, cls_names, method_name):
 
         wrapped.__wrapped__ = orig
         setattr(cls, method_name, wrapped)
-        cls._fastrsi_live_policy = True
+        cls._rsibox_live_policy = True
 
 
 def _patch_input_processor(mod):
@@ -291,7 +291,7 @@ def _patch_http_priority(mod):
     """Validate the resolved header/body priority before vLLM starts an HTTP stream."""
     cls = getattr(mod, "GenerateBaseServing", None)
     resolve = getattr(cls, "_get_priority", None)
-    if resolve is None or getattr(resolve, "_fastrsi_live_policy", False):
+    if resolve is None or getattr(resolve, "_rsibox_live_policy", False):
         return
 
     def get_priority(self, request, raw_request):
@@ -305,7 +305,7 @@ def _patch_http_priority(mod):
                                           parameter="priority", value=priority)
         return priority
 
-    get_priority._fastrsi_live_policy = True
+    get_priority._rsibox_live_policy = True
     cls._get_priority = get_priority
 
 

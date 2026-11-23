@@ -9,7 +9,7 @@ without disturbing active engine loops.
 | Role | Target | Mission | Explicit non-goal |
 |---|---|---|---|
 | **Per-repo offline / online toolsmith** (`core/agents/toolsmith_offline.md`, `core/agents/toolsmith_online.md`) | One `repos/<engine>/` | Mine hotspots, build concrete hooks (patching one wrapper dict, refreshing one class, resetting one cache), price experiments, and keep that engine's edit-to-signal loop fast and trustworthy. | Never abstract across engines and never import from `repos/<other>/`. Local duplication inside `repos/<engine>/` is fine while iterating. |
-| **FastRSI offline distillation toolsmith** (`core/agents/toolsmith_distill.md`) | `core/livelab/`, `core/agents/`, `docs/` | Compare `repos/*/` between engine waves; extract narrow, engine-agnostic primitives once at least two engines have independently proven the need, and promote cross-engine lessons. | Never unify engine-specific control planes, process trees, graph wrappers, or model-state hooks into shared base classes. |
+| **rsibox offline distillation toolsmith** (`core/agents/toolsmith_distill.md`) | `core/livelab/`, `core/agents/`, `docs/` | Compare `repos/*/` between engine waves; extract narrow, engine-agnostic primitives once at least two engines have independently proven the need, and promote cross-engine lessons. | Never unify engine-specific control planes, process trees, graph wrappers, or model-state hooks into shared base classes. |
 
 ## When distillation runs
 

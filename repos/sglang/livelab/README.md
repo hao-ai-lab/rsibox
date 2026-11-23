@@ -22,8 +22,8 @@ PYTHONPATH=repos/sglang/livelab python3 -m adapter.test_bug_replays
 ## Real-GPU conformance (`sglang.Engine`)
 
 ```sh
-export FASTRSI_SGLANG_MODEL=<model-path-or-hf-id>
-export FASTRSI_SGLANG_TP=1
+export RSIBOX_SGLANG_MODEL=<model-path-or-hf-id>
+export RSIBOX_SGLANG_TP=1
 cd core/livelab
 PYTHONPATH=../../repos/sglang/livelab python3 -m conformance --lab adapter.conformance_lab:SglangConformanceLab
 ```

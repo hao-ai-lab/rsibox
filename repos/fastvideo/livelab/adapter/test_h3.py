@@ -74,18 +74,18 @@ class H3LabClassTest(unittest.TestCase):
         ])
         self.assertEqual(env["FASTH3_MODEL"], os.path.abspath("/tmp/m"))
         self.assertEqual(env["FASTVIDEO_H3_VAE_NVFP4_DECODER"], os.path.abspath("/tmp/v.safetensors"))
-        self.assertEqual(env["FASTRSI_H3_GPUS"], "2")
-        self.assertEqual(env["FASTRSI_H3_CHECK_TIMEOUT"], "900.0")
-        self.assertEqual(env["FASTRSI_H3_ZYGOTE"], "1")
-        self.assertEqual(env["FASTRSI_H3_HOLDER"], "1")
+        self.assertEqual(env["RSIBOX_H3_GPUS"], "2")
+        self.assertEqual(env["RSIBOX_H3_CHECK_TIMEOUT"], "900.0")
+        self.assertEqual(env["RSIBOX_H3_ZYGOTE"], "1")
+        self.assertEqual(env["RSIBOX_H3_HOLDER"], "1")
 
         plain_env = H3Lab.launch_environment(["--gpus", "4"])
-        self.assertEqual(plain_env, {"FASTRSI_H3_GPUS": "4"})
+        self.assertEqual(plain_env, {"RSIBOX_H3_GPUS": "4"})
 
         empty_paths_env = H3Lab.launch_environment([
             "--model", "", "--vae", "", "--config", "", "--golden", "", "--gpus", "0",
         ])
-        self.assertEqual(empty_paths_env, {"FASTRSI_H3_GPUS": "0"})
+        self.assertEqual(empty_paths_env, {"RSIBOX_H3_GPUS": "0"})
 
         captured = {}
 
@@ -95,8 +95,8 @@ class H3LabClassTest(unittest.TestCase):
             return "fake-lab"
 
         from adapter import lab as lab_mod
-        with mock.patch.dict(os.environ, {"FASTRSI_H3_ZYGOTE": "1", "FASTRSI_H3_HOLDER": "true",
-                                          "FASTRSI_H3_CHECK_TIMEOUT": "750"}, clear=False), \
+        with mock.patch.dict(os.environ, {"RSIBOX_H3_ZYGOTE": "1", "RSIBOX_H3_HOLDER": "true",
+                                          "RSIBOX_H3_CHECK_TIMEOUT": "750"}, clear=False), \
              mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
              mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
             self.assertEqual(h3._make_h3("r.jsonl"), "fake-lab")
@@ -105,21 +105,21 @@ class H3LabClassTest(unittest.TestCase):
         self.assertIs(captured["kw"]["zygote"], True)
         self.assertIs(captured["kw"]["holder"], True)
 
-        with mock.patch.dict(os.environ, {"FASTRSI_H3_ZYGOTE": "0", "FASTRSI_H3_HOLDER": ""}, clear=False), \
+        with mock.patch.dict(os.environ, {"RSIBOX_H3_ZYGOTE": "0", "RSIBOX_H3_HOLDER": ""}, clear=False), \
              mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
              mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
-            os.environ.pop("FASTRSI_H3_CHECK_TIMEOUT", None)
+            os.environ.pop("RSIBOX_H3_CHECK_TIMEOUT", None)
             h3._make_h3(None)
         self.assertIs(captured["kw"]["zygote"], False)
         self.assertIs(captured["kw"]["holder"], False)
         self.assertEqual(captured["kw"]["check_timeout"], 600.0)
 
-        for flag_env in ({"FASTRSI_H3_ZYGOTE": "1", "FASTRSI_H3_HOLDER": "0"},
-                         {"FASTRSI_H3_ZYGOTE": "0", "FASTRSI_H3_HOLDER": "1"}):
+        for flag_env in ({"RSIBOX_H3_ZYGOTE": "1", "RSIBOX_H3_HOLDER": "0"},
+                         {"RSIBOX_H3_ZYGOTE": "0", "RSIBOX_H3_HOLDER": "1"}):
             with mock.patch.dict(os.environ, flag_env, clear=False), \
                  mock.patch.object(h3, "h3_config", return_value={"generator": {}}), \
                  mock.patch.object(lab_mod, "FastVideoLab", side_effect=fake_lab):
-                os.environ.pop("FASTRSI_H3_CHECK_TIMEOUT", None)
+                os.environ.pop("RSIBOX_H3_CHECK_TIMEOUT", None)
                 h3._make_h3(None)
             self.assertEqual(captured["kw"]["check_timeout"], 120.0, flag_env)
 

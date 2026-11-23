@@ -7,7 +7,7 @@ def _load_fn(spec_str):
     target, _, fn_name = spec_str.partition(":")
     fn_name = fn_name or "grpo_advantages"
     if Path(target).is_file():
-        spec = importlib.util.spec_from_file_location("fastrsi_verl_adv_target", target)
+        spec = importlib.util.spec_from_file_location("rsibox_verl_adv_target", target)
         loaded = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(loaded)
         return getattr(loaded, fn_name)

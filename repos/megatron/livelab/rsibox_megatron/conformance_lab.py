@@ -1,15 +1,15 @@
 """MegatronLab: a real Megatron-LM training job behind the conformance harness (LabUnderTest).
 
-The engine is a launcher command (FASTRSI_MG_CMD, a shell command that runs torchrun with
-`-m fastrsi_megatron.run pretrain_gpt.py <args>` on the lab's GPUs; it must honor $PORT and
-pass the environment through). The lab starts it with FASTRSI_LAB=1 in a new session (its own
+The engine is a launcher command (RSIBOX_MG_CMD, a shell command that runs torchrun with
+`-m rsibox_megatron.run pretrain_gpt.py <args>` on the lab's GPUs; it must honor $PORT and
+pass the environment through). The lab starts it with RSIBOX_LAB=1 in a new session (its own
 process group, so respawn kills only what the lab started), waits for the ready file, and drives
 it over the socket (client.py).
 
 Workload: `check` runs `steps` real train steps from the lab's start state S on frozen batches;
 its output is the per-step loss and grad norm. Patches edit `megatron.core.transformer.mlp`
 and `megatron.core.transformer.attention` (MLP.forward, Attention.forward_post_core_attn,
-Attention.forward, MLP.__init__), read from the running Megatron tree (FASTRSI_MG_ROOT).
+Attention.forward, MLP.__init__), read from the running Megatron tree (RSIBOX_MG_ROOT).
 
 Faults are real: crash and lost make a rank's process exit (torchrun then stops the job);
 hang makes a rank sleep in a step, which the client's timeout turns into poison; respawn
@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 
-from fastrsi import harness, ipc, proc
+from rsibox import harness, ipc, proc
 from kernel import findings as F
 
 from . import client
@@ -49,10 +49,10 @@ class _Job:
     socket are removed by kill()."""
 
     def __init__(self, cmd, env, tag, timeout=900):
-        self.dir = tempfile.mkdtemp(prefix=f"fastrsi-mg-{tag}-")
+        self.dir = tempfile.mkdtemp(prefix=f"rsibox-mg-{tag}-")
         self.ready = os.path.join(self.dir, "ready.json")
         self.sock = ipc.short_sock_path(f"fmg-{tag}")
-        env = {**os.environ, **env, "FASTRSI_READY": self.ready, "FASTRSI_SOCK": self.sock}
+        env = {**os.environ, **env, "RSIBOX_READY": self.ready, "RSIBOX_SOCK": self.sock}
         self.log = open(os.path.join(self.dir, "job.log"), "w")
         self.t0 = time.time()
         self.p = subprocess.Popen(["bash", "-c", cmd], env=env, stdout=self.log,
@@ -107,18 +107,18 @@ class MegatronLab:
         if clean[:1] == ["--"]:
             clean = clean[1:]
         parser = argparse.ArgumentParser(
-            prog="fastrsi conformance megatron --real",
+            prog="rsibox conformance megatron --real",
             description="Run conformance on a local Megatron checkout",
             allow_abbrev=False,
         )
         parser.add_argument("--root", required=True, help="Megatron-LM checkout")
         parser.add_argument("--nproc", required=True, type=int, help="number of local GPU ranks")
-        parser.add_argument("--steps", type=int, default=None, help="steps per check (FASTRSI_CHECK_STEPS)")
+        parser.add_argument("--steps", type=int, default=None, help="steps per check (RSIBOX_CHECK_STEPS)")
         parser.add_argument(
             "--check-timeout",
             type=float,
             default=None,
-            help="seconds one check call may take (FASTRSI_CHECK_TIMEOUT)",
+            help="seconds one check call may take (RSIBOX_CHECK_TIMEOUT)",
         )
         parser.add_argument("training_args", nargs=argparse.REMAINDER, help="-- followed by pretrain_gpt arguments")
         args = parser.parse_args(clean)
@@ -127,26 +127,26 @@ class MegatronLab:
         if training[:1] == ["--"]:
             training = training[1:]
         launch = [sys.executable, "-m", "torch.distributed.run", "--nproc-per-node", str(args.nproc)]
-        worker = ["-m", "fastrsi_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
+        worker = ["-m", "rsibox_megatron.run", os.path.join(root, "pretrain_gpt.py"), *training]
         env = {
-            "FASTRSI_MG_CMD": f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}',
-            "FASTRSI_MG_ROOT": root,
+            "RSIBOX_MG_CMD": f'exec {shlex.join(launch)} --master-port "$PORT" {shlex.join(worker)}',
+            "RSIBOX_MG_ROOT": root,
             "PYTHONPATH": os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH")))),
         }
         if args.steps is not None:
-            env["FASTRSI_CHECK_STEPS"] = str(args.steps)
+            env["RSIBOX_CHECK_STEPS"] = str(args.steps)
         if args.check_timeout is not None:
-            env["FASTRSI_CHECK_TIMEOUT"] = str(args.check_timeout)
+            env["RSIBOX_CHECK_TIMEOUT"] = str(args.check_timeout)
         return env
 
     name = "megatron"
     _shared = None
 
     def __init__(self, receipts=None, steps=None, check_timeout=None):
-        self.cmd = os.environ["FASTRSI_MG_CMD"]
-        self.root = os.environ["FASTRSI_MG_ROOT"]
-        self.steps = steps or int(os.environ.get("FASTRSI_CHECK_STEPS", "3"))
-        self.check_timeout = check_timeout or float(os.environ.get("FASTRSI_CHECK_TIMEOUT",
+        self.cmd = os.environ["RSIBOX_MG_CMD"]
+        self.root = os.environ["RSIBOX_MG_ROOT"]
+        self.steps = steps or int(os.environ.get("RSIBOX_CHECK_STEPS", "3"))
+        self.check_timeout = check_timeout or float(os.environ.get("RSIBOX_CHECK_TIMEOUT",
                                                                    "120"))
         self.receipts = receipts
         self.poison = []
@@ -163,9 +163,9 @@ class MegatronLab:
 
     # -- process layout ------------------------------------------------------------------
     def _env(self, port):
-        env = {"FASTRSI_LAB": "1", "PORT": str(port), "FASTRSI_CHECK_STEPS": str(self.steps)}
+        env = {"RSIBOX_LAB": "1", "PORT": str(port), "RSIBOX_CHECK_STEPS": str(self.steps)}
         if self.receipts:
-            env["FASTRSI_RECEIPTS"] = os.path.abspath(self.receipts)
+            env["RSIBOX_RECEIPTS"] = os.path.abspath(self.receipts)
         return env
 
     def _spawn(self):
@@ -317,16 +317,16 @@ class MegatronLab:
             resolved_files = self.files(patch, against="disk")
         except ValueError as err:
             return {"ok": False, "output": None, "error": str(err)}
-        d = tempfile.mkdtemp(prefix="fastrsi-mg-overlay-")
+        d = tempfile.mkdtemp(prefix="rsibox-mg-overlay-")
         out = os.path.join(d, "out.json")
         try:
             for m, text in resolved_files.items():
                 with open(os.path.join(d, m + ".py"), "w", encoding="utf-8") as f:
                     f.write(text)
             for attempt in range(2):
-                env = {**self._env(_free_port()), "FASTRSI_FRESH": out,
-                       "FASTRSI_OVERLAY": d}
-                env.pop("FASTRSI_LAB")
+                env = {**self._env(_free_port()), "RSIBOX_FRESH": out,
+                       "RSIBOX_OVERLAY": d}
+                env.pop("RSIBOX_LAB")
                 job = _Job(self.cmd, env, "fresh")
                 rc = job.wait_exit()
                 tail = job.tail(80)
@@ -367,6 +367,6 @@ def _stop_shared():
 
 
 if __name__ == "__main__":
-    from fastrsi.cli import main
+    from rsibox.cli import main
 
-    sys.exit(main(["conformance", "fastrsi_megatron.conformance_lab:MegatronLab", "--real", *sys.argv[1:]]))
+    sys.exit(main(["conformance", "rsibox_megatron.conformance_lab:MegatronLab", "--real", *sys.argv[1:]]))

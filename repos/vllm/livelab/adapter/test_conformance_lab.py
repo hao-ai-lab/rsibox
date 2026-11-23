@@ -124,7 +124,7 @@ _counter = itertools.count(1)
 def _load_fake_tree(prefix, overrides=None, only=None):
     """Load isolated copies of `only` (default all 4) modules under `<prefix>.<module>`."""
     sources = {k: v for k, v in {**FAKE_SOURCES, **(overrides or {})}.items() if only is None or k in only}
-    root = tempfile.mkdtemp(prefix=f"fastrsi-fake-{prefix}-")
+    root = tempfile.mkdtemp(prefix=f"rsibox-fake-{prefix}-")
     loaded = []
     for mod_name, text in sources.items():
         aliased = f"{prefix}.{mod_name.split('.', 1)[1]}"
@@ -194,7 +194,7 @@ class FakeBackend:
         self.w_prefix, self.c_prefix = f"fvw{tag}", f"fvc{tag}"
         w_root, w_mods = _load_fake_tree(self.w_prefix, only=CL.WORKER_MODULES)
         c_root, c_mods = _load_fake_tree(self.c_prefix, only=CL.CORE_MODULES)
-        self.host_dir = tempfile.mkdtemp(prefix="fastrsi-fake-host-")
+        self.host_dir = tempfile.mkdtemp(prefix="rsibox-fake-host-")
         self._roots.extend([w_root, c_root, self.host_dir])
         self._loaded.extend(w_mods + c_mods)
 
@@ -313,7 +313,7 @@ class ConformanceOnFakeVllmTest(unittest.TestCase):
                 [sys.executable, "-c", "import os, subprocess, sys; "
                  "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
                  "stdout=subprocess.DEVNULL); print(p.pid, flush=True); input(); os._exit(0)"],
-                env={**os.environ, "FASTRSI_LIVE_RECONFIG_DIR": marker},
+                env={**os.environ, "RSIBOX_LIVE_RECONFIG_DIR": marker},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
             ) as leader:
                 worker = int(leader.stdout.readline())
@@ -415,37 +415,37 @@ class FarmAndHelpersTest(unittest.TestCase):
             "--", "--max-model-len", "1024",
         ])
         self.assertEqual(env, {
-            "FASTRSI_VLLM_MODEL": "Qwen/Qwen3-8B",
-            "FASTRSI_VLLM_VENV": os.path.abspath("rel-venv"),
-            "FASTRSI_VLLM_WORK": os.path.abspath("rel-work"),
-            "FASTRSI_VLLM_PORT": "19000",
-            "FASTRSI_VLLM_TP": "2",
-            "FASTRSI_VLLM_CHECK_TIMEOUT": "45.5",
-            "FASTRSI_VLLM_SHARE_GPU": "0",
-            "FASTRSI_VLLM_EXTRA": "--seed 0 --enforce-eager --max-model-len 1024",
+            "RSIBOX_VLLM_MODEL": "Qwen/Qwen3-8B",
+            "RSIBOX_VLLM_VENV": os.path.abspath("rel-venv"),
+            "RSIBOX_VLLM_WORK": os.path.abspath("rel-work"),
+            "RSIBOX_VLLM_PORT": "19000",
+            "RSIBOX_VLLM_TP": "2",
+            "RSIBOX_VLLM_CHECK_TIMEOUT": "45.5",
+            "RSIBOX_VLLM_SHARE_GPU": "0",
+            "RSIBOX_VLLM_EXTRA": "--seed 0 --enforce-eager --max-model-len 1024",
         })
         minimal = CL.VllmLab.launch_environment(["--model", "/models/qwen"])
-        self.assertEqual(minimal, {"FASTRSI_VLLM_MODEL": "/models/qwen"})
-        self.assertNotIn("FASTRSI_VLLM_TP", minimal)
-        self.assertNotIn("FASTRSI_VLLM_EXTRA", minimal)
+        self.assertEqual(minimal, {"RSIBOX_VLLM_MODEL": "/models/qwen"})
+        self.assertNotIn("RSIBOX_VLLM_TP", minimal)
+        self.assertNotIn("RSIBOX_VLLM_EXTRA", minimal)
         only_tail = CL.VllmLab.launch_environment(["--model", "/models/qwen", "--", "--enforce-eager"])
-        self.assertEqual(only_tail["FASTRSI_VLLM_EXTRA"], "--enforce-eager")
+        self.assertEqual(only_tail["RSIBOX_VLLM_EXTRA"], "--enforce-eager")
 
-        # `fastrsi conformance vllm --real -- --model ...` forwards a leading "--".
+        # `rsibox conformance vllm --real -- --model ...` forwards a leading "--".
         leading = CL.VllmLab.launch_environment(["--", "--model", "/models/qwen", "--tp", "2"])
-        self.assertEqual(leading, {"FASTRSI_VLLM_MODEL": "/models/qwen", "FASTRSI_VLLM_TP": "2"})
+        self.assertEqual(leading, {"RSIBOX_VLLM_MODEL": "/models/qwen", "RSIBOX_VLLM_TP": "2"})
 
         leading_with_tail = CL.VllmLab.launch_environment(
             ["--", "--model=/models/qwen", "--", "--enforce-eager", "--max-model-len", "1024"]
         )
         self.assertEqual(leading_with_tail, {
-            "FASTRSI_VLLM_MODEL": "/models/qwen",
-            "FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024",
+            "RSIBOX_VLLM_MODEL": "/models/qwen",
+            "RSIBOX_VLLM_EXTRA": "--enforce-eager --max-model-len 1024",
         })
 
-        # Preset FASTRSI_VLLM_MODEL + raw serve flags behind a single leading "--".
+        # Preset RSIBOX_VLLM_MODEL + raw serve flags behind a single leading "--".
         raw_tail_only = CL.VllmLab.launch_environment(["--", "--enforce-eager", "--max-model-len", "1024"])
-        self.assertEqual(raw_tail_only, {"FASTRSI_VLLM_EXTRA": "--enforce-eager --max-model-len 1024"})
+        self.assertEqual(raw_tail_only, {"RSIBOX_VLLM_EXTRA": "--enforce-eager --max-model-len 1024"})
 
     def test_install_and_fresh_check_accept_stacked_unified_diffs_and_refuse_stale_diff(self):
         lab = make_cpu_lab()

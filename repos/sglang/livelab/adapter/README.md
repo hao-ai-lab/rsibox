@@ -6,7 +6,7 @@ Owns the five live-lab verbs (`install`, `check`, `reset`, `uninstall`, `status`
 ## Contract and invariants
 
 - **Lockstep TP step-gap quiescence (`lab.py`, `agent.py`):** `SglangLab.at_gap` sends an
-  `RpcReqInput("fastrsi_gap")` on `engine.send_to_rpc`. TP rank 0 receives it in
+  `RpcReqInput("rsibox_gap")` on `engine.send_to_rpc`. TP rank 0 receives it in
   `Scheduler.recv_requests` and broadcasts it over `tp_cpu_group` to every TP rank in the same
   scheduler iteration, before `get_next_batch_to_run`. Each rank drains any pending overlap
   `result_queue` via `pause_generation(mode="retract")` + `continue_generation`, parks on its

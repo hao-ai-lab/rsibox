@@ -64,8 +64,8 @@ jobs:
         run: gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
       - env:
           GH_TOKEN: ${{ github.token }}
-          FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
-          FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
+          RSIBOX_REVIEW_URL: ${{ vars.RSIBOX_REVIEW_URL || vars.FASTRSI_REVIEW_URL }}
+          RSIBOX_REVIEW_TOKEN: ${{ secrets.RSIBOX_REVIEW_TOKEN || secrets.FASTRSI_REVIEW_TOKEN }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           PR: ${{ github.event.issue.number || inputs.pr }}

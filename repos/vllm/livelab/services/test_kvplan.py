@@ -45,7 +45,7 @@ Planned = type("Planned", (FakeWorker,), {
 def plan_dir(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "vllm", types.SimpleNamespace(__version__="0.0.test"))
     monkeypatch.setattr(kvplan, "gpu", lambda w: ("Fake GB200", 189 * GiB))
-    monkeypatch.setenv("FASTRSI_KVPLAN_DIR", str(tmp_path))
+    monkeypatch.setenv("RSIBOX_KVPLAN_DIR", str(tmp_path))
     FakeWorker.profiles = 0
     return tmp_path
 
@@ -61,7 +61,7 @@ def test_plan_round_trip_skips_the_profile_run(plan_dir, caplog):
     Expect: one plan file holding the ident and 90 GiB; the second start returns the same
     90 GiB and the attributes later steps read, without a profile run (profiles stays 1),
     and logs a "reused" line. Not: that vLLM's real KV size equals the reused one (GPU)."""
-    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    caplog.set_level(logging.INFO, logger="vllm.rsibox.kvplan")
     assert Planned().determine_available_memory() == 90 * GiB
     files = list(plan_dir.glob("*.json"))
     assert len(files) == 1
@@ -80,7 +80,7 @@ def test_plan_of_another_config_is_a_finding_and_the_profile_runs(plan_dir, capl
     naming the differing field (config: c1 -> c2) and records its own plan; the low-memory c1
     start profiles too, with a kvplan_free_memory finding. Before: a miss profiled with no
     word on why, so a config drift looked like a broken cache."""
-    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    caplog.set_level(logging.INFO, logger="vllm.rsibox.kvplan")
     Planned("c1").determine_available_memory()
     assert Planned("c2").determine_available_memory() == 90 * GiB
     assert FakeWorker.profiles == 2
@@ -99,7 +99,7 @@ def test_a_second_holder_group_outside_the_budget_does_not_miss_the_plan(plan_di
     requested_memory, is 110 GiB. Expect: the plan is reused (no profile run), since the budget
     fits and the KV size was measured inside it. Before: kvplan_free_memory and a profile run
     on every reshard switch. Not: that the GPU then has room (vLLM's own start check, GPU)."""
-    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    caplog.set_level(logging.INFO, logger="vllm.rsibox.kvplan")
     Planned(free=150 * GiB).determine_available_memory()
     assert Planned(free=120 * GiB).determine_available_memory() == 90 * GiB
     assert FakeWorker.profiles == 1
@@ -115,7 +115,7 @@ def test_a_measurement_with_no_kv_memory_is_never_recorded_or_reused(plan_dir, c
     the old bad file is not reused (finding kvplan_unusable) but replaced. Before: the bad
     size was saved, and every later start with this config reused it and failed with "No
     available memory for the cache blocks". Not: why that GPU had memory held (GPU only)."""
-    caplog.set_level(logging.INFO, logger="vllm.fastrsi.kvplan")
+    caplog.set_level(logging.INFO, logger="vllm.rsibox.kvplan")
     bad = -int(9.64 * GiB)
     Bad = type("Bad", (FakeWorker,), {"determine_available_memory": kvplan.wrap(
         lambda self: (setattr(FakeWorker, "profiles", FakeWorker.profiles + 1), bad)[1])})
@@ -169,8 +169,8 @@ import http.server, json, os, sys
 argv = sys.argv[1:]
 with open(os.environ["FAKE_OUT"], "w") as _f:
     _f.write(json.dumps({{"argv": argv, "env": {{
-        k: os.environ.get(k) for k in ("PYTHONPATH", "FASTRSI_KVPLAN_DIR")}}}}))
-print('(EngineCore pid=1) INFO fastrsi kvplan: {{"event": "reused", "seconds": 0.07}}', flush=True)
+        k: os.environ.get(k) for k in ("PYTHONPATH", "RSIBOX_KVPLAN_DIR")}}}}))
+print('(EngineCore pid=1) INFO rsibox kvplan: {{"event": "reused", "seconds": 0.07}}', flush=True)
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200); self.end_headers()
@@ -183,7 +183,7 @@ http.server.HTTPServer(("127.0.0.1", int(argv[argv.index("--port") + 1])), H).se
 def test_kvplan_flag_installs_the_worker_class_and_reports_reuse():
     """Input: `engine.py start --kvplan`. Expect: the server gets --worker-cls
     kvplan.KVPlanWorker, this folder first on PYTHONPATH (so every worker can import it) and
-    FASTRSI_KVPLAN_DIR under --cache-root; the report counts the reused line with its seconds.
+    RSIBOX_KVPLAN_DIR under --cache-root; the report counts the reused line with its seconds.
     Not: that vLLM imports the class (GPU receipt, cases c and d)."""
     with tempfile.TemporaryDirectory() as d:
         fake = _script(d, "vllm", FAKE_VLLM_KV)
@@ -200,7 +200,7 @@ def test_kvplan_flag_installs_the_worker_class_and_reports_reuse():
         argv = ran["argv"]
         assert argv[argv.index("--worker-cls") + 1] == "kvplan.KVPlanWorker"
         assert ran["env"]["PYTHONPATH"].split(os.pathsep)[0] == str(HERE)
-        assert ran["env"]["FASTRSI_KVPLAN_DIR"] == str(Path(d, "c", "kvplan").resolve())
+        assert ran["env"]["RSIBOX_KVPLAN_DIR"] == str(Path(d, "c", "kvplan").resolve())
         assert rep["kvplan"]["reused"] == 1 and rep["kvplan"]["seconds"] == [0.07]
 
 

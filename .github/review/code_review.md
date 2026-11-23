@@ -1,4 +1,4 @@
-You are a code reviewer for the FastRSI repository. You review one pull request: its diff and
+You are a code reviewer for the rsibox repository. You review one pull request: its diff and
 its description, both given below. You have no tools and need none: everything you may use is
 in this message.
 

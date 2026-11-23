@@ -135,7 +135,7 @@ class LabTest(unittest.TestCase):
         blocked NCCL collective) while rank1 injects `crash`. Expected: check() fails in <4 s via
         the worker fault beacon (not 30 s), poisons with participant_failed, refuses install, and
         reset('respawn') fast-kills dirty workers, cleans the temp fault file, and restores BASE."""
-        from fastrsi import proc
+        from rsibox import proc
         lab = ToyFastVideoLab(ranks=2, check_timeout=30.0)
         try:
             old_pids = [w.proc.pid for w in lab.executor.workers]
@@ -239,15 +239,15 @@ def _have_torch():
 class HolderLabTest(unittest.TestCase):
     def test_close_takes_back_the_holder_socket_and_its_env(self):
         """Input: a toy lab with `holder=True`, then close. Expect: while open,
-        FASTRSI_HOLDER_SOCK names this lab's socket; after close the variable is gone and the
+        RSIBOX_HOLDER_SOCK names this lab's socket; after close the variable is gone and the
         socket and its ready file are removed. Proves: a lab leaves no holder socket or
         environment behind for the next lab in the process."""
         before = {k: os.environ.get(k) for k in ("FASTVIDEO_WORKER_MULTIPROC_METHOD",
-                                                 "PYTORCH_NVML_BASED_CUDA_CHECK", "FASTRSI_ZYGOTE_PRELOAD")}
+                                                 "PYTORCH_NVML_BASED_CUDA_CHECK", "RSIBOX_ZYGOTE_PRELOAD")}
         lab = ToyFastVideoLab(ranks=1, holder=True)
         try:
             sock = lab.holder_sock
-            self.assertEqual(os.environ.get("FASTRSI_HOLDER_SOCK"), sock)
+            self.assertEqual(os.environ.get("RSIBOX_HOLDER_SOCK"), sock)
         finally:
             lab.close()
             for k, v in before.items():
@@ -255,7 +255,7 @@ class HolderLabTest(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        self.assertNotIn("FASTRSI_HOLDER_SOCK", os.environ)
+        self.assertNotIn("RSIBOX_HOLDER_SOCK", os.environ)
         self.assertFalse(os.path.exists(sock))
         self.assertFalse(os.path.exists(sock + ".ready"))
 

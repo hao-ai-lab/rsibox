@@ -113,15 +113,15 @@ class _V2FullWrapper:
 
 
 class _V2KeySet(set):
-    """Mode key set over `mgr._fastrsi_orig_candidates`; mutations re-filter `mgr._candidates`."""
+    """Mode key set over `mgr._rsibox_orig_candidates`; mutations re-filter `mgr._candidates`."""
 
     def __init__(self, mgr, mode, initial=()):
         super().__init__(initial)
         self._mgr, self._mode = mgr, mode
 
     def _sync(self):
-        keys = self._mgr._fastrsi_r1_keys
-        for k, descs in self._mgr._fastrsi_orig_candidates.items():
+        keys = self._mgr._rsibox_r1_keys
+        for k, descs in self._mgr._rsibox_orig_candidates.items():
             self._mgr._candidates[k] = [
                 d for d in descs if d.cg_mode not in keys or d in keys[d.cg_mode]
             ]
@@ -152,7 +152,7 @@ def _v2_helpers(runner):
 
 def _vllm_v2_engine(runner, mgr, kinds, torch_mod, set_capturing, parallel_state):
     """The Engine of a vLLM V2 GPU worker (`ModelCudaGraphManager`; None when no graphs)."""
-    if not mgr.needs_capture() or (not getattr(mgr, "_fastrsi_r1_keys", None)
+    if not mgr.needs_capture() or (not getattr(mgr, "_rsibox_r1_keys", None)
                                    and not getattr(mgr, "_graphs_captured", False)
                                    and not getattr(mgr, "graphs", None)):
         return None
@@ -163,16 +163,16 @@ def _vllm_v2_engine(runner, mgr, kinds, torch_mod, set_capturing, parallel_state
     if enc is not None and callable(getattr(enc, "has_cudagraph", None)) and enc.has_cudagraph():
         raise NotImplementedError("R1 does not support V2 encoder CUDA graphs")
 
-    if not hasattr(mgr, "_fastrsi_r1_keys"):
-        mgr._fastrsi_orig_candidates = {k: list(v) for k, v in mgr._candidates.items()}
+    if not hasattr(mgr, "_rsibox_r1_keys"):
+        mgr._rsibox_orig_candidates = {k: list(v) for k, v in mgr._candidates.items()}
         by_mode = {}
-        for descs in mgr._fastrsi_orig_candidates.values():
+        for descs in mgr._rsibox_orig_candidates.values():
             for d in descs:
                 if name(d.cg_mode) != "NONE":
                     by_mode.setdefault(d.cg_mode, set()).add(d)
-        mgr._fastrsi_r1_keys = {m: _V2KeySet(mgr, m, ds) for m, ds in by_mode.items()}
-    r1_keys = mgr._fastrsi_r1_keys
-    if not any(r1_keys.values()) and not any(mgr._fastrsi_orig_candidates.values()):
+        mgr._rsibox_r1_keys = {m: _V2KeySet(mgr, m, ds) for m, ds in by_mode.items()}
+    r1_keys = mgr._rsibox_r1_keys
+    if not any(r1_keys.values()) and not any(mgr._rsibox_orig_candidates.values()):
         return None
     full_mode = next((m for m in r1_keys if name(m) == "FULL"), None)
     full_wrapper = _V2FullWrapper(mgr, full_mode) if full_mode is not None else None

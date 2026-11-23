@@ -59,7 +59,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import corelab  # noqa: E402  (core/livelab on sys.path + shared helpers)
-from fastrsi import harness, ipc  # noqa: E402  (stdlib only: engine.py imports this module)
+from rsibox import harness, ipc  # noqa: E402  (stdlib only: engine.py imports this module)
 
 _finding = harness.plain_finding
 

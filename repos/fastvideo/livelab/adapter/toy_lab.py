@@ -8,7 +8,7 @@ conformance cases c0-c10 on it:
     cd core/livelab && PYTHONPATH=<repo>/repos/fastvideo/livelab \\
         python3 -m conformance --lab adapter.toy_lab:ToyFastVideoLab
 """
-from fastrsi import harness
+from rsibox import harness
 from adapter.lab import FastVideoLab
 
 OPS = "adapter.toyfv.ops"

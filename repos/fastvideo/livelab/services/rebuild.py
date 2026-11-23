@@ -34,7 +34,7 @@ import sys
 import time
 import types
 
-from fastrsi import harness, hooks
+from rsibox import harness, hooks
 
 _SKIP = {"_parameters", "_buffers", "_modules", "_non_persistent_buffers_set", "training",
          "_forward_hooks", "_forward_pre_hooks", "_backward_hooks", "_backward_pre_hooks",

@@ -1,6 +1,6 @@
 <div class="fr pg">
   <nav class="pg-nav" aria-label="Site">
-    <a class="pg-mark" href="#top">FastRSI</a>
+    <a class="pg-mark" href="#top">rsibox</a>
     <span class="pg-links pg-tabs"><a href="#top" aria-current="page">Overview</a><a class="pg-ext" href="https://github.com/hao-ai-lab/rsibox">GitHub <span aria-hidden="true">&#x2197;</span></a></span>
   </nav>
 
@@ -8,18 +8,18 @@
     <div class="hero-grid">
       <div class="hero-copy">
         <h1 class="fr-title pg-title">{{TITLE}}</h1>
-        <p class="fr-lede pg-lede">FastRSI is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets an answer it can trust in seconds, not minutes.</p>
+        <p class="fr-lede pg-lede">rsibox is an agentic framework that cuts the evaluation overhead of recursive self-improvement, so an agent improving an ML system gets an answer it can trust in seconds, not minutes.</p>
         <p class="hero-cta"><button type="button" class="fr-btn hero-try" id="try-open">Try it</button></p>
       </div>
       <div class="hero-figs">
         <div class="hero-pick" id="hero-pick" role="group" aria-label="Engine shown in the two figures"></div>
-        <a class="fr-card hero-fig" href="#eval-time" data-pop="eval-time" aria-label="FastRSI cuts system and measurement overhead: time for one evaluation. Open the full figure.">
+        <a class="fr-card hero-fig" href="#eval-time" data-pop="eval-time" aria-label="rsibox cuts system and measurement overhead: time for one evaluation. Open the full figure.">
           <p class="hero-cap"><b>Skip the cold start and the full benchmark suite</b><span class="hero-sub" id="hero-ladder-sub"></span></p>
           <div id="hero-ladder"></div>
           <span class="hero-zoom">Open the full figure</span>
         </a>
         <a class="fr-card hero-fig" href="#sooner" data-pop="sooner" aria-label="So the agent reaches the same result sooner. Open the full figure.">
-          <p class="hero-cap"><b>So the agent reaches the same result sooner</b><span class="hero-sub" id="hero-race-sub"></span><span class="hero-keys"><i class="fr-sw fr-sw-codex"></i>Baseline <i class="fr-sw fr-sw-fast"></i>FastRSI</span></p>
+          <p class="hero-cap"><b>So the agent reaches the same result sooner</b><span class="hero-sub" id="hero-race-sub"></span><span class="hero-keys"><i class="fr-sw fr-sw-codex"></i>Baseline <i class="fr-sw fr-sw-fast"></i>rsibox</span></p>
           <div id="hero-race"></div>
           <span class="hero-zoom">Open the full figure</span>
         </a>
@@ -43,7 +43,7 @@ Show me the result, then walk me through one install, check and uninstall on the
   <!-- The loop -->
   <section class="fr-sec pg-loop" id="loop" aria-labelledby="loop-h">
     <h2 class="fr-h2" id="loop-h">Why coding agents get stuck waiting on the GPU</h2>
-    <p class="fr-sub">An agent edits the system, evaluates the edit, keeps it if it helped, and goes again. Every turn of the loop waits on the evaluation. That wait has two parts, and FastRSI goes after both.</p>
+    <p class="fr-sub">An agent edits the system, evaluates the edit, keeps it if it helped, and goes again. Every turn of the loop waits on the evaluation. That wait has two parts, and rsibox goes after both.</p>
     <div class="fr-card lp">
       <div class="lp-track" id="lp" role="img" aria-label="The loop: edit, start the system, run the evaluation, keep or revert, repeat. Starting the system and running the evaluation are the long steps.">
         <div class="lp-node" data-lp="0"><span class="lp-n">Edit</span><span class="lp-d">the agent changes a few lines</span></div>
@@ -98,20 +98,20 @@ Show me the result, then walk me through one install, check and uninstall on the
           <p>Manual hot reloading leaves old references, cached graphs, and dirty buffers behind. Sooner or later a benchmark looks great, and you cannot trust it.</p>
           <div class="st-mini st-frag"><span>stale objects</span><span>stale graphs</span><span>dirty state</span><b>&#x2717; fragile: restart to be sure</b></div>
         </article>
-        <article class="st-step" data-scene="fastrsi">
-          <p class="st-kicker">How FastRSI fixes startup</p>
+        <article class="st-step" data-scene="rsibox">
+          <p class="st-kicker">How rsibox fixes startup</p>
           <h3>Patch the live engine, or fall back cleanly</h3>
-          <p>FastRSI keeps the notebook's speed and adds a safety net. Each edit is a transaction that takes the cheapest path that is still safe, and falls back to the next one when it has to.</p>
+          <p>rsibox keeps the notebook's speed and adds a safety net. Each edit is a transaction that takes the cheapest path that is still safe, and falls back to the next one when it has to.</p>
           <ol class="st-mini st-fall">
             <li><b>Install into the live engine</b><span>cheapest</span></li>
             <li><b>Rebuild only what the edit touched</b></li>
             <li><b>Respawn from a warm copy</b></li>
             <li><b>Full restart</b><span>last resort</span></li>
           </ol>
-          <p>If an edit crashes or fails its check, FastRSI rolls it back and the warm engine keeps running.</p>
+          <p>If an edit crashes or fails its check, rsibox rolls it back and the warm engine keeps running.</p>
         </article>
         <article class="st-step" data-scene="probe">
-          <p class="st-kicker">How FastRSI fixes measurement</p>
+          <p class="st-kicker">How rsibox fixes measurement</p>
           <h3>Probe to steer. Evaluate in full to confirm.</h3>
           <p>While developing, you rarely need the whole benchmark. The agent writes a targeted probe: a few steps on the code path it just changed.</p>
           <p>The full evaluation still runs on the edits worth keeping. It can run in the background, so the agent is never blocked on it.</p>
@@ -170,9 +170,9 @@ Show me the result, then walk me through one install, check and uninstall on the
           <div class="ar-text" data-p="1"><p class="st-kicker">Step 1 · Offline setup</p> <h3>Map which state each function touches</h3> <p>The offline toolsmith reads the codebase, past PRs, issues, and tests, then sorts functions into six groups based on what state they mutate and how safely they can be swapped live.</p> <p>Only start-up logic, launch flags and environment variables still need one.</p></div>
           <div class="ar-text" data-p="2" hidden><p class="st-kicker">Step 2 · Offline setup</p> <h3>Build the warm-reload hooks for that engine</h3> <p>Every engine needs different plumbing to stay warm, such as a pre-initialized process to fork from, weights pinned outside the worker, or a saved state snapshot. The toolsmith builds these hooks once and logs their latency.</p></div>
           <div class="ar-text" data-p="3" hidden><p class="st-kicker">Step 3 · Offline setup</p> <h3>Verify that live reloads match a cold start</h3> <p>Every tool is checked the same way: base, edit, injected fault, reverted base, each compared with a cold start. A lab's results count only after it passes all <b>11</b> conformance cases.</p> <p>The guarantees are settled here, offline, so the checks that run on every edit can stay small.</p></div>
-          <div class="ar-text" data-p="4" hidden><p class="st-kicker">Step 4 · Live loop</p> <h3>Swap code between steps across every GPU rank at once</h3> <p>While the engine keeps stepping, FastRSI prepares the agent's edit and commits it in the barrier between two steps across every GPU rank, or aborts everywhere if any rank fails.</p> <p>A check counts only if it shows the edited code actually ran.</p></div>
+          <div class="ar-text" data-p="4" hidden><p class="st-kicker">Step 4 · Live loop</p> <h3>Swap code between steps across every GPU rank at once</h3> <p>While the engine keeps stepping, rsibox prepares the agent's edit and commits it in the barrier between two steps across every GPU rank, or aborts everywhere if any rank fails.</p> <p>A check counts only if it shows the edited code actually ran.</p></div>
           <div class="ar-text" data-p="5" hidden><p class="st-kicker">Step 5 · Live loop</p> <h3>Build new reload hooks on the fly when the agent hits new code</h3> <p>A check is too slow, an install fails, the lab falls back to a restart, or the agent enters code the lab does not cover. The online toolsmith prices the new kind of experiment, builds the missing piece and verifies it against a fresh process.</p> <p>The engine gets more live-editable the longer the agent works on it.</p></div>
-          <div class="ar-text" data-p="6" hidden><p class="st-kicker">Step 6 · Live loop</p> <h3>Recover from hung ranks and CUDA faults without reloading weights</h3> <p>When a bad kernel hangs a rank or leaves a sticky CUDA error, FastRSI marks the workers poisoned, blocks new edits, and respawns the worker group from warm host and GPU caches.</p></div>
+          <div class="ar-text" data-p="6" hidden><p class="st-kicker">Step 6 · Live loop</p> <h3>Recover from hung ranks and CUDA faults without reloading weights</h3> <p>When a bad kernel hangs a rank or leaves a sticky CUDA error, rsibox marks the workers poisoned, blocks new edits, and respawns the worker group from warm host and GPU caches.</p></div>
         </div>
         <div class="ar-panels">
           <div class="ar-panel" data-p="1">
@@ -236,7 +236,7 @@ Show me the result, then walk me through one install, check and uninstall on the
 
   <div class="pg-bridge" id="results">
     <h2 class="fr-h2">Evaluation</h2>
-    <p class="fr-sub">We ran FastRSI and Baseline on vLLM, Megatron-LM, and FastVideo to measure three things: end-to-end time to reach the same speedup, time spent per check, and how the gap scales as models get faster.</p>
+    <p class="fr-sub">We ran rsibox and Baseline on vLLM, Megatron-LM, and FastVideo to measure three things: end-to-end time to reach the same speedup, time spent per check, and how the gap scales as models get faster.</p>
   </div>
 
 {{RESULTS}}
@@ -258,9 +258,9 @@ PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre>
     <h2 class="fr-h2 cite-h" id="cite-h">Cite</h2>
     <div class="fr-card cite-card">
       <button type="button" class="fr-chip cite-copy" id="cite-copy">Copy</button>
-      <pre id="cite-bib">@misc{fastrsi,
-  title        = {FastRSI},
-  author       = {{FastRSI contributors}},
+      <pre id="cite-bib">@misc{rsibox,
+  title        = {rsibox},
+  author       = {{rsibox contributors}},
   year         = {2026},
   howpublished = {\url{https://github.com/hao-ai-lab/rsibox}}
 }</pre>
@@ -268,6 +268,6 @@ PYTHONPATH=core/livelab python3 -m conformance --lab kernel.toy_lab:ToyLab</pre>
   </section>
 
   <footer class="pg-foot">
-    <p class="fr-note">FastRSI is open source: <a href="https://github.com/hao-ai-lab/rsibox">github.com/hao-ai-lab/rsibox</a>.</p>
+    <p class="fr-note">rsibox is open source: <a href="https://github.com/hao-ai-lab/rsibox">github.com/hao-ai-lab/rsibox</a>.</p>
   </footer>
 </div>

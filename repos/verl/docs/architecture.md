@@ -1,7 +1,7 @@
 # verl Architecture: Ray Process Tree, Step-Gap Quiescence, and Coupled `S0` Reset
 
 This document maps a synchronous `verl` RL post-training job (`verl.trainer.ppo.v1.trainer_sync:PPOTrainerSync`
-at `volcengine/verl` commit `975f063b`, `0.10.0.dev`) onto the FastRSI live-lab primitives:
+at `volcengine/verl` commit `975f063b`, `0.10.0.dev`) onto the rsibox live-lab primitives:
 which processes exist, what state each holds, where the global quiescence barrier sits, and
 what invalidates a live swap vs. a coupled `S0` state reset vs. a full Ray job restart.
 All timings cite `../kb/costs.md`.
@@ -12,7 +12,7 @@ All timings cite `../kb/costs.md`.
 main_ppo driver                 Hydra config parse, ray.init(runtime_env=setup_hook)
   |  spawns remote actor
   v
-TaskRunnerV1 (1 CPU actor)      PPOTrainerFastRSISync.fit(), dataloader, core_algos advantage,
+TaskRunnerV1 (1 CPU actor)      PPOTrainerRsiboxSync.fit(), dataloader, core_algos advantage,
   |                             CheckpointEngineManager, TransferQueue coordinator, Gate host
   +-- WorkerDict x4 (1/GPU)     Colocated ActorRolloutRefWorker per rank (NCCL + Megatron/FSDP):
   |     +-- actor               TrainingWorker (Megatron-Core or FSDP model, fp32 master weights,

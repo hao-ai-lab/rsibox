@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the FastRSI site into site/public/ (static files, no dependencies).
+"""Build the rsibox site into site/public/ (static files, no dependencies).
 
     python3 site/build.py            # writes site/public/index.html
     python3 site/build.py --check    # validate build output without writing site/public/
@@ -18,16 +18,16 @@ PUB = os.path.join(HERE, "public")
 PAGES = (
     (
         "landing",
-        "fastrsi-story.html",
+        "rsibox-story.html",
         "index.html",
-        "FastRSI",
-        "FastRSI cuts the evaluation overhead of recursive self-improvement: an agent improving an ML system gets its answer in seconds, not minutes.",
+        "rsibox",
+        "rsibox cuts the evaluation overhead of recursive self-improvement: an agent improving an ML system gets its answer in seconds, not minutes.",
     ),
 )
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Build or verify the static FastRSI site bundle.")
+    ap = argparse.ArgumentParser(description="Build or verify the static rsibox site bundle.")
     ap.add_argument("--check", action="store_true", help="validate generated HTML without modifying site/public/")
     args = ap.parse_args(argv)
 

@@ -26,7 +26,7 @@ actions. The zygote itself stops if its imports initialized CUDA or the CUDA dri
 forked child could then use the GPU; it names the module, which the modules file can exclude.
 
 Before its imports the zygote installs the framework's forksafe.py (core/livelab;
-FASTRSI_ZYGOTE_FORKSAFE=0 turns it off): torch.cuda.get_device_capability and current_device
+RSIBOX_ZYGOTE_FORKSAFE=0 turns it off): torch.cuda.get_device_capability and current_device
 answer from NVML while CUDA is not initialized. Every forked server inherits it, so a library
 that asks for the GPU's capability at import (FlashInfer, imported by the API server at TP>1)
 no longer initializes CUDA there, and vLLM keeps forking the engine core and the workers
@@ -35,15 +35,15 @@ instead of spawning them.
 import argparse, contextlib, importlib, json, os, signal, socket, sys, time, traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import corelab  # noqa: F401,E402  (core/livelab on sys.path: forksafe, fastrsi)
+import corelab  # noqa: F401,E402  (core/livelab on sys.path: forksafe, rsibox)
 import forksafe, vllm_args, zygote_refresh  # noqa: E402
-from fastrsi import harness, ipc, proc  # noqa: E402
+from rsibox import harness, ipc, proc  # noqa: E402
 
 # Top-level packages whose edited modules a fork refreshes instead of refusing.
-REFRESH_PREFIXES = tuple(p for p in os.environ.get("FASTRSI_ZYGOTE_REFRESH", "vllm").split(",")
+REFRESH_PREFIXES = tuple(p for p in os.environ.get("RSIBOX_ZYGOTE_REFRESH", "vllm").split(",")
                          if p)
 # A refresh that reaches more modules than this re-imports the whole package (see plan()).
-REFRESH_ALL_ABOVE = int(os.environ.get("FASTRSI_ZYGOTE_REFRESH_ALL_ABOVE", "100"))
+REFRESH_ALL_ABOVE = int(os.environ.get("RSIBOX_ZYGOTE_REFRESH_ALL_ABOVE", "100"))
 
 # The environment the zygote was started with, before its imports. Libraries set variables
 # while importing (torch, tilelang, vLLM's env_override ...); a request is compared with this
@@ -53,9 +53,9 @@ START_ENV = dict(os.environ)
 # Keys that may differ between the zygote's and the request's environment: shell bookkeeping,
 # the cluster harness's per-task ids, and the profiler's per-run output settings (re-read
 # after fork).
-MARKER_ENV = "FASTRSI_LIVE_RECONFIG_DIR"
+MARKER_ENV = "RSIBOX_LIVE_RECONFIG_DIR"
 MARKER_MEMBERS_DIR = ".members"
-VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "FASTRSI_PROF_DIR", "FASTRSI_PROF_T0",
+VOLATILE = {"_", "PWD", "OLDPWD", "SHLVL", "RSIBOX_PROF_DIR", "RSIBOX_PROF_T0",
             MARKER_ENV}   # engine.py: one live-agent folder per launch
 VOLATILE_PREFIXES = ("RAY_",)
 
@@ -150,7 +150,7 @@ def record_marker_member(marker, pid=None, proc_root="/proc"):
 def _child(req, conns, refresh=()):
     """In the forked child: become `vllm serve` with the request's argv, cwd, log and volatile
     env keys, after dropping the `refresh` modules so the server imports them again from their
-    new source. Propagates the launch marker (`FASTRSI_LIVE_RECONFIG_DIR`) both into
+    new source. Propagates the launch marker (`RSIBOX_LIVE_RECONFIG_DIR`) both into
     `os.environ` and `<marker>/.members/<pid>` (and via `os.register_at_fork` for any forked
     descendant) because `/proc/<pid>/environ` stays the zygote's exec-time environment. With the
     `env` finding accepted, the keys where the request differs from the zygote's start
@@ -277,8 +277,8 @@ def serve(sock_path, modules_file):
     if err:                      # fail before minutes of imports, not after them
         raise SystemExit(err)
     t0 = time.time()
-    fs = {"installed": False, "why": "FASTRSI_ZYGOTE_FORKSAFE=0"}
-    if os.environ.get("FASTRSI_ZYGOTE_FORKSAFE", "1") == "1":
+    fs = {"installed": False, "why": "RSIBOX_ZYGOTE_FORKSAFE=0"}
+    if os.environ.get("RSIBOX_ZYGOTE_FORKSAFE", "1") == "1":
         import torch
         fs = forksafe.install(torch.cuda)
     mods = list(BASE_MODULES)
@@ -312,7 +312,7 @@ def serve(sock_path, modules_file):
     # Move everything imported so far out of the garbage collector's reach: a forked child
     # would otherwise scan (and so write to, copying every page) the whole inherited heap on
     # each full collection. Prefork servers do the same (Python docs, gc.freeze).
-    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1":
+    if os.environ.get("RSIBOX_ZYGOTE_GC_FREEZE", "1") == "1":
         forksafe.freeze_gc_before_fork()
     print(json.dumps({"event": "zygote_ready", "pid": os.getpid(), "import_seconds":
                       round(time.time() - t0, 2), "modules": len(sys.modules),

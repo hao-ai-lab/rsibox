@@ -1,5 +1,5 @@
 {
- "schema": "fastrsi-survey/1/history",
+ "schema": "rsibox-survey/1/history",
  "engine": "megatron",
  "scan_date": "2026-11-16",
  "ruleset_version": "1.1",

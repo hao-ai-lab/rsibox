@@ -183,13 +183,13 @@ class ForkserverPrepareHookTest(unittest.TestCase):
         output = json.loads(completed.stdout.strip().splitlines()[-1])
         self.assertEqual(output["first"], {"value": 1, "is_arg": True, "x": 7})
         self.assertEqual(output["second"], {"value": 2, "is_arg": True, "x": 7}, completed.stderr)
-        self.assertIn("[fastrsi-zygote] pid ", completed.stderr)
+        self.assertIn("[rsibox-zygote] pid ", completed.stderr)
         self.assertIn("refreshed stale=['fastvideo.consts']", completed.stderr)
 
 
 class ForkGuardTest(unittest.TestCase):
     def setUp(self):
-        self.env = {k: os.environ.get(k) for k in ("CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")}
+        self.env = {k: os.environ.get(k) for k in ("CUTE_DSL_ARCH", "RSIBOX_ZYGOTE_CC")}
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -199,13 +199,13 @@ class ForkGuardTest(unittest.TestCase):
                 os.environ[k] = v
 
     def test_cute_dsl_arch_is_pinned_before_the_preload(self):
-        """Input: CUTE_DSL_ARCH unset, FASTRSI_ZYGOTE_CC=10.0 (what NVML answers on B200/GB200);
+        """Input: CUTE_DSL_ARCH unset, RSIBOX_ZYGOTE_CC=10.0 (what NVML answers on B200/GB200);
         then CUTE_DSL_ARCH preset to sm_90a. Expect: pin_cute_dsl_arch sets sm_100a, then keeps
         the preset value. Proves: the zygote gives CuTe DSL its arch, so importing flashinfer
         -> cutlass in the server does not call cuInit to find it. Not: that the DSL reads it
         (the GPU check of the zygote respawn covers that)."""
         os.environ.pop("CUTE_DSL_ARCH", None)
-        os.environ["FASTRSI_ZYGOTE_CC"] = "10.0"
+        os.environ["RSIBOX_ZYGOTE_CC"] = "10.0"
         self.assertEqual(Z.pin_cute_dsl_arch(), "sm_100a")
         self.assertEqual(os.environ["CUTE_DSL_ARCH"], "sm_100a")
         os.environ["CUTE_DSL_ARCH"] = "sm_90a"
@@ -242,12 +242,12 @@ class ServeTest(unittest.TestCase):
         import multiprocessing.spawn as SP
         self.SP, self.prepare = SP, SP.prepare
         self.saved = (Z.LIBCUDA, Z.driver_initialized, dict(Z._SNAPSHOT))
-        self.env = {k: os.environ.get(k) for k in ("FASTRSI_ZYGOTE_PRELOAD", "FASTRSI_ZYGOTE_GC_FREEZE",
-                                                   "FASTRSI_ZYGOTE_PRESET_TORCH_KEY",
-                                                   "FASTRSI_TORCH_KEY_CACHE",
-                                                   "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")}
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastrsi_no_such_module"
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        self.env = {k: os.environ.get(k) for k in ("RSIBOX_ZYGOTE_PRELOAD", "RSIBOX_ZYGOTE_GC_FREEZE",
+                                                   "RSIBOX_ZYGOTE_PRESET_TORCH_KEY",
+                                                   "RSIBOX_TORCH_KEY_CACHE",
+                                                   "CUTE_DSL_ARCH", "RSIBOX_ZYGOTE_CC")}
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = "rsibox_no_such_module"
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
 
     def tearDown(self):
         self.SP.prepare = self.prepare
@@ -287,7 +287,7 @@ class ServeTest(unittest.TestCase):
 
     def test_serve_presets_torch_key_without_cuda_poison(self):
         """When torch is loaded, `_serve()` populates Inductor's `torch_key()` in memory or via
-        `jitcache.preset_torch_key()` without poisoning CUDA, and respects `FASTRSI_ZYGOTE_PRESET_TORCH_KEY=0`."""
+        `jitcache.preset_torch_key()` without poisoning CUDA, and respects `RSIBOX_ZYGOTE_PRESET_TORCH_KEY=0`."""
         import types
         from unittest import mock
         from services import jitcache
@@ -319,9 +319,9 @@ class ServeTest(unittest.TestCase):
         fake_torch._inductor = fake_inductor
 
         Z.driver_initialized = lambda: False
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
-        os.environ.pop("FASTRSI_TORCH_KEY_CACHE", None)
-        os.environ.pop("FASTRSI_ZYGOTE_PRESET_TORCH_KEY", None)
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = ""
+        os.environ.pop("RSIBOX_TORCH_KEY_CACHE", None)
+        os.environ.pop("RSIBOX_ZYGOTE_PRESET_TORCH_KEY", None)
         mods = {
             "torch": fake_torch,
             "torch._inductor": fake_inductor,
@@ -333,9 +333,9 @@ class ServeTest(unittest.TestCase):
             self.assertEqual(calls, ["torch_key"])
             self.assertTrue(rep["torch_key"]["in_memory"])
 
-            # With FASTRSI_TORCH_KEY_CACHE set, delegates to jitcache.preset_torch_key().
+            # With RSIBOX_TORCH_KEY_CACHE set, delegates to jitcache.preset_torch_key().
             calls.clear()
-            os.environ["FASTRSI_TORCH_KEY_CACHE"] = "/tmp/fake_torch_key.json"
+            os.environ["RSIBOX_TORCH_KEY_CACHE"] = "/tmp/fake_torch_key.json"
             with mock.patch.object(jitcache, "preset_torch_key",
                                    return_value={"hit": True, "files": 2, "seconds": 0.001}) as preset:
                 rep_cached = Z._serve()
@@ -343,9 +343,9 @@ class ServeTest(unittest.TestCase):
                 preset.assert_called_once_with()
                 self.assertTrue(rep_cached["torch_key"]["hit"])
 
-            # Opt-out via FASTRSI_ZYGOTE_PRESET_TORCH_KEY=0 skips torch_key().
+            # Opt-out via RSIBOX_ZYGOTE_PRESET_TORCH_KEY=0 skips torch_key().
             calls.clear()
-            os.environ["FASTRSI_ZYGOTE_PRESET_TORCH_KEY"] = "0"
+            os.environ["RSIBOX_ZYGOTE_PRESET_TORCH_KEY"] = "0"
             rep_off = Z._serve()
             self.assertEqual(rep_off["poison"], [])
             self.assertIsNone(rep_off["torch_key"])
@@ -393,10 +393,10 @@ class OptionalPreloadTest(unittest.TestCase):
         self._orig_env = {
             k: os.environ.get(k)
             for k in (
-                "FASTRSI_ZYGOTE_PRELOAD",
-                "FASTRSI_ZYGOTE_OPTIONAL_PRELOAD",
-                "FASTRSI_ZYGOTE_GC_FREEZE",
-                "FASTRSI_ZYGOTE_PRESET_TORCH_KEY",
+                "RSIBOX_ZYGOTE_PRELOAD",
+                "RSIBOX_ZYGOTE_OPTIONAL_PRELOAD",
+                "RSIBOX_ZYGOTE_GC_FREEZE",
+                "RSIBOX_ZYGOTE_PRESET_TORCH_KEY",
             )
         }
         self.addCleanup(self._restore_env)
@@ -420,11 +420,11 @@ class OptionalPreloadTest(unittest.TestCase):
             get_device_properties=lambda _idx=0: types.SimpleNamespace(multi_processor_count=148),
             get_device_capability=lambda _idx=0: (10, 0),
         )
-        fake_opt = types.ModuleType("_fastrsi_fake_opt_mod")
+        fake_opt = types.ModuleType("_rsibox_fake_opt_mod")
 
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
-        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = ""
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("RSIBOX_ZYGOTE_OPTIONAL_PRELOAD", None)
 
         def fake_restore():
             events.append("restore")
@@ -442,11 +442,11 @@ class OptionalPreloadTest(unittest.TestCase):
             return []
 
         with (
-            mock.patch.dict(sys.modules, {"torch": fake_torch, "_fastrsi_fake_opt_mod": fake_opt}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch, "_rsibox_fake_opt_mod": fake_opt}),
             mock.patch.object(
                 zygote,
                 "OPTIONAL_PRELOAD",
-                ("_fastrsi_fake_opt_mod", "_fastrsi_missing_opt_mod"),
+                ("_rsibox_fake_opt_mod", "_rsibox_missing_opt_mod"),
             ),
             mock.patch.object(zygote.forksafe, "install_all_guards", side_effect=fake_install_all_guards),
             mock.patch.object(zygote, "_preset_torch_key", side_effect=fake_preset),
@@ -458,7 +458,7 @@ class OptionalPreloadTest(unittest.TestCase):
 
         self.assertIsNone(res["preload_error"])
         self.assertEqual(res["poison"], [])
-        self.assertEqual(res["optional_preloaded"], ["_fastrsi_fake_opt_mod"])
+        self.assertEqual(res["optional_preloaded"], ["_rsibox_fake_opt_mod"])
         self.assertEqual(events[0], ("install_all_guards", True, False))
         self.assertLess(events.index("restore"), events.index("preset"))
         self.assertLess(events.index("restore"), events.index("poison"))
@@ -469,13 +469,13 @@ class OptionalPreloadTest(unittest.TestCase):
         from unittest import mock
         from services import zygote
 
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = ""
-        os.environ["FASTRSI_ZYGOTE_OPTIONAL_PRELOAD"] = "0"
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = ""
+        os.environ["RSIBOX_ZYGOTE_OPTIONAL_PRELOAD"] = "0"
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
         seen = []
 
         with (
-            mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_should_not_import",)),
+            mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_rsibox_should_not_import",)),
             mock.patch.object(zygote, "pin_cute_dsl_arch"),
             mock.patch.object(zygote.forksafe, "pin_triton_target", return_value=lambda: None),
             mock.patch.object(importlib, "import_module", side_effect=lambda m: seen.append(m)),
@@ -516,7 +516,7 @@ class OptionalPreloadTest(unittest.TestCase):
             mock.patch.object(zygote, "refresh_stale", return_value={"stale": [], "blocked": []}),
         ):
             zygote._install_worker_hook(poison=None, clear_nvml_env=True)
-            self.assertTrue(getattr(SP.prepare, "_fastrsi", False))
+            self.assertTrue(getattr(SP.prepare, "_rsibox", False))
             out = SP.prepare({"worker": 1})
 
         self.assertIs(SP.prepare, orig_prepare)
@@ -524,21 +524,21 @@ class OptionalPreloadTest(unittest.TestCase):
         self.assertEqual(order, [("unpatch", None, True), "affinity", "orig"])
 
     def test_serve_skips_default_optional_preload_for_custom_preload_without_torch(self):
-        """Unset FASTRSI_ZYGOTE_OPTIONAL_PRELOAD with custom preload=["fastvideo.user"] must
+        """Unset RSIBOX_ZYGOTE_OPTIONAL_PRELOAD with custom preload=["fastvideo.user"] must
         skip default OPTIONAL_PRELOAD so lightweight preloads do not pull in flashinfer/torch."""
         import importlib
         from unittest import mock
         from services import zygote
 
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastvideo.user"
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
-        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = "fastvideo.user"
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("RSIBOX_ZYGOTE_OPTIONAL_PRELOAD", None)
         seen = []
 
         with mock.patch.dict(sys.modules):
             sys.modules.pop("torch", None)
             with (
-                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_should_not_import",)),
+                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_rsibox_should_not_import",)),
                 mock.patch.object(zygote, "pin_cute_dsl_arch"),
                 mock.patch.object(zygote.forksafe, "install_all_guards") as guards_mock,
                 mock.patch.object(zygote.forksafe, "pin_triton_target", return_value=lambda: None) as triton_mock,
@@ -557,15 +557,15 @@ class OptionalPreloadTest(unittest.TestCase):
         triton_mock.assert_called_once_with()
 
     def test_serve_guards_explicit_optional_preload_without_torch_in_preload(self):
-        """Explicit FASTRSI_ZYGOTE_OPTIONAL_PRELOAD="flashinfer" activates install_all_guards
-        even when "torch" is omitted from FASTRSI_ZYGOTE_PRELOAD."""
+        """Explicit RSIBOX_ZYGOTE_OPTIONAL_PRELOAD="flashinfer" activates install_all_guards
+        even when "torch" is omitted from RSIBOX_ZYGOTE_PRELOAD."""
         import importlib
         from unittest import mock
         from services import zygote
 
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "fastvideo.user"
-        os.environ["FASTRSI_ZYGOTE_OPTIONAL_PRELOAD"] = "flashinfer"
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = "fastvideo.user"
+        os.environ["RSIBOX_ZYGOTE_OPTIONAL_PRELOAD"] = "flashinfer"
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
         events = []
 
         def fake_restore():
@@ -601,21 +601,21 @@ class OptionalPreloadTest(unittest.TestCase):
         hook_mock.assert_called_once_with([], clear_nvml_env=True)
 
     def test_serve_enables_default_optional_preload_when_torch_in_preload(self):
-        """Unset FASTRSI_ZYGOTE_OPTIONAL_PRELOAD still runs default OPTIONAL_PRELOAD under
-        install_all_guards when "torch" is in FASTRSI_ZYGOTE_PRELOAD."""
+        """Unset RSIBOX_ZYGOTE_OPTIONAL_PRELOAD still runs default OPTIONAL_PRELOAD under
+        install_all_guards when "torch" is in RSIBOX_ZYGOTE_PRELOAD."""
         import importlib
         from unittest import mock
         from services import zygote
 
-        os.environ["FASTRSI_ZYGOTE_PRELOAD"] = "torch,fastvideo.user"
-        os.environ["FASTRSI_ZYGOTE_GC_FREEZE"] = "0"
-        os.environ.pop("FASTRSI_ZYGOTE_OPTIONAL_PRELOAD", None)
+        os.environ["RSIBOX_ZYGOTE_PRELOAD"] = "torch,fastvideo.user"
+        os.environ["RSIBOX_ZYGOTE_GC_FREEZE"] = "0"
+        os.environ.pop("RSIBOX_ZYGOTE_OPTIONAL_PRELOAD", None)
         seen = []
 
         with mock.patch.dict(sys.modules):
             sys.modules.pop("torch", None)
             with (
-                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_fastrsi_fake_opt_mod",)),
+                mock.patch.object(zygote, "OPTIONAL_PRELOAD", ("_rsibox_fake_opt_mod",)),
                 mock.patch.object(zygote, "pin_cute_dsl_arch"),
                 mock.patch.object(zygote.forksafe, "install_all_guards",
                                   return_value=({"nvml_env_set": False}, lambda: None)) as guards_mock,
@@ -628,8 +628,8 @@ class OptionalPreloadTest(unittest.TestCase):
                 res = zygote._serve()
 
         self.assertIsNone(res["preload_error"])
-        self.assertEqual(seen, ["torch", "fastvideo.user", "_fastrsi_fake_opt_mod"])
-        self.assertEqual(res["optional_preloaded"], ["_fastrsi_fake_opt_mod"])
+        self.assertEqual(seen, ["torch", "fastvideo.user", "_rsibox_fake_opt_mod"])
+        self.assertEqual(res["optional_preloaded"], ["_rsibox_fake_opt_mod"])
         guards_mock.assert_called_once_with(properties=True, import_torch=True)
 
 

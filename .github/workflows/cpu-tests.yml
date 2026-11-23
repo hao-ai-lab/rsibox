@@ -1,5 +1,5 @@
 name: CPU tests
-# Fork PRs never run on the self-hosted runner: `runs-on` below picks FASTRSI_CI_RUNNER only for
+# Fork PRs never run on the self-hosted runner: `runs-on` below picks RSIBOX_CI_RUNNER only for
 # pushes, manual runs and PRs whose head branch is in this repository. GPU and torch cases run in
 # the Modal GPU CI (.github/modal-ci/), which posts the `modal-gpu` commit status.
 on:
@@ -13,7 +13,7 @@ permissions:
 env:
   PYTHONNOUSERSITE: "1"
   CUDA_VISIBLE_DEVICES: ""
-  FASTRSI_VLLM_PYTHON: ""
+  RSIBOX_VLLM_PYTHON: ""
 jobs:
   func-conformance-cases:
     # Conformance cases fail labs that lack their property (fake labs, CPU, Python ${{ matrix.python }})
@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
-    runs-on: ${{ (matrix.python == '3.12' && vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (matrix.python == '3.12' && vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +48,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.12", "3.13", "3.14"]
-    runs-on: ${{ (matrix.python == '3.12' && vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (matrix.python == '3.12' && vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -65,14 +65,12 @@ jobs:
         run: python3 -m unittest discover -s core/livelab -p 'test_forksafe.py' -v
       - name: Run the survey's unittest cases on its fixture tree (static scan, coverage read from lab files, history over a temporary git repository)
         run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
-      - name: Run the shared stdlib runtime kit tests (IPC, process trees, hooks, overlays, BaseLab 11/11, unified CLI)
-        run: python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab -v
-      - name: Run the rsibox cases (the box daemon over real HTTP on the toy lab, a local launcher in real processes; Docker, gVisor and Slurm are checked as generated commands only)
+      - name: Run the rsibox runtime kit, CLI, daemon, and launcher tests (IPC, process trees, hooks, overlays, BaseLab 11/11, HTTP box daemon, local/Docker/gVisor/Slurm launchers)
         run: python3 -m unittest discover -s core/livelab/rsibox -t core/livelab -v
-      - name: Run fastrsi doctor (core health + all engine registrations without eager GPU/torch imports)
+      - name: Run rsibox doctor (core health + all engine registrations without eager GPU/torch imports)
         env:
           PYTHONPATH: core/livelab
-        run: python3 -m fastrsi doctor
+        run: python3 -m rsibox doctor
       - name: Run site/facts and README consistency validator tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Run the CI timing comment's golden cases (API records in, the comment's numbers out; no network)
@@ -85,7 +83,7 @@ jobs:
   func-fastvideo-adapter:
     # FastVideo adapter golden tests and conformance c0-c10 on the FastVideo-shaped toy (CPU, real worker processes, no FastVideo)
     name: "func: FastVideo adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +106,7 @@ jobs:
   func-vllm-adapter:
     # vLLM adapter golden tests on in-process ranks of the toy engine (CPU, no vLLM)
     name: "func: vLLM adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -124,7 +122,7 @@ jobs:
   func-vllm-services:
     # vLLM services golden tests with fake engines (CPU; vLLM and torch cases skip)
     name: "func: vLLM services (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -139,12 +137,12 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/pytest-venv"
           "$RUNNER_TEMP/pytest-venv/bin/python" -m pip install --quiet --disable-pip-version-check pytest
-      - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (FASTRSI_VLLM_PYTHON) or torch skip and are listed (-rs)
+      - name: Run the services' pytest cases (launcher, zygote, refresh) against fake vllm serve processes; cases that need vLLM (RSIBOX_VLLM_PYTHON) or torch skip and are listed (-rs)
         run: '"$RUNNER_TEMP/pytest-venv/bin/python" -m pytest -v -rs repos/vllm/livelab/services'
   func-megatron-livelab:
     # Megatron live-lab and tool golden tests (CPU; torch cases skip)
     name: "func: Megatron adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +154,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run Megatron live-lab unittest cases (overlay, mailbox, phase stamps, zygote; torch cases skip)
-        run: python3 -m unittest discover -s repos/megatron/livelab/fastrsi_megatron -t repos/megatron/livelab -v
+        run: python3 -m unittest discover -s repos/megatron/livelab/rsibox_megatron -t repos/megatron/livelab -v
       - name: Run Megatron tool unittest cases when present (local-disk environment staging)
         run: |
           if [ -d repos/megatron/tools ]; then
@@ -165,7 +163,7 @@ jobs:
   func-verl-adapter:
     # veRL adapter, CLI tools, and conformance c0-c10 on the veRL-shaped toy (CPU, no Ray/verl)
     name: "func: veRL adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -183,11 +181,11 @@ jobs:
       - name: Run conformance c0-c10 against ToyVerlLab via unified CLI
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
-        run: python3 -m fastrsi conformance verl
+        run: python3 -m rsibox conformance verl
   func-miles-adapter:
     # miles adapter golden tests and conformance c0-c10 on the miles-shaped toy (CPU, no Ray/miles)
     name: "func: miles adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -203,11 +201,11 @@ jobs:
       - name: Run conformance c0-c10 against ToyMilesLab via unified CLI
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
-        run: python3 -m fastrsi conformance miles
+        run: python3 -m rsibox conformance miles
   func-sglang-adapter:
     # SGLang adapter, zygote services, and conformance c0-c10 on the SGLang-shaped toy (CPU, no SGLang)
     name: "func: SGLang adapter (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
@@ -225,11 +223,11 @@ jobs:
       - name: Run conformance c0-c10 against ToySglangLab via unified CLI
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
-        run: python3 -m fastrsi conformance sglang
+        run: python3 -m rsibox conformance sglang
   func-modal-ci-runner:
     # Modal GPU CI runner and loop golden cases (CPU; real git mirror/archive, stand-in modal CLI, no GitHub calls)
     name: "func: GPU CI runner self-test (CPU)"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4

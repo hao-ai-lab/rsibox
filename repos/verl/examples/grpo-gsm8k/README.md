@@ -18,7 +18,7 @@ python3 -m tools.cli train --gate $GATE -- \
 ```
 
 `full_determinism` needs `enforce_eager` on this stack (vLLM's compile autotune refuses deterministic mode), and
-`FASTRSI_RL_SEED_PER_SAMPLE=1` in the environment keeps GRPO groups diverse (`../../kb/lessons.md`).
+`RSIBOX_RL_SEED_PER_SAMPLE=1` in the environment keeps GRPO groups diverse (`../../kb/lessons.md`).
 122 s after launch `$GATE/gate.json` appears:
 
 ```json
@@ -49,7 +49,7 @@ Change `return SCORE if answer == str(ground_truth) else FORMAT_SCORE` to `retur
 ```sh
 python3 -m tools.cli request --gate $GATE --steps 1 examples/grpo-gsm8k/reward_gsm8k.py
 {"ok": true, "outcome": "committed", "verdict_s": 117.163, "install_s": 5.771, "processes": 13, "proven": true,
- "witness": {"reward0": {"fastrsi_file_60c85056948a:compute_score:15": 65}, "reward1": {...: 87}, ..., "reward7": {...}},
+ "witness": {"reward0": {"rsibox_file_60c85056948a:compute_score:15": 65}, "reward1": {...: 87}, ..., "reward7": {...}},
  "metrics": {"critic/score/mean": 0.4688, ...}}
 ```
 

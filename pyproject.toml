@@ -3,20 +3,19 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fastrsi-livelab"
+name = "rsibox"
 version = "0.1.0"
-description = "Shared engine-agnostic live-lab transaction kernel, stdlib runtime kit, conformance suite, and pre-fork CUDA guards for FastRSI."
+description = "Shared engine-agnostic live-lab transaction kernel, stdlib runtime kit, conformance suite, and pre-fork CUDA guards for rsibox."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-fastrsi = "fastrsi.cli:main"
 rsibox = "rsibox.cli:main"
 
 # `core/livelab` is the shared import root (`PYTHONPATH=core/livelab`) used by
-# `fastrsi.cli`, `fastrsi.lab`, `forksafe`, `ray_participants`, and every engine
+# `rsibox.cli`, `rsibox.lab`, `forksafe`, `ray_participants`, and every engine
 # adapter under `repos/*/livelab/`, so exposing these top-level names is
 # intentional. Offline editable installs require standard PEP 517 isolation
 # opt-out (`pip install --no-build-isolation --no-deps -e .`).
@@ -39,15 +38,16 @@ py-modules = [
   "conformance.__main__",
   "conformance.cases",
   "conformance.lab",
-  "fastrsi.__main__",
-  "fastrsi.cli",
-  "fastrsi.diffs",
-  "fastrsi.harness",
-  "fastrsi.hooks",
-  "fastrsi.ipc",
-  "fastrsi.lab",
-  "fastrsi.op_guard",
-  "fastrsi.proc",
+  "rsibox.__main__",
+  "rsibox.cli",
+  "rsibox.lab_cli",
+  "rsibox.diffs",
+  "rsibox.harness",
+  "rsibox.hooks",
+  "rsibox.ipc",
+  "rsibox.lab",
+  "rsibox.op_guard",
+  "rsibox.proc",
   "kernel.coordinator",
   "kernel.findings",
   "kernel.jit",
@@ -61,9 +61,7 @@ py-modules = [
   "kernel.toy.ops",
   "kernel.toy_lab",
   "kernel.witness",
-  "rsibox.__main__",
   "rsibox.box",
-  "rsibox.cli",
   "rsibox.client",
   "rsibox.gvisor",
   "rsibox.launch",

@@ -14,7 +14,7 @@ jobs:
   rule-pr-title:
     # Title is <type>(<scope>) summary (see AGENTS.md)
     name: "rule: PR title format"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - env:
@@ -42,7 +42,7 @@ jobs:
   rule-no-ai-attribution:
     # No AI co-authors or generated-with lines (see AGENTS.md)
     name: "rule: No AI attribution trailers"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
@@ -91,7 +91,7 @@ jobs:
   rule-leak-check:
     # Added lines have no common env-detail or secret patterns (pattern check, not a guarantee)
     name: "rule: Secret & internal path scan"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
@@ -128,7 +128,7 @@ jobs:
   docs-loop-record:
     # PRs that change repos/<engine>/ fill every Loop record field (presence only, see AGENTS.md)
     name: "docs: PR description GPU report check"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
@@ -196,7 +196,7 @@ jobs:
   rule-cross-engine-imports:
     # No repos/<engine>/ code imports from another repos/<other>/ (shared code goes to core/livelab)
     name: "rule: No cross-engine imports"
-    runs-on: ${{ (vars.FASTRSI_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4

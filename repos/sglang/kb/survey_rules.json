@@ -1,5 +1,5 @@
 {
-  "schema": "fastrsi-survey-rules/1",
+  "schema": "rsibox-survey-rules/1",
   "engine": "sglang",
   "rules_version": "sglang-1",
   "upstream": {
@@ -44,7 +44,7 @@
       "why": "scheduler-side participant parks every TP rank between batches; it reaches the scheduler process only",
       "evidence": [[
         {"path": "repos/sglang/livelab/adapter/lab.py", "contains": "StepGapCoordinator"},
-        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "fastrsi_gap"}
+        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "rsibox_gap"}
       ]],
       "unreached": [
         "sglang/srt/entrypoints/*",
@@ -83,7 +83,7 @@
     "jit_rebuild": {
       "why": "core kernel jit.py rebuilds a Triton kernel from its new text; reached through the scheduler-side participant",
       "evidence": [[
-        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "fastrsi_gap"},
+        {"path": "repos/sglang/livelab/adapter/agent.py", "contains": "rsibox_gap"},
         {"path": "core/livelab/kernel/jit.py"}
       ]],
       "unreached": ["sglang/multimodal_gen/*", "sglang/benchmark/*", "sglang/test/*"]

@@ -145,15 +145,15 @@ class SglangAdapterTests(unittest.TestCase):
             "--check-timeout", "30",
             "--rpc-timeout", "240",
         ])
-        self.assertEqual(env["FASTRSI_SGLANG_MODEL"], "Qwen/Qwen3-8B")
-        self.assertEqual(env["FASTRSI_SGLANG_TP"], "2")
-        self.assertEqual(env["FASTRSI_SGLANG_MEM_FRACTION"], "0.4")
-        self.assertEqual(env["FASTRSI_SGLANG_MAX_BS"], "8")
+        self.assertEqual(env["RSIBOX_SGLANG_MODEL"], "Qwen/Qwen3-8B")
+        self.assertEqual(env["RSIBOX_SGLANG_TP"], "2")
+        self.assertEqual(env["RSIBOX_SGLANG_MEM_FRACTION"], "0.4")
+        self.assertEqual(env["RSIBOX_SGLANG_MAX_BS"], "8")
         self.assertEqual(env["TMPDIR"], os.path.abspath("rel-sgl-work"))
-        self.assertEqual(env["FASTRSI_SGLANG_CHECK_TIMEOUT"], "30.0")
-        self.assertEqual(env["FASTRSI_SGLANG_RPC_TIMEOUT"], "240.0")
+        self.assertEqual(env["RSIBOX_SGLANG_CHECK_TIMEOUT"], "30.0")
+        self.assertEqual(env["RSIBOX_SGLANG_RPC_TIMEOUT"], "240.0")
         self.assertEqual(
-            json.loads(env["FASTRSI_SGLANG_EXTRA_ARGS"]),
+            json.loads(env["RSIBOX_SGLANG_EXTRA_ARGS"]),
             {"context_length": 2048, "port": 31000, "disable_cuda_graph": True},
         )
         with mock.patch.dict(os.environ, env, clear=False):
@@ -166,8 +166,8 @@ class SglangAdapterTests(unittest.TestCase):
         self.assertEqual(cfg["context_length"], 2048)
 
         minimal = SglangConformanceLab.launch_environment(["--", "--model", "/models/qwen"])
-        self.assertEqual(minimal, {"FASTRSI_SGLANG_MODEL": "/models/qwen"})
-        self.assertNotIn("FASTRSI_SGLANG_EXTRA_ARGS", minimal)
+        self.assertEqual(minimal, {"RSIBOX_SGLANG_MODEL": "/models/qwen"})
+        self.assertNotIn("RSIBOX_SGLANG_EXTRA_ARGS", minimal)
 
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
             SglangConformanceLab.launch_environment(["--extra", "[1, 2]"])
@@ -232,15 +232,15 @@ class SglangAdapterTests(unittest.TestCase):
         self.assertIn("param.data = param.data.neg().contiguous()", unreached_src)
 
     def test_fork_subprocs_cli_flag_and_conformance_env(self):
-        """`--fork-subprocs` maps to `FASTRSI_SGLANG_FORK_SUBPROCS=1` and is omitted by default."""
+        """`--fork-subprocs` maps to `RSIBOX_SGLANG_FORK_SUBPROCS=1` and is omitted by default."""
         from adapter import conformance_lab as clab_mod
         from adapter import lab as lab_mod
 
         default_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B"])
-        self.assertNotIn("FASTRSI_SGLANG_FORK_SUBPROCS", default_env)
+        self.assertNotIn("RSIBOX_SGLANG_FORK_SUBPROCS", default_env)
 
         fork_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B", "--fork-subprocs"])
-        self.assertEqual(fork_env["FASTRSI_SGLANG_FORK_SUBPROCS"], "1")
+        self.assertEqual(fork_env["RSIBOX_SGLANG_FORK_SUBPROCS"], "1")
 
         seen_flags = []
 
@@ -265,12 +265,12 @@ class SglangAdapterTests(unittest.TestCase):
         SglangConformanceLab._shared = None
         with mock.patch.object(lab_mod.SglangLab, "__init__", fake_super_init):
             with mock.patch.dict(os.environ, default_env, clear=False):
-                os.environ.pop("FASTRSI_SGLANG_FORK_SUBPROCS", None)
-                os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+                os.environ.pop("RSIBOX_SGLANG_FORK_SUBPROCS", None)
+                os.environ.pop("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", None)
                 SglangConformanceLab()
             SglangConformanceLab._shared = None
             with mock.patch.dict(os.environ, fork_env, clear=False):
-                os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+                os.environ.pop("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", None)
                 SglangConformanceLab()
         self.assertEqual(seen_flags, [False, True])
 
@@ -435,7 +435,7 @@ class SglangAdapterTests(unittest.TestCase):
                     "    cuda_graph_max_bs_decode: int = -1\n"
                 )
             with (
-                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "4"}, clear=False),
+                mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m", "RSIBOX_SGLANG_MAX_BS": "4"}, clear=False),
                 mock.patch.dict(sys.modules),
                 mock.patch.object(sys, "path", [tmp, *sys.path]),
             ):
@@ -453,7 +453,7 @@ class SglangAdapterTests(unittest.TestCase):
             with open(os.path.join(pkg, "server_args.py"), "w", encoding="utf-8") as fh:
                 fh.write("class ServerArgs:\n    tp_size: int = 1\n")
             with (
-                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "8"}, clear=False),
+                mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m", "RSIBOX_SGLANG_MAX_BS": "8"}, clear=False),
                 mock.patch.dict(sys.modules),
                 mock.patch.object(sys, "path", [tmp, *sys.path]),
             ):
@@ -468,7 +468,7 @@ class SglangAdapterTests(unittest.TestCase):
         fake_mod = types.ModuleType("sglang.srt.server_args")
         fake_mod.ServerArgs = type("ServerArgs", (), {"cuda_graph_max_bs_decode": 4})
         with (
-            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m"}, clear=False),
             mock.patch.dict(sys.modules, {"sglang.srt.server_args": fake_mod}),
         ):
             cfg_loaded = sglang_env_config()
@@ -497,23 +497,23 @@ class SglangAdapterTests(unittest.TestCase):
             mock.patch.object(clab_mod, "sglang_env_config", side_effect=lambda: (order.append("env_config") or {"tp_size": 1})),
             mock.patch.object(lab_mod.SglangLab, "__init__", side_effect=lambda self, *a, **kw: order.append("lab_init")),
         ):
-            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+            os.environ.pop("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", None)
             SglangConformanceLab(fork_subprocs=True)
         self.assertEqual(order, ["preload", "env_config", "lab_init"])
 
 
     def test_weight_cache_dir_cli_flag_and_conformance_env(self):
-        """`--weight-cache-dir` sets `FASTRSI_SGLANG_WEIGHT_CACHE_DIR` and `weight_cache_mode='client'`."""
+        """`--weight-cache-dir` sets `RSIBOX_SGLANG_WEIGHT_CACHE_DIR` and `weight_cache_mode='client'`."""
         from adapter import conformance_lab as clab_mod
         from adapter import lab as lab_mod
 
         default_env = SglangConformanceLab.launch_environment(["--model", "Qwen/Qwen3-8B"])
-        self.assertNotIn("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", default_env)
+        self.assertNotIn("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", default_env)
 
         wc_env = SglangConformanceLab.launch_environment([
             "--model", "Qwen/Qwen3-8B", "--weight-cache-dir", "/tmp/sgl-wc",
         ])
-        self.assertEqual(wc_env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"], "/tmp/sgl-wc")
+        self.assertEqual(wc_env["RSIBOX_SGLANG_WEIGHT_CACHE_DIR"], "/tmp/sgl-wc")
 
         calls = []
 
@@ -562,7 +562,7 @@ class SglangAdapterTests(unittest.TestCase):
         rel_env = SglangConformanceLab.launch_environment([
             "--model", "Qwen/Qwen3-8B", "--weight-cache-dir", "rel-wc/",
         ])
-        self.assertEqual(rel_env["FASTRSI_SGLANG_WEIGHT_CACHE_DIR"], os.path.abspath("rel-wc"))
+        self.assertEqual(rel_env["RSIBOX_SGLANG_WEIGHT_CACHE_DIR"], os.path.abspath("rel-wc"))
 
     def test_sglang_lab_weight_cache_fails_closed_when_daemon_missing(self):
         from adapter.lab import SglangLab
@@ -810,11 +810,11 @@ class SglangAdapterTests(unittest.TestCase):
             _shutdown_engine=lambda: shutdown_calls.append("shutdown"),
         )
         with (
-            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m"}, clear=False),
             mock.patch.object(lab_mod.SglangLab, "_preload_fork_subprocs", return_value=(True, [])),
             mock.patch.object(lab_mod.SglangLab, "__init__", side_effect=RuntimeError("daemon missing")),
         ):
-            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
+            os.environ.pop("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", None)
             with self.assertRaisesRegex(RuntimeError, "daemon missing"):
                 SglangConformanceLab(fork_subprocs=True)
         self.assertEqual(shutdown_calls, ["shutdown"])
@@ -840,11 +840,11 @@ class SglangAdapterTests(unittest.TestCase):
             _shutdown_engine=lambda: shutdown_calls.append("dead_shutdown"),
         )
         with (
-            mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m"}, clear=False),
+            mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m"}, clear=False),
             mock.patch.object(lab_mod.SglangLab, "__init__", fake_init),
         ):
-            os.environ.pop("FASTRSI_SGLANG_WEIGHT_CACHE_DIR", None)
-            os.environ.pop("FASTRSI_SGLANG_FORK_SUBPROCS", None)
+            os.environ.pop("RSIBOX_SGLANG_WEIGHT_CACHE_DIR", None)
+            os.environ.pop("RSIBOX_SGLANG_FORK_SUBPROCS", None)
             lab = SglangConformanceLab()
         self.assertEqual(reinit_calls, [True])
         self.assertIs(SglangConformanceLab._shared, lab)
@@ -871,7 +871,7 @@ class SglangAdapterTests(unittest.TestCase):
 
             finder = _EditableFinder()
             with (
-                mock.patch.dict(os.environ, {"FASTRSI_SGLANG_MODEL": "/m", "FASTRSI_SGLANG_MAX_BS": "4"}, clear=False),
+                mock.patch.dict(os.environ, {"RSIBOX_SGLANG_MODEL": "/m", "RSIBOX_SGLANG_MAX_BS": "4"}, clear=False),
                 mock.patch.dict(sys.modules),
                 mock.patch.object(sys, "meta_path", [finder, *sys.meta_path]),
             ):

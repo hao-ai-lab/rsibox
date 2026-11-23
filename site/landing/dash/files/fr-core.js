@@ -1,11 +1,11 @@
-// Shared helpers for the FastRSI sections. Each section script works alone if this is missing a piece.
+// Shared helpers for the rsibox sections. Each section script works alone if this is missing a piece.
 window.FR = window.FR || {};
 (function (FR) {
   FR.reduced = () => !window.matchMedia || window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   FR.num = (v) => (v === '' || v == null ? null : Number(v));
   FR.ok = (id) => { const r = dash.data(id); return r.status === 'ok' ? r : null; };
-  FR.arms = { codex: 'Baseline (restart per check)', fastrsi: 'FastRSI (live checks)' };
-  FR.short = { codex: 'Baseline', fastrsi: 'FastRSI' };
+  FR.arms = { codex: 'Baseline (restart per check)', rsibox: 'rsibox (live checks)' };
+  FR.short = { codex: 'Baseline', rsibox: 'rsibox' };
   // Build a data-where value: every name and value percent-encoded, joined by &.
   FR.where = (o) => Object.entries(o).map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(String(v))).join('&');
   FR.mark = (node, source, field, where) => {

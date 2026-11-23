@@ -41,7 +41,7 @@ print(json.dumps({"restored": opt.step is original}))
 
 class StepDetail(unittest.TestCase):
     def test_first_k_steps_are_split_into_microbatches_and_optimizer(self):
-        """Input: FASTRSI_STEP_DETAIL=2, three train steps of 3 microbatches (10 ms forward,
+        """Input: RSIBOX_STEP_DETAIL=2, three train steps of 3 microbatches (10 ms forward,
         20 ms backward) and a 50 ms optimizer step. Expect: steps 1-2 carry detail.mb with 3
         forward starts about 30 ms apart and opt_done - opt_start about 50 ms; step 3 has no
         detail; the optimizer's own step method is back afterwards. Without the split the
@@ -58,8 +58,8 @@ class StepDetail(unittest.TestCase):
             with open(os.path.join(d, "pretrain.py"), "w") as f:
                 f.write(SCRIPT)
             env = dict(os.environ, PYTHONPATH=os.path.dirname(HERE) + os.pathsep + d,
-                       FASTRSI_RUN=d, FASTRSI_STEP_DETAIL="2", RANK="0")
-            out = subprocess.run([sys.executable, "-m", "fastrsi_megatron.run",
+                       RSIBOX_RUN=d, RSIBOX_STEP_DETAIL="2", RANK="0")
+            out = subprocess.run([sys.executable, "-m", "rsibox_megatron.run",
                                   os.path.join(d, "pretrain.py")], env=env, cwd=d,
                                  capture_output=True, text=True, timeout=120)
             self.assertEqual(out.returncode, 0, out.stderr)

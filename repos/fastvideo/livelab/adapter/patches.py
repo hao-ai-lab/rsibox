@@ -28,7 +28,7 @@ AUD_CH = ('def _audio_latent_channels(fastvideo_args: FastVideoArgs) -> int:\n'
           '        getattr(fastvideo_args.pipeline_config, "audio_vae_config", None),\n'
           '        "audio_vae_config",\n'
           '    )\n')
-from fastrsi import harness
+from rsibox import harness
 
 QUANT = "output = output.mul_(255).clamp_(0, 255).to(torch.uint8)"
 AUDIO = "decoded = self.audio_vae.decode(latents).sample.float()"

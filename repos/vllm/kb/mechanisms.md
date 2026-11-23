@@ -17,7 +17,7 @@ Source: our survey of vLLM performance PRs (`2026-07-24` to `2026-10-24`: 487 pe
   recapture the affected CUDA graphs.
 - C++/CUDA extensions cannot be `dlclose`-unloaded safely (`STABLE_TORCH_LIBRARY` / PyTorch
   dispatcher state): [`native.py`](../livelab/adapter/native.py) builds edited `.cu` files + a
-  generated `_Cv<key>` `reg.cu` into node-local `/tmp/fastrsi-native-<uid>/<key>/libfastrsi_<key>.so`
+  generated `_Cv<key>` `reg.cu` into node-local `/tmp/rsibox-native-<uid>/<key>/librsibox_<key>.so`
   under `fcntl.flock`, loads via `ctypes.CDLL(..., RTLD_NOW | RTLD_LOCAL)`, binds the op on
   `torch.library.Library(ns, "IMPL")` inside the commit gap (paired with `R1` recapture when
   CUDA graphs are active), and undoes in milliseconds via `lib._destroy()`. The cost floor

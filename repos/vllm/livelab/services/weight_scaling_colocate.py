@@ -63,7 +63,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import corelab  # noqa: E402
-from fastrsi import proc  # noqa: E402
+from rsibox import proc  # noqa: E402
 
 EXT_CLS = "weight_scaling_colocate.LeaseWorkerExtension"
 CHUNK_WORDS = 1 << 26          # 512 MiB of 64-bit words per digest step

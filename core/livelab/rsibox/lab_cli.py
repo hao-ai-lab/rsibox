@@ -1,17 +1,17 @@
-"""Unified, engine-agnostic CLI for FastRSI (`fastrsi` / `python3 -m fastrsi`).
+"""Unified, engine-agnostic CLI for rsibox (`rsibox` / `python3 -m rsibox`).
 
 Commands:
-- `fastrsi list [--repo-root PATH] [--json]`
+- `rsibox list [--repo-root PATH] [--json]`
     Dynamically discovers the built-in `toy` lab, `template`, and every engine under
     `<repo_root>/repos/<engine>/livelab/` without hardcoding engine names or importing them.
-- `fastrsi conformance <target> [--toy | --real] [--only ...] [--receipts ...] [--json]`
+- `rsibox conformance <target> [--toy | --real] [--only ...] [--receipts ...] [--json]`
     Runs `core/livelab/conformance` against a discovered engine name (`--toy` by default,
     `--real` for the real-engine conformance class) or any explicit `module:Class` spec.
-- `fastrsi survey ...`
+- `rsibox survey ...`
     Delegates to `core/livelab/survey`.
-- `fastrsi ctl (--sock PATH | --file-channel DIR | --mailbox DIR) <verb> [...]`
+- `rsibox ctl (--sock PATH | --file-channel DIR | --mailbox DIR) <verb> [...]`
     Transport-agnostic JSON control client for any running live lab.
-- `fastrsi doctor [--repo-root PATH] [--json]`
+- `rsibox doctor [--repo-root PATH] [--json]`
     Checks core `kernel` & `conformance` health, `forksafe` environment audit, `AF_UNIX`
     socket path limits, and every discovered engine lab's `LabUnderTest` API and lazy
     GPU/torch-free importability.
@@ -66,7 +66,7 @@ _PROBE_SCRIPT = (
     "    loaded = sorted({m.split('.')[0] for m in (set(sys.modules) - before) if m.split('.')[0] in gpu_set})\n"
     "    out['gpu_imports'] = loaded\n"
     "    out['error'] = f'{type(exc).__name__}: {exc}'\n"
-    "print('FASTRSI_DOCTOR_PROBE:' + json.dumps(out))\n"
+    "print('RSIBOX_DOCTOR_PROBE:' + json.dumps(out))\n"
 )
 
 
@@ -255,7 +255,7 @@ def _cmd_conformance(args, engine_args) -> int:
     try:
         spec, extra_path = resolve_lab(args.target, real=args.real, repo_root=args.repo_root)
     except ValueError as exc:
-        print(f"fastrsi conformance: {exc}", file=sys.stderr)
+        print(f"rsibox conformance: {exc}", file=sys.stderr)
         return 2
     if args.path:
         extra_path = os.path.abspath(args.path)
@@ -278,7 +278,7 @@ def _cmd_conformance(args, engine_args) -> int:
             try:
                 conf_main.select_cases(args.only)
             except ValueError as exc:
-                print(f"fastrsi conformance: {exc}", file=sys.stderr)
+                print(f"rsibox conformance: {exc}", file=sys.stderr)
                 return 2
             conf_argv += ["--only", args.only]
         if args.receipts:
@@ -291,7 +291,7 @@ def _cmd_conformance(args, engine_args) -> int:
             lab = conf_main.load(spec)
             configure = getattr(lab, "launch_environment", None)
             if not args.real or configure is None:
-                print(f"fastrsi conformance: {spec} does not accept launch arguments", file=sys.stderr)
+                print(f"rsibox conformance: {spec} does not accept launch arguments", file=sys.stderr)
                 return 2
             env = {**os.environ, **configure(engine_args)}
             env.setdefault("PYTHONUNBUFFERED", "1")
@@ -321,10 +321,10 @@ def _cmd_ctl(args) -> int:
     try:
         req = json.loads(args.payload) if args.payload else {}
     except ValueError as exc:
-        print(f"fastrsi ctl: invalid JSON for --payload: {exc}", file=sys.stderr)
+        print(f"rsibox ctl: invalid JSON for --payload: {exc}", file=sys.stderr)
         return 2
     if not isinstance(req, dict):
-        print("fastrsi ctl: --payload must be a JSON object", file=sys.stderr)
+        print("rsibox ctl: --payload must be a JSON object", file=sys.stderr)
         return 2
     if args.verb:
         req[args.op_key] = args.verb
@@ -332,13 +332,13 @@ def _cmd_ctl(args) -> int:
         for pair in pairs:
             key, sep, val = pair.partition("=")
             if not sep:
-                print(f"fastrsi ctl: {label} expects KEY={'JSON' if parse_json else 'VALUE'}, got {pair!r}", file=sys.stderr)
+                print(f"rsibox ctl: {label} expects KEY={'JSON' if parse_json else 'VALUE'}, got {pair!r}", file=sys.stderr)
                 return 2
             if parse_json:
                 try:
                     val = json.loads(val)
                 except ValueError as exc:
-                    print(f"fastrsi ctl: invalid JSON for --json-arg {key!r}: {exc}", file=sys.stderr)
+                    print(f"rsibox ctl: invalid JSON for --json-arg {key!r}: {exc}", file=sys.stderr)
                     return 2
             req[key] = val
     try:
@@ -409,7 +409,7 @@ def _probe_lab_spec(livelab_dir: str, spec: str, livelab_core: str, *, timeout: 
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return _probe_error(spec, f"{type(exc).__name__}: {exc}")
-    prefix = "FASTRSI_DOCTOR_PROBE:"
+    prefix = "RSIBOX_DOCTOR_PROBE:"
     for line in reversed(proc_res.stdout.splitlines()):
         if line.startswith(prefix):
             try:
@@ -522,9 +522,9 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_survey(raw_argv[1:])
 
     parser = argparse.ArgumentParser(
-        prog="fastrsi",
+        prog="rsibox",
         allow_abbrev=False,
-        description="Unified engine-agnostic CLI for FastRSI live labs.",
+        description="Unified engine-agnostic CLI for rsibox live labs.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

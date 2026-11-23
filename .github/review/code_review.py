@@ -176,7 +176,7 @@ def ask_service(url, token, payload, timeout=900):
     """POST a job, then poll it. Asynchronous because a review can outlast a proxy timeout."""
     # Cloudflare's Browser Integrity Check rejects the default Python-urllib agent (error 1010).
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}",
-               "User-Agent": "fastrsi-review-ci/1"}
+               "User-Agent": "rsibox-review-ci/1"}
     cf = {"CF_ACCESS_CLIENT_ID": "CF-Access-Client-Id",
           "CF_ACCESS_CLIENT_SECRET": "CF-Access-Client-Secret"}
     headers.update({h: os.environ[k] for k, h in cf.items() if os.environ.get(k)})
@@ -223,12 +223,12 @@ def main(argv=None):
     ap.add_argument("--pr", required=True)
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "hao-ai-lab/rsibox"))
     ap.add_argument("--engines", default="agy,codex")
-    ap.add_argument("--url", default=os.environ.get("FASTRSI_REVIEW_URL"))
+    ap.add_argument("--url", default=os.environ.get("RSIBOX_REVIEW_URL"))
     ap.add_argument("--post", action="store_true", help="post the review on the PR")
     a = ap.parse_args(argv)
-    token = os.environ.get("FASTRSI_REVIEW_TOKEN")
+    token = os.environ.get("RSIBOX_REVIEW_TOKEN")
     if not a.url or not token:
-        print("::notice::Review service not configured (FASTRSI_REVIEW_URL, FASTRSI_REVIEW_TOKEN). "
+        print("::notice::Review service not configured (RSIBOX_REVIEW_URL, RSIBOX_REVIEW_TOKEN). "
               "Skipped; nothing posted.")
         return 0
 

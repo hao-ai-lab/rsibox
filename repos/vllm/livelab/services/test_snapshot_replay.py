@@ -705,15 +705,15 @@ def test_restore_refuses_when_a_snapshot_request_left_the_runner() -> None:
 
 def test_speculative_acceptance_mocker_cannot_touch_a_scored_run(monkeypatch) -> None:
     """The mocker fakes acceptance, so (1) it cannot be installed inside scored_run() or with
-    FASTRSI_SCORED=1, and (2) a scored run cannot start while one is installed."""
+    RSIBOX_SCORED=1, and (2) a scored run cannot start while one is installed."""
     target = SimpleNamespace(rejection_sampler=SimpleNamespace(forward=lambda *a, **k: None))
     with snapshot_replay.scored_run():
         with pytest.raises(snapshot_replay.MockedInScoredRunError):
             SpeculativeAcceptanceMocker(1).install(target)
-    monkeypatch.setenv("FASTRSI_SCORED", "1")
+    monkeypatch.setenv("RSIBOX_SCORED", "1")
     with pytest.raises(snapshot_replay.MockedInScoredRunError):
         SpeculativeAcceptanceMocker(1).install(target)
-    monkeypatch.delenv("FASTRSI_SCORED")
+    monkeypatch.delenv("RSIBOX_SCORED")
     mocker = SpeculativeAcceptanceMocker(1).install(target)
     try:
         with pytest.raises(snapshot_replay.MockedInScoredRunError):

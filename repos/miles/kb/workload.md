@@ -25,7 +25,7 @@ Every candidate edit must satisfy three checks before its measurement counts:
   drift across checks.
 - **Active witness (`c1`, `c2`, `c10`):** `Coordinator.prove()` confirms `witness > 0` on every
   participating actor copy (`<module>#actor` for `@ray.remote` methods, `<module>` for shared
-  helpers, `fastrsi_file_<hash>` for `sys.modules`-less reward files). Startup-only edits that
+  helpers, `rsibox_file_<hash>` for `sys.modules`-less reward files). Startup-only edits that
   never execute during `check()` report `proven = False` (`zero_witness`).
 - **Fresh-process equivalence & exact undo (`c3`, `c4`, `c7`):** Live output matches a fresh
   interpreter started from the edited files, and `uninstall()` restores base `Session` code

@@ -17,14 +17,14 @@ rank and pid.
 
 `KernelWorkerExtension` is vLLM's `--worker-extension-cls` (each rank serves a `Side`, side.py, built
 on this `Endpoint`): the engine-core host (host.py) calls
-`collective_rpc("fastrsi_kernel", args=(method, payload))` from inside its busy loop, so every
+`collective_rpc("rsibox_kernel", args=(method, payload))` from inside its busy loop, so every
 rank handles the same call between the same two steps. The rank's endpoint is made at its first
 call. Lab use only: it runs code sent to it.
 """
 import os
 import traceback
 
-from fastrsi.lab import ENDPOINT_METHODS as METHODS, RoleEndpoint as Endpoint  # noqa: F401
+from rsibox.lab import ENDPOINT_METHODS as METHODS, RoleEndpoint as Endpoint  # noqa: F401
 from kernel import findings as F
 
 
@@ -40,7 +40,7 @@ def _wrap(side, fn, first):
 
 
 class KernelWorkerExtension:
-    def fastrsi_kernel_endpoint(self):
+    def rsibox_kernel_endpoint(self):
         """This rank's side (side.py), made at the first call. It wraps this rank's
         execute_model (a step starts) and sample_tokens (the same step, later) to keep the
         side's per-step version log."""
@@ -55,10 +55,10 @@ class KernelWorkerExtension:
                 pass
         return _ENDPOINT[0]
 
-    def fastrsi_kernel(self, method, payload=None):
+    def rsibox_kernel(self, method, payload=None):
         """The kernel participant protocol on this rank. Returns an ok-dict, never raises."""
         try:
-            endpoint = self.fastrsi_kernel_endpoint()
+            endpoint = self.rsibox_kernel_endpoint()
         except BaseException as error:
             return F.not_ok(
                 f"endpoint: {type(error).__name__}: {error}",

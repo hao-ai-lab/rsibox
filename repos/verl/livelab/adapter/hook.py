@@ -1,8 +1,8 @@
-"""Ray worker setup hook: register the `fastrsi` trainer mode when verl loads."""
+"""Ray worker setup hook: register the `rsibox` trainer mode when verl loads."""
 import importlib
 
 import adapter  # noqa: F401  (ensures core/livelab is on sys.path)
-from fastrsi import hooks
+from rsibox import hooks
 
 TARGET = "verl.trainer.ppo.v1"
 

@@ -1,7 +1,7 @@
 """Torch custom-op re-definition guard for live module refresh and reload paths.
 
-Imports ``torch`` lazily inside :func:`op_redefine_guard` so importing ``fastrsi`` or
-``fastrsi.op_guard`` never pulls GPU runtimes into control-plane processes.
+Imports ``torch`` lazily inside :func:`op_redefine_guard` so importing ``rsibox`` or
+``rsibox.op_guard`` never pulls GPU runtimes into control-plane processes.
 """
 import contextlib
 import inspect

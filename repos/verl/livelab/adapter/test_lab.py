@@ -117,13 +117,13 @@ class LiveSettingsTest(unittest.TestCase):
 
 
 class HookRegistrationTest(unittest.TestCase):
-    def test_setup_hook_registers_fastrsi_trainer_mode_once_on_import(self):
+    def test_setup_hook_registers_rsibox_trainer_mode_once_on_import(self):
         """Input: synthetic `verl.trainer.ppo.v1` package with `register_trainer` and
         `PPOTrainerSync`. Action: `hook.setup()` then import `verl.trainer.ppo.v1`.
-        Expected: `PPOTrainerFastRSISync` is registered under `'fastrsi'` and is picklable."""
+        Expected: `PPOTrainerrsiboxSync` is registered under `'rsibox'` and is picklable."""
         import pickle
 
-        tmp_pkg = tempfile.mkdtemp(prefix="fastrsi-fakeverl-")
+        tmp_pkg = tempfile.mkdtemp(prefix="rsibox-fakeverl-")
         self.addCleanup(shutil.rmtree, tmp_pkg, True)
         v1_dir = Path(tmp_pkg) / "verl" / "trainer" / "ppo" / "v1"
         v1_dir.mkdir(parents=True)
@@ -169,8 +169,8 @@ class HookRegistrationTest(unittest.TestCase):
         import verl.trainer.ppo.v1  # noqa: F401
         from verl.trainer.ppo.v1 import trainer_base
 
-        self.assertIn("fastrsi", trainer_base.REGISTRY)
-        trainer_cls = trainer_base.REGISTRY["fastrsi"]
+        self.assertIn("rsibox", trainer_base.REGISTRY)
+        trainer_cls = trainer_base.REGISTRY["rsibox"]
         self.assertIs(pickle.loads(pickle.dumps(trainer_cls)), trainer_cls)
 
 
@@ -190,7 +190,7 @@ class RealRayVerlClusterTest(unittest.TestCase):
         import ray_participants as RP
         from kernel import coordinator as C, locate as L, session as SS
 
-        tmp = tempfile.mkdtemp(prefix="fastrsi-verl-realray-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-verl-realray-")
         self.addCleanup(shutil.rmtree, tmp, True)
         mod_name = "verl_ray_rollout_test_mod"
         mod_file = Path(tmp) / f"{mod_name}.py"
@@ -315,7 +315,7 @@ class RealRayVerlClusterTest(unittest.TestCase):
         from adapter.gate import VerlActorParticipant, _DRIVER, module_for_file
         from kernel import coordinator as C, locate as L, session as SS
 
-        tmp = tempfile.mkdtemp(prefix="fastrsi-verl-inplace-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-verl-inplace-")
         self.addCleanup(shutil.rmtree, tmp, True)
         reward_dir = Path(tmp) / "rewards"
         reward_dir.mkdir()

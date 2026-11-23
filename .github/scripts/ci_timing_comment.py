@@ -21,7 +21,7 @@ import subprocess
 import sys
 from datetime import datetime
 
-MARKER = "<!-- fastrsi-ci-timing -->"
+MARKER = "<!-- rsibox-ci-timing -->"
 DETAIL_STEP_SECONDS = 2
 STEP_NAME_WIDTH = 70
 

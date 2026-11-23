@@ -88,7 +88,7 @@ class SwapTest(unittest.TestCase):
         e.step(1)
         e.step(3)
         self.assertEqual((e.steps, e.mean_token()), (4, 15))         # (13 + 17) / 2
-        self.assertEqual(sorted(set(vars(eng)) - mod_keys), ["__fastrsi_hit__", "statistics"])
+        self.assertEqual(sorted(set(vars(eng)) - mod_keys), ["__rsibox_hit__", "statistics"])
         self.assertEqual(sorted(set(vars(eng.Engine)) - cls_keys), ["mean_token"])
         # the import, the witness global, the counter keys of step and mean_token, step's
         # code, the added method
@@ -100,8 +100,8 @@ class SwapTest(unittest.TestCase):
         self.assertIs(eng.Engine.step.__code__, base_code)
         self.assertEqual(L.content_hash(eng.Engine.step.__code__), base_hash)
         self.assertEqual((set(vars(eng)), set(vars(eng.Engine))),
-                         (mod_keys | {"__fastrsi_hit__"}, cls_keys))
-        self.assertIs(eng.__fastrsi_hit__, W.stub)
+                         (mod_keys | {"__rsibox_hit__"}, cls_keys))
+        self.assertIs(eng.__rsibox_hit__, W.stub)
         self.assertFalse(hasattr(e, "mean_token"))
         self.assertEqual(w.counts, {})
         e.step(1)
@@ -283,7 +283,7 @@ class SwapEdgeCaseTest(unittest.TestCase):
         the builder unchanged (reproducing the FastVideo H3 patches 02-08 stacked live-install
         `CompilationError ... StopIteration` failure). Expected: calling txn 1's lazy builder
         AFTER txn 2 still reads the exact nested kernel source via `inspect.getsourcelines`, and
-        undoing both transactions removes all `<fastrsi-live:...>` linecache entries."""
+        undoing both transactions removes all `<rsibox-live:...>` linecache entries."""
         import inspect
         import linecache
         from . import coordinator as C
@@ -322,7 +322,7 @@ class SwapEdgeCaseTest(unittest.TestCase):
         self.assertTrue(part.undo("t2")["ok"])
         self.assertTrue(part.undo("t1")["ok"])
         self.assertTrue(part.at_base()["ok"])
-        live_keys = [k for k in linecache.cache if k.startswith(f"<fastrsi-live:{module_obj.__file__}#")]
+        live_keys = [k for k in linecache.cache if k.startswith(f"<rsibox-live:{module_obj.__file__}#")]
         self.assertEqual(live_keys, [])
 
     def test_nested_class_methods_and_nested_classes_can_be_added_edited_and_removed(self):

@@ -24,7 +24,7 @@ the other ranks never see it). `reset` and `check` fail closed when a rank's res
 (state.Snapshot.restore). `digest` returns each rank's sha256 of every piece of state, so a reset
 round trip is shown bit for bit. `resume` puts S back on every rank (unless `state: "keep"`) and
 the job's next train steps get the frozen batches first, then the real iterator: the job continues
-as if the lab had not run. Fresh mode (FASTRSI_FRESH=<output path>): steps 1-2, one check,
+as if the lab had not run. Fresh mode (RSIBOX_FRESH=<output path>): steps 1-2, one check,
 the output written as JSON, then exit; the conformance harness compares it to a live check.
 """
 import contextlib
@@ -39,7 +39,7 @@ import traceback
 import torch
 import torch.distributed as dist
 
-from fastrsi import diffs, harness, ipc
+from rsibox import diffs, harness, ipc
 from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
@@ -117,9 +117,9 @@ class Lab:
         self.model, self.optimizer, self.scheduler = self.a[2], self.a[3], self.a[4]
         self.ranks = G.Ranks()
         self.rank = self.ranks.rank
-        self.steps_max = int(os.environ.get("FASTRSI_CHECK_STEPS_MAX", "8"))
-        self.default_steps = int(os.environ.get("FASTRSI_CHECK_STEPS", "4"))
-        self.warmup = int(os.environ.get("FASTRSI_WARMUP", "2"))
+        self.steps_max = int(os.environ.get("RSIBOX_CHECK_STEPS_MAX", "8"))
+        self.default_steps = int(os.environ.get("RSIBOX_CHECK_STEPS", "4"))
+        self.warmup = int(os.environ.get("RSIBOX_WARMUP", "2"))
         self.faults = {}
         self.timings = {}
         self.local = C.LocalParticipant(
@@ -182,7 +182,7 @@ class Lab:
             if self.faults.pop("crash", None):
                 os._exit(17)                              # a worker dies in a step
             if self.faults.pop("hang", None):
-                time.sleep(float(os.environ.get("FASTRSI_HANG_S", "3600")))
+                time.sleep(float(os.environ.get("RSIBOX_HANG_S", "3600")))
             _sync()
             t0 = _now()
             r = self.ts(*a, **{**self.k, "iteration": it0 + i})
@@ -257,7 +257,7 @@ class Lab:
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
-                exec(compile(code, "<fastrsi_repl>", "exec"), ns)
+                exec(compile(code, "<rsibox_repl>", "exec"), ns)
             return {"ok": True, "out": buf.getvalue()[-8000:]}
         except Exception as e:
             return {"ok": False, "out": buf.getvalue()[-4000:],
@@ -280,13 +280,13 @@ class Lab:
     # -- host (rank 0) -------------------------------------------------------------------
     def _host(self):
         if self.host is None:
-            writer = R.ReceiptWriter(os.environ["FASTRSI_RECEIPTS"]) \
-                if os.environ.get("FASTRSI_RECEIPTS") else None
+            writer = R.ReceiptWriter(os.environ["RSIBOX_RECEIPTS"]) \
+                if os.environ.get("RSIBOX_RECEIPTS") else None
             co = C.StepGapCoordinator(
                 [RanksParticipant(self)], gap=lambda fn: fn(), writer=writer,
                 interface_version=INTERFACE, phase2_deadline_s=None,
                 engine={"name": "megatron-lm", "version": _version(), "commit": None})
-            mods = sorted(set(MODULES) | set(os.environ.get("FASTRSI_MODULES", "").split(","))
+            mods = sorted(set(MODULES) | set(os.environ.get("RSIBOX_MODULES", "").split(","))
                           - {""})
             self.live_text = [{}]
             self.host = SS.Session(co, [m for m in mods if m in sys.modules])
@@ -332,20 +332,20 @@ class Lab:
                     msg = self.ranks.bcast()
                     self.ranks.gather(self.handle(msg))
                 except Exception as error:      # rank 0 gave up on the round, or is gone
-                    print(f"[fastrsi] rank {self.rank}: lost the lab's round with rank 0 "
+                    print(f"[rsibox] rank {self.rank}: lost the lab's round with rank 0 "
                           f"({type(error).__name__}: {str(error)[:200]}); exiting with code "
                           f"{LOST_ROUND_EXIT}", file=sys.stderr, flush=True)
                     os._exit(LOST_ROUND_EXIT)
                 if msg.get("op") in ("resume", "exit"):
                     return msg["op"]
-        path = os.environ.get("FASTRSI_SOCK") or ipc.short_sock_path("fastrsi-mg")
+        path = os.environ.get("RSIBOX_SOCK") or ipc.short_sock_path("rsibox-mg")
         server = G.Server(path)
-        if os.environ.get("FASTRSI_MAILBOX"):
-            G.Mailbox(os.environ["FASTRSI_MAILBOX"], server.q)
-        with open(os.environ.get("FASTRSI_READY", os.devnull), "w") as f:
+        if os.environ.get("RSIBOX_MAILBOX"):
+            G.Mailbox(os.environ["RSIBOX_MAILBOX"], server.q)
+        with open(os.environ.get("RSIBOX_READY", os.devnull), "w") as f:
             json.dump({"sock": path, "pid": os.getpid(), "timings": self.timings,
                        "mono": time.monotonic(), "time": time.time()}, f)
-        print(f"[fastrsi] lab ready on {path}: {json.dumps(self.timings)}", flush=True)
+        print(f"[rsibox] lab ready on {path}: {json.dumps(self.timings)}", flush=True)
         while True:
             req, reply = server.next()
             t0 = _now()
@@ -364,9 +364,9 @@ class Lab:
                 sent = reply(out)
             except OSError as e:                # a reply function that raises: same as gone
                 sent = False
-                print(f"[fastrsi] reply failed: {e}", file=sys.stderr, flush=True)
+                print(f"[rsibox] reply failed: {e}", file=sys.stderr, flush=True)
             if sent is False:
-                print(f"[fastrsi] client gone before the reply to {verb!r} "
+                print(f"[rsibox] client gone before the reply to {verb!r} "
                       f"({out['cost_s']} s); the lab serves on", flush=True)
             if verb == "exit":
                 server.close()
@@ -594,7 +594,7 @@ def install_hook(tr):
     def train_step(*a, **k):
         if box["lab"] is None:
             lab = box["lab"] = Lab(raw, a, k)
-            fresh = os.environ.get("FASTRSI_FRESH")
+            fresh = os.environ.get("RSIBOX_FRESH")
             if fresh:
                 out = lab.handle({"op": "check", "steps": lab.default_steps})
                 rs = [None] * lab.ranks.world if lab.rank == 0 else None

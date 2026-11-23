@@ -1,9 +1,9 @@
 """Golden cases for reading a `vllm serve` argv with vLLM's own parser (vllm_args.py), through the
-launcher (engine.py) and through the zygote. They need a real vLLM: the python in FASTRSI_VLLM_PYTHON,
+launcher (engine.py) and through the zygote. They need a real vLLM: the python in RSIBOX_VLLM_PYTHON,
 else the python running pytest if it imports vLLM. Without either (CPU CI) they skip. They run
 on CPU; no case touches a GPU.
 
-Run: FASTRSI_VLLM_PYTHON=<vLLM venv python> python3 -m pytest \
+Run: RSIBOX_VLLM_PYTHON=<vLLM venv python> python3 -m pytest \
          repos/vllm/livelab/services/test_vllm_args.py -v
 """
 import importlib.util, json, os, subprocess, sys, tempfile
@@ -16,9 +16,9 @@ sys.path.insert(0, str(HERE))
 import engine, zygote  # noqa: E402
 from test_engine import FAKE_VLLM, _free_port, _script, _short_dir, _stop  # noqa: E402
 
-VLLM_PY = os.environ.get("FASTRSI_VLLM_PYTHON") or \
+VLLM_PY = os.environ.get("RSIBOX_VLLM_PYTHON") or \
     (sys.executable if importlib.util.find_spec("vllm") else None)
-pytestmark = pytest.mark.skipif(not VLLM_PY, reason="needs vLLM: run with FASTRSI_VLLM_PYTHON "
+pytestmark = pytest.mark.skipif(not VLLM_PY, reason="needs vLLM: run with RSIBOX_VLLM_PYTHON "
                                 "set to a vLLM venv's python (CPU CI has no vLLM)")
 ENGINE = str(HERE / "engine.py")
 

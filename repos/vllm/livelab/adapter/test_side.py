@@ -45,7 +45,7 @@ def worker(cudagraph="FULL_AND_PIECEWISE", compile_mode="VLLM_COMPILE", eager=Fa
 def prepared(txn, timeout=5.0):
     """Wait until no background prepare of txn is running in this process."""
     end = time.time() + timeout
-    while any(t.name == f"fastrsi-prepare-{txn}" for t in threading.enumerate()):
+    while any(t.name == f"rsibox-prepare-{txn}" for t in threading.enumerate()):
         if time.time() > end:
             raise AssertionError(f"prepare of {txn} still running")
         time.sleep(0.005)
@@ -453,16 +453,16 @@ class VersionLogTest(unittest.TestCase):
                 return "tok"
         w = Worker()
         p = own_plan("vlog", targets=False)
-        w.fastrsi_kernel_endpoint()             # the side exists and wraps the step calls
+        w.rsibox_kernel_endpoint()             # the side exists and wraps the step calls
         w.execute_model()
-        self.assertTrue(w.fastrsi_kernel("prepare", p)["ok"])
+        self.assertTrue(w.rsibox_kernel("prepare", p)["ok"])
         w.sample_tokens()
         w.execute_model()
         w.sample_tokens()
-        self.assertTrue(w.fastrsi_kernel("commit", p["id"])["ok"])
+        self.assertTrue(w.rsibox_kernel("commit", p["id"])["ok"])
         w.execute_model()
         w.sample_tokens()
-        v = w.fastrsi_kernel("versions")
+        v = w.rsibox_kernel("versions")
         (m,) = p["modules"]
         key = f"{m}:Engine.step"
         self.assertEqual(v["mid_step_changes"], [])

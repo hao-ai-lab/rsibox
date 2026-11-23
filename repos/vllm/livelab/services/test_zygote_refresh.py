@@ -187,7 +187,7 @@ def test_refreshed_layer_registers_its_name_again(tmp_path, monkeypatch):
     assert out["events"] == [["zygote_registry_forgot", "rms_norm"]]
 
 
-VLLM_PY = os.environ.get("FASTRSI_VLLM_PYTHON")
+VLLM_PY = os.environ.get("RSIBOX_VLLM_PYTHON")
 _VLLM_REFRESH = r'''
 import json, sys, torch
 sys.path.insert(0, sys.argv[1])
@@ -229,7 +229,7 @@ print("RESULT " + json.dumps(out))
 '''
 
 
-@__import__("pytest").mark.skipif(not VLLM_PY, reason="needs vLLM: set FASTRSI_VLLM_PYTHON to a "
+@__import__("pytest").mark.skipif(not VLLM_PY, reason="needs vLLM: set RSIBOX_VLLM_PYTHON to a "
                                   "vLLM venv's python (CPU CI has no vLLM)")
 def test_vllm_layernorm_refresh_reimports_in_real_vllm(tmp_path):
     """The 61323 failure on real vLLM, on CPU: import vLLM's layernorm, refresh it and import it

@@ -86,7 +86,7 @@ Source: our per-edit restart measurement (pre-v0 internal tree), dev workload.
 
 Native CUDA incremental rebuild: 8.0–24.2 s per file (`ninja`, sm100).
 
-## FastRSI v0 overhead (Qwen3-8B, 1 GPU, sampler edits)
+## rsibox v0 overhead (Qwen3-8B, 1 GPU, sampler edits)
 
 Source: `legacy/v0` branch, `receipts/overhead-vllm.json`, `docs/overhead.md`.
 
@@ -129,7 +129,7 @@ completion each (" Paris." in every case); markers printed by the edited code sh
 - Re-imported torch ops: an identical schema is accepted and the new body replaces the old one;
   a changed schema is refused with the op's name. Opaque types re-register.
 - Still a finding (restart the zygote): an edited extension `.so`, or an edited module outside
-  `FASTRSI_ZYGOTE_REFRESH` (default `vllm`).
+  `RSIBOX_ZYGOTE_REFRESH` (default `vllm`).
 
 ## Launcher CLI with state holders and zygote (`engine.py start`, Qwen3-8B TP1 eager, 1× GB200, 2026-11-07)
 
@@ -225,7 +225,7 @@ Standalone 7-arm `layernorm_kernels.cu` compile-phase waterfall on B200 GPU 0 (`
 - `E_thin_fused_only_O2` (thin single-kernel TU stripping unrelated `rms_norm`): `8.596 s` (`ptxas 0.081 s` [`10.9×` vs `A`], `cicc 2.168 s`, `gcc 2.535 s`).
 - `H_thin_bf16_host_O0` (`BFloat16`-only thin TU): `8.321 s` (`pp 1.651 s + cudafe++ 2.813 s + gcc 2.389 s = 6.853 s` header/host floor).
 
-And after consolidating shared HTTP, health, log-phase, tensor, and subprocess helpers across `livelab/services/` (`-265` net non-test LOC), the full B200 Linux test verification (`CUDA_VISIBLE_DEVICES=4,5`, `-W error::ResourceWarning`, `0 MiB` exit) passed **`134/134`** `livelab/services` tests (including **`52/52`** real-GPU E2E across `test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`), **`72/72`** `livelab/adapter` + `examples/live-edit-qwen3` tests, **`241/241`** `core/livelab` (`156/156` `unittest`), and **`8/8`** `fastrsi doctor` (`0` GPU import violations).
+And after consolidating shared HTTP, health, log-phase, tensor, and subprocess helpers across `livelab/services/` (`-265` net non-test LOC), the full B200 Linux test verification (`CUDA_VISIBLE_DEVICES=4,5`, `-W error::ResourceWarning`, `0 MiB` exit) passed **`134/134`** `livelab/services` tests (including **`52/52`** real-GPU E2E across `test_weight_scaling_colocate.py`, `test_zygote_refresh.py`, `test_vllm_args.py`, `test_reshard_live.py`), **`72/72`** `livelab/adapter` + `examples/live-edit-qwen3` tests, **`241/241`** `core/livelab` (`156/156` `unittest`), and **`8/8`** `rsibox doctor` (`0` GPU import violations).
 
 Symlink-overlay staging & 3-family CUDA kernel verification (`native.py`, `2× B200` `TP=2`, `Qwen3-8B`, `FULL_DECODE_ONLY [1, 2, 4]`, `--kernel-config` `vllm_c`, `70 passed, 11 subtests` Linux `adapter` pytest, `0 MiB × 2` exit, zero `csrc` tree mutation):
 - **`_stage_csrc_overlay` vs `shutil.copytree` (`322` files / `48` dirs):** **`1.695–1.897 ms`** (`edit_mode`: `2` real dirs, `1` real `.cu` copy, `75` symlinks) and **`1.615–1.628 ms`** (`source_mode`) vs `12.395 ms` `copytree` (**`6.53×–7.67×` faster**).
@@ -350,7 +350,7 @@ all four token sequences matched those from a separately started server with the
 scheduling policy.
 
 With `services/core_hook.py` unifying the `EngineCoreProc` hook and `_ChannelMux` thread across
-`adapter.host` (`FASTRSI_KERNEL_DIR`) and `services.live_reconfig` (`FASTRSI_LIVE_RECONFIG_DIR`),
+`adapter.host` (`RSIBOX_KERNEL_DIR`) and `services.live_reconfig` (`RSIBOX_LIVE_RECONFIG_DIR`),
 a combined B200 GPU run (`VllmLab`, Qwen3-8B TP1 eager, `0 MiB` cleanup) verified both channels on
 the same `EngineCoreProc` (`core_pid == ping1_pid == ping2_pid == 1228641`, `hook_errors: []`):
 pre-swap live `fcfs -> priority` (`max_num_seqs=2`, `apply_s 0.191 ms`, client `6.374 ms`, HTTP

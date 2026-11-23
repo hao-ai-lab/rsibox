@@ -1,10 +1,10 @@
-"""MilesLab: `LabUnderTest` implementation over `fastrsi.lab.BaseLab` and `MilesStepGate`."""
+"""MilesLab: `LabUnderTest` implementation over `rsibox.lab.BaseLab` and `MilesStepGate`."""
 import json
 import os
 
 import adapter  # noqa: F401
 from adapter import gate as G
-from fastrsi.lab import BaseLab
+from rsibox.lab import BaseLab
 
 
 class MilesLab(BaseLab):
@@ -49,7 +49,7 @@ class MilesLab(BaseLab):
             engine_meta={
                 "name": "miles",
                 "version": "0.2.0",
-                "commit": os.environ.get("FASTRSI_ENGINE_COMMIT"),
+                "commit": os.environ.get("RSIBOX_ENGINE_COMMIT"),
             },
         )
         self.coordinator = self.gate.coordinator

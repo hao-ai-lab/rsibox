@@ -5,7 +5,7 @@ been started somewhere and made reachable: one warm engine behind one small HTTP
 agent needs only a URL and a token to edit the running engine.
 
 Standard library only. It imports no engine: the daemon takes any `LabUnderTest` class
-(`module:Class`, or a name `fastrsi list` knows).
+(`module:Class`, or a name `rsibox list` knows).
 
 ## Quick start
 
@@ -105,7 +105,7 @@ A launcher starts the daemon somewhere and waits for its box file. It never spea
 
 ```sh
 rsibox up --launcher docker --image IMG --gpus device=0 --lab vllm --real --state DIR \
-          --env FASTRSI_VLLM_MODEL=/models/m --mount /models:/models:ro
+          --env RSIBOX_VLLM_MODEL=/models/m --mount /models:/models:ro
 rsibox up --launcher slurm --lab vllm --real --state /shared/box1 \
           --sbatch-arg=--gres=gpu:1 --sbatch-arg=--time=04:00:00 --setup 'source env.sh'
 ```

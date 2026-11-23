@@ -1,5 +1,5 @@
 {
-  "schema": "fastrsi-survey-rules/1",
+  "schema": "rsibox-survey-rules/1",
   "engine": "megatron",
   "rules_version": "megatron-1.1",
   "upstream": {
@@ -117,7 +117,7 @@
       "evidence": [
         [
           {
-            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "path": "repos/megatron/livelab/rsibox_megatron/hook.py",
             "contains": "StepGapCoordinator"
           }
         ]
@@ -136,7 +136,7 @@
             "contains": "def plan"
           },
           {
-            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "path": "repos/megatron/livelab/rsibox_megatron/hook.py",
             "contains": "StepGapCoordinator"
           }
         ]
@@ -151,7 +151,7 @@
             "contains": "def plan"
           },
           {
-            "path": "repos/megatron/livelab/fastrsi_megatron/hook.py",
+            "path": "repos/megatron/livelab/rsibox_megatron/hook.py",
             "contains": "StepGapCoordinator"
           }
         ]
@@ -166,7 +166,7 @@
       "evidence": [
         [
           {
-            "path": "repos/megatron/livelab/fastrsi_megatron/zygote.py",
+            "path": "repos/megatron/livelab/rsibox_megatron/zygote.py",
             "contains": "--refresh"
           }
         ]

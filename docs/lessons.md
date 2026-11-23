@@ -1,6 +1,6 @@
 # Lessons from building a live lab
 
-What building FastRSI for vLLM taught us about the method, for any engine. Each lesson says what
+What building rsibox for vLLM taught us about the method, for any engine. Each lesson says what
 happened, the rule it produced and how to apply it. Engine-specific lessons live in
 `repos/<engine>/kb/lessons.md`; the orchestrator's working rules in `core/agents/orchestrator.md`. Edit
 lessons in place when a rule changes; this is not a log.

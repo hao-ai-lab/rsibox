@@ -191,7 +191,7 @@ if {rec_expr} is not None:
             "opts": opts,
             "tar_members": tar_members,
             "has_gh_token": any(k in os.environ for k in ("GH_TOKEN", "GITHUB_TOKEN")),
-            "modal_gpu_env": os.environ.get("FASTRSI_MODAL_GPU", ""),
+            "modal_gpu_env": os.environ.get("RSIBOX_MODAL_GPU", ""),
         }}, fh)
 out_json = opts.get("--output-json")
 if {write_json!r} and out_json:
@@ -254,7 +254,7 @@ class Refusals(Lab):
     def test_fork_pr_refused_without_posting(self):
         """A PR from a fork repository is refused by check_pr before any status is posted."""
         modal_bin = self.fake_modal()
-        fake_pr = json.dumps({"head": {"repo": {"full_name": "other/fastrsi"}, "sha": self.trusted, "ref": "patch"}})
+        fake_pr = json.dumps({"head": {"repo": {"full_name": "other/rsibox"}, "sha": self.trusted, "ref": "patch"}})
         orig_sh = runner.sh
 
         def fake_sh(argv, **kw):
@@ -712,7 +712,7 @@ class ModalAppStructure(unittest.TestCase):
         self.assertTrue({"run_core_gpu", "run_vllm_gpu", "main", "select_suites"} <= fn_names)
 
         app_mod = load_modal_app_with_stub()
-        self.assertEqual(app_mod.app.name, "fastrsi-gpu-ci")
+        self.assertEqual(app_mod.app.name, "rsibox-gpu-ci")
         core_ops = app_mod.core_gpu_image.ops
         vllm_ops = app_mod.vllm_gpu_image.ops
         self.assertEqual(core_ops[0], ("debian_slim", "3.12"))

@@ -58,7 +58,7 @@ measurements, and the cost of each call.
 
 A transaction leaves linked records that share its `id`, appended to one file: `txn` when it
 runs, `proof` after the workload ran, `undo` whenever it is undone. Every record has
-`schema` (`fastrsi-receipt/proposed-v1`), `kind`, `id`, and `writer: {pid, written_at}` added
+`schema` (`rsibox-receipt/proposed-v1`), `kind`, `id`, and `writer: {pid, written_at}` added
 by the writer.
 
 `txn`: the transaction. Phase 1 (prepare, the vote) runs while the engine steps; phase 2

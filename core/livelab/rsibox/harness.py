@@ -78,7 +78,7 @@ def build_package_overlay(
         pkg_dir = os.path.abspath(src_dir)
         site_root = os.path.dirname(pkg_dir)
 
-    overlay_root = os.path.abspath(dst) if dst else tempfile.mkdtemp(prefix="fastrsi-overlay-")
+    overlay_root = os.path.abspath(dst) if dst else tempfile.mkdtemp(prefix="rsibox-overlay-")
     for dirpath, dirnames, filenames in os.walk(pkg_dir):
         dirnames[:] = [d for d in dirnames if d != "__pycache__"]
         rel = os.path.relpath(dirpath, site_root)

@@ -1,7 +1,7 @@
 # verl Live Lab (`repos/verl/livelab/`)
 
 Step-gap live-edit adapter for **verl** synchronous RL (`PPOTrainerSync`), built on
-`core/livelab/kernel/`, `core/livelab/ray_participants.py`, and `core/livelab/fastrsi/`.
+`core/livelab/kernel/`, `core/livelab/ray_participants.py`, and `core/livelab/rsibox/`.
 
 ## Architecture & Contract
 
@@ -23,7 +23,7 @@ Step-gap live-edit adapter for **verl** synchronous RL (`PPOTrainerSync`), built
 
 ## Participants and the gate protocol
 
-The gate (`adapter/gate.py`) serves one request per step gap from `$FASTRSI_RL_GATE`: `ready.json`
+The gate (`adapter/gate.py`) serves one request per step gap from `$RSIBOX_RL_GATE`: `ready.json`
 names the next request number `n`, the client writes `req-<n>.json` and reads `resp-<n>.json`
 (`tools.cli request` does this). Participants are `driver` (the `TaskRunner` process) plus every
 warm Ray actor: `reward<i>` (`RewardLoopWorker`), `rollout<i>` (`AgentLoopWorkerTQ`, discovered at
@@ -31,15 +31,15 @@ the first step gap because `fit()` creates them) and `trainer<i>` (`WorkerDict`,
 
 | Verb | Request fields | Does |
 |---|---|---|
-| `install` | `files` (paths under `$FASTRSI_RL_ROOTS`, read from disk) or `sources` (`{module or path: text}`), `steps`, `set` | one transaction on every participant that loaded the module, then `steps` RL steps with a witness verdict |
+| `install` | `files` (paths under `$RSIBOX_RL_ROOTS`, read from disk) or `sources` (`{module or path: text}`), `steps`, `set` | one transaction on every participant that loaded the module, then `steps` RL steps with a witness verdict |
 | `check` | `steps` | runs steps and reports metrics, the rollout dump path, and the witness of every live edit |
 | `reset` | | coupled `S0`: trainer weights, optimizer, scheduler, RNG, **dataloader position**, then rollout weights (`sleep_replicas` + `update_weights`) |
-| `status` | | `base` / `edited` / `poisoned`, the transaction stack, and the fingerprint of the tracked modules (`$FASTRSI_RL_TRACK`; default `core_algos` plus the custom reward file) |
+| `status` | | `base` / `edited` / `poisoned`, the transaction stack, and the fingerprint of the tracked modules (`$RSIBOX_RL_TRACK`; default `core_algos` plus the custom reward file) |
 | `uninstall` | `id` | undoes that transaction and every later one (default: the newest) |
 | `inject` | `fault`, `participant`, `kwargs` | conformance faults only: `fail_apply`, `fail_commit`, `lost`, `tamper` in any participant; `crash`, `hang` at the driver's step boundary |
 | `stop` | | ends the job cleanly (`stopped.json`) |
 
-`FASTRSI_RL_SEED_PER_SAMPLE=1` makes checks reproducible: verl's `rollout.full_determinism` gives every
+`RSIBOX_RL_SEED_PER_SAMPLE=1` makes checks reproducible: verl's `rollout.full_determinism` gives every
 request on a replica the same vLLM seed, so a group's samples collapse and the replica a request lands
 on decides its text; `adapter/determinism.py` seeds each request from `(sample_index, session_id)`
 instead, inside every agent-loop actor.
@@ -49,19 +49,19 @@ instead, inside every agent-loop actor.
 On CPU, against the spawned multi-actor toy (`11/11`) via the unified CLI:
 
 ```sh
-PYTHONPATH=core/livelab python3 -m fastrsi conformance verl
+PYTHONPATH=core/livelab python3 -m rsibox conformance verl
 ```
 
 On GPUs, against a real gated verl job (`adapter/conformance_lab.py`, a client of the gate via
 `adapter/client.py` that also owns the job's lifetime, so `respawn` and `fresh_check` really restart
 it). `--launch` is a shell command that starts the job on `$GATE` with the reward file `$REWARD` and
 exits when the job exits; a fresh process with a patched module gets a `PYTHONPATH` overlay first.
-The job must run with `rollout.full_determinism=True` and `FASTRSI_RL_SEED_PER_SAMPLE=1`, and its
+The job must run with `rollout.full_determinism=True` and `RSIBOX_RL_SEED_PER_SAMPLE=1`, and its
 reward file must be `examples/grpo-gsm8k/reward_gsm8k.py` (the harness edits its anchors):
 
 ```sh
 # Unified CLI (from repo root)
-PYTHONPATH=core/livelab python3 -m fastrsi conformance verl --real \
+PYTHONPATH=core/livelab python3 -m rsibox conformance verl --real \
   --receipts receipts.jsonl --json -- \
   --gate /tmp/verl-gate --reward repos/verl/examples/grpo-gsm8k/reward_gsm8k.py \
   --launch 'python3 -m tools.cli train --gate $GATE -- ... reward.custom_reward_function.path=$REWARD'
@@ -90,7 +90,7 @@ PYTHONPATH=repos/verl/livelab \
 ## Running on a Real `verl` GRPO Job
 
 ```sh
-# 1. Start verl with the fastrsi trainer mode and setup hook
+# 1. Start verl with the rsibox trainer mode and setup hook
 PYTHONPATH=repos/verl/livelab:repos/verl \
   python3 -m tools.cli train --gate /tmp/verl-gate --trace /tmp/verl-trace.jsonl -- \
   data.train_files=gsm8k/train.parquet \

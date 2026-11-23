@@ -103,7 +103,7 @@ only this evidence it reads as "the edit is harmless".
 
 ## 3. One server with the adapter, and `install`
 
-The same command, plus the adapter: `FASTRSI_KERNEL_DIR=<work>/ctl` in the environment, a
+The same command, plus the adapter: `RSIBOX_KERNEL_DIR=<work>/ctl` in the environment, a
 `sitecustomize.py` that imports `adapter.host`, and
 `--worker-extension-cls adapter.worker_ext.KernelWorkerExtension`.
 

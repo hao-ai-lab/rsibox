@@ -1,11 +1,11 @@
-"""Golden tests for `core/livelab/fastrsi/lab.py` and `cli.py`:
+"""Golden tests for `core/livelab/rsibox/lab.py` and `cli.py`:
 - `RoleEndpoint` multi-role filtering and abstain bookkeeping,
 - `RecaptureCoordinator` post-commit rebuild + bounded in-gap rollback on failure,
 - `BaseLab` subclass (`MiniToyLab`) passing all 11/11 `core/livelab/conformance` cases (c0-c10),
-- Unified `fastrsi` CLI (`list`, `doctor`, `conformance`, `ctl`).
+- Unified `rsibox` CLI (`list`, `doctor`, `conformance`, `ctl`).
 
 Run from the repo root:
-    python3 -m unittest discover -s core/livelab/fastrsi -p 'test_lab_cli.py' -t core/livelab -v
+    python3 -m unittest discover -s core/livelab/rsibox -p 'test_lab_cli.py' -t core/livelab -v
 """
 import contextlib
 import io
@@ -22,7 +22,7 @@ import time
 import unittest
 
 from conformance import cases as conformance_cases
-from fastrsi import cli, harness, ipc, lab
+from rsibox import lab_cli as cli, harness, ipc, lab
 from kernel import coordinator as C
 from kernel import toy
 
@@ -344,7 +344,7 @@ class CliTests(unittest.TestCase):
                 "        super().__init__(receipts=receipts)\n"
             )
             result = subprocess.run(
-                [sys.executable, "-m", "fastrsi", "conformance", "launch_lab:LaunchLab",
+                [sys.executable, "-m", "rsibox", "conformance", "launch_lab:LaunchLab",
                  "--real", "--path", tmp, "--root", "tree with spaces", "--nproc", "2",
                  "--only", "c0_repeatable", "--json", "--", "--only", "train"],
                 cwd=LIVELAB, capture_output=True, text=True,
@@ -354,7 +354,7 @@ class CliTests(unittest.TestCase):
             self.assertIn('"lab": "launch_lab:LaunchLab"', result.stdout)
 
     def test_cli_list_doctor_conformance_and_ctl_end_to_end(self):
-        """Input: invoke `fastrsi.cli.main` for `list --json`, `doctor --json`,
+        """Input: invoke `rsibox.cli.main` for `list --json`, `doctor --json`,
         `conformance toy --only c0_repeatable,c2_visible`, and `ctl` over a real Unix socket.
         Expected: dynamic discovery finds `toy`, `template`, and repo engines without any
         hardcoded engine names; conformance passes; `ctl` maps ok/refused to exit 0/2."""
@@ -404,7 +404,7 @@ class CliTests(unittest.TestCase):
         and no toy class. Expected: `resolve_lab(name, real=False)` raises `ValueError` telling
         the caller to pass `--real`, `cli.main(["conformance", name])` exits 2 without starting
         a real lab, and `resolve_lab(name, real=True)` returns the real spec."""
-        tmp = tempfile.mkdtemp(prefix="fastrsi-cli-realonly-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-cli-realonly-")
         self.addCleanup(shutil.rmtree, tmp, True)
         os.makedirs(os.path.join(tmp, "core", "livelab"))
         real_dir = os.path.join(tmp, "repos", "realonly", "livelab")
@@ -456,7 +456,7 @@ class CliTests(unittest.TestCase):
                 "        assert json.loads(os.environ['EXT_LAUNCH_ARGS']) == ['--flag', '1']\n"
                 "        super().__init__(receipts=receipts)\n"
                 "if __name__ == '__main__':\n"
-                "    from fastrsi import cli\n"
+                "    from rsibox import lab_cli as cli\n"
                 "    raise SystemExit(cli.main([\n"
                 "        'conformance', 'ext_lab:ExtLab', '--real', '--only', 'c0_repeatable', '--', '--flag', '1'\n"
                 "    ]))\n",
@@ -473,7 +473,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("1/1 as expected", result.stdout)
 
     def test_conformance_rejects_launch_args_for_toy_lab(self):
-        """Input: `fastrsi conformance toy --only c0_repeatable -- --extra 1`.
+        """Input: `rsibox conformance toy --only c0_repeatable -- --extra 1`.
         Expected: exits 2 cleanly without running conformance because toy labs are not `--real`."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -482,7 +482,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("does not accept launch arguments", err.getvalue())
 
     def test_conformance_strips_at_most_one_leading_delimiter(self):
-        """Input: `fastrsi conformance <real-lab> --real` with (a) `--model M --tp 2`,
+        """Input: `rsibox conformance <real-lab> --real` with (a) `--model M --tp 2`,
         (b) `-- --model M --tp 2`, (c) `--root /r --nproc 2 -- --only train`,
         (d) `-- --root /r --nproc 2 -- --only train`, and (e) bare trailing `--` on `toy`.
         Expected: `_cmd_conformance` strips at most one leading `--`, keeping any inner `--`
@@ -543,7 +543,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("1/1 as expected", buf.getvalue())
 
     def test_doctor_checks_core_health_all_repo_engines_and_human_table(self):
-        """Input: `fastrsi doctor` (both `--json` and human table) against the real repository.
+        """Input: `rsibox doctor` (both `--json` and human table) against the real repository.
         Expected: core kernel & 11 conformance cases healthy, every engine under `repos/`
         discovered and importable with zero eager GPU/torch imports, exit 0."""
         buf_json = io.StringIO()
@@ -585,7 +585,7 @@ class CliTests(unittest.TestCase):
         methods, and (d) an engine directory without `livelab/`.
         Expected: `doctor --json` exits 1, reports `ok=False`, names each failing engine,
         and records the GPU import violation."""
-        tmp = tempfile.mkdtemp(prefix="fastrsi-doctor-neg-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-doctor-neg-")
         self.addCleanup(shutil.rmtree, tmp, True)
         os.makedirs(os.path.join(tmp, "core", "livelab"))
         valid_body = (
@@ -637,7 +637,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doc["summary"]["gpu_import_violations"], 1)
 
     def test_conformance_toy_alias_and_mutual_exclusion_with_real(self):
-        """Input: `fastrsi conformance toy --toy --only c0_repeatable` vs `--toy --real`.
+        """Input: `rsibox conformance toy --toy --only c0_repeatable` vs `--toy --real`.
         Expected: `--toy` runs the toy lab (exit 0); `--toy --real` exits 2 via argparse."""
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -657,7 +657,7 @@ class CliTests(unittest.TestCase):
         unknown key, invalid spec). Expected: `real: null` is healthy with `cli_launch=None`
         and `--real` refuses cleanly; `cli_launch` reports True/False accurately; invalid
         manifests fail `doctor` and `conformance` without falling back to AST discovery."""
-        tmp = tempfile.mkdtemp(prefix="fastrsi-manifest-schema-")
+        tmp = tempfile.mkdtemp(prefix="rsibox-manifest-schema-")
         self.addCleanup(shutil.rmtree, tmp, True)
         os.makedirs(os.path.join(tmp, "core", "livelab"))
         valid_body = (
@@ -726,7 +726,7 @@ class CliTests(unittest.TestCase):
                             by_name[broken])
 
     def test_conformance_subprocess_enables_unbuffered_streaming(self):
-        """Input: `fastrsi conformance <real-lab> --real -- --model M`.
+        """Input: `rsibox conformance <real-lab> --real -- --model M`.
         Expected: `_cmd_conformance` flushes stdout/stderr, invokes `[sys.executable, '-u',
         '-m', 'conformance', ...]`, and sets `PYTHONUNBUFFERED='1'` via `setdefault`."""
         from unittest import mock
@@ -779,7 +779,7 @@ class CliTests(unittest.TestCase):
 
     def test_conformance_rejects_unknown_only_case_invalid_spec_and_bad_ctl_json(self):
         """Input: unknown `--only` case name (and valid whitespace-separated `--only`),
-        malformed `module:Class` target, and invalid JSON in `fastrsi ctl`.
+        malformed `module:Class` target, and invalid JSON in `rsibox ctl`.
         Expected: crisp exit-2 errors before booting any lab; valid spaced `--only` runs."""
         from conformance import __main__ as conf_main
 
@@ -819,13 +819,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("invalid JSON", err_ctl.getvalue())
 
     def test_real_engines_support_real_help_without_gpu_imports(self):
-        """Input: `fastrsi conformance <engine> --real -- --help` for all 6 real GPU engines.
+        """Input: `rsibox conformance <engine> --real -- --help` for all 6 real GPU engines.
         Expected: exits 0, prints engine-specific help text, and leaves GPU runtime libraries
         (`torch`, etc.) unimported."""
         repo_root = os.path.dirname(os.path.dirname(LIVELAB))
         probe = (
             "import sys\n"
-            "from fastrsi import cli\n"
+            "from rsibox import lab_cli as cli\n"
             "engine, root, gpu_csv = sys.argv[1], sys.argv[2], sys.argv[3]\n"
             "before = set(sys.modules)\n"
             "try:\n"
@@ -844,18 +844,18 @@ class CliTests(unittest.TestCase):
                     capture_output=True, text=True, env=env, timeout=30,
                 )
                 self.assertEqual(proc.returncode, 0, f"{engine}: stdout={proc.stdout} stderr={proc.stderr}")
-                self.assertIn(f"fastrsi conformance {engine} --real", proc.stdout)
+                self.assertIn(f"rsibox conformance {engine} --real", proc.stdout)
 
     def test_megatron_launch_environment_strips_leading_separator_and_maps_opts(self):
         """Input: `MegatronLab.launch_environment` with leading `--`, `--steps`, `--check-timeout`,
-        and trailing `-- --foo`. Expected: strips single leading `--`, sets `FASTRSI_CHECK_STEPS`
-        and `FASTRSI_CHECK_TIMEOUT`, and forwards `--foo` to `pretrain_gpt.py`."""
+        and trailing `-- --foo`. Expected: strips single leading `--`, sets `RSIBOX_CHECK_STEPS`
+        and `RSIBOX_CHECK_TIMEOUT`, and forwards `--foo` to `pretrain_gpt.py`."""
         megatron_livelab = os.path.join(
             os.path.dirname(os.path.dirname(LIVELAB)), "repos", "megatron", "livelab"
         )
         sys.path.insert(0, megatron_livelab)
         try:
-            from fastrsi_megatron.conformance_lab import MegatronLab
+            from rsibox_megatron.conformance_lab import MegatronLab
 
             env = MegatronLab.launch_environment([
                 "--", "--root", "/tmp/mg", "--nproc", "4", "--steps", "3",
@@ -864,11 +864,11 @@ class CliTests(unittest.TestCase):
         finally:
             if megatron_livelab in sys.path:
                 sys.path.remove(megatron_livelab)
-        self.assertEqual(env["FASTRSI_MG_ROOT"], os.path.abspath("/tmp/mg"))
-        self.assertEqual(env["FASTRSI_CHECK_STEPS"], "3")
-        self.assertEqual(env["FASTRSI_CHECK_TIMEOUT"], "180.0")
-        self.assertIn("--nproc-per-node 4", env["FASTRSI_MG_CMD"])
-        self.assertTrue(env["FASTRSI_MG_CMD"].endswith("--foo"))
+        self.assertEqual(env["RSIBOX_MG_ROOT"], os.path.abspath("/tmp/mg"))
+        self.assertEqual(env["RSIBOX_CHECK_STEPS"], "3")
+        self.assertEqual(env["RSIBOX_CHECK_TIMEOUT"], "180.0")
+        self.assertIn("--nproc-per-node 4", env["RSIBOX_MG_CMD"])
+        self.assertTrue(env["RSIBOX_MG_CMD"].endswith("--foo"))
 
 
 if __name__ == "__main__":

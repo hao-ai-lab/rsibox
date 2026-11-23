@@ -18,7 +18,7 @@ Status (read before using it):
 - Times (`snapshot.timing`, `restore()`'s return) are wall time on the monotonic clock with
   `torch.cuda.synchronize()` before every reading when CUDA is in use.
 - `SpeculativeAcceptanceMocker` fakes the acceptance decision. It is refused inside
-  `scored_run()` and when FASTRSI_SCORED=1, and a scored run refuses to start or end while one
+  `scored_run()` and when RSIBOX_SCORED=1, and a scored run refuses to start or end while one
   is installed: mocked acceptance can never produce a scored number.
 """
 
@@ -1306,7 +1306,7 @@ _SCORED_DEPTH = [0]
 
 
 def _scored() -> bool:
-    return _SCORED_DEPTH[0] > 0 or os.environ.get("FASTRSI_SCORED") == "1"
+    return _SCORED_DEPTH[0] > 0 or os.environ.get("RSIBOX_SCORED") == "1"
 
 
 def assert_unmocked() -> None:
@@ -1472,7 +1472,7 @@ class SpeculativeAcceptanceMocker:
 
     def install(self, target: Any, *, journal: Any | None = None) -> SpeculativeAcceptanceMocker:
         if _scored():
-            raise MockedInScoredRunError("SpeculativeAcceptanceMocker cannot be installed in a scored run (scored_run() or FASTRSI_SCORED=1)")
+            raise MockedInScoredRunError("SpeculativeAcceptanceMocker cannot be installed in a scored run (scored_run() or RSIBOX_SCORED=1)")
         if self._installed_target is not None:
             self.uninstall()
         sampler = getattr(target, "rejection_sampler", target)

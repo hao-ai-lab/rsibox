@@ -1,12 +1,12 @@
-"""Tests for shared `fastrsi.op_guard` (M-H16): lazy torch import and op-redefine protection."""
+"""Tests for shared `rsibox.op_guard` (M-H16): lazy torch import and op-redefine protection."""
 import os
 import subprocess
 import sys
 import types
 import unittest
 
-import fastrsi
-from fastrsi.op_guard import _norm_schema, op_redefine_guard
+import rsibox
+from rsibox.op_guard import _norm_schema, op_redefine_guard
 
 
 def _make_fake_torch(schemas, *, fake_allow_override=True):
@@ -84,10 +84,10 @@ def _make_fake_torch(schemas, *, fake_allow_override=True):
 
 class OpGuardTest(unittest.TestCase):
     def test_reexport_and_zero_eager_torch_import(self):
-        self.assertIs(fastrsi.op_redefine_guard, op_redefine_guard)
-        self.assertIs(fastrsi.op_guard.op_redefine_guard, op_redefine_guard)
+        self.assertIs(rsibox.op_redefine_guard, op_redefine_guard)
+        self.assertIs(rsibox.op_guard.op_redefine_guard, op_redefine_guard)
         code = (
-            "import sys, fastrsi, fastrsi.op_guard; "
+            "import sys, rsibox, rsibox.op_guard; "
             "bad = [m for m in ('torch', 'triton', 'cuda') if m in sys.modules]; "
             "assert not bad, bad"
         )

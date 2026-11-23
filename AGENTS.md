@@ -2,9 +2,9 @@
 
 These rules apply to every coding agent (Claude Code, Codex, Antigravity, others) and to humans.
 
-## How this repo grows: the fastrsi-loop
+## How this repo grows: the rsibox-loop
 
-We build FastRSI one engine and a few real PRs at a time.
+We build rsibox one engine and a few real PRs at a time.
 
 1. **Document priors first.** Before measuring or coding, copy what we already know about the
    engine into `repos/<engine>/kb/`, with sources. Measure only what is missing.
@@ -130,7 +130,7 @@ test, because it misleads the reader.
 - `core/livelab/`: the shared engine-agnostic live-lab runtime every engine's lab builds on: the
   fixed interface, the conformance cases, the transaction `kernel/` (pure Python, imports no
   engine) with its toy lab, and `forksafe.py` (pre-fork CUDA guards for an engine zygote). Engine
-  labs import them from this folder (`FASTRSI_LIVELAB` overrides it). Changing `INTERFACE.md` is a
+  labs import them from this folder (`RSIBOX_LIVELAB` overrides it). Changing `INTERFACE.md` is a
   breaking change: bump its version and say so in the PR.
 - `template/`: minimal onboarding scaffold for bootstrapping a new engine under `repos/<new-engine>/`.
 - `docs/`: how this repo and its process work, following `docs/README.md`. No engine
@@ -160,7 +160,7 @@ The repo will be public. Experiments and the machines they ran on are not part o
   - home and scratch paths (`/raid/...`, `/home/<user>/...`, `/workspace/...`);
   - how to reach a machine: kubeconfig, SSH, tunnel or proxy recipes;
   - tokens, keys and anything else secret.
-- **Keep them instead** in a private folder outside the repo: `~/fastrsi-lab/<engine>/`.
+- **Keep them instead** in a private folder outside the repo: `~/rsibox-lab/<engine>/`.
   If you must keep notes inside the checkout, use `.lab/`, which git ignores.
 - **What `kb/` may say:** generic hardware ("4× GB200, aarch64, 956 GiB RAM") and measured
   numbers with their source described generically ("our 2026-10-08 startup run"), never how

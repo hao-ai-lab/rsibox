@@ -2078,7 +2078,7 @@ FILE vllm/models/deepseek_v41/nvidia/ops/mhc_post_collapse.py
 +                        T.float32(values[tile, v]) * inv[0]
 +                        * T.float32(weights[tile, v])
 +                    )"
-vllm-d8x32k,fastrsi,1,5,69,0,"FILE vllm/model_executor/kernels/mhc/tilelang.py
+vllm-d8x32k,rsibox,1,5,69,0,"FILE vllm/model_executor/kernels/mhc/tilelang.py
 @@ -789,6 +789,8 @@ def mhc_post_tilelang(
 
      if (
@@ -2147,7 +2147,7 @@ FILE vllm/models/deepseek_v41/nvidia/model.py
          previous_scratch = getattr(context, ""_dsv41_attention_scratch"", None)
          context._dsv41_attention_scratch = {
              ""positions"": positions,"
-vllm-d8x32k,fastrsi,2,2,92,0,"FILE vllm/model_executor/kernels/mhc/triton_post.py
+vllm-d8x32k,rsibox,2,2,92,0,"FILE vllm/model_executor/kernels/mhc/triton_post.py
 @@ -42,3 +42,73 @@ def mhc_post(x, residual, post_mix, comb_mix):
          num_warps=4, enable_fp_fusion=False, launch_pdl=pdl,
      )
@@ -2239,7 +2239,7 @@ FILE vllm/models/deepseek_v41/nvidia/ops/mhc.py
          aux = (
              residual.mean(dim=1)
              if capture_aux"
-vllm-d8x32k,fastrsi,3,1,14,0,"FILE vllm/models/deepseek_v41/nvidia/ops/mega_mhc.py
+vllm-d8x32k,rsibox,3,1,14,0,"FILE vllm/models/deepseek_v41/nvidia/ops/mega_mhc.py
 @@ -76,12 +76,9 @@ def mhc_shifted_post_pre_deep_gemm(
      scratch = getattr(get_forward_context(), ""_dsv41_attention_scratch"", None)
      quantize = quantize and num_tokens <= 32 and scratch is not None
@@ -2253,7 +2253,7 @@ vllm-d8x32k,fastrsi,3,1,14,0,"FILE vllm/models/deepseek_v41/nvidia/ops/mega_mhc.
          sf = torch.empty((hidden_size // 128, (num_tokens + 3) // 4 * 4),
                           dtype=torch.int32, device=x.device).T[:num_tokens]
          quant_args = dict(y_fp8=q, y_gemm_sf=sf)"
-vllm-d8x32k,fastrsi,4,5,295,0,"FILE vllm/model_executor/kernels/mhc/triton_post.py
+vllm-d8x32k,rsibox,4,5,295,0,"FILE vllm/model_executor/kernels/mhc/triton_post.py
 @@ -1,11 +1,15 @@
  # SPDX-License-Identifier: Apache-2.0
  # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -2548,7 +2548,7 @@ FILE vllm/models/deepseek_v41/nvidia/ops/mhc.py
                      quantize=quantize_input,
                  )
              else:"
-vllm-d8x32k,fastrsi,5,3,37,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,5,3,37,0,"FILE NOTES.md
 @@ -188,3 +188,5 @@ Measurements pending.
  - Router pipeline2 `0543fa4`, `bench-131025-c2e3`:d8 8.116, d16 9.412 ms, exact; negligible apparent difference from default. Leave default pending paired screen.
 
@@ -2585,7 +2585,7 @@ FILE vllm/utils/deep_gemm.py
 
 
  def _ceil_to_ue8m0(x: torch.Tensor):"
-vllm-d8x32k,fastrsi,6,4,154,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,6,4,154,0,"FILE NOTES.md
 @@ -299,3 +299,8 @@ Measurements pending.
  - Screen64-SM fused router grid at <=32 rows; restore global scheduling setting immediately afterward.
 
@@ -2739,7 +2739,7 @@ FILE vllm/utils/deep_gemm.py
      return _tf32_hc_prenorm_gemm_impl(
          x,
          fn,"
-vllm-d8x32k,fastrsi,7,3,99,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,7,3,99,0,"FILE NOTES.md
 @@ -337,3 +337,5 @@ Measurements pending.
  - Native128-row workspace paired `e24a157`, `bench-142637-3bf1`:5.953/8.074/11.361/9.396 ms; all changes inconclusive. Exclude the extra layout override.
  - Five-stage query paired `a5a8351`, `bench-142942-e3c5`:5.944/8.068/11.351/9.369 ms; d32 +0.05%[+0.02,+0.09], others inconclusive. Keep four stages.
@@ -2838,7 +2838,7 @@ FILE vllm/models/deepseek_v41/common/ops/query_quant.py
          if CACHE is not None:
              _insert_bf16_rounded_kv(y, row, CACHE, SLOTS, POSITIONS, ROPE,
                                    CACHE_BLOCK, CACHE_STRIDE, ROPE_STRIDE, SLOT_COUNT)"
-vllm-d8x32k,fastrsi,8,4,177,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,8,4,177,0,"FILE NOTES.md
 @@ -366,3 +366,6 @@ Measurements pending.
  - Adjacent-warp diagnostic `8a9aae7`, `bench-144240-b370`:reference d1 5.952 ms, still mismatched. Add temporary native per-thread/per-warp diagnostic outputs to local CuTe kernel; model output remains the reference.
 
@@ -3015,7 +3015,7 @@ FILE vllm/utils/deep_gemm.py
              _mega_mhc_impl(*args, **kwargs)
          finally:
              impl.set_num_sms(previous)"
-vllm-d8x32k,fastrsi,9,2,83,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,9,2,83,0,"FILE NOTES.md
 @@ -1,6 +1,6 @@
  # DeepSeek V4.1 Flash decode optimization
 
@@ -3098,7 +3098,7 @@ FILE vllm/model_executor/kernels/mhc/triton_native_input.py
          scratch[""deepgemm_input""] = (
              out, QuantizedActivation(q, sf, out.dtype, out.shape, kMxfp8Dynamic),
          )"
-vllm-d8x32k,fastrsi,10,3,47,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,10,3,47,0,"FILE NOTES.md
 @@ -533,3 +533,6 @@ The following earlier receipts were discussed by commit or grouped experiment ab
  - Attention-input-first `bc46ce9`, `bench-155648-ee61`:d32 10.883vs10.900 ms,-0.15% CI[-0.28,-0.03], retain. Screen input-first scheduling at both attention and MoE boundaries.
 
@@ -3145,7 +3145,7 @@ FILE vllm/models/deepseek_v41/nvidia/ops/mhc.py
          nr, post, comb, _, pre = native
          for value in (nr, post, comb, pre):
              value.record_stream(main)"
-vllm-d8x32k,fastrsi,11,3,28,0,"FILE NOTES.md
+vllm-d8x32k,rsibox,11,3,28,0,"FILE NOTES.md
 @@ -573,3 +573,6 @@ The following earlier receipts were discussed by commit or grouped experiment ab
  - Screen two scale-factor TMEM stages with the retained four-stage CuTe wide-query pipeline. Include the scale-stage count in the compiled-cache key so paired variants remain distinct.
 
@@ -3698,7 +3698,7 @@ FILE NOTES.md
 +
 +## Guarded lightweight storage
 +Combine direct MXFP8TensorStorage expert views with half-bucket guard capacity on quantized and linear-output allocations. Only allocated capacity changes; logical tensors, quantization groups, and GEMM dimensions remain unchanged. This targets the recurring allocator stalls observed with the unguarded storage-object probe."
-megatron,fastrsi,1,3,116,0,"FILE Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py
+megatron,rsibox,1,3,116,0,"FILE Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py
 @@ -9,6 +9,14 @@ import torch.nn.functional as F
  from megatron.core.jit import jit_fuser
  from megatron.core.utils import nvtx_decorator
@@ -3814,7 +3814,7 @@ FILE NOTES.md
 +- Fuse both input gradients and the per-token probability reduction in one Triton kernel.
 +- FP32 arithmetic with BF16 output, fallback for unsupported layouts/types/FP8 input storage.
 +- Needs numerical validation against the compiled baseline as well as timing."
-megatron,fastrsi,2,4,168,0,"FILE Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py
+megatron,rsibox,2,4,168,0,"FILE Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py
 @@ -208,8 +208,10 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
              weighted_swiglu_forward is not None and input.is_cuda
              and input.dtype == torch.bfloat16 and weights.dtype == torch.float32
@@ -3982,7 +3982,7 @@ FILE NOTES.md
 +- Isolated SwiGLU fresh repeats were 64,073 and 63,965; the original combination
 +  had 65,223. Small effects cannot be separated reliably from launch noise yet.
 +- Queue a cold measurement and gate for this full combination as another candidate."
-megatron,fastrsi,3,4,175,0,"FILE Megatron-LM/megatron/core/extensions/transformer_engine.py
+megatron,rsibox,3,4,175,0,"FILE Megatron-LM/megatron/core/extensions/transformer_engine.py
 @@ -1899,8 +1899,8 @@ if HAVE_TE and is_te_min_version(""1.9.0.dev0""):
 
              with quant_context:
@@ -4157,7 +4157,7 @@ FILE NOTES.md
 +- Enable the packed split-quantize replacement inside both original autograd forward
 +  and backward, preserving the native GEMMs, saved activations, delayed wgrad and optimizer.
 +  Every call quantizes its current tensor; no input/result cache is introduced."
-megatron,fastrsi,4,2,61,0,"FILE Megatron-LM/megatron/core/fusions/packed_mxfp8.py
+megatron,rsibox,4,2,61,0,"FILE Megatron-LM/megatron/core/fusions/packed_mxfp8.py
 @@ -20,24 +20,19 @@ def _split_scales(RS, CS, RO, CO, Meta, TOTAL, K: tl.constexpr, SWIZZLED: tl.con
      size = tl.cdiv(count, 128) * 128 * (K // 32)
      i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)

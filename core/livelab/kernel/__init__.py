@@ -1,1 +1,1 @@
-"""FastRSI transaction kernel: engine-agnostic, standard library only. See README.md."""
+"""rsibox transaction kernel: engine-agnostic, standard library only. See README.md."""

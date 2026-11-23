@@ -2,7 +2,7 @@
 import os, shutil, tempfile
 from adapter.lab import VerlLab
 from adapter.toyverl import cluster as TC
-from fastrsi import harness
+from rsibox import harness
 
 ALGOS, ROLLOUT = "adapter.toyverl.algos", "adapter.toyverl.rollout"
 _edit = harness.edit_once
@@ -12,7 +12,7 @@ class ToyVerlLab(VerlLab):
     name, package, fresh_module = "verl-toy", "adapter", "adapter.toyverl.fresh"
 
     def __init__(self, receipts=None, **kw):
-        self._tmp_dir = tempfile.mkdtemp(prefix="fastrsi-toyverl-")
+        self._tmp_dir = tempfile.mkdtemp(prefix="rsibox-toyverl-")
         self.reward_file = os.path.join(self._tmp_dir, "custom_reward.py")
         with open(self.reward_file, "w", encoding="utf-8") as handle:
             handle.write(TC.DEFAULT_REWARD_SOURCE)

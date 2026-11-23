@@ -6,7 +6,7 @@ the conformance harness of `core/livelab/conformance/`.
 
 The transaction kernel and the pre-fork guards are the framework's: `core/livelab/kernel/`
 and `core/livelab/forksafe.py`. Importing `adapter` (or `services.zygote`) puts
-`core/livelab` on `sys.path` (`FASTRSI_LIVELAB` overrides the folder).
+`core/livelab` on `sys.path` (`RSIBOX_LIVELAB` overrides the folder).
 
 - `adapter/`: the kernel inside FastVideo: `agent.py` runs in every worker process,
   `lab.py` is the lab host (the verbs), `diffs.py` turns a unified diff into the files of an
@@ -40,7 +40,7 @@ CUDA_VISIBLE_DEVICES=0,1 python3 -m conformance --lab adapter.h3:H3Lab   # from 
 ```
 
 One warm lab is shared by all eleven cases (a load is 20-30 s from a local disk, 60-150 s from
-a shared filesystem). `CUDA_VISIBLE_DEVICES` sets the ranks (`FASTRSI_H3_GPUS` overrides). The
+a shared filesystem). `CUDA_VISIBLE_DEVICES` sets the ranks (`RSIBOX_H3_GPUS` overrides). The
 probes of `../tools/` (`h3_shapes.py`, `h3_climb.py`) start the same lab.
 
 A patch file installs as it is: `lab.install({"diff": open("01-....patch").read()})`. The diff

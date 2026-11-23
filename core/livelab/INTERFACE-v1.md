@@ -71,7 +71,7 @@ Signatures and plan format: `core/livelab/kernel/coordinator.py`.
   call) uses `swap.stage_and_apply`, which runs stage, decide, validate and apply in that order;
   calling `stage` then `apply` skips the check, and a loop that never returns keeps the old
   code with no blocking finding.
-- The witness global (`__fastrsi_hit__`) is never deleted: code compiled or captured while an
+- The witness global (`__rsibox_hit__`) is never deleted: code compiled or captured while an
   edit was installed may still call it. Undo binds a no-op stub.
 - JIT targets (a Triton `@jit` kernel) are a `jit_target` finding: the swap changes the
   Python function and the launches keep the old compiled kernel. A JIT rebuild at commit

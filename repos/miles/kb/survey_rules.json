@@ -1,5 +1,5 @@
 {
-  "schema": "fastrsi-survey-rules/1",
+  "schema": "rsibox-survey-rules/1",
   "engine": "miles",
   "rules_version": "miles-1",
   "upstream": {

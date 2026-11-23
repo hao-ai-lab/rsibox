@@ -2,7 +2,7 @@
 
     python3 scenarios.py --state DIR [--only boot,busy,kill,down] [--out scenarios.json]
 
-Starts its own box with the local launcher (the `FASTRSI_VLLM_*` environment must be set as
+Starts its own box with the local launcher (the `RSIBOX_VLLM_*` environment must be set as
 for any `vllm --real` box) and runs, in order:
 
 - boot: verbs sent while the engine boots get 409 `booting`, `info` answers at once, then the
@@ -137,7 +137,7 @@ def scenario_busy(ctx):
 
 
 def scenario_kill(ctx):
-    box, port = ctx["box"], int(os.environ.get("FASTRSI_VLLM_PORT", "18500"))
+    box, port = ctx["box"], int(os.environ.get("RSIBOX_VLLM_PORT", "18500"))
     before = engine_pids(port)
     workers = [p for p in before if "Worker" in cmdline(p)]
     expect(workers, "the engine has a worker process below this box", [(p, cmdline(p)[:60]) for p in before])
@@ -169,7 +169,7 @@ def scenario_kill(ctx):
 
 
 def scenario_down(ctx):
-    box, port = ctx["box"], int(os.environ.get("FASTRSI_VLLM_PORT", "18500"))
+    box, port = ctx["box"], int(os.environ.get("RSIBOX_VLLM_PORT", "18500"))
     with open(os.path.join(ctx["state"], "box.json")) as handle:
         daemon = json.load(handle)["pid"]
     ours = set(engine_pids(port)) | {daemon} | set(descendants(daemon))

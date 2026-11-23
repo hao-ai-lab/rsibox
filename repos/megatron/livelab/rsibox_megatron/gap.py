@@ -12,7 +12,7 @@ streams. A client that times out or disconnects before its reply costs only that
 returns False and the host serves the next request (the ranks never see it). The ranks wait for
 the next message, and send their replies, on a group with a long timeout, since they wait there
 while the lab is idle or while rank 0 is still busy. Rank 0 never blocks in a collective: it
-waits for its sends and receives with a deadline, at most FASTRSI_ROUND_TIMEOUT_S after its own
+waits for its sends and receives with a deadline, at most RSIBOX_ROUND_TIMEOUT_S after its own
 part, so a rank that dies or hangs in a round fails it on rank 0 (RoundFailed), which poisons
 the lab (see Ranks for what is and is not bounded). A client's own timeout (see client.py) may be
 shorter and poison it on the client's side first.
@@ -28,7 +28,7 @@ import pickle
 import time
 from datetime import timedelta
 
-from fastrsi import ipc
+from rsibox import ipc
 
 
 class RoundFailed(RuntimeError):
@@ -66,7 +66,7 @@ class Ranks:
     The other ranks block in recv() and send() on a group with a long timeout: they wait there
     while the lab is idle, and a rank that answers before a slower rank 0 just waits. Rank 0 never
     blocks in a collective: each of its sends and receives is waited for with a deadline. It
-    waits at most FASTRSI_ROUND_TIMEOUT_S (default 900 s) for its sends, and at most that long
+    waits at most RSIBOX_ROUND_TIMEOUT_S (default 900 s) for its sends, and at most that long
     after its own part for the replies; a rank that has not answered by then (dead, hung, or
     slower than rank 0 by more than the timeout), or a send or receive that fails, fails the
     round (RoundFailed). Not bounded: rank 0's own part of the round (its own train steps)."""
@@ -75,7 +75,7 @@ class Ranks:
         import torch
         import torch.distributed as dist
         if round_timeout_s is None:
-            round_timeout_s = float(os.environ.get("FASTRSI_ROUND_TIMEOUT_S", "900"))
+            round_timeout_s = float(os.environ.get("RSIBOX_ROUND_TIMEOUT_S", "900"))
         self.torch, self.dist = torch, dist
         self.rank = dist.get_rank()
         self.world = dist.get_world_size()

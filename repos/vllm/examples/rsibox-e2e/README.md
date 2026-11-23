@@ -45,7 +45,7 @@ The box is any `vllm --real` box (`core/livelab/rsibox/README.md`); the cases do
 it was launched, so the same file checks a local box, a Docker box and a gVisor box.
 
 ```sh
-export FASTRSI_VLLM_MODEL=<model> FASTRSI_VLLM_VENV=<venv> FASTRSI_VLLM_WORK=<scratch>
+export RSIBOX_VLLM_MODEL=<model> RSIBOX_VLLM_VENV=<venv> RSIBOX_VLLM_WORK=<scratch>
 rsibox up --launcher local --lab vllm --real --state <dir> && export RSIBOX=<dir>/box.json
 rsibox wait
 

@@ -1,20 +1,20 @@
-"""The `fastrsi` verl trainer: verl's `PPOTrainerSync` plus a `StepGapCoordinator` edit gate.
+"""The `rsibox` verl trainer: verl's `PPOTrainerSync` plus a `StepGapCoordinator` edit gate.
 
-Gate protocol (files in `$FASTRSI_RL_GATE`, served at `on_step_begin`, one request at a time):
+Gate protocol (files in `$RSIBOX_RL_GATE`, served at `on_step_begin`, one request at a time):
 `ready.json` names the next request number `n`; the client writes `req-<n>.json` and reads
-`resp-<n>.json`. Verbs: `install` (files on disk under `$FASTRSI_RL_ROOTS`, or inline
+`resp-<n>.json`. Verbs: `install` (files on disk under `$RSIBOX_RL_ROOTS`, or inline
 `sources: {module or path: text}`), `check` (run `steps` steps, report metrics and witness),
 `status`, `reset` (coupled S0), `uninstall`, `inject` (conformance faults), `stop`.
 """
 import contextlib, copy, importlib.util, io, json, os, socket, sys, threading, time, types
 from pathlib import Path
 import ray_participants as RP
-from fastrsi import harness, ipc
+from rsibox import harness, ipc
 from kernel import coordinator as C, locate as L, receipt as R, session as SS
 from adapter import determinism, faults, settings, state as S0
 
-GATE_ENV, ROOTS_ENV, TRACK_ENV, SEED_ENV = "FASTRSI_RL_GATE", "FASTRSI_RL_ROOTS", "FASTRSI_RL_TRACK", "FASTRSI_RL_SEED_PER_SAMPLE"
-MODE, DEFAULT_TRACK, _TRAINER = "fastrsi", ("verl.trainer.ppo.core_algos",), None
+GATE_ENV, ROOTS_ENV, TRACK_ENV, SEED_ENV = "RSIBOX_RL_GATE", "RSIBOX_RL_ROOTS", "RSIBOX_RL_TRACK", "RSIBOX_RL_SEED_PER_SAMPLE"
+MODE, DEFAULT_TRACK, _TRAINER = "rsibox", ("verl.trainer.ppo.core_algos",), None
 _DRIVER = types.SimpleNamespace(__ray_call__=types.SimpleNamespace(remote=lambda fn, *a: fn(None, *a)))
 
 
@@ -39,7 +39,7 @@ def module_for_file(file_path, roots=()):
     real = os.path.realpath(file_path)
     for mname, loaded in list(sys.modules.items()):
         origin = getattr(loaded, "__file__", None)
-        if isinstance(origin, str) and os.path.realpath(origin) == real and not mname.startswith(("fastrsi_file_", "custom_module_")):
+        if isinstance(origin, str) and os.path.realpath(origin) == real and not mname.startswith(("rsibox_file_", "custom_module_")):
             return mname, False
     for entry in [e for e in list(sys.path) + [os.path.dirname(os.path.realpath(r)) for r in roots if r] if e]:
         base = os.path.realpath(entry)
@@ -61,7 +61,7 @@ def path_for_key(key):
 
 
 def tracked_modules(config=None, env=os.environ):
-    """Modules the session fingerprints (`$FASTRSI_RL_TRACK`, `os.pathsep`-separated module names or
+    """Modules the session fingerprints (`$RSIBOX_RL_TRACK`, `os.pathsep`-separated module names or
     `.py` paths); default: `core_algos` plus the custom reward file the job loads."""
     if env.get(TRACK_ENV):
         return [t for t in env[TRACK_ENV].split(os.pathsep) if t]
@@ -241,7 +241,7 @@ class GateMixin:
             if req.get("stop"):
                 ipc.atomic_write_json(self._gate / f"resp-{req_num}.json", {"n": req_num, "ok": True, "stopped": True}, indent=1)
                 ipc.atomic_write_json(self._gate / "stopped.json", {"t": time.time()}, indent=1)
-                raise SystemExit("fastrsi gate: stop requested")
+                raise SystemExit("rsibox gate: stop requested")
             try:
                 self._pending = self._serve_request(req_num, req)
             except Exception as err:
@@ -251,7 +251,7 @@ class GateMixin:
                 if (hang_s := faults.STATE.pop("hang_s", None)) is not None:
                     time.sleep(hang_s)
                 if faults.STATE.pop("crash", False):
-                    raise RuntimeError("fastrsi gate: injected crash at the step boundary")
+                    raise RuntimeError("rsibox gate: injected crash at the step boundary")
                 return super().on_step_begin()
 
     def _edits(self, req):
@@ -348,7 +348,7 @@ def register():
     if _TRAINER is None:
         from verl.trainer.ppo.v1.trainer_base import register_trainer
         from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
-        trainer = type("PPOTrainerFastRSISync", (GateMixin, PPOTrainerSync), {"__module__": __name__})
+        trainer = type("PPOTrainerrsiboxSync", (GateMixin, PPOTrainerSync), {"__module__": __name__})
         globals()[trainer.__name__] = trainer
         _TRAINER = register_trainer(MODE)(trainer)
     return _TRAINER

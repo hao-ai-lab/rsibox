@@ -3,15 +3,15 @@ CUDA, and starts the ranks of a training job by fork instead of torchrun + exec.
 skips the Python imports (16-85 s from a network file system in our runs) and pays only
 Megatron's own setup and the first step.
 
-    python -m fastrsi_megatron.zygote serve --sock S [--preload M1,M2] [--script pretrain_gpt.py]
-    python -m fastrsi_megatron.zygote start --sock S --nproc N [--port P] [--log-dir D]
+    python -m rsibox_megatron.zygote serve --sock S [--preload M1,M2] [--script pretrain_gpt.py]
+    python -m rsibox_megatron.zygote start --sock S --nproc N [--port P] [--log-dir D]
         [--env K=V ...] [--accept stale,env] [--refresh megatron] [--timeout SEC] -- pretrain_gpt.py <megatron args>
-    python -m fastrsi_megatron.zygote stop --sock S
+    python -m rsibox_megatron.zygote stop --sock S
 
 `start` sends one request and waits until every rank has exited; it prints one JSON line per
 event (`forked`, then `exited` with each rank's exit code) and returns the job's exit code.
-Each rank runs `fastrsi_megatron.run` (phase stamps, lab hook) exactly as under torchrun, with
-FASTRSI_T0 set to the request time, so phases.rank<r>.json counts from the request.
+Each rank runs `rsibox_megatron.run` (phase stamps, lab hook) exactly as under torchrun, with
+RSIBOX_T0 set to the request time, so phases.rank<r>.json counts from the request.
 
 Contract:
 - The zygote never initializes CUDA or the CUDA driver. If an import does, `serve` exits and
@@ -27,7 +27,7 @@ Contract:
 - Supervision (no rank or child of a rank outlives its job): the zygote is the child subreaper of
   everything it forks and reaps all of it before it serves the next request. Each rank has
   PR_SET_PDEATHSIG=SIGKILL, so it dies with the zygote, and a guard process (forked from the rank
-  before CUDA, named fastrsi-guard) that kills the rank's process group when the rank dies,
+  before CUDA, named rsibox-guard) that kills the rank's process group when the rank dies,
   however it dies. A client that disconnects while its job runs stops the job (SIGTERM, then
   SIGKILL after 10 s), as torchrun's workers stop with torchrun; `on_client_gone: "keep"` lets it
   run to its end instead. A malformed request (not JSON, not an object, missing fields) gets an
@@ -38,7 +38,7 @@ Contract:
   with a prefix that a preloaded library may read at import (NVTE_, TORCH_, TORCHINDUCTOR_,
   TRITON_, LD_, PYTHON...) differs from the zygote's start value. NCCL_*, TORCH_NCCL_*,
   CUDA_VISIBLE_DEVICES and the rank variables are read after the fork and never count;
-  "overlay": the request's FASTRSI_OVERLAY replaces modules the zygote has imported already
+  "overlay": the request's RSIBOX_OVERLAY replaces modules the zygote has imported already
   (overlay.py works only before the first import), so the edit would not run.
 - Code restart: `start --refresh megatron` makes each forked rank drop the named packages, the
   script's own modules and our modules that hold references to them (run, hook, gap, state,
@@ -53,7 +53,7 @@ import argparse, ast, contextlib, ctypes, gc, importlib, json, os, select, signa
 # package __init__); PROPS_CODE and Properties are re-exported for callers of this module
 import forksafe
 from forksafe import PROPS_CODE, Properties, freeze_gc_before_fork  # noqa: F401
-from fastrsi import hooks, ipc, proc
+from rsibox import hooks, ipc, proc
 
 START_ENV = dict(os.environ)
 # Variables a preloaded library may read at import (in the zygote, before the fork) ...
@@ -196,12 +196,12 @@ def preload(mods, script=None, check=cuda_initialized):
 REFRESH_OWN = ("run", "hook", "gap", "state", "client")
 # modules a code restart never drops even when they sit next to the script: this lab, the live-lab
 # kernel it hosts (`from kernel import ...` in hook.py), and forksafe, whose patches the rank removes
-KEEP_LOADED = ("fastrsi_megatron", "kernel", "forksafe")
+KEEP_LOADED = ("rsibox_megatron", "kernel", "forksafe")
 
 
 def refreshed(req, name):
     """Is module `name` re-imported in the ranks of this request (a code restart)?"""
-    if name.startswith("fastrsi_megatron.") and name.rsplit(".", 1)[1] in REFRESH_OWN:
+    if name.startswith("rsibox_megatron.") and name.rsplit(".", 1)[1] in REFRESH_OWN:
         return bool(req.get("refresh"))
     return any(name == p or name.startswith(p + ".") for p in req.get("refresh", []))
 
@@ -222,7 +222,7 @@ def findings(req, src):
         out.append({"kind": "env", "keys": sorted(env),
                     "why": "a library may have read these at import, in the zygote",
                     "do": "accept if they are read later, or start the zygote with them"})
-    ov = req.get("env", {}).get("FASTRSI_OVERLAY")
+    ov = req.get("env", {}).get("RSIBOX_OVERLAY")
     if ov and os.path.isdir(ov):
         pre = sorted(f[:-3] for f in os.listdir(ov) if f.endswith(".py") and f[:-3] in sys.modules
                      and not refreshed(req, f[:-3]))
@@ -308,7 +308,7 @@ def rank_env(request_data, local_rank):
         MASTER_ADDR=request_data.get("master_addr", "127.0.0.1"),
         MASTER_PORT=str(request_data["port"]),
         TORCHELASTIC_RUN_ID=str(request_data.get("run_id", "zygote")),
-        FASTRSI_T0=repr(request_data.get("t0", time.time())),
+        RSIBOX_T0=repr(request_data.get("t0", time.time())),
     )
     if num_procs > 1 and "OMP_NUM_THREADS" not in env_vars and "OMP_NUM_THREADS" not in os.environ:
         env_vars["OMP_NUM_THREADS"] = "1"  # torchrun's default for more than one rank
@@ -332,7 +332,7 @@ def unpatch(cuda=None):
 
 def bind(req, local_rank):
     """Pin the rank to its CPU list (`cpus`: one 'a-b,c' string per local rank, or auto-detected
-    GPU NUMA affinity when FASTRSI_ZYGOTE_AUTO_NUMA=1) before CUDA and its threads start. A fork
+    GPU NUMA affinity when RSIBOX_ZYGOTE_AUTO_NUMA=1) before CUDA and its threads start. A fork
     keeps the zygote's affinity; without a list nothing changes, as under torchrun. Returns the
     CPUs set, or None."""
     lists = req.get("cpus") or []
@@ -340,7 +340,7 @@ def bind(req, local_rank):
         cpus = sorted(cpu_list(lists[local_rank]))
         forksafe.bind_rank_numa_and_cpus(local_rank, explicit_cpus=cpus)
         return cpus
-    if os.environ.get("FASTRSI_ZYGOTE_AUTO_NUMA") == "1":
+    if os.environ.get("RSIBOX_ZYGOTE_AUTO_NUMA") == "1":
         res = forksafe.bind_rank_numa_and_cpus(local_rank)
         return res.get("bound_cpus") or None
     return None
@@ -367,7 +367,7 @@ def _guard(rank_pid):
         why = []
         signal.signal(signal.SIGTERM, lambda *_: why.append("term"))
         signal.signal(signal.SIGUSR2, lambda *_: why.append("rank_gone"))
-        _prctl(PR_SET_NAME, b"fastrsi-guard")
+        _prctl(PR_SET_NAME, b"rsibox-guard")
         _prctl(PR_SET_PDEATHSIG, signal.SIGUSR2)
         fd = os.open(os.devnull, os.O_RDWR)
         for i in (0, 1, 2):
@@ -415,7 +415,7 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
             _supervised(zygote_pid)
         os.environ.update(rank_env(req, local_rank))
         unguard_cuda_python()                   # the rank initializes CUDA itself
-        if os.environ.get("FASTRSI_ZYGOTE_UNPATCH", "1") != "0":
+        if os.environ.get("RSIBOX_ZYGOTE_UNPATCH", "1") != "0":
             unpatch()
         bind(req, local_rank)
         set_threads()
@@ -428,18 +428,18 @@ def _child(req, local_rank, lsock, conn, zygote_pid=None):
             os.close(fd)
         if req.get("cwd"):
             os.chdir(req["cwd"])
-        sys.argv = ["fastrsi_megatron.run"] + list(req["argv"])
+        sys.argv = ["rsibox_megatron.run"] + list(req["argv"])
         if req.get("refresh"):
             # code restart: forget the refreshed packages (and the script's own modules next to it), so the
             # ranks import them again, from the overlay where it has them; torch, TE and the rest stay loaded
             here = os.path.dirname(os.path.abspath(req["argv"][0])) + os.sep if req.get("argv") else None
             drop = drop_modules(req, here)
-            from fastrsi_megatron import overlay
+            from rsibox_megatron import overlay
             overlay.install()
-            print(json.dumps({"zygote_refresh": {"dropped": len(drop), "overlay": os.environ.get("FASTRSI_OVERLAY")}}),
+            print(json.dumps({"zygote_refresh": {"dropped": len(drop), "overlay": os.environ.get("RSIBOX_OVERLAY")}}),
                   flush=True)
         if req.get("entry", "run") == "run":
-            from fastrsi_megatron import run
+            from rsibox_megatron import run
             run.main()
         else:                                   # the script alone (tests, other launchers)
             import runpy
@@ -777,7 +777,7 @@ def serve(sock, mods, script=None, forksafe=True):
     took = preload(mods, script)
     src = sources()
     gc_frozen = 0
-    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") != "0":
+    if os.environ.get("RSIBOX_ZYGOTE_GC_FREEZE", "1") != "0":
         # Freeze preloaded modules (~900K objects) in the permanent GC generation so cyclic GC
         # traversals in forked ranks do not dirty shared Copy-on-Write pages.
         gc_info = freeze_gc_before_fork()
@@ -837,7 +837,7 @@ def request(sock, req, out=sys.stdout):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="fastrsi_megatron.zygote")
+    p = argparse.ArgumentParser(prog="rsibox_megatron.zygote")
     p.add_argument("cmd", choices=["serve", "start", "stop", "ping"])
     p.add_argument("--sock", required=True)
     p.add_argument("--preload", default=",".join(DEFAULT_PRELOAD))
@@ -851,14 +851,14 @@ def main(argv=None):
     p.add_argument("--entry", default="run", choices=["run", "script"])
     p.add_argument("--timeout", type=float, default=0)
     p.add_argument("--refresh", default="", help="code restart: comma-separated top-level packages the forked "
-                   "ranks drop and re-import (e.g. megatron), so FASTRSI_OVERLAY edits to them run")
+                   "ranks drop and re-import (e.g. megatron), so RSIBOX_OVERLAY edits to them run")
     p.add_argument("--cpus", default="", help="per local rank CPU lists, ';'-separated: '0-71;72-143'")
     argv = list(sys.argv[1:] if argv is None else argv)
     rest = argv[argv.index("--") + 1:] if "--" in argv else []
     a = p.parse_args(argv[:len(argv) - len(rest) - (1 if rest or "--" in argv else 0)])
     if a.cmd == "serve":
         serve(a.sock, [m for m in a.preload.split(",") if m], a.script,
-              os.environ.get("FASTRSI_ZYGOTE_FORKSAFE", "1") != "0")
+              os.environ.get("RSIBOX_ZYGOTE_FORKSAFE", "1") != "0")
         return 0
     if a.cmd in ("stop", "ping"):
         for ev in request(a.sock, {"op": a.cmd}):
@@ -869,7 +869,7 @@ def main(argv=None):
            "accept": [x for x in a.accept.split(",") if x], "timeout": a.timeout,
            "refresh": [x for x in a.refresh.split(",") if x],
            "cpus": [x for x in a.cpus.split(";")] if a.cpus else [],
-           "t0": float(os.environ.get("FASTRSI_T0") or time.time())}
+           "t0": float(os.environ.get("RSIBOX_T0") or time.time())}
     rc = 1
     for ev in request(a.sock, req):
         print(json.dumps(ev), flush=True)

@@ -192,7 +192,7 @@ def actor_view(host):
                 return None
             function.__globals__.setdefault(own.__name__, own)   # module_functions walks it
             alias, namespace = _register(
-                "fastrsi_actor_" + _digest(f"{module.__name__}:{id(own)}"),
+                "rsibox_actor_" + _digest(f"{module.__name__}:{id(own)}"),
                 Namespace(function.__globals__))
             return module.__name__, alias, namespace
     return None
@@ -254,7 +254,7 @@ def _real(file):
 
 def file_module(path):
     """The plan module name of a file loaded without a `sys.modules` entry."""
-    return "fastrsi_file_" + _digest(os.path.realpath(path))
+    return "rsibox_file_" + _digest(os.path.realpath(path))
 
 
 def _class_lines(text, name):

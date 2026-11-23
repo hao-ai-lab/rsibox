@@ -4,8 +4,8 @@ Minimal starter layout and runnable `LabUnderTest` skeleton for onboarding a new
 `repos/<new-engine>/`.
 
 The shared live-lab transaction kernel (`core/livelab/kernel/`), stdlib runtime kit
-(`core/livelab/fastrsi/`: `BaseLab`, `RecaptureCoordinator`, `RoleEndpoint`, IPC, process-tree,
-import hooks, package overlays, fault injectors, and the `fastrsi` CLI), Ray actor participant
+(`core/livelab/rsibox/`: `BaseLab`, `RecaptureCoordinator`, `RoleEndpoint`, IPC, process-tree,
+import hooks, package overlays, fault injectors, and the `rsibox` CLI), Ray actor participant
 helpers (`core/livelab/ray_participants.py`), pre-fork CUDA guards (`core/livelab/forksafe.py`),
 static coverage survey (`core/livelab/survey/`), and conformance suite (`core/livelab/conformance/`)
 live in `core/livelab/` and must **never** be copied into `repos/<new-engine>/`. Instead, each
@@ -21,7 +21,7 @@ repos/<new-engine>/
 ├── kb/
 │   ├── costs.md               Measured cold/warm start and restart ladder costs.
 │   ├── lessons.md             Engine-specific lessons and failure modes.
-│   ├── survey_rules.json      Static coverage declarations (`fastrsi-survey-rules/1`).
+│   ├── survey_rules.json      Static coverage declarations (`rsibox-survey-rules/1`).
 │   └── workload.md            Representative benchmark workload and invariants.
 └── livelab/
     ├── README.md              How to start the lab and run conformance cases c0–c10.
@@ -37,26 +37,26 @@ repos/<new-engine>/
 ## Step-by-Step Bootstrapping (`0/11` to `11/11` Conformance)
 
 1. Copy `template/livelab/` into `repos/<new-engine>/livelab/` as your starting package skeleton.
-2. Run the conformance suite out of the box (either via the unified `fastrsi` CLI or directly):
+2. Run the conformance suite out of the box (either via the unified `rsibox` CLI or directly):
    ```sh
-   PYTHONPATH=core/livelab python3 -m fastrsi conformance template
+   PYTHONPATH=core/livelab python3 -m rsibox conformance template
    # Or, once copied to repos/<new-engine>/livelab/, discovery picks it up automatically:
-   PYTHONPATH=core/livelab python3 -m fastrsi list
-   PYTHONPATH=core/livelab python3 -m fastrsi conformance <new-engine>
+   PYTHONPATH=core/livelab python3 -m rsibox list
+   PYTHONPATH=core/livelab python3 -m rsibox conformance <new-engine>
    ```
    `TemplateLab` instantiates and tears down cleanly, failing all `11/11` cases (`c0`–`c10`) with
-   numbered `NotImplementedError` instructions. Subclassing `fastrsi.BaseLab` implements `install`,
+   numbered `NotImplementedError` instructions. Subclassing `rsibox.BaseLab` implements `install`,
    `check`, `reset`, `uninstall`, `status`, `live_text` stack tracking, witness merging, and
    poison-on-fault handling out of the box (~60–100 LOC for a complete ToyLab):
 
    | Step | Method(s) to implement | `core/livelab/` primitive | Conformance cases unlocked |
    |---|---|---|---|
-   | **1/6** | `_start_engine()` (`status`) | `fastrsi.BaseLab`, `kernel.coordinator`, `kernel.session.Session` | Base state & fingerprint entry across `c0`–`c10` |
-   | **2/6** | `_run_workload(workload)` (`check`) | `fastrsi.BaseLab` + `coordinator.prove(txn)` | Repeatable check path for `c0` |
-   | **3/6** | `_reset_state()`, `_stop_engine()` (`reset`) | `fastrsi.BaseLab` + `fastrsi.proc.stop_tree` | `c0_repeatable` (`1/11`), respawn half of `c8` |
-   | **4/6** | `patches()` (`install` & `uninstall` inherited from `BaseLab`) | `fastrsi.BaseLab`, `fastrsi.edit_once` | `c1_noop`, `c2_visible`, `c4_uninstall`, `c6_refusal`, `c7_chain`, `c9_soak` (`7/11`) |
-   | **5/6** | `fresh_check(patch, workload)` | `fastrsi.PackageOverlay` + `fastrsi.run_fresh_subprocess` | `c3_fresh_equivalence`, `c10_not_proven` (`9/11`) |
-   | **6/6** | `inject(fault, **kwargs)` | `fastrsi.inject_participant_fault` (`fail_apply`, `fail_commit`, `tamper`) + engine crash/hang/lost hooks | `c5_failed_install`, `c8_crash_and_hang` (`11/11`) |
+   | **1/6** | `_start_engine()` (`status`) | `rsibox.BaseLab`, `kernel.coordinator`, `kernel.session.Session` | Base state & fingerprint entry across `c0`–`c10` |
+   | **2/6** | `_run_workload(workload)` (`check`) | `rsibox.BaseLab` + `coordinator.prove(txn)` | Repeatable check path for `c0` |
+   | **3/6** | `_reset_state()`, `_stop_engine()` (`reset`) | `rsibox.BaseLab` + `rsibox.proc.stop_tree` | `c0_repeatable` (`1/11`), respawn half of `c8` |
+   | **4/6** | `patches()` (`install` & `uninstall` inherited from `BaseLab`) | `rsibox.BaseLab`, `rsibox.edit_once` | `c1_noop`, `c2_visible`, `c4_uninstall`, `c6_refusal`, `c7_chain`, `c9_soak` (`7/11`) |
+   | **5/6** | `fresh_check(patch, workload)` | `rsibox.PackageOverlay` + `rsibox.run_fresh_subprocess` | `c3_fresh_equivalence`, `c10_not_proven` (`9/11`) |
+   | **6/6** | `inject(fault, **kwargs)` | `rsibox.inject_participant_fault` (`fail_apply`, `fail_commit`, `tamper`) + engine crash/hang/lost hooks | `c5_failed_install`, `c8_crash_and_hang` (`11/11`) |
 
 3. Follow `core/agents/toolsmith_offline.md` for hotspot mining, offline fail-closed checks, and
    `kb/` documentation.
@@ -69,7 +69,7 @@ budget and reuses `core/livelab/` rather than duplicating runtime machinery:
 
 | Layer / File | Owner | Non-Test Python LOC | Test Python LOC | Reused `core/livelab/` Primitives |
 |---|---|---:|---:|---|
-| `livelab/adapter/__init__.py` | `repos/<engine>` | `0`–`25` | `0` | `FASTRSI_LIVELAB` path bootstrap |
+| `livelab/adapter/__init__.py` | `repos/<engine>` | `0`–`25` | `0` | `RSIBOX_LIVELAB` path bootstrap |
 | `livelab/adapter/<gap_or_gate>.py` | `repos/<engine>` | `<fill>` | `<fill>` | `Coordinator` / `StepGapCoordinator`, `LocalParticipant` / `RayActorParticipant` |
 | `livelab/adapter/<state_reset>.py` | `repos/<engine>` | `<fill>` | `<fill>` | Coupled weight/cache snapshot & epoch drain |
 | `livelab/adapter/lab.py` | `repos/<engine>` | `<fill>` | `<fill>` | `Session`, `ReceiptWriter`, `LabUnderTest` (`c0`–`c10`) |

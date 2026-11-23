@@ -21,7 +21,7 @@ git clone https://github.com/hao-ai-lab/rsibox.git && cd rsibox
 python3 -m venv .venv && . .venv/bin/activate && pip install -e .
 
 # Run the live-swap verification check on the toy lab (~1.5 s)
-fastrsi conformance toy
+rsibox conformance toy
 
 # Start a live sandbox, run a check, and shut it down
 rsibox up --launcher local --lab toy --state /tmp/rsibox-toy

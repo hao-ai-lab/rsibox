@@ -4,12 +4,12 @@ schedulers (`engine.py`), so only the server inherits; see README.md for guards 
 import argparse, ast, contextlib, importlib, json, linecache, multiprocessing, os, runpy
 import signal, socket, sys, threading, time, tokenize, traceback
 
-LIVELAB = os.path.abspath(os.environ.get("FASTRSI_LIVELAB") or os.path.join(
+LIVELAB = os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "..", "core", "livelab"))
 if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
 import forksafe  # noqa: E402
-from fastrsi import hooks, ipc, op_guard, proc  # noqa: E402
+from rsibox import hooks, ipc, op_guard, proc  # noqa: E402
 
 DEFAULT_PRELOAD = ("torch", "sglang.srt.server_args", "sglang.srt.entrypoints.engine",
                    "sglang.srt.entrypoints.http_server", "sglang.srt.managers.tokenizer_manager")
@@ -34,7 +34,7 @@ def sock_path_error(sock_path):
 def install_guards(modules):
     """Install pre-import guards (a) and (b) via `forksafe.install_all_guards`."""
     report, restore = forksafe.install_all_guards(
-        properties=os.environ.get("FASTRSI_ZYGOTE_PROPS", "1") == "1",
+        properties=os.environ.get("RSIBOX_ZYGOTE_PROPS", "1") == "1",
         import_torch="torch" in modules,
     )
     report["forksafe"] = report.get("torch_cuda", {"installed": False})
@@ -365,7 +365,7 @@ def serve(sock_path, modules=None, prefixes=("sglang",), fork_subprocs=False):
             in list(sys.modules.items()) if getattr(module, "__file__", None)}
     roots = tuple(sorted({p.split(".")[0] for p in prefixes if p}))
     graph = hooks.import_graph(roots) if roots else {}
-    if os.environ.get("FASTRSI_ZYGOTE_GC_FREEZE", "1") == "1": forksafe.freeze_gc_before_fork()
+    if os.environ.get("RSIBOX_ZYGOTE_GC_FREEZE", "1") == "1": forksafe.freeze_gc_before_fork()
     with contextlib.suppress(FileNotFoundError): os.unlink(sock_path)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(sock_path); os.chmod(sock_path, 0o600); listener.listen(16); listener.settimeout(0.5)

@@ -28,7 +28,7 @@ import tempfile
 import threading
 import time
 
-from fastrsi import harness, ipc, lab as lab_base, proc
+from rsibox import harness, ipc, lab as lab_base, proc
 from kernel import coordinator as C
 from kernel import findings as F
 from adapter import agent
@@ -100,7 +100,7 @@ def build_request(config, workload=None):
 def force_multiproc():
     """One GPU runs in a spawned worker too (FastVideo picks the in-process executor there)."""
     from fastvideo.worker import executor as E
-    if getattr(E.Executor.get_class, "_fastrsi", False):
+    if getattr(E.Executor.get_class, "_rsibox", False):
         return
     orig = E.Executor.get_class
 
@@ -109,7 +109,7 @@ def force_multiproc():
             from fastvideo.worker.multiproc_executor import MultiprocExecutor
             return MultiprocExecutor
         return orig(args, **kw)
-    get_class._fastrsi = True
+    get_class._rsibox = True
     E.Executor.get_class = staticmethod(get_class)
 
 
@@ -141,11 +141,11 @@ class FastVideoLab(lab_base.BaseLab):
         self.modules = list(modules)
         if holder:          # loaded DiT, text encoder and VAE outlive the workers (services/holder.py)
             from services import holder as H
-            sock = ipc.short_sock_path("fastrsi-holder")
+            sock = ipc.short_sock_path("rsibox-holder")
             self.holder = H.start(sock)
             self.holder_sock = sock
             # the workers' loader hook reads it (forked from the zygote, which inherits the env)
-            os.environ["FASTRSI_HOLDER_SOCK"] = sock
+            os.environ["RSIBOX_HOLDER_SOCK"] = sock
             zygote = True   # the loader hook is installed by the zygote's worker entry
         if zygote:          # every worker group, respawns included, forks from preloaded imports
             from services import zygote as Z
@@ -188,7 +188,7 @@ class FastVideoLab(lab_base.BaseLab):
         self._check_thread = None
         if self.ranks > 1:
             self._fault_path = os.path.join(
-                tempfile.gettempdir(), f"fastrsi-fv-fault-{os.getpid()}-{id(self.gen)}.json"
+                tempfile.gettempdir(), f"rsibox-fv-fault-{os.getpid()}-{id(self.gen)}.json"
             )
             self._clear_fault_file()
             for i in range(self.ranks):
@@ -196,7 +196,7 @@ class FastVideoLab(lab_base.BaseLab):
         ps = [C.CallParticipant(f"rank{i}", self._caller(i)) for i in range(self.ranks)]
         co = C.Coordinator(ps, writer=self.writer, interface_version="1-draft",
                            engine={"name": "fastvideo", "version": self._version(),
-                                   "commit": os.environ.get("FASTRSI_ENGINE_COMMIT")},
+                                   "commit": os.environ.get("RSIBOX_ENGINE_COMMIT")},
                            phase2_deadline_s=self.rpc_timeout)
         return co, self.modules
 
@@ -275,8 +275,8 @@ class FastVideoLab(lab_base.BaseLab):
                 for path in (self.holder_sock, self.holder_sock + ".ready"):
                     with contextlib.suppress(OSError):
                         os.unlink(path)
-                if os.environ.get("FASTRSI_HOLDER_SOCK") == self.holder_sock:
-                    del os.environ["FASTRSI_HOLDER_SOCK"]
+                if os.environ.get("RSIBOX_HOLDER_SOCK") == self.holder_sock:
+                    del os.environ["RSIBOX_HOLDER_SOCK"]
 
     # -- BaseLab hooks + FastVideo-specific verbs ----------------------------------------
     def _base(self, m):
@@ -301,7 +301,7 @@ class FastVideoLab(lab_base.BaseLab):
             except BaseException as exc:
                 box["error"] = exc
 
-        thread = threading.Thread(target=runner, daemon=True, name=f"fastrsi-{self.name}-check")
+        thread = threading.Thread(target=runner, daemon=True, name=f"rsibox-{self.name}-check")
         self._check_thread = thread
         thread.start()
         deadline = time.monotonic() + self.check_timeout

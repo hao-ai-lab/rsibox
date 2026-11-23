@@ -28,12 +28,12 @@ def main(argv=None):
     import adapter  # resolves the shared conformance harness
     from conformance.__main__ import main as run_cases
 
-    os.environ.update(FASTRSI_VLLM_MODEL=args.model, FASTRSI_VLLM_WORK=args.work,
-                      FASTRSI_VLLM_TP=str(args.tp))
+    os.environ.update(RSIBOX_VLLM_MODEL=args.model, RSIBOX_VLLM_WORK=args.work,
+                      RSIBOX_VLLM_TP=str(args.tp))
     if args.graphs:
         from adapter.conformance_lab import DEFAULT_EXTRA
-        flags = shlex.split(os.environ.get("FASTRSI_VLLM_EXTRA", DEFAULT_EXTRA))
-        os.environ["FASTRSI_VLLM_EXTRA"] = shlex.join([*flags, "--no-enforce-eager"])
+        flags = shlex.split(os.environ.get("RSIBOX_VLLM_EXTRA", DEFAULT_EXTRA))
+        os.environ["RSIBOX_VLLM_EXTRA"] = shlex.join([*flags, "--no-enforce-eager"])
     opts = ["--lab", "adapter.conformance_lab:VllmLab"]
     for key in ("only", "receipts"):
         if getattr(args, key):

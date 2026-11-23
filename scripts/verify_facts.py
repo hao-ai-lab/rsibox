@@ -321,7 +321,7 @@ def _check_case_copy_and_timing(
                 timing_ids.add(cid)
                 if src == "upstream_pr":
                     timing_upstream_pr_ids.add(cid)
-                for arm_name in ("restart", "fastrsi"):
+                for arm_name in ("restart", "rsibox"):
                     arm = item.get(arm_name)
                     if not isinstance(arm, dict):
                         _add(findings, "error", "schema_error", "site/facts/case-timing.json", f"{eng} {cid}: missing {arm_name} arm")

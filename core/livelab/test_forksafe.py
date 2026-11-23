@@ -254,16 +254,16 @@ class TritonTarget(unittest.TestCase):
             self.assertEqual(calls, ["driver"])
 
     def test_capability_from_env_then_nvml(self):
-        # FASTRSI_ZYGOTE_CC="9.0" wins over NVML; without it the visible GPUs' shared capability;
+        # RSIBOX_ZYGOTE_CC="9.0" wins over NVML; without it the visible GPUs' shared capability;
         # when they differ, the first visible GPU's (CUDA device 0 in the child).
         nvml = fake_nvml([(10, 3), (10, 3), (9, 0)])
         mods, CudaDriver, _ = fake_triton()
-        with mock.patch.dict(sys.modules, mods), mock.patch.dict(os.environ, {"FASTRSI_ZYGOTE_CC": "9.0"}):
+        with mock.patch.dict(sys.modules, mods), mock.patch.dict(os.environ, {"RSIBOX_ZYGOTE_CC": "9.0"}):
             restore = forksafe.pin_triton_target(nvml=nvml)
             self.assertEqual(tuple(CudaDriver().get_current_target()), ("cuda", 90, 32))
             restore()
         env = {k: v for k, v in os.environ.items()
-               if k not in ("FASTRSI_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
+               if k not in ("RSIBOX_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(forksafe.triton_capability(nvml=fake_nvml([(10, 0), (10, 0)])), (10, 0))
             os.environ["CUDA_VISIBLE_DEVICES"] = "0,2"
@@ -369,14 +369,14 @@ class VisibleDevicesAfterFork(unittest.TestCase):
 
     def test_triton_capability_with_no_visible_gpu_uuids_and_cc_forms(self):
         """Input: CUDA_VISIBLE_DEVICES="" (every GPU hidden); "GPU-b,GPU-a" on mixed GPUs
-        (GPU 0 is 9.0, GPU 1 is 10.0, GPU-b is GPU 1); FASTRSI_ZYGOTE_CC "100", "sm_90a",
+        (GPU 0 is 9.0, GPU 1 is 10.0, GPU-b is GPU 1); RSIBOX_ZYGOTE_CC "100", "sm_90a",
         "10.3" and "ten". Expected: RuntimeError for ""; (10, 0) for the UUIDs (the first
         visible GPU); (10, 0), (9, 0), (10, 3); ValueError naming the variable for "ten".
         Pain point: "" answered GPU 0's capability for a process with no GPU, a UUID list
         answered physical GPU 0's, and "100" raised an unpacking error. Not: MIG names."""
         nvml = fake_nvml_uuids([(9, 0), (10, 0)], ["GPU-a", "GPU-b"])
         env = {key: val for key, val in os.environ.items()
-               if key not in ("FASTRSI_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
+               if key not in ("RSIBOX_ZYGOTE_CC", "CUDA_VISIBLE_DEVICES")}
         with mock.patch.dict(os.environ, env, clear=True):
             os.environ["CUDA_VISIBLE_DEVICES"] = ""
             with self.assertRaises(RuntimeError):
@@ -384,21 +384,21 @@ class VisibleDevicesAfterFork(unittest.TestCase):
             os.environ["CUDA_VISIBLE_DEVICES"] = "GPU-b,GPU-a"
             self.assertEqual(forksafe.triton_capability(nvml=nvml), (10, 0))
             for text, cap in (("100", (10, 0)), ("sm_90a", (9, 0)), ("10.3", (10, 3))):
-                os.environ["FASTRSI_ZYGOTE_CC"] = text
+                os.environ["RSIBOX_ZYGOTE_CC"] = text
                 self.assertEqual(forksafe.triton_capability(nvml=nvml), cap, text)
-            os.environ["FASTRSI_ZYGOTE_CC"] = "ten"
-            with self.assertRaisesRegex(ValueError, "FASTRSI_ZYGOTE_CC"):
+            os.environ["RSIBOX_ZYGOTE_CC"] = "ten"
+            with self.assertRaisesRegex(ValueError, "RSIBOX_ZYGOTE_CC"):
                 forksafe.triton_capability(nvml=nvml)
 
     def test_pin_skips_when_every_gpu_is_hidden(self):
-        """Input: the stand-in Triton, CUDA_VISIBLE_DEVICES="" and no FASTRSI_ZYGOTE_CC (a
+        """Input: the stand-in Triton, CUDA_VISIBLE_DEVICES="" and no RSIBOX_ZYGOTE_CC (a
         CPU-only forkserver). Expected: pin_triton_target does not raise; nothing is patched
         (the driver's own get_current_target still answers), and restore() is a no-op that
         carries the reason in `skipped`. Pain point: triton_capability refuses "" (no GPU to
         target) and the FastVideo zygote calls the pin unguarded at preload, so the
         forkserver would die. Not: a process that sees a GPU but has no NVML (still raises)."""
         mods, CudaDriver, calls = fake_triton()
-        env = {key: val for key, val in os.environ.items() if key != "FASTRSI_ZYGOTE_CC"}
+        env = {key: val for key, val in os.environ.items() if key != "RSIBOX_ZYGOTE_CC"}
         with mock.patch.dict(sys.modules, mods), \
                 mock.patch.dict(os.environ, {**env, "CUDA_VISIBLE_DEVICES": ""}, clear=True):
             restore = forksafe.pin_triton_target(nvml=fake_nvml([(10, 0)]))
@@ -738,7 +738,7 @@ class DriverCuTeAndAllGuards(unittest.TestCase):
 
         base_env = {
             k: v for k, v in os.environ.items()
-            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")
+            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "RSIBOX_ZYGOTE_CC")
         }
         base_env["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -809,7 +809,7 @@ class DriverCuTeAndAllGuards(unittest.TestCase):
             )
         base_env = {
             k: v for k, v in os.environ.items()
-            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "FASTRSI_ZYGOTE_CC")
+            if k not in ("PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH", "RSIBOX_ZYGOTE_CC")
         }
         sys.path.insert(0, fake_pkg)
         self.addCleanup(sys.path.remove, fake_pkg)

@@ -164,7 +164,7 @@ def run_one(a, sha, pr):
 
 def build_parser():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--work", default="~/fastrsi-ci")
+    ap.add_argument("--work", default="~/rsibox-ci")
     ap.add_argument("--source", default="", help="git URL to fetch branch heads from (runner default)")
     ap.add_argument("--gpu", default=os.environ.get("MODAL_GPU", "L4"))
     ap.add_argument("--python", default="3.12")
@@ -172,7 +172,7 @@ def build_parser():
     ap.add_argument("--stages", default="gpu")
     ap.add_argument("--timeout", type=int, default=1200, help="per step, seconds")
     ap.add_argument("--max-attempts", type=int, default=3)
-    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("FASTRSI_VLLM_MODEL", ""))
+    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("RSIBOX_VLLM_MODEL", ""))
     ap.add_argument("--suites", default="")
     ap.add_argument("--modal-cmd", default="")
     ap.add_argument("--logs-url-base", default="")

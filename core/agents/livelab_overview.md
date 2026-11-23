@@ -1,6 +1,6 @@
 ---
 name: livelab
-description: Use when changing, testing or profiling code in an ML engine (vLLM, SGLang, FastVideo, Megatron, verl, ...) that has a FastRSI live lab under repos/<engine>/livelab. Hot-reload changes into the running engine instead of restarting it.
+description: Use when changing, testing or profiling code in an ML engine (vLLM, SGLang, FastVideo, Megatron, verl, ...) that has a rsibox live lab under repos/<engine>/livelab. Hot-reload changes into the running engine instead of restarting it.
 ---
 
 # Live lab

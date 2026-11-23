@@ -246,14 +246,14 @@ class VllmRunner:
         if mode == "live":
             code = (
                 "import os\n"
-                "if os.environ.get('FASTRSI_KERNEL_DIR'):\n"
+                "if os.environ.get('RSIBOX_KERNEL_DIR'):\n"
                 "    import adapter.host\n"
             )
         elif mode == "fresh_native":
             code = (
                 "import ctypes, os, sys\n"
-                "so = os.environ.get('FASTRSI_FRESH_NATIVE_SO')\n"
-                "key = os.environ.get('FASTRSI_FRESH_NATIVE_KEY')\n"
+                "so = os.environ.get('RSIBOX_FRESH_NATIVE_SO')\n"
+                "key = os.environ.get('RSIBOX_FRESH_NATIVE_KEY')\n"
                 "_BOUND = []\n"
                 "def _bind(_mod):\n"
                 "    if _BOUND or not so or not key:\n"
@@ -265,7 +265,7 @@ class VllmRunner:
                 "    reg.impl('fused_add_rms_norm', lambda *a, **k: op(*a, **k), 'CUDA')\n"
                 "    _BOUND.extend((lib, reg))\n"
                 "if so and key:\n"
-                "    from fastrsi import hooks\n"
+                "    from rsibox import hooks\n"
                 "    if 'vllm.kernels.vllm_c' in sys.modules:\n"
                 "        _bind(sys.modules['vllm.kernels.vllm_c'])\n"
                 "    else:\n"
@@ -287,11 +287,11 @@ class VllmRunner:
         env["HF_HUB_OFFLINE"] = "1"
         env["PYTHONPATH"] = os.pathsep.join([site, LIVELAB, core_root, env.get("PYTHONPATH", "")]).rstrip(":")
         if fresh_so and fresh_key:
-            env["FASTRSI_FRESH_NATIVE_SO"] = fresh_so
-            env["FASTRSI_FRESH_NATIVE_KEY"] = fresh_key
+            env["RSIBOX_FRESH_NATIVE_SO"] = fresh_so
+            env["RSIBOX_FRESH_NATIVE_KEY"] = fresh_key
         else:
-            env.pop("FASTRSI_FRESH_NATIVE_SO", None)
-            env.pop("FASTRSI_FRESH_NATIVE_KEY", None)
+            env.pop("RSIBOX_FRESH_NATIVE_SO", None)
+            env.pop("RSIBOX_FRESH_NATIVE_KEY", None)
 
         cmd = [
             sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", self.args.model,
@@ -312,10 +312,10 @@ class VllmRunner:
         if adapter:
             shutil.rmtree(self.ctl, ignore_errors=True)
             os.makedirs(self.ctl, exist_ok=True)
-            env["FASTRSI_KERNEL_DIR"] = self.ctl
+            env["RSIBOX_KERNEL_DIR"] = self.ctl
             cmd += ["--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension"]
         else:
-            env.pop("FASTRSI_KERNEL_DIR", None)
+            env.pop("RSIBOX_KERNEL_DIR", None)
 
         log_path = os.path.join(self.work, f"serve-{tag}.log")
         t0 = time.monotonic()

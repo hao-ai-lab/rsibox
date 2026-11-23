@@ -25,30 +25,30 @@ dash.calc('race_run_counts', {
   description: 'Per workload: how many runs each side has in the race data (the main pair plus any other runs).',
   fn: (race_runs) => {
     const by = {};
-    race_runs.forEach((r) => { const o = (by[r.workload] = by[r.workload] || { codex: new Set(), fastrsi: new Set() }); if (o[r.arm]) o[r.arm].add(r.run); });
-    return Object.keys(by).map((workload) => ({ workload, codex_runs: by[workload].codex.size, fastrsi_runs: by[workload].fastrsi.size }));
+    race_runs.forEach((r) => { const o = (by[r.workload] = by[r.workload] || { codex: new Set(), rsibox: new Set() }); if (o[r.arm]) o[r.arm].add(r.run); });
+    return Object.keys(by).map((workload) => ({ workload, codex_runs: by[workload].codex.size, rsibox_runs: by[workload].rsibox.size }));
   },
 });
 
 dash.calc('race_sooner', {
   inputs: ['race_steps'],
-  title: "When FastRSI reaches Baseline's final result",
-  description: "Per workload: Baseline's final best (target), the hour Baseline first reached it, the hour FastRSI's best first matched or beat it, and how many times sooner that is. No hour for FastRSI means a tie.",
+  title: "When rsibox reaches Baseline's final result",
+  description: "Per workload: Baseline's final best (target), the hour Baseline first reached it, the hour rsibox's best first matched or beat it, and how many times sooner that is. No hour for rsibox means a tie.",
   fn: (race_steps) => {
     const by = {};
     for (const r of race_steps) {
       const k = r.workload;
-      (by[k] = by[k] || { codex: [], fastrsi: [] })[r.arm].push({ t: Number(r.t_h), v: Number(r.value), kind: r.kind });
+      (by[k] = by[k] || { codex: [], rsibox: [] })[r.arm].push({ t: Number(r.t_h), v: Number(r.value), kind: r.kind });
     }
     return Object.keys(by).map((workload) => {
       const c = by[workload].codex.filter((p) => p.kind !== 'end').sort((a, b) => a.t - b.t);
-      const f = by[workload].fastrsi.filter((p) => p.kind !== 'end').sort((a, b) => a.t - b.t);
+      const f = by[workload].rsibox.filter((p) => p.kind !== 'end').sort((a, b) => a.t - b.t);
       const target = Math.max(...c.map((p) => p.v));
       const t_codex = c.find((p) => p.v >= target).t;
       const hit = f.find((p) => p.v >= target);
-      const t_fastrsi = hit ? hit.t : null;
+      const t_rsibox = hit ? hit.t : null;
       const ratio = hit && hit.t > 0 ? Math.round((t_codex / hit.t) * 100) / 100 : null;
-      return { workload, target, t_codex, t_fastrsi, ratio };
+      return { workload, target, t_codex, t_rsibox, ratio };
     });
   },
 });
@@ -56,14 +56,14 @@ dash.calc('race_sooner', {
 dash.calc('race_targets', {
   inputs: ['race_steps'],
   title: 'Time to reach each result Baseline reached',
-  description: "Per workload and each best value Baseline reached: the hour Baseline first got there, the hour FastRSI's best first matched or beat it (empty when it never did), how many times sooner that is (or, where FastRSI got there later, how many times longer it took: later_ratio), and the time between them in hours and in minutes. is_final marks Baseline's final best.",
+  description: "Per workload and each best value Baseline reached: the hour Baseline first got there, the hour rsibox's best first matched or beat it (empty when it never did), how many times sooner that is (or, where rsibox got there later, how many times longer it took: later_ratio), and the time between them in hours and in minutes. is_final marks Baseline's final best.",
   fn: (race_steps) => {
     const by = {};
-    for (const r of race_steps) (by[r.workload] = by[r.workload] || { codex: [], fastrsi: [] })[r.arm].push({ t: Number(r.t_h), v: Number(r.value), kind: r.kind });
+    for (const r of race_steps) (by[r.workload] = by[r.workload] || { codex: [], rsibox: [] })[r.arm].push({ t: Number(r.t_h), v: Number(r.value), kind: r.kind });
     const out = [];
     Object.keys(by).forEach((workload) => {
       const c = by[workload].codex.filter((p) => p.kind === 'best').sort((a, b) => a.t - b.t);
-      const f = by[workload].fastrsi.filter((p) => p.kind !== 'end').sort((a, b) => a.t - b.t);
+      const f = by[workload].rsibox.filter((p) => p.kind !== 'end').sort((a, b) => a.t - b.t);
       const top = Math.max(...c.map((p) => p.v));
       c.forEach((p, i) => {
         const hit = f.find((q) => q.v >= p.v);
@@ -73,12 +73,12 @@ dash.calc('race_targets', {
           workload,
           target: p.v,
           t_codex: p.t,
-          t_fastrsi: hit ? hit.t : null,
+          t_rsibox: hit ? hit.t : null,
           ratio: hit && hit.t > 0 ? Math.round((p.t / hit.t) * 100) / 100 : null,
           later_ratio: hit && p.t > 0 && hit.t > p.t ? Math.round((hit.t / p.t) * 100) / 100 : null,
           gap_h: gap == null ? null : Math.round(Math.abs(gap) * 10) / 10,
           gap_min: gap == null ? null : Math.round(Math.abs(gap) * 60),
-          fastrsi_first: gap == null ? null : gap >= 0 ? 'yes' : 'no',
+          rsibox_first: gap == null ? null : gap >= 0 ? 'yes' : 'no',
           is_final: p.v === top ? 'yes' : 'no',
         });
       });
@@ -205,24 +205,24 @@ dash.calc('race_targets', {
     if (!tr) { big.textContent = '—'; return; }
     const where = { key: tr.key };
     const which = tr.is_final === 'yes' ? " (Baseline's final)" : ' (picked on the chart)';
-    if (tr.t_fastrsi != null && tr.ratio != null) {
-      const later = tr.fastrsi_first === 'no' && tr.later_ratio != null;
+    if (tr.t_rsibox != null && tr.ratio != null) {
+      const later = tr.rsibox_first === 'no' && tr.later_ratio != null;
       FR.mark(FR.el('span', null, Number(later ? tr.later_ratio : tr.ratio).toFixed(1), big), 'race_targets', later ? 'later_ratio' : 'ratio', where);
       big.append('×');
       const sm = FR.el('span', 'fr-stat-mid', null, big);
       sm.append(later ? ' later, ' : ' sooner, ');
       gapText(sm, tr, null);
-      sm.append(tr.fastrsi_first === 'yes' ? ' earlier' : ' later');
+      sm.append(tr.rsibox_first === 'yes' ? ' earlier' : ' later');
       lbl.append('To reach ');
       FR.mark(FR.el('span', 'fr-num', fx(tr.target), lbl), 'race_targets', 'target', where);
-      lbl.append(which + ': FastRSI at ');
-      FR.mark(FR.el('span', 'fr-num', Number(tr.t_fastrsi).toFixed(1), lbl), 'race_targets', 't_fastrsi', where);
+      lbl.append(which + ': rsibox at ');
+      FR.mark(FR.el('span', 'fr-num', Number(tr.t_rsibox).toFixed(1), lbl), 'race_targets', 't_rsibox', where);
       lbl.append(' h, Baseline at ');
       FR.mark(FR.el('span', 'fr-num', Number(tr.t_codex).toFixed(1), lbl), 'race_targets', 't_codex', where);
       lbl.append(' h.');
     } else {
       big.textContent = 'Not reached';
-      lbl.append('FastRSI never reaches ');
+      lbl.append('rsibox never reaches ');
       FR.mark(FR.el('span', 'fr-num', fx(tr.target), lbl), 'race_targets', 'target', where);
       lbl.append(which + ' within ');
       FR.mark(FR.el('span', 'fr-num', w.budget_h, lbl), 'race_workloads', 'budget_h', { workload: w.workload });
@@ -230,14 +230,14 @@ dash.calc('race_targets', {
       FR.mark(FR.el('span', 'fr-num', Number(tr.t_codex).toFixed(1), lbl), 'race_targets', 't_codex', where);
       lbl.append(' h.');
     }
-    for (const arm of ['codex', 'fastrsi']) {
+    for (const arm of ['codex', 'rsibox']) {
       const e = ends[arm];
       const s = FR.el('div', 'fr-stat ' + (arm === 'codex' ? 'is-codex' : 'is-fast'), null, box);
       const b = FR.el('div', 'fr-stat-big', null, s);
       if (e) FR.mark(FR.el('span', null, fx(e.v), b), 'race_steps', 'value', { workload: w.workload, arm, kind: 'end' });
       else b.textContent = '—';
       const l = FR.el('div', 'fr-stat-lbl', FR.short[arm] + ' final, ', s);
-      FR.mark(FR.el('span', 'fr-num', arm === 'codex' ? w.codex_run : w.fastrsi_run, l), 'race_workloads', arm === 'codex' ? 'codex_run' : 'fastrsi_run', { workload: w.workload });
+      FR.mark(FR.el('span', 'fr-num', arm === 'codex' ? w.codex_run : w.rsibox_run, l), 'race_workloads', arm === 'codex' ? 'codex_run' : 'rsibox_run', { workload: w.workload });
     }
   }
 
@@ -260,10 +260,10 @@ dash.calc('race_targets', {
     const narrow = W < 520;
     const H = Math.round(Math.max(250, Math.min(380, W * 0.56)));
     const budget = Number(w.budget_h);
-    const series = { codex: [], fastrsi: [] };
+    const series = { codex: [], rsibox: [] };
     steps.forEach((r) => series[r.arm] && series[r.arm].push({ t: Number(r.t_h), v: Number(r.value), kind: r.kind, step: r.step, commit: r.commit, subject: r.subject, arm: r.arm }));
     for (const k in series) series[k].sort((a, b) => a.t - b.t || Number(a.step) - Number(b.step));
-    const all = [...series.codex, ...series.fastrsi, ...(S.others ? others.flatMap((o) => o.pts) : [])].map((p) => p.v);
+    const all = [...series.codex, ...series.rsibox, ...(S.others ? others.flatMap((o) => o.pts) : [])].map((p) => p.v);
     const lo = Math.min(1, ...all), hi = Math.max(...all);
     const pad = (hi - lo) * 0.08 || 0.02;
     const yDom = [lo - pad * 0.4, hi + pad];
@@ -271,12 +271,12 @@ dash.calc('race_targets', {
     box.insertBefore(svg, m.tip.node);
     const yTicks = d3.scaleLinear().domain(yDom).ticks(H < 300 ? 4 : 5);
     const ml = Math.ceil(Math.max(...yTicks.map((v) => FR.textW(svg, fx(v))))) + 12;
-    const ends = { codex: series.codex.find((p) => p.kind === 'end'), fastrsi: series.fastrsi.find((p) => p.kind === 'end') };
+    const ends = { codex: series.codex.find((p) => p.kind === 'end'), rsibox: series.rsibox.find((p) => p.kind === 'end') };
     const mr = Math.ceil(Math.max(FR.textW(svg, '0.00×'), 40)) + 14;
     const mt = 36, mb = 26;
     const x = d3.scaleLinear([0, budget], [ml, W - mr]);
     const y = d3.scaleLinear(yDom, [H - mb, mt]);
-    svg.setAttribute('aria-label', `${w.label}: best speedup over ${budget} hours. Baseline ends at ${ends.codex ? fx(ends.codex.v) : 'unknown'}, FastRSI at ${ends.fastrsi ? fx(ends.fastrsi.v) : 'unknown'}. Drag the dashed line to pick another result to reach.`);
+    svg.setAttribute('aria-label', `${w.label}: best speedup over ${budget} hours. Baseline ends at ${ends.codex ? fx(ends.codex.v) : 'unknown'}, rsibox at ${ends.rsibox ? fx(ends.rsibox.v) : 'unknown'}. Drag the dashed line to pick another result to reach.`);
     // grid and axes
     const g0 = FR.svg('g', {}, svg);
     yTicks.forEach((v) => {
@@ -302,11 +302,11 @@ dash.calc('race_targets', {
       const pth = FR.svg('path', { class: 'st other ' + o.arm, d: stepPath(o.pts, x, y, budget) }, lg);
       FR.svg('title', {}, pth).textContent = o.run;
     });
-    for (const arm of ['codex', 'fastrsi']) FR.svg('path', { class: 'st ' + arm, d: stepPath(series[arm], x, y, budget) }, lg);
+    for (const arm of ['codex', 'rsibox']) FR.svg('path', { class: 'st ' + arm, d: stepPath(series[arm], x, y, budget) }, lg);
     // new-best markers
     const nbG = FR.svg('g', {}, svg);
     const pts = [];
-    for (const arm of ['codex', 'fastrsi']) series[arm].forEach((p) => {
+    for (const arm of ['codex', 'rsibox']) series[arm].forEach((p) => {
       if (p.kind === 'end') return;
       p.x = x(p.t); p.y = y(p.v);
       pts.push(p);
@@ -314,7 +314,7 @@ dash.calc('race_targets', {
       const n = FR.svg('circle', { class: 'nb ' + arm, cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: narrow ? 3 : 3.6 }, nbG);
       marks.push({ t: p.t, n, kind: 'nb', key: arm + p.step });
     });
-    // where FastRSI reaches the target (drawn by setTarget)
+    // where rsibox reaches the target (drawn by setTarget)
     const reachG = FR.svg('g', {}, svg);
     let reachDot = null, reachBr = null, cur = null;
     // playhead and clock
@@ -324,11 +324,11 @@ dash.calc('race_targets', {
     clockSub.textContent = 'of ' + budget + ' h';
     // head labels while playing, end labels at rest
     const heads = {}, endLbls = {};
-    for (const arm of ['codex', 'fastrsi']) {
+    for (const arm of ['codex', 'rsibox']) {
       heads[arm] = FR.svg('text', { class: 'lbl-' + arm }, svg);
       endLbls[arm] = FR.svg('text', { class: 'end ' + arm, x: W - mr + 6 }, svg);
     }
-    const order = ['codex', 'fastrsi'].filter((a) => ends[a]).sort((a, b) => ends[b].v - ends[a].v);
+    const order = ['codex', 'rsibox'].filter((a) => ends[a]).sort((a, b) => ends[b].v - ends[a].v);
     let prev = -Infinity;
     order.forEach((a) => {
       let yy = y(ends[a].v) + 4;
@@ -471,8 +471,8 @@ dash.calc('race_targets', {
     function drawReach(tr) {
       reachG.replaceChildren();
       reachDot = reachBr = null;
-      if (!tr || tr.t_fastrsi == null) return;
-      const rx = x(Number(tr.t_fastrsi)), cx = x(Number(tr.t_codex)), ry = y(Number(tr.target));
+      if (!tr || tr.t_rsibox == null) return;
+      const rx = x(Number(tr.t_rsibox)), cx = x(Number(tr.t_codex)), ry = y(Number(tr.target));
       reachDot = FR.svg('g', { class: 'reach' }, reachG);
       FR.svg('line', { x1: rx, x2: rx, y1: ry, y2: H - mb, 'stroke-dasharray': '2 3' }, reachDot);
       FR.svg('circle', { cx: rx, cy: ry, r: 6.5 }, reachDot).setAttribute('style', 'fill:none;stroke:var(--fr-fast);stroke-width:2');
@@ -481,7 +481,7 @@ dash.calc('race_targets', {
       FR.svg('path', { class: 'br', d: `M${rx},${by + 4}V${by}H${cx}V${by + 4}` }, reachBr);
       const t = FR.svg('text', { class: 'rt', y: by - 6, 'text-anchor': 'middle' }, reachBr);
       const a = FR.svg('tspan', {}, t);
-      const later = tr.fastrsi_first === 'no' && tr.later_ratio != null;
+      const later = tr.rsibox_first === 'no' && tr.later_ratio != null;
       FR.mark(a, 'race_targets', later ? 'later_ratio' : 'ratio', { key: tr.key });
       a.textContent = Number(later ? tr.later_ratio : tr.ratio).toFixed(1);
       t.append('× ' + (later ? 'later' : 'sooner') + ' · ');
@@ -526,12 +526,12 @@ dash.calc('race_targets', {
           if (!on) S.popped.delete(mk.key);
         }
       });
-      if (reachDot) reachDot.style.display = h >= Number(cur.t_fastrsi) - 1e-9 ? '' : 'none';
-      if (reachBr) reachBr.style.display = h >= Math.max(Number(cur.t_codex), Number(cur.t_fastrsi)) - 1e-9 ? '' : 'none';
+      if (reachDot) reachDot.style.display = h >= Number(cur.t_rsibox) - 1e-9 ? '' : 'none';
+      if (reachBr) reachBr.style.display = h >= Math.max(Number(cur.t_codex), Number(cur.t_rsibox)) - 1e-9 ? '' : 'none';
       ph.setAttribute('x1', x(h)); ph.setAttribute('x2', x(h));
       ph.style.display = rest ? 'none' : '';
       clock.textContent = h.toFixed(1) + ' h';
-      for (const arm of ['codex', 'fastrsi']) {
+      for (const arm of ['codex', 'rsibox']) {
         endLbls[arm].style.display = rest ? '' : 'none';
         const v = val(arm, h);
         if (rest || v == null) { heads[arm].style.display = 'none'; continue; }
@@ -584,9 +584,9 @@ dash.calc('race_targets', {
       if (cnt) {
         m.about.append(' Runs per side: Baseline ');
         FR.mark(FR.el('span', 'fr-num', String(cnt.codex_runs), m.about), 'race_run_counts', 'codex_runs', { workload: w.workload });
-        m.about.append(', FastRSI ');
-        FR.mark(FR.el('span', 'fr-num', String(cnt.fastrsi_runs), m.about), 'race_run_counts', 'fastrsi_runs', { workload: w.workload });
-        m.about.append(Number(cnt.codex_runs) + Number(cnt.fastrsi_runs) > 2 ? '; the bold lines are each side\'s main run.' : '.');
+        m.about.append(', rsibox ');
+        FR.mark(FR.el('span', 'fr-num', String(cnt.rsibox_runs), m.about), 'race_run_counts', 'rsibox_runs', { workload: w.workload });
+        m.about.append(Number(cnt.codex_runs) + Number(cnt.rsibox_runs) > 2 ? '; the bold lines are each side\'s main run.' : '.');
       }
       const others = [];
       if (rr.status === 'ok') {

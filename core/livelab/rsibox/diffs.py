@@ -155,7 +155,7 @@ def apply(diff: str, current) -> dict[str, str]:
     for rel_path in targets:
         if rel_path.startswith("/") or ".." in rel_path.split("/"):
             raise ValueError(f"unsafe diff path: {rel_path}")
-    with tempfile.TemporaryDirectory(prefix="fastrsi-diff-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="rsibox-diff-") as tmp:
         for rel_path in targets:
             text = current(module_of(rel_path))
             if text is None:

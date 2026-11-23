@@ -1,10 +1,10 @@
 """Client for a running Megatron lab: one JSON request per call over its Unix socket.
 
-    python -m fastrsi_megatron.client --sock PATH status        (or --mailbox DIR)
-    python -m fastrsi_megatron.client --sock PATH install --patch patch.json
-    python -m fastrsi_megatron.client --sock PATH check --steps 4
-    python -m fastrsi_megatron.client --sock PATH uninstall [--id TXN]
-    python -m fastrsi_megatron.client --sock PATH repl --code 'print(rank)'
+    python -m rsibox_megatron.client --sock PATH status        (or --mailbox DIR)
+    python -m rsibox_megatron.client --sock PATH install --patch patch.json
+    python -m rsibox_megatron.client --sock PATH check --steps 4
+    python -m rsibox_megatron.client --sock PATH uninstall [--id TXN]
+    python -m rsibox_megatron.client --sock PATH repl --code 'print(rank)'
 
 A request that gets no answer within `timeout` raises TimeoutError: the lab may be hung in a
 step, so the caller must treat it as poisoned and respawn (the lab cannot answer for itself).
@@ -13,7 +13,7 @@ import argparse
 import json
 import sys
 
-from fastrsi import ipc
+from rsibox import ipc
 
 
 def call(sock, req, timeout=600):

@@ -244,11 +244,11 @@ class TransactionTest(unittest.TestCase):
         cell's own journal calls (kernel tests)."""
         h, _, eps = make_host(self, "cell")
         p = {"id": "cell", "modules": {},
-             "repairs": [{"cell": "worker.fastrsi_fixed = 1", "declares": ["worker"],
+             "repairs": [{"cell": "worker.rsibox_fixed = 1", "declares": ["worker"],
                           "on": ["worker"]}]}
         r = h.handle({"op": "txn", "plan": p})
         self.assertEqual(r["outcome"], "committed", r["receipt"]["findings"])
-        self.assertEqual([vars(ep.scope["worker"]) for ep in eps], [{"fastrsi_fixed": 1}] * 2)
+        self.assertEqual([vars(ep.scope["worker"]) for ep in eps], [{"rsibox_fixed": 1}] * 2)
         self.assertTrue(h.handle({"op": "undo", "txn": "cell"})["ok"])
         self.assertEqual([vars(ep.scope["worker"]) for ep in eps], [{}, {}])
 
@@ -513,12 +513,12 @@ class ImportTest(unittest.TestCase):
 
     def test_importing_the_adapter_leaves_the_environment_alone(self):
         # the zygote refuses to fork for a client whose env differs from its own, so a client
-        # that imports the adapter before `zygote.request(...)` must not grow FASTRSI_LIVELAB
+        # that imports the adapter before `zygote.request(...)` must not grow RSIBOX_LIVELAB
         import subprocess
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        env = {k: v for k, v in os.environ.items() if k != "FASTRSI_LIVELAB"}
+        env = {k: v for k, v in os.environ.items() if k != "RSIBOX_LIVELAB"}
         code = ("import os, adapter, kernel; "
-                "print(repr(os.environ.get('FASTRSI_LIVELAB')), adapter.LIVELAB, kernel.__file__)")
+                "print(repr(os.environ.get('RSIBOX_LIVELAB')), adapter.LIVELAB, kernel.__file__)")
         out = subprocess.run([sys.executable, "-c", code], cwd=here, env=env, check=True,
                              capture_output=True, text=True).stdout.split()
         self.assertEqual(out[0], "None")

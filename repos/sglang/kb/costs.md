@@ -3,7 +3,7 @@
 Prior measurements gathered before new runs, plus the static-survey baseline. Every number names
 its source and setup; anything we have not timed yet is listed under [Not measured yet](#not-measured-yet).
 
-## FastRSI v0 overhead and conformance (Qwen3-8B, 1 GPU, sampler edits)
+## rsibox v0 overhead and conformance (Qwen3-8B, 1 GPU, sampler edits)
 
 Source: `legacy/v0` branch, `receipts/overhead-sglang.json`, `receipts/conformance-sglang.json`,
 `receipts/control-repeatability.json`, and `docs/overhead.md` (model and workload reconstructed
@@ -34,7 +34,7 @@ magnitude slower than a sampler swap + undo + `flush_cache` (~97 ms). Batched gr
 varied even with no agent loaded, which is why the workload gates at `max_running_requests=1`
 (`workload.md`).
 
-## Static coverage survey (`fastrsi-survey/1`)
+## Static coverage survey (`rsibox-survey/1`)
 
 Source: `core/livelab/survey` (ruleset `1`) run against the `sgl-project/sglang` Python tree at
 snapshot `cf9845f8e` (`0.5.10.post2.dev438`), excluding test files (`kb/survey_rules.json`,
@@ -110,7 +110,7 @@ Source: nightly `sglang` `0.0.0.dev1+g302b78ccf` on `1x NVIDIA B200` (`Qwen3-8B`
 
 ## Real-GPU `SglangConformanceLab` `11/11` receipts (`1x B200 TP=1` and `2x B200 TP=2`, `2026-11-19`)
 
-Source: `fastrsi conformance sglang --real` on `Qwen3-8B` inside nightly `sglang` (`lmsysorg/sglang:nightly-dev-cu13-20261030-302b78cc`, decode CUDA graphs `[1, 2, 4]`, `--mem-fraction 0.45 --max-bs 4 --check-timeout 25`), after fixing `adapter/fixture/faults.py` (`local_participant.name` instead of removed `.tp_rank`) and `adapter/fixture/harness.py` (`SGLANG_RETURN_ORIGINAL_LOGPROB` fallback for `module_state` refusal):
+Source: `rsibox conformance sglang --real` on `Qwen3-8B` inside nightly `sglang` (`lmsysorg/sglang:nightly-dev-cu13-20261030-302b78cc`, decode CUDA graphs `[1, 2, 4]`, `--mem-fraction 0.45 --max-bs 4 --check-timeout 25`), after fixing `adapter/fixture/faults.py` (`local_participant.name` instead of removed `.tp_rank`) and `adapter/fixture/harness.py` (`SGLANG_RETURN_ORIGINAL_LOGPROB` fallback for `module_state` refusal):
 
 | Configuration | Result | `c9_soak` (20 cycles install / undo) | `c8_crash_and_hang` respawns | `c3_fresh_equivalence` | GPU Cleanup |
 |---|---|---:|---|---|---|
@@ -166,7 +166,7 @@ All `--fork-subprocs` runs recorded `fallbacks: []`, `numa_bind_v2: "0"`, `cuda_
 
 ## Full 11/11 `SglangConformanceLab --fork-subprocs` (`TP=1` and `TP=2`, `Qwen3-8B`, `B200`, `2026-11-20`)
 
-Wired opt-in `fork_subprocs` / `--fork-subprocs` into `SglangLab` and `SglangConformanceLab`, with static AST inspection of `ServerArgs` in `adapter/fixture/harness.py` plus pre-config `SglangLab._preload_fork_subprocs()` guards (avoiding an unguarded `ServerArgs` CUDA init in `sglang_env_config()` that otherwise forced `spawn` fallback across all `5/5` boots, `c8 = 120.319 s`). Container `fastrsi doctor` **`8/8` (`0` violations)** and container `pytest repos/sglang/livelab`: **`25 passed in 16.20 s`** (`0` `ResourceWarning`s), `0 MiB × 8` exit:
+Wired opt-in `fork_subprocs` / `--fork-subprocs` into `SglangLab` and `SglangConformanceLab`, with static AST inspection of `ServerArgs` in `adapter/fixture/harness.py` plus pre-config `SglangLab._preload_fork_subprocs()` guards (avoiding an unguarded `ServerArgs` CUDA init in `sglang_env_config()` that otherwise forced `spawn` fallback across all `5/5` boots, `c8 = 120.319 s`). Container `rsibox doctor` **`8/8` (`0` violations)** and container `pytest repos/sglang/livelab`: **`25 passed in 16.20 s`** (`0` `ResourceWarning`s), `0 MiB × 8` exit:
 - **`TP=1 --fork-subprocs` (`1× B200`, `11/11` PASS, `108` receipts, `fork_subprocs_fallback: []` on `5/5` boots & `5/5` scheduler ranks):** total case sum **`222.417 s`** (`258.701 s` CLI wall vs `283.300 s` `spawn`, **`1.27×`**): `c0 1.632 s`, `c1 0.324 s`, `c2 0.284 s`, `c3 88.231 s` (vs `112.782 s`, `1.28×`), `c4 0.550 s`, `c5 0.777 s`, `c6 0.730 s`, `c7 1.163 s`, **`c8_crash_and_hang 92.308 s`** (vs `117.933 s`, `1.28×`; respawns **`9.79 / 9.98 / 9.86 / 9.62 s`**, sum `39.259 s` vs `64.548 s` `spawn`, **`1.64×`**), `c9 7.332 s` (`0.0620 / 0.0111 s`), `c10 29.086 s`.
 - **`TP=2 --fork-subprocs` (`2× B200`, `11/11` PASS, `108` receipts, `fork_subprocs_fallback: []` on `5/5` boots & `10/10` scheduler ranks):** total case sum **`270.789 s`** (`309.316 s` CLI wall vs `309.327 s` `spawn`, **`1.14×`**): `c0 0.515 s`, `c1 0.274 s`, `c2 0.272 s`, `c3 132.334 s`, `c4 0.896 s`, `c5 0.629 s`, `c6 0.605 s`, `c7 0.913 s`, **`c8_crash_and_hang 97.829 s`** (vs `120.666 s`, `1.23×`; respawns **`11.92 / 11.54 / 11.84 / 10.91 s`**, sum `46.218 s` vs `68.547 s` `spawn`, **`1.48×`**), `c9 6.125 s` (`0.0630 / 0.0157 s`), `c10 30.397 s`.
 

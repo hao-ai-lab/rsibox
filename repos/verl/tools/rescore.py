@@ -5,7 +5,7 @@ from pathlib import Path
 
 def rescore(rollouts_path, reward_path, function="compute_score", data_source=None, show=5):
     rows = [json.loads(ln) for ln in Path(rollouts_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    spec = importlib.util.spec_from_file_location("fastrsi_verl_rescore_target", reward_path)
+    spec = importlib.util.spec_from_file_location("rsibox_verl_rescore_target", reward_path)
     loaded = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(loaded)
     fn = getattr(loaded, function)

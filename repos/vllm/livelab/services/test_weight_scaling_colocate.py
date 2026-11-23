@@ -2,14 +2,14 @@
 
 CPU (always): ledger, digest comparison and gate logic, no torch needed; the pool's failover,
 rollback and accept with fake engines and holders; copy() when one rank fails.
-GPU (FASTRSI_GPU_E2E=1, FASTRSI_VLLM_MODEL=<path>, FASTRSI_VLLM_PYTHON=<venv python>,
-FASTRSI_GPUS=g0,g1, default the first two of CUDA_VISIBLE_DEVICES, else 0,1; free ports;
+GPU (RSIBOX_GPU_E2E=1, RSIBOX_VLLM_MODEL=<path>, RSIBOX_VLLM_PYTHON=<venv python>,
+RSIBOX_GPUS=g0,g1, default the first two of CUDA_VISIBLE_DEVICES, else 0,1; free ports;
 the temp folders are removed afterwards): real holders (vllm preload), real vLLM engines leased over CUDA IPC, a
 holder seeded over NCCL, and the pool. One regression test per bug of the PR #125 model:
   (a) a passing patch that was never accepted leaked into the active state;
   (b) rollback was a shallow copy;
   (c) a corruption fault failed over onto the same corrupted holder.
-Run under the vLLM venv:  FASTRSI_GPU_E2E=1 ... python -m pytest -x -v this_file
+Run under the vLLM venv:  RSIBOX_GPU_E2E=1 ... python -m pytest -x -v this_file
 """
 import os
 import shutil
@@ -315,24 +315,24 @@ def test_restore_holder_copies_with_the_pools_max_model_len(cpu_pool, monkeypatc
 
 # ------------------------------------------------------------------------------------- GPU --
 
-GPU = os.environ.get("FASTRSI_GPU_E2E") == "1"
-gpu = pytest.mark.skipif(not GPU, reason="needs FASTRSI_GPU_E2E=1 and a vLLM venv with GPUs")
+GPU = os.environ.get("RSIBOX_GPU_E2E") == "1"
+gpu = pytest.mark.skipif(not GPU, reason="needs RSIBOX_GPU_E2E=1 and a vLLM venv with GPUs")
 MML = 4096
 GMU = 0.35
 
 
 @pytest.fixture(scope="module")
 def pool():
-    model = os.environ["FASTRSI_VLLM_MODEL"]
-    python = os.environ.get("FASTRSI_VLLM_PYTHON", sys.executable)
+    model = os.environ["RSIBOX_VLLM_MODEL"]
+    python = os.environ.get("RSIBOX_VLLM_PYTHON", sys.executable)
     # the GPUs this job was given (CUDA_VISIBLE_DEVICES), not GPUs 0 and 1 of the host
     visible = [gpu for gpu in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if gpu.strip()]
-    gpus = (os.environ.get("FASTRSI_GPUS") or ",".join((visible or ["0", "1"])[:2])).split(",")
+    gpus = (os.environ.get("RSIBOX_GPUS") or ",".join((visible or ["0", "1"])[:2])).split(",")
     if len(gpus) < 2 or not all(gpu.strip().isdigit() for gpu in gpus[:2]):
-        pytest.skip(f"needs two GPU indices (FASTRSI_GPUS or CUDA_VISIBLE_DEVICES), got {gpus}: "
-                    "set FASTRSI_GPUS=i,j")
+        pytest.skip(f"needs two GPU indices (RSIBOX_GPUS or CUDA_VISIBLE_DEVICES), got {gpus}: "
+                    "set RSIBOX_GPUS=i,j")
     g0, g1 = int(gpus[0]), int(gpus[1])
-    work = tempfile.mkdtemp(prefix="wsc-test-", dir=os.environ.get("FASTRSI_TEST_TMP"))
+    work = tempfile.mkdtemp(prefix="wsc-test-", dir=os.environ.get("RSIBOX_TEST_TMP"))
     # AF_UNIX paths are limited to 107 bytes: the socket dir stays short, outside `work`
     sock = tempfile.mkdtemp(prefix="wsc-")
     h0 = W.Holder(g0, sock, os.path.join(work, "h0.log"))

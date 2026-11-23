@@ -1,7 +1,7 @@
 """Gate protocol client for a live gated verl job (`adapter/gate.py`).
 
 Shared by `VerlConformanceLab` (`adapter/conformance_lab.py`) and `tools.cli`
-(`repos/verl/tools/cli.py`) so `fastrsi conformance verl --real` works with only
+(`repos/verl/tools/cli.py`) so `rsibox conformance verl --real` works with only
 `repos/verl/livelab` + `core/livelab` on `PYTHONPATH`.
 """
 import json
@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import adapter  # noqa: F401  (ensures core/livelab is on sys.path)
-from fastrsi import ipc, proc
+from rsibox import ipc, proc
 
 
 class GateError(RuntimeError):
