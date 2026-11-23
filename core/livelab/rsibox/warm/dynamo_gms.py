@@ -208,8 +208,17 @@ def _visible_devices_remap_finding(
 # -- Pure-stdlib MsgPack mini-decoder for `GetRuntimeStateResponse` ----------------------
 
 
+def _slice_exact(buf: bytes, pos: int, n: int) -> tuple[bytes, int]:
+    end = pos + n
+    if n < 0 or end > len(buf):
+        raise ValueError("truncated msgpack payload")
+    return buf[pos:end], end
+
+
 def _decode_msgpack(buf: bytes, pos: int = 0) -> tuple[Any, int]:
     """Minimal pure-stdlib MsgPack decoder sufficient for GMS runtime-state maps."""
+    if pos >= len(buf):
+        raise ValueError("truncated msgpack payload")
     b = buf[pos]
     pos += 1
     if b <= 0x7F:
@@ -217,8 +226,8 @@ def _decode_msgpack(buf: bytes, pos: int = 0) -> tuple[Any, int]:
     if b >= 0xE0:
         return b - 256, pos
     if 0xA0 <= b <= 0xBF:
-        n = b & 0x1F
-        return buf[pos : pos + n].decode("utf-8", errors="replace"), pos + n
+        raw, pos = _slice_exact(buf, pos, b & 0x1F)
+        return raw.decode("utf-8", errors="replace"), pos
     if 0x80 <= b <= 0x8F:
         return _decode_msgpack_map(buf, pos, b & 0x0F)
     if 0x90 <= b <= 0x9F:
@@ -231,40 +240,50 @@ def _decode_msgpack(buf: bytes, pos: int = 0) -> tuple[Any, int]:
         return True, pos
     if b in (0xC4, 0xC5, 0xC6):
         fmt = {0xC4: "!B", 0xC5: "!H", 0xC6: "!I"}[b]
-        sz = struct.calcsize(fmt)
-        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
-        pos += sz
-        return buf[pos : pos + n], pos + n
+        hdr, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        (n,) = struct.unpack(fmt, hdr)
+        return _slice_exact(buf, pos, n)
+    if b in (0xC7, 0xC8, 0xC9):
+        fmt = {0xC7: "!B", 0xC8: "!H", 0xC9: "!I"}[b]
+        hdr, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        (n,) = struct.unpack(fmt, hdr)
+        ext_type_b, pos = _slice_exact(buf, pos, 1)
+        data, pos = _slice_exact(buf, pos, n)
+        return (struct.unpack("!b", ext_type_b)[0], data), pos
     if b == 0xCA:
-        (val,) = struct.unpack("!f", buf[pos : pos + 4])
-        return val, pos + 4
+        raw, pos = _slice_exact(buf, pos, 4)
+        return struct.unpack("!f", raw)[0], pos
     if b == 0xCB:
-        (val,) = struct.unpack("!d", buf[pos : pos + 8])
-        return val, pos + 8
+        raw, pos = _slice_exact(buf, pos, 8)
+        return struct.unpack("!d", raw)[0], pos
     if b in (0xCC, 0xCD, 0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD3):
         fmt = {
             0xCC: "!B", 0xCD: "!H", 0xCE: "!I", 0xCF: "!Q",
             0xD0: "!b", 0xD1: "!h", 0xD2: "!i", 0xD3: "!q",
         }[b]
-        sz = struct.calcsize(fmt)
-        (val,) = struct.unpack(fmt, buf[pos : pos + sz])
-        return val, pos + sz
+        raw, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        return struct.unpack(fmt, raw)[0], pos
+    if b in (0xD4, 0xD5, 0xD6, 0xD7, 0xD8):
+        n = {0xD4: 1, 0xD5: 2, 0xD6: 4, 0xD7: 8, 0xD8: 16}[b]
+        ext_type_b, pos = _slice_exact(buf, pos, 1)
+        data, pos = _slice_exact(buf, pos, n)
+        return (struct.unpack("!b", ext_type_b)[0], data), pos
     if b in (0xD9, 0xDA, 0xDB):
         fmt = {0xD9: "!B", 0xDA: "!H", 0xDB: "!I"}[b]
-        sz = struct.calcsize(fmt)
-        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
-        pos += sz
-        return buf[pos : pos + n].decode("utf-8", errors="replace"), pos + n
+        hdr, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        (n,) = struct.unpack(fmt, hdr)
+        raw, pos = _slice_exact(buf, pos, n)
+        return raw.decode("utf-8", errors="replace"), pos
     if b in (0xDC, 0xDD):
         fmt = "!H" if b == 0xDC else "!I"
-        sz = struct.calcsize(fmt)
-        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
-        return _decode_msgpack_array(buf, pos + sz, n)
+        hdr, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        (n,) = struct.unpack(fmt, hdr)
+        return _decode_msgpack_array(buf, pos, n)
     if b in (0xDE, 0xDF):
         fmt = "!H" if b == 0xDE else "!I"
-        sz = struct.calcsize(fmt)
-        (n,) = struct.unpack(fmt, buf[pos : pos + sz])
-        return _decode_msgpack_map(buf, pos + sz, n)
+        hdr, pos = _slice_exact(buf, pos, struct.calcsize(fmt))
+        (n,) = struct.unpack(fmt, hdr)
+        return _decode_msgpack_map(buf, pos, n)
     raise ValueError(f"unsupported msgpack byte 0x{b:02x}")
 
 
@@ -323,6 +342,9 @@ def _probe_gms_socket(path: str, timeout_s: float = 1.0) -> tuple[bool, dict[str
                 return True, None
             parsed, _ = _decode_msgpack(payload, 0)
             return True, parsed if isinstance(parsed, dict) else None
+        except (TimeoutError, socket.timeout):
+            # Hung / SIGSTOP'd listener accepts in kernel backlog but never responds.
+            return False, None
         except (OSError, ValueError, IndexError, struct.error):
             return True, None
 
@@ -505,13 +527,13 @@ class DynamoGmsStore:
             if not alive:
                 missing.append(path)
                 continue
-            if (
-                self.read_only
-                and tag == "weights"
-                and isinstance(state, dict)
-                and state.get("committed") is False
-            ):
-                uncommitted_weights.append(path)
+            if self.read_only and tag == "weights":
+                if (
+                    not isinstance(state, dict)
+                    or state.get("type") != "get_runtime_state_response"
+                    or state.get("committed") is not True
+                ):
+                    uncommitted_weights.append(path)
 
         if missing:
             finding = harness.plain_finding(
@@ -591,11 +613,12 @@ class DynamoGmsStore:
     def _gms_server_env(self) -> dict[str, str]:
         """Child environment for `python -m gpu_memory_service --device <phys_idx>`.
 
-        Strips `CUDA_VISIBLE_DEVICES` so CUDA driver device ordinals match physical NVML
-        indices (`--device <phys_idx>`).
+        Strips `CUDA_VISIBLE_DEVICES` (so CUDA driver device ordinals match physical NVML
+        indices) and `DYN_GMS_USE_V1` (so V0 CLI `--device-type` / `--tag` flags are accepted).
         """
         env = dict(os.environ)
         env.pop("CUDA_VISIBLE_DEVICES", None)
+        env.pop("DYN_GMS_USE_V1", None)
         env["GMS_SOCKET_DIR"] = self.socket_dir
         if self.extra_pythonpath:
             existing = env.get("PYTHONPATH", "")
@@ -624,12 +647,20 @@ class DynamoGmsStore:
             return first
 
         missing_set = set(first.missing)
-        devices_to_start = [
-            phys_idx
-            for phys_idx, uuid in targets
-            if any(os.path.join(self.socket_dir, socket_name(uuid, tag)) in missing_set for tag in self.tags)
-        ]
-        if not devices_to_start:
+        missing_tags_by_dev: dict[int, list[str]] = {}
+        for phys_idx, uuid in targets:
+            dev_missing = [
+                tag
+                for tag in self.tags
+                if os.path.join(self.socket_dir, socket_name(uuid, tag)) in missing_set
+            ]
+            if not dev_missing:
+                continue
+            bucket = missing_tags_by_dev.setdefault(phys_idx, [])
+            for tag in dev_missing:
+                if tag not in bucket:
+                    bucket.append(tag)
+        if not missing_tags_by_dev:
             return first
 
         os.makedirs(self.socket_dir, exist_ok=True)
@@ -639,7 +670,7 @@ class DynamoGmsStore:
 
         started: list[tuple[int, subprocess.Popen]] = []
         try:
-            for dev in devices_to_start:
+            for dev, dev_tags in missing_tags_by_dev.items():
                 cmd = [
                     self.python,
                     "-m",
@@ -649,7 +680,7 @@ class DynamoGmsStore:
                     "--device-type",
                     self.device_type,
                 ]
-                for tag in self.tags:
+                for tag in dev_tags:
                     cmd.extend(["--tag", tag])
                 log_path = os.path.join(log_root, f"gms-server-gpu{dev}.log")
                 with open(log_path, "ab") as log_fh:
@@ -722,40 +753,68 @@ class DynamoGmsStore:
             cfg["gms_ro_connect_timeout_ms"] = int(self.ro_connect_timeout_ms)
         return cfg
 
+    @staticmethod
+    def _parse_extra_config(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+        """Parse an explicit `model_loader_extra_config` (None, dict, or JSON object str)."""
+        if raw is None:
+            return {}, None
+        if isinstance(raw, dict):
+            return dict(raw), None
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return {}, None
+            try:
+                parsed = json.loads(s)
+            except ValueError as exc:
+                return None, f"invalid JSON in model_loader_extra_config: {exc}"
+            if not isinstance(parsed, dict):
+                return None, f"model_loader_extra_config must be a JSON object, got {type(parsed).__name__}"
+            return parsed, None
+        return None, f"model_loader_extra_config must be a JSON object or dict, got {type(raw).__name__}"
+
+    def merged_loader_config(self, raw_explicit: Any = None) -> dict[str, Any]:
+        """Merge non-conflicting user `model_loader_extra_config` keys with required GMS keys."""
+        parsed, err = self._parse_extra_config(raw_explicit)
+        if err is not None or parsed is None:
+            return self.extra_loader_config()
+        return {**parsed, **self.extra_loader_config()}
+
     def _check_explicit_extra_config(
         self,
         explicit_flags: set[str] | frozenset[str],
         vals: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Fail closed when explicit `model_loader_extra_config` contradicts required GMS keys."""
-        req = self.extra_loader_config()
-        if not req or "model_loader_extra_config" not in explicit_flags:
+        """Fail closed when explicit `model_loader_extra_config` is malformed or contradicts GMS keys."""
+        if "model_loader_extra_config" not in explicit_flags:
             return None
-        raw = vals.get("model_loader_extra_config")
-        if isinstance(raw, str):
-            try:
-                cfg = json.loads(raw) if raw.strip() else {}
-            except ValueError:
-                cfg = {}
-        elif isinstance(raw, dict):
-            cfg = raw
-        else:
-            cfg = {}
+        cfg, err = self._parse_extra_config(vals.get("model_loader_extra_config"))
+        if err is not None or cfg is None:
+            return harness.plain_finding(
+                "gms_loader_extra_config",
+                err or "invalid --model-loader-extra-config",
+                "a JSON object for --model-loader-extra-config",
+                why="Dynamo GMS requires a valid JSON object to merge gms_read_only / timeout keys",
+                actions=["pass a valid JSON object to --model-loader-extra-config", "or omit it"],
+            )
+        req = self.extra_loader_config()
+        if not req:
+            return None
         mismatches = [
-            f"{k}={cfg.get(k)!r} (expected {v!r})"
+            f"{k}={cfg[k]!r} (expected {v!r})"
             for k, v in req.items()
-            if cfg.get(k) != v
+            if k in cfg and cfg[k] != v
         ]
         if not mismatches:
             return None
         return harness.plain_finding(
             "gms_loader_extra_config",
             f"explicit --model-loader-extra-config conflicts with GMS settings: {', '.join(mismatches)}",
-            f"include {json.dumps(req)} in --model-loader-extra-config, or omit --model-loader-extra-config",
-            why="ignoring --gms-read-only or timeout settings would silently launch a writer or hang indefinitely",
+            f"compatible {json.dumps(req)} values in --model-loader-extra-config, or omit conflicting gms_* keys",
+            why="contradicting --gms-read-only or timeout settings would silently launch a writer or hang indefinitely",
             actions=[
-                "update --model-loader-extra-config to include the required gms_* keys",
-                "or omit --model-loader-extra-config so RSIBox injects it",
+                "update or drop the conflicting gms_* keys in --model-loader-extra-config",
+                "or omit --gms-read-only",
             ],
         )
 
@@ -817,8 +876,16 @@ class DynamoGmsStore:
                 findings.append(extra_conflict)
             else:
                 extra_cfg = self.extra_loader_config()
-                if extra_cfg and "model_loader_extra_config" not in explicit_flags:
-                    args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
+                if extra_cfg:
+                    raw_explicit = (
+                        vals.get("model_loader_extra_config")
+                        if "model_loader_extra_config" in explicit_flags
+                        else None
+                    )
+                    parsed_explicit, _ = self._parse_extra_config(raw_explicit)
+                    merged = {**(parsed_explicit or {}), **extra_cfg}
+                    if "model_loader_extra_config" not in explicit_flags or merged != (parsed_explicit or {}):
+                        args.extend(["--model-loader-extra-config", json.dumps(merged)])
 
         elif engine == "sglang":
             if "load_format" in explicit_flags and vals.get("load_format") not in (GMS_SGLANG_LOAD_FORMAT, None):
@@ -836,8 +903,16 @@ class DynamoGmsStore:
                 findings.append(extra_conflict)
             else:
                 extra_cfg = self.extra_loader_config()
-                if extra_cfg and "model_loader_extra_config" not in explicit_flags:
-                    args.extend(["--model-loader-extra-config", json.dumps(extra_cfg)])
+                if extra_cfg:
+                    raw_explicit = (
+                        vals.get("model_loader_extra_config")
+                        if "model_loader_extra_config" in explicit_flags
+                        else None
+                    )
+                    parsed_explicit, _ = self._parse_extra_config(raw_explicit)
+                    merged = {**(parsed_explicit or {}), **extra_cfg}
+                    if "model_loader_extra_config" not in explicit_flags or merged != (parsed_explicit or {}):
+                        args.extend(["--model-loader-extra-config", json.dumps(merged)])
 
         elif engine in ("torch_module", "fastvideo"):
             env["RSIBOX_GMS_MODE"] = "ro" if self.read_only else "rw_or_ro"

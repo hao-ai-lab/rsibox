@@ -40,17 +40,24 @@ from rsibox.warm import (  # noqa: E402
 )
 from rsibox.warm.dynamo_gms import (  # noqa: E402
     _GET_RUNTIME_STATE_FRAME,
+    _decode_msgpack,
+    _probe_gms_socket,
     long_socket_path_finding,
     resolve_target_gpus,
     socket_name,
 )
 
 
-def _encode_runtime_state_reply(state: str, committed: bool) -> bytes:
-    """Minimal MsgPack frame matching `GetRuntimeStateResponse` (`state`, `committed`)."""
+def _encode_runtime_state_reply(
+    state: str, committed: bool, msg_type: str = "get_runtime_state_response"
+) -> bytes:
+    """Minimal MsgPack frame matching `GetRuntimeStateResponse` (`type`, `state`, `committed`)."""
+    tp_b = msg_type.encode("utf-8")
     st_b = state.encode("utf-8")
     payload = (
-        b"\x82"
+        b"\x83"
+        + b"\xa4type"
+        + bytes([0xA0 | len(tp_b)]) + tp_b
         + b"\xa5state"
         + bytes([0xA0 | len(st_b)]) + st_b
         + b"\xa9committed"
@@ -208,6 +215,13 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 w_guard.gms_state = ("committed", True)
                 self.assertTrue(ro_store.probe(gpus=[uuid]).ok)
 
+                # ErrorResponse fails closed under read_only=True even if committed is absent/True.
+                w_guard.gms_state = ("error", True, "error_response")
+                pr_err = ro_store.probe(gpus=[uuid])
+                self.assertFalse(pr_err.ok)
+                self.assertEqual(pr_err.finding["check"], "dynamo_gms_not_committed")
+                w_guard.gms_state = ("committed", True)
+
                 # Missing stamp must FAIL CLOSED when expected_stamp is requested.
                 stamp = {"files": {"model": "abc"}, "weights": {}, "env": {}, "extra": None}
                 pr_missing_stamp = rw_store.probe(gpus=[uuid], expected_stamp=stamp)
@@ -283,6 +297,103 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertFalse(conflict.ok)
         checks = {f["check"] for f in conflict.findings}
         self.assertEqual(checks, {"gms_load_format", "gms_worker_cls", "gms_loader_extra_config"})
+
+        # Explicit non-conflicting user extra config merges with GMS keys cleanly.
+        merged_delta = store.launch_delta(
+            engine="vllm",
+            explicit_flags={"model_loader_extra_config"},
+            explicit_values={"model_loader_extra_config": {"foo": 1, "gms_read_only": True}},
+        )
+        self.assertTrue(merged_delta.ok, merged_delta.findings)
+        m_idx = merged_delta.args.index("--model-loader-extra-config")
+        self.assertEqual(
+            json.loads(merged_delta.args[m_idx + 1]),
+            {"foo": 1, "gms_read_only": True, "gms_ro_connect_timeout_ms": 5000},
+        )
+
+        # Malformed non-dict JSON in model_loader_extra_config emits finding without crashing.
+        bad_json_delta = store.launch_delta(
+            engine="vllm",
+            explicit_flags={"model_loader_extra_config"},
+            explicit_values={"model_loader_extra_config": "[1, 2]"},
+        )
+        self.assertFalse(bad_json_delta.ok)
+        self.assertEqual([f["check"] for f in bad_json_delta.findings], ["gms_loader_extra_config"])
+
+    def test_hung_socket_error_response_ext_msgpack_and_partial_tag_spawn(self):
+        # 1. Hung/SIGSTOP'd listening Unix socket (never replies) fails probe() on timeout.
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
+            uuid = "GPU-11111111-2222-3333-4444-555555555555"
+            w_path = os.path.join(tmp, socket_name(uuid, "weights"))
+            kv_path = os.path.join(tmp, socket_name(uuid, "kv_cache"))
+            hung = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            hung.bind(w_path)
+            hung.listen(4)
+            kv_guard = _UnixSocketGuard(kv_path, gms_state=("empty", False))
+            try:
+                alive, state = _probe_gms_socket(w_path, timeout_s=0.05)
+                self.assertFalse(alive)
+                self.assertIsNone(state)
+                store_ro = DynamoGmsStore(
+                    socket_dir=tmp, read_only=True, target_resolver=lambda *a, **k: [(0, uuid)]
+                )
+                pr_hung = store_ro.probe(gpus=[uuid], connect_timeout_s=0.05)
+                self.assertFalse(pr_hung.ok)
+                self.assertEqual(pr_hung.finding["check"], "dynamo_gms_daemon")
+            finally:
+                hung.close()
+                kv_guard.close()
+
+        # 2. MsgPack fixext/ext decoding + truncated bounds check + malformed stamp_diff.
+        # Map of 2 entries: {"ts": fixext1(type=-1, 0x2a), "committed": True}
+        payload = b"\x82\xa2ts\xd4\xff\x2a\xa9committed\xc3"
+        decoded, pos = _decode_msgpack(payload, 0)
+        self.assertEqual(pos, len(payload))
+        self.assertEqual(decoded["committed"], True)
+        self.assertEqual(decoded["ts"], (-1, b"\x2a"))
+        with self.assertRaises(ValueError):
+            _decode_msgpack(b"\xa5abc", 0)
+        self.assertEqual(stamp_diff({"files": "corrupt"}, {"files": {"a": "1"}}), ("files:invalid",))
+        self.assertEqual(stamp_diff("bad", {"files": {}}), ("stamp_invalid",))
+
+        # 3. _gms_server_env strips BOTH CUDA_VISIBLE_DEVICES and DYN_GMS_USE_V1.
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4", "DYN_GMS_USE_V1": "true"}):
+            env = DynamoGmsStore(socket_dir="/tmp/gms")._gms_server_env()
+            self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
+            self.assertNotIn("DYN_GMS_USE_V1", env)
+
+        # 4. ensure_ready() spawns ONLY the missing tag (kv_cache) when weights is already live.
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
+            uuid = "GPU-22222222-2222-3333-4444-555555555555"
+            w_guard = _UnixSocketGuard(os.path.join(tmp, socket_name(uuid, "weights")), gms_state=("committed", True))
+            spawned_cmds: list[list[str]] = []
+            try:
+                store = DynamoGmsStore(
+                    socket_dir=tmp,
+                    target_resolver=lambda *a, **k: [(0, uuid), (0, uuid)],
+                )
+
+                class _FakePopen:
+                    pid = 999999
+                    def poll(self):
+                        return 0
+                    def wait(self, timeout=None):
+                        return 0
+                    def kill(self):
+                        return None
+
+                def fake_popen(cmd, **kw):
+                    spawned_cmds.append(list(cmd))
+                    return _FakePopen()
+
+                with mock.patch("subprocess.Popen", side_effect=fake_popen):
+                    store.ensure_ready(gpus=["0"], timeout_s=0.1)
+                self.assertEqual(len(spawned_cmds), 1)
+                cmd = spawned_cmds[0]
+                self.assertIn("kv_cache", cmd)
+                self.assertNotIn("weights", cmd)
+            finally:
+                w_guard.close()
 
     def test_launch_delta_sglang_and_fastvideo_and_unsupported(self):
         store = DynamoGmsStore(socket_dir="/tmp/gms-test", read_only=False)
@@ -439,6 +550,25 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             res_fail = lab.reset("respawn")
             self.assertFalse(res_fail["ok"])
             self.assertEqual(calls, before, "DefaultRespawnDriver must not stop/spawn on failed store probe")
+
+        # 4. DefaultRespawnDriver resolves SglangLab-shaped TP (`config['tp_size']`) & visible_devices.
+        probed_kwargs: list[dict] = []
+
+        class _SpyStore(DiskStore):
+            name = "spy"
+
+            def probe(self, **kw):
+                probed_kwargs.append(dict(kw))
+                return super().probe(**kw)
+
+        lab.config = {"tp_size": 2}
+        lab.weight_store = _SpyStore()
+        lab.recovery_driver = DefaultRespawnDriver()
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0,1"}):
+            res_tp = lab.reset("respawn")
+        self.assertTrue(res_tp["ok"])
+        self.assertEqual(probed_kwargs[-1]["tp"], 2)
+        self.assertEqual(probed_kwargs[-1]["visible_devices"], "0,1")
 
 
 if __name__ == "__main__":

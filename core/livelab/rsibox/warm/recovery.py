@@ -9,6 +9,7 @@ Separates two responsibilities that were previously tangled inside `BaseLab.rese
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from typing import Any, Callable, Protocol, runtime_checkable
 
@@ -57,6 +58,20 @@ class RecoveryDriver(Protocol):
         ...
 
 
+def _resolve_lab_tp(lab: Any) -> int | None:
+    """Resolve TP degree across VllmLab (`tp`), SglangLab (`ranks` / `config['tp_size']`), etc."""
+    for attr in ("tp", "ranks"):
+        val = getattr(lab, attr, None)
+        if isinstance(val, int) and val > 0:
+            return val
+    cfg = getattr(lab, "config", None)
+    if isinstance(cfg, dict):
+        cfg_tp = cfg.get("tp_size")
+        if isinstance(cfg_tp, int) and cfg_tp > 0:
+            return cfg_tp
+    return None
+
+
 class DefaultRespawnDriver:
     """Default respawn path: verify `WeightStore` (fail closed), stop worker group, respawn."""
 
@@ -72,8 +87,10 @@ class DefaultRespawnDriver:
         t0 = time.perf_counter()
         store_probe = None
         if store is not None and store.name != "none":
-            tp = getattr(lab, "tp", None)
-            store_probe = store.probe(tp=tp)
+            store_probe = store.probe(
+                tp=_resolve_lab_tp(lab),
+                visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
+            )
             if not store_probe.ok:
                 return {
                     "ok": False,

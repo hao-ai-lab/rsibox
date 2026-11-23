@@ -92,10 +92,17 @@ def stamp_diff(old: dict[str, Any] | None, new: dict[str, Any] | None) -> tuple[
     """
     if old is None or new is None:
         return () if old == new else ("stamp_missing",)
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return ("stamp_invalid",)
     diff: list[str] = []
     for section in ("files", "weights", "env"):
-        a = old.get(section) or {}
-        b = new.get(section) or {}
+        raw_a = old.get(section)
+        raw_b = new.get(section)
+        a = {} if raw_a is None else raw_a
+        b = {} if raw_b is None else raw_b
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            diff.append(f"{section}:invalid")
+            continue
         for key in sorted(set(a) | set(b)):
             if a.get(key) != b.get(key):
                 diff.append(f"{section}:{key}")
