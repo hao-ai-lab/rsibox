@@ -67,7 +67,7 @@ jobs:
           PR: ${{ github.event.issue.number || inputs.pr }}
         run: |
           if [ -z "$RSIBOX_REVIEW_URL" ] || [ -z "$RSIBOX_REVIEW_TOKEN" ]; then
-            echo "::notice::Review service not configured (vars.FASTRSI_REVIEW_URL, secrets.FASTRSI_REVIEW_TOKEN). Skipped; nothing changed."
+            echo "::notice::Review service not configured (vars.RSIBOX_REVIEW_URL, secrets.RSIBOX_REVIEW_TOKEN). Skipped; nothing changed."
             exit 0
           fi
           python3 .github/review/review.py --pr "$PR" --engine service --url "$RSIBOX_REVIEW_URL" --apply

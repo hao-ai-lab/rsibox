@@ -31,7 +31,7 @@ repos/verl/
     README.md                Gate protocol, VerlLab, ToyVerlLab (CPU) and VerlConformanceLab (GPU) conformance
     adapter/
       __init__.py            Adds core/livelab to sys.path
-      gate.py                GateMixin + PPOTrainerrsiboxSync step-gap Coordinator and the gate verbs
+      gate.py                GateMixin + PPOTrainerRsiboxSync step-gap Coordinator and the gate verbs
       conformance_lab.py     VerlConformanceLab: LabUnderTest over a real gated job (owns relaunch and fresh jobs)
       determinism.py         Per-sample vLLM seeds so a step after S0 reset resamples the same rollouts
       faults.py              Conformance fault injection inside one participant process

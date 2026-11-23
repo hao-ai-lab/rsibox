@@ -149,7 +149,11 @@ def main(argv=None):
     if raw and raw[0] in _LAB_COMMANDS:
         from . import lab_cli
         return lab_cli.main(raw)
-    ap = argparse.ArgumentParser(prog="rsibox", description="A live lab as a service.")
+    ap = argparse.ArgumentParser(
+        prog="rsibox",
+        description="A live lab as a service.",
+        epilog="Lab commands: list, conformance, survey, ctl, doctor (run 'rsibox <cmd> --help').",
+    )
     sub = ap.add_subparsers(dest="command", required=True)
 
     def lab_args(p):

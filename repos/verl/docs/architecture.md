@@ -12,7 +12,7 @@ All timings cite `../kb/costs.md`.
 main_ppo driver                 Hydra config parse, ray.init(runtime_env=setup_hook)
   |  spawns remote actor
   v
-TaskRunnerV1 (1 CPU actor)      PPOTrainerrsiboxSync.fit(), dataloader, core_algos advantage,
+TaskRunnerV1 (1 CPU actor)      PPOTrainerRsiboxSync.fit(), dataloader, core_algos advantage,
   |                             CheckpointEngineManager, TransferQueue coordinator, Gate host
   +-- WorkerDict x4 (1/GPU)     Colocated ActorRolloutRefWorker per rank (NCCL + Megatron/FSDP):
   |     +-- actor               TrainingWorker (Megatron-Core or FSDP model, fp32 master weights,

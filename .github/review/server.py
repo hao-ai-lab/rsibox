@@ -368,9 +368,10 @@ def binary_read_paths(bin_path, path_env="/usr/bin:/bin"):
                     paths.append(os.path.realpath(resolved))
             elif interp.startswith("/"):
                 paths.append(os.path.realpath(interp))
-    for extra in os.environ.get("RSIBOX_REVIEW_EXTRA_READ", "").split(":"):
-        if extra:
-            paths.append(os.path.realpath(os.path.expanduser(extra)))
+    for env_key in ("RSIBOX_REVIEW_EXTRA_READ", "FASTRSI_REVIEW_EXTRA_READ"):
+        for extra in os.environ.get(env_key, "").split(":"):
+            if extra:
+                paths.append(os.path.realpath(os.path.expanduser(extra)))
     return list(dict.fromkeys(paths))
 
 
@@ -522,8 +523,11 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8792)
     args = ap.parse_args()
-    token_file = os.path.expanduser(os.environ.get("RSIBOX_REVIEW_TOKEN_FILE",
-                                                   "~/.config/rsibox-review/token"))
+    token_file = os.path.expanduser(
+        os.environ.get("RSIBOX_REVIEW_TOKEN_FILE")
+        or os.environ.get("FASTRSI_REVIEW_TOKEN_FILE")
+        or "~/.config/rsibox-review/token"
+    )
     token = load_token(token_file)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token
@@ -533,7 +537,8 @@ def main():
                            str(real_state("codex") / "auth.json"),
                            *[str(p) for p in Path("~/.ssh").expanduser().glob("id_*")
                              if not p.name.endswith(".pub")]]
-    server.secret_files += [p for p in os.environ.get("RSIBOX_REVIEW_SECRET_FILES", "").split(":") if p]
+    for env_key in ("RSIBOX_REVIEW_SECRET_FILES", "FASTRSI_REVIEW_SECRET_FILES"):
+        server.secret_files += [p for p in os.environ.get(env_key, "").split(":") if p]
     server.pool = ThreadPoolExecutor(max_workers=2)
     log(f"listening on {args.host}:{args.port}, engines={server.bins}")
     server.serve_forever()
