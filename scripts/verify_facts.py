@@ -480,18 +480,22 @@ def _check_readme(
     known_engines: dict[str, str],
     findings: list[dict],
 ) -> None:
-    """Parse `README.md` engine tables & repo layout and flag split-brain engine/conformance drift."""
-    readme_path = root / "README.md"
-    if not readme_path.is_file():
-        _add(findings, "error", "missing_file", "README.md", f"required file missing: {readme_path}")
+    """Parse engine table & repo layout in `docs/engines.md` (or `README.md`) and flag split-brain drift."""
+    engines_doc = root / "docs" / "engines.md"
+    if engines_doc.is_file():
+        doc_path, doc_label = engines_doc, "docs/engines.md"
+    else:
+        doc_path, doc_label = root / "README.md", "README.md"
+    if not doc_path.is_file():
+        _add(findings, "error", "missing_file", doc_label, f"required file missing: {doc_path}")
         return
-    text = readme_path.read_text(encoding="utf-8")
+    text = doc_path.read_text(encoding="utf-8")
     folder_to_name = {folder: name for name, folder in known_engines.items()}
 
     # 1. "What is in the repo today" engine table
     m_table = re.search(r"## What is in the repo today\s*\n+((?:\|.*\n)+)", text)
     if not m_table:
-        _add(findings, "error", "readme_missing_engine_table", "README.md", "could not locate '## What is in the repo today' table")
+        _add(findings, "error", "readme_missing_engine_table", doc_label, f"could not locate '## What is in the repo today' table in {doc_label}")
     else:
         rows = [
             ln for ln in m_table.group(1).splitlines()
@@ -512,15 +516,15 @@ def _check_readme(
             row = table_engines.get(_norm(folder))
             if row is None:
                 _add(
-                    findings, "drift", "readme_table_missing_engine", "README.md",
+                    findings, "drift", "readme_table_missing_engine", doc_label,
                     f"engine {label!r} (repos/{folder}) missing from 'What is in the repo today' table",
                 )
             elif _has_real_conformance_lab(root / "repos" / folder) and re.search(
                 r"no conformance adapter yet", row, re.IGNORECASE
             ):
                 _add(
-                    findings, "drift", "readme_stale_conformance_claim", "README.md",
-                    f"README.md claims {label!r} has 'no conformance adapter yet', but a real conformance Lab class exists under repos/{folder}/livelab",
+                    findings, "drift", "readme_stale_conformance_claim", doc_label,
+                    f"{doc_label} claims {label!r} has 'no conformance adapter yet', but a real conformance Lab class exists under repos/{folder}/livelab",
                 )
 
     # 2. "Repository layout" repos/<engine>/ listing
@@ -530,7 +534,7 @@ def _check_readme(
         for folder in repo_folders:
             if _norm(folder) not in listed:
                 _add(
-                    findings, "drift", "readme_layout_missing_engine", "README.md",
+                    findings, "drift", "readme_layout_missing_engine", doc_label,
                     f"engine folder {folder!r} omitted from 'Repository layout' repos/<engine>/ list",
                 )
 
