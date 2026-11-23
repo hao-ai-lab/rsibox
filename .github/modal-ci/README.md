@@ -22,8 +22,8 @@ and posts a single `modal-gpu` commit status for trusted commits.
 ## Security & Trust Boundary
 
 - `run_modal_ci.py` fetches only `refs/heads/*` (never `refs/pull/*`) into `<work>/mirror.git` and
-  refuses any SHA not contained in at least one branch of `hao-ai-lab/fastrsi` (blocking fork PRs).
-- `--pr N` verifies via `gh api` that `head.repo.full_name == hao-ai-lab/fastrsi` and
+  refuses any SHA not contained in at least one branch of `hao-ai-lab/rsibox` (blocking fork PRs).
+- `--pr N` verifies via `gh api` that `head.repo.full_name == hao-ai-lab/rsibox` and
   `head.sha == --sha`.
 - Only a clean `git archive` tarball of the verified SHA is sent to Modal containers; GitHub tokens
   never enter Modal containers.

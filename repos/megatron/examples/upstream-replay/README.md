@@ -42,7 +42,7 @@ lab runs (`megatron-core` 0.20 dev, upstream commit ae76c60e6). Source: our 2026
 Base vs base, same 4 steps: loss equal to 3 decimals (`12.948, 12.928, 14.255, 15.599`); 7,134 and
 7,537 tokens/s/GPU.
 
-Code restart from the zygote (https://github.com/hao-ai-lab/fastrsi/pull/88): the forked ranks re-import
+Code restart from the zygote (https://github.com/hao-ai-lab/rsibox/pull/88): the forked ranks re-import
 only `megatron`, while torch and Transformer Engine stay loaded. #7575 was ready 40.9 s after the
 request, against 78.8 s for the plain restart. It reached the step start at 19.0 s, of which the
 re-import took 1.4 s, and its loss stayed within 1.6e-3 of the base. #8579 took 148.7 s: it was the

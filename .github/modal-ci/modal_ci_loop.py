@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Poll hao-ai-lab/fastrsi and run the Modal GPU CI once per new trusted head.
+"""Poll hao-ai-lab/rsibox and run the Modal GPU CI once per new trusted head.
 
 Candidates are the head of main and the heads of open PRs whose head repository is
-hao-ai-lab/fastrsi itself (fork PRs are skipped here and refused again by the runner).
+hao-ai-lab/rsibox itself (fork PRs are skipped here and refused again by the runner).
 A SHA with a final result in `<work>/results/` is not rerun; a refusal or a runner error
 before `--max-attempts` leaves a non-final result, so the SHA is tried again.
 
@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO = "hao-ai-lab/fastrsi"
+REPO = "hao-ai-lab/rsibox"
 HERE = Path(__file__).resolve().parent
 
 

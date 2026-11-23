@@ -79,9 +79,9 @@ curl -fsSL -o actions-runner.tar.gz \
 echo "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40  actions-runner.tar.gz" | sha256sum -c -
 tar xzf actions-runner.tar.gz && rm -f actions-runner.tar.gz
 
-REG_TOKEN=$(gh api -X POST repos/hao-ai-lab/fastrsi/actions/runners/registration-token --jq '.token')
+REG_TOKEN=$(gh api -X POST repos/hao-ai-lab/rsibox/actions/runners/registration-token --jq '.token')
 ./config.sh --unattended \
-  --url https://github.com/hao-ai-lab/fastrsi \
+  --url https://github.com/hao-ai-lab/rsibox \
   --token "$REG_TOKEN" \
   --name fastrsi-cpu-runner-01 \
   --labels self-hosted,linux,x64,fastrsi-cpu \
@@ -96,7 +96,7 @@ EOF
 
 tmux new-session -d -s fastrsi-gh-runner \
   "cd ~/fastrsi-lab/actions-runner && ./run.sh > ~/fastrsi-lab/actions-runner/runner.stdout.log 2>&1"
-gh api repos/hao-ai-lab/fastrsi/actions/runners --jq '.runners[] | {name, status, busy, labels: [.labels[].name]}'
+gh api repos/hao-ai-lab/rsibox/actions/runners --jq '.runners[] | {name, status, busy, labels: [.labels[].name]}'
 ```
 
 ---
@@ -165,6 +165,6 @@ has one timing comment.
 - **By hand:** print the table for any commit, or post it:
 
   ```bash
-  python3 .github/scripts/ci_timing_comment.py --repo hao-ai-lab/fastrsi --sha <sha>
+  python3 .github/scripts/ci_timing_comment.py --repo hao-ai-lab/rsibox --sha <sha>
   gh workflow run ci-timing.yml -f sha=<sha> -f pr=<pr-number>
   ```
