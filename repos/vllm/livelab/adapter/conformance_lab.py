@@ -296,8 +296,10 @@ class VllmLab:
                            tuple(self.extra), os.environ.get("CUDA_VISIBLE_DEVICES"),
                            os.environ.get("VLLM_USE_V2_MODEL_RUNNER"),
                            os.environ.get("VLLM_BATCH_INVARIANT"),
-                           self.weights_backend, self.gms_socket_dir,
-                           self.gms_pythonpath, self.gms_read_only, self.gms_scratch_kv)
+                           self.weights_backend,
+                           self.gms_socket_dir or os.environ.get("GMS_SOCKET_DIR"),
+                           self.gms_pythonpath, self.gms_read_only,
+                           self.gms_scratch_kv or os.environ.get("DYN_GMS_SCRATCH_KV_ENABLED"))
         shared = VllmLab._shared
         if (shared is not None and shared.key == self.server_key and shared.alive()
                 and self._server_at_base(shared)):

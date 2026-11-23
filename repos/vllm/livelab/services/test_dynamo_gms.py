@@ -163,18 +163,39 @@ class EngineDynamoGmsTests(unittest.TestCase):
         )
         self.assertIn("gms_load_format", {f["check"] for f in f3})
 
-        # 4. --gms-read-only + explicit --model-loader-extra-config missing gms_read_only
-        a4, _ = engine.parse([
+        # 4. --gms-read-only + contradicting --model-loader-extra-config emits finding,
+        #    while non-conflicting user keys merge cleanly in serve_cmd().
+        a4, vargv4 = engine.parse([
             "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
             "--weights-backend", "dynamo_gms", "--gms-read-only",
             "--gms-socket-dir", "/tmp/gms", "--", "m",
+            "--model-loader-extra-config", '{"foo": 1}',
         ])
-        f4 = engine.argv_findings(
-            a4, _parsed(explicit=("model", "model_loader_extra_config"), model_loader_extra_config={"foo": 1})
+        f4_bad = engine.argv_findings(
+            a4, _parsed(explicit=("model", "model_loader_extra_config"), model_loader_extra_config={"gms_read_only": False})
         )
-        self.assertIn("gms_loader_extra_config", {f["check"] for f in f4})
+        self.assertIn("gms_loader_extra_config", {f["check"] for f in f4_bad})
 
-        # 5. --weights-backend ipc_cache enforces weights_load_format & weights_fallback too
+        v4_merge = _parsed(explicit=("model", "model_loader_extra_config"), model_loader_extra_config={"foo": 1})
+        self.assertEqual(engine.argv_findings(a4, v4_merge), [])
+        cmd4 = engine.serve_cmd(a4, vargv4, v4_merge)
+        self.assertEqual(cmd4.count("--model-loader-extra-config"), 1)
+        self.assertEqual(
+            json.loads(cmd4[cmd4.index("--model-loader-extra-config") + 1]),
+            {"foo": 1, "gms_read_only": True, "gms_ro_connect_timeout_ms": 10000},
+        )
+
+        # 5. --weights-backend none + explicit --load-format gms/ipc_cache is rejected
+        a5_none, _ = engine.parse([
+            "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--weights-backend", "none", "--", "m",
+        ])
+        f5_none = engine.argv_findings(
+            a5_none, _parsed(explicit=("model", "load_format"), load_format=GMS_VLLM_LOAD_FORMAT)
+        )
+        self.assertIn("weights_backend_conflict", {f["check"] for f in f5_none})
+
+        # 6. --weights-backend ipc_cache enforces weights_load_format & weights_fallback too
         a5, _ = engine.parse([
             "start", "--cache-root", "/tmp/c", "--log", "/tmp/l",
             "--weights-backend", "ipc_cache", "--", "m",
@@ -213,16 +234,17 @@ class EngineDynamoGmsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="proc-") as tmp:
             pid_dir = Path(tmp) / "4242"
             pid_dir.mkdir()
+            # Exercise `--flag=value` syntax AND RSIBOX_GMS_PYTHONPATH recovery.
             cmdline = [
                 "/usr/bin/vllm", "serve", "m", "--port", "18500",
-                "--host", "127.0.0.1",
-                "--load-format", GMS_VLLM_LOAD_FORMAT,
-                "--worker-cls", GMS_VLLM_WORKER_CLS,
-                "--model-loader-extra-config", json.dumps({"gms_read_only": True}),
+                "--host=127.0.0.1",
+                f"--load-format={GMS_VLLM_LOAD_FORMAT}",
+                f"--worker-cls={GMS_VLLM_WORKER_CLS}",
+                "--model-loader-extra-config=" + json.dumps({"gms_read_only": True}),
             ]
             (pid_dir / "cmdline").write_bytes("\0".join(cmdline).encode())
             (pid_dir / "environ").write_bytes(
-                b"GMS_SOCKET_DIR=/tmp/gms-test\0DYN_GMS_SCRATCH_KV_ENABLED=1\0"
+                b"GMS_SOCKET_DIR=/tmp/gms-test\0DYN_GMS_SCRATCH_KV_ENABLED=1\0RSIBOX_GMS_PYTHONPATH=/opt/gms\0"
             )
             st = engine.load_engine_state(os.path.join(tmp, "cache"), 4242, proc_root=tmp)
             self.assertIsNotNone(st)
@@ -231,23 +253,45 @@ class EngineDynamoGmsTests(unittest.TestCase):
             self.assertTrue(st["launcher"]["gms_read_only"])
             self.assertTrue(st["launcher"]["gms_scratch_kv"])
             self.assertEqual(st["launcher"]["gms_socket_dir"], "/tmp/gms-test")
+            self.assertEqual(st["launcher"]["gms_pythonpath"], "/opt/gms")
 
     def test_inherit_launcher_handles_equals_syntax_and_backend_switches(self):
         # Switch from saved --weights (ipc_cache) to --weights-backend=dynamo_gms
+        # must NOT inherit old ipc_cache --weights-socket-dir!
         raw1 = [
             "reconfigure", "--pid", "1", "--cache-root", "/tmp/c", "--log", "/tmp/l",
-            "--weights-backend=dynamo_gms", "--gms-socket-dir=/tmp/b",
+            "--weights-backend=dynamo_gms",
         ]
         a1, _ = engine.parse(raw1)
         engine._inherit_launcher(
             a1,
-            {"weights": True, "weights_backend": "", "gms_socket_dir": "/tmp/a", "kvplan": ""},
+            {
+                "weights": True, "weights_backend": "",
+                "weights_socket_dir": "/tmp/old-ipc-dir",
+                "gms_socket_dir": "", "kvplan": "",
+            },
             raw1,
         )
         self.assertFalse(a1.weights)
         self.assertEqual(a1.weights_backend, "dynamo_gms")
-        self.assertEqual(a1.gms_socket_dir, "/tmp/b")
+        self.assertEqual(a1.weights_socket_dir, "")
         self.assertIsNone(a1.kvplan)
+
+        # Launcher-only backend signature detects switches (prevents noop / live corruption).
+        saved_gms = {
+            "weights": False, "weights_backend": "dynamo_gms",
+            "gms_socket_dir": "/tmp/a", "gms_read_only": False, "gms_scratch_kv": False,
+        }
+        raw_flip = [
+            "reconfigure", "--pid", "1", "--cache-root", "/tmp/c", "--log", "/tmp/l",
+            "--gms-scratch-kv",
+        ]
+        a_flip, _ = engine.parse(raw_flip)
+        engine._inherit_launcher(a_flip, saved_gms, raw_flip)
+        self.assertNotEqual(
+            engine._launcher_backend_signature(saved_gms),
+            engine._launcher_backend_signature(a_flip),
+        )
 
         # Switch from saved dynamo_gms to --weights-backend=none drops gms_* inheritance
         raw2 = [

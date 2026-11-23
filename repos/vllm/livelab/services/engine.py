@@ -161,6 +161,7 @@ def _apply_gms_env(a, env):
     if store.scratch_kv:
         env["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
     if store.extra_pythonpath:
+        env["RSIBOX_GMS_PYTHONPATH"] = os.pathsep.join(store.extra_pythonpath)
         cur = [p for p in (env.get("PYTHONPATH") or "").split(os.pathsep) if p]
         for entry in store.extra_pythonpath:
             if entry not in cur:
@@ -191,6 +192,7 @@ def engine_env(a, base=None):
         and not getattr(a, "weights", False)
         and (
             getattr(a, "gms_socket_dir", "")
+            or getattr(a, "gms_read_only", False)
             or getattr(a, "gms_scratch_kv", False)
             or getattr(a, "gms_pythonpath", "")
         )
@@ -386,6 +388,17 @@ def argv_findings(a, v):
             why="--weights selects vLLM's ipc_cache daemon; it conflicts with another --weights-backend",
             actions=["drop --weights", f"or drop --weights-backend {a.weights_backend}"],
         ))
+    if (getattr(a, "weights_backend", "") == "none"
+            and "load_format" in explicit
+            and args["load_format"] in ("ipc_cache", GMS_VLLM_LOAD_FORMAT)):
+        found.append(_finding(
+            "weights_backend_conflict",
+            f"--weights-backend none and explicit --load-format {args['load_format']}",
+            "omit --load-format (or select the matching --weights-backend)",
+            why="--weights-backend none disables resident-weights launcher setup (worker class / socket env), "
+                "which would leave an explicit resident-weights --load-format misconfigured",
+            actions=["drop --load-format", f"or set --weights-backend matching {args['load_format']}"],
+        ))
     backend = weights_backend(a, v)
     if backend == "dynamo_gms":
         delta = gms_store(a).launch_delta(
@@ -450,6 +463,21 @@ def reconfig_findings(launcher_args, parsed_vllm, reconfig):
     )]
 
 
+def _strip_flag_from_argv(argv, flag):
+    """Remove all `--flag val` and `--flag=val` occurrences from an argv list."""
+    out, i = [], 0
+    prefix = flag + "="
+    while i < len(argv):
+        if argv[i] == flag:
+            i += 2
+        elif argv[i].startswith(prefix):
+            i += 1
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
+
+
 def serve_cmd(a, vargv, v):
     """The `vllm serve` argv: the caller's, verbatim, then what the launcher and the holders
     need that the caller did not set (host, load format and loader config, worker class).
@@ -465,6 +493,8 @@ def serve_cmd(a, vargv, v):
             explicit_flags=set(explicit),
             explicit_values=v["args"],
         )
+        if "--model-loader-extra-config" in delta.args:
+            cmd = _strip_flag_from_argv(cmd, "--model-loader-extra-config")
         cmd += list(delta.args)
     else:
         if (a.weights or backend == "ipc_cache") and "load_format" not in explicit:
@@ -572,20 +602,32 @@ def _strip_injected_flags(argv):
     """Strip launcher-appended holder flags from a raw `/proc/<pid>/cmdline` `vllm serve` tail."""
     cleaned, i = [], 0
     while i < len(argv):
-        if i + 1 < len(argv) and any(argv[i] == f and (v is None or argv[i + 1] == v) for f, v in _INJECTED_FLAGS):
+        tok = argv[i]
+        matched_eq = False
+        for f, v in _INJECTED_FLAGS:
+            if tok.startswith(f + "="):
+                val = tok.split("=", 1)[1]
+                if v is None or val == v:
+                    matched_eq = True
+                    break
+        if matched_eq:
+            i += 1
+        elif i + 1 < len(argv) and any(tok == f and (v is None or argv[i + 1] == v) for f, v in _INJECTED_FLAGS):
             i += 2
         else:
-            cleaned.append(argv[i])
+            cleaned.append(tok)
             i += 1
     return cleaned
 
 
 def _flag_value(tokens, flag):
-    try:
-        idx = tokens.index(flag)
-    except ValueError:
-        return None
-    return tokens[idx + 1] if idx + 1 < len(tokens) else None
+    prefix = flag + "="
+    for idx, tok in enumerate(tokens):
+        if tok == flag:
+            return tokens[idx + 1] if idx + 1 < len(tokens) else None
+        if tok.startswith(prefix):
+            return tok[len(prefix):]
+    return None
 
 
 def _proc_environ(pid, proc_root="/proc"):
@@ -637,7 +679,7 @@ def load_engine_state(cache_root, pid, proc_root="/proc"):
             "gms_socket_dir": penv.get("GMS_SOCKET_DIR", "") if is_gms else "",
             "gms_read_only": bool(cfg_dict.get("gms_read_only", False)) if is_gms else False,
             "gms_scratch_kv": scratch_raw in ("1", "true", "yes") if is_gms else False,
-            "gms_pythonpath": "",
+            "gms_pythonpath": penv.get("RSIBOX_GMS_PYTHONPATH", "") if is_gms else "",
             "kvplan": "" if wcls == KVPLAN_WORKER else None,
             "fork": False, "zygote": "",
         },
@@ -871,6 +913,10 @@ def _launch_process(launcher_args, vllm_argv, parsed_vllm, env, preflight_report
 def start(a, vargv):
     """Launch the server; return {"pid", "cmd", "t_launch", "port", "vllm_args", ...} or exit 2."""
     env = engine_env(a)
+    if (not getattr(a, "weights_backend", "")
+            and not getattr(a, "weights", False)
+            and _flag_value(vargv, "--load-format") == GMS_VLLM_LOAD_FORMAT):
+        _apply_gms_env(a, env)
     if a.zygote and a.zygote_check:
         reply = zygote.check(a.zygote, env, accept=_accept(a))
         _exit_json({"zygote_check": reply}, code=0 if reply.get("ok") else 2)
@@ -890,7 +936,6 @@ def start(a, vargv):
 
 _INHERIT_FLAGS = (
     ("--vllm", "vllm", False),
-    ("--weights-socket-dir", "weights_socket_dir", False),
     ("--fork", "fork", True),
     ("--zygote", "zygote", False),
 )
@@ -923,14 +968,45 @@ def _inherit_launcher(launcher_args, saved_launcher, raw_argv):
         if not _has_cli_flag(tokens, flag) and saved_launcher.get(attr):
             setattr(launcher_args, attr, True if is_bool else saved_launcher[attr])
     resolved_wb = weights_backend(launcher_args)
+    if (not _has_cli_flag(tokens, "--weights-socket-dir")
+            and saved_launcher.get("weights_socket_dir")
+            and (resolved_wb == "ipc_cache" or (resolved_wb == "none" and not explicit_wb and not explicit_w))):
+        launcher_args.weights_socket_dir = saved_launcher["weights_socket_dir"]
     if resolved_wb == "dynamo_gms" or (resolved_wb == "none" and not explicit_wb and not explicit_w):
         for flag, attr, is_bool in _GMS_INHERIT_FLAGS:
             if not _has_cli_flag(tokens, flag) and saved_launcher.get(attr):
                 setattr(launcher_args, attr, True if is_bool else saved_launcher[attr])
     if (not _has_cli_flag(tokens, "--kvplan")
             and saved_launcher.get("kvplan") is not None
-            and weights_backend(launcher_args) != "dynamo_gms"):
+            and resolved_wb != "dynamo_gms"):
         launcher_args.kvplan = saved_launcher["kvplan"]
+
+
+def _launcher_backend_signature(launcher_obj, parsed_vllm=None):
+    """Normalized weights/GMS/kvplan tuple to detect launcher-only `reconfigure` deltas."""
+    if isinstance(launcher_obj, dict):
+        ns = argparse.Namespace(
+            weights=bool(launcher_obj.get("weights", False)),
+            weights_backend=launcher_obj.get("weights_backend", ""),
+            weights_socket_dir=launcher_obj.get("weights_socket_dir", ""),
+            gms_socket_dir=launcher_obj.get("gms_socket_dir", ""),
+            gms_read_only=bool(launcher_obj.get("gms_read_only", False)),
+            gms_scratch_kv=bool(launcher_obj.get("gms_scratch_kv", False)),
+            gms_pythonpath=launcher_obj.get("gms_pythonpath", ""),
+            kvplan=launcher_obj.get("kvplan"),
+        )
+    else:
+        ns = launcher_obj
+    wb = weights_backend(ns, parsed_vllm)
+    return (
+        wb,
+        (getattr(ns, "weights_socket_dir", "") or "") if wb == "ipc_cache" else "",
+        gms_store(ns).socket_dir if wb == "dynamo_gms" else "",
+        bool(getattr(ns, "gms_read_only", False)) if wb == "dynamo_gms" else False,
+        bool(getattr(ns, "gms_scratch_kv", False)) if wb == "dynamo_gms" else False,
+        (getattr(ns, "gms_pythonpath", "") or "") if wb == "dynamo_gms" else "",
+        getattr(ns, "kvplan", None),
+    )
 
 
 LIVE_ACK_TIMEOUT_S = 15.0
@@ -1080,8 +1156,16 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     if not old_parsed or not old_parsed.get("ok"):
         old_parsed = read_vllm_args(launcher_args, old_vargv, env)
     new_parsed = read_vllm_args(launcher_args, new_vargv, env)
+    cli_tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
     if weights_backend(launcher_args, new_parsed) == "dynamo_gms":
+        if not _has_cli_flag(cli_tokens, "--kvplan"):
+            launcher_args.kvplan = None
         _apply_gms_env(launcher_args, env)
+    launcher_changed = (
+        bool(state.get("launcher"))
+        and _launcher_backend_signature(state["launcher"], old_parsed)
+        != _launcher_backend_signature(launcher_args, new_parsed)
+    )
     reconfig = vllm_args.classify_reconfig(old_parsed, new_parsed) if (old_parsed.get("ok") and new_parsed.get("ok")) else None
     findings, preflight_report = argv_findings(launcher_args, new_parsed), {}
     if not findings and new_parsed.get("ok"):
@@ -1097,11 +1181,12 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                     **({"reconfig": reconfig} if reconfig else {}), "note": "not started; old engine left running"})
     old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
     new_port = new_parsed["args"]["port"]
-    if reconfig is not None and reconfig.get("tier") == "noop":
+    if reconfig is not None and reconfig.get("tier") == "noop" and not launcher_changed:
         _exit_json({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                     "pid": launcher_args.pid, "note": "nothing changed"}, code=0)
     live_values, live_reason = (
         (None, "the weight key changes (holder reshard)") if reshard
+        else (None, "launcher weights/GMS settings changed") if launcher_changed
         else (None, "--reconfigure-restart given") if getattr(launcher_args, "reconfigure_restart", False)
         else (None, "the port changes") if new_port != old_port
         else live_reconfig_plan(state, reconfig)
