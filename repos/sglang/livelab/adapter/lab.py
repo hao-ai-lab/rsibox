@@ -1,5 +1,5 @@
 """SglangLab: live-lab verbs over `rsibox.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
-import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, threading
+import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, sys, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
@@ -25,6 +25,10 @@ class SglangLab(ConformanceHarness, BaseLab):
         self.fork_subprocs, self.fork_subprocs_fallback, self._fork_subprocs_restore = bool(fork_subprocs), [], None
         raw_wc = os.fspath(weight_cache_dir).strip() if weight_cache_dir else ""
         self.weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
+        if self.weight_cache_dir and weight_store is not None and getattr(weight_store, "name", "none") != "none":
+            raise ValueError(
+                f"cannot pass both weight_cache_dir and weight_store ({getattr(weight_store, 'name', type(weight_store).__name__)})"
+            )
         self._weight_cache_env_restore = None
         super().__init__(
             receipts=receipts,
@@ -137,37 +141,112 @@ class SglangLab(ConformanceHarness, BaseLab):
                     os.environ[k] = old
         self._weight_cache_env_restore = _restore
 
+    @staticmethod
+    def _build_gms_server_args(cfg):
+        """Construct SGLang `ServerArgs` and bind Dynamo GMS via `setup_gms()` + `declare_resolution()`.
+
+        Follows upstream `gpu_memory_service/examples/sglang_gms_smoke.py`: bare SGLang
+        rejects `load_format="gms"` unless `setup_gms(server_args)` registers `GMSModelLoader`
+        and enables the GMS memory saver via `declare_resolution()` (SGLang >=0.5.21).
+        """
+        try:
+            from sglang.srt.arg_groups.overrides import declare_resolution
+            from sglang.srt.server_args import ServerArgs
+        except ImportError as exc:
+            raise RuntimeError(
+                "Dynamo GMS for SGLang requires SGLang >=0.5.21 exposing "
+                "sglang.srt.arg_groups.overrides.declare_resolution()"
+            ) from exc
+        try:
+            from gpu_memory_service.integrations.sglang import setup_gms
+        except ImportError as exc:
+            raise RuntimeError(
+                "Dynamo GMS for SGLang requires `gpu_memory_service` installed "
+                "(or passed via DynamoGmsStore.extra_pythonpath)"
+            ) from exc
+
+        init_keys = {k: cfg[k] for k in ("model_path", "host", "port") if k in cfg}
+        overrides = {
+            k: v for k, v in cfg.items()
+            if k not in ("model_path", "host", "port", "load_format")
+        }
+        server_args = ServerArgs(**init_keys)
+        if overrides:
+            declare_resolution(server_args, "rsibox.gms", **overrides)
+        loader_cls = setup_gms(server_args)
+        declare_resolution(server_args, "rsibox.gms.loader", load_format=loader_cls)
+        return server_args
+
     def _prepare_weight_store(self):
         """Prepare an optional pluggable `rsibox.warm.WeightStore` (e.g. `DynamoGmsStore`)."""
         store = self.weight_store
         if store is None or getattr(store, "name", "none") == "none":
             return None
         tp_size = int(self.config.get("tp_size", 1))
-        pr = store.probe(tp=tp_size)
+        pr = store.probe(tp=tp_size, visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
         if not pr.ok:
             raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
         explicit = {k for k in ("load_format", "model_loader_extra_config") if k in self.config}
         delta = store.launch_delta(engine="sglang", explicit_flags=explicit, explicit_values=self.config)
         if not delta.ok:
             raise RuntimeError(f"weight store ({store.name}) config conflict: {delta.findings[0]['observed']}")
-        if delta.env:
+
+        extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
+        env_updates = dict(delta.env or {})
+        added_sys_paths = []
+        if extra_py:
+            cur_py = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
+            for entry in extra_py:
+                if entry not in cur_py:
+                    cur_py.append(entry)
+                if entry not in sys.path:
+                    sys.path.append(entry)
+                    added_sys_paths.append(entry)
+            env_updates["PYTHONPATH"] = os.pathsep.join(cur_py)
+
+        if env_updates or added_sys_paths:
             self._restore_weight_cache_env()
-            prev = {k: os.environ.get(k) for k in delta.env}
-            os.environ.update(delta.env)
+            prev = {k: os.environ.get(k) for k in env_updates}
+            os.environ.update(env_updates)
             def _restore():
                 for k, old in prev.items():
                     if old is None:
                         os.environ.pop(k, None)
                     else:
                         os.environ[k] = old
+                for entry in reversed(added_sys_paths):
+                    with contextlib.suppress(ValueError):
+                        sys.path.remove(entry)
             self._weight_cache_env_restore = _restore
-        merged = dict(self.config)
-        if store.name == "dynamo_gms":
-            merged.setdefault("load_format", "gms")
-            extra_cfg = store.extra_loader_config()
-            if extra_cfg and "model_loader_extra_config" not in merged:
-                merged["model_loader_extra_config"] = extra_cfg
-        return merged
+
+        try:
+            merged = dict(self.config)
+            if store.name == "dynamo_gms":
+                for cg_key in ("cuda_graph_backend_decode", "cuda_graph_backend_prefill"):
+                    cg_val = merged.get(cg_key)
+                    if cg_val is not None and cg_val != "disabled":
+                        raise RuntimeError(
+                            f"SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                            f"({cg_key}={cg_val!r}); set {cg_key}='disabled' or omit it"
+                        )
+                if merged.get("disable_cuda_graph") is False:
+                    raise RuntimeError(
+                        "SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                        "(disable_cuda_graph=False)"
+                    )
+                merged.setdefault("cuda_graph_backend_decode", "disabled")
+                merged.setdefault("cuda_graph_backend_prefill", "disabled")
+                extra_cfg = store.extra_loader_config()
+                if "model_loader_extra_config" in merged:
+                    if isinstance(merged["model_loader_extra_config"], dict):
+                        merged["model_loader_extra_config"] = json.dumps(merged["model_loader_extra_config"])
+                elif extra_cfg:
+                    merged["model_loader_extra_config"] = json.dumps(extra_cfg)
+                return {"server_args": self._build_gms_server_args(merged)}
+            return merged
+        except BaseException:
+            self._restore_weight_cache_env()
+            raise
 
     def _start_engine(self):
         listener, accept_thread, accepted, errors = None, None, {}, []
