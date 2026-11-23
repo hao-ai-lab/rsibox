@@ -30,7 +30,7 @@ jobs:
       contents: read
       actions: read
       pull-requests: write
-    runs-on: ${{ vars.FASTRSI_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4

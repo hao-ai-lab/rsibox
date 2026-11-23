@@ -221,7 +221,7 @@ def review_with(engine, url, token, repo, pr, prompt, lines):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pr", required=True)
-    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "hao-ai-lab/fastrsi"))
+    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "hao-ai-lab/rsibox"))
     ap.add_argument("--engines", default="agy,codex")
     ap.add_argument("--url", default=os.environ.get("FASTRSI_REVIEW_URL"))
     ap.add_argument("--post", action="store_true", help="post the review on the PR")

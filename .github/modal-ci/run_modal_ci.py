@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Modal GPU CI: test one trusted commit of hao-ai-lab/fastrsi on Modal GPUs.
+"""Modal GPU CI: test one trusted commit of hao-ai-lab/rsibox on Modal GPUs.
 
 Stdlib only. Fetches branch heads (never refs/pull/*) into a bare mirror, refuses
 any SHA not contained on a branch of the repo (fork PRs), exports only that trusted
@@ -31,7 +31,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-REPO = "hao-ai-lab/fastrsi"
+REPO = "hao-ai-lab/rsibox"
 CONTEXT = "modal-gpu"
 HERE = Path(__file__).resolve().parent
 CPU_EXTRA = ["pytest"]
