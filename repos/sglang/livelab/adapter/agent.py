@@ -160,8 +160,15 @@ def sync_sglang_gms_globals(server_args):
     without mutating `server_args.model_loader_extra_config`, and spawned scheduler
     children unpickle `server_args` without re-running `setup_gms()`. Calling this in
     both the parent (after `setup_gms`) and `run_scheduler_entry` guarantees
-    `gms_read_only` and `gms_ro_connect_timeout_ms` are honored in every process.
+    `gms_read_only` and `gms_ro_connect_timeout_ms` are honored in every process,
+    and installs the bare-metal `CUDA_VISIBLE_DEVICES` UUID shim when configured.
     """
+    if os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"):
+        try:
+            from rsibox.warm.dynamo_gms import install_visible_devices_uuid_shim
+            install_visible_devices_uuid_shim()
+        except Exception:
+            pass
     if server_args is None:
         return
     gms_sglang = sys.modules.get("gpu_memory_service.integrations.sglang")

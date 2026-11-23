@@ -186,7 +186,22 @@ class SglangLab(ConformanceHarness, BaseLab):
         if store is None or getattr(store, "name", "none") == "none":
             return None
         tp_size = int(self.config.get("tp_size", 1))
-        pr = store.probe(tp=tp_size, visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+        uuid_map_json = None
+        if store.name == "dynamo_gms" and vis is not None and vis.strip():
+            from rsibox.warm.dynamo_gms import ENV_GMS_DEVICE_UUID_MAP, build_device_uuid_map
+            resolver = getattr(store, "_resolve_targets", None)
+            targets = resolver(visible_devices=vis, tp=tp_size) if callable(resolver) else None
+            if targets and any(logical != phys for logical, (phys, _) in enumerate(targets)):
+                uuid_map_json = json.dumps(build_device_uuid_map(targets))
+        prev_allow_remap = getattr(store, "allow_remapped_visible_devices", False)
+        if uuid_map_json and hasattr(store, "allow_remapped_visible_devices"):
+            store.allow_remapped_visible_devices = True
+        try:
+            pr = store.probe(tp=tp_size, visible_devices=vis)
+        finally:
+            if uuid_map_json and hasattr(store, "allow_remapped_visible_devices"):
+                store.allow_remapped_visible_devices = prev_allow_remap
         if not pr.ok:
             raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
         explicit = {
@@ -201,6 +216,8 @@ class SglangLab(ConformanceHarness, BaseLab):
         self._restore_weight_cache_env()
         extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
         env_updates = dict(delta.env or {})
+        if uuid_map_json:
+            env_updates[ENV_GMS_DEVICE_UUID_MAP] = uuid_map_json
         added_sys_paths = []
         if extra_py:
             cur_py = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
