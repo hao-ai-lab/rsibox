@@ -1,11 +1,17 @@
-# FastRSI
+<p align="center">
+  <img alt="rsibox" src="assets/rsibox-logo.svg" width="360">
+</p>
 
-Test an edit to a running ML engine without restarting it.
+<p align="center">
+  <a href="#quickstart"><b>Quickstart</b></a> ·
+  <a href="#what-is-in-the-repo-today"><b>Engines</b></a> ·
+  <a href="core/livelab/INTERFACE.md"><b>Interface</b></a> ·
+  <a href="docs/kernels-and-graphs.md"><b>Kernels &amp; Graphs</b></a> ·
+  <a href="CONTRIBUTING.md"><b>Contributing</b></a> ·
+  <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
+</p>
 
-A coding agent (or a person) optimizing vLLM, Megatron-LM, FastVideo, veRL, SGLang or miles pays a full
-engine restart for every idea it tries. FastRSI installs the edit into the warm engine process,
-proves that the new code actually ran, measures it, and undoes it. When an edit cannot be swapped
-in safely, it refuses and says which restart boundary the edit needs.
+`rsibox` (**FastRSI**) lets coding agents and engineers test edits to a running ML engine without restarting it. Instead of paying a full multi-minute restart for every idea in vLLM, Megatron-LM, FastVideo, veRL, SGLang, or miles, `rsibox` installs the edit into the warm engine process, proves that the new code actually ran, measures it, and undoes it cleanly. When an edit cannot be swapped in safely, it refuses with the exact restart boundary required.
 
 ## Why
 
@@ -204,6 +210,21 @@ A live check shows that the edited path ran and that its output matched on the c
 does not show the edit is equivalent on all inputs. An engine needs a Python control layer the lab
 can reach between steps. One agent works on one warm process at a time.
 
+## Contributing
+
+Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup and PR guidelines, and [`AGENTS.md`](AGENTS.md) for the full contributor and coding-agent rules.
+
+## Citation
+
+```bibtex
+@misc{rsibox2026,
+  title        = {rsibox (FastRSI): Live Hot-Swap Sandbox for ML Engines},
+  author       = {Hao AI Lab},
+  year         = {2026},
+  howpublished = {\url{https://github.com/hao-ai-lab/rsibox}}
+}
+```
+
 ## License
 
-Apache-2.0 ([`LICENSE`](LICENSE)).
+Apache License 2.0 — see [`LICENSE`](LICENSE).
