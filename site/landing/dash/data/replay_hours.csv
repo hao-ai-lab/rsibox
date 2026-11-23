@@ -6,13 +6,13 @@ vLLM,codex,d2,3,20×,20,5.76,replay of the logged run
 vLLM,codex,d2,4,50×,50,5.75,replay of the logged run
 vLLM,codex,d2,5,100×,100,5.75,replay of the logged run
 vLLM,codex,d2,6,∞,,5.75,replay of the logged run
-vLLM,fastrsi,d1,0,1×,1,5.99,replay of the logged run
-vLLM,fastrsi,d1,1,5×,5,3.87,replay of the logged run
-vLLM,fastrsi,d1,2,10×,10,3.71,replay of the logged run
-vLLM,fastrsi,d1,3,20×,20,3.64,replay of the logged run
-vLLM,fastrsi,d1,4,50×,50,3.60,replay of the logged run
-vLLM,fastrsi,d1,5,100×,100,3.59,replay of the logged run
-vLLM,fastrsi,d1,6,∞,,3.58,replay of the logged run
+vLLM,rsibox,d1,0,1×,1,5.99,replay of the logged run
+vLLM,rsibox,d1,1,5×,5,3.87,replay of the logged run
+vLLM,rsibox,d1,2,10×,10,3.71,replay of the logged run
+vLLM,rsibox,d1,3,20×,20,3.64,replay of the logged run
+vLLM,rsibox,d1,4,50×,50,3.60,replay of the logged run
+vLLM,rsibox,d1,5,100×,100,3.59,replay of the logged run
+vLLM,rsibox,d1,6,∞,,3.58,replay of the logged run
 Megatron,codex,5c,0,1×,1,5.98,replay of the logged run
 Megatron,codex,5c,1,5×,5,5.94,replay of the logged run
 Megatron,codex,5c,2,10×,10,5.94,replay of the logged run
@@ -20,13 +20,13 @@ Megatron,codex,5c,3,20×,20,5.93,replay of the logged run
 Megatron,codex,5c,4,50×,50,5.93,replay of the logged run
 Megatron,codex,5c,5,100×,100,5.93,replay of the logged run
 Megatron,codex,5c,6,∞,,5.93,replay of the logged run
-Megatron,fastrsi,5a,0,1×,1,6.00,replay of the logged run
-Megatron,fastrsi,5a,1,5×,5,5.48,replay of the logged run
-Megatron,fastrsi,5a,2,10×,10,5.44,replay of the logged run
-Megatron,fastrsi,5a,3,20×,20,5.42,replay of the logged run
-Megatron,fastrsi,5a,4,50×,50,5.41,replay of the logged run
-Megatron,fastrsi,5a,5,100×,100,5.41,replay of the logged run
-Megatron,fastrsi,5a,6,∞,,5.41,replay of the logged run
+Megatron,rsibox,5a,0,1×,1,6.00,replay of the logged run
+Megatron,rsibox,5a,1,5×,5,5.48,replay of the logged run
+Megatron,rsibox,5a,2,10×,10,5.44,replay of the logged run
+Megatron,rsibox,5a,3,20×,20,5.42,replay of the logged run
+Megatron,rsibox,5a,4,50×,50,5.41,replay of the logged run
+Megatron,rsibox,5a,5,100×,100,5.41,replay of the logged run
+Megatron,rsibox,5a,6,∞,,5.41,replay of the logged run
 FastVideo,codex,Omni r2,0,1×,1,7.84,replay of the logged run
 FastVideo,codex,Omni r2,1,5×,5,5.89,replay of the logged run
 FastVideo,codex,Omni r2,2,10×,10,5.66,replay of the logged run
@@ -34,10 +34,10 @@ FastVideo,codex,Omni r2,3,20×,20,5.55,replay of the logged run
 FastVideo,codex,Omni r2,4,50×,50,5.49,replay of the logged run
 FastVideo,codex,Omni r2,5,100×,100,5.46,replay of the logged run
 FastVideo,codex,Omni r2,6,∞,,5.44,replay of the logged run
-FastVideo,fastrsi,Omni r2,0,1×,1,7.61,replay of the logged run
-FastVideo,fastrsi,Omni r2,1,5×,5,4.38,replay of the logged run
-FastVideo,fastrsi,Omni r2,2,10×,10,3.99,replay of the logged run
-FastVideo,fastrsi,Omni r2,3,20×,20,3.80,replay of the logged run
-FastVideo,fastrsi,Omni r2,4,50×,50,3.68,replay of the logged run
-FastVideo,fastrsi,Omni r2,5,100×,100,3.64,replay of the logged run
-FastVideo,fastrsi,Omni r2,6,∞,,3.60,replay of the logged run
+FastVideo,rsibox,Omni r2,0,1×,1,7.61,replay of the logged run
+FastVideo,rsibox,Omni r2,1,5×,5,4.38,replay of the logged run
+FastVideo,rsibox,Omni r2,2,10×,10,3.99,replay of the logged run
+FastVideo,rsibox,Omni r2,3,20×,20,3.80,replay of the logged run
+FastVideo,rsibox,Omni r2,4,50×,50,3.68,replay of the logged run
+FastVideo,rsibox,Omni r2,5,100×,100,3.64,replay of the logged run
+FastVideo,rsibox,Omni r2,6,∞,,3.60,replay of the logged run

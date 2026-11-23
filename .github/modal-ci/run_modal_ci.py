@@ -190,12 +190,12 @@ def run_modal_gpu(
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("FASTRSI_", "PYTHONPATH", "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API"))
+        if not k.startswith(("RSIBOX_", "PYTHONPATH", "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API"))
     }
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
-    env["FASTRSI_MODAL_GPU"] = gpu
-    env["FASTRSI_MODAL_TIMEOUT"] = str(remote_timeout)
+    env["RSIBOX_MODAL_GPU"] = gpu
+    env["RSIBOX_MODAL_TIMEOUT"] = str(remote_timeout)
 
     t_stage = time.monotonic()
     modal_timeout = max(timeout * 3, 2400)
@@ -294,10 +294,10 @@ def cpu_suites(src: Path, py: str, res: Path):
         ut("core-conformance-cases", "conformance", ".", cwd="core/livelab"),
         ut("core-kernel", "core/livelab/kernel", "core/livelab"),
         ut("core-forksafe", "core/livelab", p="test_forksafe.py"),
-        ut("core-fastrsi", "core/livelab/fastrsi", "core/livelab"),
+        ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
         ut("core-survey", "core/livelab/survey", "core/livelab"),
         ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
-        cmd("core-doctor", [py, "-m", "fastrsi", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
+        cmd("core-doctor", [py, "-m", "rsibox", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
         cmd("core-conformance-toylab", [py, "-m", "conformance", "--lab", "kernel.toy_lab:ToyLab"],
             cwd="core/livelab"),
         ut("template-adapter", "template/livelab/adapter", "template/livelab"),
@@ -311,21 +311,21 @@ def cpu_suites(src: Path, py: str, res: Path):
          "argv": [py, "-m", "pytest", "-v", "-rs", "-p", "no:cacheprovider",
                   f"--junitxml={res / 'vllm-services.xml'}", "repos/vllm/livelab/services"],
          "cwd": "."},
-        ut("megatron-livelab", "repos/megatron/livelab/fastrsi_megatron", "repos/megatron/livelab"),
+        ut("megatron-livelab", "repos/megatron/livelab/rsibox_megatron", "repos/megatron/livelab"),
     ]
     if (src / "repos/megatron/tools").is_dir():
         steps.append(ut("megatron-tools", "repos/megatron/tools"))
     steps += [
         ut("verl-adapter", "repos/verl/livelab/adapter", "repos/verl/livelab"),
         ut("verl-tools", "repos/verl/tools", "repos/verl"),
-        cmd("verl-conformance", [py, "-m", "fastrsi", "conformance", "verl"],
+        cmd("verl-conformance", [py, "-m", "rsibox", "conformance", "verl"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("miles-adapter", "repos/miles/livelab/adapter", "repos/miles/livelab"),
-        cmd("miles-conformance", [py, "-m", "fastrsi", "conformance", "miles"],
+        cmd("miles-conformance", [py, "-m", "rsibox", "conformance", "miles"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("sglang-adapter", "repos/sglang/livelab/adapter", "repos/sglang/livelab"),
         ut("sglang-services", "repos/sglang/livelab/services", "repos/sglang/livelab"),
-        cmd("sglang-conformance", [py, "-m", "fastrsi", "conformance", "sglang"],
+        cmd("sglang-conformance", [py, "-m", "rsibox", "conformance", "sglang"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("review-checkers", ".github/review", ".github/review"),
         ut("scripts-tests", "scripts", p="test_*.py"),
@@ -375,7 +375,7 @@ def run_stage(stage, src: Path, py: str, env_extra: dict, run_dir: Path, timeout
         steps = [step for step in steps if step["name"] in suites_filter]
     for step in steps:
         env = {k: v for k, v in os.environ.items()
-               if not k.startswith(("FASTRSI_", "PYTHON", "VIRTUAL_ENV",
+               if not k.startswith(("RSIBOX_", "PYTHON", "VIRTUAL_ENV",
                                     "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API", "MODAL_TOKEN_"))}
         env["PATH"] = str(Path(py).parent) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
         env.update(env_extra)
@@ -444,7 +444,7 @@ def quickstart(src: Path, uv: str, python: str, run_dir: Path, deadline: Deadlin
                               stderr=subprocess.STDOUT)
         if exit_code == 0:
             env = {k: v for k, v in os.environ.items()
-                   if not k.startswith(("PYTHON", "FASTRSI_",
+                   if not k.startswith(("PYTHON", "RSIBOX_",
                                         "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_API", "MODAL_TOKEN_"))}
             env["CUDA_VISIBLE_DEVICES"] = ""
             exit_code = run_group(["bash", str(script)], 1800, deadline, stdout=log,
@@ -593,14 +593,14 @@ def main(argv=None):
     ap.add_argument("--sha", required=True)
     ap.add_argument("--source", default=f"https://github.com/{REPO}.git",
                     help="git URL or bundle to fetch branch heads from")
-    ap.add_argument("--work", default=str(Path.home() / "fastrsi-ci"))
+    ap.add_argument("--work", default=str(Path.home() / "rsibox-ci"))
     ap.add_argument("--pr", type=int, help="also require this PR to be same-repo with head == sha (uses gh)")
     ap.add_argument("--gpu", default=os.environ.get("MODAL_GPU", "L4"),
                     help="Modal GPU spec (default: L4)")
     ap.add_argument("--python", default="3.12")
     ap.add_argument("--quickstart-pythons", default="3.11,3.12", help="requires-python is >=3.11")
-    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("FASTRSI_VLLM_MODEL", ""),
-                    help="model path/id for FASTRSI_VLLM_MODEL (vllm-services E2E)")
+    ap.add_argument("--vllm-model", default=os.environ.get("MODAL_VLLM_MODEL") or os.environ.get("RSIBOX_VLLM_MODEL", ""),
+                    help="model path/id for RSIBOX_VLLM_MODEL (vllm-services E2E)")
     ap.add_argument("--suites", default="", help="optional comma-separated suite filter for Modal GPU stage")
     ap.add_argument("--stages", default="gpu", help="comma-separated stages: gpu (default), cpu, quickstart")
     ap.add_argument("--modal-cmd", default="", help="override Modal CLI command (auto-detected if empty)")
@@ -680,8 +680,8 @@ def main(argv=None):
                     "cpu",
                     src,
                     str(envs / "cpu/bin/python"),
-                    {**base_env, "CUDA_VISIBLE_DEVICES": "", "FASTRSI_VLLM_PYTHON": "",
-                     "FASTRSI_VLLM_MODEL": "", "FASTRSI_GPU_E2E": "0"},
+                    {**base_env, "CUDA_VISIBLE_DEVICES": "", "RSIBOX_VLLM_PYTHON": "",
+                     "RSIBOX_VLLM_MODEL": "", "RSIBOX_GPU_E2E": "0"},
                     run_dir,
                     a.timeout,
                     deadline,

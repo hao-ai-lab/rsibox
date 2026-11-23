@@ -22,7 +22,7 @@ Python call site
   +-- [Path A: Plain Python function]
   |     fn(*args)
   |       --> reads fn.__code__ (swapped in place by journal.set_code)
-  |       --> runs __fastrsi_hit__(key) at top of body
+  |       --> runs __rsibox_hit__(key) at top of body
   |       --> dispatches eager ops to the GPU
   |
   +-- [Path B: Triton @jit / @autotune / @heuristics callable]
@@ -75,9 +75,9 @@ swap.analyze (text half, pure AST / source lines)
   +-- 1. Match target (qualname, firstlineno) in base_tree and patch_tree
   +-- 2. BEFORE witness.inject modifies the target AST node:
   |      jit.text_of(lines, base_node, patch_node)
-  |        -> cuts clean raw_src and dedented _src from patch lines (no __fastrsi_hit__ in _src)
+  |        -> cuts clean raw_src and dedented _src from patch lines (no __rsibox_hit__ in _src)
   |        -> checks if args/returns or decorator_list AST changed (sets guard if so)
-  +-- 3. witness.inject inserts __fastrsi_hit__(key) into Python AST (for added non-JIT defs
+  +-- 3. witness.inject inserts __rsibox_hit__(key) into Python AST (for added non-JIT defs
          and for fn.__code__ fingerprint consistency)
   |
 swap.stage (live half, phase 1 prepare while engine steps continue)
@@ -122,9 +122,9 @@ swap.apply (phase 2 commit inside one step gap)
 
 ### 1. Slicing clean source text before witness injection (`jit.text_of`)
 
-For plain Python functions, `swap.analyze` calls `witness.inject(node, key)` to insert `__fastrsi_hit__("<module>:<qualname>:<line>")` as the first statement of the function body, then compiles the modified AST into bytecode.
+For plain Python functions, `swap.analyze` calls `witness.inject(node, key)` to insert `__rsibox_hit__("<module>:<qualname>:<line>")` as the first statement of the function body, then compiles the modified AST into bytecode.
 
-A Triton kernel cannot execute `__fastrsi_hit__`: Triton's compiler parses `JITFunction._src` into Triton IR and rejects unknown Python calls. In `swap._analyze_trees`, `JIT.text_of(lines, bq[q][i], node)` therefore runs **before** `_inject(node, k, undo)`:
+A Triton kernel cannot execute `__rsibox_hit__`: Triton's compiler parses `JITFunction._src` into Triton IR and rejects unknown Python calls. In `swap._analyze_trees`, `JIT.text_of(lines, bq[q][i], node)` therefore runs **before** `_inject(node, k, undo)`:
 
 - It slices `raw = lines[start - 1 : node.end_lineno]` directly from the clean patched source text, starting at `node.decorator_list[0].lineno` (matching `inspect.getsourcelines`).
 - It dedents `"".join(raw)` and strips the leading decorator lines down to `^def\s+\w+\s*\(` to form `src` (matching how `JITFunction.__init__` builds `_src`), while preserving both `start` (the first decorator line, stored in `starting_line_number`) and `def_line = node.lineno` (stored in `def_file_line_number`) so compiler diagnostics report exact line numbers.
@@ -188,13 +188,13 @@ Because the original `CompiledKernel` objects and autotuner `Config` choices wer
 When a patch introduces a brand-new `@triton.jit` function that does not exist in the file on disk, two things must happen:
 
 1. **Source lookup during `exec` (`jit.seeded_lines`)**: Executing `@triton.jit def bump(v): ...` calls `inspect.getsourcelines(bump)`, which looks up `mod.__file__` in Python's `linecache`. Without intervention, `linecache` reads the unedited disk file and either slices the wrong lines or raises `OSError` if the patch is longer than the file. `swap.stage` leaves `linecache` and module namespaces untouched (`pending_adds` only); at commit time, `swap.apply` seeds `linecache` (with `journal.on_undo` restore) and invokes `_build_adds`, which wraps each scratch `exec` in `with JIT.seeded_lines(mod.__file__, st.source):`, temporarily setting `linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)` and restoring the previous entry on exit.
-2. **Witnessing an inlined added helper (`jit.arm_added`)**: Because the added function is a `@triton.jit` callable, `swap.analyze` does not inject `__fastrsi_hit__` into its body (`not _jit_decorator(n)`). At commit, `swap.apply` calls `jit.arm_added(obj, key, plans, journal, witness, added=[...])`. Starting with `jf`, it collects every `f` in `p["affected"]` for each plan `p` in `plans` whose new source `p["text"]["src"]` contains `jf.fn.__name__` as a word token (`re.findall(r"\w+", ...)`), plus transitive callers from `callers_of(jf, others)` among the other `@triton.jit` helpers in `added`, deduplicating by `id(f)`. `_hook_into` then registers `witness.arm(key, journal)` and appends a per-kernel `witness.arm_launch(key, label(f), journal)` hook (falling back to the shared `witness.arm` closure if `witness` has no `arm_launch`) to each kernel's `pre_run_hooks`, ensuring a single launch increments each key once and attributes proof to the launched kernel.
+2. **Witnessing an inlined added helper (`jit.arm_added`)**: Because the added function is a `@triton.jit` callable, `swap.analyze` does not inject `__rsibox_hit__` into its body (`not _jit_decorator(n)`). At commit, `swap.apply` calls `jit.arm_added(obj, key, plans, journal, witness, added=[...])`. Starting with `jf`, it collects every `f` in `p["affected"]` for each plan `p` in `plans` whose new source `p["text"]["src"]` contains `jf.fn.__name__` as a word token (`re.findall(r"\w+", ...)`), plus transitive callers from `callers_of(jf, others)` among the other `@triton.jit` helpers in `added`, deduplicating by `id(f)`. `_hook_into` then registers `witness.arm(key, journal)` and appends a per-kernel `witness.arm_launch(key, label(f), journal)` hook (falling back to the shared `witness.arm` closure if `witness` has no `arm_launch`) to each kernel's `pre_run_hooks`, ensuring a single launch increments each key once and attributes proof to the launched kernel.
 
 ### Failure modes prevented by `kernel/jit.py`
 
 | Failure mode | Root cause if unhandled | How `kernel/jit.py` and `swap.py` prevent it |
 |---|---|---|
-| Triton compile error on `__fastrsi_hit__` | AST witness injection runs before source extraction, polluting `JITFunction._src`. | `jit.text_of` slices clean source lines from `source.splitlines(keepends=True)` before `witness.inject` mutates the AST; `jit.arm_added` skips AST injection on added `@triton.jit` defs. |
+| Triton compile error on `__rsibox_hit__` | AST witness injection runs before source extraction, polluting `JITFunction._src`. | `jit.text_of` slices clean source lines from `source.splitlines(keepends=True)` before `witness.inject` mutates the AST; `jit.arm_added` skips AST injection on added `@triton.jit` defs. |
 | Leaf kernel edit commits but GPU runs old `cubin` | `JITFunction.fn.__code__` is swapped, but `device_caches` still maps the specialization tuple to the old `CompiledKernel`. | `jit.invalidate` clears `f.device_caches`, `f.hash`, and `f.used_global_vals`, and clears wrapping `Autotuner.cache` dicts. |
 | Edited `@triton.jit` helper leaves cross-module caller on old binary | Caller kernel inlined the old helper at compile time; clearing only the helper leaves the caller's `device_caches` and `hash` intact (or reloads the old binary from the disk cache). | `jit.scan` + `jit.callers_of` walks the AST of every loaded `JITFunction` across `sys.modules` and invalidates all transitive callers at any depth. |
 | Rebinding a removed global raises `RuntimeError` in caller | Triton 3.5+ merges callee `used_global_vals` into the caller before computing `cache_key`; stale global entries survive on the caller. | `jit.invalidate` clears `used_global_vals` on both the target kernel and every transitive caller. |
@@ -289,7 +289,7 @@ When recapturing graphs in place after a kernel rebuild:
 A core invariant of the transaction kernel (`core/livelab/kernel/README.md`) is that **a committed edit that never ran on a live workload step is never reported as proven**. With `@triton.jit` kernels and CUDA graphs, two opposite failure modes threaten a naive single-counter witness:
 
 1. **False positive from unrecaptured graph replay**: An edit to a `@triton.jit` kernel commits, but the engine keeps replaying a `CUDAGraph` captured before the edit. The GPU runs the old `cubin`. If commit alone counted as proof, the transaction would pass while testing the old kernel.
-2. **False positive from capture-only execution**: After the edit commits, the engine recaptures its CUDA graphs. During recapture, Python runs warm-up iterations and the stream-capture pass, firing `__fastrsi_hit__` and `JITFunction.pre_run_hooks` thousands of times (for example, `13,280` calls per rank across layers and batch sizes in `test_witness.py` `CaptureWitnessTest`). If capture-time calls incremented the live witness counter, `prove` would report thousands of hits even when the live verification workload never replayed any captured graph.
+2. **False positive from capture-only execution**: After the edit commits, the engine recaptures its CUDA graphs. During recapture, Python runs warm-up iterations and the stream-capture pass, firing `__rsibox_hit__` and `JITFunction.pre_run_hooks` thousands of times (for example, `13,280` calls per rank across layers and batch sizes in `test_witness.py` `CaptureWitnessTest`). If capture-time calls incremented the live witness counter, `prove` would report thousands of hits even when the live verification workload never replayed any captured graph.
 
 ### How `Witness` separates `counts` (`live`) and `capture_counts` (`capture`)
 
@@ -304,7 +304,7 @@ class Witness:
         self._capture = 0           # nesting depth of `with witness.capture():`
 ```
 
-Every witness hit—whether from a swapped Python function calling `__fastrsi_hit__(key)` or from a rebuilt Triton kernel firing `f.pre_run_hooks` (armed via `witness.arm` / `witness.arm_launch`)—calls `witness.hit(key)`:
+Every witness hit—whether from a swapped Python function calling `__rsibox_hit__(key)` or from a rebuilt Triton kernel firing `f.pre_run_hooks` (armed via `witness.arm` / `witness.arm_launch`)—calls `witness.hit(key)`:
 
 ```python
 def _capturing(self):
@@ -327,7 +327,7 @@ Two mechanisms route calls into `capture_counts`:
 1. **Stream-level probe (`Witness(capturing=fn)`)**: The participant passes a probe such as `torch.cuda.is_current_stream_capturing`. Any call made while the CUDA stream is actively recording a graph increments `capture_counts[key]`.
 2. **Recapture context (`with witness.capture():`)**: A CUDA graph recapture routine first runs 1–3 eager warm-up passes (to settle allocator addresses and trigger Triton compilation / autotuning) before entering `with torch.cuda.graph(...):`. Because those warm-up passes run on a non-capturing stream, the stream probe alone would misclassify warm-up launches as live workload steps. Wrapping the entire recapture routine (warm-ups + stream capture) in `with witness.capture():` increments `self._capture`, routing every warm-up compilation, autotuner benchmark, and stream-capture launch into `capture_counts`.
 
-When `torch` is loaded, `witness.trace_safe(fn)` marks both `witness.hook` and `witness.stub` with `torch._dynamo.assume_constant_result`. When Dynamo traces a function containing `__fastrsi_hit__(key)`, it executes the hook once during tracing (which lands in `capture_counts` when tracing runs inside `with witness.capture():`) and emits no counter mutation into the compiled FX graph.
+When `torch` is loaded, `witness.trace_safe(fn)` marks both `witness.hook` and `witness.stub` with `torch._dynamo.assume_constant_result`. When Dynamo traces a function containing `__rsibox_hit__(key)`, it executes the hook once during tracing (which lands in `capture_counts` when tracing runs inside `with witness.capture():`) and emits no counter mutation into the compiled FX graph.
 
 ### Generation-matched graph-replay witness (target design, not implemented)
 

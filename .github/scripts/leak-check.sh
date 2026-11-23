@@ -18,7 +18,7 @@ else
 fi
 
 added_files=$(git -c core.quotepath=false diff --diff-filter=AR --name-only "${diff_range[@]}" -- . "${exclude[@]}")
-export FASTRSI_LEAK_ADDED_FILES="$added_files"
+export RSIBOX_LEAK_ADDED_FILES="$added_files"
 
 script_file=$(mktemp)
 trap 'rm -f "$script_file"' EXIT
@@ -136,7 +136,7 @@ def _check_text(file_path, line_no, display_text, text, hits):
 
 
 hits = {}
-for fname in os.environ.get("FASTRSI_LEAK_ADDED_FILES", "").splitlines():
+for fname in os.environ.get("RSIBOX_LEAK_ADDED_FILES", "").splitlines():
     if fname and SENSITIVE_FILE_RE.search(fname) and not fname.endswith(".pub"):
         hits.setdefault("sensitive filename", []).append(f"{fname}:1: added sensitive file"[:160])
 
@@ -190,7 +190,7 @@ if hits:
         print(f"LEAK? {name}:")
         for e in entries:
             print(f"  {e}")
-    print("Move these to ~/fastrsi-lab/<engine>/ (or .lab/) and describe them generically. See AGENTS.md.")
+    print("Move these to ~/rsibox-lab/<engine>/ (or .lab/) and describe them generically. See AGENTS.md.")
     sys.exit(1)
 
 print(f"OK: no leak pattern in {added_count} added lines. This is a pattern check, not a guarantee.")

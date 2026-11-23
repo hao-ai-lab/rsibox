@@ -1,4 +1,4 @@
-# FastRSI Core
+# rsibox Core
 
 Shared engine-agnostic runtime (`core/livelab/`) and agent role specifications (`core/agents/`).
 No engine-specific code belongs under `core/`; per-engine adapters, restart services, knowledge

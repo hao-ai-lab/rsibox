@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Modal GPU CI app (`fastrsi-gpu-ci`) with cached core and vLLM container images.
+"""Modal GPU CI app (`rsibox-gpu-ci`) with cached core and vLLM container images.
 
 Runs all core + multi-engine suites in `run_core_gpu` (torch 2.9.1+cu128, Triton, Ray)
 in parallel with `vllm-services` in `run_vllm_gpu` (real vLLM + pytest).
@@ -22,14 +22,14 @@ from pathlib import Path
 
 import modal
 
-DEFAULT_GPU = os.environ.get("FASTRSI_MODAL_GPU", "L4")
-DEFAULT_REMOTE_TIMEOUT = int(os.environ.get("FASTRSI_MODAL_TIMEOUT", "3600"))
+DEFAULT_GPU = os.environ.get("RSIBOX_MODAL_GPU", "L4")
+DEFAULT_REMOTE_TIMEOUT = int(os.environ.get("RSIBOX_MODAL_TIMEOUT", "3600"))
 
 CORE_SUITE_ORDER = (
     "core-conformance-cases",
     "core-kernel",
     "core-forksafe",
-    "core-fastrsi",
+    "core-rsibox",
     "core-survey",
     "core-rsibox",
     "core-doctor",
@@ -57,7 +57,7 @@ ALL_SUITE_ORDER = (
     "core-conformance-cases",
     "core-kernel",
     "core-forksafe",
-    "core-fastrsi",
+    "core-rsibox",
     "core-survey",
     "core-rsibox",
     "core-doctor",
@@ -83,7 +83,7 @@ ALL_SUITE_ORDER = (
 )
 ALL_SUITES = frozenset(ALL_SUITE_ORDER)
 
-app = modal.App("fastrsi-gpu-ci")
+app = modal.App("rsibox-gpu-ci")
 
 core_gpu_image = (
     modal.Image.debian_slim(python_version="3.12")
@@ -135,10 +135,10 @@ def build_core_steps(src: Path, py: str, res_dir: Path, unittest_json_path: Path
         ut("core-conformance-cases", "conformance", ".", cwd="core/livelab"),
         ut("core-kernel", "core/livelab/kernel", "core/livelab"),
         ut("core-forksafe", "core/livelab", pattern="test_forksafe.py"),
-        ut("core-fastrsi", "core/livelab/fastrsi", "core/livelab"),
+        ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
         ut("core-survey", "core/livelab/survey", "core/livelab"),
         ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
-        cmd("core-doctor", [py, "-m", "fastrsi", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
+        cmd("core-doctor", [py, "-m", "rsibox", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
         cmd("core-conformance-toylab", [py, "-m", "conformance", "--lab", "kernel.toy_lab:ToyLab"],
             cwd="core/livelab"),
         ut("template-adapter", "template/livelab/adapter", "template/livelab"),
@@ -148,21 +148,21 @@ def build_core_steps(src: Path, py: str, res_dir: Path, unittest_json_path: Path
             [py, "-m", "conformance", "--lab", "adapter.toy_lab:ToyFastVideoLab"],
             cwd="core/livelab", env={"PYTHONPATH": str(src / "repos/fastvideo/livelab")}),
         ut("vllm-adapter", "repos/vllm/livelab/adapter", "repos/vllm/livelab"),
-        ut("megatron-livelab", "repos/megatron/livelab/fastrsi_megatron", "repos/megatron/livelab"),
+        ut("megatron-livelab", "repos/megatron/livelab/rsibox_megatron", "repos/megatron/livelab"),
     ]
     if (src / "repos/megatron/tools").is_dir():
         steps.append(ut("megatron-tools", "repos/megatron/tools"))
     steps += [
         ut("verl-adapter", "repos/verl/livelab/adapter", "repos/verl/livelab"),
         ut("verl-tools", "repos/verl/tools", "repos/verl"),
-        cmd("verl-conformance", [py, "-m", "fastrsi", "conformance", "verl"],
+        cmd("verl-conformance", [py, "-m", "rsibox", "conformance", "verl"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("miles-adapter", "repos/miles/livelab/adapter", "repos/miles/livelab"),
-        cmd("miles-conformance", [py, "-m", "fastrsi", "conformance", "miles"],
+        cmd("miles-conformance", [py, "-m", "rsibox", "conformance", "miles"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("sglang-adapter", "repos/sglang/livelab/adapter", "repos/sglang/livelab"),
         ut("sglang-services", "repos/sglang/livelab/services", "repos/sglang/livelab"),
-        cmd("sglang-conformance", [py, "-m", "fastrsi", "conformance", "sglang"],
+        cmd("sglang-conformance", [py, "-m", "rsibox", "conformance", "sglang"],
             env={"PYTHONPATH": str(src / "core/livelab")}),
         ut("review-checkers", ".github/review", ".github/review"),
         ut("scripts-tests", "scripts", pattern="test_*.py"),
@@ -172,10 +172,10 @@ def build_core_steps(src: Path, py: str, res_dir: Path, unittest_json_path: Path
 
 def build_vllm_step(py: str, res_dir: Path, vllm_model: str = "") -> dict:
     """Return the isolated `vllm-services` pytest step spec."""
-    step_env = {"FASTRSI_VLLM_PYTHON": py}
+    step_env = {"RSIBOX_VLLM_PYTHON": py}
     if vllm_model:
-        step_env["FASTRSI_VLLM_MODEL"] = vllm_model
-        step_env["FASTRSI_GPU_E2E"] = "1"
+        step_env["RSIBOX_VLLM_MODEL"] = vllm_model
+        step_env["RSIBOX_GPU_E2E"] = "1"
     return {
         "name": "vllm-services",
         "kind": "pytest",
@@ -283,10 +283,10 @@ def _run_step(step: dict, src: Path, res_dir: Path, timeout: int, label: str) ->
         "ORT_INTRA_OP_NUM_THREADS",
     }
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("FASTRSI_", "PYTHON", "VIRTUAL_ENV")) and k not in strip_exact}
+           if not k.startswith(("RSIBOX_", "PYTHON", "VIRTUAL_ENV")) and k not in strip_exact}
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env["FASTRSI_TEST_GPU"] = "1"
+    env["RSIBOX_TEST_GPU"] = "1"
     env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
     env.update(step.get("env", {}))
 
@@ -359,7 +359,7 @@ def run_core_gpu(
     """Unpack the trusted source archive and run core + non-vllm-services suites on GPU."""
     t0 = time.monotonic()
     gpu_info = _collect_gpu_info()
-    tmp_root = Path(tempfile.mkdtemp(prefix="fastrsi-core-", dir="/tmp"))
+    tmp_root = Path(tempfile.mkdtemp(prefix="rsibox-core-", dir="/tmp"))
     try:
         src = tmp_root / "src"
         res_dir = tmp_root / "results"
@@ -397,7 +397,7 @@ def run_vllm_gpu(
     """Unpack the trusted source archive and run `vllm-services` pytest suite on GPU."""
     t0 = time.monotonic()
     gpu_info = _collect_gpu_info()
-    tmp_root = Path(tempfile.mkdtemp(prefix="fastrsi-vllm-", dir="/tmp"))
+    tmp_root = Path(tempfile.mkdtemp(prefix="rsibox-vllm-", dir="/tmp"))
     try:
         src = tmp_root / "src"
         res_dir = tmp_root / "results"

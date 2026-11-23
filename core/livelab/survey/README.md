@@ -19,7 +19,7 @@ It answers "how much of the tree has a live install path in this lab". It does n
   the Python shares.
 - **Per record:** `group`, `install` (the install class), `capability` (the lab path that
   would install it), `covered`, `rule`, `basis` and `firm`.
-- **Output:** one JSON report per engine (`schema: fastrsi-survey/1`): totals,
+- **Output:** one JSON report per engine (`schema: rsibox-survey/1`): totals,
   per-top-level-module counts (`modules`), and two-level subsystem counts (`by_subsystem`),
   in functions and in lines, per install class and per capability (`by_cap`), with the
   upstream commit scanned, the scan date, the rule set's version and the rules file's digest.

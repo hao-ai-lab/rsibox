@@ -52,7 +52,7 @@
       const NS = 'http://www.w3.org/2000/svg', el = (t, a, p) => { const n = document.createElementNS(NS, t); for (const k in a) n.setAttribute(k, a[k]); if (p) p.appendChild(n); return n; };
       const fig = hr.closest('.hero-fig');
       const pts = (arm) => dash.data('race_steps').data.filter((r) => r.workload === wl.workload && r.arm === arm && r.kind === 'best').map((r) => [+r.t_h, +r.value]).sort((x, y) => x[0] - y[0]);
-      const C = pts('codex'), F = pts('fastrsi');
+      const C = pts('codex'), F = pts('rsibox');
       if (!C.length || !F.length) {
         if (fig) fig.classList.add('hero-blank');
         $('div', 'hr-empty', 'Autoresearch race not run yet for this engine.', hr);
@@ -67,7 +67,7 @@
       const ticks = []; for (let v = 1; v <= hi + 1e-9; v += stp) ticks.push(v);
       const top = Math.max(hi, ticks[ticks.length - 1]) + (hi - 1) * 0.11;
       const x = (t) => m.l + (W - m.l - m.r) * t / T, y = (v) => Hh - m.b - (Hh - m.t - m.b) * (v - 1) / (top - 1);
-      const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + Hh, role: 'img', class: 'hr-svg', 'aria-label': wl.label + ': best speedup over ' + T + ' hours. Baseline ends at ' + endC.toFixed(2) + '×, FastRSI at ' + endF.toFixed(2) + '×.' }, hr);
+      const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + Hh, role: 'img', class: 'hr-svg', 'aria-label': wl.label + ': best speedup over ' + T + ' hours. Baseline ends at ' + endC.toFixed(2) + '×, rsibox at ' + endF.toFixed(2) + '×.' }, hr);
       ticks.forEach((v) => { el('line', { x1: x(0), x2: x(T), y1: y(v), y2: y(v), class: v === 1 ? 'hr-ax' : 'hr-grid' }, svg); el('text', { x: m.l - 7, y: y(v) + 3.5, class: 'hr-t', 'text-anchor': 'end' }, svg).textContent = v.toFixed(dp) + '×'; });
       el('line', { x1: x(0), x2: x(0), y1: y(1), y2: m.t - 8, class: 'hr-ax' }, svg);
       el('text', { x: 6, y: m.t - 16, class: 'hr-t' }, svg).textContent = 'best speedup so far';
@@ -204,7 +204,7 @@
   }
 
   // ---- where am I: a numbered label on each section, a side rail on wide screens, and a small contents button everywhere
-  const TOC = [['top', 'Start'], ['loop', 'The loop'], ['story', 'Where the overhead comes from'], ['arch', 'How FastRSI works'], ['built', 'Case studies'],
+  const TOC = [['top', 'Start'], ['loop', 'The loop'], ['story', 'Where the overhead comes from'], ['arch', 'How rsibox works'], ['built', 'Case studies'],
     ['sooner', 'Evaluation: same result sooner'], ['eval-time', 'Evaluation: time per check'], ['model-speed', 'Evaluation: faster models'], ['use', 'Try it']]
     .map(([id, label]) => ({ id, label, el: document.getElementById(id) })).filter((t) => t.el);
   if (TOC.length > 2) {
@@ -291,17 +291,17 @@
     let cur = null;
     const tag = (p, q) => $('span', 'cs-tag' + (q.live ? ' ok' : ''), q.tag || (q.live ? 'installed live' : q.install ? 'restarted from a warm copy' : 'restarted'), p);
     const PH = ['Failed live attempt, stop the old job', 'Process start-up and imports', 'Engine and model start-up', 'Load the weights', 'Compile and JIT builds', 'CUDA graph capture', 'First step and warm-up steps', 'Install the edit live', 'Run the check', 'Other'];
-    // two stacked bars (plain restart, FastRSI) on one time axis, then the same phases as a small table
+    // two stacked bars (plain restart, rsibox) on one time axis, then the same phases as a small table
     const phases = (q, info) => {
       const g = $('div', 'alt-gain', null, info), max = Math.max(q.t_rst, q.t_run);
-      [['Plain restart', q.t_rst, q.ph[0]], [q.live ? 'FastRSI, installed live' : 'FastRSI, ' + q.tag, q.t_run, q.ph[1]]].forEach(([lab, t, ph], i) => {
+      [['Plain restart', q.t_rst, q.ph[0]], [q.live ? 'rsibox, installed live' : 'rsibox, ' + q.tag, q.t_run, q.ph[1]]].forEach(([lab, t, ph], i) => {
         const r = $('div', 'alt-bar', null, g); $('span', 'alt-bl', lab, r); const tr = $('span', 'alt-btr', null, r), st = $('span', 'alt-stk', null, tr); $('span', 'alt-bv fr-num', secs(t), r);
         ph.forEach(([n, s]) => { const sg = $('i', 'ph' + PH.indexOf(n), null, st); sg.style.flex = s + ' 0 0'; sg.title = n + ': ' + s + ' s'; });
         const w = Math.max(0.8, 100 * t / max) + '%'; if (reduced || !i) st.style.width = w; else { st.style.width = '100%'; setTimeout(() => { st.style.transition = 'width 0.9s cubic-bezier(.2,.7,.2,1)'; st.style.width = w; }, 250); }
       });
       const x = $('p', 'alt-x', null, info);
-      if (q.x >= 1.05) { $('b', 'fr-num', times(q.x), x); $('span', null, ' sooner from edit to check result', x); } else $('span', null, 'No gain on this one: FastRSI fell back to a full restart.', x);
-      const tb = $('table', 'alt-ph', null, info), hd = $('tr', null, null, tb); $('th', null, 'Where the time goes', hd); $('th', null, 'Restart', hd); $('th', null, 'FastRSI', hd);
+      if (q.x >= 1.05) { $('b', 'fr-num', times(q.x), x); $('span', null, ' sooner from edit to check result', x); } else $('span', null, 'No gain on this one: rsibox fell back to a full restart.', x);
+      const tb = $('table', 'alt-ph', null, info), hd = $('tr', null, null, tb); $('th', null, 'Where the time goes', hd); $('th', null, 'Restart', hd); $('th', null, 'rsibox', hd);
       const get = (ph, n) => { const f = ph.find((p) => p[0] === n); return f ? f[1].toFixed(1) + ' s' : '–'; };
       PH.filter((n) => q.ph[0].concat(q.ph[1]).some((p) => p[0] === n)).forEach((n) => { const r = $('tr', null, null, tb), c = $('td', null, null, r); $('i', 'ph' + PH.indexOf(n), null, c); c.appendChild(document.createTextNode(n)); $('td', 'fr-num', get(q.ph[0], n), r); $('td', 'fr-num', get(q.ph[1], n), r); });
       (q.notes || []).forEach((n) => $('p', 'alt-note', n, info));

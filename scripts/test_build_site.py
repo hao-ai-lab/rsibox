@@ -58,7 +58,7 @@ class SiteBuildTests(unittest.TestCase):
             with open(out_html, encoding="utf-8") as fh:
                 html = fh.read()
             self.assertTrue(html.isascii())
-            self.assertIn("<title>FastRSI</title>", html)
+            self.assertIn("<title>rsibox</title>", html)
 
     def test_subprocess_check_leaves_site_public_untouched(self):
         real_pub = os.path.join(REPO_ROOT, "site", "public")

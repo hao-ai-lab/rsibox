@@ -1,11 +1,11 @@
 # Modal GPU CI (`modal-gpu` commit status)
 
-Runs FastRSI's torch, Triton, CUDA, Ray, and real-vLLM test suites on cached Modal GPU containers
+Runs rsibox's torch, Triton, CUDA, Ray, and real-vLLM test suites on cached Modal GPU containers
 and posts a single `modal-gpu` commit status for trusted commits.
 
 ## Architecture
 
-- [`modal_app.py`](modal_app.py) defines Modal App `fastrsi-gpu-ci` with two cached Python 3.12
+- [`modal_app.py`](modal_app.py) defines Modal App `rsibox-gpu-ci` with two cached Python 3.12
   `debian_slim` images that build once and stay cached across CI runs:
   - `core_gpu_image`: `git`, `build-essential`, `libnuma1`, `torch==2.9.1` (`cu128`), `pytest`,
     `numpy`, `nvidia-ml-py`, `setuptools`, `wheel`, `ray`.
@@ -35,7 +35,7 @@ and posts a single `modal-gpu` commit status for trusted commits.
 ```sh
 python3 .github/modal-ci/run_modal_ci.py \
   --sha <40-hex sha> \
-  --work ~/fastrsi-ci \
+  --work ~/rsibox-ci \
   --gpu L4
 ```
 
@@ -45,7 +45,7 @@ Useful flags:
 - `--suites core-kernel,vllm-services`: run a subset of suites (unused Modal function is skipped).
 - `--stages cpu,gpu,quickstart`: optionally run local CPU parity and README quickstart checks
   alongside Modal `gpu`.
-- `--vllm-model <model>`: set `FASTRSI_VLLM_MODEL` and `FASTRSI_GPU_E2E=1` for `vllm-services`.
+- `--vllm-model <model>`: set `RSIBOX_VLLM_MODEL` and `RSIBOX_GPU_E2E=1` for `vllm-services`.
 - `--modal-cmd "uv run --no-project --with modal modal"`: override the auto-detected Modal CLI.
 
 Output goes to `<work>/runs/<sha12>-<UTC>/`: `summary.md`, `summary.json`, `logs/gpu/<step>.log`,

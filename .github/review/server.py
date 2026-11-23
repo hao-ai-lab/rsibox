@@ -30,7 +30,7 @@ Safety (the prompt carries untrusted PR text):
 
 Standard library only.
 
-  FASTRSI_REVIEW_TOKEN_FILE=~/.config/fastrsi-review/token AGY=/path/to/agy CODEX=/path/to/codex \
+  RSIBOX_REVIEW_TOKEN_FILE=~/.config/rsibox-review/token AGY=/path/to/agy CODEX=/path/to/codex \
       python3 server.py --port 8792
 """
 import argparse, base64, json, os, re, secrets, shutil, subprocess, sys, tempfile, threading, time
@@ -349,7 +349,7 @@ def system_read_paths():
 def binary_read_paths(bin_path, path_env="/usr/bin:/bin"):
     """Grant read+exec on the executable file itself (and its shebang interpreter file, if any),
     never its parent folder recursively. Operators can opt extra package paths in via
-    FASTRSI_REVIEW_EXTRA_READ."""
+    RSIBOX_REVIEW_EXTRA_READ."""
     exe = os.path.realpath(bin_path)
     paths = [exe]
     try:
@@ -368,7 +368,7 @@ def binary_read_paths(bin_path, path_env="/usr/bin:/bin"):
                     paths.append(os.path.realpath(resolved))
             elif interp.startswith("/"):
                 paths.append(os.path.realpath(interp))
-    for extra in os.environ.get("FASTRSI_REVIEW_EXTRA_READ", "").split(":"):
+    for extra in os.environ.get("RSIBOX_REVIEW_EXTRA_READ", "").split(":"):
         if extra:
             paths.append(os.path.realpath(os.path.expanduser(extra)))
     return list(dict.fromkeys(paths))
@@ -438,7 +438,7 @@ def run_review(job_id, req, bins, secret_files):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "fastrsi-review/2"
+    server_version = "rsibox-review/2"
 
     def send(self, code, obj):
         body = json.dumps(obj).encode()
@@ -522,8 +522,8 @@ def main():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8792)
     args = ap.parse_args()
-    token_file = os.path.expanduser(os.environ.get("FASTRSI_REVIEW_TOKEN_FILE",
-                                                   "~/.config/fastrsi-review/token"))
+    token_file = os.path.expanduser(os.environ.get("RSIBOX_REVIEW_TOKEN_FILE",
+                                                   "~/.config/rsibox-review/token"))
     token = load_token(token_file)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token
@@ -533,7 +533,7 @@ def main():
                            str(real_state("codex") / "auth.json"),
                            *[str(p) for p in Path("~/.ssh").expanduser().glob("id_*")
                              if not p.name.endswith(".pub")]]
-    server.secret_files += [p for p in os.environ.get("FASTRSI_REVIEW_SECRET_FILES", "").split(":") if p]
+    server.secret_files += [p for p in os.environ.get("RSIBOX_REVIEW_SECRET_FILES", "").split(":") if p]
     server.pool = ThreadPoolExecutor(max_workers=2)
     log(f"listening on {args.host}:{args.port}, engines={server.bins}")
     server.serve_forever()

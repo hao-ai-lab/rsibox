@@ -1,7 +1,7 @@
 {
- "schema": "fastrsi-interface-risks/1",
+ "schema": "rsibox-interface-risks/1",
  "updated": "2026-11-16",
- "source": "core/livelab/INTERFACE-v1.md; FastRSI PRs #144-#156; Issue #150; repos/*/docs/architecture.md",
+ "source": "core/livelab/INTERFACE-v1.md; rsibox PRs #144-#156; Issue #150; repos/*/docs/architecture.md",
  "boundaries": [
   {
    "id": "kernel",
@@ -1223,7 +1223,7 @@
    "primary_blast_radius": "rank_hang",
    "verification_tier": "GPU",
    "invariants": [
-    "StepGapCoordinator runs at train-step boundary over a timeout-bounded Gloo group (repos/megatron/livelab/fastrsi_megatron/hook.py)."
+    "StepGapCoordinator runs at train-step boundary over a timeout-bounded Gloo group (repos/megatron/livelab/rsibox_megatron/hook.py)."
    ],
    "closed_bugs": [
     {
@@ -2265,7 +2265,7 @@
    "primary_blast_radius": "silent_corruption",
    "verification_tier": "GPU",
    "invariants": [
-    "state.py snapshots and restores model parameters, optimizer state, RNG, and quantized TransformerEngine MXFP8 inner byte tensors bit-for-bit (repos/megatron/livelab/fastrsi_megatron/state.py)."
+    "state.py snapshots and restores model parameters, optimizer state, RNG, and quantized TransformerEngine MXFP8 inner byte tensors bit-for-bit (repos/megatron/livelab/rsibox_megatron/state.py)."
    ],
    "closed_bugs": [
     {
@@ -2290,7 +2290,7 @@
      "blast_radius": "silent_corruption",
      "summary": "Delayed-scaling FP8 amax history buffers and NVFP4 recipes outside MXFP8, plus multi-node MoE router aux buffers, need explicit recipe checks.",
      "mitigation": "Verify state.digest() equality before and after restore on every new FP8 recipe.",
-     "reproducer": "python3 -m unittest repos/megatron/livelab/fastrsi_megatron/test_pieces.py"
+     "reproducer": "python3 -m unittest repos/megatron/livelab/rsibox_megatron/test_pieces.py"
     }
    ]
   },

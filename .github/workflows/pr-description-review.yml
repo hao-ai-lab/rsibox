@@ -60,14 +60,14 @@ jobs:
         run: gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes >/dev/null || true
       - env:
           GH_TOKEN: ${{ github.token }}
-          FASTRSI_REVIEW_URL: ${{ vars.FASTRSI_REVIEW_URL }}
-          FASTRSI_REVIEW_TOKEN: ${{ secrets.FASTRSI_REVIEW_TOKEN }}
+          RSIBOX_REVIEW_URL: ${{ vars.RSIBOX_REVIEW_URL || vars.FASTRSI_REVIEW_URL }}
+          RSIBOX_REVIEW_TOKEN: ${{ secrets.RSIBOX_REVIEW_TOKEN || secrets.FASTRSI_REVIEW_TOKEN }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           PR: ${{ github.event.issue.number || inputs.pr }}
         run: |
-          if [ -z "$FASTRSI_REVIEW_URL" ] || [ -z "$FASTRSI_REVIEW_TOKEN" ]; then
+          if [ -z "$RSIBOX_REVIEW_URL" ] || [ -z "$RSIBOX_REVIEW_TOKEN" ]; then
             echo "::notice::Review service not configured (vars.FASTRSI_REVIEW_URL, secrets.FASTRSI_REVIEW_TOKEN). Skipped; nothing changed."
             exit 0
           fi
-          python3 .github/review/review.py --pr "$PR" --engine service --url "$FASTRSI_REVIEW_URL" --apply
+          python3 .github/review/review.py --pr "$PR" --engine service --url "$RSIBOX_REVIEW_URL" --apply

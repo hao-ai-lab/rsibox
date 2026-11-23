@@ -109,8 +109,8 @@
       const o = $('div', 'o', null, k.el), b = bar(o); hud(Math.round(STARTUP) + ' s'); await c.spend(b, STARTUP, 3600);
       o.replaceChildren(); $('span', 't', 'ready in ' + Math.round(STARTUP) + ' s', o); $('span', 'bad', '✗ ' + Math.round(STARTUP) + ' s wasted restarting everything', o);
     },
-    async fastrsi(c) {
-      win('FastRSI · live engine', 'Install time (0.02 s), probe time and CUDA graph capture (' + Math.round(GRAPH) + ' s) are measured on vLLM. Failed edits behave as in our fault-injection tests: the check fails and the process is kept.', true);
+    async rsibox(c) {
+      win('rsibox · live engine', 'Install time (0.02 s), probe time and CUDA graph capture (' + Math.round(GRAPH) + ' s) are measured on vLLM. Failed edits behave as in our fault-injection tests: the check fails and the process is kept.', true);
       H.tries = 0; H.wait = 0; hud(PROBE.toFixed(1) + ' s');
       const lab = $('div', 'lab', null, body), left = $('div', 'stack', null, lab), right = $('div', 'txn', null, lab);
       $('h4', null, 'The running engine', left); $('h4', null, 'Each edit is a transaction', right);
@@ -135,7 +135,7 @@
       }
     },
     async probe(c) {
-      win('FastRSI · probe and confirm', 'Measured on vLLM: ' + PROBE.toFixed(1) + ' s for a small-batch probe, ' + FULL.toFixed(1) + ' s for the full check on the warm engine. Which edits pass is illustrative.', true);
+      win('rsibox · probe and confirm', 'Measured on vLLM: ' + PROBE.toFixed(1) + ' s for a small-batch probe, ' + FULL.toFixed(1) + ' s for the full check on the warm engine. Which edits pass is illustrative.', true);
       H.tries = 0; H.wait = 0; hud(PROBE.toFixed(1) + ' s');
       const lanes = $('div', 'lanes', null, body), a = $('div', 'lane', null, lanes), b = $('div', 'lane', null, lanes);
       $('h4', null, 'Targeted probes: the agent steers on these', a); const chips = $('div', 'chips', null, a);

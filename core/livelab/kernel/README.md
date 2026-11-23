@@ -106,7 +106,7 @@ template's conformance cases c0-c10.
   that leads there, the one live function with the target's qualname is taken, with an
   advisory `line_aliased` finding.
 - **Witness** proves that swapped code ran, per participant. The swap puts
-  `__fastrsi_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
+  `__rsibox_hit__("<module>:<qualname>:<line>")` at the top of each new body (`inject`,
   after the docstring; for a lambda or generator expression, in the expression: a generator
   expression counts once per item). The module global is bound to the participant's
   `Witness.hook`; undo binds the no-op `stub` instead of deleting it, since code compiled or
@@ -284,7 +284,7 @@ lab in CI; all 11 pass (no XFAIL).
 
 ## Not here yet
 
-The prototype swap (fastrsi#12) had more than a plain live code swap needs; these parts come back in later PRs:
+The prototype swap (rsibox#12) had more than a plain live code swap needs; these parts come back in later PRs:
 
 - **New-field backfill** (`_backfill_code`, `fields.py`, plan `"backfill": true`) and
   `rebuilds=` (a recipe that rebuilds the objects resolves the finding). Until then

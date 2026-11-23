@@ -17,7 +17,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 ## Repository layout
 
 ```
-core/livelab/        shared stdlib runtime (kernel/, fastrsi/, rsibox/, conformance/, survey/, forksafe.py, INTERFACE.md)
+core/livelab/        shared stdlib runtime (kernel/, rsibox/, rsibox/, conformance/, survey/, forksafe.py, INTERFACE.md)
 core/agents/         prompts for coding agents (livelab_overview, developer, orchestrator, toolsmith)
 repos/<engine>/      vllm, fastvideo, megatron, verl, sglang, miles (docs/, kb/, livelab/, examples/)
 docs/                design notes on engines, restart mechanisms, kernels/CUDA graphs, and CI

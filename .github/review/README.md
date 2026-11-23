@@ -37,7 +37,7 @@ python3 .github/review/code_review.py --pr 22                 # print, post noth
 python3 .github/review/code_review.py --pr 22 --post          # also post it
 ```
 
-It needs the same `FASTRSI_REVIEW_URL` and `FASTRSI_REVIEW_TOKEN` as the description review.
+It needs the same `RSIBOX_REVIEW_URL` and `RSIBOX_REVIEW_TOKEN` as the description review.
 
 ## What the description checker guarantees
 
@@ -85,7 +85,7 @@ holds only copies of the reviewer's credential files (never its real state direc
 other conversations or settings), inside `confine.py`: Linux Landlock lets the reviewer read
 only system paths (without `/run`, except specific DNS resolver files) and its own binary file
 (never its parent directory recursively; extra bundle directories require
-`FASTRSI_REVIEW_EXTRA_READ`), isolates `/dev/shm` per job via `--private-shm` (denying global
+`RSIBOX_REVIEW_EXTRA_READ`), isolates `/dev/shm` per job via `--private-shm` (denying global
 `/dev/shm` if namespaces are unavailable), and lets it write only the job directory. A refreshed
 credential is copied back only if it is valid JSON for the same account and the real file was
 not changed meanwhile. Known limit: a prompt-injected reviewer that keeps the account fields
@@ -110,8 +110,8 @@ Trap: Cloudflare's Browser Integrity Check answers 403 (error 1010) to the defau
    (set `AGY` / `CODEX` if they are not on `PATH`), behind HTTPS. Optionally put a Cloudflare Access policy with a service
    token in front.
 2. In the GitHub repo settings:
-   - variable `FASTRSI_REVIEW_URL` = the review service URL
-   - secret `FASTRSI_REVIEW_TOKEN` = the bearer token
+   - variable `RSIBOX_REVIEW_URL` = the review service URL
+   - secret `RSIBOX_REVIEW_TOKEN` = the bearer token
    - secrets `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`, only if you use Access
 
 Until the URL and token are set, the CI review step skips with a notice and changes nothing.

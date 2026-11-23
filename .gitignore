@@ -4,7 +4,7 @@ __pycache__/
 *.orig
 *.rej
 .venv/
-.fastrsi/
+.rsibox/
 .pytest_cache/
 .ruff_cache/
 build/

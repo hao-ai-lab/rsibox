@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build build/fastrsi-story.html: the home page (src/) plus the three results figures (dash/).
+"""Build build/rsibox-story.html: the home page (src/) plus the three results figures (dash/).
 Usage: python3 build.py [path to the dashboard working copy with files/ and data/]"""
 import json, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -52,15 +52,15 @@ if os.path.exists(PRS):
             if t["engine"] == e["engine"]: by.setdefault(t["id"], []).append(t)
         for cid, ts in by.items():
             isl = lambda o: o.startswith("installed live")   # Megatron-LM writes "installed live"; FastVideo adds how far it was proven
-            t = sorted(ts, key=lambda t: not isl(t["fastrsi"]["outcome"]))[0]
+            t = sorted(ts, key=lambda t: not isl(t["rsibox"]["outcome"]))[0]
             r = next((r for r in rows if str(r["pr"]) == cid), None)
             if r is None:   # one of our own agent edits: no upstream pull request, the diff comes with the timing
                 dj = t["diff"]; r = {"pr": cid, "repo": t["repo"], "title": dj["title"], "utitle": dj["title"], "agent": True, "install": "", "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": [{"path": f["path"], "lines": f["lines"], "cut": 0} for f in dj["files"]], "more": 0}; rows.append(r)
-            fr, rs, notes = t["fastrsi"], t["restart"], []
+            fr, rs, notes = t["rsibox"], t["restart"], []
             lab = lambda o: ("installed live, partly proven" if "partly proven" in o else "installed live") if isl(o) else "restarted from a warm copy" if re.search(r"warm restart|restarted warm", o) else "fell back to a restart"
             if t["variant"]:
                 o = [x for x in ts if x is not t][0]
-                notes.append("This check makes one %s. Without it the check never runs the edited code, and FastRSI restarts instead: %.1f s against %.1f s." % (t["variant"].replace(" before the check", " first"), o["fastrsi"]["total"], o["restart"]["total"]))
+                notes.append("This check makes one %s. Without it the check never runs the edited code, and rsibox restarts instead: %.1f s against %.1f s." % (t["variant"].replace(" before the check", " first"), o["rsibox"]["total"], o["restart"]["total"]))
             if t.get("improved"):
                 im = t["improved"]; notes.append("With a fix that is not merged yet: %.1f s (%.1f\u00d7), %s." % (im["total"], rs["total"] / im["total"], lab(im["outcome"])))
             r.update({"live": isl(fr["outcome"]), "tag": lab(fr["outcome"]), "t_rst": rs["total"], "t_run": fr["total"], "x": round(rs["total"] / fr["total"], 1), "ph": [rs["phases"], fr["phases"]], "setup": t["setup"], "notes": notes, "pair": "", "variant": t["variant"]})
@@ -86,7 +86,7 @@ page = rd(f"{HERE}/src/page.html")
 page = page.replace("{{CASE_SUB}}", COPY.get("subtitle", ""))
 page = page.replace("{{TITLE}}", title).replace("{{LEDE}}", lede)
 page = page.replace("{{RESULTS}}", "\n".join(sec(i) for i in ("sooner", "eval-time", "model-speed")))
-out = f"""<title>FastRSI Home</title>
+out = f"""<title>rsibox Home</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500&display=swap">
 <style>
@@ -121,6 +121,6 @@ def ascii_only(doc):
     return out
 out = ascii_only(out)
 os.makedirs(f"{HERE}/build", exist_ok=True)
-open(f"{HERE}/build/fastrsi-story.html", "w", encoding="utf-8").write(out)
+open(f"{HERE}/build/rsibox-story.html", "w", encoding="utf-8").write(out)
 print("built", len(out), "bytes")
 open(f"{HERE}/build/preview.html", "w", encoding="utf-8").write('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0;font:14px system-ui}[hidden]{display:none!important}</style></head><body>' + out + '</body></html>')

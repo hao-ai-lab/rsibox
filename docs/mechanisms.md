@@ -36,9 +36,9 @@ The live-swap verification check ([`core/livelab/conformance/README.md`](../core
 What CPU CI runs (`.github/workflows/cpu-tests.yml`); torch, vLLM, and Linux-only cases skip automatically on a laptop:
 
 ```sh
-PYTHONPATH=core/livelab python3 -m fastrsi doctor
+PYTHONPATH=core/livelab python3 -m rsibox doctor
 python3 -m unittest discover -s core/livelab/kernel -t core/livelab
-python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab
+python3 -m unittest discover -s core/livelab/rsibox -t core/livelab
 python3 -m unittest discover -s core/livelab -p 'test_forksafe.py'
 python3 -m unittest discover -s core/livelab/survey -t core/livelab
 (cd core/livelab && python3 -m unittest discover -s conformance -t .)

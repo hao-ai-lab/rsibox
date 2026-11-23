@@ -313,7 +313,7 @@ class JobIsolation(unittest.TestCase):
         exe.write_text(f"#!{interp}\necho ok\n")
         work = Path(self.tmp.name, "job")
         work.mkdir()
-        with mock.patch.dict(os.environ, {"FASTRSI_REVIEW_EXTRA_READ": ""}):
+        with mock.patch.dict(os.environ, {"RSIBOX_REVIEW_EXTRA_READ": ""}):
             argv, _ = server.command("codex", "hi", "default", str(work), {"codex": str(exe)})
         r_idx = argv.index("--read")
         w_idx = argv.index("--write")
@@ -420,7 +420,7 @@ class Confine(unittest.TestCase):
         and never sees files created on the host /dev/shm."""
         if not os.path.isdir("/dev/shm"):
             self.skipTest("/dev/shm not present")
-        with tempfile.NamedTemporaryFile(dir="/dev/shm", prefix="fastrsi-host-", delete=False) as f:
+        with tempfile.NamedTemporaryFile(dir="/dev/shm", prefix="rsibox-host-", delete=False) as f:
             f.write(b"host-shm-secret")
             host_file = f.name
         try:

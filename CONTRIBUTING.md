@@ -1,6 +1,6 @@
 # Contributing to rsibox
 
-Thank you for your interest in contributing to **rsibox (FastRSI)**!
+Thank you for your interest in contributing to **rsibox (rsibox)**!
 
 ## Getting Started
 
@@ -13,8 +13,8 @@ python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 
 # Verify your local environment and run the 11-case toy conformance suite
-python3 -m fastrsi doctor
-python3 -m fastrsi conformance toy
+python3 -m rsibox doctor
+python3 -m rsibox conformance toy
 ```
 
 ## Running Tests
@@ -23,7 +23,7 @@ Before opening a pull request, run the CPU test suites relevant to your change (
 
 ```sh
 python3 -m unittest discover -s core/livelab/kernel -t core/livelab
-python3 -m unittest discover -s core/livelab/fastrsi -t core/livelab
+python3 -m unittest discover -s core/livelab/rsibox -t core/livelab
 (cd core/livelab && python3 -m unittest discover -s conformance -t .)
 python3 scripts/verify_facts.py --strict
 ```

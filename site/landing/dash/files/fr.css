@@ -1,4 +1,4 @@
-/* FastRSI results: instrument-panel look. Colors mix toward the theme's text color so they hold in light and dark. */
+/* rsibox results: instrument-panel look. Colors mix toward the theme's text color so they hold in light and dark. */
 .fr {
   --fr-codex: color-mix(in oklab, #c0392b 80%, var(--color-fg));
   --fr-fast: color-mix(in oklab, #2463b4 78%, var(--color-fg));
@@ -83,13 +83,13 @@
 .fr-svg .gl { stroke: var(--fr-grid); stroke-width: 1; }
 .fr-svg .st { fill: none; stroke-width: 2.25; stroke-linejoin: round; }
 .fr-svg .st.codex { stroke: var(--fr-codex); }
-.fr-svg .st.fastrsi { stroke: var(--fr-fast); }
+.fr-svg .st.rsibox { stroke: var(--fr-fast); }
 .fr-svg .ck { opacity: .55; }
 .fr-svg .ck.codex { fill: var(--fr-codex-soft); }
-.fr-svg .ck.fastrsi { fill: var(--fr-fast-soft); }
+.fr-svg .ck.rsibox { fill: var(--fr-fast-soft); }
 .fr-svg .nb { fill: var(--color-panel); stroke-width: 2; transform-box: fill-box; transform-origin: center; }
 .fr-svg .nb.codex { stroke: var(--fr-codex); }
-.fr-svg .nb.fastrsi { stroke: var(--fr-fast); }
+.fr-svg .nb.rsibox { stroke: var(--fr-fast); }
 .fr-svg .nb.pop { animation: fr-pop .68s var(--cds-ease-out, ease-out); }
 @keyframes fr-pop { 0% { transform: scale(0); } 60% { transform: scale(1.6); } 100% { transform: scale(1); } }
 .fr-svg .tgt { stroke: var(--fr-muted); stroke-dasharray: 4 4; stroke-width: 1; }
@@ -97,7 +97,7 @@
 .fr-svg .ph { stroke: var(--fr-ink); stroke-width: 1; opacity: .5; }
 .fr-svg .clock { font-family: var(--font-anthropic-serif); font-size: 22px; fill: var(--fr-ink); }
 .fr-svg .end.codex, .fr-svg .lbl-codex { fill: var(--fr-codex); font-weight: 600; }
-.fr-svg .end.fastrsi, .fr-svg .lbl-fastrsi { fill: var(--fr-fast); font-weight: 600; }
+.fr-svg .end.rsibox, .fr-svg .lbl-rsibox { fill: var(--fr-fast); font-weight: 600; }
 .fr-svg .reach line, .fr-svg .reach path { stroke: var(--fr-fast); stroke-width: 1.5; fill: none; }
 .fr-svg .reach .br { stroke: var(--fr-ink); stroke-width: 1.25; }
 .fr-svg .reach .rt { fill: var(--fr-ink); font-family: var(--font-anthropic-sans); font-size: 13px; font-weight: 600; }
@@ -108,7 +108,7 @@
 .fr-tip .tv { font-family: var(--fr-mono); font-variant-numeric: tabular-nums; }
 .fr-tip .tm { color: var(--cds-text-secondary, var(--fr-muted)); }
 .fr-tip .codex { color: var(--fr-codex); }
-.fr-tip .fastrsi { color: var(--fr-fast); }
+.fr-tip .rsibox { color: var(--fr-fast); }
 .fr-k { width: 12px; height: 12px; display: inline-block; border-radius: 2px; }
 .fr-k-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fr-muted); opacity: .6; }
 .fr-k-ring { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--fr-muted); }
@@ -145,7 +145,7 @@
 .fr-table th { text-align: left; font-weight: var(--cds-font-weight-medium); color: var(--fr-muted); border-bottom: 1px solid var(--fr-rule); padding: 4px 8px 4px 0; }
 .fr-table td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--fr-rule); }
 .fr-table td.n, .fr-table th:not(:first-child) { text-align: right; font-family: var(--fr-mono); }
-.fr-table td.codex { color: var(--fr-codex); } .fr-table td.fastrsi { color: var(--fr-fast); }
+.fr-table td.codex { color: var(--fr-codex); } .fr-table td.rsibox { color: var(--fr-fast); }
 .fr-stat-mid { font-size: var(--cds-font-size-heading); }
 .fr-svg .tgt { stroke: var(--fr-ink); opacity: .55; stroke-dasharray: 5 4; stroke-width: 1.25; pointer-events: none; }
 .fr-svg .tgt-hit { stroke: transparent; stroke-width: 14; cursor: ns-resize; }
@@ -182,14 +182,14 @@
 .fr-mini .fr-mini-read { display: flex; flex-wrap: wrap; gap: 2px var(--cds-gap-md); font-size: var(--cds-font-size-caption); color: var(--fr-muted); margin-bottom: 4px; }
 .fr-mini .v { font-family: var(--fr-mono); font-variant-numeric: tabular-nums; font-weight: 600; }
 .fr-mini .v.codex { color: var(--fr-codex); }
-.fr-mini .v.fastrsi { color: var(--fr-fast); }
+.fr-mini .v.rsibox { color: var(--fr-fast); }
 .fr-mini .v.gap { color: var(--fr-ink); }
 .fr-svg .ln { fill: none; stroke-width: 2; }
 .fr-svg .ln.codex { stroke: var(--fr-codex); }
-.fr-svg .ln.fastrsi { stroke: var(--fr-fast); }
+.fr-svg .ln.rsibox { stroke: var(--fr-fast); }
 .fr-svg .ln.dash { stroke-dasharray: 3 4; opacity: .7; }
 .fr-svg .pt.codex { fill: var(--fr-codex); }
-.fr-svg .pt.fastrsi { fill: var(--fr-fast); }
+.fr-svg .pt.rsibox { fill: var(--fr-fast); }
 .fr-svg .sel { stroke: var(--fr-ink); stroke-width: 1; opacity: .35; }
 .fr-svg .gapbar { stroke: var(--fr-ink); stroke-width: 1.25; }
 .fr-svg .nodata-band { fill: color-mix(in oklab, var(--fr-muted) 10%, transparent); }

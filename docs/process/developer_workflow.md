@@ -1,6 +1,6 @@
 # Developer and Multi-Agent Workflow SOP
 
-This document specifies the developer and multi-agent operating procedure for FastRSI across `core/`, `template/`, and `repos/<engine>/`. It governs how the top-level Engineering Manager ("Boss") delegates work to specialized subagents, enforces pre-review verification, orders and bundles pull requests for review, triages review findings, and reports empirical measurements.
+This document specifies the developer and multi-agent operating procedure for rsibox across `core/`, `template/`, and `repos/<engine>/`. It governs how the top-level Engineering Manager ("Boss") delegates work to specialized subagents, enforces pre-review verification, orders and bundles pull requests for review, triages review findings, and reports empirical measurements.
 
 ---
 

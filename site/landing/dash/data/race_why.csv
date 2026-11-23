@@ -189,7 +189,7 @@ vllm-d8x32k,codex,13,Combine validated tiny-batch scheduling and four-warp norma
      out = torch.empty_like(residual)
      collapsed = torch.empty_like(x)
 … 9 more lines in this hunk","3 files changed, 26 insertions(+), 6 deletions(-)",
-vllm-d8x32k,fastrsi,1,Harden small-batch dispatch and scope shared attention metadata,vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py,"@@ -627,6 +629,15 @@
+vllm-d8x32k,rsibox,1,Harden small-batch dispatch and scope shared attention metadata,vllm/model_executor/layers/fused_moe/deep_gemm_mega_moe.py,"@@ -627,6 +629,15 @@
          )
          symm_buffer = self._symm_buffers.get(key)
 +        if (
@@ -204,7 +204,7 @@ vllm-d8x32k,fastrsi,1,Harden small-batch dispatch and scope shared attention met
          if symm_buffer is None:
              args = (
                  group,","5 files changed, 21 insertions(+), 2 deletions(-)",
-vllm-d8x32k,fastrsi,2,Fuse residual mixing and ordered input collapse before tiled RMSNorm,vllm/model_executor/kernels/mhc/triton_post.py,"@@ -42,3 +42,73 @@
+vllm-d8x32k,rsibox,2,Fuse residual mixing and ordered input collapse before tiled RMSNorm,vllm/model_executor/kernels/mhc/triton_post.py,"@@ -42,3 +42,73 @@
      )
      return out
 +
@@ -220,7 +220,7 @@ vllm-d8x32k,fastrsi,2,Fuse residual mixing and ordered input collapse before til
 +    x = tl.load(X + row * H + col, valid, 0).to(tl.float32)
 +    r0 = tl.load(R + (row * 4) * H + col, valid, 0).to(tl.float32)
 … 58 more lines in this hunk","2 files changed, 78 insertions(+), 1 deletion(-)",
-vllm-d8x32k,fastrsi,3,Avoid unused scale allocation in native Mega mHC path,vllm/models/deepseek_v41/nvidia/ops/mega_mhc.py,"@@ -76,12 +76,9 @@
+vllm-d8x32k,rsibox,3,Avoid unused scale allocation in native Mega mHC path,vllm/models/deepseek_v41/nvidia/ops/mega_mhc.py,"@@ -76,12 +76,9 @@
      quantize = quantize and num_tokens <= 32 and scratch is not None
      if quantize:
 -        from vllm.models.deepseek_v41.common.ops.query_quant import mxfp8_scale_bytes
@@ -232,7 +232,7 @@ vllm-d8x32k,fastrsi,3,Avoid unused scale allocation in native Mega mHC path,vllm
          sf = torch.empty((hidden_size // 128, (num_tokens + 3) // 4 * 4),
                           dtype=torch.int32, device=x.device).T[:num_tokens]
          quant_args = dict(y_fp8=q, y_gemm_sf=sf)","1 file changed, 3 deletions(-)",
-vllm-d8x32k,fastrsi,4,Document exact mHC arithmetic and harden standalone dispatch,vllm/model_executor/kernels/mhc/triton_post.py,"@@ -121,33 +141,58 @@
+vllm-d8x32k,rsibox,4,Document exact mHC arithmetic and harden standalone dispatch,vllm/model_executor/kernels/mhc/triton_post.py,"@@ -121,33 +141,58 @@
 -def mhc_post_input(x, residual, post_mix, comb_mix, pre_mix, norm_weight, norm_eps,
 -                   *, quantize=False):
 +def mhc_post_input(
@@ -248,7 +248,7 @@ vllm-d8x32k,fastrsi,4,Document exact mHC arithmetic and harden standalone dispat
 +) -> tuple[torch.Tensor, torch.Tensor]:
 +    """"""Publish mixed residuals and a normalized, optionally MXFP8 input.""""""
 … 52 more lines in this hunk","5 files changed, 132 insertions(+), 44 deletions(-)",
-vllm-d8x32k,fastrsi,5,Combine verified local GEMM and native mHC scheduling wins,vllm/utils/deep_gemm.py,"@@ -1016,7 +1016,17 @@
+vllm-d8x32k,rsibox,5,Combine verified local GEMM and native mHC scheduling wins,vllm/utils/deep_gemm.py,"@@ -1016,7 +1016,17 @@
          _missing()
          return
 -    _mega_mhc_impl(*args, **kwargs)
@@ -264,7 +264,7 @@ vllm-d8x32k,fastrsi,5,Combine verified local GEMM and native mHC scheduling wins
 +    else:
 +        _mega_mhc_impl(*args, **kwargs)
 … 3 more lines in this hunk","3 files changed, 14 insertions(+), 2 deletions(-)",
-vllm-d8x32k,fastrsi,6,Retain faster three-stage wide query GEMM,vllm/model_executor/kernels/linear/mxfp8/flashinfer.py,"@@ -298,3 +301,58 @@
+vllm-d8x32k,rsibox,6,Retain faster three-stage wide query GEMM,vllm/model_executor/kernels/linear/mxfp8/flashinfer.py,"@@ -298,3 +301,58 @@
          output_shape = (*input_shape[:-1], output_size)
          return output.view(output_shape)
 +
@@ -280,7 +280,7 @@ vllm-d8x32k,fastrsi,6,Retain faster three-stage wide query GEMM,vllm/model_execu
 +
 +    k, n = layer.weight.shape
 … 43 more lines in this hunk","4 files changed, 71 insertions(+), 53 deletions(-)",
-vllm-d8x32k,fastrsi,7,Retain and document four-stage wide decode projection,vllm/model_executor/kernels/linear/mxfp8/flashinfer.py,"@@ -182,8 +182,17 @@
+vllm-d8x32k,rsibox,7,Retain and document four-stage wide decode projection,vllm/model_executor/kernels/linear/mxfp8/flashinfer.py,"@@ -182,8 +182,17 @@
              )
 
 -        if 0 < input_mxfp8.shape[0] <= 32 and N >= 16384 and K <= 2048 and out_dtype == torch.bfloat16:
@@ -296,7 +296,7 @@ vllm-d8x32k,fastrsi,7,Retain and document four-stage wide decode projection,vllm
 +            and out_dtype == torch.bfloat16
 +        ):
 … 4 more lines in this hunk","3 files changed, 33 insertions(+), 12 deletions(-)",
-vllm-d8x32k,fastrsi,8,Stack query pipeline and compact native mHC scheduling,vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py,"@@ -339,42 +339,29 @@
+vllm-d8x32k,rsibox,8,Stack query pipeline and compact native mHC scheduling,vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py,"@@ -339,42 +339,29 @@
                      acc[m] = acc[m] + gA_part[m, tidx].to(cutlass.Float32) * bv2
 
 -        if const_expr(self.debug_mode == 3):
@@ -312,7 +312,7 @@ vllm-d8x32k,fastrsi,8,Stack query pipeline and compact native mHC scheduling,vll
              for m in cutlass.range_constexpr(M):
 -                gC[m, n_idx * bs + tidx] = acc[m]
 … 49 more lines in this hunk","4 files changed, 28 insertions(+), 95 deletions(-)",
-vllm-d8x32k,fastrsi,9,Combine exact native mHC overlap and verified launch tuning,vllm/model_executor/kernels/mhc/triton_native_input.py,"@@ -81,7 +83,25 @@
+vllm-d8x32k,rsibox,9,Combine exact native mHC overlap and verified launch tuning,vllm/model_executor/kernels/mhc/triton_native_input.py,"@@ -81,7 +83,25 @@
 -def native_mhc_input(x, residual, post, comb, pre, weight, eps, *, quantize=False, moe_input=None):
 +def native_mhc_input(
 +    x: torch.Tensor,
@@ -328,7 +328,7 @@ vllm-d8x32k,fastrsi,9,Combine exact native mHC overlap and verified launch tunin
 +) -> torch.Tensor:
 +    """"""Release the layer input while native mHC computes next coefficients.
 … 9 more lines in this hunk","2 files changed, 33 insertions(+), 6 deletions(-)",
-vllm-d8x32k,fastrsi,10,Retain input-first native mHC scheduling,vllm/models/deepseek_v41/nvidia/ops/mhc.py,"@@ -271,12 +271,10 @@
+vllm-d8x32k,rsibox,10,Retain input-first native mHC scheduling,vllm/models/deepseek_v41/nvidia/ops/mhc.py,"@@ -271,12 +271,10 @@
          from vllm.model_executor.kernels.mhc.triton_native_input import native_mhc_input
          main = torch.cuda.current_stream()
 -        early_input = None
@@ -344,7 +344,7 @@ vllm-d8x32k,fastrsi,10,Retain input-first native mHC scheduling,vllm/models/deep
          stream.wait_stream(main)
          with torch.cuda.stream(stream):
 … 1 more lines in this hunk","3 files changed, 8 insertions(+), 12 deletions(-)",
-vllm-d8x32k,fastrsi,11,Preserve original mHC dispatch for sharded token boundaries,vllm/models/deepseek_v41/nvidia/model.py,"@@ -508,6 +508,8 @@
+vllm-d8x32k,rsibox,11,Preserve original mHC dispatch for sharded token boundaries,vllm/models/deepseek_v41/nvidia/model.py,"@@ -508,6 +508,8 @@
          native_overlap = (
              self.ffn.use_native_mega_moe
 +            and not self.use_sequence_parallel
@@ -451,7 +451,7 @@ megatron,codex,10,Guard native expert storage capacities against token count var
      out = torch.empty((capacity, width), dtype=dtype, device=device)[:rows]
      general_grouped_gemm(
          list(weights), views, out=list(out.split(splits)),","2 files changed, 5 insertions(+), 2 deletions(-)",
-megatron,fastrsi,1,Fuse weighted SwiGLU backward and probability reduction in Triton,Megatron-LM/megatron/core/fusions/weighted_swiglu_triton.py,"@@ -0,0 +1,61 @@
+megatron,rsibox,1,Fuse weighted SwiGLU backward and probability reduction in Triton,Megatron-LM/megatron/core/fusions/weighted_swiglu_triton.py,"@@ -0,0 +1,61 @@
 +# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 +""""""Row-tiled weighted SwiGLU kernels, including the router probability gradient.""""""
 +
@@ -467,7 +467,7 @@ megatron,fastrsi,1,Fuse weighted SwiGLU backward and probability reduction in Tr
 +    mask = (rows[:, None] < M) & (cols[None, :] < N)
 +    a = tl.load(X + rows[:, None] * (2 * N) + cols[None, :], mask, 0).to(tl.float32)
 … 47 more lines in this hunk","3 files changed, 87 insertions(+), 1 deletion(-)",
-megatron,fastrsi,2,Combine gated kernel improvements with prioritized communication overlap,Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py,"@@ -208,8 +208,10 @@
+megatron,rsibox,2,Combine gated kernel improvements with prioritized communication overlap,Megatron-LM/megatron/core/fusions/fused_bias_swiglu.py,"@@ -208,8 +208,10 @@
              and input.dtype == torch.bfloat16 and weights.dtype == torch.float32
              and input.is_contiguous() and weights.is_contiguous()
 -            and weights.numel() == input.shape[0]
@@ -479,7 +479,7 @@ megatron,fastrsi,2,Combine gated kernel improvements with prioritized communicat
          )
          if ctx.use_triton:
              return weighted_swiglu_forward(input, weights)","4 files changed, 127 insertions(+), 5 deletions(-)",
-megatron,fastrsi,3,Batch aligned expert MXFP8 quantization in native forward and backward,Megatron-LM/megatron/core/fusions/packed_quantization_context.py,"@@ -4,63 +4,34 @@
+megatron,rsibox,3,Batch aligned expert MXFP8 quantization in native forward and backward,Megatron-LM/megatron/core/fusions/packed_quantization_context.py,"@@ -4,63 +4,34 @@
  import torch
 
 -_PROBED = False
@@ -495,7 +495,7 @@ megatron,fastrsi,3,Batch aligned expert MXFP8 quantization in native forward and
 -    return value[:rows, :cols]
 +_ANNOUNCED = set()
 … 63 more lines in this hunk","4 files changed, 46 insertions(+), 89 deletions(-)",
-megatron,fastrsi,4,Select original packed scale copy and remove diagnostic output,Megatron-LM/megatron/core/fusions/packed_mxfp8.py,"@@ -20,24 +20,19 @@
+megatron,rsibox,4,Select original packed scale copy and remove diagnostic output,Megatron-LM/megatron/core/fusions/packed_mxfp8.py,"@@ -20,24 +20,19 @@
      i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
      valid = i < size
 -    # Walk the physical destination layout so stores are contiguous. Expert

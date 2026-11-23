@@ -87,7 +87,7 @@ class Rejects(unittest.TestCase):
 
     def test_invented_code_span(self):
         """A new flag or command the author never wrote must not appear."""
-        new = rewrite("Install took 22 ms;", "Install took 22 ms with `VLLM_USE_FASTRSI_JIT`;")
+        new = rewrite("Install took 22 ms;", "Install took 22 ms with `VLLM_USE_RSIBOX_JIT`;")
         self.assertTrue(any("added code" in x for x in check(TITLE, BODY, TITLE, new)))
 
     def test_changed_number_inside_code(self):
