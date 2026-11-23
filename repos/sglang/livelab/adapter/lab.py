@@ -175,6 +175,9 @@ class SglangLab(ConformanceHarness, BaseLab):
             declare_resolution(server_args, "rsibox.gms", **overrides)
         loader_cls = setup_gms(server_args)
         declare_resolution(server_args, "rsibox.gms.loader", load_format=loader_cls)
+        # Upstream setup_gms() reads raw getattr(server_args, "model_loader_extra_config")
+        # which stays '{}' under SGLang >=0.5.21 declare_resolution(); sync from resolved overrides.
+        agent.sync_sglang_gms_globals(server_args)
         return server_args
 
     def _prepare_weight_store(self):
@@ -186,11 +189,16 @@ class SglangLab(ConformanceHarness, BaseLab):
         pr = store.probe(tp=tp_size, visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
         if not pr.ok:
             raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
-        explicit = {k for k in ("load_format", "model_loader_extra_config") if k in self.config}
+        explicit = {
+            k for k in ("load_format", "model_loader_extra_config")
+            if self.config.get(k) is not None
+        }
         delta = store.launch_delta(engine="sglang", explicit_flags=explicit, explicit_values=self.config)
         if not delta.ok:
             raise RuntimeError(f"weight store ({store.name}) config conflict: {delta.findings[0]['observed']}")
 
+        # Restore any previous store env/sys.path before re-computing additions (safe on re-entry).
+        self._restore_weight_cache_env()
         extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
         env_updates = dict(delta.env or {})
         added_sys_paths = []
@@ -205,7 +213,6 @@ class SglangLab(ConformanceHarness, BaseLab):
             env_updates["PYTHONPATH"] = os.pathsep.join(cur_py)
 
         if env_updates or added_sys_paths:
-            self._restore_weight_cache_env()
             prev = {k: os.environ.get(k) for k in env_updates}
             os.environ.update(env_updates)
             def _restore():
@@ -236,13 +243,17 @@ class SglangLab(ConformanceHarness, BaseLab):
                     )
                 merged.setdefault("cuda_graph_backend_decode", "disabled")
                 merged.setdefault("cuda_graph_backend_prefill", "disabled")
-                extra_cfg = store.extra_loader_config()
-                if "model_loader_extra_config" in merged:
-                    if isinstance(merged["model_loader_extra_config"], dict):
-                        merged["model_loader_extra_config"] = json.dumps(merged["model_loader_extra_config"])
-                elif extra_cfg:
-                    merged["model_loader_extra_config"] = json.dumps(extra_cfg)
+                merged_extra = store.merged_loader_config(merged.get("model_loader_extra_config"))
+                if merged_extra:
+                    merged["model_loader_extra_config"] = json.dumps(merged_extra)
+                elif "model_loader_extra_config" in merged and merged["model_loader_extra_config"] is None:
+                    merged.pop("model_loader_extra_config", None)
                 return {"server_args": self._build_gms_server_args(merged)}
+            if delta.args:
+                raise RuntimeError(
+                    f"weight store ({store.name}) returned CLI args {list(delta.args)} "
+                    "that SglangLab cannot map automatically"
+                )
             return merged
         except BaseException:
             self._restore_weight_cache_env()
@@ -251,13 +262,15 @@ class SglangLab(ConformanceHarness, BaseLab):
     def _start_engine(self):
         listener, accept_thread, accepted, errors = None, None, {}, []
         try:
-            gms_cfg = None
-            if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
-                gms_cfg = self._prepare_weight_store()
-            elif self.weight_cache_dir:
+            # weight_cache_dir sets env vars only (before fork preload), whereas
+            # _prepare_weight_store() imports sglang/torch/GMS and must run AFTER forksafe guards.
+            if self.weight_cache_dir:
                 self._prepare_weight_cache()
             if self.fork_subprocs:
                 self._prepare_fork_subprocs()
+            gms_cfg = None
+            if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
+                gms_cfg = self._prepare_weight_store()
             tp_size = int(self.config.get("tp_size", 1))
             self.sock_path = ipc.short_sock_path("fsgl")
             with contextlib.suppress(FileNotFoundError): os.unlink(self.sock_path)

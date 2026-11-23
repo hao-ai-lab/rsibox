@@ -24,9 +24,30 @@ class ConformanceHarness:
             files = self.files(patch, against="disk") if hasattr(self, "files") else (patch or {}).get("files")
         except ValueError as err:
             return {"ok": False, "output": None, "error": str(err)}
+        fresh_cfg = dict(self.config)
+        if fresh_cfg.get("load_format") == "gms":
+            fresh_cfg.pop("load_format", None)
+        raw_extra = fresh_cfg.get("model_loader_extra_config")
+        if raw_extra is not None:
+            parsed_extra = None
+            if isinstance(raw_extra, str) and raw_extra.strip():
+                try:
+                    parsed_extra = json.loads(raw_extra)
+                except ValueError:
+                    parsed_extra = None
+            elif isinstance(raw_extra, dict):
+                parsed_extra = dict(raw_extra)
+            if isinstance(parsed_extra, dict) and any(k.startswith("gms_") for k in parsed_extra):
+                cleaned = {k: v for k, v in parsed_extra.items() if not k.startswith("gms_")}
+                if cleaned:
+                    fresh_cfg["model_loader_extra_config"] = (
+                        json.dumps(cleaned) if isinstance(raw_extra, str) else cleaned
+                    )
+                else:
+                    fresh_cfg.pop("model_loader_extra_config", None)
         spec = {
             "mode": self.fresh_mode,
-            "config": self.config,
+            "config": fresh_cfg,
             "workload": workload or self.default_workload(),
         }
         with H.PackageOverlay(self.package, files) as overlay:
