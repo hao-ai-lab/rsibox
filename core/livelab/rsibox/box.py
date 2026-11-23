@@ -183,7 +183,11 @@ class Box:
         except BaseException as exc:  # noqa: BLE001
             return 200, {"ok": False, "module": module, "error": f"{type(exc).__name__}: {exc}"}
         if not isinstance(text, str):
-            return 200, {"ok": False, "module": module, "error": "the lab does not serve this module's text"}
+            avail = sorted(stack[-1]) if stack else sorted(getattr(lab, "base_text", None) or ())
+            reply = {"ok": False, "module": module, "error": "the lab does not serve this module's text"}
+            if avail:
+                reply["available"] = avail
+            return 200, reply
         return 200, {"ok": True, "module": module, "text": text, "hash": text_hash(text)}
 
     # -- events --------------------------------------------------------------------------
