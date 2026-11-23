@@ -27,8 +27,8 @@ PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 LIVELAB_DIR = REPO_ROOT / "core" / "livelab"
 
 RUNTIME_ROOT_MODULES = ("forksafe", "livestream", "ray_participants")
-RUNTIME_ROOT_PACKAGES = ("conformance", "rsibox", "kernel", "rsibox", "survey")
-EXPECTED_PACKAGES = ("conformance", "rsibox", "kernel", "kernel.toy", "rsibox", "survey")
+RUNTIME_ROOT_PACKAGES = ("conformance", "kernel", "rsibox", "survey")
+EXPECTED_PACKAGES = ("conformance", "kernel", "kernel.toy", "rsibox", "survey")
 EXPECTED_TOP_LEVEL = sorted((*RUNTIME_ROOT_MODULES, *RUNTIME_ROOT_PACKAGES))
 
 _HAS_SETUPTOOLS = importlib.util.find_spec("setuptools") is not None
