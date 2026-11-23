@@ -11,7 +11,7 @@
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` (**FastRSI**) is a live hot-swap sandbox for ML engines. Instead of paying a multi-minute restart for every edit in **vLLM**, **SGLang**, **Megatron-LM**, **FastVideo**, **veRL**, or **miles**, coding agents and engineers swap edits into a warm running process, prove the new code executed, measure it, and undo it cleanly — or get an explicit refusal naming the cheapest restart boundary required.
+`rsibox` lets coding agents and engineers test edits inside a running ML engine (vLLM, SGLang, Megatron-LM, FastVideo, veRL, miles) without restarting — with execution proof and instant rollback.
 
 ## Quickstart
 
