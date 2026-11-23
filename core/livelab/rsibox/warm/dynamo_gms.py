@@ -45,6 +45,7 @@ GMS_TAGS: tuple[str, ...] = ("weights", "kv_cache")
 GMS_VLLM_LOAD_FORMAT = "gms"
 GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 GMS_SGLANG_LOAD_FORMAT = "gms"
+ENV_GMS_DEVICE_UUID_MAP = "RSIBOX_GMS_DEVICE_UUID_MAP"
 DEFAULT_RO_CONNECT_TIMEOUT_MS = 10_000
 _SAMPLE_UUID = "GPU-00000000-0000-0000-0000-000000000000"
 
@@ -166,6 +167,77 @@ def resolve_gpu_uuids(
     """Resolve NVML GPU UUIDs (`GPU-...`) for target GPUs (or None if unavailable)."""
     targets = resolve_target_gpus(gpus, visible_devices=visible_devices, tp=tp)
     return [uuid for _, uuid in targets] if targets else None
+
+
+def build_device_uuid_map(targets: Sequence[tuple[int, str]]) -> dict[str, str]:
+    """Map logical CUDA ordinals (`"0"`, `"1"`, ...) to physical GPU UUIDs."""
+    return {str(logical_idx): uuid for logical_idx, (_, uuid) in enumerate(targets)}
+
+
+def install_visible_devices_uuid_shim(
+    mapping: dict[int, str] | dict[str, str] | str | None = None,
+) -> bool:
+    """Fix bare-metal GMS V0 `get_socket_path(local_rank)` under remapped `CUDA_VISIBLE_DEVICES`.
+
+    Upstream GMS V0 `gpu_memory_service.common.utils.get_socket_path(device, tag)` queries
+    `pynvml.nvmlDeviceGetHandleByIndex(device)`, which ignores bare-metal `CUDA_VISIBLE_DEVICES`
+    (e.g. `CUDA_VISIBLE_DEVICES=4,5,6,7`). Pre-populating `_uuid_cache` and wrapping
+    `get_socket_path` / `invalidate_uuid_cache` routes logical CUDA ordinal `0..N-1` to the
+    exact physical GPU UUID socket without importing `torch`, `cuda`, or `pynvml`.
+    """
+    raw = os.environ.get(ENV_GMS_DEVICE_UUID_MAP) if mapping is None else mapping
+    if not raw:
+        return False
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return False
+    elif isinstance(raw, dict):
+        parsed = raw
+    else:
+        return False
+    if not isinstance(parsed, dict) or not parsed:
+        return False
+    try:
+        int_map = {int(k): str(v) for k, v in parsed.items() if str(v)}
+    except (TypeError, ValueError):
+        return False
+    if not int_map:
+        return False
+    try:
+        from gpu_memory_service.common import utils as gms_utils
+    except ImportError:
+        return False
+
+    cache = getattr(gms_utils, "_uuid_cache", None)
+    if isinstance(cache, dict):
+        cache.update(int_map)
+
+    orig_get = getattr(gms_utils, "_rsibox_orig_get_socket_path", gms_utils.get_socket_path)
+    orig_inv = getattr(gms_utils, "_rsibox_orig_invalidate_uuid_cache", gms_utils.invalidate_uuid_cache)
+    gms_utils._rsibox_orig_get_socket_path = orig_get
+    gms_utils._rsibox_orig_invalidate_uuid_cache = orig_inv
+    gms_utils._rsibox_device_uuid_map = dict(int_map)
+
+    def _mapped_get_socket_path(device: int, tag: str = "weights") -> str:
+        mapped = getattr(gms_utils, "_rsibox_device_uuid_map", None) or {}
+        uuid = mapped.get(device)
+        if uuid is not None:
+            sock_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
+            return os.path.join(sock_dir, f"gms_{uuid}_{tag}.sock")
+        return orig_get(device, tag)
+
+    def _mapped_invalidate_uuid_cache() -> None:
+        orig_inv()
+        c = getattr(gms_utils, "_uuid_cache", None)
+        m = getattr(gms_utils, "_rsibox_device_uuid_map", None)
+        if isinstance(c, dict) and isinstance(m, dict):
+            c.update(m)
+
+    gms_utils.get_socket_path = _mapped_get_socket_path
+    gms_utils.invalidate_uuid_cache = _mapped_invalidate_uuid_cache
+    return True
 
 
 def _visible_devices_remap_finding(

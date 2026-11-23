@@ -7,11 +7,14 @@ Engine-agnostic, pure Python stdlib kit inside `rsibox.warm`:
 """
 from . import dynamo_gms, recovery, snapshot_contract, types, weight_store
 from .dynamo_gms import (
+    ENV_GMS_DEVICE_UUID_MAP,
     GMS_SGLANG_LOAD_FORMAT,
     GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
     DynamoGmsStore,
+    build_device_uuid_map,
+    install_visible_devices_uuid_shim,
 )
 from .recovery import (
     DefaultRespawnDriver,
@@ -41,6 +44,7 @@ __all__ = [
     "DiskStore",
     "DynamoGmsStore",
     "DynamoK8sSnapshotDriver",
+    "ENV_GMS_DEVICE_UUID_MAP",
     "ENV_SNAPSHOT_CONTROL_DIR",
     "GMS_SGLANG_LOAD_FORMAT",
     "GMS_TAGS",
@@ -57,8 +61,10 @@ __all__ = [
     "StandbyShadowDriver",
     "StoreProbe",
     "WeightStore",
+    "build_device_uuid_map",
     "dynamo_gms",
     "get_weight_store",
+    "install_visible_devices_uuid_shim",
     "list_weight_stores",
     "recovery",
     "register_weight_store",

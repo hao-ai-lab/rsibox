@@ -39,9 +39,12 @@ from rsibox.warm import (  # noqa: E402
     stamp_diff,
 )
 from rsibox.warm.dynamo_gms import (  # noqa: E402
+    ENV_GMS_DEVICE_UUID_MAP,
     _GET_RUNTIME_STATE_FRAME,
     _decode_msgpack,
     _probe_gms_socket,
+    build_device_uuid_map,
+    install_visible_devices_uuid_shim,
     long_socket_path_finding,
     resolve_target_gpus,
     socket_name,
@@ -186,6 +189,44 @@ class DynamoGmsStoreTests(unittest.TestCase):
             )
             pr2 = store_ok.probe(visible_devices="4")
             self.assertEqual(pr2.finding["check"], "dynamo_gms_daemon")
+
+    def test_visible_devices_uuid_shim_routes_logical_ordinals_and_survives_invalidate(self):
+        import types
+
+        fake_utils = types.ModuleType("gpu_memory_service.common.utils")
+        fake_utils._uuid_cache = {}
+
+        def orig_get_socket_path(device: int, tag: str = "weights") -> str:
+            u = fake_utils._uuid_cache.get(device, f"WRONG-PHYS-{device}")
+            return os.path.join(os.environ.get("GMS_SOCKET_DIR", "/tmp"), f"gms_{u}_{tag}.sock")
+
+        def orig_invalidate() -> None:
+            fake_utils._uuid_cache.clear()
+
+        fake_utils.get_socket_path = orig_get_socket_path
+        fake_utils.invalidate_uuid_cache = orig_invalidate
+        fake_mods = {
+            "gpu_memory_service": types.ModuleType("gpu_memory_service"),
+            "gpu_memory_service.common": types.ModuleType("gpu_memory_service.common"),
+            "gpu_memory_service.common.utils": fake_utils,
+        }
+        mapping = build_device_uuid_map([(4, "GPU-444"), (5, "GPU-555")])
+        self.assertEqual(mapping, {"0": "GPU-444", "1": "GPU-555"})
+
+        with mock.patch.dict(sys.modules, fake_mods), mock.patch.dict(
+            os.environ, {"GMS_SOCKET_DIR": "/tmp/gms-test", ENV_GMS_DEVICE_UUID_MAP: json.dumps(mapping)}
+        ):
+            self.assertTrue(install_visible_devices_uuid_shim())
+            want0 = os.path.join("/tmp/gms-test", socket_name("GPU-444", "weights"))
+            want1_kv = os.path.join("/tmp/gms-test", socket_name("GPU-555", "kv_cache"))
+            want1_w = os.path.join("/tmp/gms-test", socket_name("GPU-555", "weights"))
+            # Both wrapped utils.get_socket_path AND pre-imported orig_get_socket_path resolve GPU-444/555!
+            self.assertEqual(fake_utils.get_socket_path(0, "weights"), want0)
+            self.assertEqual(orig_get_socket_path(1, "kv_cache"), want1_kv)
+            # Survives invalidate_uuid_cache()!
+            fake_utils.invalidate_uuid_cache()
+            self.assertEqual(fake_utils.get_socket_path(0, "weights"), want0)
+            self.assertEqual(orig_get_socket_path(1, "weights"), want1_w)
 
     def test_probe_uses_msgpack_runtime_state_and_fails_closed_on_uncommitted_ro_and_missing_stamp(self):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
