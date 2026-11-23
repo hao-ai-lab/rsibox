@@ -113,6 +113,12 @@ class ToyLab:
         base = self.live_text[-1]
         modules = {}
         for m, new in patch["files"].items():    # targets: "auto" (stage finds them)
+            if m not in base:
+                return {"ok": False, "id": None, "outcome": "refused",
+                        "codes": ["module_unknown"], "mechanisms": [],
+                        "findings": [{"check": "module_unknown", "observed": m,
+                                      "expected": sorted(base)}],
+                        "receipt": None, "cost_s": round(time.perf_counter() - t0, 6)}
             modules[m] = {"source": new, "base_hash": L.text_hash(base[m])}
         plan = {"modules": modules, "accept": patch.get("accept", []),
                 "undo_resets": patch.get("undo_resets", []), "recipes": ["R0 swap"]}

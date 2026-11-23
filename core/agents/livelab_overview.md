@@ -9,10 +9,24 @@ A live lab is a warm, running engine you can change without restarting it. Resta
 most of a check on setup (77–90% in our vLLM, Megatron and FastVideo measurements); a live
 lab keeps that state resident.
 
-## Calls
+## Calls & CLI
 
-`install(patch)`, `check(workload)`, `reset()`, `uninstall()`, `status()`.
-Contract: `core/livelab/INTERFACE.md`. Engine specifics: `repos/<engine>/livelab/README.md`.
+Every lab exposes `install(patch)`, `check(workload)`, `reset()`, `uninstall()`, and `status()`
+(`core/livelab/INTERFACE.md`). Drive any lab over HTTP via `rsibox` (`core/livelab/rsibox/README.md`):
+
+```sh
+rsibox up --launcher local --lab <engine> [--real] --state /tmp/box1
+export RSIBOX=/tmp/box1/box.json
+rsibox wait                                 # wait until warm; prints boot_s
+rsibox source <module> > mod.py             # fetch live source text
+# ... edit mod.py ...
+rsibox install --file <module>=mod.py       # atomic swap across ranks (exit 2 if refused)
+rsibox check                                # output, proven, witness counts, cost_s
+rsibox uninstall                            # journaled revert to base
+rsibox down --state /tmp/box1
+```
+
+Engine specifics: `repos/<engine>/livelab/README.md` (and `rsibox conformance <engine> --real -- --help` for GPU flags).
 
 ## Before every experiment
 
