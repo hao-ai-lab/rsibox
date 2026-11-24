@@ -511,6 +511,61 @@ class VllmQuiesceHooksTest(unittest.TestCase):
             self.assertFalse((control_path / "vllm-restore-ready").exists())
             self.assertIn("host check failed", result.error or "")
 
+    def test_resume_after_restore_refreshes_server_start_ticks_only_after_host_ping(self):
+        """CRIU restore preserves PID but assigns a new /proc/<pid>/stat starttime."""
+        instance = _LiveFakeVllmInstance(pid=os.getpid())
+        self.addCleanup(instance.close)
+        current_ticks = [154497550]
+
+        with (
+            mock.patch.object(conformance_lab.engine, "_start_time", side_effect=lambda _pid: current_ticks[0]),
+            mock.patch.object(conformance_lab, "_alive", return_value=True),
+        ):
+            server_handle = conformance_lab._ServerHandle(
+                os.getpid(), instance.port, instance.kernel_dir, 0.01, ""
+            )
+            lab = _attach_live_handle_to_lab(instance)
+            lab.server = server_handle
+            hooks = lab.quiesce_hooks(timeout=0.5)
+
+            hooks.warmup_for_snapshot()
+            receipt = hooks.quiesce_for_snapshot()
+            self.assertTrue(receipt.ok, receipt)
+            self.assertTrue(lab.server.alive())
+
+            # Simulate CRIU restore: same PID, new /proc/<pid>/stat field 22 starttime.
+            current_ticks[0] = 154501520
+            self.assertFalse(lab.server.alive())
+
+            # Case 1: if post-restore host ping fails, start_ticks MUST NOT be refreshed.
+            instance.channel.stop()
+            failed_resume = hooks.resume_after_restore(receipt)
+            self.assertFalse(failed_resume["ok"])
+            self.assertEqual(lab.server.start_ticks, 154497550)
+            self.assertFalse(lab.server.alive())
+
+            # Re-enter restored sleeping state and bring host channel back up.
+            instance.state.paused = True
+            instance.state.sleeping_tags = {"weights", "kv_cache"}
+            instance.channel = ipc.FileChannelServer(
+                instance.kernel_dir,
+                lambda command: (
+                    setattr(instance.backend.host, "loop_thread", threading.current_thread())
+                    or instance.backend.ctl(command)
+                ),
+                poll_s=0.005,
+            )
+            self.assertFalse(lab.server.alive())
+
+            # Case 2: once wake_up + resume + adapter.host ping/fingerprint succeed,
+            # start_ticks refreshes so `lab.server.alive()` and `lab.check()` work again.
+            resumed = hooks.resume_after_restore(receipt)
+            self.assertTrue(resumed["ok"], resumed)
+            self.assertEqual(lab.server.start_ticks, 154501520)
+            self.assertTrue(lab.server.alive())
+            post_check = lab.check()
+            self.assertTrue(post_check["ok"], post_check)
+
 
 class VllmLabSleepModeAndShadowPromotionTest(unittest.TestCase):
     def tearDown(self):

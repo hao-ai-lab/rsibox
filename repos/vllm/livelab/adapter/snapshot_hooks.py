@@ -333,6 +333,9 @@ class VllmQuiesceHooks:
             wake_query=wake_query, timeout=self._timeout, label="post-restore",
         )
         if outcome.get("ok"):
+            server = getattr(self._lab, "server", None) if self._lab is not None else None
+            if callable(getattr(server, "refresh_start_ticks", None)):
+                server.refresh_start_ticks()
             outcome["resumed"] = list(receipt.released)
         return outcome
 

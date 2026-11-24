@@ -176,6 +176,10 @@ class _ServerHandle:
     def alive(self):
         return _alive(self.pid) and engine._same_process(self.pid, self.start_ticks)
 
+    def refresh_start_ticks(self):
+        self.start_ticks = engine._start_time(self.pid)
+        return self.start_ticks
+
     def stop(self):
         if self.alive() or not _alive(self.pid):
             engine.stop_engine(self.pid, grace=8, marker=self.marker)
