@@ -433,6 +433,29 @@
    "notes": [
     "337 non-test prod adapter LOC reusing ray_participants.py, proving derived-engine onboarding under 400 prod LOC; 11/11 conformance + 2x GB200 smoke."
    ]
+  },
+  {
+   "engine": "Transformers",
+   "folder": "repos/transformers",
+   "recorded_facts": [
+    {
+     "fact": "Onboarded unmodified HuggingFace Transformers (5.20.2) with a persistent step-gap worker subprocess, TransformersQuiesceHooks, and ToyTransformersLab reusing core/livelab unchanged.",
+     "source": "repos/transformers/docs/architecture.md; repos/transformers/kb/costs.md"
+    },
+    {
+     "fact": "Passed 11/11 CPU conformance (ToyTransformersLab), 11/11 real-GPU conformance on 1x B200 Qwen3-0.6B via rsibox conformance transformers --real (c9 0.2727 s install / 0.0843 s undo, c8 respawns 4.26-4.50 s, 0 MiB exit), live multi-module swaps on Qwen3-0.6B (0.521 s vs 4.718 s cold, 9.05x) and Qwen3-8B (0.605 s vs 7.746 s cold, 12.81x), and DynamoK8sSnapshotDriver quiesce/resume freeing 1,166 MiB (0.032 s resume) and 15,778 MiB (0.310 s resume).",
+     "source": "repos/transformers/kb/costs.md"
+    }
+   ],
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Runs against unmodified HuggingFace Transformers inside a persistent warm worker subprocess with zero upstream patches.",
+    "source": "repos/transformers/docs/architecture.md"
+   },
+   "notes": [
+    "11/11 CPU + 11/11 1x B200 GPU conformance and TransformersQuiesceHooks snapshot lifecycle verified on Qwen3-0.6B and Qwen3-8B."
+   ]
   }
  ]
 }

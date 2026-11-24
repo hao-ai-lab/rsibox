@@ -75,7 +75,9 @@ so `TransformersLab` plugs directly into `rsibox.warm.DynamoK8sSnapshotDriver`:
   including `fail_apply`/`fail_commit` atomic rollback (`c5`), all 4 refusal classes (`c6`),
   `crash`/`hang`/`lost`/`tamper` poison + respawn recovery (`c8`), 20-cycle soak (`c9`), and
   unreached startup-only edit detection (`c10`).
-- **Real GPU verification (`TransformersLab`)**: Verified on 1× NVIDIA B200 (`Qwen3-0.6B` and
-  `Qwen3-8B`, our 2026-11-24 B200 run) across 3 real `transformers` modules (`generation.utils`,
-  `generation.logits_process`, `models.qwen3.modeling_qwen3`), fresh `PackageOverlay` parity, and
-  `DynamoK8sSnapshotDriver` quiesce/resume + post-resume live edits.
+- **Real GPU verification (`TransformersLab`)**: Passed **11/11** real-GPU conformance (`c0–c10`)
+  via `rsibox conformance transformers --real` on 1× NVIDIA B200 (`Qwen3-0.6B`, `c9` install median
+  `0.2727 s` / uninstall `0.0843 s`, `c8` respawns `4.26–4.50 s`, our 2026-11-24 B200 run), plus
+  multi-module live edits (`generation.utils`, `generation.logits_process`,
+  `models.qwen3.modeling_qwen3`), fresh `PackageOverlay` parity, and `DynamoK8sSnapshotDriver`
+  quiesce/resume + post-resume live edits on both `Qwen3-0.6B` and `Qwen3-8B`.

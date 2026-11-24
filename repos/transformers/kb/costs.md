@@ -32,11 +32,9 @@ Measured in our 2026-11-24 B200 run over 3 consecutive `checkpoint_and_wait()` c
 | **Qwen3-0.6B** | `0.040 ± 0.021` | `1.415 s` | `0.413 s`, `0.422 s` | **`0.032 ± 0.004 s`** | `1,164–1,166 MiB` | Yes (`0.270 s` install, `0.231 s` check) |
 | **Qwen3-8B** | `0.048 ± 0.019` | `15.644 s` | `8.758 s`, `8.976 s` | **`0.310 ± 0.011 s`** | `15,740–15,778 MiB` | Yes (`0.287 s` install, `0.307 s` check) |
 
-## CPU Conformance (`ToyTransformersLab`)
+## Conformance (`c0–c10`) Receipts
 
-Measured on CPU (2026-11-24):
+Measured in our 2026-11-24 B200 run:
 
-- `rsibox conformance transformers`: **11/11 PASS** (`c0–c10`), total ~2.4 s on CPU.
-- `c9_soak` (20 cycles): install median `~0.007 s`, uninstall median `~0.002 s`.
-- `c8_crash_and_hang` respawn recovery: `~0.055 s` per respawn across `crash`, `hang`, `lost`, and
-  `tamper`.
+- **Real GPU (`TransformersLab`, 1× NVIDIA B200, `Qwen3-0.6B` `bfloat16` via `rsibox conformance transformers --real`)**: **11/11 PASS** (`c0–c10`), `c9_soak` (20 cycles) install median `0.2727 s` / uninstall median `0.0843 s`, `c8_crash_and_hang` respawns `4.26–4.50 s` across `crash`/`hang`/`lost`/`tamper`, `c3_fresh_equivalence` visible & 3-edit chain bit-exact (`22.820 s`), `c10_not_proven` `zero_witness` with fresh divergence via `PreTrainedModel.tie_weights` (`7.954 s`), clean `0 MiB` exit.
+- **CPU (`ToyTransformersLab` via `rsibox conformance transformers`)**: **11/11 PASS** (`c0–c10`), total ~3.7 s on CPU (`c9_soak` install median `~0.007 s` / uninstall median `~0.002 s`, `c8` respawn `~0.05–0.17 s`).

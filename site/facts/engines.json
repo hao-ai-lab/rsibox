@@ -1,6 +1,6 @@
 {
  "shared_kernel": {
-  "what": "All six engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
+  "what": "All seven engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
   "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
   "gpu_fix_receipt": "PR #136 (B200, TP=2)",
   "source": "core/livelab/kernel/README.md; core/livelab/rsibox/; PR #136"
@@ -557,6 +557,41 @@
      "status": "merged_gpu_verified",
      "source": "PR #162; repos/miles/kb/costs.md",
      "note": "11/11 CPU conformance on ToyMilesLab; 11/11 real-GPU conformance via first-class rsibox conformance miles --real (MilesConformanceLab, 113 receipts; post-fanout & PEP 578 negative-cache c9 0.0536 s install [1.16x vs 0.0622 s] / 0.0129 s undo [1.31x vs 0.0169 s], median 0.0384 s edit-to-commit / 0.0046 s undo, gap 0.0083 s, c8 respawns 47.07-47.81 s, c3 bit-exact visible & 3-chain, c10 zero_witness with fresh divergence, 0 MiB x 2, 15/15 miles + 33/33 core container pytest, 6/6 real-GPU CLI launch) plus earlier RealSlime11Lab 11/11 on 2x B200 slime Qwen3-0.6B GRPO under non-zero-gradient parity_rm (88.76 s fresh -> 0.6972 s [127.3x] with weights_backuper S0 refresh). 2026-11-20 2x B200 unified parity_rm restart dissection: 82.385 s cold restart -> 53.480 s warm restart (1.5x) -> 0.890 s live get_grpo_returns swap + 3.58 GB S0 restore + full step (92.6x; 52.9 ms install, 0.220 s restore, 0.617 s step, 15.7 ms bit-exact undo) -> 0.678 s recorded-rollout Megatron replay (121.5x). On 2026-11-21 (2x B200, Qwen3-0.6B GSM8K GRPO + parity_rm), AST compile() negative caching cut warm status() 37.15x (0.875 -> 0.0236 s) across 32 AST compiles with 0 wipes (11/11 conformance, 15/15 container pytest), and the two-stage ladder ran 102.58 s cold -> 72.27 s warm -> Stage 1 live MilesStepGate + S0 + 320-traj (40x8x512) GRPO step 14.07 s (7.3x: 0.0495 s install + 0.424 s S0 + 13.60 s step) -> Stage 2 64-traj (8x8x512) recorded-rollout Megatron replay + weight sync 1.89 s (54.3x: 0.0511 s install + 0.226 s S0 + 1.61 s train/sync, bit-exact S0/undo/fresh). On 2x GB200 miles 0.2.0 (PR #162): 0.069 s (69.22 ms) multi-actor live swap + EpochDataBuffer code_epoch drain + coupled S0 weight sync."
+    }
+   ]
+  },
+  {
+   "engine": "Transformers",
+   "upstream": "huggingface/transformers",
+   "folder": "repos/transformers",
+   "mechanisms": [
+    {
+     "name": "Persistent warm worker live swap (`TransformersLab`)",
+     "what": "Runs `AutoModelForCausalLM` + `AutoTokenizer` inside a dedicated step-gap worker subprocess over an `AF_UNIX` JSON channel (`rsibox.ipc.UnixJsonServer`), performing atomic `__code__` swaps across `transformers.generation.*`, `transformers.modeling_utils`, and model architecture modules with post-commit/post-undo state resets.",
+     "startup_cost_removed": "Worker Python/PyTorch/Transformers imports and model weight load from disk.",
+     "measured_saving": {
+      "before": "4.718 (Qwen3-0.6B) / 7.746 (Qwen3-8B, 9.508 cold page cache)",
+      "after": "0.521 (Qwen3-0.6B, 9.05x) / 0.605 (Qwen3-8B, 12.81x; 0.113-0.281 s install, 0.072-0.097 s undo)",
+      "unit": "s",
+      "setup": "1x B200, PyTorch 2.14.0+cu130, Transformers 5.20.2, Qwen3-0.6B & Qwen3-8B bfloat16, 2x16 greedy check, 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/transformers/docs/architecture.md; repos/transformers/kb/costs.md",
+     "note": "Passed 11/11 conformance on CPU (ToyTransformersLab) and 11/11 real-GPU conformance on 1x B200 Qwen3-0.6B via rsibox conformance transformers --real (c9 install median 0.2727 s / uninstall 0.0843 s, c8 respawns 4.26-4.50 s, c3 visible & 3-edit chain bit-exact, c10 zero_witness with fresh divergence via PreTrainedModel.tie_weights, 0 MiB exit). Also verified across 3 real modules (generation.utils, generation.logits_process, models.qwen3.modeling_qwen3) with fresh PackageOverlay parity on both Qwen3-0.6B and Qwen3-8B."
+    },
+    {
+     "name": "Snapshot quiesce/resume with pinned CPU weight offload (`TransformersQuiesceHooks`)",
+     "what": "Implements `rsibox.warm.QuiesceHooks` for `DynamoK8sSnapshotDriver`: clears caches, offloads model parameters and buffers to pinned CPU memory without breaking tied weights, empties CUDA allocator cache, refuses generation/edits while quiesced, and restores weights over DMA with channel + fingerprint verification.",
+     "startup_cost_removed": "GPU VRAM retention during checkpointing and cold weight reload from disk on restore.",
+     "measured_saving": {
+      "before": "4.718 (Qwen3-0.6B) / 7.746 (Qwen3-8B) cold load + check",
+      "after": "0.032 (Qwen3-0.6B, 1,166 MiB freed) / 0.310 (Qwen3-8B, 15,778 MiB freed, ~51 GiB/s H2D resume)",
+      "unit": "s",
+      "setup": "1x B200, Transformers 5.20.2, DynamoK8sSnapshotDriver 3x cycles, offload_to_cpu=True pin_memory=True, 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/transformers/livelab/adapter/snapshot_hooks.py; repos/transformers/kb/costs.md",
+     "note": "Bit-exact generation and full post-resume RSIBox live hot-swap verified after restore on both Qwen3-0.6B and Qwen3-8B (0 MiB cleanup)."
     }
    ]
   }

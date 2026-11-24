@@ -819,7 +819,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("invalid JSON", err_ctl.getvalue())
 
     def test_real_engines_support_real_help_without_gpu_imports(self):
-        """Input: `rsibox conformance <engine> --real -- --help` for all 6 real GPU engines.
+        """Input: `rsibox conformance <engine> --real -- --help` for all 7 real GPU engines.
         Expected: exits 0, prints engine-specific help text, and leaves GPU runtime libraries
         (`torch`, etc.) unimported."""
         repo_root = os.path.dirname(os.path.dirname(LIVELAB))
@@ -837,7 +837,7 @@ class CliTests(unittest.TestCase):
             "raise SystemExit(rc)\n"
         )
         env = {**os.environ, "PYTHONPATH": LIVELAB}
-        for engine in ("vllm", "fastvideo", "megatron", "verl", "sglang", "miles"):
+        for engine in ("vllm", "fastvideo", "megatron", "verl", "sglang", "miles", "transformers"):
             with self.subTest(engine=engine):
                 proc = subprocess.run(
                     [sys.executable, "-c", probe, engine, repo_root, ",".join(cli._GPU_RUNTIME_LIBS)],
