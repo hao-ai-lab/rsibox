@@ -424,38 +424,34 @@ class RecaptureTest(unittest.TestCase):
         self.assertEqual(rs[0].step(4), ("v1", "FULL"))
 
     def test_r1_undo_uses_recapture_undo_deadline_and_respects_explicit_override(self):
-        """Input: default phase-2 deadline 0.15 s, R1 undo deadline 1.5 s; rank 1's graph
-        teardown sync sleeps 0.35 s during undo (longer than 0.15 s, shorter than 1.5 s).
-        Expected: (a) explicit undo of an R1 txn without `phase2_deadline_s` uses the R1 undo
-        deadline, succeeds cleanly, does not poison the host, and restores base graphs; (b)
-        undo of an earlier R0 txn that cascades over a later R1 txn also uses the R1 undo
-        deadline; (c) explicit `phase2_deadline_s=0.15` on an R1 undo is still enforced
-        (fail-closed, poisons host); (d) a plain R0 undo still uses the tight 0.15 s deadline.
-        Fails before the fix: (a) and (b) hit `deadline_missed` and poison the host."""
+        """Input: default phase-2 deadline 0.15 s, R1 undo deadline 1.5 s; rank 1's undo fault
+        hook sleeps 0.35 s (decoupled from `engine.sync`). Expected: (a) explicit undo of an R1
+        txn without `phase2_deadline_s` uses the R1 undo deadline, succeeds cleanly, does not
+        poison the host, and restores base graphs; (b) undo of an earlier R0 txn cascading over
+        a later R1 txn also uses the R1 undo deadline; (c) retried undo of a partial-rollback
+        failed R1 txn also triggers `_undo_touches_recapture` and uses the R1 undo deadline; (d)
+        explicit `phase2_deadline_s=0.15` on an R1 undo is still enforced (fail-closed, poisons
+        host); (e) a plain R0 undo keeps the tight 0.15 s deadline. Fails before the fix: (a),
+        (b), and (c) hit `deadline_missed` and poison the host."""
         from unittest import mock
         from kernel import locate as locate_mod
         from .test_host import ENG
 
         lab, runners, _ = host(self, "r1udl")
-        delay_enabled = [False]
-
-        def slow_rank1_sync():
-            if delay_enabled[0]:
-                time.sleep(0.18)  # called before + after graph swap -> ~0.36 s total
-
-        runners[1].engine.sync = slow_rank1_sync
+        undo_fault = {"worker:1": {"method": "undo", "delay_s": 0.35, "fail": False}}
         with mock.patch.object(H, "PHASE2_DEADLINE_S", 0.15), \
              mock.patch.object(H, "RECAPTURE_UNDO_DEADLINE_S", 1.5), \
              mock.patch.object(H, "GAP_TIMEOUT_S", 1.0), \
              mock.patch.object(H, "RPC_GRACE_S", 0.2):
             # (a) Direct R1 undo uses RECAPTURE_UNDO_DEADLINE_S
             commit_reply = lab.handle(
-                {"op": "txn", "plan": plan("r1udl1", rebuild=["R1"], r1={"sizes": [4]})}
+                {
+                    "op": "txn",
+                    "plan": plan("r1udl1", rebuild=["R1"], r1={"sizes": [4]}, faults=undo_fault),
+                }
             )
             self.assertEqual(commit_reply["outcome"], "committed")
-            delay_enabled[0] = True
             undo_reply = lab.handle({"op": "undo", "txn": "r1udl1"})
-            delay_enabled[0] = False
             self.assertTrue(undo_reply["ok"], undo_reply)
             self.assertFalse(lab.co.poison)
             self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
@@ -463,7 +459,10 @@ class RecaptureTest(unittest.TestCase):
 
             # (b) Cascaded undo (R0 base -> R1 child) also uses RECAPTURE_UNDO_DEADLINE_S
             self.assertEqual(
-                lab.handle({"op": "txn", "plan": plan("r0parent")})["outcome"], "committed"
+                lab.handle(
+                    {"op": "txn", "plan": plan("r0parent", faults=undo_fault)}
+                )["outcome"],
+                "committed",
             )
             v1_source = ENG.replace('self.ran.append("base")', 'self.ran.append("v1")')
             v2_source = v1_source.replace('self.ran.append("v1")', 'self.ran.append("v2")')
@@ -483,37 +482,47 @@ class RecaptureTest(unittest.TestCase):
             self.assertEqual(
                 lab.handle({"op": "txn", "plan": child_plan})["outcome"], "committed"
             )
-            delay_enabled[0] = True
             cascade_reply = lab.handle({"op": "undo", "txn": "r0parent"})
-            delay_enabled[0] = False
             self.assertTrue(cascade_reply["ok"], cascade_reply)
             self.assertFalse(lab.co.poison)
             self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
 
-            # (c) Explicit tight phase2_deadline_s on R1 undo still fails closed
+            # (c) Retried undo of a partial-rollback failed R1 txn gets RECAPTURE_UNDO_DEADLINE_S
+            lab.co.txns["r1partial"] = {
+                "state": "aborted",
+                "outcome": "rolled_back",
+                "plan": {"rebuild": ["R1"]},
+                "pending_rollback": [lab.workers],
+                "out": {"rebuild": {"ok": False}},
+            }
+            self.assertTrue(lab._undo_touches_recapture("r1partial"))
+            partial_deadline, _, _ = lab._resolve_deadlines("undo", {"txn": "r1partial"})
+            self.assertEqual(partial_deadline, 1.5)
+            lab.co.txns.pop("r1partial")
+
+            # (d) Explicit tight phase2_deadline_s on R1 undo still fails closed
             self.assertEqual(
                 lab.handle(
-                    {"op": "txn", "plan": plan("r1tight", rebuild=["R1"], r1={"sizes": [4]})}
+                    {
+                        "op": "txn",
+                        "plan": plan("r1tight", rebuild=["R1"], r1={"sizes": [4]}, faults=undo_fault),
+                    }
                 )["outcome"],
                 "committed",
             )
-            delay_enabled[0] = True
             tight_reply = lab.handle(
                 {"op": "undo", "txn": "r1tight", "phase2_deadline_s": 0.15}
             )
-            delay_enabled[0] = False
             self.assertFalse(tight_reply["ok"])
             self.assertTrue(lab.co.poison)
             time.sleep(0.4)  # let rank 1's lane finish its queued undo
 
-        # (d) Plain R0 undo (no R1 rebuilt) keeps the tight PHASE2_DEADLINE_S
+        # (e) Plain R0 undo (no R1 rebuilt) keeps the tight PHASE2_DEADLINE_S
         r0_lab, _, _ = host(self, "r0tight")
         with mock.patch.object(H, "PHASE2_DEADLINE_S", 0.15), \
              mock.patch.object(H, "RECAPTURE_UNDO_DEADLINE_S", 1.5), \
              mock.patch.object(H, "RPC_GRACE_S", 0.2):
-            r0_plan = plan(
-                "r0only", faults={"worker:1": {"method": "undo", "delay_s": 0.35, "fail": False}}
-            )
+            r0_plan = plan("r0only", faults=undo_fault)
             self.assertEqual(r0_lab.handle({"op": "txn", "plan": r0_plan})["outcome"], "committed")
             r0_undo = r0_lab.handle({"op": "undo", "txn": "r0only"})
             self.assertFalse(r0_undo["ok"])
@@ -522,13 +531,12 @@ class RecaptureTest(unittest.TestCase):
 
     def test_failed_r1_rollback_uses_recapture_undo_deadline_and_scales_gap_timeout(self):
         """Input: 2 ranks driven through a real background loop thread; `PHASE2_DEADLINE_S=0.15`,
-        `GAP_TIMEOUT_S=0.25`, `RECAPTURE_UNDO_DEADLINE_S=1.5`; rank 1's capture raises while
-        rank 0's rollback undo takes 0.35 s (exceeding both 0.15 s and 0.25 s). Expected:
-        rollback uses the 1.5 s R1 undo deadline, `gap_timeout` automatically scales above it
-        (no premature `LateJob` breaking `WorkerGroup`), outcome is `rolled_back` with
-        `rollback.status == "undone"`, `rollback.deadline_s == 1.5`, host is not poisoned, and
-        negative/non-finite deadlines fail closed. Fails before the fix: `deadline_missed` and
-        `LateJob` poison and break the worker group."""
+        `GAP_TIMEOUT_S=0.25`, `RECAPTURE_UNDO_DEADLINE_S=1.5`, `RECAPTURE_CAPTURE_BUDGET_S=1.0`;
+        rank 1's capture raises while rank 0's rollback undo takes 0.35 s. Also tests
+        `RECAPTURE_UNDO_DEADLINE_S=None` (must NOT drop `gap_timeout_s` scaling for commit),
+        capture-budget inclusion in R1 `txn` gap sizing, and fail-closed rejection of `bool`,
+        negative, NaN, and `1e308` timeouts. Fails before the fix: `deadline_missed`/`LateJob`
+        poison and break `WorkerGroup`, or `RECAPTURE_UNDO_DEADLINE_S=None` skips scaling."""
         from unittest import mock
 
         lab, runners, _ = host(self, "r1rbscale")
@@ -556,8 +564,16 @@ class RecaptureTest(unittest.TestCase):
         )
         with mock.patch.object(H, "PHASE2_DEADLINE_S", 0.15), \
              mock.patch.object(H, "RECAPTURE_UNDO_DEADLINE_S", 1.5), \
+             mock.patch.object(H, "RECAPTURE_CAPTURE_BUDGET_S", 1.0), \
              mock.patch.object(H, "GAP_TIMEOUT_S", 0.25), \
              mock.patch.object(H, "RPC_GRACE_S", 0.2):
+            # Verify R1 txn gap_timeout_s covers commit + capture_budget + rollback + grace + headroom
+            _, r1_gap_timeout_s, _ = lab._resolve_deadlines(
+                "txn", {"plan": {"rebuild": ["R1"]}}
+            )
+            expected_min = (0.15 / 2.0 + 0.2) + 1.0 + (1.5 + 0.2) + H.GAP_TIMEOUT_HEADROOM_S
+            self.assertAlmostEqual(r1_gap_timeout_s, expected_min, places=6)
+
             reply = lab.handle({"op": "txn", "plan": slow_rollback_plan})
             receipt = reply["receipt"]
             self.assertEqual(reply["outcome"], "rolled_back")
@@ -580,20 +596,36 @@ class RecaptureTest(unittest.TestCase):
             self.assertIsNone(lab.workers.broken)
             self.assertTrue(lab.handle({"op": "undo", "txn": "r0bigdl"})["ok"])
 
-            # Negative and NaN deadlines fail closed without poisoning
-            bad_deadline = lab.handle({"op": "status", "phase2_deadline_s": -1.0})
-            self.assertFalse(bad_deadline["ok"])
-            self.assertIn("phase2_deadline_s", bad_deadline["error"])
-            bad_gap = lab.handle({"op": "status", "gap_timeout_s": float("nan")})
-            self.assertFalse(bad_gap["ok"])
-            self.assertIn("gap_timeout_s", bad_gap["error"])
+            # Bool, negative, NaN, and overflowing timeouts fail closed without poisoning
+            for bad_value in (True, False, -1.0, float("nan"), 1e308):
+                bad_deadline = lab.handle({"op": "status", "phase2_deadline_s": bad_value})
+                self.assertFalse(bad_deadline["ok"], f"expected failure for {bad_value!r}")
+                self.assertIn("phase2_deadline_s", bad_deadline["error"])
+                bad_gap = lab.handle({"op": "status", "gap_timeout_s": bad_value})
+                self.assertFalse(bad_gap["ok"], f"expected failure for {bad_value!r}")
+                self.assertIn("gap_timeout_s", bad_gap["error"])
             self.assertFalse(lab.co.poison)
+
+        # Bug A regression: RECAPTURE_UNDO_DEADLINE_S=None must NOT drop gap_timeout_s scaling
+        with mock.patch.object(H, "PHASE2_DEADLINE_S", 0.5), \
+             mock.patch.object(H, "RECAPTURE_UNDO_DEADLINE_S", None), \
+             mock.patch.object(H, "RECAPTURE_CAPTURE_BUDGET_S", 0.0), \
+             mock.patch.object(H, "GAP_TIMEOUT_S", 0.25), \
+             mock.patch.object(H, "RPC_GRACE_S", 0.2):
+            resolved_dl, resolved_gap, _ = lab._resolve_deadlines(
+                "txn", {"plan": {"rebuild": ["R1"]}}
+            )
+            self.assertEqual(resolved_dl, 0.5)
+            self.assertGreaterEqual(resolved_gap, 0.5 + 0.2 + H.GAP_TIMEOUT_HEADROOM_S)
 
     def test_recapture_restore_and_unextend_sync_around_graph_teardown(self):
         """Input: 2-rank recapture + extend with instrumented `engine.sync` and wrapper dict
-        setter. Expected: `restore()` on undo and `unextend()` on extend undo both synchronize
-        before and after dropping recaptured graphs so no in-flight GPU replay races graph
-        destruction. Fails before the fix: `sync` is never called during undo."""
+        setter; plus a sticky CUDA error raised by the leading `engine.sync()` during undo.
+        Expected: (a) `restore()` and `unextend()` synchronize before and after graph teardown;
+        (b) even if the leading `engine.sync()` raises, the `finally` block still restores the
+        base wrapper entry dict and dispatcher keys while propagating the error so undo fails
+        closed (`undo_incomplete`). Fails before the fix: `sync` is never called during undo,
+        or a raising leading sync skips dict restoration."""
         lab, runners, _ = host(self, "syncorder")
         events = []
 
@@ -625,6 +657,26 @@ class RecaptureTest(unittest.TestCase):
         swap_index = events.index("swap_dict")
         self.assertGreaterEqual(events[:swap_index].count("sync"), 3)
         self.assertGreaterEqual(events[swap_index + 1:].count("sync"), 1)
+
+        # Sticky CUDA error on leading sync must still restore base dicts & keys, fail-closed
+        err_lab, err_runners, _ = host(self, "syncerr")
+        base_dict = err_runners[0].full.concrete_cudagraph_entries
+        self.assertEqual(
+            err_lab.handle(
+                {"op": "txn", "plan": plan("syncerr1", rebuild=["R1"], r1={"sizes": [4]})}
+            )["outcome"],
+            "committed",
+        )
+        self.assertIsNot(err_runners[0].full.concrete_cudagraph_entries, base_dict)
+
+        def failing_sync():
+            raise RuntimeError("sticky CUDA device-side assert")
+
+        err_runners[0].engine.sync = failing_sync
+        err_undo = err_lab.handle({"op": "undo", "txn": "syncerr1"})
+        self.assertFalse(err_undo["ok"])
+        self.assertIs(err_runners[0].full.concrete_cudagraph_entries, base_dict)
+        self.assertEqual(err_runners[0].keys, {"FULL": {8, 4, 2, 1}})
 
 
 R1Test = RecaptureTest

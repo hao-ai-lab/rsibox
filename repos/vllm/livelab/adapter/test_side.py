@@ -138,10 +138,11 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         self.assertEqual([ran(n) for n in names], ["base", "base"])
 
     def test_phase2_lane_binds_worker_cuda_device(self):
-        """Input: a worker rank owning `cuda:3` with a stubbed initialized `torch.cuda.device`;
-        bounded `commit` and `undo` calls run on the side's lane thread. Expected: each lane
-        call enters `torch.cuda.device("cuda:3")` on the lane thread so CUDA graph teardown and
-        sync never touch device 0. Fails before the fix: `entered_devices` is empty."""
+        """Input: (a) a worker rank owning `cuda:3`; (b) a worker rank owning un-indexed `"cuda"`
+        while the main thread's `torch.cuda.current_device()` is `5`. Expected: bounded `commit`
+        and `undo` calls on the lane thread enter `torch.cuda.device("cuda:3")` for (a) and pin
+        explicit device `5` on the main thread for (b) so lane threads never touch device 0.
+        Fails before the fix: `entered_devices` is empty or passes un-indexed `"cuda"`."""
         import contextlib
         import types
         from unittest import mock
@@ -158,12 +159,13 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         fake_torch.cuda = NS(
             is_initialized=lambda: True,
             is_current_stream_capturing=lambda: False,
+            current_device=lambda: 5 if threading.get_ident() == caller_thread_id else 0,
             device=record_device,
         )
         worker_stub = NS(model_runner=NS(device="cuda:3"))
-        side = Side("worker", scope={"worker": worker_stub}, rank=3)
         target_plan = own_plan("lane_dev")
         with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            side = Side("worker", scope={"worker": worker_stub}, rank=3)
             self.assertTrue(side.dispatch("prepare", target_plan)["ok"])
             deadline_at = time.time() + 5.0
             commit_reply = side.dispatch(
@@ -175,6 +177,26 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         self.assertTrue(commit_reply["ok"], commit_reply)
         self.assertTrue(undo_reply["ok"], undo_reply)
         self.assertEqual([device for device, _ in entered_devices], ["cuda:3", "cuda:3"])
+        self.assertTrue(all(thread_id != caller_thread_id for _, thread_id in entered_devices))
+
+        entered_devices.clear()
+        unindexed_worker = NS(model_runner=NS(device="cuda"))
+        unindexed_plan = own_plan("lane_unindexed")
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            unindexed_side = Side("worker", scope={"worker": unindexed_worker}, rank=5)
+            self.assertTrue(unindexed_side.dispatch("prepare", unindexed_plan)["ok"])
+            deadline_at = time.time() + 5.0
+            self.assertTrue(
+                unindexed_side.dispatch(
+                    "commit", {"txn": unindexed_plan["id"], "deadline_at": deadline_at}
+                )["ok"]
+            )
+            self.assertTrue(
+                unindexed_side.dispatch(
+                    "undo", {"txn": unindexed_plan["id"], "deadline_at": deadline_at}
+                )["ok"]
+            )
+        self.assertEqual([device for device, _ in entered_devices], [5, 5])
         self.assertTrue(all(thread_id != caller_thread_id for _, thread_id in entered_devices))
 
 
@@ -257,32 +279,50 @@ class GraphTest(unittest.TestCase):
         self.assertEqual((r["ok"], r["findings"]), (True, []))
 
     def test_vllm_models_and_kernel_prefixes_block_without_r1_and_commit_with_r1(self):
-        """Input: 2-rank graph-mode host using the default `CAPTURED_PREFIXES` (no override)
-        editing vLLM 0.33.0 top-level model and kernel modules (`vllm.models.deepseek_v41.*`,
-        `vllm.model_executor.kernels.*`, `vllm.kernels.*`) plus a non-model scheduler module.
-        Expected: model and kernel edits abort with blocking `captured_target` (route R1) when
-        `rebuild` is omitted, turn advisory and recapture graphs when `rebuild=["R1"]` is given,
-        route `zero_witness` to R1 if accepted without R1, commit with zero findings on an eager
-        worker, and leave non-model modules (`vllm.v1.core.sched.*`) unblocked. Fails before the
-        fix: `vllm.models.*`, `vllm.model_executor.kernels.*`, and `vllm.kernels.*` commit
-        silently without `captured_target` or R1 recapture."""
+        """Input: 2-rank graph-mode host using the default `CAPTURED_PREFIXES` and
+        `CAPTURED_EXCLUSIONS` (no override), editing vLLM 0.33.0 captured GPU modules
+        (`vllm.models.*`, `vllm.model_executor.kernels.*`, `vllm.kernels.*`,
+        `vllm.v1.attention.backends.*`, `vllm.v1.attention.ops.*`, `vllm.lora.layers.*`,
+        `vllm.lora.ops.*`, `vllm.distributed.device_communicators.*`, exact `vllm._custom_ops`)
+        plus host-side exclusions under `vllm.models.*` (`*.model_state`, `*host_table*`,
+        `*.quant_config`, `*.mm_preprocess`) and non-captured modules.
+        Expected: captured GPU edits abort with blocking `captured_target` (route R1, phrasing
+        "captured GPU code") when `rebuild` is omitted, turn advisory and recapture graphs when
+        `rebuild=["R1"]` is given, route `zero_witness` to R1 if accepted without R1, commit
+        with zero findings on an eager worker, and leave host-side exclusions and non-captured
+        modules unblocked. Fails before the fix: `vllm.models.*`/attention/LoRA/comm/`_custom_ops`
+        commit silently without `captured_target`, or host-side `model_state`/`engram_host_table`
+        are falsely blocked."""
         from .test_recapture import Runner
 
         lab, rank_packages, sides = make_host(self, "vllm033")
         runners = []
-        prefix_aliases = {
-            "vllm.models.deepseek_v41.nvidia": None,
-            "vllm.model_executor.kernels.attention": None,
-            "vllm.kernels.triton": None,
-            "vllm.v1.core.sched": None,
-        }
+        exact_aliases = (
+            "vllm.models.deepseek_v41.nvidia.model",
+            "vllm.model_executor.kernels.attention.candidate_blocks",
+            "vllm.kernels.triton.activation",
+            "vllm.v1.attention.backends.flash_attn",
+            "vllm.v1.attention.ops.triton_decode_attention",
+            "vllm.lora.layers.row_parallel_linear",
+            "vllm.lora.ops.triton_ops.lora_shrink_op",
+            "vllm.lora.punica_wrapper.punica_gpu",
+            "vllm.distributed.device_communicators.custom_all_reduce",
+            "vllm._custom_ops",
+            "vllm._custom_ops_extra",
+            "vllm.models.deepseek_v41.nvidia.model_state",
+            "vllm.models.deepseek_v41.nvidia.ops.engram_host_table",
+            "vllm.models.deepseek_v41.quant_config",
+            "vllm.models.deepseek_v41.common.mm_preprocess",
+            "vllm.distributed.device_communicators.cpu_communicator",
+            "vllm.v1.core.sched.scheduler",
+        )
         for package_name, side in zip(rank_packages, sides):
             side.scope["worker"] = worker()
             runner = Runner(package_name)
             side.scope["r1_engine"] = runner.engine
             runners.append(runner)
-            for alias_prefix in prefix_aliases:
-                side.lp.alias[alias_prefix] = package_name
+            for module_name in exact_aliases:
+                side.lp.alias[module_name] = package_name + ".engine"
 
         def module_plan(txn_id, module_name, **extra):
             return {
@@ -301,9 +341,16 @@ class GraphTest(unittest.TestCase):
             }
 
         captured_modules = (
-            "vllm.models.deepseek_v41.nvidia.engine",
-            "vllm.model_executor.kernels.attention.engine",
-            "vllm.kernels.triton.engine",
+            "vllm.models.deepseek_v41.nvidia.model",
+            "vllm.model_executor.kernels.attention.candidate_blocks",
+            "vllm.kernels.triton.activation",
+            "vllm.v1.attention.backends.flash_attn",
+            "vllm.v1.attention.ops.triton_decode_attention",
+            "vllm.lora.layers.row_parallel_linear",
+            "vllm.lora.ops.triton_ops.lora_shrink_op",
+            "vllm.lora.punica_wrapper.punica_gpu",
+            "vllm.distributed.device_communicators.custom_all_reduce",
+            "vllm._custom_ops",
         )
         for index, module_name in enumerate(captured_modules):
             refused = lab.handle(
@@ -318,6 +365,7 @@ class GraphTest(unittest.TestCase):
                 ("aborted", [("captured_target", 0, "R1", "T1"), ("captured_target", 1, "R1", "T1")]),
                 f"expected blocking captured_target for {module_name}",
             )
+            self.assertIn("captured GPU code", refused["receipt"]["findings"][0]["observed"])
             self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
 
             recaptured = lab.handle(
@@ -339,13 +387,13 @@ class GraphTest(unittest.TestCase):
             self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
 
         # Accepted without R1 still routes zero_witness to R1 via default CAPTURED_PREFIXES
-        subject_key = f"vllm.models.deepseek_v41.nvidia.engine:Engine.step:{STEP_LINE}"
+        subject_key = f"vllm.models.deepseek_v41.nvidia.model:Engine.step:{STEP_LINE}"
         accepted = lab.handle(
             {
                 "op": "txn",
                 "plan": module_plan(
                     "v033-acc",
-                    "vllm.models.deepseek_v41.nvidia.engine",
+                    "vllm.models.deepseek_v41.nvidia.model",
                     accept=[{"check": "captured_target", "subject": subject_key}],
                 ),
             }
@@ -358,14 +406,29 @@ class GraphTest(unittest.TestCase):
             if finding["check"] == "zero_witness"
         ]
         self.assertEqual(zero_witness_findings, [("zero_witness", "R1", "T1")] * 2)
+        self.assertIn("captured GPU code", proof["findings"][0]["observed"])
         self.assertTrue(lab.handle({"op": "undo", "txn": "v033-acc"})["ok"])
 
-        # Non-model scheduler module is unaffected by CAPTURED_PREFIXES
-        non_model = lab.handle(
-            {"op": "txn", "plan": module_plan("v033-sched", "vllm.v1.core.sched.engine")}
+        # Host-side exclusions under vllm.models.* and non-captured modules must NOT block
+        unblocked_modules = (
+            "vllm.models.deepseek_v41.nvidia.model_state",
+            "vllm.models.deepseek_v41.nvidia.ops.engram_host_table",
+            "vllm.models.deepseek_v41.quant_config",
+            "vllm.models.deepseek_v41.common.mm_preprocess",
+            "vllm.distributed.device_communicators.cpu_communicator",
+            "vllm._custom_ops_extra",
+            "vllm.v1.core.sched.scheduler",
         )
-        self.assertEqual((non_model["outcome"], non_model["receipt"]["findings"]), ("committed", []))
-        self.assertTrue(lab.handle({"op": "undo", "txn": "v033-sched"})["ok"])
+        for index, module_name in enumerate(unblocked_modules):
+            unblocked = lab.handle(
+                {"op": "txn", "plan": module_plan(f"v033-host-{index}", module_name)}
+            )
+            self.assertEqual(
+                (unblocked["outcome"], unblocked["receipt"]["findings"]),
+                ("committed", []),
+                f"expected host-side / non-captured module {module_name} not to block",
+            )
+            self.assertTrue(lab.handle({"op": "undo", "txn": f"v033-host-{index}"})["ok"])
 
         # Eager worker has no captured_target finding on vllm.models.*
         eager_package = f"ads{next(_n)}_eager_v033"
@@ -374,10 +437,10 @@ class GraphTest(unittest.TestCase):
             "worker",
             scope={"worker": worker(eager=True)},
             rank=0,
-            alias={"vllm.models.deepseek_v41.nvidia": eager_package},
+            alias={"vllm.models.deepseek_v41.nvidia.model": eager_package + ".engine"},
         )
         eager_reply = eager_side.dispatch(
-            "prepare", module_plan("v033-eager", "vllm.models.deepseek_v41.nvidia.engine")
+            "prepare", module_plan("v033-eager", "vllm.models.deepseek_v41.nvidia.model")
         )
         self.assertEqual((eager_reply["ok"], eager_reply["findings"]), (True, []))
 

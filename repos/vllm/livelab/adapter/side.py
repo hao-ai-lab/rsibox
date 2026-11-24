@@ -18,9 +18,11 @@
 - **Graph detection** (graphs.py). On a worker whose config runs CUDA graphs or torch.compile,
   the split decorator itself (`eager_break_during_capture`, in any module, and code nested in
   it) is a blocking `captured_target` at prepare: it runs only when ops are decorated (import)
-  or graphs captured (vLLM #59941). A target in model or kernel code (`vllm.models.*`,
-  `vllm.model_executor.models.*`, `.layers.*`, `.kernels.*`, `vllm.kernels.*`) is checked at
-  prepare:
+  or graphs captured (vLLM #59941). A target in captured GPU code (`vllm.models.*`,
+  `vllm.model_executor.models.*`, `.layers.*`, `.kernels.*`, `vllm.kernels.*`,
+  `vllm.v1.attention.backends.*`, `.ops.*`, `vllm.lora.layers.*`, `.ops.*`,
+  `.punica_wrapper.*`, `vllm.distributed.device_communicators.*`, `vllm._custom_ops`, minus
+  host-side `CAPTURED_EXCLUSIONS`) is checked at prepare:
   reached only through an op that splits the graph (Python on prefill, graphs on decode) is an
   advisory `captured_partly`; captured only, or undecided, is a blocking `captured_target`.
   Both route R1. A plan with `"rebuild": ["R1"]` asks for the recapture (recapture.py, run by
@@ -40,7 +42,7 @@
 - **Fault hook** (tests): `plan["faults"] = {role or "role:rank": method or {"method",
   "delay_s", "fail"}}` makes that method fail on that role (or rank), or delays it.
 """
-import contextlib
+import fnmatch
 import importlib
 import os
 import sys
@@ -64,12 +66,53 @@ CAPTURED_PREFIXES = (
     "vllm.model_executor.layers.",
     "vllm.model_executor.kernels.",
     "vllm.kernels.",
+    "vllm.v1.attention.backends.",
+    "vllm.v1.attention.ops.",
+    "vllm.lora.layers.",
+    "vllm.lora.ops.",
+    "vllm.lora.punica_wrapper.",
+    "vllm.distributed.device_communicators.",
+    "vllm._custom_ops",
+)
+CAPTURED_EXCLUSIONS = (
+    "*.model_state",
+    "*.model_state.*",
+    "*host_table*",
+    "*.config",
+    "*.configs",
+    "*.quant_config",
+    "*.mm_preprocess",
+    "*.model_loader",
+    "*.model_loader.*",
+    "*.weight_utils",
+    "*.cpu_communicator",
+    "*.cpu_attn",
+    "*.cpu_mla",
+    "*.cpu_sdpa",
+    "*.punica_cpu",
 )
 R1_NOT_HERE = ("add \"rebuild\": [\"R1\"] to the plan to recapture the graphs in the commit's "
                "gap, or restart with the edit, or run eager")
 R1_ASKED = "the plan asks for R1: the host recaptures the graphs in the commit's gap"
 R1 = {"action": "recapture the graphs with the commit (plan \"rebuild\": [\"R1\"]), or "
                 "restart with the edit or run eager", "cost": "recipe R1 / a restart"}
+
+
+def is_captured_module(module_name, prefixes=CAPTURED_PREFIXES, exclusions=CAPTURED_EXCLUSIONS):
+    """True when `module_name` falls under `prefixes` (prefix with trailing dot, or exact
+    module/package name) and does not match any host-side glob in `exclusions`."""
+    matched = False
+    for prefix in prefixes:
+        if prefix.endswith("."):
+            if module_name.startswith(prefix):
+                matched = True
+                break
+        elif module_name == prefix or module_name.startswith(prefix + "."):
+            matched = True
+            break
+    if not matched:
+        return False
+    return not any(fnmatch.fnmatchcase(module_name, pattern) for pattern in exclusions)
 
 
 def wants_recapture(plan):
@@ -94,31 +137,6 @@ def stream_capturing():
                 and torch.cuda.is_current_stream_capturing())
 
 
-def _worker_device_context(worker_obj):
-    """Bind `torch.cuda.device(device)` when the worker owns an initialized CUDA device, so a
-    phase-2 lane thread never creates a stray CUDA context on device 0 during undo/sync."""
-    if worker_obj is None:
-        return contextlib.nullcontext()
-    runner = getattr(worker_obj, "model_runner", None)
-    device = getattr(runner, "device", None) if runner is not None else None
-    if device is None:
-        device = getattr(worker_obj, "device", None)
-    if device is None:
-        return contextlib.nullcontext()
-    torch_module = sys.modules.get("torch")
-    cuda_module = getattr(torch_module, "cuda", None) if torch_module is not None else None
-    device_context = getattr(cuda_module, "device", None) if cuda_module is not None else None
-    is_initialized = getattr(cuda_module, "is_initialized", None)
-    if not callable(device_context) or (callable(is_initialized) and not is_initialized()):
-        return contextlib.nullcontext()
-    device_type = getattr(device, "type", None)
-    if device_type is not None and device_type != "cuda":
-        return contextlib.nullcontext()
-    if isinstance(device, str) and not device.startswith("cuda"):
-        return contextlib.nullcontext()
-    return device_context(device)
-
-
 class Side(Endpoint):
     def __init__(self, role, scope=None, rank=None, **participant):
         worker = role == "worker"
@@ -126,6 +144,9 @@ class Side(Endpoint):
                          engine_names=dynamo_name,
                          capturing=stream_capturing if worker else None, **participant)
         self.captured_prefixes = CAPTURED_PREFIXES
+        self.captured_exclusions = CAPTURED_EXCLUSIONS
+        self._cuda_device = None
+        self._resolve_worker_cuda_device()
         self._jobs = {}        # txn -> {"result", "t0", "lock", "cancelled"}, until the vote ends
         self._faults = {}      # txn -> {"method", "delay_s", "fail"} for this role / rank
         self._lane = None
@@ -138,6 +159,28 @@ class Side(Endpoint):
         self.recapture = RC.Recapture()
         self.r1 = self.recapture
         self.native = N.NativeManager()
+
+    def _resolve_worker_cuda_device(self):
+        """Resolve and pin this worker's CUDA device on the caller (main) thread so background
+        lane threads bind the right rank even when `runner.device` is un-indexed `"cuda"`."""
+        if self._cuda_device is not None:
+            return self._cuda_device
+        worker_obj = self.scope.get("worker")
+        if worker_obj is None:
+            return None
+        runner = getattr(worker_obj, "model_runner", None)
+        raw_device = getattr(runner, "device", None) if runner is not None else None
+        if raw_device is None:
+            raw_device = getattr(worker_obj, "device", None)
+        resolved = RC.resolve_cuda_device(raw_device)
+        if resolved is not None:
+            self._cuda_device = resolved
+        return resolved
+
+    def _is_captured_module(self, module_name):
+        return is_captured_module(
+            module_name, self.captured_prefixes, self.captured_exclusions
+        )
 
     # -- graph detection ----------------------------------------------------------------
     def _graph(self):
@@ -170,7 +213,7 @@ class Side(Endpoint):
                 "a target the engine runs in Python", subject=k),
                 "route": "R1", "today": "T1"})
         items = model_items
-        if not items or not module.startswith(self.captured_prefixes):
+        if not items or not self._is_captured_module(module):
             return out
         try:
             act = self.lp._actual(module)
@@ -200,20 +243,20 @@ class Side(Endpoint):
             why = (f"; could not decide statically, so this stays blocking: {detail}"
                    if kind == "unknown" else f"; {detail}")
             out.append({**F.finding(
-                "captured_target", f"the engine runs {mode}, and {module} is model code{why}; "
+                "captured_target", f"the engine runs {mode}, and {module} is captured GPU code{why}; "
                 f"{R1_NOT_HERE}", "a target the engine runs in Python", subject=k),
                 "route": "R1", "today": "T1"})
         return out
 
     def _route(self, r):
-        """Proof time: a zero_witness on model code, on the split decorator, or on a native CUDA
+        """Proof time: a zero_witness on captured GPU code, on the split decorator, or on a native CUDA
         kernel while the engine runs graphs says why."""
         for f in (r.get("findings") or []) if isinstance(r, dict) else []:
             subj = str(f.get("subject", ""))
             mod, _, rest = subj.partition(":")
             what = (
                 "native CUDA kernel" if subj.startswith("native:") else
-                "model code" if mod.startswith(self.captured_prefixes) else
+                "captured GPU code" if self._is_captured_module(mod) else
                 "the split decorator" if G.decoration_time(rest.rpartition(":")[0]) else None
             )
             if f.get("check") == "zero_witness" and what and self._graph() is not None:
@@ -451,9 +494,11 @@ class Side(Endpoint):
             return self._fault(method, payload) or super()._dispatch(method, payload)
         if self._lane is None:
             self._lane = C.Lane(self.who().replace(" rank ", ""))
+        pinned_device = self._resolve_worker_cuda_device()
+
         def call():
             try:
-                with _worker_device_context(self.scope.get("worker")):
+                with RC.cuda_device_context(pinned_device):
                     return self._fault(method, payload) or super(Side, self)._dispatch(
                         method, payload
                     )
