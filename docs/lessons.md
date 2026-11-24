@@ -324,16 +324,17 @@ proportionally to the process's size, and a file protocol must publish "next" be
 
 ### 18. Size multi-agent pools to stage service time, not equal role slices
 
-**What happened.** (Sources: companion PR #214, our 2026-11-24 B200 run on `Qwen/Qwen3-8B` / `vLLM 0.33.0`, CUDA graphs on; see [`agent-teams-and-contention.md`](agent-teams-and-contention.md).) With scripted worker threads sharing warm sandboxes via `SandboxPool`, a single B200 serving 8 workers (`68.3` edits/min) beat 3 B200s running live warm-cache restarts at `C = 3, N = 6` (`3.56` edits/min) by `19.2×`. Across `27` team-topology cells, pinning a dedicated Eval GPU (`Dev+Eval Split` and `Triad`) eliminated Eval queue stalls (`0/12` vs. `10–12/12` in `Monolithic`), but static 1:1:1 partitioning saturated Eval at `96–97%` (`1.38 s`/idea, `64.4%` of GPU-seconds) while capping throughput at `40.4–42.4` ideas/min and leaving `~70–77%` of Dev (`0.42 s`/idea) and Toolsmith (`0.34 s` amortized/idea) idle. Meanwhile, a 2-Eval / 1-shared-(Dev+Toolsmith) split would put Dev+Toolsmith at `~95%` busy at `75` ideas/min (`~78.6` ideas/min ceiling), close to monolithic's `74.7` ideas/min.
+**What happened.** (Sources: companion PRs #214, #226, our 2026-11-24 B200 runs on `Qwen/Qwen3-8B` / `vLLM 0.33.0`, CUDA graphs on; see [`agent-teams-and-contention.md`](agent-teams-and-contention.md).) With scripted worker threads sharing warm sandboxes via `SandboxPool`, a single B200 serving 8 workers (`68.3` edits/min) beat 3 B200s running live warm-cache restarts at `C = 3, N = 6` (`3.56` edits/min) by `19.2×`. Across `27` `EXP-B` team-topology cells, pinning a dedicated Eval GPU (`Dev+Eval Split` and `Triad`) eliminated Eval queue stalls (`0/12` vs. `10–12/12` in `Monolithic`), but static 1:1:1 partitioning saturated Eval at `96–97%` (`1.38 s`/idea, `64.4%` of GPU-seconds) while capping throughput at `40.4–42.4` ideas/min and leaving `~70–77%` of Dev (`0.42 s`/idea) and Toolsmith (`0.34 s` amortized/idea) idle. Follow-up `EXP-D` (`16` cells, `448` verified leases) empirically validated both remedies on `3× B200`: (a) a stage-proportional 2-Eval / 1-shared-(Dev+Toolsmith) split lifted throughput `+53–61%` (vs. `EXP-B` matched-`N` Triad) to `64.0–67.2` ideas/min while preserving `0/12` Eval stalls (`0.000 s` wait) and balancing utilization (`83.5–84.0%` Dev+TS / `73.6–75.5%` Eval); and (b) priority-scheduled shared pools (`SandboxPool(..., priority=...)`, `Eval=10 > Fix=5 > Dev=0`, PR #226) sustained peak monolithic throughput (`76.3–80.7` ideas/min at `C = 3, N ≥ 4`, `90.6–95.8%` util; `53.9–57.3` ideas/min at `C = 2`, `97.0–97.6%` util) while cutting mean Eval queue wait `4.68×` at `C = 3, N = 8` (`1.164 → 0.249 s`) and `8.65×` at `C = 2, N = 8` (`2.088 → 0.241 s`), corroborated by `6.98×–7.21×` Eval wait reductions across SGLang, TensorRT-LLM, and HuggingFace Transformers.
 
 **Rule.** Allocate static role GPUs proportionally to measured stage service time
-($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$) rather than equal 1:1:1 slices,
-and keep Dev and Toolsmith on a shared pool unless repair rebuilds dominate.
+($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$) when strict `0.000 s` Eval isolation is required,
+or use a priority-scheduled shared `SandboxPool` (`priority=10` Eval > `priority=5` Fix > `priority=0` Dev) to retain full fleet throughput while bounding Eval wait to one residual lease.
 
 **Apply it.**
 - Measure amortized busy time (`hold_s + cleanup_s`) per stage before splitting a `SandboxPool` into
   fixed role sub-pools.
 - Reserve dedicated Eval slots when zero Eval queue wait is required, sized to Eval's measured share
-  of total GPU-seconds.
-- Treat elastic role borrowing and priority Eval scheduling as hypotheses to benchmark before relying
-  on them in production pools.
+  of total GPU-seconds (keep Dev and Toolsmith shared unless repair rebuilds dominate).
+- On small shared clusters (`C ≤ 3`) where peak throughput matters more than `0.000 s` Eval wait,
+  enable `SandboxPool` priority scheduling so Eval leases jump ahead of queued Dev work
+  (non-preemptively) without stranding idle GPUs.
