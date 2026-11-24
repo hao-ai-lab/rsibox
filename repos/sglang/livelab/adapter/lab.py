@@ -461,3 +461,14 @@ class SglangLab(ConformanceHarness, BaseLab):
         replies = self.at_gap(lambda: [C._call(p, "reset", "state") for p in self.co.participants], self.rpc_timeout)
         ok = all(r.get("ok") for r in replies)
         return {"ok": ok, "reset": ["radix_cache", "kv_pool", "mamba_pool", "rng"] if ok else []}
+
+    def quiesce_hooks(self, *, release_tags=None, pause_mode="retract", warmup_workload=None):
+        """Return `SglangQuiesceHooks` bound to this live lab for snapshot checkpoint/restore."""
+        from adapter.snapshot_hooks import SglangQuiesceHooks
+
+        return SglangQuiesceHooks(
+            self,
+            release_tags=release_tags,
+            pause_mode=pause_mode,
+            warmup_workload=warmup_workload,
+        )
