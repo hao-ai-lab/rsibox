@@ -55,6 +55,7 @@ from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
 
+from . import graph_guard as GG
 from . import graphs as G
 from . import native as N
 from . import recapture as RC
@@ -156,7 +157,10 @@ class Side(Endpoint):
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps, self.vlog, self.mid_step_changes, self._cur = 0, [], [], None
         self._plan = threading.local()    # the plan this thread prepares (graph checks read it)
-        self.recapture = RC.Recapture()
+        self.graph_guard = GG.GraphReplayGuard()
+        self._txn_graph_affect: set[str] = set()
+        self._txn_pre_epoch: dict[str, int] = {}
+        self.recapture = RC.Recapture(guard=self.graph_guard)
         self.r1 = self.recapture
         self.native = N.NativeManager()
 
@@ -300,8 +304,20 @@ class Side(Endpoint):
             r["findings"] = list(r.get("findings") or []) + list(nr["findings"])
         return r
 
+    def _affects_graphs(self, plan, reply) -> bool:
+        if self.role != "worker" or not isinstance(reply, dict) or not reply.get("ok") or reply.get("abstain"):
+            return False
+        if (plan or {}).get("native") or wants_r1(plan):
+            return True
+        if any(f.get("check") in ("captured_target", "captured_partly") for f in (reply.get("findings") or ())):
+            return True
+        if self._graph() is not None:
+            return False
+        return bool(("recapture_engine" in self.scope or "r1_engine" in self.scope) and (plan or {}).get("modules"))
+
     def local(self, method, payload):
-        """Include staged native validation, cleanup on abort/undo, and native hashes in proof."""
+        """Include staged native validation, selective graph-guard epoch tracking, cleanup on
+        abort/undo, and native hashes in proof."""
         txn, _ = C.txn_ref(payload)
         if isinstance(txn, str):
             if method == "validate" and self.native.has_staged(txn):
@@ -311,6 +327,16 @@ class Side(Endpoint):
             elif method in ("abort", "undo"):
                 self.native.abort(txn)
         r = super().local(method, payload)
+        if isinstance(txn, str) and r.get("ok") and not r.get("abstain"):
+            if method == "commit" and txn in self._txn_graph_affect:
+                self._txn_pre_epoch[txn] = self.graph_guard.code_epoch
+                self.graph_guard.bump_code_epoch(f"commit:{txn}")
+            elif method == "undo":
+                self._txn_graph_affect.discard(txn)
+                if (pre := self._txn_pre_epoch.pop(txn, None)) is not None:
+                    self.graph_guard.restore_code_epoch(pre, f"undo:{txn}")
+            elif method == "abort":
+                self._txn_graph_affect.discard(txn)
         if method == "proof" and isinstance(txn, str) and r.get("ok") and isinstance(r.get("hashes"), dict):
             nh = self.native.hashes(txn)
             if nh:
@@ -409,8 +435,11 @@ class Side(Endpoint):
             self._plan.plan = None
         if isinstance(r, dict) and r.get("ok"):
             self._watch_targets(r.get("targets"), txn)
+            if self._affects_graphs(plan, r):
+                self._txn_graph_affect.add(txn)
         else:
             self._drop_watch(txn)
+            self._txn_graph_affect.discard(txn)
         return r
 
     # -- recapture ------------------------------------------------------------------------
@@ -429,7 +458,7 @@ class Side(Endpoint):
             return F.not_ok(f"recapture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"{type(e).__name__}: {e}", "recapture can reach this rank's graphs")])
         if method == "graphs":
-            return F.ok(**RC.graphs(eng))
+            return F.ok(**RC.graphs(eng), guard=self.graph_guard.stats())
         if method in ("recapture_extend", "r1_extend"):
             return self.recapture.extend(eng, p["txn"], self.lp.journal, self.lp.witness,
                                          p.get("sizes"), p.get("extend_id"))
@@ -438,7 +467,8 @@ class Side(Endpoint):
         if self.lp._state.get(p["txn"]) != "committed":
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
-                                  p.get("modes"), p.get("sizes"))
+                                  p.get("modes"), p.get("sizes"),
+                                  release_old=bool(p.get("release_old", False)))
 
     _r1 = _recapture
 

@@ -39,10 +39,13 @@ Not here: ubatched (DBO) graphs, encoder graphs, drafter-only modes, DP > 1 (the
 V2 model runner (`ModelCudaGraphManager`) is supported via `_vllm_v2_engine` alongside V1.
 """
 import contextlib
+import gc
 import sys
 import time
 
 from kernel import findings as F
+
+from .graph_guard import GraphReplayGuard, graph_key
 
 ENTRY_ATTRS = ("concrete_cudagraph_entries", "entries")
 ORDER = ("PIECEWISE", "FULL")      # capture_model's order
@@ -360,28 +363,92 @@ def graphs(engine):
                          for wrapper, attr in wrappers if attr]}
 
 
-def _drop_descriptors(engine, wrappers, pairs):
+def _cuda_vram_mib(engine) -> float:
+    """Return CUDA reserved (or engine-reported) VRAM in MiB without importing `torch`."""
+    cuda = getattr(sys.modules.get("torch"), "cuda", None)
+    if callable(getattr(cuda, "is_available", None)) and cuda.is_available() and callable(getattr(cuda, "memory_reserved", None)):
+        return round(float(cuda.memory_reserved()) / 1048576.0, 3)
+    mem = engine.memory() if engine is not None else {}
+    if isinstance(mem, dict):
+        for k in ("reserved", "allocated"):
+            if isinstance(mem.get(k), (int, float)):
+                return round(float(mem[k]) / 1048576.0, 3)
+    return 0.0
+
+
+def _cuda_sync_and_empty_cache() -> bool:
+    cuda = getattr(sys.modules.get("torch"), "cuda", None)
+    if not (callable(getattr(cuda, "is_available", None)) and cuda.is_available()):
+        return False
+    for fn_name in ("synchronize", "empty_cache"):
+        if callable(fn := getattr(cuda, fn_name, None)):
+            fn()
+    return True
+
+
+def _clear_entries(entry_dict: dict) -> int:
+    count = len(entry_dict)
+    for entry in list(entry_dict.values()):
+        for obj in (entry, getattr(entry, "cudagraph", None)):
+            if callable(reset := getattr(obj, "reset", None)):
+                with contextlib.suppress(Exception):
+                    reset()
+    entry_dict.clear()
+    return count
+
+
+def teardown_graph_pool(engine, wrappers, selected, *, release_entries: bool = True,
+                        guard: GraphReplayGuard | None = None, reason: str = "r1_teardown") -> dict:
+    """Detach old graph dicts, optionally release strong refs, run GC + CUDA cache cleanup,
+    and advance per-mode `guard.pool_epoch` before R1 recapture (no-op bump if `selected` empty)."""
+    t0, vram_before, freed, detached = time.perf_counter(), _cuda_vram_mib(engine), 0, []
+    selected_names = [name(mode) for mode in selected]
+    for wrapper, attr in wrappers:
+        old_dict = getattr(wrapper, attr); setattr(wrapper, attr, {})
+        if release_entries: detached.append(old_dict)
+    for mode in selected:
+        engine.keys[mode].clear()
+    if release_entries:
+        freed = sum(_clear_entries(d) for d in detached)
+        detached.clear()
+    gc.collect(); _cuda_sync_and_empty_cache()
+    if guard is not None and selected_names:
+        guard.invalidate_modes(selected_names)
+        guard.bump_pool_epoch(reason, modes=selected_names)
+    return {"teardown_vram_before_mib": vram_before, "teardown_vram_after_mib": _cuda_vram_mib(engine),
+            "freed_graphs_count": freed, "teardown_s": round(time.perf_counter() - t0, 6),
+            **({"pool_epoch": guard.pool_epoch, "pool_epochs": guard.pool_epochs} if guard is not None else {})}
+
+
+def _wrapper_mode(wrapper):
+    return getattr(wrapper, "runtime_mode", None) or "PIECEWISE"
+
+
+def _drop_descriptors(engine, wrappers, pairs, guard: GraphReplayGuard | None = None):
     for mode, desc in pairs:
         engine.keys[mode].discard(desc)
         for wrapper, attr in wrappers:
-            if getattr(wrapper, "runtime_mode", None) in (None, mode):
+            if name(_wrapper_mode(wrapper)) == name(mode):
                 getattr(wrapper, attr).pop(desc, None)
+        if guard is not None:
+            guard.invalidate(graph_key(mode, desc))
 
 
 class Recapture:
-    """R1 state of one rank: what each transaction replaced (for extend)."""
+    """R1 state of one rank: what each transaction replaced (for extend) and its replay guard."""
 
-    def __init__(self):
+    def __init__(self, guard: GraphReplayGuard | None = None):
         self.live = {}       # txn -> {"modes", "chosen": {mode: set}, "left": {mode: [desc]}}
+        self.guard = guard if guard is not None else GraphReplayGuard()
 
     def _select(self, engine, modes, sizes):
         """Partition dispatcher keys and wrapper dicts into chosen and left sets."""
         keys = engine.keys
         selected = [mode for mode in keys if keys[mode] and (modes is None or name(mode) in modes)]
+        selected_names = {name(mode) for mode in selected}
         old_keys = {mode: set(keys[mode]) for mode in selected}
         wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers()
-                    if _attr(wrapper) and (getattr(wrapper, "runtime_mode", None) is None
-                                           or getattr(wrapper, "runtime_mode") in selected)]
+                    if _attr(wrapper) and name(_wrapper_mode(wrapper)) in selected_names]
         old_entries = [(wrapper, attr, getattr(wrapper, attr)) for wrapper, attr in wrappers]
         want = None if sizes is None else {int(s) for s in sizes}
         chosen = {mode: [desc for desc in old_keys[mode] if want is None or _size(desc) in want]
@@ -390,16 +457,10 @@ class Recapture:
                 for mode in selected}
         return selected, old_keys, wrappers, old_entries, chosen, left
 
-    def _swap_dicts(self, wrappers, selected, engine):
-        """Install empty entry dicts on selected wrappers and clear dispatcher keys."""
-        for wrapper, attr in wrappers:
-            setattr(wrapper, attr, {})
-        for mode in selected:
-            engine.keys[mode].clear()
-
-    def run(self, engine, txn, journal, witness, modes=None, sizes=None):
-        """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds and
-        memory before/after; on failure the old graphs are back and the reply is not-ok."""
+    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False):
+        """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds, pool
+        teardown telemetry, and memory before/after; on failure old graphs and exact pre-R1
+        guard stamps are restored (or cleared when `release_old=True`)."""
         if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
@@ -411,21 +472,50 @@ class Recapture:
         selected, old_keys, wrappers, old_entries, chosen, left = self._select(
             engine, modes, sizes
         )
+        selected_names = [name(mode) for mode in selected]
+        guard = self.guard
+        pre_pool_epochs, pre_stamps = guard.snapshot_modes(selected_names)
+        if release_old:
+            old_entries.clear()
 
-        def restore():
-            try:
+            def restore():
+                try:
+                    engine.sync()
+                finally:
+                    for wrapper, attr in wrappers:
+                        _clear_entries(getattr(wrapper, attr))
+                    for mode in selected:
+                        engine.keys[mode].clear()
+                    if selected_names:
+                        guard.invalidate_modes(selected_names)
+                        guard.bump_pool_epoch(f"restore:{txn}", modes=selected_names)
+                    gc.collect()
+                    _cuda_sync_and_empty_cache()
                 engine.sync()
-            finally:
-                for wrapper, attr, old_dict in old_entries:
-                    setattr(wrapper, attr, old_dict)
-                for mode in selected:
-                    engine.keys[mode].clear()
-                    engine.keys[mode].update(old_keys[mode])
-            engine.sync()
+        else:
+            def restore():
+                try:
+                    engine.sync()
+                finally:
+                    for wrapper, attr, old_dict in old_entries:
+                        setattr(wrapper, attr, old_dict)
+                    for mode in selected:
+                        engine.keys[mode].clear()
+                        engine.keys[mode].update(old_keys[mode])
+                    if selected_names:
+                        guard.restore_modes(pre_pool_epochs, pre_stamps)
+                    gc.collect()
+                    _cuda_sync_and_empty_cache()
+                engine.sync()
 
         mem0 = engine.memory()
         try:
-            self._swap_dicts(wrappers, selected, engine)
+            teardown = teardown_graph_pool(
+                engine, wrappers, selected,
+                release_entries=bool(release_old),
+                guard=guard,
+                reason=f"r1:{txn}",
+            )
             result = self._capture(engine, chosen, witness)
             if not result["ok"]:
                 restore()
@@ -446,7 +536,7 @@ class Recapture:
             self.live.pop(txn, None)
         journal.record_call(forget, f"R1 state of {txn}")
 
-        return F.ok(**result["report"], modes=[name(mode) for mode in selected],
+        return F.ok(**result["report"], **teardown, modes=[name(mode) for mode in selected],
                     wrappers=len(wrappers),
                     eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
                            for mode, descriptors in left.items() if descriptors},
@@ -470,13 +560,15 @@ class Recapture:
         for mode, descriptors in chosen.items():
             state["left"][mode] = [desc for desc in state["left"][mode] if desc not in descriptors]
         wrappers = state["wrappers"]
+        guard = self.guard
 
         def unextend():
             try:
                 engine.sync()
             finally:
                 _drop_descriptors(engine, wrappers,
-                                  [(mode, desc) for mode, descs in chosen.items() for desc in descs])
+                                  [(mode, desc) for mode, descs in chosen.items() for desc in descs],
+                                  guard=guard)
                 for mode in chosen:
                     state["left"][mode] = [desc for desc in state["old_keys"][mode]
                                            if desc not in engine.keys[mode]]
@@ -505,8 +597,9 @@ class Recapture:
 
     def _capture(self, engine, chosen, witness):
         """Capture `chosen` ({mode: [desc]}); every key goes in just before its capture (the
-        runner's dummy run asks the dispatcher for the mode). On error the keys of this call
-        come out again, so no step dispatches to a half-captured descriptor."""
+        runner's dummy run asks the dispatcher for the mode). Stamps each captured graph on
+        `self.guard`. On error the keys of this call come out again, so no step dispatches to
+        a half-captured descriptor."""
         done, timings = [], []
         t0 = time.perf_counter()
         order = sorted(chosen, key=lambda mode: ORDER.index(name(mode)) if name(mode) in ORDER else 9)
@@ -518,10 +611,16 @@ class Recapture:
                         engine.keys[mode].add(desc)
                         done.append((mode, desc))
                         engine.capture(mode, desc)
+                        self.guard.stamp(graph_key(mode, desc))
                         timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
+            active_modes = {name(m) for m, ds in chosen.items() if ds}
+            for wrapper in engine.wrappers():
+                if (attr := _attr(wrapper)) and (w_mode := name(_wrapper_mode(wrapper))) in active_modes:
+                    for entry_key in getattr(wrapper, attr):
+                        self.guard.stamp(graph_key(getattr(entry_key, "cg_mode", None) or w_mode, entry_key))
         except Exception as e:
             wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
-            _drop_descriptors(engine, wrappers, done)
+            _drop_descriptors(engine, wrappers, done, guard=self.guard)
             engine.sync()
             return F.not_ok(f"R1 capture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"capture of {name(done[-1][0]) if done else '?'} "

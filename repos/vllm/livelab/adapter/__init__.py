@@ -12,6 +12,9 @@ LIVELAB = os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(
 if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
 
+from .graph_guard import GraphReplayGuard, StaleGraphReplayError, graph_key, input_signature  # noqa: E402
+from .native import BackgroundBuildJob, BackgroundBuildPool, compile_async  # noqa: E402
+from .recapture import teardown_graph_pool  # noqa: E402
 from .snapshot_hooks import (  # noqa: E402
     VllmQuiesceHooks,
     VllmShadowPromoter,
@@ -20,9 +23,8 @@ from .snapshot_hooks import (  # noqa: E402
 )
 
 __all__ = [
-    "LIVELAB",
-    "VllmQuiesceHooks",
-    "VllmShadowPromoter",
-    "make_shadow_recovery_driver",
-    "park_shadow_server",
+    "BackgroundBuildJob", "BackgroundBuildPool", "GraphReplayGuard", "LIVELAB",
+    "StaleGraphReplayError", "VllmQuiesceHooks", "VllmShadowPromoter",
+    "compile_async", "graph_key", "input_signature",
+    "make_shadow_recovery_driver", "park_shadow_server", "teardown_graph_pool",
 ]

@@ -9,6 +9,7 @@ Undo calls `lib._destroy()` via the kernel journal, restoring the original C++ i
 sub-millisecond time without recompiling or unloading shared libraries (already-captured graphs
 are handled orthogonally by `R1` recapture in the same step gap).
 """
+import atexit
 import concurrent.futures
 import contextlib
 import ctypes
@@ -16,11 +17,14 @@ import fcntl
 import glob
 import hashlib
 import importlib
+import itertools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import weakref
@@ -669,14 +673,16 @@ def commit_txn(mgr_id: int, txn: str, journal, arm) -> None:
 class NativeManager:
     """Per-worker coordinator helper for `plan['native']` 2PC staging, commit, and hashes."""
 
-    def __init__(self):
+    def __init__(self, build_pool=None):
         self._staged: dict[str, dict] = {}
         self._committed: dict[str, dict] = {}
+        self._build_jobs: dict[str, str] = {}
+        self.build_pool = build_pool if build_pool is not None else _DEFAULT_BUILD_POOL
         _MANAGERS[id(self)] = weakref.ref(self, lambda _r, mid=id(self): _MANAGERS.pop(mid, None))
 
     def prepare(
         self, txn: str, spec: dict, *, graph=None, wants_r1: bool = False,
-        accept=(), participant: str | None = None,
+        accept=(), participant: str | None = None, async_build: bool = False,
     ) -> dict:
         """Validate `spec`, check graph safety (`R1`), build `.so`, and load versioned ops."""
         def _tag(finding: dict, **extra) -> dict:
@@ -709,7 +715,18 @@ class NativeManager:
             return F.not_ok(f"vote no: {decision['blocking']}", decision["findings"], txn=txn, staged={})
 
         try:
-            built = build_native(spec)
+            if async_build or bool(spec.get("async_build", False)):
+                job = self.build_pool.compile_async(spec, job_id=f"txn-{txn}")
+                self._build_jobs[txn] = job.job_id
+                try:
+                    res = job.wait(timeout_s=float(spec.get("compile_timeout_s", 300)) + 30.0)
+                finally:
+                    self._build_jobs.pop(txn, None)
+                if not res.get("ok") or "result" not in res:
+                    raise RuntimeError(res.get("error") or "background native build failed")
+                built = res["result"]
+            else:
+                built = build_native(spec)
             loaded = load_library(built["so"], built["key"])
             ver_ns = f"_Cv{built['key']}"
             for op_name in ops:
@@ -745,6 +762,8 @@ class NativeManager:
         return F.ok()
 
     def abort(self, txn: str) -> None:
+        if (jid := self._build_jobs.pop(txn, None)) is not None:
+            self.build_pool.cancel(jid)
         self._staged.pop(txn, None)
 
     def hashes(self, txn: str) -> dict[str, list[str]]:
@@ -752,3 +771,174 @@ class NativeManager:
         if not st:
             return {}
         return {_witness_key(op_spec, op_name, st["key"]): [st["key"]] for op_name, op_spec in st["ops"].items()}
+
+
+_BG_BUILD_RUNNER = (
+    "import json, sys, traceback\nfrom adapter.native import build_native\n"
+    "try:\n"
+    "    with open(sys.argv[1], 'r', encoding='utf-8') as fh: spec = json.load(fh)\n"
+    "    payload = {'ok': True, 'result': build_native(spec)}\n"
+    "except BaseException as exc:\n"
+    "    payload = {'ok': False, 'error': f'{type(exc).__name__}: {exc}', 'traceback': traceback.format_exc()[-1500:]}\n"
+    "with open(sys.argv[2], 'w', encoding='utf-8') as fh: json.dump(payload, fh)\n"
+    "sys.exit(0 if payload['ok'] else 1)\n"
+)
+
+
+def _terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.5) -> None:
+    """Terminate `proc` and its entire process group (even if the leader already exited)."""
+    pgid = proc.pid
+    with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(pgid, signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired): proc.wait(timeout=max(0.0, float(grace_s)))
+    with contextlib.suppress(ProcessLookupError, PermissionError): os.killpg(pgid, signal.SIGKILL)
+    with contextlib.suppress(Exception): proc.wait(timeout=5.0)
+
+
+class BackgroundBuildJob:
+    """One non-blocking background native compilation subprocess (`subprocess.Popen`)."""
+
+    def __init__(self, job_id: str, proc: subprocess.Popen, tmp_dir: str,
+                 stdout_path: str, stderr_path: str, *, result_path: str | None = None, key: str | None = None):
+        self.job_id, self.key, self._proc, self._tmp_dir = job_id, key, proc, tmp_dir
+        self._stdout_path, self._stderr_path, self._result_path = stdout_path, stderr_path, result_path
+        self._t0, self._lock, self._result, self._cancelled = time.perf_counter(), threading.Lock(), None, False
+
+    @property
+    def pid(self) -> int: return self._proc.pid
+    @property
+    def cancelled(self) -> bool: return self._cancelled
+    @property
+    def elapsed_s(self) -> float: return round(time.perf_counter() - self._t0, 6)
+    @property
+    def done(self) -> bool: return self._result is not None or self._proc.poll() is not None
+
+    def _read_tail(self, path: str, limit: int = 2000) -> str:
+        with contextlib.suppress(OSError):
+            with open(path, "r", encoding="utf-8", errors="replace") as fh: return fh.read()[-limit:]
+        return ""
+
+    def _finalize(self, rc: int) -> dict:
+        if self._result is not None: return dict(self._result)
+        stdout, stderr, payload = self._read_tail(self._stdout_path), self._read_tail(self._stderr_path), None
+        if self._result_path and os.path.isfile(self._result_path):
+            with contextlib.suppress(OSError, json.JSONDecodeError):
+                with open(self._result_path, "r", encoding="utf-8") as fh: payload = json.load(fh)
+        if self._tmp_dir:
+            shutil.rmtree(self._tmp_dir, ignore_errors=True); self._tmp_dir = ""
+        base = {"job_id": self.job_id, "key": self.key, "cancelled": self._cancelled, "returncode": rc, "build_s": self.elapsed_s}
+        if self._cancelled:
+            res = {**base, "ok": False, "error": "background build cancelled"}
+        elif isinstance(payload, dict):
+            ok = (rc == 0) and bool(payload.get("ok"))
+            err = payload.get("error") or (f"build subprocess exited with code {rc}" if not ok else None)
+            res = {**base, "ok": ok, "key": (payload.get("result") or {}).get("key", self.key),
+                   **({"result": payload["result"]} if ok and "result" in payload else {}), **({"error": err} if err else {})}
+        else:
+            err = (stderr or stdout).strip()[-1200:]
+            res = {**base, "ok": rc == 0, "stdout": stdout, "stderr": stderr,
+                   **({"error": err or f"build subprocess exited with code {rc}"} if rc != 0 else {})}
+        self._result = res
+        return dict(res)
+
+    def poll(self) -> dict | None:
+        with self._lock:
+            if self._result is not None: return dict(self._result)
+            return None if (rc := self._proc.poll()) is None else self._finalize(rc)
+
+    def wait(self, timeout_s: float | None = None) -> dict:
+        if self._result is not None: return dict(self._result)
+        try: rc = self._proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"background build {self.job_id} did not finish within {timeout_s} s") from exc
+        with self._lock: return self._finalize(rc)
+
+    def cancel(self, grace_s: float = 0.5) -> bool:
+        with self._lock:
+            if self._result is not None: return False
+            if (rc := self._proc.poll()) is not None: self._finalize(rc); return False
+            self._cancelled = True
+            _terminate_process_group(self._proc, grace_s=grace_s)
+            self._finalize(rc if (rc := self._proc.poll()) is not None else -signal.SIGKILL)
+            return True
+
+
+def _resolve_bg_spec(spec: dict) -> dict:
+    out = dict(spec)
+    if (out.get("arch") or "auto") == "auto" and not os.environ.get("RSIBOX_NATIVE_ARCH"):
+        cuda = getattr(sys.modules.get("torch"), "cuda", None)
+        if callable(getattr(cuda, "is_available", None)) and cuda.is_available():
+            with contextlib.suppress(Exception):
+                major, minor = cuda.get_device_capability(); out["arch"] = f"{major}{minor}"
+    return out
+
+
+_BUILD_POOLS: "weakref.WeakSet[BackgroundBuildPool]" = weakref.WeakSet()
+
+
+class BackgroundBuildPool:
+    """Pool of non-blocking background native build subprocesses."""
+
+    def __init__(self):
+        self._jobs: dict[str, BackgroundBuildJob] = {}
+        self._seq, self._lock = itertools.count(1), threading.Lock()
+        _BUILD_POOLS.add(self)
+
+    def _spawn_env(self, extra_env: dict | None = None, *, hide_cuda: bool = False) -> dict[str, str]:
+        env = {**os.environ, **({str(k): str(v) for k, v in extra_env.items()} if extra_env else {})}
+        pkg = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        core = os.path.abspath(os.path.join(pkg, "..", "..", "..", "core", "livelab"))
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(p for p in [pkg, core, *env.get("PYTHONPATH", "").split(os.pathsep)] if p))
+        if hide_cuda and (extra_env is None or "CUDA_VISIBLE_DEVICES" not in extra_env):
+            env["CUDA_VISIBLE_DEVICES"] = ""
+        return env
+
+    def compile_async(self, spec: dict | None = None, *, job_id: str | None = None,
+                      cmd: list[str] | None = None, cwd: str | None = None, env: dict | None = None) -> BackgroundBuildJob:
+        if spec is None and not cmd:
+            raise ValueError("compile_async requires either a native build `spec` or an explicit `cmd`")
+        bg_spec = _resolve_bg_spec(spec) if spec is not None else None
+        key = spec_key(bg_spec) if bg_spec is not None else None
+        jid = job_id or (f"native-{key}-{next(self._seq)}" if key else f"build-{next(self._seq)}")
+        with self._lock:
+            if (prev := self._jobs.get(jid)) is not None and prev.poll() is None:
+                raise ValueError(f"background build job already active: {jid!r}")
+        tmp_dir = tempfile.mkdtemp(prefix="rsibox-bgbuild-")
+        stdout_p, stderr_p, result_p = os.path.join(tmp_dir, "stdout.log"), os.path.join(tmp_dir, "stderr.log"), None
+        try:
+            if cmd is not None:
+                argv, spawn_env = [str(a) for a in cmd], self._spawn_env(env) if env is not None else None
+            else:
+                spec_p, result_p = os.path.join(tmp_dir, "spec.json"), os.path.join(tmp_dir, "result.json")
+                with open(spec_p, "w", encoding="utf-8") as fh: json.dump(bg_spec, fh)
+                argv, spawn_env = [sys.executable, "-c", _BG_BUILD_RUNNER, spec_p, result_p], self._spawn_env(env, hide_cuda=True)
+            with open(stdout_p, "wb") as out_fh, open(stderr_p, "wb") as err_fh:
+                proc = subprocess.Popen(argv, cwd=cwd, env=spawn_env, stdin=subprocess.DEVNULL,
+                                        stdout=out_fh, stderr=err_fh, start_new_session=True)
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True); raise
+        job = BackgroundBuildJob(jid, proc, tmp_dir, stdout_p, stderr_p, result_path=result_p, key=key)
+        with self._lock: self._jobs[jid] = job
+        return job
+
+    def get(self, job_id: str) -> BackgroundBuildJob | None:
+        with self._lock: return self._jobs.get(job_id)
+    def _require(self, job_id: str) -> BackgroundBuildJob:
+        if (job := self.get(job_id)) is None: raise KeyError(f"unknown background build job: {job_id!r}")
+        return job
+    def poll(self, job_id: str) -> dict | None: return self._require(job_id).poll()
+    def wait(self, job_id: str, timeout_s: float | None = None) -> dict: return self._require(job_id).wait(timeout_s=timeout_s)
+    def cancel(self, job_id: str, grace_s: float = 0.5) -> bool: return False if (j := self.get(job_id)) is None else j.cancel(grace_s=grace_s)
+    def active_jobs(self) -> list[str]:
+        with self._lock: items = list(self._jobs.items())
+        return [jid for jid, job in items if job.poll() is None]
+    def cancel_all(self, grace_s: float = 0.5) -> int:
+        with self._lock: jobs = list(self._jobs.values())
+        return sum(1 for job in jobs if job.cancel(grace_s=grace_s))
+    def __enter__(self) -> "BackgroundBuildPool": return self
+    def __exit__(self, *_exc) -> None: self.cancel_all()
+
+_DEFAULT_BUILD_POOL = BackgroundBuildPool()
+atexit.register(lambda: [p.cancel_all() for p in list(_BUILD_POOLS)])
+
+def compile_async(spec: dict | None = None, *, pool: BackgroundBuildPool | None = None, **kwargs) -> BackgroundBuildJob:
+    return (pool if pool is not None else _DEFAULT_BUILD_POOL).compile_async(spec, **kwargs)
