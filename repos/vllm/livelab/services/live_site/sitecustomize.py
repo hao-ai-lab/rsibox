@@ -25,10 +25,21 @@ if os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"):
         from gpu_memory_service.common import utils as _gms_utils
 
         _raw_map = _json.loads(os.environ["RSIBOX_GMS_DEVICE_UUID_MAP"])
-        _int_map = {int(k): str(v) for k, v in _raw_map.items() if str(v)} if isinstance(_raw_map, dict) else {}
+        _int_map = {}
+        if isinstance(_raw_map, dict):
+            for _k, _v in _raw_map.items():
+                if isinstance(_k, bool) or not isinstance(_v, str) or not _v.strip():
+                    continue
+                _idx = int(_k)
+                if _idx >= 0:
+                    _int_map[_idx] = _v.strip()
         if _int_map:
             _cache = getattr(_gms_utils, "_uuid_cache", None)
+            _prev_map = getattr(_gms_utils, "_rsibox_device_uuid_map", None)
             if isinstance(_cache, dict):
+                if isinstance(_prev_map, dict):
+                    for _old_k in _prev_map:
+                        _cache.pop(_old_k, None)
                 _cache.update(_int_map)
             _orig_get = getattr(_gms_utils, "_rsibox_orig_get_socket_path", _gms_utils.get_socket_path)
             _orig_inv = getattr(_gms_utils, "_rsibox_orig_invalidate_uuid_cache", _gms_utils.invalidate_uuid_cache)
