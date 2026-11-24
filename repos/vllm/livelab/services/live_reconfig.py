@@ -49,6 +49,7 @@ TAG = "RSIBOX_LIVE_RECONFIG"
 ENV = "RSIBOX_LIVE_RECONFIG_DIR"
 POLICY_FILE = "policy.json"
 LIVE_FIELDS = ("max_num_seqs", "max_num_batched_tokens", "scheduling_policy")
+SCHEDULING_POLICIES = ("fcfs", "priority")
 _AGENT = []
 _POLICY_CACHE = {"path": None, "mtime_ns": None, "policy": None}
 _write_json = ipc.atomic_write_json
@@ -66,7 +67,7 @@ def check_values(values, boot):
             problems.append(f"{name}: no live consumer (live: {', '.join(LIVE_FIELDS)})")
             continue
         if name == "scheduling_policy":
-            if value not in ("fcfs", "priority"):
+            if value not in SCHEDULING_POLICIES:
                 problems.append(f"scheduling_policy={value!r}: expected fcfs or priority")
             continue
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
@@ -126,7 +127,7 @@ def _sync_api_policy(obj):
         return
     if _POLICY_CACHE["path"] != path or _POLICY_CACHE["mtime_ns"] != sig:
         data = _read_json(path)
-        if not isinstance(data, dict) or data.get("scheduling_policy") not in ("fcfs", "priority"):
+        if not isinstance(data, dict) or data.get("scheduling_policy") not in SCHEDULING_POLICIES:
             return
         _POLICY_CACHE.update(path=path, mtime_ns=sig, policy=data["scheduling_policy"])
     policy = _POLICY_CACHE["policy"]

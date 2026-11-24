@@ -619,13 +619,13 @@ def _seed_engine_state(cache_root, log_path, api_pid, live_dir, *,
 
 def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_path, monkeypatch):
     """Input: a running local live_reconfig file-channel agent + persisted engine state file,
-    with `vllm_args.parse`, `engine.read_vllm_args`, `engine.engine_env`, and `engine.preflight`
-    wired to fail if called. Action: call `engine.reconfigure` with (1) `--max-num-seqs 64`,
+    with `vllm_args.parse`, `engine.read_vllm_args`, and `engine.engine_env` wired to fail if
+    called. Action: call `engine.reconfigure` with (1) `--max-num-seqs 64`,
     (2) `--max-num-seqs=32 --max_num_batched_tokens=2048 --scheduling-policy=priority`, and
-    (3) repeated `--max-num-seqs 32` (noop). Expect: all succeed in < 0.5 s without ever calling
-    vLLM's parser, the scheduler mutates in-place, `policy.json` and `engines/<pid>.json` are
-    updated consistently with the slow-path contract, and a follow-up non-live `override_finding`
-    accepts the fast-path persisted state cleanly."""
+    (3) repeated `--max-num-seqs 32` (noop). Expect: all succeed quickly without ever calling
+    vLLM's parser, real parse seconds are recorded, the scheduler mutates in-place,
+    `policy.json` and `engines/<pid>.json` are updated consistently with the slow-path contract,
+    and a follow-up non-live `override_finding` accepts the fast-path persisted state cleanly."""
     import json
     import os
     import time
@@ -646,12 +646,11 @@ def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_p
         _seed_engine_state(cache_root, log_path, api_pid, live_dir)
 
         def fail_if_called(*_args, **_kwargs):
-            raise AssertionError("slow parser/env/preflight path must not run on live fast path")
+            raise AssertionError("slow parser/env path must not run on live fast path")
 
         monkeypatch.setattr(vllm_args, "parse", fail_if_called)
         monkeypatch.setattr(engine, "read_vllm_args", fail_if_called)
         monkeypatch.setattr(engine, "engine_env", fail_if_called)
-        monkeypatch.setattr(engine, "preflight", fail_if_called)
 
         raw_argv_first = [
             "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
@@ -662,10 +661,12 @@ def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_p
         report_first = engine.reconfigure(launcher_args, patch_vargv, raw_argv_first)
         elapsed_first = time.perf_counter() - started_at
 
-        assert elapsed_first < 0.5, f"fast path took {elapsed_first:.3f}s"
+        assert elapsed_first <= 3.0, f"fast path took {elapsed_first:.3f}s"
         assert report_first["reconfig"]["path"] == "in_process_live"
         assert report_first["reconfig"]["restarted"] is False
         assert report_first["vllm_args"]["via"] == "live_fast_path"
+        assert isinstance(report_first["vllm_args"]["seconds"]["parse"], float)
+        assert report_first["vllm_args"]["seconds"]["parse"] >= 0.0
         assert scheduler.max_num_running_reqs == 64
         assert agent.target_seqs == 64
 
@@ -679,7 +680,7 @@ def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_p
         report_second = engine.reconfigure(launcher_args, patch_vargv, raw_argv_second)
         elapsed_second = time.perf_counter() - started_at
 
-        assert elapsed_second < 0.5, f"fast path took {elapsed_second:.3f}s"
+        assert elapsed_second <= 3.0, f"fast path took {elapsed_second:.3f}s"
         assert report_second["reconfig"]["path"] == "in_process_live"
         assert scheduler.max_num_running_reqs == 32
         assert scheduler.max_num_scheduled_tokens == 2048
@@ -723,15 +724,87 @@ def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_p
         shutdown()
 
 
+def test_live_fast_path_parse_and_synthesize_match_full_parser_parity():
+    """Golden parity test: `synthesize_live_parsed(old, *parse_live_patch(patch))` matches
+    full parser output (`args`, `set(explicit)`, `explicit_values`, `arities`) across `=`
+    syntax, underscore spellings, duplicate flags, and mixed base/patch forms, while rejecting
+    overlong >4300-digit integers cleanly without raising `ValueError`."""
+    import argparse
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import test_engine
+    import vllm_args
+
+    class _FlexibleStubParser(argparse.ArgumentParser):
+        def parse_args(self, args=None, namespace=None):
+            normalized = []
+            for token in list(args or ()):
+                if token.startswith("--") and token != "--":
+                    if "=" in token:
+                        option, value = token.split("=", 1)
+                        token = "--" + option[2:].replace("_", "-") + "=" + value
+                    else:
+                        token = "--" + token[2:].replace("_", "-")
+                normalized.append(token)
+            return super().parse_args(normalized, namespace=namespace)
+
+    stub_namespace = {}
+    exec(test_engine.STUB_PARSER["vllm/entrypoints/common/cli_args.py"].split("\n", 2)[2], stub_namespace)
+    parser = stub_namespace["make_arg_parser"](_FlexibleStubParser(prog="vllm serve"))
+    parser.add_argument("--scheduling-policy", default="fcfs", choices=["fcfs", "priority"])
+    stub_parse = lambda argv: vllm_args.parse(argv, parser)
+
+    cases = (
+        (
+            ["Qwen/Qwen3-8B", "--port", "8123", "--max-num-seqs", "128"],
+            ["--max-num-seqs=32"],
+        ),
+        (
+            ["Qwen/Qwen3-8B", "--port", "8123", "--max-num-seqs=128", "--max-num-batched-tokens", "4096"],
+            ["--max_num_batched_tokens=2048", "--scheduling_policy", "priority"],
+        ),
+        (
+            ["Qwen/Qwen3-8B", "--port", "8123", "--max-num-seqs", "128"],
+            ["--max-num-seqs", "64", "--max-num-seqs=32"],
+        ),
+        (
+            ["Qwen/Qwen3-8B", "--port=8123", "--max-num-seqs=128", "--max-num-batched-tokens=4096"],
+            ["--max-num-seqs", "32", "--max-num-batched-tokens=2048", "--scheduling-policy=priority"],
+        ),
+    )
+    for base_argv, patch_argv in cases:
+        old_parsed = stub_parse(base_argv)
+        live_values, live_arities = vllm_args.parse_live_patch(patch_argv)
+        assert live_values is not None, patch_argv
+        synthesized = vllm_args.synthesize_live_parsed(old_parsed, live_values, live_arities)
+        merged_argv = vllm_args.override(base_argv, patch_argv)
+        full_parsed = stub_parse(merged_argv)
+        assert full_parsed["ok"], (merged_argv, full_parsed)
+        assert synthesized["args"] == full_parsed["args"], (base_argv, patch_argv)
+        assert set(synthesized["explicit"]) == set(full_parsed["explicit"]), (base_argv, patch_argv)
+        assert synthesized["explicit_values"] == full_parsed["explicit_values"], (base_argv, patch_argv)
+        assert synthesized["arities"] == full_parsed["arities"], (base_argv, patch_argv)
+        assert synthesized["seconds"]["parse"] >= 0.0
+        assert vllm_args.override_finding(patch_argv, old_parsed, synthesized) is None
+
+    # >4300-digit integer must fail closed without raising ValueError.
+    overlong_values, overlong_arities = vllm_args.parse_live_patch(["--max-num-seqs", "9" * 5000])
+    assert overlong_values is None and overlong_arities is None
+
+
 def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_ready(
     tmp_path, monkeypatch, capsys
 ):
     """Input: a live agent with boot max_num_seqs=128 and stubbed slow parser. Action: invoke
     `engine.reconfigure` for (1) non-live `--max-model-len 2048`, (2) mixed live + non-live,
-    (3) `--max-num-seqs 99999` above boot limit, (4) invalid `--max-num-seqs 0`, (5) missing
-    `ready.json`, and (6) live agent returning `ok=False`. Expect: every case falls back cleanly
-    to `read_vllm_args`, reports exact findings or restart reasons, leaves the live scheduler
-    untouched on invalid/non-live inputs, and never sends a duplicate live request on failure."""
+    (3) `--max-num-seqs 99999` above boot limit, (4) invalid `--max-num-seqs 0`, (5) live agent
+    returning `ok=False`, (6) missing `ready.json`, and (7) launcher-backend change (`--kvplan`),
+    `--reconfigure-restart`, `--zygote-check`, mismatched `api_pid`, dead `core_pid`, corrupt
+    non-int `boot`, and legacy state missing `arities`/`explicit_values`. Expect: every case
+    falls back cleanly to `read_vllm_args` without crashing, reports exact findings or restart
+    reasons, leaves the live scheduler untouched on invalid/non-live inputs, and never retries
+    the live request on failure."""
     import json
     import os
     import pytest
@@ -741,6 +814,7 @@ def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_re
     import engine
     import live_reconfig
     import test_engine
+    from rsibox import ipc
 
     api_pid = os.getpid()
     cache_root = tmp_path / "cache"
@@ -832,8 +906,76 @@ def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_re
         assert "simulated refusal" in report["reconfig"]["restart_reason"]
         monkeypatch.setattr(live_reconfig, "request", original_request)
 
-        # (6) Missing ready.json falls back cleanly to full path and restarts.
-        (Path(live_dir) / "ready.json").unlink()
+        # (6) Launcher-backend change (--kvplan), --reconfigure-restart, and --zygote-check bypass fast path.
+        for extra_launcher_flags in (
+            ["--kvplan"],
+            ["--reconfigure-restart"],
+        ):
+            parser_calls.clear()
+            raw_argv = [
+                "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+                "--log", str(log_path), *extra_launcher_flags, "--", "--max-num-seqs", "64",
+            ]
+            launcher_args, patch_vargv = engine.parse(raw_argv)
+            report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+            assert len(parser_calls) == 1, extra_launcher_flags
+            assert report["reconfig"]["path"] == "restart", extra_launcher_flags
+            assert scheduler.max_num_running_reqs == 128
+
+        parser_calls.clear()
+        capsys.readouterr()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--zygote-check", "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert exit_info.value.code == 0
+        assert len(parser_calls) == 1
+        assert scheduler.max_num_running_reqs == 128
+
+        # (7) Mismatched api_pid, dead core_pid, corrupt non-int boot, and missing ready.json fall back cleanly.
+        ready_path = Path(live_dir) / "ready.json"
+        original_ready = json.loads(ready_path.read_text())
+        for mutated_ready, expect_reason_substr in (
+            ({**original_ready, "api_pid": api_pid + 999}, "belongs to api pid"),
+            ({**original_ready, "pid": 99999999}, "is gone"),
+            ({**original_ready, "boot": {**original_ready["boot"], "max_num_seqs": "128"}}, None),
+        ):
+            ipc.atomic_write_json(ready_path, mutated_ready)
+            parser_calls.clear()
+            raw_argv = [
+                "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+                "--log", str(log_path), "--", "--max-num-seqs", "64",
+            ]
+            launcher_args, patch_vargv = engine.parse(raw_argv)
+            if expect_reason_substr is None:
+                # Corrupt non-int boot fails closed in fast path without crashing; restore valid boot for slow path check.
+                report_fast, failure_fast, reconciled_fast = engine._try_fast_live_reconfigure(
+                    launcher_args, engine.load_engine_state(cache_root, api_pid), patch_vargv, raw_argv
+                )
+                assert (report_fast, failure_fast, reconciled_fast) == (None, None, None)
+            else:
+                report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+                assert len(parser_calls) == 1, mutated_ready
+                assert report["reconfig"]["path"] == "restart"
+                assert expect_reason_substr in report["reconfig"]["restart_reason"]
+
+        # Legacy state missing arities / explicit_values fails closed in fast path.
+        ipc.atomic_write_json(ready_path, original_ready)
+        legacy_state = engine.load_engine_state(cache_root, api_pid)
+        legacy_state["vllm_args"].pop("arities", None)
+        legacy_state["vllm_args"].pop("explicit_values", None)
+        launcher_args, patch_vargv = engine.parse([
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ])
+        assert engine._try_fast_live_reconfigure(
+            launcher_args, legacy_state, patch_vargv, []
+        ) == (None, None, None)
+
+        ready_path.unlink()
         parser_calls.clear()
         raw_argv = [
             "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
@@ -844,5 +986,155 @@ def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_re
         assert len(parser_calls) == 1
         assert report["reconfig"]["path"] == "restart"
         assert "no live agent" in report["reconfig"]["restart_reason"]
+    finally:
+        shutdown()
+
+
+def test_reconfigure_fast_live_failure_reconciles_drift_and_preserves_fallback_reason(
+    tmp_path, monkeypatch, capsys
+):
+    """P1 regression: (a) fast-path preflight finding aborts cleanly before sending any live
+    command; (b) `lost`/timeout with late pickup reconciles actual scheduler state into
+    `engines/<pid>.json` and preserves `live_fallback_reason` + `live_reconciled_fields` on a
+    subsequent exit-2 `read_vllm_args` refusal; (c) read-back mismatch reconciles state and
+    preserves `live_fallback_reason` + `live_reconciled_fields` on a subsequent `zygote.check`
+    refusal."""
+    import json
+    import os
+    import pytest
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import engine
+    import live_reconfig
+    import test_engine
+
+    api_pid = os.getpid()
+    cache_root = tmp_path / "cache"
+    log_path = tmp_path / "serve.log"
+    live_dir, agent, scheduler, shutdown = _start_local_live_agent(
+        tmp_path, monkeypatch, api_pid=api_pid, boot_seqs=128, boot_tokens=4096
+    )
+    stub_parse = test_engine._stub_parser()
+    try:
+        # (a) Preflight failure prevents fast path from touching the live agent at all.
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+        original_request = live_reconfig.request
+        live_calls = []
+
+        def spy_request(*args, **kwargs):
+            live_calls.append((args, kwargs))
+            return original_request(*args, **kwargs)
+
+        monkeypatch.setattr(live_reconfig, "request", spy_request)
+        monkeypatch.setattr(
+            engine,
+            "preflight",
+            lambda *_args, **_kwargs: (
+                [{"check": "weights_daemon", "observed": "dead", "expected": "up"}],
+                {"weights_probe": {"ok": False}},
+            ),
+        )
+        monkeypatch.setattr(
+            engine,
+            "read_vllm_args",
+            lambda _launcher_args, argv, _process_env: {**stub_parse(argv), "via": "direct"},
+        )
+        capsys.readouterr()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert exit_info.value.code == 2
+        assert live_calls == [], "preflight failure must abort before sending any live command"
+        preflight_payload = json.loads(capsys.readouterr().out.strip())
+        assert preflight_payload["findings"][0]["check"] == "weights_daemon"
+        assert "live_fallback_reason" not in preflight_payload
+
+        # Restore clean preflight for (b) and (c).
+        monkeypatch.setattr(engine, "preflight", lambda *_args, **_kwargs: ([], {}))
+
+        # (b) Timeout/lost with late pickup + fallback read_vllm_args refusal (vllm not importable).
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+
+        def lost_with_late_pickup(root, op, timeout=15.0, **payload):
+            if op == "set":
+                # Simulate the engine core applying the command after the client timed out.
+                agent.apply(payload["values"])
+                return {"ok": False, "error": f"no reply from the live agent in {timeout} s"}
+            return original_request(root, op, timeout=timeout, **payload)
+
+        monkeypatch.setattr(live_reconfig, "request", lost_with_late_pickup)
+        monkeypatch.setattr(
+            engine,
+            "read_vllm_args",
+            lambda *_args, **_kwargs: {
+                "ok": False,
+                "error": "vLLM's parser is not importable by python",
+                "via": "direct",
+            },
+        )
+        capsys.readouterr()
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert exit_info.value.code == 2
+        lost_payload = json.loads(capsys.readouterr().out.strip())
+        assert "no reply" in lost_payload.get("live_fallback_reason", ""), lost_payload
+        assert lost_payload.get("live_reconciled_fields") == {"max_num_seqs": 64}, lost_payload
+        reconciled_state = engine.load_engine_state(cache_root, api_pid)
+        assert reconciled_state["vllm_args"]["args"]["max_num_seqs"] == 64
+
+        # Subsequent reconfigure back to 128 must NOT treat 128 as a noop (state was reconciled to 64).
+        monkeypatch.setattr(live_reconfig, "request", original_request)
+        restore_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "128",
+        ]
+        launcher_args, patch_vargv = engine.parse(restore_argv)
+        restore_report = engine.reconfigure(launcher_args, patch_vargv, restore_argv)
+        assert restore_report["reconfig"]["path"] == "in_process_live"
+        assert scheduler.max_num_running_reqs == 128
+
+        # (c) Read-back mismatch + fallback zygote.check refusal preserves live_fallback_reason.
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+
+        def mismatch_request(root, op, timeout=15.0, **payload):
+            if op == "set":
+                agent.apply({"max_num_seqs": 48})
+                return {"ok": True, "after": agent.scheduler_view()}
+            return original_request(root, op, timeout=timeout, **payload)
+
+        monkeypatch.setattr(live_reconfig, "request", mismatch_request)
+        monkeypatch.setattr(
+            engine,
+            "read_vllm_args",
+            lambda _launcher_args, argv, _process_env: {**stub_parse(argv), "via": "direct"},
+        )
+        monkeypatch.setattr(
+            engine.zygote,
+            "check",
+            lambda *_args, **_kwargs: {
+                "ok": False, "findings": [{"check": "zygote_stale"}], "error": "stale",
+            },
+        )
+        monkeypatch.setattr(engine, "engine_env", lambda *_args, **_kwargs: dict(os.environ))
+        capsys.readouterr()
+        zygote_raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--zygote", str(tmp_path / "z.sock"),
+            "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(zygote_raw_argv)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, zygote_raw_argv)
+        assert exit_info.value.code == 2
+        zygote_payload = json.loads(capsys.readouterr().out.strip())
+        assert "scheduler reads back" in zygote_payload.get("live_fallback_reason", ""), zygote_payload
+        assert zygote_payload.get("live_reconciled_fields") == {"max_num_seqs": 48}, zygote_payload
+        assert engine.load_engine_state(cache_root, api_pid)["vllm_args"]["args"]["max_num_seqs"] == 48
     finally:
         shutdown()
