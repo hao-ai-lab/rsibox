@@ -153,7 +153,7 @@ class GraphGuardGoldenTests(unittest.TestCase):
             def execute_model(self, *a, **k): return None
             def sample_tokens(self, *a, **k): return None
 
-        mods = {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=FakeV1Wrapper)}
+        mods = {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=FakeV1Wrapper), "vllm.forward_context": None}
         saved = list(WE._ENDPOINT)
         WE._ENDPOINT.clear()
         try:
@@ -243,7 +243,7 @@ class GraphGuardGoldenTests(unittest.TestCase):
             hybrid_mgr = _V2HybridMgr()
             hybrid_worker = NS(model_runner=NS(cudagraph_manager=hybrid_mgr))
             guard2 = GG.GraphReplayGuard()
-            with mock.patch.dict(sys.modules, {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=_PiecewiseWrapper)}):
+            with mock.patch.dict(sys.modules, {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=_PiecewiseWrapper), "vllm.forward_context": None}):
                 WE.install_replay_guard(hybrid_worker, guard2)
                 # (a) breakable_cg_runner stamped under "PIECEWISE", never "None"
                 self.assertIn(GG.graph_key("PIECEWISE", d_batch), guard2.stamps)
@@ -512,6 +512,183 @@ class GraphGuardGoldenTests(unittest.TestCase):
             spec_res = spec_job.wait(timeout_s=15.0)
             self.assertTrue(spec_res["ok"], spec_res)
             self.assertTrue(os.path.isfile(spec_res["result"]["so"]))
+
+    def test_v1_full_and_piecewise_r1_recapture_and_warmup_bypass(self):
+        """Golden regression for live B200 FULL_AND_PIECEWISE R1 crash on main (#220):
+        1. `CUDAGraphWrapper.__call__` during `CUDAGraphMode.NONE` warmup, mode mismatch
+           (`FULL` traversing a nested `PIECEWISE` wrapper), or `entry.cudagraph is None`
+           capture must NOT raise `StaleGraphReplayError`, while actual stale replay still raises.
+        2. `Recapture._capture()` stamps each mode's wrapper entries immediately after that mode
+           finishes (before `FULL` capture runs), even when relaxed wrapper keys differ from
+           dispatcher keys."""
+        class CUDAGraphMode(enum.Enum):
+            NONE = 0
+            PIECEWISE = 1
+            FULL = 2
+
+        fc_state = {"avail": True, "mode": CUDAGraphMode.PIECEWISE, "desc": None}
+        fake_fc_mod = types.ModuleType("vllm.forward_context")
+        fake_fc_mod.is_forward_context_available = lambda: fc_state["avail"]
+        fake_fc_mod.get_forward_context = lambda: NS(
+            cudagraph_runtime_mode=fc_state["mode"], batch_descriptor=fc_state["desc"],
+        )
+
+        class _Entry:
+            def __init__(self, cg="graph-obj"):
+                self.cudagraph = cg
+
+        class _BreakableEntry:
+            def __init__(self, cap="cap-obj"):
+                self.capture = cap
+
+        class _V1Wrapper:
+            _all_instances = []
+            def __init__(self, runtime_mode):
+                self.runtime_mode = runtime_mode
+                self.concrete_cudagraph_entries = {}
+                self._all_instances.append(self)
+            def __call__(self, *args, **kwargs):
+                mode_label = "NONE_MODE" if self.runtime_mode is None else self.runtime_mode.name
+                return f"ran:{mode_label}:{fc_state['mode'].name}"
+
+        class _BreakableWrapper:
+            _all_instances = []
+            def __init__(self, runtime_mode=None):
+                self.runtime_mode = runtime_mode
+                self.entries = {}
+                self._all_instances.append(self)
+            def __call__(self, *args, **kwargs):
+                return f"breakable:{fc_state['mode'].name}"
+
+        class _TaggedDesc:
+            def __init__(self, cg_mode, num_tokens):
+                self.cg_mode, self.num_tokens = cg_mode, num_tokens
+            def __hash__(self): return hash((self.cg_mode, self.num_tokens))
+            def __eq__(self, o): return isinstance(o, _TaggedDesc) and (self.cg_mode, self.num_tokens) == (o.cg_mode, o.num_tokens)
+
+        pw_wrapper = _V1Wrapper(CUDAGraphMode.PIECEWISE)
+        full_wrapper = _V1Wrapper(CUDAGraphMode.FULL)
+        br_wrapper = _BreakableWrapper(runtime_mode=None)
+        pw_wrapper.concrete_cudagraph_entries[("relaxed", 8)] = _Entry("cg-pw-8")
+        full_wrapper.concrete_cudagraph_entries[("full", 8)] = _Entry("cg-full-8")
+        br_wrapper.entries[("br", 8)] = _BreakableEntry("cap-8")
+        guard = GG.GraphReplayGuard()
+        mods = {
+            "vllm.forward_context": fake_fc_mod,
+            "vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=_V1Wrapper),
+            "vllm.compilation.breakable_cudagraph": NS(BreakableCUDAGraphWrapper=_BreakableWrapper),
+        }
+        with mock.patch.dict(sys.modules, mods):
+            WE._hook_v1_callable(pw_wrapper, guard)
+            WE._hook_v1_callable(full_wrapper, guard)
+            WE._hook_v1_callable(br_wrapper, guard)
+            # Bump epoch so all pre-existing graphs are STALE!
+            guard.bump_code_epoch("commit:txn-1")
+            guard.bump_pool_epoch("r1:txn-1", modes=["PIECEWISE", "FULL"])
+
+            # 1a. Actual PIECEWISE and FULL replays MUST fail closed with StaleGraphReplayError!
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.PIECEWISE, ("relaxed", 8)
+            with self.assertRaises(GG.StaleGraphReplayError):
+                pw_wrapper()
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.FULL, ("full", 8)
+            with self.assertRaises(GG.StaleGraphReplayError):
+                full_wrapper()
+            # BreakableCUDAGraphWrapper(runtime_mode=None) matches FULL and MUST stay fail-closed!
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.FULL, ("br", 8)
+            with self.assertRaises(GG.StaleGraphReplayError):
+                br_wrapper()
+
+            # 1b. NONE warmup, mode mismatch, unavailable fc, cudagraph=None, and capture=None bypass!
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.NONE, ("relaxed", 8)
+            self.assertEqual(pw_wrapper(), "ran:PIECEWISE:NONE")
+            fc_state["mode"] = CUDAGraphMode.FULL
+            self.assertEqual(pw_wrapper(), "ran:PIECEWISE:FULL")
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.PIECEWISE, ("full", 8)
+            self.assertEqual(full_wrapper(), "ran:FULL:PIECEWISE")
+            fc_state["avail"] = False
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.PIECEWISE, ("relaxed", 8)
+            self.assertEqual(pw_wrapper(), "ran:PIECEWISE:PIECEWISE")
+            fc_state["avail"] = True
+            pw_wrapper.concrete_cudagraph_entries[("relaxed", 8)] = _Entry(None)
+            self.assertEqual(pw_wrapper(), "ran:PIECEWISE:PIECEWISE")
+            fc_state["mode"], fc_state["desc"] = CUDAGraphMode.FULL, ("br", 8)
+            br_wrapper.entries[("br", 8)] = _BreakableEntry(None)
+            self.assertEqual(br_wrapper(), "breakable:FULL")
+
+            # 2. Recapture._capture: PIECEWISE populates relaxed key ("relaxed", 8) while dispatcher
+            #    key is ("disp", 8); FULL capture triggers a PIECEWISE check BEFORE _capture finishes.
+            #    Also verify cross-mode cg_mode filtering: a stale FULL-tagged entry inside a
+            #    PIECEWISE wrapper is NOT stamped during PIECEWISE, while a PIECEWISE-tagged entry
+            #    inside a FULL wrapper IS stamped during PIECEWISE.
+            pw_wrapper.concrete_cudagraph_entries.clear()
+            full_wrapper.concrete_cudagraph_entries.clear()
+            stale_full_in_pw = _TaggedDesc(CUDAGraphMode.FULL, 16)
+            pw_in_full = _TaggedDesc(CUDAGraphMode.PIECEWISE, 16)
+            pw_wrapper.concrete_cudagraph_entries[stale_full_in_pw] = _Entry("stale-full")
+            rec = RC.Recapture(guard=guard)
+            keys = {CUDAGraphMode.PIECEWISE: {("disp", 8)}, CUDAGraphMode.FULL: {("full", 8)}}
+
+            def fake_capture(mode, desc):
+                if mode is CUDAGraphMode.PIECEWISE:
+                    pw_wrapper.concrete_cudagraph_entries[("relaxed", 8)] = _Entry("cg-pw-new")
+                    full_wrapper.concrete_cudagraph_entries[pw_in_full] = _Entry("cg-pw-in-full")
+                else:
+                    # During FULL capture: PIECEWISE entries are stamped, stale FULL entry is NOT!
+                    fc_state["mode"], fc_state["desc"] = CUDAGraphMode.PIECEWISE, ("relaxed", 8)
+                    pw_wrapper()
+                    guard.check_before_replay(GG.graph_key(CUDAGraphMode.PIECEWISE, pw_in_full))
+                    self.assertFalse(guard.is_fresh(GG.graph_key(CUDAGraphMode.FULL, stale_full_in_pw)))
+                    full_wrapper.concrete_cudagraph_entries[desc] = _Entry("cg-full-new")
+
+            eng = RC.Engine(
+                wrappers=lambda: [pw_wrapper, full_wrapper],
+                keys=keys,
+                capture=fake_capture,
+                session=lambda: contextlib.nullcontext(),
+                memory=lambda: {},
+                sync=lambda: None,
+            )
+            fake_witness = NS(capture=lambda: contextlib.nullcontext())
+            rep = rec._capture(eng, {CUDAGraphMode.PIECEWISE: [("disp", 8)], CUDAGraphMode.FULL: [("full", 8)]}, fake_witness)
+            self.assertTrue(rep["ok"], rep)
+            guard.check_before_replay(GG.graph_key(CUDAGraphMode.PIECEWISE, ("relaxed", 8)))
+            guard.check_before_replay(GG.graph_key(CUDAGraphMode.PIECEWISE, pw_in_full))
+            guard.check_before_replay(GG.graph_key(CUDAGraphMode.FULL, ("full", 8)))
+
+            # 3. Empty chosen[mode] preserves existing input_sig stamps, and failed FULL capture
+            #    rolls back newly-added relaxed PIECEWISE wrapper entries + guard stamps.
+            sig_keep = GG.input_signature(_TensorLike((8, 64), "torch.bfloat16", 0x2000))
+            guard.stamp(GG.graph_key(CUDAGraphMode.PIECEWISE, ("relaxed", 8)), sig_keep)
+            empty_pw_eng = RC.Engine(
+                wrappers=lambda: [pw_wrapper, full_wrapper],
+                keys={CUDAGraphMode.PIECEWISE: set(), CUDAGraphMode.FULL: set()},
+                capture=lambda mode, desc: full_wrapper.concrete_cudagraph_entries.__setitem__(desc, _Entry("cg-full-2")),
+                session=lambda: contextlib.nullcontext(),
+                memory=lambda: {},
+                sync=lambda: None,
+            )
+            rep_empty_pw = rec._capture(empty_pw_eng, {CUDAGraphMode.PIECEWISE: [], CUDAGraphMode.FULL: [("full", 8)]}, fake_witness)
+            self.assertTrue(rep_empty_pw["ok"], rep_empty_pw)
+            self.assertEqual(guard.stamps[GG.graph_key(CUDAGraphMode.PIECEWISE, ("relaxed", 8))][2], sig_keep)
+
+            def failing_full_capture(mode, desc):
+                if mode is CUDAGraphMode.PIECEWISE:
+                    pw_wrapper.concrete_cudagraph_entries[("relaxed", 32)] = _Entry("cg-pw-32")
+                else:
+                    raise RuntimeError("simulated FULL capture OOM")
+
+            fail_eng = RC.Engine(
+                wrappers=lambda: [pw_wrapper, full_wrapper],
+                keys={CUDAGraphMode.PIECEWISE: set(), CUDAGraphMode.FULL: set()},
+                capture=failing_full_capture,
+                session=lambda: contextlib.nullcontext(),
+                memory=lambda: {},
+                sync=lambda: None,
+            )
+            rep_fail = rec._capture(fail_eng, {CUDAGraphMode.PIECEWISE: [("disp", 32)], CUDAGraphMode.FULL: [("full", 32)]}, fake_witness)
+            self.assertFalse(rep_fail["ok"])
+            self.assertNotIn(("relaxed", 32), pw_wrapper.concrete_cudagraph_entries)
+            self.assertNotIn(GG.graph_key(CUDAGraphMode.PIECEWISE, ("relaxed", 32)), guard.stamps)
 
 
 if __name__ == "__main__":

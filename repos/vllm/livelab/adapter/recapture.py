@@ -421,7 +421,8 @@ def teardown_graph_pool(engine, wrappers, selected, *, release_entries: bool = T
 
 
 def _wrapper_mode(wrapper):
-    return getattr(wrapper, "runtime_mode", None) or "PIECEWISE"
+    raw = getattr(wrapper, "runtime_mode", None)
+    return "PIECEWISE" if raw is None else raw
 
 
 def _drop_descriptors(engine, wrappers, pairs, guard: GraphReplayGuard | None = None):
@@ -600,27 +601,52 @@ class Recapture:
         runner's dummy run asks the dispatcher for the mode). Stamps each captured graph on
         `self.guard`. On error the keys of this call come out again, so no step dispatches to
         a half-captured descriptor."""
-        done, timings = [], []
+        done, timings, added_wrapper_entries = [], [], []
         t0 = time.perf_counter()
         order = sorted(chosen, key=lambda mode: ORDER.index(name(mode)) if name(mode) in ORDER else 9)
         try:
             with witness.capture(), engine.session():
                 for mode in order:
+                    if not chosen[mode]:
+                        continue
+                    mode_name = name(mode)
+                    before_keys = {
+                        (id(wrapper), attr): set(getattr(wrapper, attr))
+                        for wrapper in engine.wrappers()
+                        if (attr := _attr(wrapper))
+                    }
                     for desc in sorted(chosen[mode], key=_size, reverse=True):
                         t = time.perf_counter()
                         engine.keys[mode].add(desc)
                         done.append((mode, desc))
                         engine.capture(mode, desc)
                         self.guard.stamp(graph_key(mode, desc))
-                        timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
-            active_modes = {name(m) for m, ds in chosen.items() if ds}
-            for wrapper in engine.wrappers():
-                if (attr := _attr(wrapper)) and (w_mode := name(_wrapper_mode(wrapper))) in active_modes:
-                    for entry_key in getattr(wrapper, attr):
-                        self.guard.stamp(graph_key(getattr(entry_key, "cg_mode", None) or w_mode, entry_key))
+                        timings.append([mode_name, _size(desc), round(time.perf_counter() - t, 6)])
+                    # Stamp wrapper-side entry keys for this mode immediately so PIECEWISE entries
+                    # (whose relaxed BatchDescriptor can differ from dispatcher keys) are stamped
+                    # before FULL warmup/capture runs, without stamping other modes' entries.
+                    for wrapper in engine.wrappers():
+                        if not (attr := _attr(wrapper)):
+                            continue
+                        entries = getattr(wrapper, attr)
+                        seen_before = before_keys.get((id(wrapper), attr), set())
+                        wrapper_mode = _wrapper_mode(wrapper)
+                        for entry_key in entries:
+                            entry_mode = name(getattr(entry_key, "cg_mode", None) or wrapper_mode)
+                            if entry_mode != mode_name:
+                                continue
+                            gk = graph_key(entry_mode, entry_key)
+                            if entry_key not in seen_before:
+                                added_wrapper_entries.append((wrapper, attr, entry_key, gk))
+                                self.guard.stamp(gk)
+                            elif gk not in self.guard.stamps or not self.guard.is_fresh(gk):
+                                self.guard.stamp(gk)
         except Exception as e:
             wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
             _drop_descriptors(engine, wrappers, done, guard=self.guard)
+            for wrapper, attr, entry_key, gk in added_wrapper_entries:
+                getattr(wrapper, attr).pop(entry_key, None)
+                self.guard.invalidate(gk)
             engine.sync()
             return F.not_ok(f"R1 capture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"capture of {name(done[-1][0]) if done else '?'} "
