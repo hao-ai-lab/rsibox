@@ -15,7 +15,7 @@ Provides shared, zero-dependency building blocks for rsibox live labs:
 import os
 import sys
 
-from . import diffs, op_guard, pool, warm
+from . import diffs, op_guard, pool, pool_server, warm
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .op_guard import op_redefine_guard
 from .harness import (
@@ -60,8 +60,10 @@ from .ipc import (
 )
 from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
 from .pool import (
-    PoolClosedError, PoolError, PoolSlot, PoolTimeoutError, SandboxPool, SlotLease, verify_trace,
+    DEFAULT_PRIORITY, PRIORITY_RANKS, PoolClosedError, PoolError, PoolSlot, PoolTimeoutError,
+    SandboxPool, SlotLease, verify_trace,
 )
+from .pool_server import PoolClient, PoolServer, RemoteLease
 from .proc import (
     descendants,
     direct_children,
@@ -113,16 +115,21 @@ def bootstrap_livelab(
 __all__ = [
     "AfterImportHook",
     "BaseLab",
+    "DEFAULT_PRIORITY",
     "FileChannelServer",
     "MAX_SOCK_PATH",
     "MailboxServer",
     "OverlayFinder",
+    "PRIORITY_RANKS",
     "PackageOverlay",
+    "PoolClient",
     "PoolClosedError",
     "PoolError",
+    "PoolServer",
     "PoolSlot",
     "PoolTimeoutError",
     "RecaptureCoordinator",
+    "RemoteLease",
     "RoleEndpoint",
     "SandboxPool",
     "SlotLease",
@@ -158,6 +165,7 @@ __all__ = [
     "pid_alive",
     "plain_finding",
     "pool",
+    "pool_server",
     "port_in_use",
     "ppid_map",
     "purge_modules",

@@ -48,6 +48,7 @@ py-modules = [
   "rsibox.lab",
   "rsibox.op_guard",
   "rsibox.pool",
+  "rsibox.pool_server",
   "rsibox.proc",
   "kernel.coordinator",
   "kernel.findings",
