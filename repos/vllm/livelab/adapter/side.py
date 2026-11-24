@@ -468,7 +468,9 @@ class Side(Endpoint):
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
                                   p.get("modes"), p.get("sizes"),
-                                  release_old=bool(p.get("release_old", False)))
+                                  release_old=bool(p.get("release_old", False)),
+                                  kernel_swaps=p.get("kernel_swaps"),
+                                  tier=p.get("tier", "auto"))
 
     _r1 = _recapture
 

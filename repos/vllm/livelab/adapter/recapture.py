@@ -46,6 +46,7 @@ import time
 from kernel import findings as F
 
 from .graph_guard import GraphReplayGuard, graph_key
+from .graph_patch import extract_cudagraph, patch_graphs_in_place
 
 ENTRY_ATTRS = ("concrete_cudagraph_entries", "entries")
 ORDER = ("PIECEWISE", "FULL")      # capture_model's order
@@ -457,10 +458,58 @@ class Recapture:
                 for mode in selected}
         return selected, old_keys, wrappers, old_entries, chosen, left
 
-    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False):
-        """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds, pool
-        teardown telemetry, and memory before/after; on failure old graphs and exact pre-R1
-        guard stamps are restored (or cleared when `release_old=True`)."""
+    def _collect_graphs(self, wrappers, chosen):
+        """Collect `(graph_key, CUDAGraph)` pairs for selected wrappers and descriptors."""
+        chosen_by_mode = {name(mode): set(descs) for mode, descs in chosen.items()}
+        out = []
+        for wrapper, attr in wrappers:
+            mname = name(_wrapper_mode(wrapper))
+            want = chosen_by_mode.get(mname) or set()
+            entries = getattr(wrapper, attr, None) or {}
+            for desc, entry in entries.items():
+                if desc not in want:
+                    continue
+                cg = extract_cudagraph(entry)
+                if cg is not None:
+                    out.append((graph_key(mname, desc), cg))
+        return out
+
+    def patch_nodes(self, engine, txn, journal, kernel_swaps, modes=None, sizes=None,
+                    *, drv=None, allow_empty=False):
+        """Tier-A surgical in-place `cuGraphExecKernelNodeSetParams` update across selected graphs."""
+        if engine is None:
+            return F.ok(skipped="this worker runs no graphs", tier="A_surgical_node_patch", seconds=0.0)
+        if not journal.marks or journal.marks[-1][0] != txn:
+            return F.not_ok(f"{txn} is not this rank's newest committed transaction",
+                            reason="not_newest_txn")
+        selected, _old_keys, wrappers, _old_entries, chosen, _left = self._select(
+            engine, modes, sizes
+        )
+        selected_names = [name(mode) for mode in selected]
+        graphs = self._collect_graphs(wrappers, chosen)
+        res = patch_graphs_in_place(
+            graphs=graphs,
+            kernel_swaps=kernel_swaps,
+            sync_fn=engine.sync,
+            guard=self.guard,
+            selected_modes=selected_names,
+            txn=txn,
+            journal=journal,
+            drv=drv,
+            allow_empty=allow_empty,
+        )
+        if res.get("ok"):
+            res.pop("undo", None)
+            res["modes"] = selected_names
+            res["wrappers"] = len(wrappers)
+        return res
+
+    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False,
+            kernel_swaps=None, tier="auto", drv=None):
+        """Recapture after txn's commit (or Tier-A surgical node patch when `kernel_swaps` is
+        provided and `tier` is `'auto'` or `'surgical'`). Returns an ok-dict with per-descriptor
+        seconds, pool teardown telemetry, and memory before/after; on failure old graphs and
+        exact pre-R1 guard stamps are restored (or cleared when `release_old=True`)."""
         if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
@@ -468,6 +517,17 @@ class Recapture:
         if not journal.marks or journal.marks[-1][0] != txn:
             return F.not_ok(f"{txn} is not this rank's newest committed transaction: its undo "
                             "would not restore the graphs R1 replaces")
+
+        surgical_fallback_reason = None
+        if kernel_swaps is not None and tier in ("auto", "surgical"):
+            patched = self.patch_nodes(
+                engine, txn, journal, kernel_swaps, modes=modes, sizes=sizes, drv=drv
+            )
+            if patched.get("ok"):
+                return patched
+            if tier == "surgical":
+                return patched
+            surgical_fallback_reason = patched.get("reason") or patched.get("error")
 
         selected, old_keys, wrappers, old_entries, chosen, left = self._select(
             engine, modes, sizes
@@ -538,6 +598,9 @@ class Recapture:
 
         return F.ok(**result["report"], **teardown, modes=[name(mode) for mode in selected],
                     wrappers=len(wrappers),
+                    tier="B_selective_recapture",
+                    **({"surgical_fallback_reason": surgical_fallback_reason}
+                       if surgical_fallback_reason else {}),
                     eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
                            for mode, descriptors in left.items() if descriptors},
                     memory={"before": mem0, "after": engine.memory()})

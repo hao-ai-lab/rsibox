@@ -13,6 +13,14 @@ if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
 
 from .graph_guard import GraphReplayGuard, StaleGraphReplayError, graph_key, input_signature  # noqa: E402
+from .graph_patch import (  # noqa: E402
+    KernelSwapSpec,
+    collect_triton_func_map,
+    disable_keep_graph_hook,
+    enable_keep_graph_hook,
+    extract_cudagraph,
+    patch_graphs_in_place,
+)
 from .native import BackgroundBuildJob, BackgroundBuildPool, compile_async  # noqa: E402
 from .recapture import teardown_graph_pool  # noqa: E402
 from .snapshot_hooks import (  # noqa: E402
@@ -23,8 +31,10 @@ from .snapshot_hooks import (  # noqa: E402
 )
 
 __all__ = [
-    "BackgroundBuildJob", "BackgroundBuildPool", "GraphReplayGuard", "LIVELAB",
+    "BackgroundBuildJob", "BackgroundBuildPool", "GraphReplayGuard", "KernelSwapSpec", "LIVELAB",
     "StaleGraphReplayError", "VllmQuiesceHooks", "VllmShadowPromoter",
-    "compile_async", "graph_key", "input_signature",
-    "make_shadow_recovery_driver", "park_shadow_server", "teardown_graph_pool",
+    "collect_triton_func_map", "compile_async", "disable_keep_graph_hook",
+    "enable_keep_graph_hook", "extract_cudagraph", "graph_key", "input_signature",
+    "make_shadow_recovery_driver", "park_shadow_server", "patch_graphs_in_place",
+    "teardown_graph_pool",
 ]
