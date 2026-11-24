@@ -35,8 +35,15 @@ needs one is a finding, not a silent swap.
   all). A role with nothing to do abstains (votes yes, changes nothing) instead of vetoing with
   `empty_change`.
 - **Deadline.** Phase 2 has a deadline (`RSIBOX_KERNEL_PHASE2_DEADLINE`, default 5 s; 0 turns
-  it off). Each side runs its phase-2 calls on its own lane thread and answers by the
-  deadline, so every rank replies and a late one is `deadline_missed` naming its rank; the
+  it off). Undoing an R1 recaptured transaction (explicit `undo` or rollback after a failed
+  recapture) destroys captured CUDA graphs and synchronizes devices, so without a per-op
+  `phase2_deadline_s` it uses `RSIBOX_KERNEL_R1_UNDO_DEADLINE` (default 30 s; 0 turns it off);
+  when `gap_timeout_s` is omitted, the host sizes it to cover the active phase-2 deadline plus
+  `RSIBOX_KERNEL_RPC_GRACE` and headroom (for R1 `txn`: commit half-deadline +
+  `RSIBOX_KERNEL_R1_CAPTURE_BUDGET` (default 30 s) + rollback undo deadline + RPC grace +
+  headroom; pass explicit `gap_timeout_s` if a capture exceeds the default budget). Each side
+  runs its phase-2 calls on its own lane thread (bound to the worker's pinned CUDA device) and
+  answers by the deadline, so every rank replies and a late one is `deadline_missed` naming its rank; the
   kernel rolls the others back in the same gap and poisons the host. `collective_rpc` gets the
   time left plus `RSIBOX_KERNEL_RPC_GRACE` (2 s) as a backstop timeout. A timeout leaves a late reply in the executor's queue, so the worker group then
   refuses every call (`deadline_missed`) and the kernel poisons the host: undo only, then
@@ -44,8 +51,12 @@ needs one is a finding, not a silent swap.
   started but did not finish while the caller waited: it may still apply, so the group
   refuses every later call and poisons the host itself.
 - **Graph detection** (`graphs.py`, `side.Side`). On a worker whose config runs CUDA graphs
-  or torch.compile, a target in model code (`vllm.model_executor.models` / `.layers`) is
-  checked at prepare. Reached only through an op that splits the graph: an advisory
+  or torch.compile, a target in captured GPU code (`vllm.models.*`,
+  `vllm.model_executor.models.*`, `.layers.*`, `.kernels.*`, `vllm.kernels.*`,
+  `vllm.v1.attention.backends.*`, `.ops.*`, `vllm.lora.layers.*`, `.ops.*`,
+  `.punica_wrapper.*`, `vllm.distributed.device_communicators.*`, `vllm._custom_ops`, minus
+  host-side `CAPTURED_EXCLUSIONS` such as `*.model_state`, `*host_table*`, `*.quant_config`,
+  `*.mm_preprocess`) is checked at prepare. Reached only through an op that splits the graph: an advisory
   `captured_partly` (Python on prefill, graphs on decode). Captured only, or undecided: a
   blocking `captured_target`, so every rank votes no and the edit is reported, not applied.
   Both route to CUDA graph recapture. With `"rebuild": ["recapture"]` in the plan they turn advisory (the host

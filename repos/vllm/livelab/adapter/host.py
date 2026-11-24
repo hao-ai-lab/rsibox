@@ -37,7 +37,14 @@ How a transaction runs (kernel `StepGapCoordinator`):
   no batch is in flight. While it waits, the loop schedules nothing new ("pause keep":
   `scheduler.has_requests` is shadowed to False while `batch_queue` drains).
 - Phase 2 has a deadline (RSIBOX_KERNEL_PHASE2_DEADLINE, default 5 s; `phase2_deadline_s` per
-  op; 0 turns it off). Every side answers its phase-2 calls by the deadline from its own lane
+  op; 0 turns it off). Undoing an R1 recaptured transaction (explicit `undo` or rollback of a
+  failed recapture) destroys captured CUDA graphs and synchronizes devices, so without an
+  explicit `phase2_deadline_s` it uses `RSIBOX_KERNEL_R1_UNDO_DEADLINE` (default 30 s; 0 turns
+  it off). When `gap_timeout_s` is omitted, the host sizes `in_loop` to cover the active
+  phase-2 deadline plus RPC grace and headroom (for R1 `txn`: commit half-deadline +
+  `RSIBOX_KERNEL_R1_CAPTURE_BUDGET` (default 30 s) + rollback undo deadline + RPC grace +
+  headroom); pass an explicit `gap_timeout_s` if a capture exceeds the default budget. Every
+  side answers its phase-2 calls by the deadline from its own lane
   (`deadline_missed` naming the late rank), and collective_rpc gets `timeout` = the time left
   + RSIBOX_KERNEL_RPC_GRACE (default 2 s) as a backstop for a process that cannot answer at
   all. A timeout leaves the late reply in the executor's
@@ -58,6 +65,7 @@ The host records every step's duration, so a reply says how long steps stalled.
 """
 import collections
 import itertools
+import math
 import os
 import statistics
 import sys
@@ -71,13 +79,52 @@ from kernel import findings as F
 from kernel import receipt as R
 from services import core_hook
 
-from .side import Side
+from .side import Side, wants_recapture
 
 TAG = "RSIBOX_KERNEL"
 DIR = os.environ.get("RSIBOX_KERNEL_DIR")
-GAP_TIMEOUT_S = float(os.environ.get("RSIBOX_KERNEL_GAP_TIMEOUT", "30"))
-PHASE2_DEADLINE_S = float(os.environ.get("RSIBOX_KERNEL_PHASE2_DEADLINE", "5")) or None
-RPC_GRACE_S = float(os.environ.get("RSIBOX_KERNEL_RPC_GRACE", "2"))
+MAX_TIMEOUT_S = float(getattr(threading, "TIMEOUT_MAX", 1e9))
+
+
+def _parse_nonnegative_seconds(raw_value, field_name, *, zero_mode="keep", default=None):
+    """Parse a finite, non-negative duration in seconds within `threading.TIMEOUT_MAX`.
+    Rejects booleans, negatives, NaN/Inf, and values above `MAX_TIMEOUT_S`."""
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{field_name} must be a number, not bool ({raw_value!r})")
+    parsed_value = float(raw_value)
+    if not math.isfinite(parsed_value) or parsed_value < 0 or parsed_value > MAX_TIMEOUT_S:
+        raise ValueError(
+            f"{field_name} must be finite in [0, {MAX_TIMEOUT_S}], got {raw_value!r}"
+        )
+    if parsed_value == 0:
+        if zero_mode == "none":
+            return None
+        if zero_mode == "default":
+            return default
+        return 0.0
+    return parsed_value
+
+
+def _env_seconds(env_name, fallback, *, zero_mode="keep"):
+    default_value = None if zero_mode == "none" else float(fallback)
+    return _parse_nonnegative_seconds(
+        os.environ.get(env_name, fallback),
+        env_name,
+        zero_mode=zero_mode,
+        default=default_value,
+    )
+
+
+GAP_TIMEOUT_S = _env_seconds("RSIBOX_KERNEL_GAP_TIMEOUT", "30", zero_mode="default")
+PHASE2_DEADLINE_S = _env_seconds("RSIBOX_KERNEL_PHASE2_DEADLINE", "5", zero_mode="none")
+RECAPTURE_UNDO_DEADLINE_S = _env_seconds(
+    "RSIBOX_KERNEL_R1_UNDO_DEADLINE", "30", zero_mode="none"
+)
+RECAPTURE_CAPTURE_BUDGET_S = _env_seconds("RSIBOX_KERNEL_R1_CAPTURE_BUDGET", "30", zero_mode="keep")
+RPC_GRACE_S = _env_seconds("RSIBOX_KERNEL_RPC_GRACE", "2", zero_mode="keep")
+GAP_TIMEOUT_HEADROOM_S = 5.0
 PREPARE_TIMEOUT_S = 300.0
 _HOST = []
 _Job = core_hook.LoopJob
@@ -238,6 +285,7 @@ class Host:
         self.steps = collections.deque(maxlen=100000)   # (start perf_counter, seconds)
         self.core_side = Side("core", scope={"core": core})
         self._extends = itertools.count(1)
+        self._explicit_phase2_deadline = False
         self.dp = parallel(core)
         self.workers = WorkerGroup(self, self.dp["expected"])
         self.co = RecaptureCoordinator(
@@ -246,7 +294,98 @@ class Host:
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None},
-            rebuild=lambda txn, spec: self.workers.recapture({"txn": txn, **spec}))
+            rebuild=self._run_recapture)
+
+    def _recapture_undo_deadline(self, base_deadline_s):
+        """Deadline for undoing R1 graphs (destroying captured CUDA graphs across TP ranks can
+        take several seconds). Keeps `None` when deadlines are disabled."""
+        if base_deadline_s is None or RECAPTURE_UNDO_DEADLINE_S is None:
+            return None
+        return max(base_deadline_s, RECAPTURE_UNDO_DEADLINE_S)
+
+    def _undo_touches_recapture(self, txn_id):
+        """True when undoing `txn_id` (or its cascade of later held transactions) restores R1
+        graphs, including retried partial rollbacks of failed R1 transactions."""
+        transactions = self.co.txns
+        if txn_id not in transactions:
+            return False
+        order = list(transactions)
+        for candidate_id in order[order.index(txn_id):]:
+            record = transactions[candidate_id]
+            if candidate_id != txn_id and record.get("state") not in C._HELD:
+                continue
+            if (
+                record.get("rebuilt")
+                or (record.get("out") or {}).get("rebuild")
+                or (record.get("pending_rollback") and wants_recapture(record.get("plan")))
+            ):
+                return True
+        return False
+
+    def _run_recapture(self, txn_id, spec):
+        reply = self.workers.recapture({"txn": txn_id, **spec})
+        if not reply.get("ok") and not self._explicit_phase2_deadline:
+            self.co.phase2_deadline_s = self._recapture_undo_deadline(
+                self.co.phase2_deadline_s
+            )
+        return reply
+
+    def _resolve_deadlines(self, operation, command):
+        """Resolve `(phase2_deadline_s, gap_timeout_s, explicit_phase2)` for one control op.
+        Fail closed on bool/negative/non-finite/overflowing timeouts; when `gap_timeout_s` is
+        omitted, size it to cover commit + budgeted recapture + rollback undo + RPC grace +
+        headroom for R1 `txn` (or active phase-2 deadline + RPC grace + headroom otherwise)."""
+        explicit_phase2 = "phase2_deadline_s" in command
+        if explicit_phase2:
+            phase2_deadline_s = _parse_nonnegative_seconds(
+                command["phase2_deadline_s"], "phase2_deadline_s", zero_mode="none"
+            )
+        else:
+            phase2_deadline_s = PHASE2_DEADLINE_S
+            if operation == "undo" and self._undo_touches_recapture(command.get("txn")):
+                phase2_deadline_s = self._recapture_undo_deadline(phase2_deadline_s)
+
+        explicit_gap = "gap_timeout_s" in command and command["gap_timeout_s"] is not None
+        if explicit_gap:
+            gap_timeout_s = _parse_nonnegative_seconds(
+                command["gap_timeout_s"],
+                "gap_timeout_s",
+                zero_mode="default",
+                default=GAP_TIMEOUT_S,
+            )
+        else:
+            gap_timeout_s = GAP_TIMEOUT_S
+            plain_phase2_s = (
+                (phase2_deadline_s + RPC_GRACE_S)
+                if phase2_deadline_s is not None
+                else 0.0
+            )
+            if operation == "txn" and wants_recapture(command.get("plan")):
+                commit_phase_s = (
+                    (phase2_deadline_s / 2.0 + RPC_GRACE_S)
+                    if phase2_deadline_s is not None
+                    else 0.0
+                )
+                rollback_deadline_s = (
+                    phase2_deadline_s
+                    if explicit_phase2
+                    else self._recapture_undo_deadline(phase2_deadline_s)
+                )
+                rollback_phase_s = (
+                    (rollback_deadline_s + RPC_GRACE_S)
+                    if rollback_deadline_s is not None
+                    else 0.0
+                )
+                recapture_phase_s = (
+                    commit_phase_s + RECAPTURE_CAPTURE_BUDGET_S + rollback_phase_s
+                )
+                min_gap_timeout_s = max(plain_phase2_s, recapture_phase_s) + GAP_TIMEOUT_HEADROOM_S
+                gap_timeout_s = min(max(gap_timeout_s, min_gap_timeout_s), MAX_TIMEOUT_S)
+            elif phase2_deadline_s is not None:
+                min_gap_timeout_s = plain_phase2_s + GAP_TIMEOUT_HEADROOM_S
+                gap_timeout_s = min(max(gap_timeout_s, min_gap_timeout_s), MAX_TIMEOUT_S)
+
+        return phase2_deadline_s, gap_timeout_s, explicit_phase2
 
     def _in_gap(self, fn):
         try:
@@ -324,14 +463,17 @@ class Host:
 
     def handle(self, cmd):
         op = cmd.get("op")
-        self.gap_timeout = float(cmd.get("gap_timeout_s") or GAP_TIMEOUT_S)
-        self.co.phase2_deadline_s = (cmd["phase2_deadline_s"] or None
-                                     if "phase2_deadline_s" in cmd else PHASE2_DEADLINE_S)
         t0, held0 = time.perf_counter(), self.held_steps
         try:
+            phase2_deadline_s, gap_timeout_s, explicit_phase2 = self._resolve_deadlines(op, cmd)
+            self.gap_timeout = gap_timeout_s
+            self.co.phase2_deadline_s = phase2_deadline_s
+            self._explicit_phase2_deadline = explicit_phase2
             r = self._op(op, cmd)
         except Exception as e:
             r = F.not_ok(f"{op}: {type(e).__name__}: {e}", traceback=traceback.format_exc()[-2000:])
+        finally:
+            self._explicit_phase2_deadline = False
         t1 = time.perf_counter()
         r["host"] = {"op": op, "seconds": round(t1 - t0, 6), "held_steps": self.held_steps - held0,
                      "steps_during": self.step_stats(t0, t1),
