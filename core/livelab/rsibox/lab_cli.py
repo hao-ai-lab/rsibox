@@ -486,10 +486,28 @@ def doctor_report(repo_root: str | None = None, *, timeout: float = 15.0) -> dic
 
 
 def _cmd_doctor(args) -> int:
+    from . import doctor
+
+    if args.engine:
+        try:
+            report = doctor.run_preflight(engine=args.engine, repo_root=args.repo_root)
+        except ValueError as exc:
+            print(f"rsibox doctor: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=1, default=str))
+        else:
+            print(doctor.format_preflight_report(report))
+        return 0 if (report["strict_ok"] if args.strict else report["ok"]) else 1
+
     report = doctor_report(args.repo_root)
+    preflight = doctor.run_preflight(repo_root=args.repo_root)
+    report["preflight"] = preflight
+    report["ok"] = bool(report["ok"] and preflight["ok"])
+    passed = (report["ok"] and preflight["strict_ok"]) if args.strict else report["ok"]
     if args.json:
         print(json.dumps(report, indent=1, default=str))
-        return 0 if report["ok"] else 1
+        return 0 if passed else 1
     core = report["core"]
     k_ok = len(core["kernel"]["loaded"])
     k_tot = k_ok + len(core["kernel"]["missing"])
@@ -513,7 +531,13 @@ def _cmd_doctor(args) -> int:
     s = report["summary"]
     print(f"\nsummary: {s['labs_ok']}/{s['labs_total']} labs ok ({s['engines_ok']}/{s['engines_total']} engines), "
           f"{s['gpu_import_violations']} GPU import violation(s)")
-    return 0 if report["ok"] else 1
+    non_ok = [item for item in preflight["findings"] if item["status"] != "ok"]
+    if args.strict and non_ok:
+        print("\npreflight issues (--strict):")
+        for item in non_ok:
+            hint = f" (hint: {item['remediation']})" if item.get("remediation") else ""
+            print(f"  [{item['status'].upper()}] {item['name']}: {item['summary']}{hint}")
+    return 0 if passed else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -563,6 +587,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p_doc = sub.add_parser("doctor", help="audit environment and discovered labs")
     p_doc.add_argument("--repo-root", default=None)
+    p_doc.add_argument("--engine", default=None, help="run per-engine preflight diagnostics (toy, <repo engine>, or all)")
+    p_doc.add_argument("--strict", action="store_true", help="exit non-zero on any warning or failure")
     p_doc.add_argument("--json", action="store_true")
 
     if raw_argv[:1] == ["conformance"]:

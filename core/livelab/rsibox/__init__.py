@@ -15,9 +15,11 @@ Provides shared, zero-dependency building blocks for rsibox live labs:
 import os
 import sys
 
-from . import diffs, op_guard, pool, warm
+from . import diffs, doctor, op_guard, pool, promote, warm
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
+from .doctor import check_rlimit_nofile, run_preflight
 from .op_guard import op_redefine_guard
+from .promote import run_promotion, verify_promotion_receipt
 from .harness import (
     PackageOverlay,
     SourceStack,
@@ -134,11 +136,13 @@ __all__ = [
     "bootstrap_livelab",
     "build_package_overlay",
     "check_failure",
+    "check_rlimit_nofile",
     "dependents",
     "descendants",
     "diff_paths",
     "diffs",
     "direct_children",
+    "doctor",
     "edit_once",
     "file_channel_call",
     "free_port",
@@ -160,12 +164,15 @@ __all__ = [
     "pool",
     "port_in_use",
     "ppid_map",
+    "promote",
     "purge_modules",
     "read_json",
     "read_module",
     "reap_all",
     "resolve_patch_files",
     "run_fresh_subprocess",
+    "run_preflight",
+    "run_promotion",
     "short_sock_path",
     "sock_path_error",
     "stat_ppid",
@@ -175,6 +182,7 @@ __all__ = [
     "unbind_module",
     "unix_json_call",
     "unix_json_stream",
+    "verify_promotion_receipt",
     "verify_trace",
     "warm",
 ]
