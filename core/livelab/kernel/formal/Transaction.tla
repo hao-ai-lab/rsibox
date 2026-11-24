@@ -110,7 +110,7 @@ FinalizeRollbackClean ==
     /\ coord_state = "rolling_back"
     /\ \A p \in Participants : p_state[p] \in {"undone", "aborted", "idle"}
     /\ coord_state' = "rolled_back"
-    /\ UNCHANGED <<recovery_required, poisoned>>
+    /\ UNCHANGED <<p_state, recovery_required, poisoned>>
 
 Respawn ==
     /\ coord_state' = "idle"
