@@ -296,7 +296,6 @@ def cpu_suites(src: Path, py: str, res: Path):
         ut("core-forksafe", "core/livelab", p="test_forksafe.py"),
         ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
         ut("core-survey", "core/livelab/survey", "core/livelab"),
-        ut("core-rsibox", "core/livelab/rsibox", "core/livelab"),
         cmd("core-doctor", [py, "-m", "rsibox", "doctor"], env={"PYTHONPATH": str(src / "core/livelab")}),
         cmd("core-conformance-toylab", [py, "-m", "conformance", "--lab", "kernel.toy_lab:ToyLab"],
             cwd="core/livelab"),

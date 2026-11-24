@@ -18,6 +18,8 @@ and posts a single `modal-gpu` commit status for trusted commits.
   status posting (`--post`).
 - [`modal_ci_loop.py`](modal_ci_loop.py) polls `main` and open same-repo PRs and invokes
   `run_modal_ci.py` for any head without a final result.
+- [`parse_comment_cmd.py`](parse_comment_cmd.py) parses and validates `/run-gpu-ci` PR comments
+  and `workflow_dispatch` inputs fail-closed against `ALL_SUITES` in `modal_app.py`.
 
 ## Security & Trust Boundary
 
@@ -63,36 +65,41 @@ Forwards `--gpu`, `--stages`, `--timeout`, `--max-attempts`, `--vllm-model`, `--
 `--source`, and `--modal-cmd`, and checks `ps -ww` against `<work>/active/<sha>.pid` before
 sending `SIGTERM` on timeout.
 
-## Optional GitHub Actions Trigger
+## GitHub Actions Trigger
 
-To run the GPU suite from GitHub Actions on trusted same-repo pushes/PRs using repository secrets
-`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`:
+[`.github/workflows/modal-gpu.yml`](../workflows/modal-gpu.yml) runs Modal GPU CI on demand using
+repository secrets `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` and posts the `modal-gpu` commit
+status:
 
-```yaml
-jobs:
-  modal-gpu:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install modal
-      - env:
-          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
-          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-          TARGET_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          python3 .github/modal-ci/run_modal_ci.py \
-            --source "${{ github.server_url }}/${{ github.repository }}.git" \
-            --sha "$TARGET_SHA" \
-            --work "$RUNNER_TEMP/modal-ci" \
-            --gpu L4
-```
+- **PR comment (`/run-gpu-ci`):** Any repository `OWNER`, `MEMBER`, or `COLLABORATOR` can comment
+  on a same-repo PR to trigger a GPU run (acknowledged with an `eyes` reaction). Only the first
+  line of the comment is parsed by [`parse_comment_cmd.py`](parse_comment_cmd.py); trailing lines
+  are ignored:
+
+  ```text
+  /run-gpu-ci
+  /run-gpu-ci --gpu H100 --suites core-kernel,vllm-services
+  /run-gpu-ci --gpu A10G --suites vllm-services --vllm-model Qwen/Qwen3-0.6B
+  ```
+
+  Supported optional flags:
+  - `--gpu <spec>`: Modal GPU spec matching `^[A-Za-z0-9][A-Za-z0-9:_-]{0,31}$` (default `L4`).
+  - `--suites <csv>`: comma-separated suite names from `ALL_SUITES` in `modal_app.py` (default: all).
+  - `--vllm-model <id>`: model ID matching `^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$` without `..`.
+
+- **Manual dispatch (`workflow_dispatch`):** Trigger **Modal GPU CI** from the Actions tab (or
+  `gh workflow run modal-gpu.yml`) with optional inputs `pr` (defaults to `main` when empty),
+  `gpu` (default `L4`), `suites`, and `vllm_model`:
+
+  ```sh
+  gh workflow run modal-gpu.yml -f pr=206 -f gpu=L4 -f suites=core-kernel,vllm-services
+  ```
+
+- **Trust boundary:** Workflow scripts always run from the default branch (`ref: ${{ github.sha }}`,
+  `persist-credentials: false`), never from PR head code. Fork PRs are refused before Modal is
+  invoked. Pull requests touching `.github/modal-ci/**` or `.github/workflows/modal-gpu.yml` run
+  only the offline stdlib self-test (`test_modal_ci.py -v`) with read-only permissions and zero
+  secrets.
 
 ## Offline Tests
 

@@ -26,6 +26,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import modal_ci_loop as loop   # noqa: E402
+import parse_comment_cmd       # noqa: E402
 import run_modal_ci as runner  # noqa: E402
 
 README = """# demo
@@ -827,6 +828,188 @@ class ModalAppStructure(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     app_mod.main(str(tar), str(out_json))
             spawned_core.cancel.assert_called_once()
+
+    def test_suite_orders_and_steps_have_no_duplicates(self):
+        """CORE_SUITE_ORDER, ALL_SUITE_ORDER, build_core_steps, and cpu_suites contain zero duplicates."""
+        app_module = load_modal_app_with_stub()
+        self.assertEqual(len(app_module.CORE_SUITE_ORDER), len(set(app_module.CORE_SUITE_ORDER)))
+        self.assertEqual(len(app_module.ALL_SUITE_ORDER), len(set(app_module.ALL_SUITE_ORDER)))
+        self.assertEqual(app_module.CORE_SUITE_ORDER.count("core-rsibox"), 1)
+        self.assertEqual(app_module.ALL_SUITE_ORDER.count("core-rsibox"), 1)
+        self.assertEqual(
+            set(app_module.CORE_SUITE_ORDER) | set(app_module.VLLM_SUITE_ORDER),
+            set(app_module.ALL_SUITE_ORDER),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "repos/megatron/tools").mkdir(parents=True)
+            core_step_names = [
+                step["name"]
+                for step in app_module.build_core_steps(
+                    root, sys.executable, root / "res", HERE / "unittest_json.py"
+                )
+            ]
+            self.assertEqual(len(core_step_names), len(set(core_step_names)))
+            self.assertEqual(core_step_names, list(app_module.CORE_SUITE_ORDER))
+
+            cpu_step_names = [
+                step["name"] for step in runner.cpu_suites(root, sys.executable, root / "res")
+            ]
+            self.assertEqual(len(cpu_step_names), len(set(cpu_step_names)))
+            self.assertEqual(cpu_step_names.count("core-rsibox"), 1)
+
+
+class CommentCommandParser(unittest.TestCase):
+    """Golden tests for strict fail-closed `/run-gpu-ci` comment and dispatch parsing."""
+
+    def test_allowed_suites_matches_modal_app_all_suites(self):
+        app_module = load_modal_app_with_stub()
+        self.assertEqual(parse_comment_cmd.load_allowed_suites(), app_module.ALL_SUITES)
+
+    def test_plain_command_uses_default_gpu_and_all_suites(self):
+        parsed = parse_comment_cmd.parse_comment_command("/run-gpu-ci")
+        self.assertEqual(parsed, parse_comment_cmd.ParsedCommand(gpu="L4", suites="", vllm_model=""))
+        self.assertEqual(
+            parse_comment_cmd.parse_comment_command("  /run-gpu-ci   "),
+            parse_comment_cmd.ParsedCommand(gpu="L4", suites="", vllm_model=""),
+        )
+
+    def test_valid_flags_space_and_equals_syntax(self):
+        parsed = parse_comment_cmd.parse_comment_command(
+            "/run-gpu-ci --gpu H100 --suites core-kernel,vllm-services"
+        )
+        self.assertEqual(
+            parsed,
+            parse_comment_cmd.ParsedCommand(
+                gpu="H100", suites="core-kernel,vllm-services", vllm_model=""
+            ),
+        )
+        parsed_equals = parse_comment_cmd.parse_comment_command(
+            "/run-gpu-ci --gpu=A100-80GB:2 --suites=vllm-services,core-kernel --vllm-model=Qwen/Qwen3-0.6B"
+        )
+        self.assertEqual(
+            parsed_equals,
+            parse_comment_cmd.ParsedCommand(
+                gpu="A100-80GB:2",
+                suites="vllm-services,core-kernel",
+                vllm_model="Qwen/Qwen3-0.6B",
+            ),
+        )
+
+    def test_multiline_comments_ignore_trailing_prose(self):
+        parsed_unix = parse_comment_cmd.parse_comment_command(
+            "/run-gpu-ci --gpu H100\nRe-running after fixing the Triton kernel."
+        )
+        self.assertEqual(parsed_unix.gpu, "H100")
+        self.assertEqual(parsed_unix.suites, "")
+
+        parsed_crlf = parse_comment_cmd.parse_comment_command(
+            "/run-gpu-ci --suites core-kernel,core-rsibox\r\nTrailing prose with $(ignored); | &&"
+        )
+        self.assertEqual(parsed_crlf.gpu, "L4")
+        self.assertEqual(parsed_crlf.suites, "core-kernel,core-rsibox")
+
+    def test_unknown_and_malformed_suites_rejected(self):
+        bad_comments = [
+            "/run-gpu-ci --suites does-not-exist",
+            "/run-gpu-ci --suites core-kernel,unknown-suite",
+            "/run-gpu-ci --suites core-kernel,",
+            "/run-gpu-ci --suites ,core-kernel",
+            "/run-gpu-ci --suites=",
+        ]
+        for comment in bad_comments:
+            with self.subTest(comment=comment):
+                with self.assertRaises(ValueError):
+                    parse_comment_cmd.parse_comment_command(comment)
+
+    def test_shell_metacharacters_and_injection_attempts_rejected(self):
+        injection_comments = [
+            "/run-gpu-ci --gpu L4; id",
+            "/run-gpu-ci --gpu $(whoami)",
+            "/run-gpu-ci --gpu `id`",
+            "/run-gpu-ci --gpu L4 && echo pwned",
+            "/run-gpu-ci --gpu L4 | cat /etc/passwd",
+            '/run-gpu-ci --gpu "L4"',
+            "/run-gpu-ci --gpu 'L4'",
+            "/run-gpu-ci --gpu L4 > /tmp/out",
+            "/run-gpu-ci --gpu -flag",
+            "/run-gpu-ci --gpu " + ("A" * 33),
+            "/run-gpu-ci --vllm-model ../etc/passwd",
+            "/run-gpu-ci --vllm-model /etc/passwd",
+            "/run-gpu-ci --vllm-model Qwen/../secret",
+            "/run-gpu-ci --vllm-model -dash",
+            "/run-gpu-ci --vllm-model " + ("a" * 129),
+            "/run-gpu-ci --gpu L4\x00",
+        ]
+        for comment in injection_comments:
+            with self.subTest(comment=comment):
+                with self.assertRaises(ValueError):
+                    parse_comment_cmd.parse_comment_command(comment)
+
+    def test_non_matching_and_bad_flag_comments_rejected(self):
+        non_matching_comments = [
+            "",
+            "   ",
+            "\n/run-gpu-ci",
+            "Please /run-gpu-ci",
+            "/run-gpu-ci-extra",
+            "/review",
+            "/run-gpu-ci extra-positional",
+            "/run-gpu-ci --timeout 9999",
+            "/run-gpu-ci --gpu",
+            "/run-gpu-ci --gpu --suites core-kernel",
+            "/run-gpu-ci --gpu L4 --gpu H100",
+            "/run-gpu-ci --suites core-kernel, vllm-services",
+        ]
+        for comment in non_matching_comments:
+            with self.subTest(comment=comment):
+                with self.assertRaises(ValueError):
+                    parse_comment_cmd.parse_comment_command(comment)
+
+    def test_cli_writes_github_output_for_comment_and_dispatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_file = Path(temp_dir) / "github_output.txt"
+            env_comment = {
+                "EVENT_NAME": "issue_comment",
+                "COMMENT_BODY": "/run-gpu-ci --gpu A10G --suites core-kernel,vllm-services",
+            }
+            with mock.patch.dict(os.environ, env_comment, clear=False):
+                exit_code = parse_comment_cmd.main(["--github-output", str(output_file)])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                output_file.read_text(encoding="utf-8").splitlines(),
+                ["gpu=A10G", "suites=core-kernel,vllm-services", "vllm_model=", "pr="],
+            )
+
+            dispatch_output = Path(temp_dir) / "dispatch_output.txt"
+            env_dispatch = {
+                "EVENT_NAME": "workflow_dispatch",
+                "INPUT_PR": "206",
+                "INPUT_GPU": "",
+                "INPUT_SUITES": "core-rsibox",
+                "INPUT_VLLM_MODEL": "Qwen/Qwen3-0.6B",
+            }
+            with mock.patch.dict(os.environ, env_dispatch, clear=False):
+                exit_code = parse_comment_cmd.main(["--github-output", str(dispatch_output)])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(
+                dispatch_output.read_text(encoding="utf-8").splitlines(),
+                ["gpu=L4", "suites=core-rsibox", "vllm_model=Qwen/Qwen3-0.6B", "pr=206"],
+            )
+
+            bad_dispatch = {
+                "EVENT_NAME": "workflow_dispatch",
+                "INPUT_PR": "206;rm",
+                "INPUT_GPU": "L4",
+                "INPUT_SUITES": "",
+                "INPUT_VLLM_MODEL": "",
+            }
+            stderr_buffer = io.StringIO()
+            with mock.patch.dict(os.environ, bad_dispatch, clear=False), \
+                    contextlib.redirect_stderr(stderr_buffer):
+                exit_code = parse_comment_cmd.main([])
+            self.assertEqual(exit_code, 1)
+            self.assertIn("::error::", stderr_buffer.getvalue())
 
 
 if __name__ == "__main__":
