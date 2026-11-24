@@ -584,10 +584,10 @@
      "what": "Implements `rsibox.warm.QuiesceHooks` for `DynamoK8sSnapshotDriver`: clears caches, offloads model parameters and buffers to pinned CPU memory without breaking tied weights, empties CUDA allocator cache, refuses generation/edits while quiesced, and restores weights over DMA with channel + fingerprint verification.",
      "startup_cost_removed": "GPU VRAM retention during checkpointing and cold weight reload from disk on restore.",
      "measured_saving": {
-      "before": "4.718 (Qwen3-0.6B) / 7.746 (Qwen3-8B) cold load + check",
-      "after": "0.032 (Qwen3-0.6B, 1,166 MiB freed) / 0.310 (Qwen3-8B, 15,778 MiB freed, ~51 GiB/s H2D resume)",
+      "before": "3.966 (Qwen3-0.6B) / 6.925 (Qwen3-8B) cold disk weight load",
+      "after": "0.032 (Qwen3-0.6B, 1,166 MiB freed) / 0.310 (Qwen3-8B, 15,778 MiB / 15.4 GiB freed, ~50 GiB/s in-process H2D hook resume)",
       "unit": "s",
-      "setup": "1x B200, Transformers 5.20.2, DynamoK8sSnapshotDriver 3x cycles, offload_to_cpu=True pin_memory=True, 2026-11-24"
+      "setup": "1x B200, Transformers 5.20.2, DynamoK8sSnapshotDriver sentinel lifecycle 3x cycles (in-process hook restore; full CRIU container dump/restore not yet measured), offload_to_cpu=True pin_memory=True, 2026-11-24"
      },
      "status": "merged_gpu_verified",
      "source": "repos/transformers/livelab/adapter/snapshot_hooks.py; repos/transformers/kb/costs.md",

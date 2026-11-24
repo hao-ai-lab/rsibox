@@ -11,7 +11,7 @@
    `nn.Parameter` storage. Calling `model.to("cpu")` first and then deduplicating tensors via
    `dict.fromkeys([*model.parameters(), *model.buffers()])` while only pinning unaliased contiguous
    full-storage tensors preserves weight tying and achieves `0.032 s` resume on `Qwen3-0.6B` and
-   `0.310 s` resume on `Qwen3-8B` (~51 GiB/s effective H2D bandwidth).
+   `0.310 s` resume on `Qwen3-8B` (~50 GiB/s effective H2D bandwidth).
 
 3. **First-time pinned CPU allocation dominates quiesce latency, not restore latency.**
    On `Qwen3-8B` (~15.4 GiB weights), the first `quiesce_for_snapshot()` took `15.64 s` due to cold
