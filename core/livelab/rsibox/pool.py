@@ -41,6 +41,10 @@ def _close_quietly(lab: Any) -> None:
     if lab is not None:
         with contextlib.suppress(Exception):
             lab.close()
+def _lab_identity(obj: Any) -> int:
+    if isinstance(obj, _BoxLabAdapter):
+        obj = obj._box
+    return id(obj.lab) if (isinstance(obj, Box) and obj.lab is not None) else id(obj)
 def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
         return None
@@ -283,10 +287,10 @@ class SandboxPool:
                 raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
             if slot.slot_id in self._slots:
                 raise ValueError(f"duplicate slot_id: {slot.slot_id!r}")
-            raw_target = slot.box.lab if (slot.box is not None and slot.box.lab is not None) else (slot.box or slot.lab)
-            if id(raw_target) in seen_targets:
+            target_id = _lab_identity(slot.box or slot.lab)
+            if target_id in seen_targets:
                 raise ValueError(f"duplicate underlying lab/box for slot_id: {slot.slot_id!r}")
-            seen_targets.add(id(raw_target))
+            seen_targets.add(target_id)
             self._slots[slot.slot_id] = _SlotState(slot)
         self._trace_path, self._clock, self._wall_clock = trace_path, clock, wall_clock
         self._close_labs, self._created_mono = close_labs, clock()
@@ -443,33 +447,35 @@ class SandboxPool:
 
     def _run_recovery_hook(self, slot_state: _SlotState, hook: Callable[[PoolSlot, Any, str], Any],
                            reason: str) -> tuple[bool, str | None]:
-        try:
-            result = hook(slot_state.slot, slot_state.lab, reason)
-        except Exception as error:
-            return False, f"{type(error).__name__}: {error}"
-        replaced = False
-        candidate_lab = slot_state.lab
-        if result is False:
-            return False, "recovery hook returned False"
+        try: result = hook(slot_state.slot, slot_state.lab, reason)
+        except Exception as error: return False, f"{type(error).__name__}: {error}"
+        replaced, candidate_lab = False, slot_state.lab
+        if result is False: return False, "recovery hook returned False"
         if isinstance(result, dict):
-            if not result.get("ok"):
-                return False, str(result.get("error") or "recovery hook returned ok=False")
-        elif result is not None and result is not True:
+            if not result.get("ok"): return False, str(result.get("error") or "recovery hook returned ok=False")
+        elif result is not None and result is not True and _lab_identity(result) != _lab_identity(slot_state.lab):
             if isinstance(result, Box):
                 if result.state != "ready":
+                    if self._close_labs: _close_quietly(result)
                     return False, f"replacement Box is not ready (state={result.state!r})"
                 candidate_lab = _BoxLabAdapter(result)
             else:
                 candidate_lab = result
+            cand_id = _lab_identity(candidate_lab)
+            with self._lock:
+                aliased = any(o is not slot_state and _lab_identity(o.lab) == cand_id for o in self._slots.values())
+            if aliased: return False, "replacement lab aliases another pool slot"
             replaced = True
         verified = _safe_lab_call(candidate_lab, "status")
         if _is_clean_base(verified):
             if replaced:
+                old_lab = slot_state.lab
                 with self._lock:
-                    slot_state.lab = candidate_lab
-                    slot_state.slot.lab = candidate_lab
+                    slot_state.lab = slot_state.slot.lab = candidate_lab
                     slot_state.slot.box = result if isinstance(result, Box) else None
+                if self._close_labs and old_lab is not candidate_lab: _close_quietly(old_lab)
             return True, None
+        if replaced and self._close_labs: _close_quietly(candidate_lab)
         return False, str(verified.get("error") or f"not clean after recovery (state={verified.get('state')!r})")
 
     def _clean_and_recover_slot(self, slot_state: _SlotState, *, force_reset_state: bool) -> _CleanupOutcome:

@@ -11,26 +11,31 @@ import json
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from kernel import toy_lab
 from rsibox import (
     PRIORITY_RANKS,
     PoolClient,
+    PoolClosedError,
     PoolError,
     PoolServer,
     PoolSlot,
     PoolTimeoutError,
     SandboxPool,
     edit_once,
+    pool_server as pool_server_module,
     short_sock_path,
     verify_trace,
 )
+from rsibox.box import Box
 
 LIVELAB_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -564,6 +569,238 @@ class PoolPriorityFailoverDaemonTests(unittest.TestCase):
             self.assertTrue(verified["ok"], verified)
             self.assertEqual(verified["count"], 1)
             self.assertEqual(verified["records"][0]["priority"], "eval")
+
+    def test_p1_1_failover_replacement_lifecycle_aliasing_and_quarantine(self):
+        """Regression for P1-1: same-Box failover preserves slot.box in-place, sibling-aliased
+        replacements are rejected without closing sibling, dirty replacements are closed before
+        fallback, clean swaps close displaced old labs when close_labs=True, and double failure
+        quarantines fail-closed."""
+        # Case A: Returning the same Box treats recovery as in-place without clearing slot.box.
+        boxed = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        boxed.boot()
+        self.addCleanup(boxed.close)
+        box_closed = [0]
+        orig_box_close = boxed.close
+        boxed.close = lambda: (box_closed.__setitem__(0, box_closed[0] + 1), orig_box_close())[1]
+
+        def inplace_box_failover(slot, lab, reason):
+            lab.reset("respawn")
+            return boxed
+
+        box_slot = PoolSlot("box-0", boxed)
+        box_pool = SandboxPool([box_slot], close_labs=True, failover_fn=inplace_box_failover)
+        out = box_pool.run_isolated("a-box", lambda lab, lease: (lab.inject("crash"), lab.check())[1])
+        self.assertTrue(out["ok"] and out["recovered"] and out["recovery_mode"] == "failover", out)
+        self.assertIs(box_slot.box, boxed)
+        self.assertEqual(box_closed[0], 0)
+        box_pool.close(close_labs=True)
+        self.assertEqual(box_closed[0], 1)
+
+        # Case B/C/D: Alias rejection, dirty-candidate close + fallback, clean swap closes old lab,
+        # and both hooks failing quarantines fail-closed.
+        lab0, lab1 = self._make_toy_lab(), self._make_toy_lab()
+        dirty_cand = self._make_toy_lab()
+        dirty_cand.inject("crash")
+        dirty_cand.check()
+        standby_lab = self._make_toy_lab()
+
+        closed_tags: list[str] = []
+        for tag, target in (("lab0", lab0), ("lab1", lab1), ("dirty", dirty_cand)):
+            orig = target.close
+            target.close = (lambda t=tag, fn=orig: (closed_tags.append(t), fn())[1])
+
+        mode = ["alias"]
+        recover_calls = [0]
+
+        def failover_hook(slot, lab, reason):
+            if mode[0] == "alias":
+                return lab1
+            if mode[0] == "dirty":
+                return dirty_cand
+            if mode[0] == "swap":
+                return standby_lab
+            return {"ok": False, "error": "failover unavailable"}
+
+        def recover_hook(slot, lab, reason):
+            recover_calls[0] += 1
+            if mode[0] == "both_fail":
+                return {"ok": False, "error": "recover unavailable"}
+            return lab.reset("respawn")
+
+        pool = SandboxPool(
+            [PoolSlot("s0", lab0), PoolSlot("s1", lab1)],
+            close_labs=True, failover_fn=failover_hook, recover_fn=recover_hook,
+        )
+        self.addCleanup(pool.close)
+
+        # B: Alias to s1 rejected without closing s1; falls back to recover_fn.
+        r_alias = pool.run_isolated("u-alias", lambda lab, lease: (lab.inject("crash"), lab.check())[1])
+        self.assertEqual(r_alias["recovery_mode"], "recover")
+        self.assertEqual(closed_tags, [])
+        self.assertEqual(lab1.status()["state"], "base")
+
+        # C1: Dirty candidate rejected AND closed before falling back to recover_fn.
+        mode[0] = "dirty"
+        r_dirty = pool.run_isolated("u-dirty", lambda lab, lease: (lab.inject("crash"), lab.check())[1])
+        self.assertEqual(r_dirty["recovery_mode"], "recover")
+        self.assertEqual(closed_tags, ["dirty"])
+
+        # C2: Clean swap promotes standby_lab AND closes displaced lab0.
+        mode[0] = "swap"
+        r_swap = pool.run_isolated("u-swap", lambda lab, lease: (lab.inject("crash"), lab.check())[1])
+        self.assertEqual(r_swap["recovery_mode"], "failover")
+        self.assertEqual(closed_tags, ["dirty", "lab0"])
+
+        # D: Both hooks fail -> s0 quarantined fail-closed, s1 unaffected.
+        mode[0] = "both_fail"
+        r_fail = pool.run_isolated("u-fail", lambda lab, lease: (lab.inject("crash"), lab.check())[1])
+        self.assertEqual(r_fail["status_after"], "quarantined")
+        self.assertEqual(r_fail["recovery_mode"], "none")
+        self.assertFalse(r_fail["recovered"])
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["s0"])
+        r_sib = pool.run_isolated("u-sib", lambda lab, lease: (lease.slot_id, lab.check()["ok"]))
+        self.assertEqual(r_sib["result"], ("s1", True))
+
+    def test_p1_2_remote_lease_timeout_closes_socket_and_prevents_desync(self):
+        """Regression for P1-2: timed-out RemoteLease RPC marks lease released, closes the
+        socket so the server rolls back the edit, blocks subsequent RPCs, avoids desync on
+        release(), and PoolClient.acquire wraps transport errors as PoolError."""
+        with self.assertRaises(PoolError):
+            PoolClient(short_sock_path("rsibox-missing")).acquire("a0", timeout_s=0.5)
+
+        lab = self._make_toy_lab()
+        base_output = lab.check()["output"]
+        entered_check = threading.Event()
+        unblock_check = threading.Event()
+        self.addCleanup(unblock_check.set)
+        orig_check = lab.check
+        slow_once = [True]
+
+        def gated_check(workload=None):
+            if slow_once[0]:
+                slow_once[0] = False
+                entered_check.set()
+                unblock_check.wait(timeout=5.0)
+            return orig_check(workload)
+
+        lab.check = gated_check
+        sock_path = short_sock_path("rsibox-p12")
+        with tempfile.TemporaryDirectory(prefix="rsibox-p12-") as temp_dir:
+            trace_path = os.path.join(temp_dir, "p12.jsonl")
+            pool = SandboxPool([PoolSlot("s0", lab)], trace_path=trace_path)
+            self.addCleanup(pool.close)
+            server = PoolServer(pool, sock_path)
+            self.addCleanup(server.close)
+
+            client = PoolClient(sock_path, timeout_s=0.15)
+            lease = client.acquire("timeout-agent", timeout_s=5.0)
+            src = lease.source("toy.ops")
+            self.assertTrue(lease.install(_patch_activate_offset(src["text"], offset=55))["ok"])
+
+            with self.assertRaises(PoolError):
+                lease.check()
+            self.assertTrue(lease.released)
+            with self.assertRaises(PoolError):
+                lease.status()
+            self.assertEqual(lease.release(), {})
+
+            self.assertTrue(entered_check.wait(timeout=2.0))
+            unblock_check.set()
+
+            next_client = PoolClient(sock_path, timeout_s=5.0)
+            with next_client.acquire("next-agent", timeout_s=5.0) as clean:
+                self.assertEqual(clean.status()["state"], "base")
+                self.assertEqual(clean.check()["output"], base_output)
+            self.assertTrue(verify_trace(trace_path)["ok"])
+
+    def test_p1_3_socket_safety_permissions_inode_unlink_and_frame_cap(self):
+        """Regression for P1-3: PoolServer refuses regular files and live sockets, enforces
+        0o600 mode, preserves unrelated inode on close(), and enforces max JSON line cap."""
+        lab1, lab2 = self._make_toy_lab(), self._make_toy_lab()
+        pool1 = SandboxPool([PoolSlot("s1", lab1)])
+        pool2 = SandboxPool([PoolSlot("s2", lab2)])
+        self.addCleanup(pool1.close)
+        self.addCleanup(pool2.close)
+
+        with tempfile.TemporaryDirectory(prefix="rsibox-p13-") as temp_dir:
+            reg_file = os.path.join(temp_dir, "keep.txt")
+            with open(reg_file, "w", encoding="utf-8") as fh:
+                fh.write("do-not-delete")
+            with self.assertRaises(PoolError):
+                PoolServer(pool1, reg_file)
+            with open(reg_file, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "do-not-delete")
+
+        sock_path = short_sock_path("rsibox-p13")
+        server1 = PoolServer(pool1, sock_path)
+        self.addCleanup(server1.close)
+        self.assertEqual(stat.S_IMODE(os.lstat(sock_path).st_mode), 0o600)
+
+        # Live daemon must NOT be clobbered by a second PoolServer on the same sock_path.
+        with self.assertRaises(PoolError):
+            PoolServer(pool2, sock_path)
+        self.assertTrue(PoolClient(sock_path, timeout_s=5.0).health()["ok"])
+
+        # Oversized frame rejected cleanly without crashing the server.
+        with mock.patch.object(pool_server_module, "_MAX_LINE_BYTES", 128):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+                raw.settimeout(5.0)
+                raw.connect(sock_path)
+                raw.sendall((json.dumps({"op": "stats", "pad": "x" * 256}) + "\n").encode("utf-8"))
+                reply = json.loads(raw.makefile("rb").readline().decode("utf-8"))
+            self.assertFalse(reply["ok"])
+            self.assertEqual(reply.get("error_type"), "ValueError")
+        self.assertTrue(PoolClient(sock_path, timeout_s=5.0).health()["ok"])
+
+        # If path inode is replaced externally before close(), close() must NOT unlink the new file.
+        os.unlink(sock_path)
+        with open(sock_path, "w", encoding="utf-8") as fh:
+            fh.write("replaced")
+        self.addCleanup(lambda: os.path.exists(sock_path) and os.unlink(sock_path))
+        server1.close()
+        self.assertTrue(os.path.isfile(sock_path))
+
+    def test_p1_4_server_close_without_closing_pool_unblocks_blocked_acquire_fast(self):
+        """Regression for P1-4: PoolServer.close(close_pool=False) returns in <2s even when a
+        remote client is blocked inside acquire(), leaving zero zombie waiters on SandboxPool."""
+        lab = self._make_toy_lab()
+        pool = SandboxPool([PoolSlot("s0", lab)])
+        self.addCleanup(pool.close)
+        sock_path = short_sock_path("rsibox-p14")
+        server = PoolServer(pool, sock_path, close_pool=False)
+
+        held = pool.acquire("direct-holder")
+        errors: list[BaseException] = []
+
+        def blocked_remote() -> None:
+            try:
+                PoolClient(sock_path, timeout_s=30.0).acquire("remote-waiter", timeout_s=30.0)
+            except BaseException as exc:
+                errors.append(exc)
+
+        waiter_thread = threading.Thread(target=blocked_remote)
+        waiter_thread.start()
+        deadline = time.monotonic() + 3.0
+        while server.stats()["active_connections"] < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.05)
+
+        t0 = time.monotonic()
+        server.close(close_pool=False)
+        elapsed = time.monotonic() - t0
+        waiter_thread.join(timeout=3.0)
+
+        self.assertLess(elapsed, 2.0, f"server.close(close_pool=False) took {elapsed:.2f}s")
+        self.assertFalse(waiter_thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], (PoolClosedError, PoolError))
+        self.assertEqual(pool.health()["queued_waiters"], 0)
+
+        # Pool itself remains open and fully functional after releasing direct holder.
+        held.release()
+        with pool.lease("after-close", timeout_s=2.0) as post_lease:
+            self.assertEqual(post_lease.slot_id, "s0")
+            self.assertTrue(post_lease.lab.check()["ok"])
 
 
 if __name__ == "__main__":
