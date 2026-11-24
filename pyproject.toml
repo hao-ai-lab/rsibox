@@ -47,6 +47,7 @@ py-modules = [
   "rsibox.ipc",
   "rsibox.lab",
   "rsibox.op_guard",
+  "rsibox.pool",
   "rsibox.proc",
   "kernel.coordinator",
   "kernel.findings",
