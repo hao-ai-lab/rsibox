@@ -15,12 +15,11 @@
 
 ## Use with Your Coding Agent
 
-*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — your agent installs `rsibox`, starts a warm sandbox, and iterates without restarting:*
+*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — zero manual setup:*
 
 ```text
-Clone https://github.com/hao-ai-lab/rsibox.git, read core/agents/livelab_overview.md and AGENTS.md,
-start an rsibox for <engine>, and iterate on <optimization> with rsibox install -> check -> uninstall
-without restarting the engine.
+Install https://github.com/hao-ai-lab/rsibox.git and read core/agents/livelab_overview.md.
+Whenever we edit or benchmark an ML engine, use rsibox to hot-reload and verify changes in-place instead of restarting.
 ```
 
 **Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
