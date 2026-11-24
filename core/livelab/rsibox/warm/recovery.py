@@ -198,13 +198,10 @@ class AsyncShadowReplenisher:
         self._cancel_event = threading.Event()
         self._invoke_worker = _build_worker_invoker(replenish_worker, self._cancel_event)
         self._condition = threading.Condition(threading.Lock())
-        self._in_flight = False
+        self._in_flight = self._closed = self._closed_with_live_worker = False
         self._pending_request: tuple[Any, WeightStore | None] | None = None
         self._active_thread: threading.Thread | None = None
-        self._closed = False
-        self._closed_with_live_worker = False
-        self._thread_seq = 0
-        self._attempts = self._succeeded = self._failed = 0
+        self._thread_seq = self._attempts = self._succeeded = self._failed = 0
         self._coalesced = self._busy_rejected = self._disposed_after_close = 0
         self._last_ok: bool | None = None
         self._last_cost_s: float | None = None
@@ -265,10 +262,8 @@ class AsyncShadowReplenisher:
         self._in_flight = True
         self._thread_seq += 1
         worker_thread = threading.Thread(
-            target=self._run_loop,
-            args=(lab, store),
-            name=f"{self._thread_name_prefix}-{self._thread_seq}",
-            daemon=True,
+            target=self._run_loop, args=(lab, store),
+            name=f"{self._thread_name_prefix}-{self._thread_seq}", daemon=True,
         )
         self._active_thread = worker_thread
         try:
@@ -276,10 +271,7 @@ class AsyncShadowReplenisher:
         except RuntimeError as error:
             now_wall = time.time()
             self._record_attempt_locked(
-                attempt_ok=False,
-                cost_s=0.0,
-                started_wall=now_wall,
-                finished_wall=now_wall,
+                attempt_ok=False, cost_s=0.0, started_wall=now_wall, finished_wall=now_wall,
                 error_message=f"{type(error).__name__}: {error}",
             )
             self._mark_idle_locked()
@@ -323,38 +315,35 @@ class AsyncShadowReplenisher:
                 except BaseException as error:
                     error_message = f"{type(error).__name__}: {error}"
 
-                with self._condition:
-                    should_dispose = self._closed and attempt_ok and outcome is not None and self._dispose_fn is not None
+                cost_s = round(time.perf_counter() - started_monotonic, 6)
+                finished_wall = time.time()
                 disposed = False
-                if should_dispose and self._dispose_fn is not None:
+                while True:
+                    with self._condition:
+                        need_dispose = (not disposed) and self._closed and attempt_ok and outcome is not None and self._dispose_fn is not None
+                        if not need_dispose:
+                            self._record_attempt_locked(
+                                attempt_ok=attempt_ok, cost_s=cost_s, started_wall=started_wall,
+                                finished_wall=finished_wall, error_message=error_message, disposed=disposed,
+                            )
+                            if not self._closed and self._pending_request is not None:
+                                current_lab, current_store = self._pending_request
+                                self._pending_request = None
+                                self._condition.notify_all()
+                                break
+                            self._closed_with_live_worker = False
+                            self._mark_idle_locked()
+                            return
                     try:
                         self._dispose_fn(outcome)
                         disposed = True
                     except BaseException as dispose_error:
                         attempt_ok = False
                         error_message = f"dispose_fn failed: {type(dispose_error).__name__}: {dispose_error}"
-
-                cost_s = round(time.perf_counter() - started_monotonic, 6)
-                finished_wall = time.time()
-
-                with self._condition:
-                    self._record_attempt_locked(
-                        attempt_ok=attempt_ok,
-                        cost_s=cost_s,
-                        started_wall=started_wall,
-                        finished_wall=finished_wall,
-                        error_message=error_message,
-                        disposed=disposed,
-                    )
-                    if not self._closed and self._pending_request is not None:
-                        current_lab, current_store = self._pending_request
-                        self._pending_request = None
-                        self._condition.notify_all()
-                        continue
-                    self._mark_idle_locked()
-                    return
+                        disposed = True
         except BaseException:  # pragma: no cover - defensive state cleanup
             with self._condition:
+                self._closed_with_live_worker = False
                 self._mark_idle_locked()
 
     def _record_attempt_locked(
@@ -467,55 +456,39 @@ class StandbyShadowDriver:
         self._fallback_driver = fallback_driver
 
     def _standby_guard(
-        self,
-        async_replenisher: Any,
-        lab: Any,
-        store: WeightStore | None,
-        *,
-        reason: str,
-        started_at: float,
+        self, async_replenisher: Any, lab: Any, store: WeightStore | None, *, reason: str, started_at: float
     ) -> dict[str, Any] | None:
         """Verify standby readiness before stopping the primary; wait or fall back if not ready."""
         replenisher_state = async_replenisher.status()
-        if (replenisher_state.get("in_flight") or replenisher_state.get("pending")) and (
-            self._replenish_wait_timeout_s > 0.0
-        ):
+        if (replenisher_state.get("in_flight") or replenisher_state.get("pending")) and self._replenish_wait_timeout_s > 0.0:
             async_replenisher.wait(timeout_s=self._replenish_wait_timeout_s)
             replenisher_state = async_replenisher.status()
 
+        is_closed = bool(replenisher_state.get("closed"))
         still_busy = bool(replenisher_state.get("in_flight") or replenisher_state.get("pending"))
-        last_failed = (
-            replenisher_state.get("attempts", 0) > 0
-            and (
-                replenisher_state.get("last_ok") is False
-                or replenisher_state.get("last_error") is not None
-            )
+        last_failed = replenisher_state.get("attempts", 0) > 0 and (
+            replenisher_state.get("last_ok") is False or replenisher_state.get("last_error") is not None
         )
-        if not still_busy and not last_failed:
+        if not is_closed and not still_busy and not last_failed:
             return None
 
         if self._fallback_driver is not None:
             fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
             fallback_result["fallback_from"] = self.name
-            if last_failed and fallback_result.get("ok") and self._replenish_fn is not None:
+            if last_failed and not still_busy and not is_closed and fallback_result.get("ok") and self._replenish_fn is not None:
                 fallback_result["replenish"] = self._replenish_fn(lab, store)
             return fallback_result
 
-        if still_busy:
-            error_text = "standby_not_ready: replenishment still in flight"
-            replenish_status: Any = "in_flight"
+        if is_closed:
+            error_text, replenish_status = "standby_not_ready: replenisher is closed", "closed"
+        elif still_busy:
+            error_text, replenish_status = "standby_not_ready: replenishment still in flight", "in_flight"
         else:
             error_text = f"standby_not_ready: last replenishment failed ({replenisher_state.get('last_error')})"
             replenish_status = self._replenish_fn(lab, store) if self._replenish_fn is not None else None
         return {
-            "ok": False,
-            "reset": [],
-            "driver": self.name,
-            "recovery_mode": self.name,
-            "reason": reason,
-            "error": error_text,
-            "replenish": replenish_status,
-            "replenisher_status": replenisher_state,
+            "ok": False, "reset": [], "driver": self.name, "recovery_mode": self.name, "reason": reason,
+            "error": error_text, "replenish": replenish_status, "replenisher_status": replenisher_state,
             "cost_s": round(time.perf_counter() - started_at, 6),
         }
 

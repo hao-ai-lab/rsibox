@@ -140,6 +140,20 @@ def _resolve_min_nofile(min_nofile: int | None) -> int:
     return int(min_nofile)
 
 
+def _read_nofile_state(
+    min_nofile: int,
+    get_nofile: Callable[[], tuple[int, int] | None] | None,
+) -> tuple[int, int, bool] | None:
+    limits = (_default_get_nofile if get_nofile is None else get_nofile)()
+    if limits is None:
+        return None
+    soft_limit, hard_limit = int(limits[0]), int(limits[1])
+    soft_exceeds_hard = (not _is_infinite_limit(hard_limit)) and (
+        _is_infinite_limit(soft_limit) or soft_limit > hard_limit
+    )
+    return soft_limit, hard_limit, soft_exceeds_hard
+
+
 def nofile_limit_finding(
     min_nofile: int = DEFAULT_MIN_NOFILE,
     *,
@@ -149,39 +163,37 @@ def nofile_limit_finding(
 ) -> dict[str, Any] | None:
     """Return a `gms_nofile_limit` finding when `RLIMIT_NOFILE` soft limit is below `min_nofile`.
 
-    Read-only by default (`auto_raise=False`). When `auto_raise=True`, calls `set_nofile`
-    ONLY if `hard_limit >= min_nofile` so process-global limits are never mutated on failure.
+    Read-only by default (`auto_raise=False`). When `auto_raise=True`, raises soft up to
+    `min(hard_limit, max(RECOMMENDED_NOFILE, min_nofile))` ONLY if `hard_limit >= min_nofile`.
     """
     if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
         raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
     if min_nofile == 0:
         return None
-    limits = (_default_get_nofile if get_nofile is None else get_nofile)()
-    if limits is None:
+    state = _read_nofile_state(min_nofile, get_nofile)
+    if state is None:
         return None
-    soft_limit, hard_limit = int(limits[0]), int(limits[1])
-    soft_exceeds_hard = (not _is_infinite_limit(hard_limit)) and (
-        _is_infinite_limit(soft_limit) or soft_limit > hard_limit
-    )
+    soft_limit, hard_limit, soft_exceeds_hard = state
     if not soft_exceeds_hard and _limit_satisfies(soft_limit, min_nofile):
         return None
 
     effective_soft, raise_error = soft_limit, None
+    recommended = max(RECOMMENDED_NOFILE, min_nofile)
     if auto_raise and not soft_exceeds_hard and _limit_satisfies(hard_limit, min_nofile):
-        if min_nofile > soft_limit:
+        target_soft = recommended if _is_infinite_limit(hard_limit) else min(hard_limit, recommended)
+        if target_soft > soft_limit:
             apply_limits = set_nofile if set_nofile is not None else (_default_set_nofile if get_nofile is None else None)
             if apply_limits is None:
                 raise_error = "set_nofile hook not provided for custom get_nofile"
             else:
                 try:
-                    apply_limits(min_nofile, hard_limit)
-                    effective_soft = min_nofile
+                    apply_limits(target_soft, hard_limit)
+                    effective_soft = target_soft
                 except (OSError, ValueError) as error:
                     raise_error = str(error)
         if _limit_satisfies(effective_soft, min_nofile):
             return None
 
-    recommended = max(RECOMMENDED_NOFILE, min_nofile)
     detail = f"invalid: soft > hard; required min_nofile={min_nofile}" if soft_exceeds_hard else f"below required min_nofile={min_nofile}"
     observed = f"RLIMIT_NOFILE soft={effective_soft}, hard={hard_limit} ({detail})"
     if raise_error:
@@ -190,11 +202,7 @@ def nofile_limit_finding(
         "gms_nofile_limit",
         observed,
         f"RLIMIT_NOFILE soft >= {min_nofile} (recommended {recommended})",
-        why=(
-            "Dynamo GMS exports per-allocation CUDA VMM handles as file descriptors over "
-            "Unix SCM_RIGHTS; low FD caps (such as Docker's default 1024) exhaust open FDs "
-            "mid-load or mid-restore with [Errno 24] Too many open files"
-        ),
+        why="Dynamo GMS exports CUDA VMM handles over Unix SCM_RIGHTS; low FD caps (e.g. Docker's default 1024) exhaust FDs mid-load/restore with [Errno 24] Too many open files",
         actions=[
             f"raise container FD cap with --ulimit nofile={recommended}:{recommended}",
             f"or raise shell limit with `ulimit -n {recommended}` before launching",
@@ -628,11 +636,28 @@ class DynamoGmsStore:
 
     def check_nofile(self) -> dict[str, Any] | None:
         """Read-only verification of `RLIMIT_NOFILE` against `self.min_nofile`."""
-        return nofile_limit_finding(
-            self.min_nofile,
-            auto_raise=False,
-            get_nofile=self._get_nofile,
-        )
+        return nofile_limit_finding(self.min_nofile, auto_raise=False, get_nofile=self._get_nofile)
+
+    def _probe_nofile(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Read-only probe check: fail closed if unraisable/invalid, else return optional advisory."""
+        if self.min_nofile == 0:
+            return None, None
+        state = _read_nofile_state(self.min_nofile, self._get_nofile)
+        if state is None:
+            return None, None
+        soft_limit, hard_limit, soft_exceeds_hard = state
+        if not soft_exceeds_hard and _limit_satisfies(soft_limit, self.min_nofile):
+            return None, None
+        if soft_exceeds_hard or not _limit_satisfies(hard_limit, self.min_nofile):
+            return nofile_limit_finding(self.min_nofile, auto_raise=False, get_nofile=lambda: (soft_limit, hard_limit)), None
+        recommended = max(RECOMMENDED_NOFILE, self.min_nofile)
+        return None, {
+            "soft": soft_limit,
+            "hard": hard_limit,
+            "min_nofile": self.min_nofile,
+            "recommended": recommended,
+            "action": f"call DynamoGmsStore.prepare_nofile() / ensure_ready() or run `ulimit -n {recommended}`",
+        }
 
     def prepare_nofile(self) -> dict[str, Any] | None:
         """Verify `RLIMIT_NOFILE`, safely raising soft limit if `auto_raise_nofile=True`."""
@@ -710,7 +735,7 @@ class DynamoGmsStore:
                 finding=path_finding,
             )
 
-        nofile_finding = self.check_nofile()
+        nofile_finding, nofile_advisory = self._probe_nofile()
         if nofile_finding is not None:
             return StoreProbe(
                 ok=False,
@@ -719,6 +744,7 @@ class DynamoGmsStore:
                 error=nofile_finding["observed"],
                 finding=nofile_finding,
             )
+        probe_details = {"nofile_advisory": nofile_advisory} if nofile_advisory is not None else None
 
         targets = self._resolve_targets(gpus=gpus, visible_devices=visible_devices, tp=tp)
         if not targets:
@@ -813,6 +839,7 @@ class DynamoGmsStore:
                 seconds=time.monotonic() - t0,
                 error=finding["observed"],
                 finding=finding,
+                details=probe_details,
             )
 
         if uncommitted_weights:
@@ -865,6 +892,7 @@ class DynamoGmsStore:
             backend=self.name,
             sockets=tuple(paths),
             seconds=time.monotonic() - t0,
+            details=probe_details,
         )
 
     def _gms_server_env(self) -> dict[str, str]:
@@ -925,15 +953,17 @@ class DynamoGmsStore:
     ) -> StoreProbe:
         """Reuse already-running GMS servers, and spawn local GMS servers only for missing GPUs."""
         t0 = time.monotonic()
-        for preflight_finding in (long_socket_path_finding(self.socket_dir, self.tags), self.prepare_nofile()):
-            if preflight_finding is not None:
-                return StoreProbe(
-                    ok=False,
-                    backend=self.name,
-                    seconds=time.monotonic() - t0,
-                    error=preflight_finding["observed"],
-                    finding=preflight_finding,
-                )
+        preflight_finding = long_socket_path_finding(self.socket_dir, self.tags)
+        if preflight_finding is None:
+            preflight_finding = self.prepare_nofile()
+        if preflight_finding is not None:
+            return StoreProbe(
+                ok=False,
+                backend=self.name,
+                seconds=time.monotonic() - t0,
+                error=preflight_finding["observed"],
+                finding=preflight_finding,
+            )
         first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, allow_remapped=True)
         if first.ok or not first.matched_gpus:
             return first
