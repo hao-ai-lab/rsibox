@@ -82,13 +82,37 @@ def _resolve_shadow_ranks(shadow_lab: Any) -> int:
     return raw
 
 
+def _safe_pid(proc: Any) -> int | None:
+    try:
+        pid = getattr(proc, "pid", None)
+    except Exception:
+        return None
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    return pid
+
+
+def _stat_start_ticks(pid: int) -> int | None:
+    """Return `/proc/<pid>/stat` field 22 (`starttime`) on Linux, or `None` if unavailable."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
+            raw = handle.read()
+        rparen = raw.rfind(")")
+        if rparen < 0:
+            return None
+        fields = raw[rparen + 2 :].split()
+        return int(fields[19]) if len(fields) > 19 else None
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _proc_is_alive(proc: Any) -> bool:
     if hasattr(proc, "is_alive"):
         return bool(proc.is_alive())
     if hasattr(proc, "poll"):
         return proc.poll() is None
-    pid = getattr(proc, "pid", None)
-    return bool(pid) and _proc.pid_alive(int(pid))
+    pid = _safe_pid(proc)
+    return pid is not None and _proc.pid_alive(pid)
 
 
 def _wait_proc(proc: Any, timeout_s: float) -> None:
@@ -110,49 +134,93 @@ def _close_socket_like(sock: Any) -> None:
         pass
 
 
+def _collect_owned_descendants(
+    live: Sequence[Any], self_pid: int, known: dict[int, int | None]
+) -> None:
+    """Discover descendants of still-live direct children of `self_pid` using one `ppid_map()` scan."""
+    parents = _proc.ppid_map()
+    kids: dict[int, list[int]] = {}
+    for child, parent in parents.items():
+        kids.setdefault(parent, []).append(child)
+    owned_live_pids: list[int] = []
+    for proc in live:
+        pid = _safe_pid(proc)
+        if pid is None or pid == self_pid:
+            continue
+        with contextlib.suppress(Exception):
+            if _proc_is_alive(proc) and parents.get(pid) == self_pid:
+                owned_live_pids.append(pid)
+    seen = set(owned_live_pids) | {self_pid}
+    todo = list(owned_live_pids)
+    while todo:
+        current = todo.pop(0)
+        for child in sorted(kids.get(current, ())):
+            if child not in seen:
+                seen.add(child)
+                todo.append(child)
+                if child not in known:
+                    known[child] = _stat_start_ticks(child)
+
+
+def _descendant_matches(dpid: int, expected_ticks: int | None) -> bool:
+    if not _proc.pid_alive(dpid):
+        return False
+    if expected_ticks is not None:
+        return _stat_start_ticks(dpid) == expected_ticks
+    return True
+
+
 def _terminate_child_processes(procs: Sequence[Any]) -> None:
     """Terminate and reap owned `multiprocessing.Process` / `subprocess.Popen` children and descendants."""
-    live = [p for p in procs if p is not None and getattr(p, "pid", None)]
+    self_pid = os.getpid()
+    live = []
+    for proc in procs:
+        if proc is None:
+            continue
+        pid = _safe_pid(proc)
+        if pid is not None and pid != self_pid:
+            live.append(proc)
     if not live:
         return
-    self_pid = os.getpid()
-    owned_pids = {int(p.pid) for p in live}
-    descendant_pids: list[int] = []
-    seen_desc: set[int] = set(owned_pids) | {self_pid}
-    for proc in live:
-        with contextlib.suppress(Exception):
-            for dpid in _proc.descendants(int(proc.pid)):
-                if dpid not in seen_desc:
-                    seen_desc.add(dpid)
-                    descendant_pids.append(dpid)
+
+    sigkill_num = getattr(signal, "SIGKILL", signal.SIGTERM)
+    descendants: dict[int, int | None] = {}
 
     for sig_method, sig_num, timeout_s in (
         ("terminate", signal.SIGTERM, _TARGETED_STOP_TERM_TIMEOUT_S),
-        ("kill", signal.SIGKILL, _TARGETED_STOP_KILL_TIMEOUT_S),
+        ("kill", sigkill_num, _TARGETED_STOP_KILL_TIMEOUT_S),
     ):
+        with contextlib.suppress(Exception):
+            _collect_owned_descendants(live, self_pid, descendants)
         any_alive = False
-        for dpid in reversed(descendant_pids):
-            with contextlib.suppress(OSError):
-                if _proc.pid_alive(dpid):
-                    any_alive = True
-                    os.kill(dpid, sig_num)
+        for dpid in reversed(list(descendants.keys())):
+            if not _descendant_matches(dpid, descendants[dpid]):
+                continue
+            try:
+                os.kill(dpid, sig_num)
+                any_alive = True
+            except OSError:
+                pass
         for proc in live:
             with contextlib.suppress(Exception):
                 if not _proc_is_alive(proc):
                     continue
-                any_alive = True
                 if hasattr(proc, sig_method):
                     getattr(proc, sig_method)()
+                    any_alive = True
                 else:
-                    os.kill(int(proc.pid), sig_num)
+                    pid = _safe_pid(proc)
+                    if pid is not None and pid != self_pid:
+                        os.kill(pid, sig_num)
+                        any_alive = True
         if not any_alive:
             break
         deadline = time.monotonic() + timeout_s
         for proc in live:
             with contextlib.suppress(Exception):
                 _wait_proc(proc, max(0.0, deadline - time.monotonic()))
-        while descendant_pids and time.monotonic() < deadline:
-            if not any(_proc.pid_alive(dpid) for dpid in descendant_pids):
+        while descendants and time.monotonic() < deadline:
+            if not any(_descendant_matches(dpid, ticks) for dpid, ticks in descendants.items()):
                 break
             time.sleep(0.02)
 
@@ -163,6 +231,8 @@ def _shutdown_targeted_engine(engine: Any, tm: Any, watchdog: Any, owned_procs: 
     with contextlib.suppress(Exception):
         shm = getattr(engine, "_multi_tokenizer_shm", None)
         if shm is not None:
+            with contextlib.suppress(Exception):
+                shm.close()
             with contextlib.suppress(FileNotFoundError):
                 shm.unlink()
             engine._multi_tokenizer_shm = None
@@ -178,19 +248,25 @@ def _shutdown_targeted_engine(engine: Any, tm: Any, watchdog: Any, owned_procs: 
         _close_socket_like(send_to_rpc)
         with contextlib.suppress(Exception):
             engine.send_to_rpc = None
-    for attr in ("send_to_scheduler", "recv_from_detokenizer"):
-        _close_socket_like(getattr(tm, attr, None))
+    for attr in ("send_to_scheduler", "recv_from_detokenizer", "load_snapshot_reader"):
+        sock = getattr(tm, attr, None)
+        if sock is not None:
+            _close_socket_like(sock)
+            with contextlib.suppress(Exception):
+                setattr(tm, attr, None)
     with contextlib.suppress(Exception):
         daemon_procs = getattr(engine, "_weight_cache_daemon_procs", None)
         if daemon_procs and hasattr(engine, "_terminate_weight_cache_daemons"):
             engine._terminate_weight_cache_daemons(daemon_procs)
             engine._weight_cache_daemon_procs = []
-    _terminate_child_processes(owned_procs)
-    for attr in ("mm_processor", "cuda_vmm_feature_transport"):
-        sub = getattr(tm, attr, None)
-        if sub is not None and hasattr(sub, "shutdown"):
-            with contextlib.suppress(Exception):
-                sub.shutdown()
+    try:
+        _terminate_child_processes(owned_procs)
+    finally:
+        for attr in ("mm_processor", "cuda_vmm_feature_transport"):
+            sub = getattr(tm, attr, None)
+            if sub is not None and hasattr(sub, "shutdown"):
+                with contextlib.suppress(Exception):
+                    sub.shutdown()
 
 
 def stop_sglang_engine_targeted(lab: Any, *, preserve_process_env: bool = True) -> bool:
