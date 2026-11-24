@@ -757,9 +757,19 @@ def test_reconfigure_live_path_is_acknowledged_by_the_engine_core_agent():
             if Path(live_dir, "ready.json").exists():
                 break
             time.sleep(0.05)
-        proc, rep = _reconfigure(cache_dir, os.path.join(work_dir, "r1.log"), pids[0], env,
+        poison_pkg_root = Path(work_dir, "poison_vllm")
+        (poison_pkg_root / "vllm").mkdir(parents=True)
+        (poison_pkg_root / "vllm" / "__init__.py").write_text(
+            "raise RuntimeError('vllm must not be imported on live fast path')\n"
+        )
+        fast_env = {**env, "PYTHONPATH": str(poison_pkg_root)}
+        started_at = time.perf_counter()
+        proc, rep = _reconfigure(cache_dir, os.path.join(work_dir, "r1.log"), pids[0], fast_env,
                                  "--max-num-seqs", "4")
+        elapsed_fast = time.perf_counter() - started_at
         assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert elapsed_fast <= 3.0, f"fast live CLI took {elapsed_fast:.3f}s"
+        assert rep["vllm_args"]["via"] == "live_fast_path", rep["vllm_args"]
         rc = rep["reconfig"]
         assert rc["path"] == "in_process_live" and rc["restarted"] is False, rc
         assert rep["pid"] == pids[0] and not zygote._exited(pids[0])
