@@ -14,6 +14,8 @@ Environment variables (no hostnames or paths in code):
 - `RSIBOX_VLLM_EXTRA`: extra `vllm serve` flags (default `--seed 0 --gpu-memory-utilization 0.35
   --enforce-eager --max-model-len 2048 --disable-flashinfer-autotune`).
 - `RSIBOX_VLLM_CHECK_TIMEOUT`: HTTP / control timeout in seconds (default `30`).
+- `RSIBOX_VLLM_ENABLE_SLEEP_MODE`: opt-in (`1`/`true`/`yes`) to append `--enable-sleep-mode` and
+  set `VLLM_SERVER_DEV_MODE=1` for snapshot quiesce and shadow promotion endpoints.
 """
 import argparse
 import atexit
@@ -39,6 +41,7 @@ from kernel import session as SS
 from services import engine
 
 from . import client
+from .snapshot_hooks import VllmQuiesceHooks, VllmShadowPromoter
 
 SAMPLER, LOGITS_PROC = "vllm.v1.worker.gpu.sample.sampler", "vllm.model_executor.layers.logits_processor"
 SCHED_UTILS, SCHEDULER = "vllm.v1.core.sched.utils", "vllm.v1.core.sched.scheduler"
@@ -173,6 +176,10 @@ class _ServerHandle:
     def alive(self):
         return _alive(self.pid) and engine._same_process(self.pid, self.start_ticks)
 
+    def refresh_start_ticks(self):
+        self.start_ticks = engine._start_time(self.pid)
+        return self.start_ticks
+
     def stop(self):
         if self.alive() or not _alive(self.pid):
             engine.stop_engine(self.pid, grace=8, marker=self.marker)
@@ -181,6 +188,7 @@ class _ServerHandle:
 class VllmLab:
     """`LabUnderTest` driving a live vLLM server through `adapter.host`."""
     name = "vllm"
+    supports_gms_uuid_shim = True
     _shared = None
 
     @staticmethod
@@ -193,7 +201,7 @@ class VllmLab:
         """
         argv = list(argv)
         known_opts = {"--model", "--venv", "--work", "--port", "--tp", "--extra",
-                      "--check-timeout", "--no-share-gpu",
+                      "--check-timeout", "--no-share-gpu", "--enable-sleep-mode",
                       "--weights-backend", "--gms-socket-dir", "--gms-pythonpath",
                       "--gms-read-only", "--gms-scratch-kv", "-h", "--help"}
         if argv[:1] == ["--"] and len(argv) > 1:
@@ -223,6 +231,7 @@ class VllmLab:
             ("--extra", dict(default=None, help="extra `vllm serve` flags string")),
             ("--check-timeout", dict(type=float, default=None, help="HTTP / control timeout in seconds")),
             ("--no-share-gpu", dict(action="store_true", help="keep live server running during fresh_check")),
+            ("--enable-sleep-mode", dict(action="store_true", help="enable vLLM sleep mode and dev endpoints for snapshot/shadow hooks")),
             ("--weights-backend", dict(choices=["none", "ipc_cache", "dynamo_gms"], default=None, help="pluggable resident weights backend")),
             ("--gms-socket-dir", dict(default=None, help="Dynamo GMS socket directory")),
             ("--gms-pythonpath", dict(default=None, help="extra PYTHONPATH containing gpu_memory_service")),
@@ -248,6 +257,8 @@ class VllmLab:
                 env[key] = xform(val)
         if ns.no_share_gpu:
             env["RSIBOX_VLLM_SHARE_GPU"] = "0"
+        if ns.enable_sleep_mode:
+            env["RSIBOX_VLLM_ENABLE_SLEEP_MODE"] = "1"
         if ns.gms_read_only:
             env["RSIBOX_VLLM_GMS_READ_ONLY"] = "1"
         if ns.gms_scratch_kv:
@@ -256,11 +267,18 @@ class VllmLab:
             env["RSIBOX_VLLM_EXTRA"] = shlex.join((shlex.split(ns.extra) if ns.extra is not None else []) + tail)
         return env
 
-    def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None):
+    def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None,
+                 weight_store=None, recovery_driver=None, enable_sleep_mode=None):
         self.receipts = receipts
         self.check_timeout = float(check_timeout or os.environ.get("RSIBOX_VLLM_CHECK_TIMEOUT", "30"))
+        self.weight_store, self.recovery_driver, self._was_shared = weight_store, recovery_driver, False
+        self.enable_sleep_mode = (
+            os.environ.get("RSIBOX_VLLM_ENABLE_SLEEP_MODE", "0").strip().lower() in ("1", "true", "yes")
+            if enable_sleep_mode is None else bool(enable_sleep_mode)
+        )
         self._backend, self._fault_txns, self._pending_inject, self._stack_files = backend, [], None, []
         if backend is not None:
+            self.weights_backend, self.server, self.port, self.tp = "", None, 0, 1
             self.base_text = dict(base_texts)
             self.bridge = HostBridge(self._ctl)
             self.session = SS.Session(self.bridge, MODULES)
@@ -299,7 +317,9 @@ class VllmLab:
                            self.weights_backend,
                            self.gms_socket_dir or os.environ.get("GMS_SOCKET_DIR"),
                            self.gms_pythonpath, self.gms_read_only,
-                           self.gms_scratch_kv or os.environ.get("DYN_GMS_SCRATCH_KV_ENABLED"))
+                           self.gms_scratch_kv or os.environ.get("DYN_GMS_SCRATCH_KV_ENABLED"),
+                           self.enable_sleep_mode,
+                           os.environ.get("VLLM_SERVER_DEV_MODE"))
         shared = VllmLab._shared
         if (shared is not None and shared.key == self.server_key and shared.alive()
                 and self._server_at_base(shared)):
@@ -331,6 +351,11 @@ class VllmLab:
         env = {**os.environ, "RSIBOX_KERNEL_DIR": kernel_dir, "PYTHONPATH": os.pathsep.join(py_parts),
                "HF_HUB_OFFLINE": os.environ.get("HF_HUB_OFFLINE", "1"),
                "VLLM_BATCH_INVARIANT": os.environ.get("VLLM_BATCH_INVARIANT", "1")}
+        extra_serve_args = list(self.extra)
+        if self.enable_sleep_mode:
+            env["VLLM_SERVER_DEV_MODE"] = "1"
+            if "--enable-sleep-mode" not in extra_serve_args:
+                extra_serve_args.append("--enable-sleep-mode")
         cmd = [
             self.python_bin, self.engine_py, "start", "--cache-root", self.cache_root,
             "--log", log_path, "--vllm", self.vllm_bin,
@@ -356,7 +381,7 @@ class VllmLab:
             "--timeout", "900", "--",
             self.model, "--port", str(port), "--served-model-name", "m", "-tp", str(self.tp),
             "--distributed-executor-backend", "mp",
-            "--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension", *self.extra,
+            "--worker-extension-cls", "adapter.worker_ext.KernelWorkerExtension", *extra_serve_args,
         ]
         t0 = time.perf_counter()
         proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=960)
@@ -513,10 +538,53 @@ class VllmLab:
                 "findings": [f for p in proofs for f in (p.get("receipt") or {}).get("findings", [])],
                 "cost_s": round(time.perf_counter() - t0, 6)}
 
+    def _stop_engine(self):
+        self._pending_inject, self._fault_txns, self._stack_files = None, [], []
+        if self._backend is not None:
+            return
+        if self.server is not None:
+            if VllmLab._shared is self.server:
+                VllmLab._shared = None
+                self._was_shared = True
+            self.server.stop()
+
+    def _spawn(self):
+        if self._backend is not None:
+            self._backend.respawn()
+        else:
+            self.server = VllmLab._shared = self._start_server(self.port, "live", use_farm=False)
+            self._was_shared = False
+        self.bridge = HostBridge(self._ctl)
+        self.session.recovered(self.bridge)
+
+    def quiesce_hooks(self, *, sleep_level=1, pause_mode="keep", release_kv_only=False,
+                      timeout=None, base_url=None):
+        """Return `VllmQuiesceHooks` bound to this live lab for snapshot checkpoint/restore."""
+        return VllmQuiesceHooks(
+            lab=self, base_url=base_url, sleep_level=sleep_level, pause_mode=pause_mode,
+            release_kv_only=release_kv_only, weights_backend=self.weights_backend,
+            timeout=self.check_timeout if timeout is None else timeout,
+        )
+
+    def promote_shadow(self, shadow_server, *, stop_primary=True, replenish_fn=None, timeout=None):
+        """Promote a parked standby shadow server handle onto this `VllmLab`."""
+        promoter = VllmShadowPromoter(
+            shadow_server=shadow_server, replenish_fn=replenish_fn,
+            timeout=self.check_timeout if timeout is None else timeout,
+        )
+        if stop_primary:
+            return promoter.recovery_driver().respawn(self, self.weight_store, reason="promote_shadow")
+        result = promoter.promote(self, self.weight_store)
+        if result.get("ok") and replenish_fn is not None:
+            replenish_fn(self, self.weight_store)
+        return result
+
     def reset(self, kind="state"):
         t0 = time.perf_counter()
         if kind == "respawn":
             self._pending_inject, self._fault_txns, self._stack_files = None, [], []
+            if self.recovery_driver is not None:
+                return self.recovery_driver.respawn(self, self.weight_store, reason="reset_respawn")
             if self._backend is not None:
                 self._backend.respawn()
                 start_info = {}
