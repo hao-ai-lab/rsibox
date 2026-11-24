@@ -673,11 +673,11 @@ def commit_txn(mgr_id: int, txn: str, journal, arm) -> None:
 class NativeManager:
     """Per-worker coordinator helper for `plan['native']` 2PC staging, commit, and hashes."""
 
-    def __init__(self):
+    def __init__(self, build_pool=None):
         self._staged: dict[str, dict] = {}
         self._committed: dict[str, dict] = {}
         self._build_jobs: dict[str, str] = {}
-        self.build_pool = BackgroundBuildPool()
+        self.build_pool = build_pool if build_pool is not None else _DEFAULT_BUILD_POOL
         _MANAGERS[id(self)] = weakref.ref(self, lambda _r, mid=id(self): _MANAGERS.pop(mid, None))
 
     def prepare(
@@ -872,12 +872,16 @@ def _resolve_bg_spec(spec: dict) -> dict:
     return out
 
 
+_BUILD_POOLS: "weakref.WeakSet[BackgroundBuildPool]" = weakref.WeakSet()
+
+
 class BackgroundBuildPool:
     """Pool of non-blocking background native build subprocesses."""
 
     def __init__(self):
         self._jobs: dict[str, BackgroundBuildJob] = {}
         self._seq, self._lock = itertools.count(1), threading.Lock()
+        _BUILD_POOLS.add(self)
 
     def _spawn_env(self, extra_env: dict | None = None, *, hide_cuda: bool = False) -> dict[str, str]:
         env = {**os.environ, **({str(k): str(v) for k, v in extra_env.items()} if extra_env else {})}
@@ -918,11 +922,9 @@ class BackgroundBuildPool:
 
     def get(self, job_id: str) -> BackgroundBuildJob | None:
         with self._lock: return self._jobs.get(job_id)
-
     def _require(self, job_id: str) -> BackgroundBuildJob:
         if (job := self.get(job_id)) is None: raise KeyError(f"unknown background build job: {job_id!r}")
         return job
-
     def poll(self, job_id: str) -> dict | None: return self._require(job_id).poll()
     def wait(self, job_id: str, timeout_s: float | None = None) -> dict: return self._require(job_id).wait(timeout_s=timeout_s)
     def cancel(self, job_id: str, grace_s: float = 0.5) -> bool: return False if (j := self.get(job_id)) is None else j.cancel(grace_s=grace_s)
@@ -935,10 +937,8 @@ class BackgroundBuildPool:
     def __enter__(self) -> "BackgroundBuildPool": return self
     def __exit__(self, *_exc) -> None: self.cancel_all()
 
-
 _DEFAULT_BUILD_POOL = BackgroundBuildPool()
-atexit.register(_DEFAULT_BUILD_POOL.cancel_all)
-
+atexit.register(lambda: [p.cancel_all() for p in list(_BUILD_POOLS)])
 
 def compile_async(spec: dict | None = None, *, pool: BackgroundBuildPool | None = None, **kwargs) -> BackgroundBuildJob:
     return (pool if pool is not None else _DEFAULT_BUILD_POOL).compile_async(spec, **kwargs)

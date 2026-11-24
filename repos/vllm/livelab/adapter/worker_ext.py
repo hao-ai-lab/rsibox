@@ -66,7 +66,7 @@ def _hook_v1_callable(wrapper, guard):
         orig_call = cls.__call__
         def guarded_call(self, *args, **kwargs):
             if (g := getattr(self, "_rsibox_guard", None)) is not None and not stream_capturing() and not getattr(getattr(self, "runner", None), "capturing", False):
-                entries, mode = _v1_entries(self), getattr(self, "runtime_mode", "FULL")
+                entries, mode = _v1_entries(self), getattr(self, "runtime_mode", None) or "PIECEWISE"
                 desc = _v1_call_desc(entries, mode, args, kwargs)
                 if desc is not None and isinstance(entries, dict) and desc in entries:
                     g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, desc), kwargs.get("input_sig"))
@@ -89,7 +89,7 @@ def install_replay_guard(worker, guard):
     for w in {id(x): x for x in v1}.values():
         if callable(w): _hook_v1_callable(w, guard); attached += 1
         elif callable(getattr(w, "replay", None)): guard.attach_wrapper(w, method="replay"); attached += 1
-        _stamp_entries(guard, _v1_entries(w), getattr(w, "runtime_mode", "FULL"))
+        _stamp_entries(guard, _v1_entries(w), getattr(w, "runtime_mode", None) or "PIECEWISE")
     return attached
 
 

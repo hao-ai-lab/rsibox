@@ -19,20 +19,14 @@ class StaleGraphReplayError(RuntimeError):
         self.expected_sig, self.actual_sig = expected_sig, actual_sig
 
 
-def _mode_name(mode: Any) -> str:
-    return getattr(mode, "name", None) or str(mode)
-
-
-def _key_mode(key: Any) -> str:
-    return key[0] if isinstance(key, tuple) and key and isinstance(key[0], str) else "*"
+def _mode_name(mode: Any) -> str: return getattr(mode, "name", None) or str(mode)
+def _key_mode(key: Any) -> str: return key[0] if isinstance(key, tuple) and key and isinstance(key[0], str) else "*"
 
 
 def graph_key(mode: Any, desc: Any) -> tuple[str, Any]:
     """Canonical hashable `(mode_name, descriptor)` key (never falls back to unsafe `id()`)."""
     m = _mode_name(mode)
-    try:
-        hash(desc)
-        return (m, desc)
+    try: hash(desc); return (m, desc)
     except TypeError:
         attrs = tuple((a, getattr(desc, a)) for a in ("num_tokens", "num_reqs", "uniform", "has_lora") if hasattr(desc, a))
         return (m, attrs or repr(desc))
@@ -41,10 +35,8 @@ def graph_key(mode: Any, desc: Any) -> tuple[str, Any]:
 def input_signature(*items: Any) -> tuple[Any, ...]:
     """Immutable `(shape, dtype, data_ptr)` signature tuple for tensors or stand-ins."""
     return tuple(
-        (tuple(int(d) for d in x.shape), str(x.dtype),
-         int(x.data_ptr()) if callable(getattr(x, "data_ptr", None)) else None)
-        if hasattr(x, "shape") and hasattr(x, "dtype") else x
-        for x in items
+        (tuple(int(d) for d in x.shape), str(x.dtype), int(x.data_ptr()) if callable(getattr(x, "data_ptr", None)) else None)
+        if hasattr(x, "shape") and hasattr(x, "dtype") else x for x in items
     )
 
 
@@ -72,9 +64,7 @@ class GraphReplayGuard:
     @property
     def stamps(self) -> dict[Any, tuple[int, int, Any]]:
         with self._lock: return dict(self._stamps)
-
-    def pool_epoch_for(self, mode: Any) -> int:
-        return self._pool_epochs.get(_mode_name(mode), 0)
+    def pool_epoch_for(self, mode: Any) -> int: return self._pool_epochs.get(_mode_name(mode), 0)
 
     def bump_code_epoch(self, reason: str = "") -> int:
         with self._lock:
@@ -91,10 +81,8 @@ class GraphReplayGuard:
         with self._lock:
             names = ([_mode_name(m) for m in modes] if modes is not None
                      else list(set(self._pool_epochs) | {_key_mode(k) for k in self._stamps} or {"*"}))
-            for m in names:
-                self._pool_epochs[m] = self._pool_epochs.get(m, 0) + 1
-            if names:
-                self._last_reason = reason
+            for m in names: self._pool_epochs[m] = self._pool_epochs.get(m, 0) + 1
+            if names: self._last_reason = reason
             return self.pool_epoch
 
     def snapshot_modes(self, modes) -> tuple[dict[str, int], dict[Any, tuple[int, int, Any]]]:

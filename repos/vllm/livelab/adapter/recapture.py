@@ -420,11 +420,15 @@ def teardown_graph_pool(engine, wrappers, selected, *, release_entries: bool = T
             **({"pool_epoch": guard.pool_epoch, "pool_epochs": guard.pool_epochs} if guard is not None else {})}
 
 
+def _wrapper_mode(wrapper):
+    return getattr(wrapper, "runtime_mode", None) or "PIECEWISE"
+
+
 def _drop_descriptors(engine, wrappers, pairs, guard: GraphReplayGuard | None = None):
     for mode, desc in pairs:
         engine.keys[mode].discard(desc)
         for wrapper, attr in wrappers:
-            if getattr(wrapper, "runtime_mode", None) in (None, mode):
+            if name(_wrapper_mode(wrapper)) == name(mode):
                 getattr(wrapper, attr).pop(desc, None)
         if guard is not None:
             guard.invalidate(graph_key(mode, desc))
@@ -441,10 +445,10 @@ class Recapture:
         """Partition dispatcher keys and wrapper dicts into chosen and left sets."""
         keys = engine.keys
         selected = [mode for mode in keys if keys[mode] and (modes is None or name(mode) in modes)]
+        selected_names = {name(mode) for mode in selected}
         old_keys = {mode: set(keys[mode]) for mode in selected}
         wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers()
-                    if _attr(wrapper) and (getattr(wrapper, "runtime_mode", None) is None
-                                           or getattr(wrapper, "runtime_mode") in selected)]
+                    if _attr(wrapper) and name(_wrapper_mode(wrapper)) in selected_names]
         old_entries = [(wrapper, attr, getattr(wrapper, attr)) for wrapper, attr in wrappers]
         want = None if sizes is None else {int(s) for s in sizes}
         chosen = {mode: [desc for desc in old_keys[mode] if want is None or _size(desc) in want]
@@ -609,6 +613,11 @@ class Recapture:
                         engine.capture(mode, desc)
                         self.guard.stamp(graph_key(mode, desc))
                         timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
+            active_modes = {name(m) for m, ds in chosen.items() if ds}
+            for wrapper in engine.wrappers():
+                if (attr := _attr(wrapper)) and (w_mode := name(_wrapper_mode(wrapper))) in active_modes:
+                    for entry_key in getattr(wrapper, attr):
+                        self.guard.stamp(graph_key(getattr(entry_key, "cg_mode", None) or w_mode, entry_key))
         except Exception as e:
             wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
             _drop_descriptors(engine, wrappers, done, guard=self.guard)

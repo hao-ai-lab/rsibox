@@ -196,6 +196,93 @@ class GraphGuardGoldenTests(unittest.TestCase):
                 with self.assertRaises(GG.StaleGraphReplayError) as cm_u:
                     strict_mgr.run_fullgraph(d_unseen)
                 self.assertEqual(cm_u.exception.reason, "unstamped")
+
+            # Realistic V2 FULL_AND_PIECEWISE R1: FULL lives in mgr.graphs (BatchExecutionDescriptor),
+            # PIECEWISE lives in CUDAGraphWrapper (BatchDescriptor, different key type!) AND a
+            # breakable_cg_runner with runtime_mode=None. Verify:
+            # (a) startup stamps breakable_cg_runner under "PIECEWISE" (not "None");
+            # (b) partial-mode R1 (modes=["FULL"]) does NOT wipe runtime_mode=None breakable wrapper;
+            # (c) FULL_AND_PIECEWISE R1 stamps BOTH BatchExecutionDescriptor AND BatchDescriptor so
+            #     both V2 run_fullgraph AND V1/breakable __call__ replay cleanly post-R1!
+            class BatchDescriptor:
+                def __init__(self, num_tokens): self.num_tokens = num_tokens
+                def __hash__(self): return hash(("BD", self.num_tokens))
+                def __eq__(self, o): return isinstance(o, BatchDescriptor) and self.num_tokens == o.num_tokens
+
+            class _PiecewiseWrapper:
+                _all_instances = []
+                def __init__(self, runtime_mode):
+                    self.runtime_mode = runtime_mode
+                    self.concrete_cudagraph_entries = {BatchDescriptor(4): "pw_v0"}
+                    self.runner = NS(capturing=False)
+                    self._all_instances.append(self)
+                def __call__(self, desc, input_sig=None):
+                    return self.concrete_cudagraph_entries[desc]
+
+            class _BreakableRunner:
+                def __init__(self):
+                    self.runtime_mode = None  # vLLM V2 breakable runner has runtime_mode=None
+                    self.entries = {BatchDescriptor(4): "br_v0"}
+                    self.runner = NS(capturing=False)
+                def __call__(self, desc, input_sig=None):
+                    return self.entries[desc]
+
+            pw_wrap = _PiecewiseWrapper(CUDAGraphMode.PIECEWISE)
+            br_runner = _BreakableRunner()
+            d_exec_full = BatchExecutionDescriptor(CUDAGraphMode.FULL, 4)
+            d_exec_pw = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 4)
+            d_batch = BatchDescriptor(4)
+
+            class _V2HybridMgr:
+                def __init__(self):
+                    self.graphs = {d_exec_full: "full_v0"}
+                    self.breakable_cg_runner = br_runner
+                def run_fullgraph(self, desc, input_sig=None):
+                    return self.graphs[desc]
+
+            hybrid_mgr = _V2HybridMgr()
+            hybrid_worker = NS(model_runner=NS(cudagraph_manager=hybrid_mgr))
+            guard2 = GG.GraphReplayGuard()
+            with mock.patch.dict(sys.modules, {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=_PiecewiseWrapper)}):
+                WE.install_replay_guard(hybrid_worker, guard2)
+                # (a) breakable_cg_runner stamped under "PIECEWISE", never "None"
+                self.assertIn(GG.graph_key("PIECEWISE", d_batch), guard2.stamps)
+                self.assertNotIn(GG.graph_key(None, d_batch), guard2.stamps)
+                self.assertEqual(pw_wrap(d_batch), "pw_v0")
+                self.assertEqual(br_runner(d_batch), "br_v0")
+                self.assertEqual(hybrid_mgr.run_fullgraph(d_exec_full), "full_v0")
+
+                # Build Recapture Engine matching V2 FULL + PIECEWISE + runtime_mode=None breakable
+                full_w = RC._V2FullWrapper(hybrid_mgr, CUDAGraphMode.FULL)
+                keys2 = {CUDAGraphMode.FULL: {d_exec_full}, CUDAGraphMode.PIECEWISE: {d_exec_pw}}
+                ver = ["v1"]
+                def _cap2(mode, desc):
+                    if mode == CUDAGraphMode.FULL:
+                        hybrid_mgr.graphs[desc] = f"full_{ver[0]}"
+                    else:
+                        pw_wrap.concrete_cudagraph_entries[d_batch] = f"pw_{ver[0]}"
+                        br_runner.entries[d_batch] = f"br_{ver[0]}"
+                eng2 = RC.Engine(lambda: [full_w, pw_wrap, br_runner], keys2, _cap2)
+                rec2 = RC.Recapture(guard=guard2)
+                j2 = NS(marks=[("t1", 0)], entries=[], record_call=lambda fn, lbl: j2.entries.append((fn, lbl)))
+                w2 = NS(capture=contextlib.nullcontext)
+
+                # (b) Partial-mode R1 (modes=["FULL"] only) must NOT wipe runtime_mode=None breakable!
+                guard2.bump_code_epoch("t1")
+                r_full_only = rec2.run(eng2, "t1", j2, w2, modes=["FULL"])
+                self.assertTrue(r_full_only["ok"], r_full_only)
+                self.assertEqual(br_runner.entries[d_batch], "br_v0")
+                self.assertEqual(hybrid_mgr.run_fullgraph(d_exec_full), "full_v1")
+
+                # (c) Full + Piecewise R1 stamps BOTH BatchExecutionDescriptor AND BatchDescriptor!
+                ver[0] = "v2"
+                j2.marks.append(("t2", len(j2.entries)))
+                guard2.bump_code_epoch("t2")
+                r_both = rec2.run(eng2, "t2", j2, w2)
+                self.assertTrue(r_both["ok"], r_both)
+                self.assertEqual(hybrid_mgr.run_fullgraph(d_exec_full), "full_v2")
+                self.assertEqual(pw_wrap(d_batch), "pw_v2")
+                self.assertEqual(br_runner(d_batch), "br_v2")
         finally:
             WE._ENDPOINT[:] = saved
 
