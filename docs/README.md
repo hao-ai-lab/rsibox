@@ -6,13 +6,13 @@ architecture goes in `repos/<engine>/docs/`, its measurements in `repos/<engine>
 ```
 docs/
   README.md                       this index
-  lessons.md                      framework lessons from building a live lab
-  kernels-and-graphs.md           bytecode swap, Triton @jit rebuild, CUDA graphs, launch witnesses, and warm-cache restart taxes
+  lessons.md                      framework lessons from building an RSIBox sandbox
+  kernels-and-graphs.md           bytecode swap, Triton @jit rebuild, CUDA graphs, execution checks, and warm-cache restart taxes
   process/
     developer_workflow.md         Boss-Subagent delegation SOP, model routing, PR bundling, and two-tier reporting
     local_and_self_hosted_ci.md   self-hosted runner routing (RSIBOX_CI_RUNNER) and local commit-status CI
   core/                           how the skill and the agent prompts work
-  livelab/                        the interface, receipts, conformance
+  livelab/                        the sandbox interface, run logs, and verification suite
 ```
 
 Rules:
@@ -23,7 +23,7 @@ Rules:
 
 ## Index
 
-- [Lessons from building a live lab](lessons.md): framework lessons and rules for applying them.
-- [Bytecode swap, kernel rebuild, and CUDA graph replay](kernels-and-graphs.md): why Python bytecode swaps stop at `@triton.jit` and `CUDAGraph` boundaries, how `core/livelab/kernel/jit.py` rebuilds kernels in place with zero-recompile undo, how the two-ledger witness (`live` vs. `capture`) prevents false positives, what selective graph recapture does today in the vLLM lab, the target design (not implemented) for lazy recapture and for updating all ~50 shape buckets at once (`cuGraphExecKernelNodeSetParams`, `cuGraphExecUpdate`), and how warm-cache restart taxes break down across vLLM, Megatron-LM, and FastVideo.
+- [Lessons from building an RSIBox sandbox](lessons.md): framework lessons and rules for applying them.
+- [Bytecode swap, kernel rebuild, and CUDA graph replay](kernels-and-graphs.md): why Python bytecode swaps stop at `@triton.jit` and `CUDAGraph` boundaries, how `core/livelab/kernel/jit.py` rebuilds kernels in place with zero-recompile undo, how the two-ledger execution check (`live` vs. `capture`) prevents false positives, what selective graph recapture does today in the vLLM sandbox, the target design (not implemented) for lazy recapture and for updating all ~50 shape buckets at once (`cuGraphExecKernelNodeSetParams`, `cuGraphExecUpdate`), and how warm-cache restart taxes break down across vLLM, Megatron-LM, and FastVideo.
 - [Developer and multi-agent workflow SOP](process/developer_workflow.md): Boss–Subagent delegation architecture, mandatory `letitdo` trajectory audit triangle, model routing policy, pre-flight checklist, dependency-ordered PR bundling, P0/P1/P2 review triage, and two-tier empirical reporting standards.
 - [Local and self-hosted CI](process/local_and_self_hosted_ci.md): how `.github/workflows/cpu-tests.yml` and `.github/workflows/pr-rules.yml` route between a self-hosted runner (`vars.RSIBOX_CI_RUNNER`) and `ubuntu-latest`, how persistent runner workspaces stay CPU-isolated and idempotent, and how local commit-status CI (`statuses/<sha>`) keeps pull requests verified when GitHub Actions dispatch is paused.

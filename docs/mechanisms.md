@@ -11,22 +11,22 @@ When an edit cannot be swapped in place, `rsibox` refuses before mutating state 
 | **In place, CUDA graphs** | Selective `R1` recapture of affected graphs in live workers | Edits inside graph-captured paths | [`repos/vllm/livelab/adapter/recapture.py`](../repos/vllm/livelab/adapter/recapture.py) |
 | **In place, C++/CUDA** | Compile edited `.cu` side-library, rebind `torch.ops._C` + `R1` recapture | Single-unit C++/CUDA kernels | [`repos/vllm/livelab/adapter/native.py`](../repos/vllm/livelab/adapter/native.py) |
 | **In process, rebuild** | Re-import edited module and rebuild live objects | Constructors, new fields, module constants | [`repos/fastvideo/livelab/services/rebuild.py`](../repos/fastvideo/livelab/services/rebuild.py) |
-| **Warm respawn (zygote)** | Fork from pre-imported server; weights served over CUDA IPC | Launch flags, startup code, refused edits | [`core/livelab/forksafe.py`](../core/livelab/forksafe.py), `repos/*/livelab/services/{zygote,weights,holder}.py` |
+| **Warm respawn (fork server)** | Fork from pre-imported server (`zygote`); weights served over CUDA IPC | Launch flags, startup code, refused edits | [`core/livelab/forksafe.py`](../core/livelab/forksafe.py), `repos/*/livelab/services/{zygote,weights,holder}.py` |
 | **In-memory reshard** | Reshard held weights between TP and EP over CUDA IPC | Expert-parallelism layout switches | [`repos/vllm/livelab/services/reshard_live.py`](../repos/vllm/livelab/services/reshard_live.py) |
 
 See [`docs/kernels-and-graphs.md`](kernels-and-graphs.md) for the deeper kernel and CUDA graph design.
 
-## Lab interface & live-swap verification check
+## Sandbox interface & verification suite
 
 Every engine adapter implements [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md): `install(patch)`, `check(workload)`, `reset()`, `uninstall()`, and `status()` (`base`, `edited`, or `poisoned`).
 
-The live-swap verification check ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) verifies:
+The sandbox verification suite ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) verifies:
 
-- **c0–c2:** Repeatable workload; no-op edit stays bit-exact; visible edit changes output and fires witnesses on every rank.
+- **c0–c2:** Repeatable workload; no-op edit stays bit-exact; visible edit changes output and triggers execution checks (`witness`) on every rank.
 - **c3:** Live-edited output (and a chain of 3 edits) matches a fresh process started with the edit.
-- **c4, c7, c9:** Undo restores output and code identity to base, step-by-step through chains, and across 20 install/undo cycles.
+- **c4, c7, c9:** Undo restores output and code identity to base, step-by-step through chains, and across a 20-cycle repeated install/undo stress test.
 - **c5–c6:** Mid-install faults roll back all ranks; unsupported or silent no-op edits are refused without mutating state.
-- **c8:** Crashed, hung, or externally tampered workers mark the lab `poisoned` until respawned at base.
+- **c8:** Crashed, hung, or externally tampered workers mark the sandbox faulted (`poisoned`) until respawned at base.
 - **c10:** Startup-only edits whose new code never ran are reported not proven (`zero_witness`).
 
 **Limits:** A live check proves the edited path ran and matched on the chosen workload, not equivalence on all inputs. Engines need a Python control layer reachable between steps, and one agent operates one warm process at a time.

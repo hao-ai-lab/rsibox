@@ -1,6 +1,6 @@
 # `miles` (`radixark/miles`, `THUDM/slime` Fork)
 
-Live-lab adapter, static coverage rules, and conformance suite for `miles` (`radixark/miles`
+RSIBox sandbox adapter, static coverage rules, and verification suite for `miles` (`radixark/miles`
 `0.2.0` @ `7767e158bcb743b47a7db0b0674abebacc02e82a`), a Ray-based RL post-training framework
 forked from `THUDM/slime` that couples SGLang rollout servers with Megatron-LM / FSDP training
 actors across synchronous (`train.py`) and fully asynchronous (`train_async.py --fully-async`)
@@ -19,7 +19,7 @@ loops.
   buffered trajectory groups with `code_epoch` so pre-edit async rollouts never leak into post-edit
   training steps, and couples trainer `S0` weight restoration with an immediate `update_weights`
   broadcast + `flush_cache` to rollout servers.
-- **`11/11` conformance (`c0`–`c10`):** Passes all 11 conformance cases across Python `3.11`–`3.14`
+- **`11/11` verification suite (`c0`–`c10`):** Passes all 11 verification cases across Python `3.11`–`3.14`
   on spawned rollout and trainer actor processes (`ToyMilesLab`), plus real `@ray.remote` actor
   live-swap verification (`test_adapter.py`).
 - **Static coverage (`kb/survey_rules.json`):** Out of `6,422` Python functions (`111,721` lines)

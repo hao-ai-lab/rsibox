@@ -1,25 +1,25 @@
-# Conformance
+# Sandbox Verification Suite (`conformance`)
 
-A lab's receipts count only after it passes every case.
+A sandbox adapter's eval logs count only after it passes every verification case below.
 
-Each case drives a lab only through `LabUnderTest` (`lab.py`): the five interface verbs
-(`install`, `check`, `reset`, `uninstall`, `status`) plus a harness the lab provides for
-conformance only (`patches`: named edits; `fresh_check`: the workload in a new process
-started from the edited files; `inject`: faults). So the same cases run against the toy lab
-on CPU now and against an engine adapter later.
+Each case drives a sandbox adapter only through `LabUnderTest` (`lab.py`): the five interface verbs
+(`install`, `check`, `reset`, `uninstall`, `status`) plus a test harness the adapter provides for
+verification (`patches`: named edits; `fresh_check`: the workload in a new process
+started from the edited files; `inject`: fault injection). The same cases run against the toy sandbox
+on CPU now and against any real engine adapter later.
 
 | Case | Passes only if |
 |---|---|
 | `c0_repeatable` | The workload gives the same output across 3 checks with `reset()` calls between them, `reset()` clears non-empty state, and status stays `base` |
-| `c1_noop` | A change that keeps behavior installs, runs (witness), and leaves output bit-exact |
-| `c2_visible` | A visible edit changes output, and the witness fires on every participant |
+| `c1_noop` | A change that keeps behavior installs, executes (call-count check `witness`), and leaves output bit-exact |
+| `c2_visible` | A visible edit changes output, and the execution check (`witness`) fires on every participant |
 | `c3_fresh_equivalence` | The live edit's output (one edit, and a chain of 3) equals a fresh process started with that edit |
 | `c4_uninstall` | Undo returns output and code identity (hash and object of every function) to base |
 | `c5_failed_install` | A fault mid-install (one participant after 2 of 3 swaps; another's commit) leaves base, proven, across 3 functions in 2 modules |
-| `c6_refusal` | Unsupported edits are refused with the right code, and nothing changes: syntax `patch_invalid`, closure `closure_changed`, module constant `outside_changes`, no code change `empty_change` |
+| `c6_refusal` | Unsupported edits are refused with the right diagnostic code, and nothing changes: syntax `patch_invalid`, closure `closure_changed`, module constant `outside_changes`, no code change `empty_change` |
 | `c7_chain` | 3 stacked edits (two on the same function) each run; undoing them one by one returns each earlier output exactly, ending at base |
-| `c8_crash_and_hang` | Crash, hang, lost participant and tampered code each poison the session; a poisoned lab refuses install; respawn returns to base |
-| `c9_soak` | Output returns to base after 20 cycles of install and undo |
+| `c8_crash_and_hang` | Crash, hang, lost participant and tampered code each mark the session faulted (`poisoned`); a faulted sandbox refuses install; respawn returns to base |
+| `c9_soak` | Repeated-cycle stress test: output returns to base after 20 cycles of install and undo |
 | `c10_not_proven` | An edit that never runs as Python (startup-only code) installs but its check reads `proven: False` with `zero_witness`, while a fresh process shows the edit matters |
 
 An install that changes nothing must fail, not report success: `c6_refusal` (`empty`).
@@ -35,10 +35,10 @@ python3 -m unittest discover -s conformance -t . -v
 ```
 
 `--lab` takes `module:Class` (a `LabUnderTest`). `--receipts` keeps the `txn` / `proof` / `undo`
-receipts the cases' transactions write (kernel/receipt.py, a proposal that needs a human
-owner). The run's own verdict is printed, not written: the receipt proposal has no record
-kind for a conformance run, and adding one extends the receipt writer, which needs its human
-owner first (AGENTS.md, Trust).
+run-log records the cases' transactions write (`kernel/receipt.py`, a proposal that needs a human
+owner). The run's own verdict is printed, not written: the run-log proposal has no record
+kind for a verification run, and adding one extends the writer, which needs its human
+owner first (`AGENTS.md`, Trust).
 
 Real output on the toy lab (CPU, about 1.5 s; c8 waits out a 0.5 s check timeout):
 

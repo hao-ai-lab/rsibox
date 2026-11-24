@@ -53,20 +53,20 @@ and iterate on <optimization> with rsibox install -> check -> uninstall without 
 | Guarantee | What It Enforces |
 | :--- | :--- |
 | **[Atomic step-gap swap](docs/mechanisms.md)** | Stages edits while the engine runs and commits across all ranks together between steps. |
-| **[Witness execution proof](core/livelab/INTERFACE.md)** | Counts calls on every rank so silent no-op edits (`zero_witness`) fail instead of passing. |
+| **[Execution check](core/livelab/INTERFACE.md)** | Counts calls on every rank so silent no-op edits (`zero_witness`) fail instead of passing. |
 | **[Journaled rollback](docs/mechanisms.md)** | Logs every mutation's inverse; `uninstall` restores exact code objects and verifies base identity. |
-| **[Explicit restart boundaries](docs/kernels-and-graphs.md)** | Refuses unsafe edits before touching state and names the cheapest warm tier (Triton, CUDA graph recapture, `.cu` reload, or zygote + CUDA IPC). |
-| **[Live-swap verification check](core/livelab/conformance/README.md)** | Verifies repeatability, parity with fresh restart, crash/hang poisoning, and repeated undo stability. |
+| **[Explicit restart boundaries](docs/kernels-and-graphs.md)** | Refuses unsafe edits before touching state and names the cheapest warm tier (Triton, CUDA graph recapture, `.cu` reload, or pre-warmed fork server + CUDA IPC). |
+| **[Sandbox verification suite](core/livelab/conformance/README.md)** | Verifies repeatability, parity with fresh restart, crash/hang fault handling, and repeated undo stability. |
 
 See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CPU tests, and [`core/agents/`](core/agents/) for ready-to-use agent prompts.
 
 ## Supported Engines & Highlights
 
 - **Serving (**`vLLM`**,** `SGLang`**):** Live Python, Triton, V1/V2 CUDA graph recapture, and C++/CUDA `.cu` hot-reload — up to **95×** faster on vLLM (`228 s → 2.4–23.6 s`) and **176×** on SGLang (`66.4 s → 0.38–1.77 s`).
-- **Training & Video (**`Megatron-LM`**,** `FastVideo`**):** Multi-GPU TP/DP/PP/VPP2 and SP4 live swaps + zygote/IPC weight holders — 82-iteration Megatron hill-climb without restarts and up to **92×** faster FastVideo checks.
+- **Training & Video (**`Megatron-LM`**,** `FastVideo`**):** Multi-GPU TP/DP/PP/VPP2 and SP4 live swaps + pre-warmed fork server / IPC weight holders — 82-iteration Megatron hill-climb without restarts and up to **92×** faster FastVideo checks.
 - **RL Post-Training (**`veRL`**,** `miles`**):** 21-actor Ray live swaps with coupled `S0` reset — up to **93×** faster on miles (`82.4 s → 0.89 s`) and **8.2×** live / `12.6 ms` offline replay on veRL.
 
-Full engine tables, hardware receipts, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
+Full engine tables, verified benchmarks, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
 
 ## Contributors
 

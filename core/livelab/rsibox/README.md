@@ -1,8 +1,8 @@
-# rsibox: a live lab as a service
+# rsibox: a live sandbox as a service
 
-A **lab** is the in-engine adapter that implements `INTERFACE.md`. A **box** is a lab that has
-been started somewhere and made reachable: one warm engine behind one small HTTP daemon. An
-agent needs only a URL and a token to edit the running engine.
+A **sandbox adapter** (`lab`) implements `INTERFACE.md` for an engine. A **box** is a running
+sandbox made reachable over HTTP: one warm engine behind one small local daemon. An agent needs
+only a URL and a token to edit the running engine.
 
 Standard library only. It imports no engine: the daemon takes any `LabUnderTest` class
 (`module:Class`, or a name `rsibox list` knows).
@@ -66,8 +66,8 @@ Every request carries `Authorization: Bearer <token>`. Bodies and replies are JS
 | `GET /v1/source?module=M` | `{"module", "text", "hash"}` of the live text |
 | `GET /v1/info` | box state, lab spec, boot seconds, the call in flight, counts |
 | `GET /v1/events?since=N` | calls after event `N`, each with verb, ok, outcome and seconds |
-| `GET /v1/receipts` | the receipt file's records. There is no route that writes it |
-| `POST /v1/close` | close the lab and stop the daemon |
+| `GET /v1/receipts` | the run-log (`receipts.jsonl`) records. There is no route that writes it |
+| `POST /v1/close` | close the sandbox and stop the daemon |
 
 | HTTP status | Means |
 |---|---|
