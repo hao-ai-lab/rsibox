@@ -99,6 +99,144 @@ class IpcTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             ipc.mailbox_call(os.path.join(self.tmp, "mb-dead"), {"verb": "ping"}, timeout=0.05, poll_s=0.005)
 
+    def test_file_channel_and_mailbox_alive_fn_fast_fails_on_real_sigkill(self):
+        """Pain point: when a live engine worker is SIGKILLed right after a client starts polling
+        a file channel (or mailbox) with a 60-180 s check timeout, polling without liveness checks
+        stalls recovery for the entire timeout. With `alive_fn`, a real SIGKILL fails fast in
+        milliseconds while preserving valid replies written just before exit and honoring `min_seq`."""
+        fc_dir = os.path.join(self.tmp, "fc-kill")
+        os.makedirs(fc_dir, exist_ok=True)
+        # 1. Pre-exit dead peer fails immediately without writing ctl.json.
+        pre_dead = ipc.file_channel_call(fc_dir, {"op": "status"}, timeout=60.0, alive_fn=lambda: False)
+        self.assertFalse(pre_dead["ok"])
+        self.assertTrue(pre_dead["lost"])
+        self.assertIn("before send", pre_dead["error"])
+        self.assertFalse(os.path.exists(os.path.join(fc_dir, "ctl.json")))
+
+        # 2. Invalid arguments fail closed with TypeError / ValueError, and NaN timeout does not hang.
+        with self.assertRaises(TypeError):
+            ipc.file_channel_call(fc_dir, {"op": "status"}, alive_fn="not-callable")  # type: ignore[arg-type]
+        for bad_min_seq in (True, 1.5, "10"):
+            with self.assertRaises(TypeError):
+                ipc.file_channel_call(fc_dir, {"op": "status"}, min_seq=bad_min_seq)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            ipc.file_channel_call(fc_dir, {"op": "status"}, min_seq=-1)
+        with self.assertRaises(ValueError):
+            ipc.file_channel_call(fc_dir, {"op": "status"}, poll_s=-0.1)
+        with self.assertRaises(ValueError):
+            ipc.file_channel_call(fc_dir, {"op": "status"}, poll_s=float("nan"))
+        with self.assertRaises(TypeError):
+            ipc.mailbox_call(os.path.join(self.tmp, "mb-bad"), {"verb": "status"}, alive_fn=123)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            ipc.mailbox_call(os.path.join(self.tmp, "mb-bad"), {"verb": "status"}, poll_s=float("inf"))
+        nan_fc = ipc.file_channel_call(os.path.join(self.tmp, "fc-nan"), {"op": "status"}, timeout=float("nan"), min_seq=0)
+        self.assertFalse(nan_fc["ok"])
+        self.assertTrue(nan_fc["lost"])
+        with self.assertRaises(TimeoutError):
+            ipc.mailbox_call(os.path.join(self.tmp, "mb-nan"), {"verb": "status"}, timeout=float("nan"))
+
+        # 3. Real subprocess gets SIGKILLed mid-request -> file_channel_call fails fast (< 2.0 s vs 60 s timeout).
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (sleeper.kill(), sleeper.wait()) if sleeper.poll() is None else None)
+        ctl_path = os.path.join(fc_dir, "ctl.json")
+        stop_killer = threading.Event()
+
+        def kill_after_ctl():
+            while not stop_killer.is_set() and not os.path.exists(ctl_path):
+                time.sleep(0.002)
+            if not stop_killer.is_set():
+                sleeper.kill()
+                sleeper.wait()
+
+        killer = threading.Thread(target=kill_after_ctl, daemon=True)
+        killer.start()
+        t0 = time.perf_counter()
+        try:
+            lost = ipc.file_channel_call(
+                fc_dir, {"op": "status"}, timeout=60.0, poll_s=0.005, min_seq=10,
+                alive_fn=lambda: sleeper.poll() is None,
+            )
+            elapsed_s = time.perf_counter() - t0
+        finally:
+            stop_killer.set()
+            killer.join(timeout=3.0)
+        self.assertFalse(lost["ok"])
+        self.assertTrue(lost["lost"])
+        self.assertEqual(lost["seq"], 11)
+        self.assertIn("before reply", lost["error"])
+        self.assertLess(elapsed_s, 2.0, f"expected fast-fail on SIGKILL, took {elapsed_s:.3f}s")
+
+        # 4. Reply written right before peer exits still succeeds (final reply check on death).
+        race_dir = os.path.join(self.tmp, "fc-reply-then-exit")
+        os.makedirs(os.path.join(race_dir, "reply"), exist_ok=True)
+        checks = [0]
+
+        def alive_after_reply() -> bool:
+            checks[0] += 1
+            if checks[0] == 1:
+                return True  # alive before send
+            ipc.atomic_write_json(os.path.join(race_dir, "reply", "1.json"), {"ok": True, "op": "final"})
+            return False  # peer exits immediately after writing reply
+
+        race_reply = ipc.file_channel_call(
+            race_dir, {"op": "final"}, timeout=5.0, poll_s=0.005, alive_fn=alive_after_reply,
+        )
+        self.assertTrue(race_reply["ok"])
+        self.assertEqual(race_reply["op"], "final")
+
+        # 5. Mailbox fast-fail raises ConnectionError on dead peer without creating dir/request,
+        # unlinks stale req on mid-call death, and preserves final replies written right before exit.
+        mb_pre_dead = os.path.join(self.tmp, "mb-pre-dead")
+        with self.assertRaises(ConnectionError):
+            ipc.mailbox_call(mb_pre_dead, {"verb": "status"}, timeout=60.0, alive_fn=lambda: False)
+        self.assertFalse(os.path.exists(mb_pre_dead))
+
+        mb_dir = os.path.join(self.tmp, "mb-kill")
+        sleeper_mb = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: (sleeper_mb.kill(), sleeper_mb.wait()) if sleeper_mb.poll() is None else None)
+        stop_mb_killer = threading.Event()
+
+        def kill_after_mb_req():
+            while not stop_mb_killer.is_set():
+                if os.path.isdir(mb_dir) and any(n.startswith("req-") for n in os.listdir(mb_dir)):
+                    break
+                time.sleep(0.002)
+            if not stop_mb_killer.is_set():
+                sleeper_mb.kill()
+                sleeper_mb.wait()
+
+        mb_killer = threading.Thread(target=kill_after_mb_req, daemon=True)
+        mb_killer.start()
+        t_mb = time.perf_counter()
+        try:
+            with self.assertRaises(ConnectionError):
+                ipc.mailbox_call(mb_dir, {"verb": "status"}, timeout=60.0, poll_s=0.005, alive_fn=lambda: sleeper_mb.poll() is None)
+            mb_elapsed = time.perf_counter() - t_mb
+        finally:
+            stop_mb_killer.set()
+            mb_killer.join(timeout=3.0)
+        self.assertLess(mb_elapsed, 2.0)
+        self.assertEqual([n for n in os.listdir(mb_dir) if n.startswith("req-")], [])
+
+        # Mailbox reply written right before peer exit still succeeds (after NFS listdir revalidation).
+        mb_race = os.path.join(self.tmp, "mb-reply-then-exit")
+        mb_checks = [0]
+
+        def mb_alive_after_reply() -> bool:
+            mb_checks[0] += 1
+            if mb_checks[0] == 1:
+                return True
+            reqs = [n for n in os.listdir(mb_race) if n.startswith("req-") and n.endswith(".json")]
+            self.assertEqual(len(reqs), 1)
+            rid = reqs[0][4:-5]
+            ipc.atomic_write_json(os.path.join(mb_race, f"resp-{rid}.json"), {"ok": True, "verb": "final"})
+            return False
+
+        mb_race_ans = ipc.mailbox_call(
+            mb_race, {"verb": "final"}, timeout=5.0, poll_s=0.005, alive_fn=mb_alive_after_reply,
+        )
+        self.assertEqual(mb_race_ans, {"ok": True, "verb": "final"})
+
 
 class ProcTests(unittest.TestCase):
     def test_stat_parsing_handles_comm_with_spaces_and_parens(self):
