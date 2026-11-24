@@ -31,6 +31,8 @@ import json
 import os
 import time
 
+from . import identity as ID
+
 SCHEMA = "rsibox-receipt/proposed-v1"
 FIELDS = {
     "txn": ("schema", "kind", "id", "interface_version", "engine", "base_hash", "patch_hash",
@@ -56,6 +58,10 @@ def _invalid(record):
         return f"schema {record['schema']!r}"
     if kind == "txn" and record["outcome"] not in OUTCOMES:
         return f"outcome {record['outcome']!r}"
+    ident = record.get("identity")
+    if ident is not None:
+        if not isinstance(ident, dict) or not isinstance(ident.get("digest"), str) or len(ident["digest"]) != 64:
+            return "invalid identity digest"
     return None
 
 
@@ -69,7 +75,9 @@ class ReceiptWriter:
         bad = _invalid(record)
         if bad:
             return {"ok": False, "error": f"invalid receipt: {bad}"}
-        rec = {**record, "writer": {"pid": os.getpid(), "written_at": time.time()}}
+        ident = record.get("identity") or ID.identity_for_receipt(record)
+        rec = {**record, "identity": ident,
+               "writer": {"pid": os.getpid(), "written_at": time.time()}}
         try:
             line = json.dumps(rec, sort_keys=True, default=str)
             with open(self.path, "a") as f:

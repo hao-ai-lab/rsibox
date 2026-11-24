@@ -22,8 +22,13 @@ Never raises to the caller: every call returns an ok-dict.
 """
 from . import coordinator as C
 from . import findings as F
+from . import identity as ID
+from . import jit as JIT
 from . import locate as L
+from . import swap as S
+import ast
 import json
+import sys
 
 
 def _targeted_modules(plan, name, unit):
@@ -126,12 +131,17 @@ def _split_commit(receipt, plan=None, expected_fp=None):
 
 
 class Session:
-    def __init__(self, coordinator, modules):
+    def __init__(self, coordinator, modules, base_sources=None):
         self.co = coordinator
         self.modules = list(modules)
         self.stack = []          # committed txn ids, oldest first
         self.expected = []       # fingerprint expected at each stack depth: [base, after t1, ...]
         self.poison = []         # findings
+        self._recovery_required = False
+        self._recovery_reasons = []
+        self._base_sources = dict(base_sources or {})
+        self._source_stack = [dict(self._base_sources)]
+        self._last_fp = None
         fp = self._fingerprint()
         if fp is None:
             self.fault("tampered", "a participant gave no fingerprint at start",
@@ -151,8 +161,10 @@ class Session:
         out = {}
         for p, r in zip(self.co.participants, replies):
             if not r["ok"]:
+                self._last_fp = None
                 return None
             out[p.name] = r["code"]
+        self._last_fp = out
         return out
 
     @staticmethod
@@ -188,25 +200,216 @@ class Session:
         """Every poison finding: the session's own and the coordinator's (deadline missed)."""
         return self.poison + list(getattr(self.co, "poison", []))
 
+    def recovery_required(self):
+        """True when a failed rollback, undo, or unconfirmed abort requires a clean respawn."""
+        if self._recovery_required:
+            return True
+        co_check = getattr(self.co, "is_recovery_required", None)
+        return bool(co_check()) if callable(co_check) else False
+
+    def _latch_recovery(self, reason):
+        self._recovery_required = True
+        if reason and reason not in self._recovery_reasons:
+            self._recovery_reasons.append(reason)
+
+    def _alias_map(self):
+        for p in getattr(self.co, "participants", ()):
+            if isinstance(p, C.LocalParticipant) and p.alias:
+                return p.alias
+        return None
+
+    def identity(self, fp_raw=None):
+        """Deterministic SHA-256 identity of active module sources, txn chain, and state."""
+        fp = fp_raw if fp_raw is not None else (self.expected[-1] if self.expected else None)
+        eng = getattr(self.co, "engine", None)
+        return ID.compute_identity(
+            module_sources=self._source_stack[-1], txns=self.stack, state=self.state(),
+            modules=self.modules, fingerprint=fp, incarnation=getattr(self.co, "incarnation", 1),
+            recovery_required=self.recovery_required(), metadata={"engine": eng} if eng else {},
+            alias=self._alias_map())
+
     def state(self):
-        return "poisoned" if self.poisoned() else "edited" if self.stack else "base"
+        return "poisoned" if (self.poisoned() or self._recovery_required) else (
+            "edited" if self.stack else "base")
 
     def status(self):
         """One fingerprint round: `verify` already took it, so its digest is reused instead of
         asking every participant again (on a 21-actor Ray job a round costs about 10 s)."""
         v = self.verify() if not self.poisoned() else None
-        fp = v.get("fingerprint") if v is not None else self.digest(self._fingerprint())
-        return F.ok(state=self.state(), txns=list(self.stack), poison=self.poisoned(), fingerprint=fp)
+        fp_raw = self._last_fp if v is not None else self._fingerprint()
+        fp = v.get("fingerprint") if v is not None else self.digest(fp_raw)
+        rec_req = self.recovery_required()
+        return F.ok(state=self.state(), txns=list(self.stack), poison=self.poisoned(),
+                    fingerprint=fp, recovery_required=rec_req,
+                    incarnation=getattr(self.co, "incarnation", 1),
+                    identity=self.identity(fp_raw=fp_raw))
 
     def _refuse(self, what):
+        rec_req = self.recovery_required()
+        if what == "uninstall":
+            why = "; ".join(self._recovery_reasons) or "; ".join(
+                f["check"] for f in self.poisoned()) or "rollback or undo failed"
+            return F.not_ok(
+                "uninstall refused: recovery required (respawn)",
+                [F.finding("recovery_required", why,
+                           "clean respawn via reset('respawn') / recovered()")],
+                outcome="refused", state="poisoned", recovery_required=True, undone=[])
+        why = "; ".join(f["check"] for f in self.poisoned()) or (
+            "recovery_required" if rec_req else "poisoned")
+        if rec_req and "recovery_required" not in why:
+            why = f"{why}; recovery_required"
         return F.not_ok(f"{what} refused: session poisoned", [F.finding(
-            "session_poisoned", "; ".join(f["check"] for f in self.poisoned()),
-            "a session in a known state")], outcome="refused")
+            "session_poisoned", why,
+            "a session in a known state")], outcome="refused", recovery_required=rec_req)
+
+    # -- non-mutating dry-run planner ----------------------------------------------------
+    def _plan_live_for(self, mod_name, base_src, mod_obj):
+        if mod_obj is not None:
+            run, held = L.index_module(mod_obj, L.module_functions(mod_obj))
+            return {kl: True for kl, cs in run.items() if any(held.get(c) for c in cs)}
+        live, top_live = {}, set()
+        prefixes = (f"{mod_name}:", f"{mod_name}#actor:")
+        for entries in (self.expected[-1] if self.expected else {}).values():
+            for key in (entries or ()):
+                bare = key.split("/", 1)[1] if key.startswith("rank") and "/" in key else key
+                for pref in prefixes:
+                    if bare.startswith(pref):
+                        q, sep, ln = bare[len(pref):].rpartition(":")
+                        if sep and ln.isdigit():
+                            live[(q, int(ln))] = True
+                            top_live.add(q.split(".<locals>.", 1)[0])
+        try:
+            for q, nodes in S.qual_index(ast.parse(base_src, f"<{mod_name}>")).items():
+                if not live or q.split(".<locals>.", 1)[0] in top_live:
+                    for n in nodes:
+                        live.setdefault((q, S.first_line(n)), True)
+        except SyntaxError:
+            pass
+        return live
+
+    def _plan_base_source(self, mod_name, spec, extra_sources):
+        mod_obj = sys.modules.get(ID._resolve_alias(mod_name, self._alias_map()))
+        for cand in (
+            extra_sources.get(mod_name) if isinstance(extra_sources, dict) else None,
+            self._source_stack[-1].get(mod_name),
+            *(p._live_source(mod_name) for p in getattr(self.co, "participants", ())
+              if isinstance(p, C.LocalParticipant)),
+            spec.get("base_source") if isinstance(spec, dict) else None,
+        ):
+            if isinstance(cand, str):
+                return cand, mod_obj
+        mod_file = getattr(mod_obj, "__file__", None) if mod_obj is not None else None
+        if isinstance(mod_file, str):
+            try:
+                with open(mod_file, encoding="utf-8") as fh:
+                    return fh.read(), mod_obj
+            except OSError:
+                pass
+        return None, mod_obj
+
+    def plan(self, patch, base_sources=None):
+        """Non-mutating dry-run planner: inspect `patch` without touching any participant,
+        module dict, witness, or transaction journal."""
+        ident = self.identity()
+
+        def refused(affected, findings):
+            return {"ok": False, "affected_modules": affected, "targets": {},
+                    "mechanisms": ["refused"], "restart_boundary": "refused",
+                    "refusal_findings": findings, "findings": findings, "identity": ident}
+
+        if not isinstance(patch, dict):
+            return refused([], [F.finding("patch_invalid", "patch must be a dict", "a patch dict")])
+        modules = (patch.get("modules") or {} if "modules" in patch else
+                   {m: {"source": src} for m, src in (patch.get("files") or {}).items()})
+        repairs, accept, affected = patch.get("repairs") or [], patch.get("accept", ()), sorted(modules)
+        if self.poisoned() or self.recovery_required():
+            return refused(affected, self._refuse("plan").get("findings", []))
+        if not modules and not repairs:
+            return refused([], [F.finding("empty_change", "patch has no modules or repair cells",
+                                          "at least one module edit or repair cell")])
+        fs, mechs, targets_out, any_change = [], [], {}, bool(repairs)
+        for mod_name, spec in modules.items():
+            if not isinstance(spec, dict) or not isinstance(spec.get("source"), str):
+                fs.append(F.finding("patch_invalid", f"{mod_name}: missing source", "string source", subject=mod_name))
+                continue
+            base_src, mod_obj = self._plan_base_source(mod_name, spec, base_sources)
+            if base_src is None:
+                fs.append(F.finding("patch_invalid", f"{mod_name}: base source unavailable", "known module", subject=mod_name))
+                continue
+            if spec.get("base_hash") and spec["base_hash"] != L.text_hash(base_src):
+                fs.append(F.finding("base_mismatch", f"{mod_name}: base_hash differs", spec["base_hash"], subject=mod_name))
+            ana = S.analyze(base_src, spec["source"], spec.get("targets", "auto"),
+                            getattr(mod_obj, "__file__", None) or f"<{mod_name}>",
+                            mod_name, self._plan_live_for(mod_name, base_src, mod_obj))
+            if "error" in ana or ana.get("new_error"):
+                fs.append(F.finding("patch_invalid", ana.get("error") or ana["new_error"], "valid Python", subject=mod_name))
+                continue
+            targets_out[mod_name] = ana["resolved"]
+            base_codes = L.code_tree(ana["base_units"][0])[0] if ana["base_units"] else {}
+            new_codes = L.code_tree(ana["new_units"][0])[0] if ana["new_units"] else {}
+            any_change = any_change or bool(ana["added"] or ana["removed"] or any(i.get("changed") for i in ana["imports"]))
+            for (q, line), tr in zip(ana["resolved"], ana["targets"]):
+                key, st = L.key_of(mod_name, q, line), tr["status"]
+                if st in ("no_definition", "count", "no_live_function"):
+                    chk = "no_live_function" if st == "no_live_function" else "not_in_patch"
+                    fs.append(F.finding(chk, f"{key}: {st}", "live matching definition", subject=key))
+                    continue
+                any_change = any_change or bool(tr.get("changed"))
+                bc, nc = (base_codes.get((q, line)) or [None])[0], (new_codes.get((q, tr["new_line"])) or [None])[0]
+                if bc is not None and nc is not None and bc.co_freevars != nc.co_freevars:
+                    fs.append(F.finding("closure_changed", f"{bc.co_freevars} -> {nc.co_freevars}",
+                                        f"same free variables {bc.co_freevars}", subject=key))
+                if tr.get("nested_signature"):
+                    fs.append(F.finding("nested_signature", tr["nested_signature"], "unchanged signature", subject=key))
+                jit_kind = tr.get("jit") or (S._jit_holder(mod_obj, q) if mod_obj else None)
+                if jit_kind:
+                    jt = tr.get("jit_text")
+                    if jt and not jt.get("guard"):
+                        mechs.append("triton_rejit")
+                        fs.append({**F.finding("jit_rebuild", f"{key}: {jit_kind}", "in-place Triton rebuild", subject=key), "advisory": True})
+                    else:
+                        fs.append(F.finding("jit_target", (jt or {}).get("guard") or f"{key}: {jit_kind}", "rebuildable JIT kernel", subject=key))
+                elif q.rpartition(".")[2] in S.CONSTRUCTORS:
+                    if tr.get("reinit"):
+                        mechs.append("constructor_reinit")
+                        fs.append({**F.finding("constructor_reinit", key, "re-init in place", subject=key), "advisory": True})
+                    else:
+                        fs.append(F.finding("constructor_edit", key, "non-constructor target", subject=key))
+                elif tr.get("changed"):
+                    mechs.append("in_place_python")
+            if ana["added"]:
+                mechs.append("in_place_python")
+            if ana["removed"]:
+                fs.append(F.finding("removed_definition", ", ".join(ana["removed"]), "explicit accept", subject=mod_name))
+            fs += [F.finding("new_fields", f"{nf['cls']}.{nf['field']}", "existing field", subject=mod_name)
+                   for nf in ana["new_fields"]]
+            if ana["outside_changes"]:
+                fs.append(F.finding("outside_changes", f"{mod_name}: changes outside targets", "target bodies only", subject=mod_name))
+        for rep in repairs:
+            try:
+                compile(rep["cell"], "<plan-repair>", "exec")
+                mechs.append("repair_cell")
+            except Exception as e:
+                fs.append(F.finding("patch_invalid", f"repair cell: {type(e).__name__}: {e}", "valid repair cell"))
+        if not fs and not any_change:
+            fs.append(F.finding("empty_change", "no definition changed, added, or removed", "at least one change"))
+        dec = F.decide(fs, accept)
+        ok = bool(dec["proceed"])
+        uniq = list(dict.fromkeys(mechs)) if ok else ["refused"]
+        boundary = ("refused" if not ok else
+                    "triton_rejit" if "triton_rejit" in uniq else
+                    "constructor_reinit" if "constructor_reinit" in uniq else
+                    "repair_cell" if "repair_cell" in uniq and "in_place_python" not in uniq else
+                    "in_place_python")
+        return {"ok": ok, "affected_modules": affected, "targets": targets_out,
+                "mechanisms": uniq, "restart_boundary": boundary,
+                "refusal_findings": [f for f in dec["findings"] if not f.get("accepted")],
+                "findings": dec["findings"], "identity": ident}
 
     # -- verbs ---------------------------------------------------------------------------
     def install(self, plan, **kw):
         """One transaction. Returns the coordinator's result plus `state`."""
-        if self.poisoned():
+        if self.poisoned() or self.recovery_required():
             return self._refuse("install")
         # code changed outside the journal since the last commit or undo: refuse before the
         # transaction, or its commit would record the tampered code as expected
@@ -237,27 +440,42 @@ class Session:
                            "the code the commit installed", subject=res["txn"])
             self.stack.append(res["txn"])
             self.expected.append(fp)
+            next_src = dict(self._source_stack[-1])
+            for m, spec in (plan.get("modules") or {}).items():
+                if isinstance(spec, dict) and isinstance(spec.get("source"), str):
+                    next_src[m] = spec["source"]
+            self._source_stack.append(next_src)
         else:                                    # aborted or rolled back: base must hold
             if outcome == "rolled_back":
                 receipt = _read_txn_receipt(self.co, res)
-                rollback_status = ((receipt or {}).get("rollback") or {}).get("status")
+                rb = (receipt or {}).get("rollback") or {}
+                rollback_status = rb.get("status")
                 if rollback_status != "undone":
                     already = any(f.get("check") == "undo_incomplete" for f in self.poisoned())
+                    why = ("rollback receipt missing" if receipt is None else
+                           f"rollback status was {rollback_status!r}")
                     if not already:
-                        why = ("rollback receipt missing" if receipt is None else
-                               f"rollback status was {rollback_status!r}")
                         self.fault("undo_incomplete",
                                    f"rollback of a failed commit was partial ({why})",
                                    "every committed participant undone")
+                    rb_parts = rb.get("participants") or {}
+                    hard_fail = (receipt is None or not rb_parts or any(
+                        not u.get("ok") and not u.get("missed") for u in rb_parts.values()
+                    ))
+                    if hard_fail:
+                        self._latch_recovery(f"commit rollback failed ({why})")
             self.verify()
-        return {**res, "outcome": outcome, "state": self.state()}
+        return {**res, "outcome": outcome, "state": self.state(),
+                "recovery_required": self.recovery_required()}
 
     def uninstall(self, txn=None):
-        """Undo `txn` and every later transaction (newest first); default: the newest. Allowed
-        while poisoned (undo is how a poisoned lab backs out before a respawn); the session
-        stays poisoned."""
+        """Undo `txn` and every later transaction (newest first); default: the newest.
+        Refused fail-closed when `recovery_required` is latched (failed rollback/undo/abort);
+        otherwise allowed while poisoned (e.g. tampered code) before respawn."""
+        if self.recovery_required():
+            return self._refuse("uninstall")
         if not self.stack:
-            return F.ok(undone=[], state=self.state())
+            return F.ok(undone=[], state=self.state(), recovery_required=False)
         txn = txn or self.stack[-1]
         if txn not in self.stack:
             return F.not_ok(f"{txn} is not committed in this session")
@@ -271,26 +489,37 @@ class Session:
             results.append(u)
             if not u["ok"]:
                 status_label = (u.get("receipt") or {}).get("status", u.get("status", "partial"))
+                self._latch_recovery(f"undo of {t}: {status_label}")
                 self.fault("undo_incomplete", f"undo of {t}: {status_label}",
                            "undone on every participant", subject=t)
                 return F.not_ok("undo failed", self.poisoned(), undone=undone,
-                                results=results, state=self.state())
+                                results=results, state=self.state(), recovery_required=True)
             self.stack.pop()
             self.expected.pop()
+            if len(self._source_stack) > 1:
+                self._source_stack.pop()
             undone.append(t)
         v = self.verify()
-        return {**v, "undone": undone, "results": results, "state": self.state()}
+        return {**v, "undone": undone, "results": results, "state": self.state(),
+                "recovery_required": self.recovery_required()}
 
-    def recovered(self, coordinator=None):
+    def recovered(self, coordinator=None, base_sources=None):
         """After the lab respawned its participants: a new base, no poison, empty stack."""
         if coordinator is not None:
             self.co = coordinator
         elif hasattr(self.co, "recovered"):
             self.co.recovered()
         self.stack, self.poison = [], []
+        self._recovery_required = False
+        self._recovery_reasons = []
+        if base_sources is not None:
+            self._base_sources = dict(base_sources)
+        self._source_stack = [dict(self._base_sources)]
         fp = self._fingerprint()
         self.expected = [fp]
         if fp is None:
             self.fault("tampered", "a participant gave no fingerprint after respawn",
                        "every participant answers")
-        return F.ok(state=self.state())
+        return F.ok(state=self.state(), recovery_required=False,
+                    incarnation=getattr(self.co, "incarnation", 1),
+                    identity=self.identity(fp_raw=fp))
