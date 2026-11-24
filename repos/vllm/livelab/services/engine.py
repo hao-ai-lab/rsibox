@@ -109,6 +109,14 @@ import corelab  # noqa: F401,E402  (core/livelab on sys.path)
 import kvplan, live_reconfig, vllm_args, weights, zygote  # noqa: E402
 import forksafe  # noqa: E402
 from rsibox import harness, ipc, proc  # noqa: E402  (stdlib only)
+from rsibox.warm import (  # noqa: E402  (stdlib only)
+    ENV_GMS_DEVICE_UUID_MAP,
+    DynamoGmsStore,
+    GMS_VLLM_LOAD_FORMAT,
+    GMS_VLLM_WORKER_CLS,
+    build_device_uuid_map,
+)
+from rsibox.warm.dynamo_gms import resolve_target_gpus  # noqa: E402  (stdlib only)
 
 _finding = harness.plain_finding
 
@@ -149,6 +157,30 @@ def cache_env(root):
     return {k: str(root / sub) for k, sub in CACHE_LAYOUT.items()}
 
 
+def _apply_gms_env(a, env):
+    """Apply Dynamo GMS environment variables without shadowing LIVE_SITE / farm_dir."""
+    store = gms_store(a)
+    env["GMS_SOCKET_DIR"] = store.socket_dir
+    if store.scratch_kv:
+        env["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
+    if store.extra_pythonpath:
+        env["RSIBOX_GMS_PYTHONPATH"] = os.pathsep.join(store.extra_pythonpath)
+        cur = [p for p in (env.get("PYTHONPATH") or "").split(os.pathsep) if p]
+        for entry in store.extra_pythonpath:
+            if entry not in cur:
+                cur.append(entry)
+        env["PYTHONPATH"] = os.pathsep.join(cur)
+    vis = env.get("CUDA_VISIBLE_DEVICES")
+    if vis is not None and vis.strip():
+        targets = resolve_target_gpus(visible_devices=vis)
+        if targets and any(logical != phys for logical, (phys, _) in enumerate(targets)):
+            env[ENV_GMS_DEVICE_UUID_MAP] = json.dumps(build_device_uuid_map(targets))
+        else:
+            env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
+    else:
+        env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
+
+
 def engine_env(a, base=None):
     """The environment every engine process runs with, and the zygote's (start_zygote)."""
     env = dict(os.environ if base is None else base)
@@ -166,6 +198,19 @@ def engine_env(a, base=None):
         env["PYTHONPATH"] = os.pathsep.join([here] + ([env["PYTHONPATH"]]
                                                       if env.get("PYTHONPATH") else []))
         env["RSIBOX_KVPLAN_DIR"] = kvplan_dir(a)
+    env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
+    explicit_backend = getattr(a, "weights_backend", "") or ""
+    if explicit_backend == "dynamo_gms" or (
+        not explicit_backend
+        and not getattr(a, "weights", False)
+        and (
+            getattr(a, "gms_socket_dir", "")
+            or getattr(a, "gms_read_only", False)
+            or getattr(a, "gms_scratch_kv", False)
+            or getattr(a, "gms_pythonpath", "")
+        )
+    ):
+        _apply_gms_env(a, env)
     if a.fork:
         # The engine core and workers are forked, not spawned: they inherit the parent's
         # imports. vLLM falls back to spawn when the parent has initialized CUDA; fork_check()
@@ -226,11 +271,44 @@ def kvplan_dir(a):
     return str(Path(a.kvplan or Path(a.cache_root) / "kvplan").resolve())
 
 
-def load_format(a, v):
-    """The load format the server will use: the argv's if explicit, else ipc_cache with
-    --weights, else vLLM's default."""
-    if a.weights and "load_format" not in v["explicit"]:
+def weights_backend(a, v=None):
+    """Resolved resident-weights backend: 'dynamo_gms', 'ipc_cache', or 'none'."""
+    explicit_backend = getattr(a, "weights_backend", "") or ""
+    if explicit_backend:
+        return explicit_backend
+    if getattr(a, "weights", False):
         return "ipc_cache"
+    if v and v.get("ok"):
+        lf = (v.get("args") or {}).get("load_format")
+        if lf == GMS_VLLM_LOAD_FORMAT:
+            return "dynamo_gms"
+        if lf == "ipc_cache":
+            return "ipc_cache"
+    return "none"
+
+
+def gms_store(a, *, allow_remapped=False):
+    """Build the `DynamoGmsStore` configured by launcher flags."""
+    sock_dir = getattr(a, "gms_socket_dir", "") or getattr(a, "weights_socket_dir", "") or None
+    extra_py = [p for p in (getattr(a, "gms_pythonpath", "") or "").split(os.pathsep) if p]
+    return DynamoGmsStore(
+        socket_dir=sock_dir,
+        read_only=bool(getattr(a, "gms_read_only", False)),
+        scratch_kv=bool(getattr(a, "gms_scratch_kv", False)),
+        extra_pythonpath=extra_py,
+        allow_remapped_visible_devices=allow_remapped,
+    )
+
+
+def load_format(a, v):
+    """The load format the server will use: the argv's if explicit, else the selected
+    weights backend's format (`ipc_cache` or `gms`), else vLLM's default."""
+    if "load_format" not in v["explicit"]:
+        backend = weights_backend(a, v)
+        if backend == "ipc_cache":
+            return "ipc_cache"
+        if backend == "dynamo_gms":
+            return GMS_VLLM_LOAD_FORMAT
     return v["args"]["load_format"]
 
 
@@ -290,7 +368,8 @@ def argv_findings(a, v):
     if "host" in explicit and args["host"] != "127.0.0.1":
         found.append(_finding("vllm_host", f"--host {args['host']}", "--host 127.0.0.1 (the launcher's)",
                               why="lab engines bind 127.0.0.1 only", actions=["drop --host"]))
-    if a.weights and "load_format" in explicit and args["load_format"] != "ipc_cache":
+    want_ipc = bool(a.weights or getattr(a, "weights_backend", "") == "ipc_cache")
+    if want_ipc and "load_format" in explicit and args["load_format"] != "ipc_cache":
         found.append(_finding(
             "weights_load_format", f"--weights and the argv's --load-format {args['load_format']}",
             "--load-format ipc_cache, or none (--weights adds it)",
@@ -298,7 +377,7 @@ def argv_findings(a, v):
             actions=["drop --load-format", "drop --weights"],
         ))
     cfg = explicit_loader_config(v)
-    if a.weights and cfg is not None and cfg.get("fallback", True) is not False:
+    if want_ipc and cfg is not None and cfg.get("fallback", True) is not False:
         fb = json.dumps(cfg["fallback"]) if "fallback" in cfg else "unset (vLLM's default: true)"
         found.append(_finding(
             "weights_fallback", f"--weights and the argv's --model-loader-extra-config with fallback {fb}",
@@ -315,6 +394,42 @@ def argv_findings(a, v):
             why="vLLM dials the config's folder; the daemon probe would check the other one",
             actions=["drop --weights-socket-dir", "set socket_dir in the config to the same folder"],
         ))
+    if getattr(a, "weights", False) and getattr(a, "weights_backend", "") in ("none", "dynamo_gms"):
+        found.append(_finding(
+            "weights_backend_conflict",
+            f"--weights (ipc_cache) and --weights-backend {a.weights_backend}",
+            "one resident weights backend",
+            why="--weights selects vLLM's ipc_cache daemon; it conflicts with another --weights-backend",
+            actions=["drop --weights", f"or drop --weights-backend {a.weights_backend}"],
+        ))
+    if (getattr(a, "weights_backend", "") == "none"
+            and "load_format" in explicit
+            and args["load_format"] in ("ipc_cache", GMS_VLLM_LOAD_FORMAT)):
+        found.append(_finding(
+            "weights_backend_conflict",
+            f"--weights-backend none and explicit --load-format {args['load_format']}",
+            "omit --load-format (or select the matching --weights-backend)",
+            why="--weights-backend none disables resident-weights launcher setup (worker class / socket env), "
+                "which would leave an explicit resident-weights --load-format misconfigured",
+            actions=["drop --load-format", f"or set --weights-backend matching {args['load_format']}"],
+        ))
+    backend = weights_backend(a, v)
+    if backend == "dynamo_gms":
+        delta = gms_store(a).launch_delta(
+            engine="vllm",
+            explicit_flags=set(explicit),
+            explicit_values=args,
+        )
+        found.extend(delta.findings)
+        if a.kvplan is not None:
+            found.append(_finding(
+                "kvplan_gms_worker_cls",
+                f"--kvplan ({KVPLAN_WORKER}) and --weights-backend dynamo_gms ({GMS_VLLM_WORKER_CLS})",
+                "either --kvplan or --weights-backend dynamo_gms (both set --worker-cls)",
+                why="vLLM accepts a single --worker-cls; Dynamo GMS requires GMSWorker while --kvplan uses KVPlanWorker "
+                    "(note: RSIBox live editing uses --worker-extension-cls and composes cleanly with GMSWorker)",
+                actions=["drop --kvplan when using --weights-backend dynamo_gms", "or use --weights-backend ipc_cache"],
+            ))
     if a.kvplan is not None and "worker_cls" in explicit and args["worker_cls"] != KVPLAN_WORKER:
         found.append(_finding(
             "kvplan_worker_cls", f"--kvplan and the argv's --worker-cls {args['worker_cls']}",
@@ -326,12 +441,27 @@ def argv_findings(a, v):
 
 
 def reconfig_findings(launcher_args, parsed_vllm, reconfig):
-    """Findings when a `reconfigure` with resident weights (`ipc_cache`) changes a Tier-2 WeightCacheKey field."""
+    """Findings when a `reconfigure` with resident weights (`ipc_cache` or `dynamo_gms`) changes a Tier-2 WeightCacheKey field."""
+    backend = weights_backend(launcher_args, parsed_vllm)
     if (not reconfig or reconfig["weights_compatible"]
-            or load_format(launcher_args, parsed_vllm) != "ipc_cache"
+            or backend not in ("ipc_cache", "dynamo_gms")
             or getattr(launcher_args, "weights_accept_reconfig", False)):
         return []
     diff = {k: reconfig["changed"][k] for k in reconfig["weight_key_changed"]}
+    if backend == "dynamo_gms":
+        return [_finding(
+            "weights_reconfig_tier2",
+            f"{reconfig['tier']} change on WeightCacheKey fields: {diff}",
+            "Tier 1 engine flags only (max_model_len, enforce_eager, compilation_config, "
+            "max_num_batched_tokens, max_num_seqs, gpu_memory_utilization, enable_prefix_caching, ...), "
+            "or a fresh Dynamo GMS server matching the new model/sharding/dtype",
+            why="Dynamo GMS holds committed GPU allocations for the original model/sharding/dtype layout; "
+                "relaunching against mismatched resident weights fails or corrupts layout validation after the old engine stops",
+            actions=["restart the GMS server(s) for the new model/sharding/dtype, then pass --weights-accept-reconfig",
+                     "pass --weights-backend none to load from disk",
+                     "keep WeightCacheKey flags unchanged for zero-disk GMS reconfiguration"],
+            risk="stopping the running engine for a dynamo_gms start that fails at load_model",
+        )]
     return [_finding(
         "weights_reconfig_tier2",
         f"{reconfig['tier']} change on WeightCacheKey fields: {diff}",
@@ -347,6 +477,21 @@ def reconfig_findings(launcher_args, parsed_vllm, reconfig):
     )]
 
 
+def _strip_flag_from_argv(argv, flag):
+    """Remove all `--flag val` and `--flag=val` occurrences from an argv list."""
+    out, i = [], 0
+    prefix = flag + "="
+    while i < len(argv):
+        if argv[i] == flag:
+            i += 2
+        elif argv[i].startswith(prefix):
+            i += 1
+        else:
+            out.append(argv[i])
+            i += 1
+    return out
+
+
 def serve_cmd(a, vargv, v):
     """The `vllm serve` argv: the caller's, verbatim, then what the launcher and the holders
     need that the caller did not set (host, load format and loader config, worker class).
@@ -355,10 +500,21 @@ def serve_cmd(a, vargv, v):
     cmd, explicit = [a.vllm, "serve", *vargv], v["explicit"]
     if "host" not in explicit:
         cmd += ["--host", "127.0.0.1"]
-    if a.weights and "load_format" not in explicit:
-        cmd += ["--load-format", "ipc_cache"]
-    if load_format(a, v) == "ipc_cache" and "model_loader_extra_config" not in explicit:
-        cmd += ["--model-loader-extra-config", json.dumps(weights.loader_config(socket_dir(a, v)))]
+    backend = weights_backend(a, v)
+    if backend == "dynamo_gms":
+        delta = gms_store(a).launch_delta(
+            engine="vllm",
+            explicit_flags=set(explicit),
+            explicit_values=v["args"],
+        )
+        if "--model-loader-extra-config" in delta.args:
+            cmd = _strip_flag_from_argv(cmd, "--model-loader-extra-config")
+        cmd += list(delta.args)
+    else:
+        if (a.weights or backend == "ipc_cache") and "load_format" not in explicit:
+            cmd += ["--load-format", "ipc_cache"]
+        if load_format(a, v) == "ipc_cache" and "model_loader_extra_config" not in explicit:
+            cmd += ["--model-loader-extra-config", json.dumps(weights.loader_config(socket_dir(a, v)))]
     if a.kvplan is not None and "worker_cls" not in explicit:
         cmd += ["--worker-cls", KVPLAN_WORKER]
     return cmd
@@ -368,7 +524,16 @@ def preflight(a, v, env):
     """Holder checks that stop this start before anything runs (each names its override), and
     the report fields of the checks that ran."""
     found, rep = [], {}
-    if load_format(a, v) == "ipc_cache":
+    backend = weights_backend(a, v)
+    if backend == "dynamo_gms":
+        pr = gms_store(a, allow_remapped=bool(env.get(ENV_GMS_DEVICE_UUID_MAP))).probe(
+            visible_devices=env.get("CUDA_VISIBLE_DEVICES"),
+            tp=v["args"]["tensor_parallel_size"],
+        )
+        rep["gms_probe"] = pr.to_dict()
+        if not pr.ok and not a.weights_accept_missing:
+            found.append(pr.finding)
+    elif load_format(a, v) == "ipc_cache":
         pr = weights.probe(socket_dir(a, v), env.get("CUDA_VISIBLE_DEVICES"),
                            v["args"]["tensor_parallel_size"])
         rep["weights_probe"] = pr
@@ -423,7 +588,12 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
         "launcher": {
             "vllm": launcher_args.vllm,
             "weights": bool(launcher_args.weights),
+            "weights_backend": getattr(launcher_args, "weights_backend", ""),
             "weights_socket_dir": launcher_args.weights_socket_dir,
+            "gms_socket_dir": getattr(launcher_args, "gms_socket_dir", ""),
+            "gms_read_only": bool(getattr(launcher_args, "gms_read_only", False)),
+            "gms_scratch_kv": bool(getattr(launcher_args, "gms_scratch_kv", False)),
+            "gms_pythonpath": getattr(launcher_args, "gms_pythonpath", ""),
             "kvplan": launcher_args.kvplan,
             "fork": bool(launcher_args.fork),
             "zygote": launcher_args.zygote,
@@ -433,8 +603,12 @@ def save_engine_state(launcher_args, pid, port, vllm_argv, command, parsed_vllm)
 
 
 _INJECTED_FLAGS = (
-    ("--host", "127.0.0.1"), ("--load-format", "ipc_cache"),
-    ("--model-loader-extra-config", None), ("--worker-cls", KVPLAN_WORKER),
+    ("--host", "127.0.0.1"),
+    ("--load-format", "ipc_cache"),
+    ("--load-format", GMS_VLLM_LOAD_FORMAT),
+    ("--model-loader-extra-config", None),
+    ("--worker-cls", KVPLAN_WORKER),
+    ("--worker-cls", GMS_VLLM_WORKER_CLS),
 )
 
 
@@ -442,46 +616,85 @@ def _strip_injected_flags(argv):
     """Strip launcher-appended holder flags from a raw `/proc/<pid>/cmdline` `vllm serve` tail."""
     cleaned, i = [], 0
     while i < len(argv):
-        if i + 1 < len(argv) and any(argv[i] == f and (v is None or argv[i + 1] == v) for f, v in _INJECTED_FLAGS):
+        tok = argv[i]
+        matched_eq = False
+        for f, v in _INJECTED_FLAGS:
+            if tok.startswith(f + "="):
+                val = tok.split("=", 1)[1]
+                if v is None or val == v:
+                    matched_eq = True
+                    break
+        if matched_eq:
+            i += 1
+        elif i + 1 < len(argv) and any(tok == f and (v is None or argv[i + 1] == v) for f, v in _INJECTED_FLAGS):
             i += 2
         else:
-            cleaned.append(argv[i])
+            cleaned.append(tok)
             i += 1
     return cleaned
 
 
 def _flag_value(tokens, flag):
+    prefix = flag + "="
+    for idx, tok in enumerate(tokens):
+        if tok == flag:
+            return tokens[idx + 1] if idx + 1 < len(tokens) else None
+        if tok.startswith(prefix):
+            return tok[len(prefix):]
+    return None
+
+
+def _proc_environ(pid, proc_root="/proc"):
+    """Best-effort parse of `/proc/<pid>/environ` into a str->str dict."""
+    out = {}
     try:
-        idx = tokens.index(flag)
-    except ValueError:
-        return None
-    return tokens[idx + 1] if idx + 1 < len(tokens) else None
+        raw = Path(f"{proc_root}/{pid}/environ").read_bytes()
+    except OSError:
+        return out
+    for item in raw.split(b"\0"):
+        if b"=" in item:
+            k, v = item.split(b"=", 1)
+            out[k.decode(errors="replace")] = v.decode(errors="replace")
+    return out
 
 
-def load_engine_state(cache_root, pid):
+def load_engine_state(cache_root, pid, proc_root="/proc"):
     """Load engine `pid` state from `<cache-root>/engines/<pid>.json`, falling back to `/proc/<pid>/cmdline`."""
     if (state := ipc.read_json(_engine_state_path(cache_root, pid))) is not None:
         return state
     try:
-        raw_tokens = [t for t in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0") if t]
+        raw_tokens = [t for t in Path(f"{proc_root}/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0") if t]
     except OSError:
         return None
     if "serve" not in raw_tokens:
         return None
     idx = raw_tokens.index("serve")
     tail = raw_tokens[idx + 1:]
-    socket_dir_val = ""
+    cfg_dict = {}
     if (raw_cfg := _flag_value(tail, "--model-loader-extra-config")):
         with contextlib.suppress(Exception):
-            socket_dir_val = json.loads(raw_cfg).get("socket_dir") or ""
+            parsed_cfg = json.loads(raw_cfg)
+            if isinstance(parsed_cfg, dict):
+                cfg_dict = parsed_cfg
+    lf = _flag_value(tail, "--load-format")
+    wcls = _flag_value(tail, "--worker-cls")
+    is_gms = lf == GMS_VLLM_LOAD_FORMAT or wcls == GMS_VLLM_WORKER_CLS
+    is_ipc = lf == "ipc_cache"
+    penv = _proc_environ(pid, proc_root=proc_root) if is_gms else {}
+    scratch_raw = (penv.get("DYN_GMS_SCRATCH_KV_ENABLED") or "").strip().lower()
     return {
         "pid": pid, "port": None, "vargv": _strip_injected_flags(tail),
         "cmd": raw_tokens[idx - 1:] if idx >= 1 else raw_tokens, "vllm_args": None,
         "launcher": {
             "vllm": raw_tokens[idx - 1] if idx >= 1 else "vllm",
-            "weights": _flag_value(tail, "--load-format") == "ipc_cache",
-            "weights_socket_dir": socket_dir_val,
-            "kvplan": "" if _flag_value(tail, "--worker-cls") == KVPLAN_WORKER else None,
+            "weights": is_ipc,
+            "weights_backend": "dynamo_gms" if is_gms else ("ipc_cache" if is_ipc else ""),
+            "weights_socket_dir": cfg_dict.get("socket_dir") or "",
+            "gms_socket_dir": penv.get("GMS_SOCKET_DIR", "") if is_gms else "",
+            "gms_read_only": bool(cfg_dict.get("gms_read_only", False)) if is_gms else False,
+            "gms_scratch_kv": scratch_raw in ("1", "true", "yes") if is_gms else False,
+            "gms_pythonpath": penv.get("RSIBOX_GMS_PYTHONPATH", "") if is_gms else "",
+            "kvplan": "" if wcls == KVPLAN_WORKER else None,
             "fork": False, "zygote": "",
         },
     }
@@ -714,10 +927,16 @@ def _launch_process(launcher_args, vllm_argv, parsed_vllm, env, preflight_report
 def start(a, vargv):
     """Launch the server; return {"pid", "cmd", "t_launch", "port", "vllm_args", ...} or exit 2."""
     env = engine_env(a)
+    if (not getattr(a, "weights_backend", "")
+            and not getattr(a, "weights", False)
+            and _flag_value(vargv, "--load-format") == GMS_VLLM_LOAD_FORMAT):
+        _apply_gms_env(a, env)
     if a.zygote and a.zygote_check:
         reply = zygote.check(a.zygote, env, accept=_accept(a))
         _exit_json({"zygote_check": reply}, code=0 if reply.get("ok") else 2)
     v = read_vllm_args(a, vargv, env)
+    if weights_backend(a, v) == "dynamo_gms":
+        _apply_gms_env(a, env)
     found, pre = argv_findings(a, v), {}
     if not found:
         found, pre = preflight(a, v, env)
@@ -731,23 +950,77 @@ def start(a, vargv):
 
 _INHERIT_FLAGS = (
     ("--vllm", "vllm", False),
-    ("--weights", "weights", True),
-    ("--weights-socket-dir", "weights_socket_dir", False),
     ("--fork", "fork", True),
     ("--zygote", "zygote", False),
 )
+
+_GMS_INHERIT_FLAGS = (
+    ("--gms-socket-dir", "gms_socket_dir", False),
+    ("--gms-read-only", "gms_read_only", True),
+    ("--gms-scratch-kv", "gms_scratch_kv", True),
+    ("--gms-pythonpath", "gms_pythonpath", False),
+)
+
+
+def _has_cli_flag(tokens, flag):
+    return any(tok == flag or tok.startswith(flag + "=") for tok in tokens)
 
 
 def _inherit_launcher(launcher_args, saved_launcher, raw_argv):
     """Inherit launcher flags from the running engine's recorded state when not passed on CLI."""
     if not saved_launcher:
         return
+    tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
+    explicit_wb = _has_cli_flag(tokens, "--weights-backend")
+    explicit_w = _has_cli_flag(tokens, "--weights")
+    if not explicit_wb and not explicit_w:
+        if saved_launcher.get("weights"):
+            launcher_args.weights = True
+        if saved_launcher.get("weights_backend"):
+            launcher_args.weights_backend = saved_launcher["weights_backend"]
     for flag, attr, is_bool in _INHERIT_FLAGS:
-        if flag not in raw_argv and saved_launcher.get(attr):
+        if not _has_cli_flag(tokens, flag) and saved_launcher.get(attr):
             setattr(launcher_args, attr, True if is_bool else saved_launcher[attr])
-    if (not any(tok == "--kvplan" or tok.startswith("--kvplan=") for tok in raw_argv)
-            and saved_launcher.get("kvplan") is not None):
+    resolved_wb = weights_backend(launcher_args)
+    if (not _has_cli_flag(tokens, "--weights-socket-dir")
+            and saved_launcher.get("weights_socket_dir")
+            and (resolved_wb == "ipc_cache" or (resolved_wb == "none" and not explicit_wb and not explicit_w))):
+        launcher_args.weights_socket_dir = saved_launcher["weights_socket_dir"]
+    if resolved_wb == "dynamo_gms" or (resolved_wb == "none" and not explicit_wb and not explicit_w):
+        for flag, attr, is_bool in _GMS_INHERIT_FLAGS:
+            if not _has_cli_flag(tokens, flag) and saved_launcher.get(attr):
+                setattr(launcher_args, attr, True if is_bool else saved_launcher[attr])
+    if (not _has_cli_flag(tokens, "--kvplan")
+            and saved_launcher.get("kvplan") is not None
+            and resolved_wb != "dynamo_gms"):
         launcher_args.kvplan = saved_launcher["kvplan"]
+
+
+def _launcher_backend_signature(launcher_obj, parsed_vllm=None):
+    """Normalized weights/GMS/kvplan tuple to detect launcher-only `reconfigure` deltas."""
+    if isinstance(launcher_obj, dict):
+        ns = argparse.Namespace(
+            weights=bool(launcher_obj.get("weights", False)),
+            weights_backend=launcher_obj.get("weights_backend", ""),
+            weights_socket_dir=launcher_obj.get("weights_socket_dir", ""),
+            gms_socket_dir=launcher_obj.get("gms_socket_dir", ""),
+            gms_read_only=bool(launcher_obj.get("gms_read_only", False)),
+            gms_scratch_kv=bool(launcher_obj.get("gms_scratch_kv", False)),
+            gms_pythonpath=launcher_obj.get("gms_pythonpath", ""),
+            kvplan=launcher_obj.get("kvplan"),
+        )
+    else:
+        ns = launcher_obj
+    wb = weights_backend(ns, parsed_vllm)
+    return (
+        wb,
+        (getattr(ns, "weights_socket_dir", "") or "") if wb == "ipc_cache" else "",
+        gms_store(ns).socket_dir if wb == "dynamo_gms" else "",
+        bool(getattr(ns, "gms_read_only", False)) if wb == "dynamo_gms" else False,
+        bool(getattr(ns, "gms_scratch_kv", False)) if wb == "dynamo_gms" else False,
+        (getattr(ns, "gms_pythonpath", "") or "") if wb == "dynamo_gms" else "",
+        getattr(ns, "kvplan", None),
+    )
 
 
 LIVE_ACK_TIMEOUT_S = 15.0
@@ -897,6 +1170,16 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     if not old_parsed or not old_parsed.get("ok"):
         old_parsed = read_vllm_args(launcher_args, old_vargv, env)
     new_parsed = read_vllm_args(launcher_args, new_vargv, env)
+    cli_tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
+    if weights_backend(launcher_args, new_parsed) == "dynamo_gms":
+        if not _has_cli_flag(cli_tokens, "--kvplan"):
+            launcher_args.kvplan = None
+        _apply_gms_env(launcher_args, env)
+    launcher_changed = (
+        bool(state.get("launcher"))
+        and _launcher_backend_signature(state["launcher"], old_parsed)
+        != _launcher_backend_signature(launcher_args, new_parsed)
+    )
     reconfig = vllm_args.classify_reconfig(old_parsed, new_parsed) if (old_parsed.get("ok") and new_parsed.get("ok")) else None
     findings, preflight_report = argv_findings(launcher_args, new_parsed), {}
     if not findings and new_parsed.get("ok"):
@@ -912,11 +1195,12 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                     **({"reconfig": reconfig} if reconfig else {}), "note": "not started; old engine left running"})
     old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
     new_port = new_parsed["args"]["port"]
-    if reconfig is not None and reconfig.get("tier") == "noop":
+    if reconfig is not None and reconfig.get("tier") == "noop" and not launcher_changed:
         _exit_json({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                     "pid": launcher_args.pid, "note": "nothing changed"}, code=0)
     live_values, live_reason = (
         (None, "the weight key changes (holder reshard)") if reshard
+        else (None, "launcher weights/GMS settings changed") if launcher_changed
         else (None, "--reconfigure-restart given") if getattr(launcher_args, "reconfigure_restart", False)
         else (None, "the port changes") if new_port != old_port
         else live_reconfig_plan(state, reconfig)
@@ -1060,7 +1344,12 @@ def launcher_parser():
         ("--log", dict(required=True, help="the server's log file")),
         ("--vllm", dict(default="vllm", help="start: the vllm executable")),
         ("--weights", dict(action="store_true", help="start: map weights held by weights.py (--load-format ipc_cache, no disk fallback)")),
+        ("--weights-backend", dict(choices=["", "none", "ipc_cache", "dynamo_gms"], default="", help="start: pluggable resident weights backend (default: ipc_cache with --weights, else none)")),
         ("--weights-socket-dir", dict(default="", help="daemon --socket-dir (default: vLLM's default folder)")),
+        ("--gms-socket-dir", dict(default="", help="dynamo_gms: GMS_SOCKET_DIR holding gms_<uuid>_{weights,kv_cache}.sock")),
+        ("--gms-read-only", dict(action="store_true", help="dynamo_gms: force RO lock mode (gms_read_only=true; attach committed GMS weights only)")),
+        ("--gms-scratch-kv", dict(action="store_true", help="dynamo_gms: set DYN_GMS_SCRATCH_KV_ENABLED=1 for low-VRAM colocated shadow/standby workers")),
+        ("--gms-pythonpath", dict(default="", help="dynamo_gms: optional extra PYTHONPATH entry containing gpu_memory_service")),
         ("--weights-accept-missing", dict(action="store_true", help="start: launch although no daemon answers")),
         ("--weights-accept-reconfig", dict(action="store_true", help="reconfigure: proceed with ipc_cache across a Tier-2 WeightCacheKey change")),
         ("--reconfigure-restart", dict(action="store_true", help="reconfigure: force a warm restart even for live fields")),
