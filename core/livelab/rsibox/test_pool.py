@@ -8,6 +8,7 @@ Run from the repository root:
 """
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from kernel import coordinator as kernel_coordinator
 from kernel import toy as kernel_toy
@@ -24,6 +26,7 @@ from kernel import toy_lab
 from rsibox import (
     BaseLab,
     PoolClosedError,
+    PoolError,
     PoolSlot,
     PoolTimeoutError,
     SandboxPool,
@@ -132,6 +135,17 @@ class SandboxPoolTests(unittest.TestCase):
         lab = toy_lab.ToyLab(ranks=2, check_timeout=2.0, hang_s=0.5)
         self.addCleanup(lab.close)
         return lab
+
+    def _wait_for_waiters(self, pool: SandboxPool, expected_count: int, timeout_s: float = 2.0) -> None:
+        deadline = time.monotonic() + timeout_s
+        observed = 0
+        while time.monotonic() < deadline:
+            with pool._lock:
+                observed = len(pool._waiters)
+            if observed >= expected_count:
+                return
+            time.sleep(0.002)
+        self.fail(f"expected at least {expected_count} waiter(s), observed {observed}")
 
     def test_eight_concurrent_agents_on_two_toylabs_zero_cross_agent_leakage(self):
         """Pain point: Agent A leaves stacked edits and dirty cache on a warm slot; Agent B
@@ -402,9 +416,7 @@ class SandboxPoolTests(unittest.TestCase):
             thread = threading.Thread(target=queued_worker, args=(f"eval-{index}",))
             thread.start()
             waiter_threads.append(thread)
-            deadline = time.monotonic() + 2.0
-            while len(pool._waiters) < index and time.monotonic() < deadline:
-                time.sleep(0.002)
+            self._wait_for_waiters(pool, index)
         first_lease.release()
         for thread in waiter_threads:
             thread.join(timeout=10.0)
@@ -470,23 +482,15 @@ class SandboxPoolTests(unittest.TestCase):
 
             waiter_thread = threading.Thread(target=queued_acquire)
             waiter_thread.start()
-            deadline = time.monotonic() + 2.0
-            while not pool._waiters and time.monotonic() < deadline:
-                time.sleep(0.002)
-            # Advance clock 1.0s while agent-c-waiter is queued, then release holder (cleanup adds 0.5s -> queue_wait=1.5s).
+            self._wait_for_waiters(pool, 1)
+            # Advance clock 1.0s while agent-c-waiter is queued; holder cleanup adds 0.5s -> queue_wait_s=1.5s.
             fake_clock.advance(1.0)
             fake_wall_clock.advance(1.0)
             holder.release()
             waiter_thread.join(timeout=5.0)
             self.assertFalse(waiter_thread.is_alive())
 
-            # Idle gap of 1.5s: total elapsed = 2.0+0.5 (L1) + 1.0+3.0 (L2) + 1.0+0.5 (L3a) + 1.5+0.5 (L3b) = 10.0s!
-            # Wait: check exact elapsed:
-            # L1: hold 2.0 + cleanup 0.5 = 2.5 (slot-0)
-            # L2: hold 1.0 + recovery 3.0 = 4.0 (slot-1)
-            # L3a: hold 1.0 + cleanup 0.5 = 1.5 (slot-0)
-            # L3b: hold 1.5 + cleanup 0.5 = 2.0 (slot-0), queued for 1.0 + 0.5 = 1.5s
-            # Total elapsed = 2.5 + 4.0 + 1.5 + 2.0 = 10.0s!
+            # Total elapsed = 2.5 (L1) + 4.0 (L2) + 1.5 (L3a) + 2.0 (L3b) = 10.0s.
             verified = verify_trace(trace_path)
             self.assertTrue(verified["ok"], verified)
             self.assertEqual(verified["count"], 4)
@@ -593,9 +597,7 @@ class SandboxPoolTests(unittest.TestCase):
 
         waiter_thread = threading.Thread(target=blocked_waiter)
         waiter_thread.start()
-        deadline = time.monotonic() + 2.0
-        while not pool._waiters and time.monotonic() < deadline:
-            time.sleep(0.002)
+        self._wait_for_waiters(pool, 1)
 
         healthy_lab.inject("crash")
         healthy_lab.check()
@@ -659,9 +661,7 @@ class SandboxPoolTests(unittest.TestCase):
             target=lambda: self._capture_error(lambda: pool.acquire("waiter", role="eval"), closed_errors)
         )
         waiter.start()
-        deadline = time.monotonic() + 2.0
-        while not pool._waiters and time.monotonic() < deadline:
-            time.sleep(0.002)
+        self._wait_for_waiters(pool, 1)
         pool.close()
         waiter.join(timeout=5.0)
         held.release()
@@ -689,6 +689,423 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertEqual(outcome["slot_id"], "healthy-1")
         self.assertTrue(slot_zero.quarantined)
         self.assertEqual(pool.metrics()["quarantined_slots"], ["broken-0"])
+
+    def test_trace_write_failure_does_not_double_release_or_corrupt_next_owner(self):
+        """Regression for P0-1: OSError in `_append_trace()` must still return the slot once,
+        must never double-clean or double-count metrics, and must not corrupt the queued owner."""
+        slot_lab = self._make_toy_lab()
+        reset_state_calls = 0
+        original_reset = slot_lab.reset
+
+        def counting_reset(kind: str = "state"):
+            nonlocal reset_state_calls
+            if kind == "state":
+                reset_state_calls += 1
+            return original_reset(kind)
+
+        slot_lab.reset = counting_reset
+
+        with tempfile.TemporaryDirectory(prefix="rsibox-trace-dir-") as trace_dir:
+            # Pointing trace_path at a directory forces IsADirectoryError on _append_trace().
+            pool = SandboxPool([PoolSlot("slot-0", slot_lab)], trace_path=trace_dir)
+            self.addCleanup(pool.close)
+
+            second_acquired = threading.Event()
+            allow_second_release = threading.Event()
+            second_outcome: dict = {}
+
+            def second_agent() -> None:
+                second_lease = pool.acquire("agent-2", timeout_s=5.0)
+                second_acquired.set()
+                try:
+                    installed = second_lease.lab.install(
+                        _patch_activate_offset(second_lease.lab.base_text["toy.ops"], offset=13)
+                    )
+                    self.assertTrue(installed["ok"], installed)
+                    allow_second_release.wait(timeout=5.0)
+                    checked = second_lease.lab.check()
+                    second_outcome["proven"] = checked["proven"]
+                    second_outcome["output"] = checked["output"]
+                finally:
+                    with contextlib.suppress(OSError):
+                        second_lease.release()
+
+            waiter_thread = threading.Thread(target=second_agent)
+            captured_first_lease = None
+            with self.assertRaises(OSError):
+                with pool.lease("agent-1") as first_lease:
+                    captured_first_lease = first_lease
+                    first_lease.lab.install(
+                        _patch_activate_offset(first_lease.lab.base_text["toy.ops"], offset=5)
+                    )
+                    waiter_thread.start()
+                    self._wait_for_waiters(pool, 1)
+
+            # First acquire cleaned dirty initial state (1) + first release cleaned once (2).
+            self.assertEqual(reset_state_calls, 2)
+            self.assertTrue(second_acquired.wait(timeout=5.0))
+            self.assertEqual(pool.metrics()["total_leases"], 1)
+
+            # Duplicate release on first_lease re-raises the saved OSError without touching slot-0!
+            with self.assertRaises(OSError):
+                captured_first_lease.release()
+            self.assertEqual(reset_state_calls, 2)
+            self.assertEqual(pool.metrics()["total_leases"], 1)
+
+            allow_second_release.set()
+            waiter_thread.join(timeout=5.0)
+            self.assertFalse(waiter_thread.is_alive())
+            self.assertTrue(second_outcome["proven"])
+            self.assertEqual(second_outcome["output"], _expected_toy_output(slot_lab.ranks, offset=13))
+            self.assertEqual(reset_state_calls, 3)
+            self.assertEqual(pool.metrics()["total_leases"], 2)
+
+    def test_infinite_and_huge_timeouts_and_base_exception_cleanup_leak_zero_slots(self):
+        """Regression for P0-2: inf/huge timeouts never raise OverflowError, NaN raises ValueError,
+        and BaseException/clock failure during wait or acquire leaks zero waiters or slots."""
+        slot_lab = self._make_toy_lab()
+        pool = SandboxPool([PoolSlot("slot-0", slot_lab)])
+        self.addCleanup(pool.close)
+
+        with self.assertRaises(ValueError):
+            pool.acquire("agent-nan", timeout_s=float("nan"))
+
+        # Huge and infinite timeouts work cleanly on queued handoff.
+        holder = pool.acquire("holder")
+        acquired_slots: list[str] = []
+
+        def infinite_waiter() -> None:
+            with pool.lease("inf-agent", timeout_s=float("inf")) as leased:
+                acquired_slots.append(leased.slot_id)
+
+        def huge_timeout_waiter() -> None:
+            with pool.lease("huge-agent", timeout_s=1e20) as leased:
+                acquired_slots.append(leased.slot_id)
+
+        thread_one = threading.Thread(target=infinite_waiter)
+        thread_two = threading.Thread(target=huge_timeout_waiter)
+        thread_one.start()
+        self._wait_for_waiters(pool, 1)
+        thread_two.start()
+        self._wait_for_waiters(pool, 2)
+        holder.release()
+        thread_one.join(timeout=5.0)
+        thread_two.join(timeout=5.0)
+        self.assertEqual(acquired_slots, ["slot-0", "slot-0"])
+
+        # Simulate KeyboardInterrupt inside waiter.event.wait() BOTH before and after handoff.
+        from rsibox import pool as pool_module
+
+        held = pool.acquire("holder-2")
+        real_waiter_cls = pool_module._Waiter
+
+        # Case A: interrupt while still waiting (no slot assigned yet) -> waiter removed, zero leaks.
+        def interrupting_waiter_unassigned(role):
+            waiter = real_waiter_cls(role)
+            waiter.event.wait = lambda timeout=None: (_ for _ in ()).throw(
+                KeyboardInterrupt("interrupt before handoff")
+            )
+            return waiter
+
+        with mock.patch.object(pool_module, "_Waiter", side_effect=interrupting_waiter_unassigned):
+            with self.assertRaises(KeyboardInterrupt):
+                pool.acquire("interrupted-unassigned", timeout_s=5.0)
+        with pool._lock:
+            self.assertEqual(len(pool._waiters), 0)
+
+        # Case B: interrupt right AFTER holder hands off slot -> assigned slot returned cleanly!
+        interrupted_errors: list[BaseException] = []
+
+        def interrupting_waiter_after_handoff(role):
+            waiter = real_waiter_cls(role)
+            real_wait = waiter.event.wait
+
+            def wait_then_interrupt(timeout=None):
+                real_wait(timeout=timeout)
+                raise KeyboardInterrupt("interrupt after handoff")
+
+            waiter.event.wait = wait_then_interrupt
+            return waiter
+
+        with mock.patch.object(pool_module, "_Waiter", side_effect=interrupting_waiter_after_handoff):
+            wait_thread = threading.Thread(
+                target=lambda: self._capture_error(
+                    lambda: pool.acquire("interrupted-after-handoff", timeout_s=5.0),
+                    interrupted_errors,
+                )
+            )
+            wait_thread.start()
+            self._wait_for_waiters(pool, 1)
+            held.release()
+            wait_thread.join(timeout=5.0)
+            self.assertFalse(wait_thread.is_alive())
+
+        self.assertEqual(len(interrupted_errors), 1)
+        self.assertIsInstance(interrupted_errors[0], KeyboardInterrupt)
+        with pool._lock:
+            self.assertEqual(len(pool._waiters), 0)
+        with pool.lease("post-interrupt", timeout_s=1.0) as clean_lease:
+            self.assertEqual(clean_lease.slot_id, "slot-0")
+
+        # Failing custom clock right after _claim_slot() must NOT leak slot_state.in_use=True.
+        call_counter = [0]
+
+        def flaky_clock() -> float:
+            call_counter[0] += 1
+            if call_counter[0] == 4:
+                raise RuntimeError("clock failed after claim")
+            return float(call_counter[0])
+
+        flaky_pool = SandboxPool([PoolSlot("slot-flaky", slot_lab)], clock=flaky_clock)
+        self.addCleanup(flaky_pool.close)
+        with self.assertRaises(RuntimeError):
+            flaky_pool.acquire("flaky-caller")
+        with flaky_pool.lease("recovery-caller", timeout_s=1.0) as recovered_lease:
+            self.assertEqual(recovered_lease.slot_id, "slot-flaky")
+
+    def test_close_races_with_handoff_and_is_idempotent_with_close_labs(self):
+        """Regression for P1-1: close(close_labs=True) closes every lab at most once, is not
+        undone by a later close(close_labs=False), and never grants a lease after close()."""
+        idle_lab = self._make_toy_lab()
+        busy_lab = self._make_toy_lab()
+        close_counts = {"idle": 0, "busy": 0}
+        orig_idle_close, orig_busy_close = idle_lab.close, busy_lab.close
+
+        def spy_idle_close():
+            close_counts["idle"] += 1
+            orig_idle_close()
+
+        def spy_busy_close():
+            close_counts["busy"] += 1
+            orig_busy_close()
+
+        idle_lab.close = spy_idle_close
+        busy_lab.close = spy_busy_close
+
+        pool = SandboxPool(
+            [PoolSlot("busy-0", busy_lab), PoolSlot("idle-1", idle_lab)],
+            close_labs=False,
+        )
+        busy_lease = pool.acquire("holder")
+        self.assertEqual(busy_lease.slot_id, "busy-0")
+
+        # First close(close_labs=True) closes idle-1 once; second close(close_labs=False) must NOT
+        # double-close idle-1 OR prevent busy-0 from closing on release.
+        pool.close(close_labs=True)
+        pool.close(close_labs=False)
+        pool.close(close_labs=True)
+        self.assertEqual(close_counts, {"idle": 1, "busy": 0})
+        busy_lease.release()
+        self.assertEqual(close_counts, {"idle": 1, "busy": 1})
+
+        # Race: close(close_labs=True) called while acquire() is inside pre-acquire status().
+        race_lab = self._make_toy_lab()
+        race_closes = [0]
+        orig_race_close = race_lab.close
+        race_lab.close = lambda: (race_closes.__setitem__(0, race_closes[0] + 1), orig_race_close())[1]
+        entered_status = threading.Event()
+        allow_status_finish = threading.Event()
+        orig_status = race_lab.status
+
+        def slow_status():
+            if not entered_status.is_set():
+                entered_status.set()
+                allow_status_finish.wait(timeout=5.0)
+            return orig_status()
+
+        race_lab.status = slow_status
+        race_pool = SandboxPool([PoolSlot("race-0", race_lab)], close_labs=True)
+        race_errors: list[BaseException] = []
+        acquire_thread = threading.Thread(
+            target=lambda: self._capture_error(lambda: race_pool.acquire("racer"), race_errors)
+        )
+        acquire_thread.start()
+        self.assertTrue(entered_status.wait(timeout=5.0))
+        race_pool.close(close_labs=True)
+        allow_status_finish.set()
+        acquire_thread.join(timeout=5.0)
+        self.assertEqual(len(race_errors), 1)
+        self.assertIsInstance(race_errors[0], PoolClosedError)
+        self.assertEqual(race_closes[0], 1)
+
+    def test_fenced_lease_proxy_blocks_post_release_access_and_first_acquire_cleans_cache(self):
+        """Regression for P1-2: initial acquire cleans pre-existing engine cache, and any stale
+        reference or pre-bound method on `lease.lab` raises `PoolError` after `release()`."""
+        slot_lab = self._make_toy_lab()
+        slot_lab.engines["rank0"].cache["preexisting_stale"] = "dirty"
+        pool = SandboxPool([PoolSlot("slot-0", slot_lab)])
+        self.addCleanup(pool.close)
+
+        first_lease = pool.acquire("agent-1")
+        self.assertEqual(first_lease.lab.engines["rank0"].cache, {})
+        with self.assertRaises(PoolError):
+            first_lease.lab.close()
+
+        stale_lab_ref = first_lease.lab
+        stale_check_method = first_lease.lab.check
+        first_lease.release()
+
+        # Post-release access via stale lab ref or pre-bound method must fail closed with PoolError.
+        with self.assertRaises(PoolError):
+            stale_lab_ref.status()
+        with self.assertRaises(PoolError):
+            stale_lab_ref.install(_patch_activate_offset(slot_lab.base_text["toy.ops"], offset=8))
+        with self.assertRaises(PoolError):
+            stale_check_method()
+        with self.assertRaises(PoolError):
+            _ = stale_lab_ref.base_text
+        with self.assertRaises(PoolError):
+            stale_lab_ref.custom_flag = True
+
+        # Next agent's lease on the same slot remains completely unaffected.
+        with pool.lease("agent-2") as second_lease:
+            self.assertEqual(second_lease.lab.status()["state"], "base")
+            self.assertTrue(second_lease.lab.check()["ok"])
+
+    def test_multi_writer_shared_trace_chain_and_expected_head_truncation_detection(self):
+        """Regression for P1-3: two independent SandboxPool instances writing concurrently to
+        the same trace_path produce a valid unbroken chain, and expected_head catches truncation."""
+        lab_a = self._make_toy_lab()
+        lab_b = self._make_toy_lab()
+
+        with tempfile.TemporaryDirectory(prefix="rsibox-shared-trace-") as temp_dir:
+            trace_path = os.path.join(temp_dir, "shared.jsonl")
+            pool_a = SandboxPool([PoolSlot("pool-a-0", lab_a)], trace_path=trace_path)
+            pool_b = SandboxPool([PoolSlot("pool-b-0", lab_b)], trace_path=trace_path)
+            self.addCleanup(pool_a.close)
+            self.addCleanup(pool_b.close)
+
+            barrier = threading.Barrier(8)
+
+            def worker(target_pool: SandboxPool, worker_name: str) -> None:
+                barrier.wait(timeout=10.0)
+                outcome = target_pool.run_isolated(worker_name, lambda lab, lease: lab.check()["ok"])
+                self.assertTrue(outcome["ok"], outcome)
+
+            threads = [
+                threading.Thread(
+                    target=worker,
+                    args=(pool_a if index < 4 else pool_b, f"multi-agent-{index}"),
+                )
+                for index in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15.0)
+                self.assertFalse(thread.is_alive())
+
+            verified = verify_trace(trace_path)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(verified["count"], 8)
+            self.assertEqual([entry["seq"] for entry in verified["records"]], list(range(1, 9)))
+
+            # Verify expected_head matches live head and detects tail truncation.
+            saved_head = verified["head"]
+            self.assertTrue(verify_trace(trace_path, expected_head=saved_head)["ok"])
+            with open(trace_path, encoding="utf-8") as handle:
+                lines = handle.readlines()
+            with open(trace_path, "w", encoding="utf-8") as handle:
+                handle.writelines(lines[:-1])
+            self.assertTrue(verify_trace(trace_path)["ok"])
+            truncated_check = verify_trace(trace_path, expected_head=saved_head)
+            self.assertFalse(truncated_check["ok"])
+            self.assertIn("trace head mismatch", truncated_check["error"])
+
+    def test_verify_trace_rejects_malformed_json_bool_seq_reordered_and_pool_fails_closed(self):
+        """Regression for P1-4: verify_trace rejects non-dict JSON, bool seq, syntax errors,
+        deletions, and reorders; SandboxPool resumes valid traces and fails closed on corrupt ones."""
+        slot_lab = self._make_toy_lab()
+        with tempfile.TemporaryDirectory(prefix="rsibox-malformed-trace-") as temp_dir:
+            trace_path = os.path.join(temp_dir, "trace.jsonl")
+
+            # Write 3 valid records, then resume in a second pool instance and append a 4th.
+            pool_one = SandboxPool([PoolSlot("slot-0", slot_lab)], trace_path=trace_path)
+            for index in range(3):
+                self.assertTrue(pool_one.run_isolated(f"a-{index}", lambda lab, lease: True)["ok"])
+            pool_one.close()
+
+            pool_two = SandboxPool([PoolSlot("slot-0", slot_lab)], trace_path=trace_path)
+            self.assertTrue(pool_two.run_isolated("a-3", lambda lab, lease: True)["ok"])
+            expected_head = pool_two.metrics()["trace_head"]
+            pool_two.close()
+            resumed = verify_trace(trace_path, expected_head=expected_head)
+            self.assertTrue(resumed["ok"], resumed)
+            self.assertEqual(resumed["count"], 4)
+
+            with open(trace_path, encoding="utf-8") as handle:
+                valid_lines = handle.readlines()
+
+            # Non-dict JSON lines must return ok=False without raising AttributeError.
+            for bad_payload in ("[]\n", "123\n", "null\n", '"text"\n'):
+                bad_path = os.path.join(temp_dir, "non_dict.jsonl")
+                with open(bad_path, "w", encoding="utf-8") as handle:
+                    handle.write(bad_payload)
+                result = verify_trace(bad_path)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["line"], 1)
+
+            # Boolean seq (True == 1 in Python) must be rejected.
+            bool_record = json.loads(valid_lines[0])
+            bool_record["seq"] = True
+            bool_path = os.path.join(temp_dir, "bool_seq.jsonl")
+            with open(bool_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(bool_record) + "\n")
+            self.assertFalse(verify_trace(bool_path)["ok"])
+
+            # Deleted middle line and swapped lines must fail verification.
+            deleted_path = os.path.join(temp_dir, "deleted.jsonl")
+            with open(deleted_path, "w", encoding="utf-8") as handle:
+                handle.writelines([valid_lines[0], valid_lines[2], valid_lines[3]])
+            self.assertFalse(verify_trace(deleted_path)["ok"])
+
+            swapped_path = os.path.join(temp_dir, "swapped.jsonl")
+            with open(swapped_path, "w", encoding="utf-8") as handle:
+                handle.writelines([valid_lines[1], valid_lines[0]])
+            self.assertFalse(verify_trace(swapped_path)["ok"])
+
+            # Malformed JSON reports line number and causes SandboxPool.__init__ to fail closed.
+            corrupt_path = os.path.join(temp_dir, "corrupt.jsonl")
+            with open(corrupt_path, "w", encoding="utf-8") as handle:
+                handle.write(valid_lines[0] + "{not valid json\n")
+            corrupt_check = verify_trace(corrupt_path)
+            self.assertFalse(corrupt_check["ok"])
+            self.assertEqual(corrupt_check["line"], 2)
+            with self.assertRaises(PoolError):
+                SandboxPool([PoolSlot("slot-0", slot_lab)], trace_path=corrupt_path)
+
+    def test_pool_slot_rejects_non_ready_box_states_and_forwards_receipts(self):
+        """Regression for P1-5: PoolSlot rejects booting/failed/closed Boxes cleanly instead of
+        mistaking a booting engine for a poisoned worker, and forwards ready Box receipts."""
+        booting_box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        self.assertEqual(booting_box.state, "booting")
+        with self.assertRaises(ValueError):
+            PoolSlot("booting-0", booting_box)
+
+        failed_box = Box(lambda receipts=None: (_ for _ in ()).throw(RuntimeError("boot failed")), spec="toy")
+        failed_box.boot()
+        self.assertEqual(failed_box.state, "failed")
+        with self.assertRaises(ValueError):
+            PoolSlot("failed-0", failed_box)
+
+        with tempfile.TemporaryDirectory(prefix="rsibox-ready-box-") as state_dir:
+            ready_box = Box(
+                lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts),
+                spec="toy",
+                state_dir=state_dir,
+            )
+            ready_box.boot()
+            self.addCleanup(ready_box.close)
+            pool = SandboxPool([PoolSlot("ready-0", ready_box)])
+            self.addCleanup(pool.close)
+            with pool.lease("box-agent") as leased:
+                receipts_reply = leased.lab.receipts()
+                self.assertTrue(receipts_reply["ok"])
+                self.assertIsInstance(receipts_reply["receipts"], list)
+
+            ready_box.close()
+            with self.assertRaises(ValueError):
+                PoolSlot("closed-0", ready_box)
 
     @staticmethod
     def _capture_error(callable_fn, bucket: list[BaseException]) -> None:

@@ -60,13 +60,7 @@ from .ipc import (
 )
 from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
 from .pool import (
-    PoolClosedError,
-    PoolError,
-    PoolSlot,
-    PoolTimeoutError,
-    SandboxPool,
-    SlotLease,
-    verify_trace,
+    PoolClosedError, PoolError, PoolSlot, PoolTimeoutError, SandboxPool, SlotLease, verify_trace,
 )
 from .proc import (
     descendants,
