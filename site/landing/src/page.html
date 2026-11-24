@@ -106,10 +106,10 @@ Show me the result, then walk me through one install, check and uninstall on the
             <li><b>Live config &amp; R0 code swap</b><span>3.7&ndash;92 ms</span></li>
             <li><b>Selective R1 CUDA graph recapture</b><span>0.6&ndash;3.7 s</span></li>
             <li><b>Dynamo GMS shadow promotion</b><span>0.31&ndash;1.86 s</span></li>
-            <li><b>Dynamo GMS + Snapshot (CRIU) restore</b><span>3.6&ndash;7.0 s</span></li>
-            <li><b>Warm-JIT or cold-JIT restart</b><span>35&ndash;1,840 s</span></li>
+            <li><b>Dynamo Snapshot (CRIU) restore</b><span>2.7&ndash;7.0 s</span></li>
+            <li><b>Warm-JIT or cold-JIT restart</b><span>11&ndash;1,840 s</span></li>
           </ol>
-          <p>If an edit fails its check, rsibox rolls it back in place. When a change crashes a rank or crosses a process boundary, rsibox composes with NVIDIA Dynamo GMS and Snapshot (CRIU + <code>cuda-checkpoint</code>) for sub-second to few-second recovery on NVIDIA B200 (1.5 GB to 491 GiB TP4), then resumes millisecond live edits.</p>
+          <p>If an edit fails its check, rsibox rolls it back in place. When a change crashes a rank or crosses a process boundary, rsibox composes with NVIDIA Dynamo GMS and Snapshot (CRIU + <code>cuda-checkpoint</code>) for sub-second to few-second recovery across vLLM, SGLang, and TensorRT-LLM on NVIDIA B200 (1.5 GB to 491 GiB TP4), then resumes millisecond live edits.</p>
         </article>
         <article class="st-step" data-scene="probe">
           <p class="st-kicker">How rsibox fixes measurement</p>
