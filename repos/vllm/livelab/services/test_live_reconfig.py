@@ -499,7 +499,8 @@ def test_core_hook_refuses_duplicate_control_dir(tmp_path, capsys):
 
 
 def _start_local_live_agent(tmp_path, monkeypatch, *, api_pid, boot_seqs=128,
-                            boot_tokens=4096, max_model_len=4096, chunked_prefill=True):
+                            boot_tokens=4096, max_model_len=4096, chunked_prefill=True,
+                            before_job_hook=None):
     """Run a real live_reconfig.Agent + core_hook._ChannelMux on local background threads."""
     import enum
     import os
@@ -581,6 +582,8 @@ def _start_local_live_agent(tmp_path, monkeypatch, *, api_pid, boot_seqs=128,
             if tag == "STOP":
                 break
             if tag == live_reconfig.TAG:
+                if before_job_hook is not None:
+                    before_job_hook()
                 payload.run()
 
     loop_thread = threading.Thread(target=busy_loop, daemon=True)
@@ -756,6 +759,10 @@ def test_live_fast_path_parse_and_synthesize_match_full_parser_parity():
     stub_parse = lambda argv: vllm_args.parse(argv, parser)
 
     cases = (
+        (
+            ["Qwen/Qwen3-8B", "--port", "8123"],
+            ["--max-num-seqs", "32"],
+        ),
         (
             ["Qwen/Qwen3-8B", "--port", "8123", "--max-num-seqs", "128"],
             ["--max-num-seqs=32"],
@@ -952,10 +959,10 @@ def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_re
             launcher_args, patch_vargv = engine.parse(raw_argv)
             if expect_reason_substr is None:
                 # Corrupt non-int boot fails closed in fast path without crashing; restore valid boot for slow path check.
-                report_fast, failure_fast, reconciled_fast = engine._try_fast_live_reconfigure(
+                fast_outcome = engine._try_fast_live_reconfigure(
                     launcher_args, engine.load_engine_state(cache_root, api_pid), patch_vargv, raw_argv
                 )
-                assert (report_fast, failure_fast, reconciled_fast) == (None, None, None)
+                assert fast_outcome == (None, None, None, False)
             else:
                 report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
                 assert len(parser_calls) == 1, mutated_ready
@@ -973,7 +980,7 @@ def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_re
         ])
         assert engine._try_fast_live_reconfigure(
             launcher_args, legacy_state, patch_vargv, []
-        ) == (None, None, None)
+        ) == (None, None, None, False)
 
         ready_path.unlink()
         parser_calls.clear()
@@ -1017,6 +1024,14 @@ def test_reconfigure_fast_live_failure_reconciles_drift_and_preserves_fallback_r
     )
     stub_parse = test_engine._stub_parser()
     try:
+        # Guard against ever signalling pytest's own pid if a regression reaches restart.
+        monkeypatch.setattr(
+            engine,
+            "stop_engine",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stop_engine must not run in refusal regression test")
+            ),
+        )
         # (a) Preflight failure prevents fast path from touching the live agent at all.
         _seed_engine_state(cache_root, log_path, api_pid, live_dir)
         original_request = live_reconfig.request
@@ -1137,4 +1152,151 @@ def test_reconfigure_fast_live_failure_reconciles_drift_and_preserves_fallback_r
         assert zygote_payload.get("live_reconciled_fields") == {"max_num_seqs": 48}, zygote_payload
         assert engine.load_engine_state(cache_root, api_pid)["vllm_args"]["args"]["max_num_seqs"] == 48
     finally:
+        shutdown()
+
+
+def test_reconfigure_delayed_mux_timeout_marks_uncertain_and_prevents_false_noop(
+    tmp_path, monkeypatch, capsys
+):
+    """P1-1 real delayed-mux proof + P2-1 boot-default baseline proof:
+    1. A real `_ChannelMux` + `Agent` delays handling the first `set` job on the loop thread so
+       both `apply_in_process_reconfig` (`LIVE_ACK_TIMEOUT_S=0.15`) and the follow-up `status`
+       reconciliation probe (`LIVE_STATUS_RECONCILE_TIMEOUT_S=0.15`) time out while the
+       single-threaded mux is still busy.
+    2. Assert `engines/<pid>.json` persists `live_state_uncertain=True` and the exit-2 fallback
+       refusal reports both `live_state_uncertain=True` and `live_fallback_reason`.
+    3. Release the delayed loop so `64` finishes applying late while the state file still says
+       `128` + `live_state_uncertain=True`.
+    4. Run `reconfigure -- --max-num-seqs 128` on the fast path (parser wired to fail): assert
+       it does NOT false-noop, probes `status`, detects drift (`64 != 128`), applies `128` live,
+       clears `live_state_uncertain`, and leaves scheduler + state file both at `128`.
+    5. Verify P2-1: when `old_args["max_num_seqs"]` is `None` (default, not passed at boot) and
+       the scheduler matches `boot["max_num_seqs"]`, `_reconcile_live_state` reports no drift."""
+    import json
+    import os
+    import threading
+    import time
+    import pytest
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import engine
+    import test_engine
+    import vllm_args
+
+    api_pid = os.getpid()
+    cache_root = tmp_path / "cache"
+    log_path = tmp_path / "serve.log"
+    release_first_job = threading.Event()
+    first_job_paused = threading.Event()
+    pause_state = {"armed": True}
+
+    def pause_first_job():
+        if pause_state["armed"]:
+            pause_state["armed"] = False
+            first_job_paused.set()
+            release_first_job.wait(timeout=5.0)
+
+    live_dir, agent, scheduler, shutdown = _start_local_live_agent(
+        tmp_path,
+        monkeypatch,
+        api_pid=api_pid,
+        boot_seqs=128,
+        boot_tokens=4096,
+        before_job_hook=pause_first_job,
+    )
+    try:
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+        monkeypatch.setattr(engine, "LIVE_ACK_TIMEOUT_S", 0.15)
+        monkeypatch.setattr(engine, "LIVE_STATUS_RECONCILE_TIMEOUT_S", 0.15)
+        monkeypatch.setattr(
+            engine,
+            "stop_engine",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stop_engine must not run in delayed-mux test")
+            ),
+        )
+        monkeypatch.setattr(
+            engine,
+            "read_vllm_args",
+            lambda *_args, **_kwargs: {
+                "ok": False,
+                "error": "vLLM's parser is not importable by python",
+                "via": "direct",
+            },
+        )
+
+        # (1) First reconfigure times out while single-threaded mux is blocked in `set`.
+        capsys.readouterr()
+        raw_argv_set = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv_set)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv_set)
+        assert exit_info.value.code == 2
+        assert first_job_paused.is_set(), "real busy loop must have picked up the first set job"
+        timeout_payload = json.loads(capsys.readouterr().out.strip())
+        assert "no reply" in timeout_payload.get("live_fallback_reason", ""), timeout_payload
+        assert timeout_payload.get("live_state_uncertain") is True, timeout_payload
+
+        persisted_uncertain = engine.load_engine_state(cache_root, api_pid)
+        assert persisted_uncertain.get("live_state_uncertain") is True
+        assert persisted_uncertain["vllm_args"]["args"]["max_num_seqs"] == 128
+
+        # (2) Release the delayed engine loop so the late `set(64)` completes on the scheduler.
+        release_first_job.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and agent.target_seqs != 64:
+            time.sleep(0.01)
+        assert agent.target_seqs == 64
+        assert scheduler.max_num_running_reqs == 64
+        # State file still holds stale 128 + live_state_uncertain=True until reconciled.
+        assert engine.load_engine_state(cache_root, api_pid)["vllm_args"]["args"]["max_num_seqs"] == 128
+
+        # (3) Restoring `--max-num-seqs 128` on the fast path must NOT false-noop!
+        monkeypatch.setattr(engine, "LIVE_ACK_TIMEOUT_S", 5.0)
+        monkeypatch.setattr(engine, "LIVE_STATUS_RECONCILE_TIMEOUT_S", 2.0)
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("slow parser must not run when status reconciles uncertain state")
+
+        original_parse = vllm_args.parse
+        monkeypatch.setattr(vllm_args, "parse", fail_if_called)
+        monkeypatch.setattr(engine, "read_vllm_args", fail_if_called)
+
+        raw_argv_restore = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "128",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv_restore)
+        restore_report = engine.reconfigure(launcher_args, patch_vargv, raw_argv_restore)
+        assert restore_report["reconfig"]["path"] == "in_process_live"
+        assert restore_report["vllm_args"]["via"] == "live_fast_path"
+        assert agent.target_seqs == 128
+        assert scheduler.max_num_running_reqs == 128
+
+        persisted_clean = engine.load_engine_state(cache_root, api_pid)
+        assert persisted_clean["vllm_args"]["args"]["max_num_seqs"] == 128
+        assert not persisted_clean.get("live_state_uncertain")
+
+        # (4) P2-1: untouched boot defaults (`None` in old_args matching `boot`) are NOT drift.
+        monkeypatch.setattr(vllm_args, "parse", original_parse)
+        stub_parse = test_engine._stub_parser()
+        default_vargv = ["Qwen/Qwen3-8B", "--port", "8123"]
+        default_parsed = {**stub_parse(default_vargv), "via": "direct"}
+        assert default_parsed["args"]["max_num_seqs"] is None
+        default_state = {
+            **persisted_clean,
+            "vargv": default_vargv,
+            "vllm_args": default_parsed,
+        }
+        status_ok, drifted = engine._reconcile_live_state(
+            launcher_args, default_state, default_parsed, agent.boot, attempted_values={"max_num_seqs": 64}
+        )
+        assert status_ok is True
+        assert drifted is None
+    finally:
+        release_first_job.set()
         shutdown()

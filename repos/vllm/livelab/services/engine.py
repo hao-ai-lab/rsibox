@@ -1190,17 +1190,31 @@ def _valid_live_boot(boot):
     return True
 
 
-def _reconcile_live_state_after_failure(launcher_args, state, old_parsed, attempted_values):
-    """After an ambiguous live apply failure (timeout/lost or read-back mismatch), probe the
-    live agent's scheduler status with a short bounded timeout. When the scheduler's live
-    values differ from `old_parsed`, persist the reconciled state to `engines/<pid>.json`
-    and update `state` in-place so state never silently drifts."""
+def _mark_live_state_uncertain(cache_root, state):
+    """Persist `live_state_uncertain=True` in `engines/<pid>.json` after an ambiguous live
+    timeout whose outcome could not be confirmed via `status`, preventing a future false noop."""
+    state["live_state_uncertain"] = True
+    state_path = _engine_state_path(cache_root, state["pid"])
+    ipc.atomic_write_json(state_path, dict(state))
+
+
+def _reconcile_live_state(
+    launcher_args, state, old_parsed, boot, *, attempted_values=None, clear_uncertain=False
+):
+    """Probe the live agent's scheduler status with a short bounded timeout.
+
+    Returns `(status_ok, drifted_fields)`. When the scheduler's live values differ from
+    `old_parsed` (comparing default `None` fields against `boot` so untouched boot defaults are
+    not reported as drift), persists the reconciled state to `engines/<pid>.json`, updates
+    `state` in-place, and clears `live_state_uncertain`. When `clear_uncertain=True` and
+    `status` confirms no drift, clears `live_state_uncertain` in `engines/<pid>.json`.
+    """
     live_dir = state.get("live_dir")
     if not live_dir:
-        return None
+        return False, None
     status = live_reconfig.request(live_dir, "status", timeout=LIVE_STATUS_RECONCILE_TIMEOUT_S)
     if not isinstance(status, dict) or not status.get("ok"):
-        return None
+        return False, None
     observed = {}
     target_seqs = status.get("target_max_num_seqs")
     if isinstance(target_seqs, int) and not isinstance(target_seqs, bool) and target_seqs >= 1:
@@ -1216,20 +1230,30 @@ def _reconcile_live_state_after_failure(launcher_args, state, old_parsed, attemp
     if scheduling_policy in live_reconfig.SCHEDULING_POLICIES:
         observed["scheduling_policy"] = scheduling_policy
     old_args = old_parsed.get("args") or {}
-    drifted = {
-        field_name: value
-        for field_name, value in observed.items()
-        if old_args.get(field_name) != value
-        and (field_name in attempted_values or old_args.get(field_name) is not None)
-    }
+    boot_limits = boot if isinstance(boot, dict) else {}
+    drifted = {}
+    for field_name, value in observed.items():
+        recorded = old_args.get(field_name)
+        baseline = (
+            recorded
+            if recorded is not None
+            else ("fcfs" if field_name == "scheduling_policy" else boot_limits.get(field_name))
+        )
+        if baseline != value and (
+            attempted_values is None or field_name in attempted_values or recorded is not None
+        ):
+            drifted[field_name] = value
     if not drifted:
-        return None
+        if clear_uncertain and state.get("live_state_uncertain"):
+            state.pop("live_state_uncertain", None)
+            ipc.atomic_write_json(_engine_state_path(launcher_args.cache_root, state["pid"]), dict(state))
+        return True, None
     reconciled_patch = []
     for field_name, value in drifted.items():
         reconciled_patch.extend([f"--{field_name.replace('_', '-')}", str(value)])
     reconciled_values, reconciled_arities = vllm_args.parse_live_patch(reconciled_patch)
     if reconciled_values is None:
-        return drifted
+        return True, drifted
     reconciled_parsed = vllm_args.synthesize_live_parsed(
         old_parsed, reconciled_values, reconciled_arities
     )
@@ -1248,29 +1272,30 @@ def _reconcile_live_state_after_failure(launcher_args, state, old_parsed, attemp
     )
     state["vargv"] = reconciled_vargv
     state["vllm_args"] = reconciled_parsed
-    return drifted
+    state.pop("live_state_uncertain", None)
+    return True, drifted
 
 
 def _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv):
     """Fast stdlib path for `reconfigure` when `patch_vargv` only updates `LIVE_FIELDS`
     and the running engine's live agent can apply the delta without importing vLLM's parser.
 
-    Returns `(report, None, None)` on success, `(None, failure_reason, reconciled_fields)` if
-    live apply was attempted and refused/timed out (caller falls back to restart without
-    retrying live apply and preserves `failure_reason` on every refusal exit), or
-    `(None, None, None)` if any precondition or preflight check fails (caller falls back
-    cleanly to the full path before touching the running engine). Exits 0 directly when the
-    validated live patch is a verified no-op.
+    Returns `(report, None, None, False)` on success, `(None, failure_reason, reconciled_fields,
+    state_uncertain)` if live apply was attempted and refused/timed out (caller falls back to
+    restart without retrying live apply and preserves `failure_reason` on every refusal exit),
+    or `(None, None, None, False)` if any precondition or preflight check fails (caller falls
+    back cleanly to the full path before touching the running engine). Exits 0 directly when
+    the validated live patch is a verified no-op.
     """
     if getattr(launcher_args, "reconfigure_restart", False) or getattr(
         launcher_args, "zygote_check", False
     ):
-        return None, None, None
+        return None, None, None, False
     parse_started = time.monotonic()
     live_values, live_arities = vllm_args.parse_live_patch(patch_vargv)
     parse_elapsed = time.monotonic() - parse_started
     if live_values is None:
-        return None, None, None
+        return None, None, None, False
     old_parsed = state.get("vllm_args")
     if (
         not isinstance(old_parsed, dict)
@@ -1282,11 +1307,11 @@ def _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv):
         or not isinstance(state.get("vargv"), list)
         or _has_arity_mismatch(old_parsed)
     ):
-        return None, None, None
+        return None, None, None, False
     live_dir = state.get("live_dir")
     ready = live_reconfig.read_ready(live_dir) if live_dir else None
     if not isinstance(ready, dict) or ready.get("api_pid") != state.get("pid"):
-        return None, None, None
+        return None, None, None, False
     core_pid = ready.get("pid")
     if (
         not isinstance(core_pid, int)
@@ -1294,38 +1319,45 @@ def _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv):
         or core_pid <= 0
         or zygote._exited(core_pid)
     ):
-        return None, None, None
+        return None, None, None, False
     boot = ready.get("boot")
     if not _valid_live_boot(boot) or live_reconfig.check_values(live_values, boot):
-        return None, None, None
+        return None, None, None, False
+    cli_tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
+    effective_launcher = argparse.Namespace(**vars(launcher_args))
+    if weights_backend(effective_launcher, old_parsed) == "dynamo_gms":
+        if not _has_cli_flag(cli_tokens, "--kvplan"):
+            effective_launcher.kvplan = None
+    if state.get("live_state_uncertain"):
+        status_ok, _ = _reconcile_live_state(
+            effective_launcher, state, old_parsed, boot, clear_uncertain=True
+        )
+        if not status_ok:
+            return None, None, None, False
+        old_parsed = state["vllm_args"]
     new_parsed = vllm_args.synthesize_live_parsed(
         old_parsed, live_values, live_arities, parse_seconds=parse_elapsed
     )
-    cli_tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
-    effective_launcher = argparse.Namespace(**vars(launcher_args))
-    if weights_backend(effective_launcher, new_parsed) == "dynamo_gms":
-        if not _has_cli_flag(cli_tokens, "--kvplan"):
-            effective_launcher.kvplan = None
     launcher_changed = (
         _launcher_backend_signature(state["launcher"], old_parsed)
         != _launcher_backend_signature(effective_launcher, new_parsed)
     )
     if launcher_changed or argv_findings(effective_launcher, new_parsed):
-        return None, None, None
+        return None, None, None, False
     if value_finding(new_parsed) is not None:
-        return None, None, None
+        return None, None, None, False
     if vllm_args.override_finding(patch_vargv, old_parsed, new_parsed) is not None:
-        return None, None, None
+        return None, None, None, False
     old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
     new_port = new_parsed["args"].get("port")
     if new_port is None or new_port != old_port:
-        return None, None, None
+        return None, None, None, False
     probe_env = dict(os.environ)
     if weights_backend(effective_launcher, new_parsed) == "dynamo_gms":
         _apply_gms_env(effective_launcher, probe_env)
     preflight_findings, preflight_report = preflight(effective_launcher, new_parsed, probe_env)
     if preflight_findings:
-        return None, None, None
+        return None, None, None, False
     reconfig = vllm_args.classify_reconfig(old_parsed, new_parsed)
     if reconfig.get("tier") == "noop":
         _exit_json(
@@ -1335,21 +1367,25 @@ def _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv):
         )
     plan_values, _ = live_reconfig_plan(state, reconfig)
     if plan_values is None:
-        return None, None, None
+        return None, None, None, False
     new_vargv = vllm_args.override(state["vargv"], patch_vargv)
     report, failure_reason = apply_in_process_reconfig(
         effective_launcher, state, new_vargv, new_parsed, preflight_report, reconfig, plan_values
     )
     if report is not None:
-        return report, None, None
+        return report, None, None, False
     reconciled_fields = None
+    state_uncertain = False
     if failure_reason and (
         "no reply" in failure_reason or "scheduler reads back" in failure_reason
     ):
-        reconciled_fields = _reconcile_live_state_after_failure(
-            effective_launcher, state, old_parsed, plan_values
+        status_ok, reconciled_fields = _reconcile_live_state(
+            effective_launcher, state, old_parsed, boot, attempted_values=plan_values
         )
-    return None, failure_reason, reconciled_fields
+        if not status_ok:
+            _mark_live_state_uncertain(launcher_args.cache_root, state)
+            state_uncertain = True
+    return None, failure_reason, reconciled_fields, state_uncertain
 
 
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
@@ -1372,8 +1408,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             actions=["use the same --cache-root as `engine.py start`", "use `engine.py start` with the full argv instead"],
         )], "note": "not started"})
     _inherit_launcher(launcher_args, state.get("launcher"), raw_argv)
-    fast_report, fast_live_failure, fast_reconciled = _try_fast_live_reconfigure(
-        launcher_args, state, patch_vargv, raw_argv
+    fast_report, fast_live_failure, fast_reconciled, fast_state_uncertain = (
+        _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv)
     )
     if fast_report is not None:
         return fast_report
@@ -1382,6 +1418,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         fast_fallback_extra["live_fallback_reason"] = fast_live_failure
     if fast_reconciled:
         fast_fallback_extra["live_reconciled_fields"] = fast_reconciled
+    if fast_state_uncertain:
+        fast_fallback_extra["live_state_uncertain"] = True
     env, old_vargv = engine_env(launcher_args), state["vargv"]
     new_vargv = vllm_args.override(old_vargv, patch_vargv)
     old_parsed = state.get("vllm_args")
@@ -1415,12 +1453,18 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
                     "note": "not started; old engine left running"})
     old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
     new_port = new_parsed["args"]["port"]
-    if reconfig is not None and reconfig.get("tier") == "noop" and not launcher_changed:
+    if (
+        reconfig is not None
+        and reconfig.get("tier") == "noop"
+        and not launcher_changed
+        and not state.get("live_state_uncertain")
+    ):
         _exit_json({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                     "pid": launcher_args.pid, **fast_fallback_extra,
                     "note": "nothing changed"}, code=0)
     live_values, live_reason = (
         (None, fast_live_failure) if fast_live_failure is not None
+        else (None, "persisted live state is uncertain after a prior timeout") if state.get("live_state_uncertain")
         else (None, "the weight key changes (holder reshard)") if reshard
         else (None, "launcher weights/GMS settings changed") if launcher_changed
         else (None, "--reconfigure-restart given") if getattr(launcher_args, "reconfigure_restart", False)
@@ -1476,6 +1520,7 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         "stop_seconds": round(time.perf_counter() - t_stop, 6), "stop": stop_info,
         **({"reshard": reshard_report} if reshard_report is not None else {}),
         **({"live_reconciled_fields": fast_reconciled} if fast_reconciled else {}),
+        **({"live_state_uncertain": True} if fast_state_uncertain else {}),
     }
     return _launch_process(launcher_args, new_vargv, new_parsed, env, preflight_report,
                            extra_report={"reconfig": reconfig_report})
