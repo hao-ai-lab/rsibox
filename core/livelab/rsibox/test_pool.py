@@ -769,6 +769,22 @@ class SandboxPoolTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             pool.acquire("agent-nan", timeout_s=float("nan"))
+        with self.assertRaises(TypeError):
+            pool.acquire("agent-bool", timeout_s=True)
+        with self.assertRaises(TypeError):
+            SandboxPool([PoolSlot("slot-bad-drain", self._make_toy_lab())], drain_timeout_s=False)
+
+        # Duplicate underlying Lab or Box across two PoolSlots in one pool must fail fast.
+        shared_lab = self._make_toy_lab()
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("dup-0", shared_lab), PoolSlot("dup-1", shared_lab)])
+        shared_box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        shared_box.boot()
+        self.addCleanup(shared_box.close)
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("box-0", shared_box), PoolSlot("box-1", shared_box)])
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("box-0", shared_box), PoolSlot("lab-1", shared_box.lab)])
 
         # Huge and infinite timeouts work cleanly on queued handoff.
         holder = pool.acquire("holder")
@@ -856,12 +872,30 @@ class SandboxPoolTests(unittest.TestCase):
                 raise RuntimeError("clock failed after claim")
             return float(call_counter[0])
 
-        flaky_pool = SandboxPool([PoolSlot("slot-flaky", slot_lab)], clock=flaky_clock)
+        flaky_pool = SandboxPool([PoolSlot("slot-flaky", self._make_toy_lab())], clock=flaky_clock)
         self.addCleanup(flaky_pool.close)
         with self.assertRaises(RuntimeError):
             flaky_pool.acquire("flaky-caller")
         with flaky_pool.lease("recovery-caller", timeout_s=1.0) as recovered_lease:
             self.assertEqual(recovered_lease.slot_id, "slot-flaky")
+
+        # Clock failure at pre-acquire quarantine timestamp must still quarantine the broken slot.
+        broken_lab = self._make_toy_lab()
+        broken_lab.status = lambda: {"ok": False, "state": "poisoned", "error": "broken"}
+        broken_lab.reset = lambda kind="state": {"ok": False, "error": "respawn failed"}
+        quarantine_ticks = [0]
+
+        def clock_failing_at_quarantine() -> float:
+            quarantine_ticks[0] += 1
+            if quarantine_ticks[0] == 9:
+                raise RuntimeError("clock failed at quarantine")
+            return float(quarantine_ticks[0])
+
+        quarantine_pool = SandboxPool([PoolSlot("broken-clock-0", broken_lab)], clock=clock_failing_at_quarantine)
+        self.addCleanup(quarantine_pool.close)
+        with self.assertRaises(PoolTimeoutError):
+            quarantine_pool.acquire("caller", timeout_s=1.0)
+        self.assertEqual(quarantine_pool.metrics()["quarantined_slots"], ["broken-clock-0"])
 
     def test_close_races_with_handoff_and_is_idempotent_with_close_labs(self):
         """Regression for P1-1: close(close_labs=True) closes every lab at most once, is not
@@ -929,15 +963,27 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertEqual(race_closes[0], 1)
 
     def test_fenced_lease_proxy_blocks_post_release_access_and_first_acquire_cleans_cache(self):
-        """Regression for P1-2: initial acquire cleans pre-existing engine cache, and any stale
-        reference or pre-bound method on `lease.lab` raises `PoolError` after `release()`."""
+        """Regression for P1-2 / P1-A: initial acquire cleans pre-existing engine cache, stale
+        references on `lease.lab` raise `PoolError` after `release()`, `lease.slot` is a read-only
+        view without `.lab`/`.box`, and external `PoolSlot` mutation cannot corrupt scheduling."""
         slot_lab = self._make_toy_lab()
         slot_lab.engines["rank0"].cache["preexisting_stale"] = "dirty"
-        pool = SandboxPool([PoolSlot("slot-0", slot_lab)])
+        pool_slot = PoolSlot("slot-0", slot_lab, role="dev", metadata={"gpu": 0})
+        pool = SandboxPool([pool_slot])
         self.addCleanup(pool.close)
 
-        first_lease = pool.acquire("agent-1")
+        first_lease = pool.acquire("agent-1", role="dev")
         self.assertEqual(first_lease.lab.engines["rank0"].cache, {})
+        self.assertEqual(first_lease.slot.slot_id, "slot-0")
+        self.assertEqual(first_lease.slot.role, "dev")
+        self.assertEqual(first_lease.slot.metadata["gpu"], 0)
+        self.assertFalse(hasattr(first_lease.slot, "lab"))
+        self.assertFalse(hasattr(first_lease.slot, "box"))
+        self.assertFalse(hasattr(first_lease.slot, "quarantined"))
+        with self.assertRaises(AttributeError):
+            first_lease.slot.role = "eval"
+        with self.assertRaises(TypeError):
+            first_lease.slot.metadata["gpu"] = 99
         with self.assertRaises(PoolError):
             first_lease.lab.close()
 
@@ -945,7 +991,9 @@ class SandboxPoolTests(unittest.TestCase):
         stale_check_method = first_lease.lab.check
         first_lease.release()
 
-        # Post-release access via stale lab ref or pre-bound method must fail closed with PoolError.
+        # Post-release access via stale lab ref, pre-bound method, or released mutation must fail closed.
+        with self.assertRaises(AttributeError):
+            first_lease.released = False
         with self.assertRaises(PoolError):
             stale_lab_ref.status()
         with self.assertRaises(PoolError):
@@ -957,10 +1005,161 @@ class SandboxPoolTests(unittest.TestCase):
         with self.assertRaises(PoolError):
             stale_lab_ref.custom_flag = True
 
-        # Next agent's lease on the same slot remains completely unaffected.
-        with pool.lease("agent-2") as second_lease:
+        # External mutation of original PoolSlot must NOT corrupt role routing or quarantine state.
+        pool_slot.role = "tampered"
+        pool_slot.quarantined = True
+        self.assertEqual(pool.metrics()["quarantined_slots"], [])
+        with pool.lease("agent-2", role="dev", timeout_s=1.0) as second_lease:
+            self.assertEqual(second_lease.slot.role, "dev")
             self.assertEqual(second_lease.lab.status()["state"], "base")
             self.assertTrue(second_lease.lab.check()["ok"])
+
+        # Conversely, clearing PoolSlot.quarantined externally cannot un-quarantine a failed slot.
+        broken_lab = self._make_toy_lab()
+        broken_lab.status = lambda: {"ok": False, "state": "poisoned", "error": "fatal"}
+        broken_lab.reset = lambda kind="state": {"ok": False, "error": "respawn broken"}
+        broken_slot = PoolSlot("broken-0", broken_lab, role="dev")
+        broken_pool = SandboxPool([broken_slot])
+        self.addCleanup(broken_pool.close)
+        with self.assertRaises(PoolTimeoutError):
+            broken_pool.acquire("agent-3", role="dev", timeout_s=0.1)
+        self.assertEqual(broken_pool.metrics()["quarantined_slots"], ["broken-0"])
+        broken_slot.quarantined = False
+        self.assertEqual(broken_pool.metrics()["quarantined_slots"], ["broken-0"])
+        with self.assertRaises(PoolTimeoutError):
+            broken_pool.acquire("agent-4", role="dev", timeout_s=0.05)
+
+    def test_release_drains_in_flight_fenced_call_or_quarantines_on_drain_timeout(self):
+        """Regression for P1-B: release() waits for an in-flight fenced call to finish before
+        cleanup, and quarantines the slot fail-closed without concurrent cleanup if drain times out."""
+        # Case A: in-flight check() completes within drain_timeout_s -> strictly ordered before reset().
+        drain_lab = self._make_toy_lab()
+        events: list[str] = []
+        events_lock = threading.Lock()
+        entered_check = threading.Event()
+        allow_check_finish = threading.Event()
+        self.addCleanup(allow_check_finish.set)
+        orig_check, orig_reset = drain_lab.check, drain_lab.reset
+
+        def gated_check(workload=None):
+            with events_lock:
+                events.append("check_start")
+            entered_check.set()
+            allow_check_finish.wait(timeout=5.0)
+            reply = orig_check(workload)
+            with events_lock:
+                events.append("check_end")
+            return reply
+
+        def tracked_reset(kind="state"):
+            with events_lock:
+                events.append(f"reset_{kind}")
+            return orig_reset(kind)
+
+        drain_lab.check = gated_check
+        drain_lab.reset = tracked_reset
+
+        drain_pool = SandboxPool([PoolSlot("drain-0", drain_lab)], drain_timeout_s=5.0)
+        self.addCleanup(drain_pool.close)
+        leased = drain_pool.acquire("agent-drain")
+        with events_lock:
+            events.clear()
+
+        background_replies: list[dict] = []
+        background_thread = threading.Thread(target=lambda: background_replies.append(leased.lab.check()))
+        background_thread.start()
+        self.assertTrue(entered_check.wait(timeout=5.0))
+
+        release_records: list[dict] = []
+        release_thread = threading.Thread(target=lambda: release_records.append(leased.release()))
+        release_thread.start()
+
+        deadline = time.monotonic() + 2.0
+        while not leased.released and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertTrue(leased.released)
+        time.sleep(0.05)
+        self.assertTrue(release_thread.is_alive())
+        with self.assertRaises(PoolError):
+            leased.lab.status()
+        with events_lock:
+            self.assertNotIn("reset_state", events)
+
+        allow_check_finish.set()
+        background_thread.join(timeout=5.0)
+        release_thread.join(timeout=5.0)
+        self.assertFalse(background_thread.is_alive())
+        self.assertFalse(release_thread.is_alive())
+        self.assertTrue(background_replies and background_replies[0]["ok"])
+        self.assertEqual(release_records[0]["status_after"], "base")
+        self.assertLess(events.index("check_end"), events.index("reset_state"))
+        self.assertEqual(drain_pool.metrics()["quarantined_slots"], [])
+        with drain_pool.lease("agent-next", timeout_s=1.0) as next_lease:
+            self.assertEqual(next_lease.slot_id, "drain-0")
+            self.assertEqual(next_lease.lab.status()["state"], "base")
+
+        # Case B: hung in-flight check() exceeds short drain_timeout_s -> quarantine fail-closed,
+        # ZERO concurrent cleanup on the occupied lab, and healthy slot 1 keeps serving.
+        hung_lab = self._make_toy_lab()
+        healthy_lab = self._make_toy_lab()
+        entered_hang = threading.Event()
+        release_hang = threading.Event()
+        self.addCleanup(release_hang.set)
+        hung_resets = [0]
+        orig_hung_check, orig_hung_reset = hung_lab.check, hung_lab.reset
+
+        def hung_check(workload=None):
+            entered_hang.set()
+            release_hang.wait(timeout=5.0)
+            return orig_hung_check(workload)
+
+        def counted_hung_reset(kind="state"):
+            hung_resets[0] += 1
+            return orig_hung_reset(kind)
+
+        hung_lab.check = hung_check
+        hung_lab.reset = counted_hung_reset
+
+        hang_pool = SandboxPool(
+            [PoolSlot("slot-0", hung_lab, role="eval"), PoolSlot("slot-1", healthy_lab, role="dev")],
+            drain_timeout_s=0.05,
+        )
+        self.addCleanup(hang_pool.close)
+        hung_lease = hang_pool.acquire("agent-hung", role="eval")
+        resets_before_release = hung_resets[0]
+        hung_thread = threading.Thread(target=lambda: hung_lease.lab.check())
+        hung_thread.start()
+        self.assertTrue(entered_hang.wait(timeout=5.0))
+
+        # Queue a waiter specifically for role="eval"; undrained quarantine must wake it promptly.
+        waiter_errors: list[BaseException] = []
+        eval_waiter = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: hang_pool.acquire("agent-eval-waiter", role="eval", timeout_s=5.0),
+                waiter_errors,
+            )
+        )
+        eval_waiter.start()
+        self._wait_for_waiters(hang_pool, 1)
+
+        release_record = hung_lease.release()
+        self.assertEqual(release_record["status_after"], "quarantined")
+        self.assertIn("in-flight fenced call did not drain", release_record["error"])
+        self.assertEqual(hung_resets[0], resets_before_release)
+        self.assertEqual(hang_pool.metrics()["quarantined_slots"], ["slot-0"])
+
+        eval_waiter.join(timeout=2.0)
+        self.assertFalse(eval_waiter.is_alive())
+        self.assertEqual(len(waiter_errors), 1)
+        self.assertIsInstance(waiter_errors[0], PoolTimeoutError)
+
+        # Healthy slot-1 continues serving immediately with zero stall.
+        healthy_outcome = hang_pool.run_isolated("agent-healthy", lambda lab, lease: lab.check()["ok"])
+        self.assertTrue(healthy_outcome["ok"], healthy_outcome)
+        self.assertEqual(healthy_outcome["slot_id"], "slot-1")
+        release_hang.set()
+        hung_thread.join(timeout=5.0)
+        self.assertFalse(hung_thread.is_alive())
 
     def test_multi_writer_shared_trace_chain_and_expected_head_truncation_detection(self):
         """Regression for P1-3: two independent SandboxPool instances writing concurrently to
@@ -1108,9 +1307,9 @@ class SandboxPoolTests(unittest.TestCase):
                 PoolSlot("closed-0", ready_box)
 
     @staticmethod
-    def _capture_error(callable_fn, bucket: list[BaseException]) -> None:
+    def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
-            callable_fn()
+            operation()
         except BaseException as error:
             bucket.append(error)
 

@@ -6,7 +6,7 @@ strict FIFO queueing, role routing, fenced leases, failover/quarantine, and JSON
 from __future__ import annotations
 
 from collections import deque, namedtuple
-import contextlib, hashlib, json, math, os, threading, time
+import contextlib, dataclasses, hashlib, json, math, os, threading, time, types
 from typing import Any, Callable, Iterator, Sequence
 try:
     import fcntl
@@ -19,13 +19,9 @@ _GENESIS_HASH = "genesis"
 _CleanupOutcome = namedtuple("_CleanupOutcome", "healthy cleanup_s recovery_s recovered status_after error")
 _RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recovered", "status_after", "error")
 
-class PoolError(RuntimeError):
-    """Base error raised by `SandboxPool`."""
-class PoolTimeoutError(TimeoutError, PoolError):
-    """Raised when waiting for a healthy matching slot times out or none exists."""
-class PoolClosedError(PoolError):
-    """Raised when attempting to acquire a slot from a closed `SandboxPool`."""
-
+class PoolError(RuntimeError): """Base error raised by `SandboxPool`."""
+class PoolTimeoutError(TimeoutError, PoolError): """Raised when waiting for a healthy matching slot times out."""
+class PoolClosedError(PoolError): """Raised when attempting to acquire a slot from a closed `SandboxPool`."""
 
 def _format_error(error: str | BaseException | None) -> str | None:
     if error is None:
@@ -35,12 +31,14 @@ def _close_quietly(lab: Any) -> None:
     if lab is not None:
         with contextlib.suppress(Exception):
             lab.close()
-def _validate_timeout(timeout_s: float | None) -> float | None:
+def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
         return None
+    if isinstance(timeout_s, bool):
+        raise TypeError(f"{name} must be a real number or None, not bool")
     value = float(timeout_s)
     if math.isnan(value):
-        raise ValueError("timeout_s must not be NaN")
+        raise ValueError(f"{name} must not be NaN")
     return (None if value > 0 else 0.0) if math.isinf(value) else max(0.0, value)
 def _safe_lab_call(lab: Any, method_name: str, *args: Any) -> dict[str, Any]:
     method = getattr(lab, method_name, None)
@@ -63,10 +61,7 @@ def _hash_trace_record(record: dict[str, Any]) -> str:
     payload = {key: value for key, value in record.items() if key != "record_sha256"}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
-
-def _validate_trace_record(
-    record: Any, expected_sequence: int | None, expected_previous: str | None
-) -> tuple[str | None, int, str]:
+def _validate_trace_record(record: Any, expected_sequence: int | None, expected_previous: str | None) -> tuple[str | None, int, str]:
     if not isinstance(record, dict):
         return f"expected JSON object, got {type(record).__name__}", 0, ""
     sequence, digest = record.get("seq"), record.get("record_sha256")
@@ -82,8 +77,7 @@ def _validate_trace_record(
 def _chain_record(record: dict[str, Any], last_sequence: int, last_hash: str) -> tuple[dict[str, Any], int, str]:
     next_sequence = last_sequence + 1
     chained = {**record, "seq": next_sequence, "prev_sha256": last_hash}
-    digest = _hash_trace_record(chained)
-    chained["record_sha256"] = digest
+    chained["record_sha256"] = digest = _hash_trace_record(chained)
     return chained, next_sequence, digest
 def _read_trace_tail(handle: Any) -> tuple[int, str]:
     handle.seek(0)
@@ -91,10 +85,9 @@ def _read_trace_tail(handle: Any) -> tuple[int, str]:
     if not last_line:
         return 0, _GENESIS_HASH
     try:
-        tail = json.loads(last_line)
+        error_msg, last_sequence, last_hash = _validate_trace_record(json.loads(last_line), None, None)
     except ValueError as error:
         raise PoolError(f"corrupt trace tail: {error}") from error
-    error_msg, last_sequence, last_hash = _validate_trace_record(tail, None, None)
     if error_msg is not None:
         raise PoolError(f"corrupt trace tail: {error_msg}")
     return last_sequence, last_hash
@@ -123,7 +116,6 @@ def verify_trace(trace_path: str, *, expected_head: tuple[int, str] | None = Non
                 "error": f"trace head mismatch: expected {expected_head!r}, got {head!r}"}
     return {"ok": True, "count": len(records), "head": head, "records": records}
 
-
 class _BoxLabAdapter:
     """Thin 5-verb `Lab` proxy over a ready `Box`, preserving its call gate and event log."""
     def __init__(self, box: Box) -> None: self._box = box
@@ -141,31 +133,41 @@ class _BoxLabAdapter:
             raise AttributeError(f"box is not ready; cannot access {attribute_name!r}")
         return getattr(self._box.lab, attribute_name)
 
-
 class _FencedLabProxy:
-    """Fenced proxy around a leased `Lab` that rejects all access once the lease is released."""
+    """Fenced proxy around a leased `Lab` that tracks in-flight calls and rejects post-release access."""
     def __init__(self, lease: SlotLease, target: Any) -> None:
         object.__setattr__(self, "_lease", lease)
         object.__setattr__(self, "_target", target)
-    def _check_active(self) -> None:
-        if self._lease.released:
-            raise PoolError(f"lease for slot {self._lease.slot_id!r} has already been released")
+    def _run_fenced(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        lease = self._lease
+        with lease._call_cond:
+            if lease._released:
+                raise PoolError(f"lease for slot {lease.slot_id!r} has already been released")
+            lease._active_calls += 1
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            with lease._call_cond:
+                lease._active_calls -= 1
+                if lease._active_calls == 0:
+                    lease._call_cond.notify_all()
     def close(self) -> None:
-        self._check_active()
+        self._run_fenced(lambda: None)
         raise PoolError("cannot close a pooled lab via SlotLease; call SandboxPool.close()")
     def __getattr__(self, attribute_name: str) -> Any:
-        self._check_active()
-        value = getattr(self._target, attribute_name)
+        value = self._run_fenced(getattr, self._target, attribute_name)
         if not callable(value):
             return value
-        def fenced_call(*args: Any, **kwargs: Any) -> Any:
-            self._check_active()
-            return value(*args, **kwargs)
-        return fenced_call
+        return lambda *args, **kwargs: self._run_fenced(value, *args, **kwargs)
     def __setattr__(self, attribute_name: str, value: Any) -> None:
-        self._check_active()
-        setattr(self._target, attribute_name, value)
+        self._run_fenced(setattr, self._target, attribute_name, value)
 
+@dataclasses.dataclass(frozen=True)
+class _SlotView:
+    """Immutable view of slot identity and metadata exposed via `SlotLease.slot`."""
+    slot_id: str
+    role: str | None
+    metadata: types.MappingProxyType
 
 class PoolSlot:
     """One warm RSIBox `Lab` (or ready `Box`, `state == "ready"`) bound to a named slot and role."""
@@ -182,35 +184,36 @@ class PoolSlot:
         self.lab: Any = _BoxLabAdapter(lab) if isinstance(lab, Box) else lab
         self.quarantined, self.quarantine_reason = False, None
 
-
 class _SlotState:
-    __slots__ = ("slot", "in_use", "active_since", "dirty", "busy_s", "lab_closed")
+    __slots__ = ("slot", "slot_id", "role", "lab", "view", "quarantined", "quarantine_reason",
+                 "in_use", "active_since", "dirty", "busy_s", "lab_closed")
     def __init__(self, slot: PoolSlot) -> None:
-        self.slot, self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = (
-            slot, False, None, True, 0.0, False,
-        )
+        self.slot, self.slot_id, self.role, self.lab = slot, slot.slot_id, slot.role, slot.lab
+        self.view = _SlotView(slot.slot_id, slot.role, types.MappingProxyType(dict(slot.metadata)))
+        self.quarantined, self.quarantine_reason = False, None
+        self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = False, None, True, 0.0, False
 
 class _Waiter:
-    __slots__ = ("role", "event", "assigned_slot", "assigned_dirty", "cancelled", "failure", "closed")
+    __slots__ = ("role", "event", "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
     def __init__(self, role: str | None) -> None:
-        self.role, self.event, self.assigned_slot, self.assigned_dirty = role, threading.Event(), None, True
+        self.role, self.event, self.assigned_state, self.assigned_dirty = role, threading.Event(), None, True
         self.cancelled, self.failure, self.closed = False, None, False
-
 
 class SlotLease:
     """Exclusive lease over one `PoolSlot`; supports `with` and idempotent `release()`."""
-    def __init__(self, pool: SandboxPool, slot: PoolSlot, agent_id: str, role: str | None,
+    def __init__(self, pool: SandboxPool, slot_state: _SlotState, agent_id: str, role: str | None,
                  idea_id: str | None, acquired_at: float, acquired_mono: float,
                  queue_wait_s: float, preparation: _CleanupOutcome) -> None:
-        self._pool, self.slot, self.slot_id = pool, slot, slot.slot_id
+        self._pool, self._lab, self.slot, self.slot_id = pool, slot_state.lab, slot_state.view, slot_state.slot_id
         self.agent_id, self.role, self.idea_id = agent_id, role, idea_id
         self.acquired_at, self._acquired_mono, self.queue_wait_s = acquired_at, acquired_mono, queue_wait_s
         self._preparation = preparation
         self.cleanup_s, self.recovery_s, self.recovered = preparation.cleanup_s, preparation.recovery_s, preparation.recovered
         self.released_at = self.hold_s = self.error = self.status_after = None
-        self.released, self._release_lock, self._trace_record, self._trace_error = False, threading.Lock(), None, None
-        self.lab: Any = _FencedLabProxy(self, slot.lab)
-
+        self._released, self._release_lock, self._call_cond, self._active_calls = False, threading.Lock(), threading.Condition(), 0
+        self._trace_record, self._trace_error, self.lab = None, None, _FencedLabProxy(self, slot_state.lab)
+    @property
+    def released(self) -> bool: return self._released
     def release(self, error: str | BaseException | None = None) -> dict[str, Any]:
         return self._pool._release_lease(self, error=error)
     def __enter__(self) -> SlotLease: return self
@@ -218,30 +221,32 @@ class SlotLease:
         self.release(error=exc_value)
         return False
 
-
 class SandboxPool:
     """Thread-safe FIFO scheduler multiplexing N agents over C warm RSIBox slots."""
 
     def __init__(self, slots: Sequence[PoolSlot], *, trace_path: str | None = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 wall_clock: Callable[[], float] = time.time, close_labs: bool = False) -> None:
+                 clock: Callable[[], float] = time.monotonic, wall_clock: Callable[[], float] = time.time,
+                 close_labs: bool = False, drain_timeout_s: float | None = 5.0) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
+        self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
         self._slots: dict[str, _SlotState] = {}
-        self._slot_order: list[str] = []
+        seen_targets: set[int] = set()
         for slot in slots:
             if not isinstance(slot, PoolSlot):
                 raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
             if slot.slot_id in self._slots:
                 raise ValueError(f"duplicate slot_id: {slot.slot_id!r}")
+            raw_target = slot.box.lab if (slot.box is not None and slot.box.lab is not None) else (slot.box or slot.lab)
+            if id(raw_target) in seen_targets:
+                raise ValueError(f"duplicate underlying lab/box for slot_id: {slot.slot_id!r}")
+            seen_targets.add(id(raw_target))
             self._slots[slot.slot_id] = _SlotState(slot)
-            self._slot_order.append(slot.slot_id)
         self._trace_path, self._clock, self._wall_clock = trace_path, clock, wall_clock
         self._close_labs, self._created_mono = close_labs, clock()
         self._lock, self._trace_lock, self._waiters = threading.Lock(), threading.Lock(), deque()
         self._closed, self._total_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0.0
-        self._queue_waits, self._hold_times = [], []
-        self._trace_sequence, self._trace_previous_hash = 0, _GENESIS_HASH
+        self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         if trace_path and os.path.isfile(trace_path):
             verified = verify_trace(trace_path)
             if not verified["ok"]:
@@ -254,83 +259,79 @@ class SandboxPool:
         except Exception:
             return self._created_mono if fallback is None else fallback
     def _has_healthy_slot(self, role: str | None) -> bool:
-        return any(not slot_state.slot.quarantined and (role is None or slot_state.slot.role == role)
+        return any(not slot_state.quarantined and (role is None or slot_state.role == role)
                    for slot_state in self._slots.values())
     def _mark_lab_to_close_locked(self, slot_state: _SlotState) -> Any | None:
         if self._closed and self._close_labs and not slot_state.lab_closed:
             slot_state.lab_closed = True
-            return slot_state.slot.lab
+            return slot_state.lab
         return None
 
-    def _complete_slot_locked(self, slot_id: str, finish_mono: float, healthy: bool,
-                              reason: str | None, *, preserve_dirty: bool = False) -> Any | None:
+    def _complete_slot_locked(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
+                              *, preserve_dirty: bool = False, skip_close: bool = False) -> Any | None:
         slot_state = self._slots[slot_id]
         if slot_state.active_since is not None:
             slot_state.busy_s += max(0.0, finish_mono - slot_state.active_since)
-        slot_state.slot.quarantined, slot_state.dirty = not healthy, (True if not healthy else preserve_dirty)
-        slot_state.slot.quarantine_reason = None if healthy else (reason or "recovery failed")
+        slot_state.quarantined, slot_state.dirty = not healthy, (True if not healthy else preserve_dirty)
+        slot_state.quarantine_reason = None if healthy else (reason or "recovery failed")
+        slot_state.slot.quarantined, slot_state.slot.quarantine_reason = slot_state.quarantined, slot_state.quarantine_reason
         if not self._closed and healthy:
-            slot_role = slot_state.slot.role
             for index, waiter in enumerate(self._waiters):
-                if not waiter.cancelled and (waiter.role is None or waiter.role == slot_role):
+                if not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role):
                     del self._waiters[index]
-                    waiter.assigned_slot, waiter.assigned_dirty = slot_state.slot, slot_state.dirty
+                    waiter.assigned_state, waiter.assigned_dirty = slot_state, slot_state.dirty
                     slot_state.in_use, slot_state.active_since = True, finish_mono
                     waiter.event.set()
                     return None
         slot_state.in_use, slot_state.active_since = False, None
         if not healthy:
-            remaining: deque[_Waiter] = deque()
             for waiter in self._waiters:
                 if not waiter.cancelled and not self._has_healthy_slot(waiter.role):
                     waiter.failure = f"no healthy slot available for role={waiter.role!r}"
                     waiter.event.set()
-                elif not waiter.cancelled:
-                    remaining.append(waiter)
-            self._waiters = remaining
-        return self._mark_lab_to_close_locked(slot_state)
+            self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
+        return None if skip_close else self._mark_lab_to_close_locked(slot_state)
     def _finish_slot(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
-                     *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0) -> None:
+                     *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0,
+                     skip_close: bool = False) -> None:
         with self._lock:
             self._total_recovery_s += extra_recovery_s
-            lab_to_close = self._complete_slot_locked(slot_id, finish_mono, healthy, reason, preserve_dirty=preserve_dirty)
+            lab_to_close = self._complete_slot_locked(slot_id, finish_mono, healthy, reason,
+                                                      preserve_dirty=preserve_dirty, skip_close=skip_close)
         _close_quietly(lab_to_close)
     def _cancel_waiter_locked(self, waiter: _Waiter) -> Any | None:
         waiter.cancelled = True
         with contextlib.suppress(ValueError):
             self._waiters.remove(waiter)
-        if waiter.assigned_slot is None:
+        if waiter.assigned_state is None:
             return None
-        return self._complete_slot_locked(waiter.assigned_slot.slot_id, self._safe_clock(), True, None,
+        return self._complete_slot_locked(waiter.assigned_state.slot_id, self._safe_clock(), True, None,
                                           preserve_dirty=waiter.assigned_dirty)
 
-    def _claim_slot(self, role: str | None, deadline: float | None) -> tuple[PoolSlot, bool]:
+    def _claim_slot(self, role: str | None, deadline: float | None) -> tuple[_SlotState, bool]:
         with self._lock:
             if self._closed:
                 raise PoolClosedError("SandboxPool is closed")
             if not self._has_healthy_slot(role):
                 raise PoolTimeoutError(f"no healthy slot available for role={role!r}")
-            for slot_id in self._slot_order:
-                slot_state = self._slots[slot_id]
-                slot_role = slot_state.slot.role
-                if slot_state.in_use or slot_state.slot.quarantined or (role is not None and slot_role != role):
+            for slot_state in self._slots.values():
+                if slot_state.in_use or slot_state.quarantined or (role is not None and slot_state.role != role):
                     continue
-                if any(not waiter.cancelled and (waiter.role is None or waiter.role == slot_role)
+                if any(not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role)
                        for waiter in self._waiters):
                     continue
                 slot_state.in_use, slot_state.active_since = True, self._clock()
-                return slot_state.slot, slot_state.dirty
+                return slot_state, slot_state.dirty
             if deadline is not None and self._clock() >= deadline:
                 raise PoolTimeoutError(f"timed out waiting for slot (role={role!r})")
             waiter = _Waiter(role)
             self._waiters.append(waiter)
         try:
             while True:
-                if deadline is None:
-                    waiter.event.wait()
+                remaining_s = None if deadline is None else deadline - self._clock()
+                if remaining_s is not None and remaining_s <= 0.0:
                     break
-                remaining_s = deadline - self._clock()
-                if remaining_s <= 0.0 or waiter.event.wait(timeout=min(remaining_s, threading.TIMEOUT_MAX)):
+                if waiter.event.wait(timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX)):
                     break
         except BaseException:
             with self._lock:
@@ -338,8 +339,8 @@ class SandboxPool:
             _close_quietly(lab_to_close)
             raise
         with self._lock:
-            if waiter.assigned_slot is not None and not self._closed:
-                return waiter.assigned_slot, waiter.assigned_dirty
+            if waiter.assigned_state is not None and not self._closed:
+                return waiter.assigned_state, waiter.assigned_dirty
             closed_error = self._closed or waiter.closed
             lab_to_close = self._cancel_waiter_locked(waiter)
         _close_quietly(lab_to_close)
@@ -353,9 +354,7 @@ class SandboxPool:
             return str(status.get("error") or "slot poisoned")
         remaining = list(status.get("txns") or ())
         had_transactions = bool(remaining)
-        for _ in range(len(remaining) + 1):
-            if not remaining:
-                break
+        for _ in range(len(remaining)):
             reply = _safe_lab_call(lab, "uninstall", remaining[0])
             if not reply.get("ok") or reply.get("state") == "poisoned":
                 return str(reply.get("error") or "uninstall failed")
@@ -366,27 +365,25 @@ class SandboxPool:
             if not recheck.get("ok") or recheck.get("state") == "poisoned":
                 return str(recheck.get("error") or "slot poisoned after uninstall")
             remaining = list(recheck.get("txns") or ())
+            if not remaining:
+                break
         if remaining:
             return "uninstall did not clear transaction stack"
-        if force_reset_state or had_transactions:
-            reset_reply = _safe_lab_call(lab, "reset", "state")
-            if not reset_reply.get("ok"):
-                return str(reset_reply.get("error") or 'reset("state") failed')
+        if (force_reset_state or had_transactions) and not (reset_reply := _safe_lab_call(lab, "reset", "state")).get("ok"):
+            return str(reset_reply.get("error") or 'reset("state") failed')
         after = _safe_lab_call(lab, "status")
-        if not _is_clean_base(after):
-            return str(after.get("error") or f"post-cleanup state was {after.get('state', 'unknown')!r}")
-        return None
+        return None if _is_clean_base(after) else str(after.get("error") or f"post-cleanup state was {after.get('state', 'unknown')!r}")
 
-    def _clean_and_recover_slot(self, slot: PoolSlot, *, force_reset_state: bool) -> _CleanupOutcome:
+    def _clean_and_recover_slot(self, lab: Any, *, force_reset_state: bool) -> _CleanupOutcome:
         cleanup_start = self._clock()
-        cleanup_error = self._cleanup_in_place(slot.lab, force_reset_state=force_reset_state)
+        cleanup_error = self._cleanup_in_place(lab, force_reset_state=force_reset_state)
         cleanup_s = max(0.0, self._clock() - cleanup_start)
         if cleanup_error is None:
             return _CleanupOutcome(True, cleanup_s, 0.0, False, "base", None)
         recovery_start = self._clock()
-        respawn = _safe_lab_call(slot.lab, "reset", "respawn")
+        respawn = _safe_lab_call(lab, "reset", "respawn")
         recovery_s = max(0.0, self._clock() - recovery_start)
-        if respawn.get("ok") and _is_clean_base(verified := _safe_lab_call(slot.lab, "status")):
+        if respawn.get("ok") and _is_clean_base(verified := _safe_lab_call(lab, "status")):
             return _CleanupOutcome(True, cleanup_s, recovery_s, True, "base", None)
         reason = (respawn.get("error") or cleanup_error or 'reset("respawn") failed'
                   if not respawn.get("ok") else
@@ -402,31 +399,32 @@ class SandboxPool:
         queue_start = self._clock()
         deadline = None if normalized_timeout is None else queue_start + normalized_timeout
         while True:
-            slot, slot_dirty = self._claim_slot(role, deadline)
+            slot_state, slot_dirty = self._claim_slot(role, deadline)
             slot_returned = False
             try:
                 claim_mono = self._clock()
                 preparation = (_CleanupOutcome(True, 0.0, 0.0, False, "base", None)
-                               if (not slot_dirty and _is_clean_base(_safe_lab_call(slot.lab, "status")))
-                               else self._clean_and_recover_slot(slot, force_reset_state=True))
+                               if (not slot_dirty and _is_clean_base(_safe_lab_call(slot_state.lab, "status")))
+                               else self._clean_and_recover_slot(slot_state.lab, force_reset_state=True))
                 if preparation.healthy:
                     ready_mono, ready_wall = self._clock(), self._wall_clock()
                     with self._lock:
                         if not self._closed:
-                            self._slots[slot.slot_id].dirty = False
-                            return SlotLease(self, slot, agent_id, role, idea_id, ready_wall, ready_mono,
+                            slot_state.dirty = False
+                            return SlotLease(self, slot_state, agent_id, role, idea_id, ready_wall, ready_mono,
                                              round(max(0.0, claim_mono - queue_start), 6), preparation)
-                        lab_to_close = self._complete_slot_locked(slot.slot_id, ready_mono, True, None)
+                        lab_to_close = self._complete_slot_locked(slot_state.slot_id, ready_mono, True, None)
                         slot_returned = True
                     _close_quietly(lab_to_close)
                     raise PoolClosedError("SandboxPool closed while preparing slot")
-                self._finish_slot(slot.slot_id, self._clock(), False,
+                self._finish_slot(slot_state.slot_id, self._safe_clock(fallback=claim_mono), False,
                                   preparation.error or "pre-acquire recovery failed",
                                   extra_recovery_s=preparation.recovery_s)
                 slot_returned = True
             except BaseException:
                 if not slot_returned:
-                    self._finish_slot(slot.slot_id, self._safe_clock(fallback=queue_start), True, None, preserve_dirty=True)
+                    self._finish_slot(slot_state.slot_id, self._safe_clock(fallback=queue_start),
+                                      True, None, preserve_dirty=True)
                 raise
 
     @contextlib.contextmanager
@@ -445,17 +443,27 @@ class SandboxPool:
 
     def _release_lease(self, lease: SlotLease, *, error: str | BaseException | None = None) -> dict[str, Any]:
         with lease._release_lock:
-            if lease.released:
-                if lease._trace_error is not None:
-                    raise lease._trace_error
-                return dict(lease._trace_record or {})
-            lease.released = True
+            with lease._call_cond:
+                if lease._released:
+                    if lease._trace_error is not None:
+                        raise lease._trace_error
+                    return dict(lease._trace_record or {})
+                lease._released = True
+                drain_deadline = None if self._drain_timeout_s is None else time.monotonic() + self._drain_timeout_s
+                while lease._active_calls > 0:
+                    remaining_s = None if drain_deadline is None else drain_deadline - time.monotonic()
+                    if remaining_s is not None and remaining_s <= 0.0:
+                        break
+                    lease._call_cond.wait(timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX))
+                undrained = lease._active_calls > 0
             release_mono = self._safe_clock(fallback=lease._acquired_mono)
             hold_s, caller_error = max(0.0, release_mono - lease._acquired_mono), _format_error(error)
             cleanup, finish_mono, finalized = None, None, None
             try:
                 released_at = self._wall_clock()
-                cleanup = self._clean_and_recover_slot(lease.slot, force_reset_state=True)
+                cleanup = (_CleanupOutcome(False, 0.0, 0.0, False, "quarantined",
+                                           "in-flight fenced call did not drain before release")
+                           if undrained else self._clean_and_recover_slot(lease._lab, force_reset_state=True))
                 finish_mono = self._clock()
                 raw_cleanup_s = lease._preparation.cleanup_s + cleanup.cleanup_s
                 raw_recovery_s = lease._preparation.recovery_s + cleanup.recovery_s
@@ -474,8 +482,7 @@ class SandboxPool:
                     "recovered": recovered, "error": combined_error, "status_after": cleanup.status_after,
                 }
                 with self._lock:
-                    self._total_leases += 1
-                    self._recoveries += int(recovered)
+                    self._total_leases, self._recoveries = self._total_leases + 1, self._recoveries + int(recovered)
                     self._total_recovery_s += raw_recovery_s
                     self._queue_waits.append(lease.queue_wait_s)
                     self._hold_times.append(hold_s)
@@ -487,17 +494,15 @@ class SandboxPool:
             finally:
                 done_mono = finish_mono if finish_mono is not None else self._safe_clock(fallback=release_mono)
                 self._finish_slot(lease.slot_id, done_mono, bool(cleanup.healthy) if cleanup is not None else False,
-                                  cleanup.error if cleanup is not None else "lease release interrupted")
+                                  cleanup.error if cleanup is not None else "lease release interrupted",
+                                  skip_close=undrained)
             return dict(finalized)
     def _append_trace(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._trace_lock:
             if self._trace_path:
-                parent_dir = os.path.dirname(os.path.abspath(self._trace_path))
-                if parent_dir:
-                    os.makedirs(parent_dir, exist_ok=True)
+                os.makedirs(os.path.dirname(os.path.abspath(self._trace_path)), exist_ok=True)
                 with open(self._trace_path, "a+", encoding="utf-8") as handle:
-                    if fcntl is not None:
-                        fcntl.flock(handle, fcntl.LOCK_EX)
+                    fcntl and fcntl.flock(handle, fcntl.LOCK_EX)
                     try:
                         last_sequence, last_hash = _read_trace_tail(handle)
                         chained, next_seq, digest = _chain_record(record, last_sequence, last_hash)
@@ -506,8 +511,7 @@ class SandboxPool:
                         handle.flush()
                         os.fsync(handle.fileno())
                     finally:
-                        if fcntl is not None:
-                            fcntl.flock(handle, fcntl.LOCK_UN)
+                        fcntl and fcntl.flock(handle, fcntl.LOCK_UN)
             else:
                 chained, next_seq, digest = _chain_record(record, self._trace_sequence, self._trace_previous_hash)
             self._trace_sequence, self._trace_previous_hash = next_seq, digest
@@ -545,8 +549,7 @@ class SandboxPool:
             now_mono = self._clock()
             elapsed_s, total_leases = max(0.0, now_mono - self._created_mono), self._total_leases
             per_slot_utilization: dict[str, float] = {}
-            for slot_id in self._slot_order:
-                slot_state = self._slots[slot_id]
+            for slot_id, slot_state in self._slots.items():
                 busy = slot_state.busy_s + (max(0.0, now_mono - slot_state.active_since)
                                             if slot_state.active_since is not None else 0.0)
                 per_slot_utilization[slot_id] = round(0.0 if (elapsed_s <= 0.0 or busy <= 0.0) else min(1.0, busy / elapsed_s), 6)
@@ -556,7 +559,7 @@ class SandboxPool:
                 "p95_queue_wait_s": round(_percentile(self._queue_waits, 0.95), 6),
                 "mean_hold_s": round(sum(self._hold_times) / total_leases, 6) if total_leases else 0.0,
                 "total_recovery_s": round(self._total_recovery_s, 6), "recoveries": self._recoveries,
-                "quarantined_slots": [slot_id for slot_id in self._slot_order if self._slots[slot_id].slot.quarantined],
+                "quarantined_slots": [slot_id for slot_id, state in self._slots.items() if state.quarantined],
                 "per_slot_utilization": per_slot_utilization, "trace_head": trace_head,
             }
 
@@ -573,10 +576,8 @@ class SandboxPool:
                     waiter.closed = True
                     waiter.event.set()
             if self._close_labs:
-                labs_to_close = [
-                    lab for slot_id in self._slot_order if not self._slots[slot_id].in_use
-                    for lab in (self._mark_lab_to_close_locked(self._slots[slot_id]),) if lab is not None
-                ]
+                labs_to_close = [lab for state in self._slots.values() if not state.in_use
+                                 for lab in (self._mark_lab_to_close_locked(state),) if lab is not None]
         for lab in labs_to_close:
             _close_quietly(lab)
 
