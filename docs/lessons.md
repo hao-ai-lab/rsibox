@@ -324,49 +324,16 @@ proportionally to the process's size, and a file protocol must publish "next" be
 
 ### 18. Size multi-agent pools to stage service time, not equal role slices
 
-**What happened.** In our 2026-11-24 B200 multi-agent study (`Qwen/Qwen3-8B`, `vLLM 0.33.0`, CUDA
-graphs on; see [`agent-teams-and-contention.md`](agent-teams-and-contention.md)), `SandboxPool`
-shared-slot leasing cut per-edit hold time from `45.74 ± 0.43 s` (Warm-JIT restart) to `0.63–0.87 s`,
-so a single B200 serving 8 concurrent agents (`68.3` edits/min) outperformed 3 B200s running
-restart-per-edit (`3.56` edits/min) by `19.2×` with `3×` fewer GPUs. Across `27` team-topology cells
-(`324` verified ideas), pinning dedicated Eval GPUs (`Dev+Eval Split` and `Orchestrator + 3-Pool
-Triad`) eliminated Eval queue stalls completely (`0/12` vs. `10–12/12` in `Monolithic`). However,
-static 1:1:1 role partitioning saturated the single Eval GPU at `96–97%` (`1.38 s`/idea, `64.4%` of
-total GPU-seconds) while leaving Dev (`28–31%`, `0.42 s`/idea) and Toolsmith-Fixer (`23–25%`,
-`0.34 s` amortized/idea) underutilized, capping throughput at `41.6–42.4` ideas/min versus `74.7`
-ideas/min for an elastic `Monolithic` 3-GPU pool.
+**What happened.** (Sources: companion PR #214, our 2026-11-24 B200 run on `Qwen/Qwen3-8B` / `vLLM 0.33.0`, CUDA graphs on; see [`agent-teams-and-contention.md`](agent-teams-and-contention.md).) With scripted worker threads sharing warm sandboxes via `SandboxPool`, a single B200 serving 8 workers (`68.3` edits/min) beat 3 B200s running live warm-cache restarts at `C = 3, N = 6` (`3.56` edits/min) by `19.2×`. Across `27` team-topology cells, pinning a dedicated Eval GPU (`Dev+Eval Split` and `Triad`) eliminated Eval queue stalls (`0/12` vs. `10–12/12` in `Monolithic`), but static 1:1:1 partitioning saturated Eval at `96–97%` (`1.38 s`/idea, `64.4%` of GPU-seconds) while capping throughput at `40.4–42.4` ideas/min and leaving `~70–77%` of Dev (`0.42 s`/idea) and Toolsmith (`0.34 s` amortized/idea) idle. Meanwhile, a 2-Eval / 1-shared-(Dev+Toolsmith) split would put Dev+Toolsmith at `~95%` busy at `75` ideas/min (`~78.6` ideas/min ceiling), close to monolithic's `74.7` ideas/min.
 
 **Rule.** Allocate static role GPUs proportionally to measured stage service time
-($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$), or use elastic slot
-reassignment with priority scheduling when reset-to-base is sub-second.
+($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$) rather than equal 1:1:1 slices,
+and keep Dev and Toolsmith on a shared pool unless repair rebuilds dominate.
 
 **Apply it.**
 - Measure amortized busy time (`hold_s + cleanup_s`) per stage before splitting a `SandboxPool` into
   fixed role sub-pools.
-- Reserve dedicated Eval slots when noiseless latency measurement or zero Eval wait is required, and
-  give Eval a GPU share matching its fraction of total GPU-seconds.
-- Keep Dev and Toolsmith-Fixer on a shared pool unless failure rates or heavy rebuilds (such as `.cu`
-  compiles) routinely starve Dev slots.
-
-### 19. Keep health probes read-only, and verify captured-module prefixes against the real installed tree
-
-**What happened.** Two silent systems bugs surfaced while hardening the sandbox across real vLLM
-`0.33.0` environments: first, an `RLIMIT_NOFILE` environment check inside `probe()` mutated the
-calling process's file-descriptor soft limit via `resource.setrlimit` as a side effect of a
-supposedly read-only diagnostic; second, hardcoded CUDA-graph capture prefixes (`CAPTURED_PREFIXES`)
-drifted from the real installed `vllm.v1` package layout and over-matched host-side configuration
-modules (`vllm.model_executor.models.config`), either missing real captured attention paths or
-forcing unnecessary `~1.13 s` CUDA graph recaptures on host-only edits.
-
-**Rule.** Read-only diagnostic probes (`probe()`, `status()`, `doctor`) must never mutate
-process-global OS state (rlimits, env vars, signals, or files), and every captured-module prefix list
-must be validated against the real installed module tree alongside explicit `CAPTURED_EXCLUSIONS`
-for host-side config and state modules.
-
-**Apply it.**
-- Inspect `resource.getrlimit` in probes and report actionable findings; apply any `setrlimit` raise
-  only in explicit launcher/bootstrap paths before spawning workers.
-- Maintain explicit `CAPTURED_EXCLUSIONS` (such as `*.config`) next to `CAPTURED_PREFIXES`, and test
-  both against real imported package trees so host-side edits stay on the `~80–120 ms` in-place
-  Python hot-swap path while captured GPU kernels fail closed unless selective graph recapture
-  (`rebuild=["R1"]`) is requested.
+- Reserve dedicated Eval slots when zero Eval queue wait is required, sized to Eval's measured share
+  of total GPU-seconds.
+- Treat elastic role borrowing and priority Eval scheduling as hypotheses to benchmark before relying
+  on them in production pools.

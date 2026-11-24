@@ -1,50 +1,53 @@
 # Multi-Agent GPU Contention and Agent-Team Topologies
 
-Running one coding agent against one dedicated GPU hides the cost of restarting an inference engine. Running a team of concurrent agents (`N = 2..8`) against a shared GPU budget (`C = 1..3`) exposes it immediately: every full restart stalls the slot for tens of seconds, serialization turns `N` agents into an `O(N)` FIFO queue, and idle GPUs waiting on CPU-side Python imports and CUDA graph capture dominate cluster spend.
+Running one coding agent against one dedicated GPU hides the cost of restarting an inference engine. Running `N = 2..8` concurrent workers against a shared GPU budget (`C = 1..3`) exposes it immediately: every full restart stalls the slot for tens of seconds, serialization turns `N` workers into an `O(N)` FIFO queue, and GPUs waiting on Python imports and CUDA graph capture dominate cluster spend.
 
-This document reports a controlled empirical study on `3× NVIDIA B200` GPUs serving `Qwen/Qwen3-8B` on `vLLM 0.33.0` with CUDA graphs enabled (`our 2026-11-24 B200 run`), evaluating:
+> **Scope & Companion PRs:** This empirical study exercises stacked infrastructure PRs **#210** (vLLM `CAPTURED_PREFIXES` and `CAPTURED_EXCLUSIONS`), **#211** (`RLIMIT_NOFILE` probe guard and `AsyncShadowReplenisher`), **#212** (fast-path live CLI reconfigure), and **#214** (`SandboxPool` and `verify_trace`). This documentation PR is ordered to merge after those companion PRs land on `main`.
+>
+> **Workload note:** All `N` concurrent workers in this study are **deterministic scripted Python threads** executing fixed, behavior-preserving edits and config updates (not LLM-generated code changes). See [Section 5](#5-what-this-study-does-not-show) for scope boundaries and caveats.
 
-1. **Multi-agent GPU contention (`EXP-A`):** restart-per-edit (both Cold-JIT and Warm-JIT, verified by live multi-agent trials) versus `rsibox` shared-slot scheduling (`SandboxPool`, `core/livelab/rsibox/pool.py`) across `C ∈ {1, 2, 3}` GPUs and `N ∈ {1, 2, 4, 8}` concurrent agents, including synthetic-poison fault-injection cells.
-2. **Multi-agent team topologies (`EXP-B`):** `27` cells (`324` end-to-end verified vLLM ideas) comparing `Monolithic`, `Dev+Eval Split`, and `Orchestrator + 3-Pool Triad` (`K Dev` + `Toolsmith-Fixer` + `Dedicated Eval`) on a realistic 6-idea concurrent workload with fail-closed refusals and automated repair.
+This document reports a controlled study on `3× NVIDIA B200` GPUs serving `Qwen/Qwen3-8B` on `vLLM 0.33.0` with CUDA graphs enabled (`our 2026-11-24 B200 run`), evaluating:
+
+1. **Multi-agent GPU contention (`EXP-A`):** warm-cache restart-per-edit (anchored by `n = 3` single-GPU repeats and corroborated by two live multi-agent restart trials) versus `SandboxPool` shared-slot scheduling (`core/livelab/rsibox/pool.py`, PR #214) across `C ∈ {1, 2, 3}` GPUs and `N ∈ {1, 2, 4, 8}` scripted agent threads, including two synthetic-poison fault-injection cells.
+2. **Multi-agent team topologies (`EXP-B`):** `27` cells (`324` pipeline task runs: `270` hot-path tasks proven + `54` startup-only host-excluded config commits) comparing `Monolithic`, `Dev+Eval Split`, and `Orchestrator + 3-Pool Triad` (`K Dev` + `Toolsmith-Fixer` + `Dedicated Eval`) on a fixed 6-idea concurrent workload with fail-closed refusals and scripted repair.
 
 ### Headline Findings
 
-- **43.7×–60.5× steady-state throughput speedup (`68.3–190.4` edits/min vs. `1.31–3.82` edits/min):** replacing Warm-JIT restarts (`45.74 ± 0.43 s` per edit, measured) with `SandboxPool` leasing over live hot-reload cuts per-edit slot hold time to `0.63–0.87 s`.
-- **28.7× lower mean queue wait at `C = 1, N = 4`:** mean wait drops from `68.97 s` (p95 `137.84 s`) in the live restart trial to `2.40 s` (p95 `5.31 s`) on `rsibox`.
-- **1 GPU running `rsibox` beats 3 GPUs running restart-per-edit by 19.2×:** a single B200 serving 8 concurrent agents achieves `68.3` edits/min on `rsibox`, versus `3.56` edits/min across 3 B200s running live restart-per-edit (`C = 3, N = 6`) — delivering `19.2×` higher throughput with `3×` fewer GPUs.
-- **Automated refusal-to-repair lifts verified idea completion from `66.7%` to `100.0%`:** across all `27` `EXP-B` cells (`324` ideas), fail-closed refusals (`captured_target` and `patch_invalid`) let a Toolsmith-Fixer stage upgrade or repair failing edits cleanly with zero state contamination (`max_abs_logprob_diff == 0.0`).
-- **Dedicated Eval pools eliminate Eval stalls (`0/12` vs. `10–12/12`), but static 1:1:1 GPU splits underutilize Dev and Toolsmith:** when full 3-prompt `logprobs=5` verification (`1.38 s`/idea) accounts for `64%` of total GPU-seconds (`2.14 s`/idea), pinning 1 GPU per role saturates the Eval GPU at `96–97%` while capping Dev (`28–31%`) and Toolsmith (`23–25%`). Pool shares should match measured stage service times ($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$) or reassign slots elastically.
+- **43.7×–53.6× multi-agent steady-state speedup (`N = 2–8`; `60.5×` at `N = 1`; `7.1×–9.4×` under injected worker poison):** replacing warm-cache restarts (`45.74 ± 0.43 s` to ready + check + stop, `n = 3`, measured) with `SandboxPool` leasing over live hot-reload cuts per-edit slot hold time to `0.63–0.87 s` and sustains `68.3–190.4` edits/min in clean cells (`18.7–35.9` edits/min in the two fault-injection cells that triggered a full warm-cache respawn).
+- **28.7× lower mean queue wait at `C = 1, N = 4`:** mean wait drops from `68.97 s` (p95 `137.84 s`, `1` edit/agent live restart trial) to `2.40 s` (p95 `5.31 s`, `4` edits/agent `SandboxPool`).
+- **1 GPU running `rsibox` beats 3 GPUs running live restart-per-edit by 19.2×:** a single B200 serving `N = 8` concurrent workers reaches `68.3` edits/min on `rsibox`, versus `3.56` edits/min across 3 B200s running live warm-cache restart-per-edit at `C = 3, N = 6` — delivering `19.2×` higher throughput with `3×` fewer GPUs (comparing `N = 8` vs. `N = 6`).
+- **Fail-closed refusal-to-repair pipeline reaches `10/12` proven hot-path tasks + `2/12` host-excluded commits (`66.7%` first-pass $\to$ `100.0%` pipeline completion):** across all `27` `EXP-B` cells, fail-closed refusals (`captured_target` and `patch_invalid`) route to the Toolsmith-Fixer stage without corrupting live state (`global_max_abs_logprob_diff == 0.0`).
+- **Dedicated Eval pools eliminate Eval stalls (`0/12` vs. `10–12/12`), but static 1:1:1 GPU splits saturate Eval (`96–97%`) and cap throughput at `40.4–42.4` ideas/min:** because full 3-prompt `logprobs=5` verification (`1.38 s`/idea) consumes `64.4%` of total GPU-seconds (`2.14 s`/idea), pinning 1 GPU per role leaves `~70–77%` of Dev (`27–31%` util at `C = 3`) and Toolsmith (`23–25%` util) capacity idle while a monolithic 3-GPU pool reaches `74.7` ideas/min.
 
 ---
 
 ## 1. Mechanism Cost Ladder & Experimental Setup
 
-Following [Lesson 12](lessons.md#12-most-real-changes-need-a-restart-so-make-restarts-cheap-and-name-them-in-words), every action in this study is named by what it does together with its measured overhead on `Qwen/Qwen3-8B` (`BF16`, `TP=1`, CUDA graphs enabled, `our 2026-11-24 B200 run`):
+Following [Lesson 12](lessons.md#12-most-real-changes-need-a-restart-so-make-restarts-cheap-and-name-them-in-words), every action is named in plain words with what the time runs to and whether the figure was measured in this B200 study (`Qwen/Qwen3-8B`, `BF16`, `TP=1`, CUDA graphs enabled) or comes from a companion PR:
 
-| Action | Implementation | Measured overhead | What it updates |
-|---|---|---|---|
-| **Fast-path live CLI reconfigure** | [`repos/vllm/livelab/services/engine.py`](../repos/vllm/livelab/services/engine.py), [`live_reconfig.py`](../repos/vllm/livelab/services/live_reconfig.py) | **`~96 ms`** CLI wall (`92.9–99.6 ms` across `EXP-A`, `95.7 ms` mean; `4.3 ms` in-process control-plane update, measured) | Runtime scheduler flags (`--max-num-seqs`, `--scheduling-policy`, `--max-num-batched-tokens`) with zero restart and zero graph recapture |
-| **In-place Python hot-swap** | [`core/livelab/kernel/swap.py`](../core/livelab/kernel/swap.py) | **`~80–120 ms`** install/undo (measured) | Function and method bodies outside captured CUDA graphs (worker sampler, scheduler utils, host-excluded modules) with journaled undo |
-| **Selective CUDA graph recapture** | [`repos/vllm/livelab/adapter/recapture.py`](../repos/vllm/livelab/adapter/recapture.py) (`rebuild=["R1"]`) | **`~1.13 s`** mean (`0.78–1.64 s` across `EXP-A`, measured) | Graph-captured GPU kernels (e.g., `FlashAttentionImpl.forward`), recapturing only affected CUDA graphs in-place |
-| **NVIDIA Dynamo GMS Shadow failover** *(optional warm recovery)* | [`core/livelab/rsibox/warm/README.md`](../core/livelab/rsibox/warm/README.md) | **`0.34 s`** Shadow failover; **`2.86 s`** CRIU + `cuda-checkpoint` restore (measured) | Sub-second fallback when a worker is poisoned, keeping GPU weights resident instead of restarting from disk |
-| **Warm-JIT full engine restart** | Plain `vllm serve` respawn with warm on-disk compile cache | **`45.74 ± 0.43 s`** per edit (`44.76 s` start + `0.38 s` check + `0.59 s` stop, measured) | Fresh process with persistent compile cache (`1.31` edits/min on 1 GPU) |
-| **Cold-JIT full engine restart** | Plain `vllm serve` first compile with empty cache | **`170.33 s`** wall (`164.08 s` to `/health`, measured) | Full cold compilation and initial graph capture |
+| Action | Implementation | Overhead & status | Source | What it updates |
+|---|---|---|---|---|
+| **Fast-path live CLI reconfigure** | [`repos/vllm/livelab/services/engine.py`](../repos/vllm/livelab/services/engine.py), [`live_reconfig.py`](../repos/vllm/livelab/services/live_reconfig.py) | **`~96 ms`** to applied (`92.9–99.6 ms` across `EXP-A`, `95.7 ms` mean, measured in this study); `4.3 ms` in-process control-plane update (measured in PR #212) | This study / PR #212 | Runtime scheduler flags (`--max-num-seqs`, `--scheduling-policy`, `--max-num-batched-tokens`) with zero restart and zero graph recapture |
+| **In-place Python hot-swap** | [`core/livelab/kernel/swap.py`](../core/livelab/kernel/swap.py) | **`~80–120 ms`** to installed / undone (measured in this study) | This study | Function and method bodies outside captured CUDA graphs (worker sampler, scheduler utils, host-excluded modules) with journaled undo |
+| **Selective CUDA graph recapture** | [`repos/vllm/livelab/adapter/recapture.py`](../repos/vllm/livelab/adapter/recapture.py) | **`~1.13 s`** to recaptured (`0.78–1.64 s` mean across `EXP-A` cells, measured in this study) | This study | Graph-captured GPU kernels (`FlashAttentionImpl.forward`), recapturing only affected CUDA graphs in-place |
+| **NVIDIA Dynamo GMS Shadow failover** *(not exercised in this study)* | [`core/livelab/rsibox/warm/README.md`](../core/livelab/rsibox/warm/README.md) | **`0.34 s` / `0.98 s`** to ready (anticipated projection from companion PR #209; **not measured** in this `Qwen3-8B` pool study) | Companion PR #209 | Warm failover keeping GPU weights resident when a worker is poisoned |
+| **Warm-cache restart** *(persistent compile cache on disk)* | Plain `vllm serve` respawn | **`45.74 ± 0.43 s`** to ready + check + stop (`44.76 s` to ready + `0.38 s` check + `0.59 s` stop, `n = 3`, measured in this study) | This study | Fresh process reusing warm on-disk compile cache (`1.31` edits/min on 1 GPU) |
+| **Cold-cache restart** *(empty compile cache)* | Plain `vllm serve` first compile | **`170.33 s`** total wall (`164.08 s` to `/health`, `n = 1`, measured in separate pre-suite warmup run) | Pre-suite warmup | Full cold compilation and initial graph capture |
 
-### Hardware and Serving Configuration
+### Hardware, Serving Configuration, and Suite Run Accounting
 
-- **Hardware:** `3× NVIDIA B200` (183,359 MiB HBM per GPU). All `EXP-A` and `EXP-B` cells ran sequentially inside one continuous `1,159.11 s` suite (`our 2026-11-24 B200 run`) after a `50.25 s` parallel 3-GPU warm pool boot.
+- **Hardware:** `3× NVIDIA B200` (`183,359 MiB` HBM per GPU).
+- **Run accounting:** The cold-cache restart reference (`170.33 s`, `n = 1`) ran in a separate pre-suite warmup run to populate the persistent compile cache. The main `1,159.11 s` continuous suite (`our 2026-11-24 B200 run`) executed: `init`, `3×` warm-cache restart repeats, `2×` live multi-agent restart contention trials (`C = 1, N = 4` and `C = 3, N = 6`), the `50.25 s` parallel 3-GPU warm pool boot, all `12` `EXP-A` pool cells, all `27` `EXP-B` pool cells, and `teardown` — logged at 1 Hz across all 3 GPUs (`3,477` telemetry samples = `3 GPUs × 1,159 s`).
 - **Engine & Model:** `vLLM 0.33.0` serving `Qwen/Qwen3-8B` (`BF16`, `-tp 1`, `--distributed-executor-backend mp`, `--worker-extension-cls adapter.worker_ext.KernelWorkerExtension`, `--gpu-memory-utilization 0.42`, `--max-model-len 1024`, `--max-num-seqs 64`, `--max-num-batched-tokens 8192`, `--disable-flashinfer-autotune`, `--seed 0`).
 - **CUDA Graphs:** `FULL_AND_PIECEWISE` mode with `--compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8]}'`.
 - **Determinism:** `VLLM_BATCH_INVARIANT=1`, greedy decoding (`temperature=0.0`, `seed=0`, `max_tokens=12`, `logprobs=5`).
 
 ### Trust & Tamper-Evident Verification Methodology
 
-Every claim in this study is anchored to four independent verification layers rather than unverified summary prints:
-
 1. **SHA-256 hash-chained lease traces (`39 / 39` passed):** every `SandboxPool` cell writes an append-only JSONL lease log chaining each record's `prev_sha256` into `record_sha256`. Post-run verification via `verify_trace(..., expected_head=...)` passed `39 / 39` traces (`100%`) across **`936` real lease records** (`180` in `EXP-A` + `756` in `EXP-B`).
-2. **Bit-exact cross-agent and cross-GPU isolation (`max_abs_logprob_diff == 0.0`):** baseline `logprobs=5` outputs were cross-checked across all 3 GPUs (`cross_gpu_baseline_logprob_diff == 0.0`), and every post-install and post-undo check across all `39` cells produced `global_max_abs_logprob_diff == 0.0`. Every slot was asserted clean (`state == "base"`, zero poison) after every cell.
-3. **Execution witnesses on every hot-path edit:** per [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md), live code swaps prove execution via witness counters — `12` calls per 12-token prompt (`36` across a 3-prompt Eval) for in-place Python hot-swaps (`vllm.v1.worker.gpu.sample.sampler`, `vllm.v1.core.sched.utils`) and `36` calls per decode step across 36 transformer layers for selective CUDA graph recapture (`FlashAttentionImpl.forward`).
-4. **Continuous 1 Hz GPU hardware telemetry (`3,477` samples):** a background `nvidia-smi` sampler recorded memory (`~95.5 GiB` steady warm footprint per active slot), utilization, power, and temperature across every phase and verified clean return to baseline memory and `0%` utilization after shutdown.
+2. **Numerical preservation & zero cross-agent contamination (`max_abs_logprob_diff == 0.0`):** because all hot-path code edits in this benchmark are behavior-preserving (no-op / counter) swaps, `logprobs=5` parity directly checks for state corruption or cross-agent leakage. Cross-GPU baselines matched (`cross_gpu_baseline_logprob_diff == 0.0`), every post-install and post-undo check across all `39` cells gave `global_max_abs_logprob_diff == 0.0`, and every slot was asserted clean (`state == "base"`, zero poison) after every cell.
+3. **Execution witnesses on hot-path edits:** per [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md), live code swaps prove execution via witness counters — `12` calls per 12-token prompt (`36` across a 3-prompt Eval) for in-place Python hot-swaps (`vllm.v1.worker.gpu.sample.sampler`, `vllm.v1.core.sched.utils`) and `36` calls across 36 transformer layers during the **prefill/mixed step (live witness ledger)** for selective CUDA graph recapture (`FlashAttentionImpl.forward`, since captured CUDA graphs handle decode replay under `FULL_AND_PIECEWISE`).
+4. **Continuous 1 Hz GPU hardware telemetry (`3,477` samples):** background `nvidia-smi` sampling across all 3 GPUs recorded active warm device memory of **`~93.3 GiB`** (`95,494–95,626 MiB` total device memory, `+74.8 GiB` above the `18,894 MiB` pre-run reservation baseline), utilization, power, and temperature, and verified clean return to baseline memory and `0%` utilization after teardown.
 
 ---
 
@@ -52,26 +55,26 @@ Every claim in this study is anchored to four independent verification layers ra
 
 ### 2.1 Restart-per-Edit Baselines and Live Contention Trials
 
-When agents restart the engine for each edit, the GPU spends over `97%` of wall clock restarting Python, reloading weights, and recapturing CUDA graphs (`1.9–3.7%` mean GPU utilization in our 1 Hz telemetry):
+When workers restart the engine for each edit, GPUs sit kernel-idle for **over 96%** of wall clock (`1.9–3.7%` mean GPU utilization in our 1 Hz telemetry) while waiting on Python imports, weight loads, and CUDA graph capture:
 
 | Baseline measurement | GPUs (`C`) | Agents (`N`) | Edits | Wall clock (s) | Mean queue wait (s) | P95 queue wait (s) | Mean service (s) | Throughput (edits/min) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Cold-JIT single-GPU reference | 1 | 1 | 1 | `170.33` | `0.00` | `0.00` | `170.33` | `0.35` |
-| Warm-JIT single-GPU (3× repeats) | 1 | 1 | 1 | `45.74 ± 0.43` | `0.00` | `0.00` | `45.74` | `1.31` |
-| Live restart contention trial | 1 | 4 | 4 | `184.12` | `68.97` | `137.84` | `46.03` | `1.30` |
-| Live restart contention trial | 3 | 6 | 6 | `101.14` | `25.45` | `51.21` | `50.47` | `3.56` |
+| Cold-cache restart *(pre-suite warmup, `n = 1`)* | 1 | 1 | 1 | `170.33` | `0.00` | `0.00` | `170.33` | `0.35` |
+| Warm-cache restart *(`n = 3` repeats)* | 1 | 1 | 1 | `45.74 ± 0.43` | `0.00` | `0.00` | `45.74` | `1.31` |
+| Live warm-cache restart trial *(1 edit/agent)* | 1 | 4 | 4 | `184.12` | `68.97` | `137.84` | `46.03` | `1.30` |
+| Live warm-cache restart trial *(1 edit/agent)* | 3 | 6 | 6 | `101.14` | `25.45` | `51.21` | `50.47` | `3.56` |
 
-To avoid burning hours of GPU time repeating 32-restart cells, the 12-cell comparison table below compares real `SandboxPool` runs against an analytical FIFO restart curve anchored to the measured `45.74 s` Warm-JIT repeat mean. The live `C = 1, N = 4` trial corroborates this analytical model within **`0.6%`** (`184.12 s` measured vs. `182.97 s` analytical; `1.304` vs. `1.312` edits/min). Furthermore, the live `C = 3, N = 6` trial shows that concurrent multi-GPU restarts suffer host-CPU and PCIe contention (`50.47 s` mean service vs. `45.74 s` single-GPU), meaning the analytical FIFO baseline is slightly *optimistic* for restart-per-edit and therefore conservative with respect to `rsibox` speedups.
+In the 12-cell matrix below, real `SandboxPool` measurements are compared against an analytical FIFO restart curve anchored to the `n = 3` warm-cache restart mean (`45.74 s`). The live `C = 1, N = 4` trial corroborates this FIFO model within **`0.6%`** (`184.12 s` measured vs. `182.97 s` analytical; `1.304` vs. `1.312` edits/min). Moreover, the live `C = 3, N = 6` trial shows concurrent 3-GPU restarts suffer host-CPU and PCIe contention (`50.47 s` mean service vs. `45.74 s` single-GPU), making the analytical FIFO curve slightly optimistic for restart-per-edit and therefore conservative with respect to `rsibox` speedups.
 
 ### 2.2 Complete `SandboxPool` Contention Matrix (`C ∈ {1, 2, 3} × N ∈ {1, 2, 4, 8}`)
 
-In every cell, `N` concurrent agent threads each execute `4` real leases (`4N` total leases) rotating through:
-1. **In-place Python hot-swap** (`vllm.v1.worker.gpu.sample.sampler` or `vllm.v1.core.sched.utils`) + witness proof + undo parity check;
+In each cell (`n = 1` run per cell), `N` scripted threads each execute `4` leases (`4N` total leases) cycling through:
+1. **In-place Python hot-swap** (`vllm.v1.worker.gpu.sample.sampler` or `vllm.v1.core.sched.utils`, `~80–120 ms`) + witness proof + undo parity check;
 2. **Fast-path live CLI reconfigure** (`--max-num-seqs 32 --scheduling-policy priority` or `48 / fcfs`, `~96 ms`) + check;
 3. **Selective CUDA graph recapture** (`FlashAttentionImpl.forward` with `rebuild=["R1"]`, `~1.13 s`) + witness proof + undo parity check;
-4. **Fault/exclusion handling:** fail-closed broken-syntax refusal (`patch_invalid`) + `reset("state")`, host-side excluded `vllm.model_executor.models.config` hot-swap (zero recapture), or — in two explicitly marked fault-injection cells — synthetic worker poison triggering a real Warm-JIT respawn on the faulted slot.
+4. **Refusal / exclusion / fault lease:** fail-closed broken-syntax refusal (`patch_invalid`) + `reset("state")`, host-side excluded `vllm.model_executor.models.config` hot-swap (zero recapture), or — in two explicitly marked fault-injection cells — a synthetic `session.fault` poison triggering a real warm-cache restart on the faulted slot.
 
-| `C` | `N` | Leases | `rsibox` Wall (s) | `rsibox` Edits/min | Restart Edits/min *(FIFO)* | Speedup | Mean Q-Wait (s) | P95 Q-Wait (s) | Mean Hold (s) | Slot Recoveries | Max LP Diff | Proven | Trace OK |
+| `C` | `N` | Leases | `rsibox` Wall (s) | `rsibox` Edits/min | Restart Edits/min *(FIFO)* | Speedup | Mean Q-Wait (s) | P95 Q-Wait (s) | Mean Hold (s) | Slot Recoveries | Max LP Diff | Proven\*\* | Trace OK |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|:---:|
 | 1 | 1 | 4 | 3.02 | **79.4** | 1.31 | **60.5×** | 0.000 | 0.000 | 0.628 | 0 | 0.0 | 2/2 | Yes |
 | 1 | 2 | 8 | 6.83 | **70.3** | 1.31 | **53.6×** | 0.803 | 1.804 | 0.729 | 0 | 0.0 | 4/4 | Yes |
@@ -86,63 +89,64 @@ In every cell, `N` concurrent agent threads each execute `4` real leases (`4N` t
 | 3 | 4 | 16 | 5.04 | **190.4** | 3.50 | **54.4×** | 0.221 | 0.671 | 0.739 | 0 | 0.0 | 8/8 | Yes |
 | 3 | 8 | 32 | 53.53 | **35.9** | 3.82 | **9.4×**\* | 1.362 | 2.809 | 0.746 | 1 (`45.60 s`)\* | 0.0 | 16/16 | Yes |
 
-\* *Fault-injection cells `(C = 2, N = 4)` and `(C = 3, N = 8)` deliberately injected synthetic session poison (`participant_failed`) on one lease to exercise end-to-end slot recovery.*
+\* *Fault-injection cells `(C = 2, N = 4)` and `(C = 3, N = 8)` injected a synthetic `session.fault` (`participant_failed`) on one lease to force a real warm-cache respawn (`44.74 s` / `45.60 s`) on the faulted slot.*  
+\*\* *`Proven = 2N/2N` counts the 2 inference-hot-path code-swap leases per agent (in-place Python hot-swap + selective CUDA graph recapture); live CLI reconfigurations, refusals, and startup-only config edits are not witness-checked.*
 
 ### 2.3 Takeaways from `EXP-A`
 
-1. **Steady-state throughput scales linearly with `C` and stays flat under `8×` agent oversubscription:** on 1 GPU, `rsibox` sustains `68.3–79.4` edits/min across `N = 1..8` (`52.1×–60.5×` over Warm-JIT restart); scaling to `C = 2` reaches `140.0` edits/min (`N = 8`), and `C = 3` reaches `190.4` edits/min (`N = 4`).
-2. **3× GPU savings with 19.2× higher throughput:** 1 B200 running `rsibox` with 8 concurrent agents (`68.3` edits/min) outperforms 3 B200s running live restart-per-edit (`3.56` edits/min at `C = 3, N = 6`) by **`19.2×`** while consuming `3×` fewer GPUs.
-3. **28.7× queue-wait collapse:** at `C = 1, N = 4`, mean queue wait drops from `68.97 s` to `2.40 s` (`28.7×` reduction) and p95 queue wait drops from `137.84 s` to `5.31 s` (`25.9×` reduction).
-4. **Fault isolation works — and quantifies why sub-second warm recovery matters:** in `(C = 2, N = 4)` and `(C = 3, N = 8)`, `SandboxPool` detected the synthetic poison on lease release, quarantined the faulted slot only long enough to execute a real Warm-JIT respawn (`44.74 s` and `45.60 s`), and kept sibling GPUs serving uninterrupted (mean queue wait remained `0.823 s` and `1.362 s`, with `0` slots left quarantined and `0.0` logprob diff). Because even one plain `45 s` respawn dominates cell wall clock (`51.29 s` and `53.53 s`), swapping that fallback to NVIDIA Dynamo GMS Shadow failover (`0.34 s`, measured) cuts fault-recovery wall clock by **`~130×`** and preserves steady-state pool throughput even under frequent worker crashes.
+1. **High throughput with sub-linear multi-GPU scaling:** on 1 GPU, `rsibox` sustains `68.3–79.4` edits/min across `N = 1..8` (`52.1×–60.5×` over warm-cache restart). Peak clean-cell throughput scales sub-linearly with `C` from `79.4` (`C = 1, N = 1`) to `140.0` (`C = 2, N = 8`, **`1.76×`**) and `190.4` edits/min (`C = 3, N = 4`, **`2.40×`**), with `~±10%` single-run (`n = 1`) cell-to-cell variance visible across `N = 1` (`69.5–79.4` edits/min) and `N = 2` (`114.6–125.2` edits/min).
+2. **3× fewer GPUs with 19.2× higher throughput:** 1 B200 running `rsibox` (`68.3` edits/min at `N = 8`) outperforms 3 B200s running live warm-cache restart-per-edit (`3.56` edits/min at `C = 3, N = 6`) by **`19.2×`** while using `3×` fewer GPUs (noting `N = 8` vs. `N = 6`).
+3. **28.7× queue-wait collapse at `C = 1, N = 4`:** mean queue wait drops from `68.97 s` (`1` edit/agent live restart trial) to `2.40 s` (`4` edits/agent pool), and p95 queue wait drops from `137.84 s` to `5.31 s` (`25.9×`).
+4. **Fault isolation works — and exposes the tail cost of plain warm-cache respawns:** in `(C = 2, N = 4)` and `(C = 3, N = 8)`, `SandboxPool` detected the synthetic poison on lease release, respawned only the faulted slot (`44.74 s` and `45.60 s`), and kept sibling GPUs serving uninterrupted (mean queue wait stayed `0.823 s` and `1.362 s`, `0` slots left quarantined, `0.0` logprob diff). However, that single `~45 s` respawn still dropped cell speedup to **`7.1×`** and **`9.4×`**. No cell in this study ran NVIDIA Dynamo GMS Shadow failover; replacing the plain warm-cache fallback with Shadow failover (`0.34 s` / `0.98 s` to ready, anticipated projection from companion PR #209) is an unmeasured next step to eliminate this `~45 s` tail spike.
 
 ---
 
 ## 3. Multi-Agent Team Architecture & Division-of-Labor Study (`EXP-B`)
 
-`EXP-A` treats all agents as homogeneous editors. Real autonomous engineering teams divide labor across roles: **Dev** agents propose patches and run quick sanity checks, a **Toolsmith-Fixer** diagnoses fail-closed sandbox refusals and repairs broken submissions, and a **Dedicated Eval** verifier runs full multi-prompt correctness and latency checks.
+`EXP-A` treats all workers identically. Multi-agent engineering pipelines split labor across roles: **Dev** workers apply edits and run quick sanity checks, a **Toolsmith-Fixer** handles fail-closed sandbox refusals, and a **Dedicated Eval** stage runs multi-prompt correctness and TTFT verification.
 
 ```mermaid
 flowchart LR
-  Orch["Orchestrator (12 concurrent vLLM ideas)"]
-  DevPool["Pool 1: Dev Slots (K Dev agents, quick check)"]
-  TSPool["Pool 2: Toolsmith-Fixer Slot (refusal repair and R1 upgrade)"]
+  Orch["Orchestrator (12 scripted vLLM tasks)"]
+  DevPool["Pool 1: Dev Slots (K Dev threads, quick check)"]
+  TSPool["Pool 2: Toolsmith-Fixer Slot (refusal repair and selective graph recapture ~1.13 s)"]
   EvalPool["Pool 3: Dedicated Eval Slot (3-prompt logprobs=5 and TTFT)"]
-  Done["Verified Ideas (100% completion, SHA-256 trace)"]
+  Done["Completed Tasks (10/12 proven + 2/12 host-config, SHA-256 trace)"]
 
-  Orch -->|"Dispatch idea"| DevPool
+  Orch -->|"Dispatch task"| DevPool
   DevPool -->|"Pass (66.7% 1st-pass)"| EvalPool
   DevPool -->|"Fail-closed refusal (captured_target / patch_invalid)"| TSPool
   TSPool -->|"Upgraded or repaired (33.3%)"| EvalPool
   EvalPool -->|"Bit-exact undo parity (max diff 0.0)"| Done
 ```
 
-### 3.1 Real 6-Idea Concurrent vLLM Workload
+### 3.1 Fixed 6-Idea Scripted vLLM Workload
 
-Every `EXP-B` cell executes `12` concurrent tasks (`2×` each of `6` real vLLM ideas, producing `28` hash-chained `SandboxPool` leases per cell: `12` Dev + `4` Toolsmith-Fixer + `12` Eval):
+Every `EXP-B` cell runs `12` concurrent scripted tasks (`2×` each of `6` tasks, producing `28` hash-chained `SandboxPool` leases per cell: `12` Dev + `4` Toolsmith-Fixer + `12` Eval):
 
-| # | Idea | Initial Dev action | First-pass outcome | Toolsmith-Fixer action | Eval verification |
+| # | Trace ID | Initial Dev action | First-pass outcome | Toolsmith-Fixer scripted action | Eval verification & proof status |
 |---:|---|---|---|---|---|
-| 1 | `idea1_r0_sampler` | In-place Python hot-swap on `vllm.v1.worker.gpu.sample.sampler` | Pass (`12` witness calls) | — | 3-prompt `logprobs=5` + TTFT + witness (`36`) + undo parity |
-| 2 | `idea2_tier1_seqs_priority` | Fast-path live CLI reconfigure (`--max-num-seqs 32 --scheduling-policy priority`, `~96 ms`) | Pass (scheduler ack verified) | — | 3-prompt `logprobs=5` + TTFT |
-| 3 | `idea3_r1_attn_missing_r1` | Edit `FlashAttentionImpl.forward` without graph recapture | **Refused fail-closed** (`captured_target`) | Upgrades request to selective CUDA graph recapture (`rebuild=["R1"]`, `~1.13 s`) | 3-prompt `logprobs=5` + TTFT + witness (`36`/step) + undo parity |
-| 4 | `idea4_r0_host_config_excl` | In-place Python hot-swap on `vllm.model_executor.models.config` (host-excluded) | Pass (zero recapture) | — | 3-prompt `logprobs=5` + TTFT + undo parity\* |
-| 5 | `idea5_broken_syntax_fault` | Broken Python syntax in `sampler` | **Refused fail-closed** (`patch_invalid`) | Repairs edit onto `vllm.v1.core.sched.utils` (in-place Python hot-swap) | 3-prompt `logprobs=5` + TTFT + witness (`36`) + undo parity |
-| 6 | `idea6_tier1_batch_tokens` | Fast-path live CLI reconfigure (`--max-num-batched-tokens 4096`, `~96 ms`) | Pass (scheduler ack verified) | — | 3-prompt `logprobs=5` + TTFT |
+| 1 | `idea1_r0_sampler` | In-place Python hot-swap on `vllm.v1.worker.gpu.sample.sampler` | Pass (`12` witness calls) | — | **Proven:** 3-prompt `logprobs=5` + TTFT + witness (`36`) + undo parity |
+| 2 | `idea2_tier1_seqs_priority` | Fast-path live CLI reconfigure (`--max-num-seqs 32 --scheduling-policy priority`, `~96 ms`) | Pass (scheduler ack verified) | — | **Proven (config ack):** 3-prompt `logprobs=5` + TTFT |
+| 3 | `idea3_r1_attn_missing_r1` | Edit `FlashAttentionImpl.forward` without graph recapture | **Refused fail-closed** (`captured_target`) | Upgrades to selective CUDA graph recapture (`rebuild=["R1"]`, `~1.13 s`) | **Proven:** 3-prompt `logprobs=5` + TTFT + prefill/mixed witness (`36`) + undo parity |
+| 4 | `idea4_r0_host_config_excl` | In-place Python hot-swap on `vllm.model_executor.models.config` (host-excluded) | Pass (zero recapture) | — | **Committed without execution proof (`witness = 0` by design):** startup-only function exercising `CAPTURED_EXCLUSIONS` + undo parity |
+| 5 | `idea5_broken_syntax_fault` | Broken Python syntax in `sampler` | **Refused fail-closed** (`patch_invalid`) | Substitutes valid in-place Python hot-swap on `vllm.v1.core.sched.utils` | **Proven:** 3-prompt `logprobs=5` + TTFT + witness (`36`) + undo parity |
+| 6 | `idea6_tier1_batch_tokens` | Fast-path live CLI reconfigure (`--max-num-batched-tokens 4096`, `~96 ms`) | Pass (scheduler ack verified) | — | **Proven (config ack):** 3-prompt `logprobs=5` + TTFT |
 
-\* *Witness transparency:* `6 / 6` inference-hot-path code edits per cell (Ideas 1, 3, and 5 × 2 repeats) prove non-zero execution witnesses. The remaining `2` code edits (Idea 4 × 2) target `verify_and_update_config` in `vllm.model_executor.models.config`, which is startup-only and deliberately tests `CAPTURED_EXCLUSIONS` so host-side config edits commit via in-place Python hot-swap without triggering CUDA graph recapture (`6 / 8` total code edits with inference witnesses; `4` ideas are live CLI reconfigurations verified by scheduler ack).
+Per [Lesson 5](lessons.md#5-code-that-runs-at-build-import-or-capture-time-is-not-reached-by-a-swap), a zero witness is never counted as execution-proven. Each 12-task cell therefore completes **`10 / 12` proven hot-path tasks** (`6 / 6` inference-hot-path code edits with live witnesses + `4 / 4` live CLI reconfigurations with verified scheduler acks) plus **`2 / 12` startup-only host-excluded config edits** committed without execution proof (`witness = 0` by design) to verify that `CAPTURED_EXCLUSIONS` avoids unnecessary CUDA graph recapture.
 
-### 3.2 Complete 27-Cell Topology Matrix (`324` Verified Ideas)
+### 3.2 Complete 27-Cell Topology Matrix (`324` Pipeline Task Runs)
 
-Three topologies were evaluated over `C ∈ {1, 2, 3}` GPUs and `N ∈ {1, 2, 3, 4, 6, 8}` agents:
-- **`monolithic`:** all `N` agents share one undifferentiated `C`-GPU `SandboxPool` for Dev, self-repair, and Eval.
-- **`dev_eval_split` (`C ≥ 2`):** `C - 1` GPUs form the Dev/Repair pool (`K_dev = N - 1` agents) and `1` dedicated GPU forms the Eval pool.
-- **`triad_orchestrator` (`C = 3`):** `1` GPU for Dev (`Pool 1`, `K_dev = N - 2` agents), `1` GPU for Toolsmith-Fixer (`Pool 2`), and `1` GPU for Dedicated Eval (`Pool 3`).
+Three topologies were evaluated over `C ∈ {1, 2, 3}` GPUs and `N ∈ {1, 2, 3, 4, 6, 8}` scripted threads (`n = 1` per cell):
+- **`monolithic`:** all `N` threads share one undifferentiated `C`-GPU `SandboxPool` for Dev, repair, and Eval.
+- **`dev_eval_split` (`C ≥ 2`):** `C - 1` GPUs form the Dev/Repair pool (`K_dev = N - 1` threads) and `1` dedicated GPU forms the Eval pool.
+- **`triad_orchestrator` (`C = 3`):** `1` GPU for Dev (`Pool 1`, `K_dev = N - 2` threads), `1` GPU for Toolsmith-Fixer (`Pool 2`), and `1` GPU for Dedicated Eval (`Pool 3`).
 
-In all `27` cells: **1st-pass success = `66.7%`**, **post-Toolsmith verified success = `100.0%`**, **`max_abs_logprob_diff == 0.0`**, and **SHA-256 trace verification = `27 / 27` passed**.
+In all `27` cells: **1st-pass pass rate = `66.7%`**, **post-Toolsmith pipeline completion = `100.0%` (`10/12` proven hot-path + `2/12` host-excluded config commits)**, **`max_abs_logprob_diff == 0.0`**, and **SHA-256 trace verification = `27 / 27` passed**.
 
 #### `C = 1` GPU
 
-| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util | Mean TTFT (ms) |
+| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util\* | Mean TTFT (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---:|
 | `monolithic` | 1 | 1 | 25.84 | **27.9** | 0.000 | **0.000** | **0** | 1.00 / — / 1.00 | 22.1 |
 | `monolithic` | 2 | 2 | 25.84 | **27.9** | 0.878 | **1.048** | **12** | 1.00 / — / 1.00 | 21.4 |
@@ -152,7 +156,7 @@ In all `27` cells: **1st-pass success = `66.7%`**, **post-Toolsmith verified suc
 
 #### `C = 2` GPUs
 
-| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util | Mean TTFT (ms) |
+| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util\* | Mean TTFT (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---:|
 | `monolithic` | 1 | 1 | 26.25 | **27.4** | 0.000 | **0.000** | **0** | 0.50 / — / 0.50 | 21.3 |
 | `monolithic` | 2 | 2 | 13.52 | **53.2** | 0.000 | **0.000** | **0** | 0.94 / — / 0.94 | 21.6 |
@@ -166,7 +170,7 @@ In all `27` cells: **1st-pass success = `66.7%`**, **post-Toolsmith verified suc
 
 #### `C = 3` GPUs
 
-| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util | Mean TTFT (ms) |
+| Topology | `N` | `K_dev` | Wall (s) | Ideas/min | Mean Q-Wait (s) | Eval Q-Wait (s) | Eval Stalls (`/12`) | Dev / TS / Eval Util\* | Mean TTFT (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|---|---:|
 | `monolithic` | 1 | 1 | 26.82 | **26.8** | 0.000 | **0.000** | **0** | 0.33 / — / 0.33 | 21.4 |
 | `monolithic` | 2 | 2 | 13.31 | **54.1** | 0.000 | **0.000** | **0** | 0.64 / — / 0.64 | 21.1 |
@@ -182,26 +186,40 @@ In all `27` cells: **1st-pass success = `66.7%`**, **post-Toolsmith verified suc
 | `triad_orchestrator` | 6 | 4 | 17.24 | **41.8** | 0.480 | **0.000** | **0** | 0.31 / 0.24 / 0.96 | 20.8 |
 | `triad_orchestrator` | 8 | 6 | 17.29 | **41.6** | 0.733 | **0.000** | **0** | 0.31 / 0.24 / 0.96 | 20.8 |
 
+\* *In `monolithic`, all GPUs serve every role, so `Dev Util` and `Eval Util` both report the fleet-wide average slot utilization.*
+
 ---
 
-## 4. Empirical Scaling Law & Pool-Sizing Recommendations
+## 4. Pool-Sizing Heuristic
 
-The `EXP-B` matrix exposes a non-trivial scheduling trade-off that only appears under real GPU measurements:
+The `EXP-B` matrix exposes a concrete scheduling trade-off under real GPU service times:
 
-1. **Dedicated Eval pools completely eliminate Eval interference.** Whenever `N > C` in `monolithic`, Eval leases queue behind Dev and repair leases: `10–12` of `12` evaluations stall with `0.35–5.30 s` mean Eval queue wait (`p95` up to `8.22 s`), and mean TTFT shows slightly more jitter (`21.0–22.1 ms`). Both `dev_eval_split` and `triad_orchestrator` reduce Eval stalls to **`0 / 12`** and Eval queue wait to **`0.000 s`** across every agent count (`N = 2..8`), holding mean TTFT tightly at `20.8–20.9 ms`.
-2. **Static 1-GPU-per-role partitioning creates an Eval bottleneck.** Across all four `triad_orchestrator` traces (`48` Dev, `16` Toolsmith, `48` Eval leases), measured busy time (`hold_s + cleanup_s`) per idea averages:
+1. **Dedicated Eval pools eliminate Eval queue interference.** Whenever `N > C` in `monolithic`, Eval leases queue behind Dev and repair leases: `10–12` of `12` evaluations stall with `0.34–5.30 s` mean Eval queue wait (`p95` up to `8.22 s`), and mean TTFT spans `21.0–21.7 ms` (`22.1 ms` at `C = 1, N = 1`). Both `dev_eval_split` and `triad_orchestrator` cut Eval stalls to **`0 / 12`** and Eval queue wait to **`0.000 s`** across `N = 2..8`, holding mean TTFT tightly at `20.8–20.9 ms`.
+2. **Static 1-GPU-per-role partitioning bottlenecks on Eval and strands `~70–77%` of Dev/Toolsmith capacity.** Across all four `triad_orchestrator` traces (`48` Dev, `16` Toolsmith, `48` Eval leases), measured busy time (`hold_s + cleanup_s`) per task averages:
    - **Eval** (3-prompt `logprobs=5` + TTFT + undo parity): **`1.38 s` / idea** (`16.54 s` per 12 ideas — **`64.4%`** of total GPU-seconds);
    - **Dev** (initial install + 1-prompt sanity check): **`0.42 s` / idea** (`5.03 s` per 12 ideas — **`19.6%`** of total GPU-seconds);
-   - **Toolsmith-Fixer** (`1.03 s` per repaired idea across `4/12` failing ideas): **`0.34 s` amortized / idea** (`4.13 s` per 12 ideas — **`16.1%`** of total GPU-seconds).
+   - **Toolsmith-Fixer** (`1.03 s` per repaired idea across `4 / 12` failing ideas): **`0.34 s` amortized / idea** (`4.13 s` per 12 ideas — **`16.1%`** of total GPU-seconds).
 
-   Because a single Eval GPU can process at most `60 / 1.38 ≈ 43.5` ideas/min, pinning 1 GPU to Eval caps both `dev_eval_split` and `triad_orchestrator` at `~41.6–42.4` ideas/min (`17.0–17.8 s` wall) with `96–97%` Eval utilization while leaving Dev (`28–31%`) and Toolsmith (`23–25%`) mostly idle. Meanwhile, `monolithic` (`C = 3, N = 8`) lets all 3 GPUs execute Eval concurrently and reaches **`74.7` ideas/min** (`9.63 s` wall, `90%` fleet utilization) at the cost of `10 / 12` Eval stalls (`1.19 s` mean Eval wait).
+   Because a single Eval GPU tops out at `60 / 1.38 ≈ 43.5` ideas/min, pinning 1 GPU to Eval caps both `dev_eval_split` and `triad_orchestrator` at **`40.4–42.4` ideas/min** (`16.98–17.81 s` wall) with `96–97%` Eval utilization while leaving Dev (`27–31%` at `C = 3`; `30–31%` in triad) and Toolsmith (`23–25%`) mostly idle. Meanwhile, `monolithic` (`C = 3, N = 8`) runs Eval on all 3 GPUs concurrently and reaches **`74.7` ideas/min** (`9.63 s` wall, `90%` fleet utilization) at the cost of `10 / 12` Eval stalls (`1.19 s` mean Eval wait).
 
-### Concrete Sizing Rules for Multi-Agent `SandboxPool` Deployments
+### Practical Pool-Sizing Rules
 
-1. **Match static role GPU counts to measured stage service time.** If strict Eval isolation is required (e.g., noiseless latency benchmarking or strict SLA on evaluation turnaround), size each role's GPU share proportionally to its amortized GPU-seconds per idea:
+1. **Match static role GPU shares to measured stage service time.** If strict Eval isolation is required, size each role's GPU share proportionally to its amortized GPU-seconds per idea:
 
    $$\frac{C_{\text{eval}}}{C} \approx \frac{T_{\text{eval}}}{T_{\text{dev}} + T_{\text{toolsmith}} + T_{\text{eval}}}$$
 
-   For this workload ($T_{\text{eval}} / T_{\text{total}} = 0.644$), a 3-GPU cluster should assign **2 GPUs to Eval and 1 shared GPU to Dev + Toolsmith** rather than 1:1:1 — lifting theoretical Eval capacity from `43.5` to `~87` ideas/min while keeping Dev + Toolsmith below saturation (`~79%` at `75` ideas/min).
-2. **Prefer elastic role reassignment over fixed partitioning for small clusters (`C ≤ 3`).** Because `rsibox` resets any slot back to bit-exact `base` in `~80–120 ms` (verified by `max_abs_logprob_diff == 0.0` across all `936` leases), a `SandboxPool` slot does not need to be statically bound to one role forever. Running a shared pool with **priority-scheduled Eval leases** (or dynamically borrowing idle Dev/Toolsmith slots when Eval queue depth exceeds 1) captures both `monolithic`'s `74.7` ideas/min fleet throughput and `triad`'s low Eval wait without stranding `70%` of Dev/Toolsmith GPU capacity.
-3. **Reserve dedicated Toolsmith GPUs only when failure rates or repair costs are high.** At a `33.3%` refusal rate with `1.03 s` average repair cost, Toolsmith consumes only `16%` of fleet GPU-seconds and shares a slot cleanly with Dev. A dedicated Toolsmith pool pays off only when repairs invoke heavier rebuilds (such as `.cu` side-library compilation at `7.3–19.2 s`) or multi-step diagnostic loops that would otherwise block Dev throughput.
+   For this workload ($T_{\text{eval}} / T_{\text{total}} = 0.644$), a 3-GPU cluster should assign **2 GPUs to Eval and 1 shared GPU to Dev + Toolsmith** rather than 1:1:1. That raises Eval capacity from `43.5` to `~87.1` ideas/min, while the combined Dev + Toolsmith stage (`(5.03 + 4.13) / 12 = 0.763 s`/idea) reaches a 1-GPU ceiling of **`~78.6` ideas/min** (`~95%` busy at `75` ideas/min, becoming the limiting stage roughly `5%` above monolithic's `74.7` ideas/min).
+2. **Elastic role reassignment with Eval priority *(unmeasured hypothesis)*.** For in-place Python hot-swaps, `rsibox` resets a slot back to bit-exact `base` in `~80–120 ms` (whereas selective CUDA graph recapture takes `~1.13 s` and a poisoned-slot warm-cache respawn takes `~45 s`). Because clean hot-swap resets are sub-second, a shared `SandboxPool` with priority-scheduled Eval leases — or dynamic borrowing of idle Dev/Toolsmith slots — is a promising design for small clusters (`C ≤ 3`) to avoid stranding `~70–77%` of Dev/Toolsmith capacity. Neither priority scheduling nor elastic slot borrowing has been implemented or benchmarked yet.
+3. **Share Dev and Toolsmith slots unless repair cost dominates.** At a `33.3%` refusal rate with `1.03 s` average repair time, Toolsmith accounts for only `16.1%` of GPU-seconds. A dedicated Toolsmith GPU is warranted only when repairs invoke much heavier rebuilds (such as `.cu` side-library compilation at `7.3–19.2 s`) that would otherwise block Dev throughput.
+
+---
+
+## 5. What This Study Does Not Show
+
+To prevent over-extrapolating from a controlled benchmark, the following boundaries apply directly to every number above:
+
+- **Scripted workers, not LLM agents:** all `N` workers were deterministic Python threads executing a fixed 6-idea suite with zero LLM think-time; real coding agents generate variable edit mixes, longer think intervals between leases, and semantic bugs that require multi-turn diagnosis rather than a scripted fallback substitution.
+- **Swappable-only edit mix:** every hot-path edit in `EXP-A` and `EXP-B` stayed within in-place Python hot-swap, fast-path live CLI reconfigure, or selective CUDA graph recapture. Real upstream PR replays across vLLM, Megatron-LM, and FastVideo show roughly `~50%` of PRs touch constructors, module-level state, or startup code that requires a restart tier ([Lesson 12](lessons.md#12-most-real-changes-need-a-restart-so-make-restarts-cheap-and-name-them-in-words)). Furthermore, `~25%` of `EXP-A` pool leases were fast refusals or startup-only config edits rather than full GPU kernel changes.
+- **Single-run (`n = 1`) pool cells:** each of the `12` `EXP-A` and `27` `EXP-B` pool cells ran once (`n = 1`), exhibiting `~±10%` cell-to-cell variance across identical single/dual-worker cells (`69.5–79.4` edits/min at `N = 1`; `114.6–125.2` edits/min at `N = 2`).
+- **Imperfect like-for-like cross-arm comparisons:** the `C = 1, N = 4` queue-wait comparison (`68.97 s` vs. `2.40 s`) compares `1` edit/agent in the live restart trial against `4` edits/agent in `SandboxPool`, and the `19.2×` 1-GPU vs. 3-GPU comparison compares `N = 8` on 1 GPU (`68.3` edits/min) against `N = 6` on 3 GPUs (`3.56` edits/min).
+- **Synthetic fault triggers and unmeasured Shadow failover:** the two fault-injection cells `(C = 2, N = 4)` and `(C = 3, N = 8)` injected synthetic `session.fault` poison rather than crashing CUDA kernels, and both recovered via plain warm-cache respawns (`44.74 s` / `45.60 s`). NVIDIA Dynamo GMS Shadow failover (`0.34 s` / `0.98 s` in companion PR #209) was not run inside this study.
