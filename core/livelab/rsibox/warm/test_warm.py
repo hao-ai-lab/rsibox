@@ -291,17 +291,39 @@ class DynamoGmsStoreTests(unittest.TestCase):
             self.assertEqual(pr.finding["check"], "dynamo_gms_daemon")
 
     def test_stop_reaps_owned_children_promptly_without_zombie_stall(self):
-        store = DynamoGmsStore(socket_dir="/tmp")
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
-            start_new_session=True,
-        )
-        store._owned_procs.append(child)
-        t0 = time.monotonic()
-        store.stop()
-        elapsed = time.monotonic() - t0
-        self.assertIsNotNone(child.poll(), "child process was not reaped")
-        self.assertLess(elapsed, 2.0, f"stop() stalled for {elapsed:.2f}s waiting on zombie")
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-det-") as tmp:
+            store = DynamoGmsStore(socket_dir=tmp)
+            # 1. Detached daemon spawned via _spawn_gms_daemon is reparented away from us
+            #    (so SGLang's kill_process_tree(os.getpid()) cannot kill it) and stops cleanly.
+            ppid_file = os.path.join(tmp, "ppid.txt")
+            log_file = os.path.join(tmp, "daemon.log")
+            daemon_pid = store._spawn_gms_daemon(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os, time; open({ppid_file!r}, 'w').write(str(os.getppid())); time.sleep(60)",
+                ],
+                os.environ.copy(),
+                log_file,
+            )
+            store._owned_pids.append(daemon_pid)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and not os.path.exists(ppid_file):
+                time.sleep(0.02)
+            self.assertTrue(os.path.exists(ppid_file))
+            self.assertNotEqual(int(Path(ppid_file).read_text().strip()), os.getpid())
+
+            # 2. Direct Popen fallback also reaps cleanly without zombie stall.
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                start_new_session=True,
+            )
+            store._owned_procs.append(child)
+            t0 = time.monotonic()
+            store.stop()
+            elapsed = time.monotonic() - t0
+            self.assertIsNotNone(child.poll(), "child process was not reaped")
+            self.assertLess(elapsed, 2.0, f"stop() stalled for {elapsed:.2f}s waiting on zombie")
 
     def test_launch_delta_vllm_and_conflicts(self):
         store = DynamoGmsStore(
@@ -414,20 +436,11 @@ class DynamoGmsStoreTests(unittest.TestCase):
                     target_resolver=lambda *a, **k: [(0, uuid), (0, uuid)],
                 )
 
-                class _FakePopen:
-                    pid = 999999
-                    def poll(self):
-                        return 0
-                    def wait(self, timeout=None):
-                        return 0
-                    def kill(self):
-                        return None
-
-                def fake_popen(cmd, **kw):
+                def fake_spawn(cmd, env, log_path):
                     spawned_cmds.append(list(cmd))
-                    return _FakePopen()
+                    return 999999
 
-                with mock.patch("subprocess.Popen", side_effect=fake_popen):
+                with mock.patch.object(store, "_spawn_gms_daemon", side_effect=fake_spawn):
                     store.ensure_ready(gpus=["0"], timeout_s=0.1)
                 self.assertEqual(len(spawned_cmds), 1)
                 cmd = spawned_cmds[0]

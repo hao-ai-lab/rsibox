@@ -471,6 +471,7 @@ class DynamoGmsStore:
         self._uuid_resolver = uuid_resolver
         self._target_resolver = target_resolver
         self._owned_procs: list[subprocess.Popen] = []
+        self._owned_pids: list[int] = []
 
     def _resolve_targets(
         self,
@@ -698,6 +699,37 @@ class DynamoGmsStore:
             env["PYTHONPATH"] = os.pathsep.join(parts)
         return env
 
+    def _spawn_gms_daemon(self, cmd: list[str], env: dict[str, str], log_path: str) -> int:
+        """Spawn a detached GMS server reparented away from this process.
+
+        Detaching via a short-lived intermediate launcher reparents the GMS server to
+        init/subreaper so engine shutdown helpers that walk caller children (such as
+        SGLang's `kill_process_tree(os.getpid(), include_parent=False)`) never kill
+        the persistent GMS weight server.
+        """
+        helper = (
+            "import json, os, subprocess, sys; "
+            "cmd, log_path = json.loads(sys.argv[1]), sys.argv[2]; "
+            "fh = open(log_path, 'ab'); "
+            "p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=fh, "
+            "stderr=subprocess.STDOUT, start_new_session=True, close_fds=True); "
+            "sys.stdout.write(f'{p.pid}\\n'); sys.stdout.flush(); os._exit(0)"
+        )
+        res = subprocess.run(
+            [self.python, "-c", helper, json.dumps(cmd), log_path],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+        )
+        pid_txt = res.stdout.strip().splitlines()[-1].strip() if res.stdout.strip() else ""
+        if res.returncode != 0 or not pid_txt.isdigit():
+            raise RuntimeError(
+                f"failed to launch detached GMS daemon rc={res.returncode}: {res.stderr.strip()}"
+            )
+        return int(pid_txt)
+
     def ensure_ready(
         self,
         *,
@@ -740,7 +772,7 @@ class DynamoGmsStore:
         os.makedirs(log_root, exist_ok=True)
         env = self._gms_server_env()
 
-        started: list[tuple[int, subprocess.Popen]] = []
+        started: list[tuple[int, int]] = []
         try:
             for dev, dev_tags in missing_tags_by_dev.items():
                 cmd = [
@@ -755,25 +787,16 @@ class DynamoGmsStore:
                 for tag in dev_tags:
                     cmd.extend(["--tag", tag])
                 log_path = os.path.join(log_root, f"gms-server-gpu{dev}.log")
-                with open(log_path, "ab") as log_fh:
-                    child = subprocess.Popen(
-                        cmd,
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=log_fh,
-                        stderr=subprocess.STDOUT,
-                        start_new_session=True,
-                    )
-                started.append((dev, child))
-                self._owned_procs.append(child)
+                daemon_pid = self._spawn_gms_daemon(cmd, env, log_path)
+                started.append((dev, daemon_pid))
+                self._owned_pids.append(daemon_pid)
 
             deadline = time.monotonic() + float(timeout_s)
             while time.monotonic() < deadline:
-                for dev, child in started:
-                    rc = child.poll()
-                    if rc is not None:
+                for dev, daemon_pid in started:
+                    if not proc.pid_alive(daemon_pid):
                         raise RuntimeError(
-                            f"GMS server for GPU {dev} exited early with code {rc} "
+                            f"GMS server for GPU {dev} (pid={daemon_pid}) exited early "
                             f"(see {os.path.join(log_root, f'gms-server-gpu{dev}.log')})"
                         )
                 pr = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, connect_timeout_s=0.3)
@@ -791,11 +814,11 @@ class DynamoGmsStore:
 
             raise TimeoutError(f"GMS server sockets did not become ready within {timeout_s:.1f}s")
         except BaseException as exc:
-            # Never leave half-started GMS daemons or unreaped zombies holding GPU resources.
-            for _, child in started:
-                self._stop_child(child, grace=3.0)
-                if child in self._owned_procs:
-                    self._owned_procs.remove(child)
+            # Never leave half-started GMS daemons holding GPU resources.
+            for _, daemon_pid in started:
+                proc.stop_session(daemon_pid, grace=3.0)
+                if daemon_pid in self._owned_pids:
+                    self._owned_pids.remove(daemon_pid)
             if not isinstance(exc, Exception):
                 raise
             finding = harness.plain_finding(
@@ -1017,7 +1040,11 @@ class DynamoGmsStore:
             child.wait(timeout=2.0)
 
     def stop(self) -> None:
-        """Stop and reap every GMS server process spawned by this instance (leaves external sidecars alone)."""
+        """Stop every GMS server process spawned by this instance (leaves external sidecars alone)."""
+        pids = list(self._owned_pids)
+        self._owned_pids.clear()
+        for pid in pids:
+            proc.stop_session(pid, grace=5.0)
         procs = list(self._owned_procs)
         self._owned_procs.clear()
         for child in procs:
