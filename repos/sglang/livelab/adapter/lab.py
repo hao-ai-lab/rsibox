@@ -20,10 +20,12 @@ class SglangLab(ConformanceHarness, BaseLab):
     threaded_check = True
     supports_gms_uuid_shim = True
     def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0, fork_subprocs=False,
-                 weight_cache_dir=None, weight_store=None, recovery_driver=None):
+                 weight_cache_dir=None, weight_store=None, recovery_driver=None,
+                 allow_nonpauseable_cuda_graphs=False):
         self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
         self.engine, self.sock_path, self.ranks, self.rank_conns, self.rank_locks = None, None, 0, {}, {}
         self.fork_subprocs, self.fork_subprocs_fallback, self._fork_subprocs_restore = bool(fork_subprocs), [], None
+        self.allow_nonpauseable_cuda_graphs = bool(allow_nonpauseable_cuda_graphs)
         raw_wc = os.fspath(weight_cache_dir).strip() if weight_cache_dir else ""
         self.weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
         if self.weight_cache_dir and weight_store is not None and getattr(weight_store, "name", "none") != "none":
@@ -214,6 +216,7 @@ class SglangLab(ConformanceHarness, BaseLab):
         extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
         env_updates = dict(delta.env or {})
         env_removals = []
+        nonpauseable_cg = bool(getattr(self, "allow_nonpauseable_cuda_graphs", False))
         if store.name == "dynamo_gms":
             from rsibox.warm.dynamo_gms import ENV_GMS_DEVICE_UUID_MAP, uninstall_visible_devices_uuid_shim
             if uuid_map_json:
@@ -221,6 +224,11 @@ class SglangLab(ConformanceHarness, BaseLab):
             else:
                 env_removals.append(ENV_GMS_DEVICE_UUID_MAP)
                 uninstall_visible_devices_uuid_shim()
+            if nonpauseable_cg:
+                env_updates[agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG] = "1"
+            else:
+                env_removals.append(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG)
+                agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
         added_sys_paths = []
         if extra_py:
             cur_py = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
@@ -251,25 +259,38 @@ class SglangLab(ConformanceHarness, BaseLab):
                     with contextlib.suppress(Exception):
                         from rsibox.warm.dynamo_gms import uninstall_visible_devices_uuid_shim
                         uninstall_visible_devices_uuid_shim()
+                    if os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG) != "1":
+                        with contextlib.suppress(Exception):
+                            agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                    with contextlib.suppress(Exception):
+                        agent.uninstall_sglang_gms_meta_loader_shim()
             self._weight_cache_env_restore = _restore
 
         try:
             merged = dict(self.config)
             if store.name == "dynamo_gms":
-                for cg_key in ("cuda_graph_backend_decode", "cuda_graph_backend_prefill"):
-                    cg_val = merged.get(cg_key)
-                    if cg_val is not None and cg_val != "disabled":
+                if nonpauseable_cg:
+                    if merged.get("cuda_graph_backend_decode") is None:
+                        merged["cuda_graph_backend_decode"] = "full"
+                    if merged.get("cuda_graph_backend_prefill") is None:
+                        merged["cuda_graph_backend_prefill"] = "disabled"
+                else:
+                    for cg_key in ("cuda_graph_backend_decode", "cuda_graph_backend_prefill"):
+                        cg_val = merged.get(cg_key)
+                        if cg_val is not None and cg_val != "disabled":
+                            raise RuntimeError(
+                                f"SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                                f"({cg_key}={cg_val!r}); set {cg_key}='disabled', omit it, or pass "
+                                "allow_nonpauseable_cuda_graphs=True when never pausing 'cuda_graph'"
+                            )
+                    if merged.get("disable_cuda_graph") is False:
                         raise RuntimeError(
-                            f"SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
-                            f"({cg_key}={cg_val!r}); set {cg_key}='disabled' or omit it"
+                            "SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                            "(disable_cuda_graph=False); pass allow_nonpauseable_cuda_graphs=True "
+                            "when never pausing 'cuda_graph'"
                         )
-                if merged.get("disable_cuda_graph") is False:
-                    raise RuntimeError(
-                        "SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
-                        "(disable_cuda_graph=False)"
-                    )
-                merged.setdefault("cuda_graph_backend_decode", "disabled")
-                merged.setdefault("cuda_graph_backend_prefill", "disabled")
+                    merged.setdefault("cuda_graph_backend_decode", "disabled")
+                    merged.setdefault("cuda_graph_backend_prefill", "disabled")
                 merged_extra = store.merged_loader_config(merged.get("model_loader_extra_config"))
                 if merged_extra:
                     merged["model_loader_extra_config"] = json.dumps(merged_extra)

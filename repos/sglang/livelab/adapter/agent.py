@@ -1,9 +1,14 @@
 """Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `rsibox_gap`."""
-import json, linecache, os, queue, random, sys, threading
+import contextlib, functools, importlib, json, linecache, logging, os, queue, random, sys, threading
 from multiprocessing.connection import Client
 from adapter import recapture as R1
 from rsibox import harness
 from kernel import coordinator as C, findings as F
+
+ENV_SGLANG_GMS_NONPAUSEABLE_CG = "RSIBOX_SGLANG_GMS_NONPAUSEABLE_CG"
+_GMS_CG_SHIM_LOCK = threading.RLock()
+_GMS_CG_SHIM_STATE = {"installed": False, "cls": None, "orig_cuda_graph": None, "orig_pause": None}
+_GMS_META_SHIM_STATE = {"installed": False, "cls": None, "orig_create_meta_model": None}
 
 GAP_METHODS = frozenset({"park", "validate", "commit", "undo", "recapture",
                          "recapture_extend", "recapture_extend_drop", "reset", "release_gap"})
@@ -153,6 +158,238 @@ def _control_loop(scheduler, conn):
     except (EOFError, OSError):
         return
 
+def install_sglang_gms_nonpauseable_cuda_graph_shim():
+    """Delegate `GMSMemorySaverImpl.cuda_graph` to `torch.cuda.graph` when graphs are never paused.
+
+    Upstream `gpu_memory_service` raises `RuntimeError` in `GMSMemorySaverImpl.cuda_graph()`
+    because GMS does not support *pauseable* CUDA graphs. When a workflow (such as CRIU +
+    `cuda-checkpoint`) only releases `weights` and `kv_cache` and never pauses the
+    `cuda_graph` tag, standard non-pauseable `torch.cuda.graph()` capture works cleanly
+    against VA-stable GMS VMM pointers. Fails closed if any caller attempts `pause('cuda_graph')`.
+    """
+    ms_mod = sys.modules.get("gpu_memory_service.integrations.sglang.memory_saver")
+    if ms_mod is None:
+        try:
+            ms_mod = importlib.import_module("gpu_memory_service.integrations.sglang.memory_saver")
+        except ImportError:
+            return False
+    impl_cls = getattr(ms_mod, "GMSMemorySaverImpl", None)
+    if impl_cls is None:
+        return False
+    with _GMS_CG_SHIM_LOCK:
+        if _GMS_CG_SHIM_STATE["installed"] and _GMS_CG_SHIM_STATE["cls"] is impl_cls:
+            return True
+        if _GMS_CG_SHIM_STATE["installed"]:
+            uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+
+        orig_cuda_graph = getattr(impl_cls, "cuda_graph", None)
+        orig_pause = getattr(impl_cls, "pause", None)
+
+        @contextlib.contextmanager
+        def _nonpauseable_cuda_graph(
+            self,
+            cuda_graph,
+            pool=None,
+            stream=None,
+            capture_error_mode="global",
+            tag="cuda_graph",
+            **backup_options,
+        ):
+            torch_mod = sys.modules.get("torch") or importlib.import_module("torch")
+            with torch_mod.cuda.graph(
+                cuda_graph,
+                pool=pool,
+                stream=stream,
+                capture_error_mode=capture_error_mode,
+            ):
+                yield
+
+        impl_cls.cuda_graph = _nonpauseable_cuda_graph
+        if callable(orig_pause):
+            @functools.wraps(orig_pause)
+            def _guarded_pause(self, *args, **kwargs):
+                tag = args[0] if args else kwargs.get("tag")
+                if tag == "cuda_graph":
+                    raise RuntimeError(
+                        "cannot pause 'cuda_graph' tag when non-pauseable CUDA graphs are enabled "
+                        "under Dynamo GMS; release only 'weights' and/or 'kv_cache'"
+                    )
+                return orig_pause(self, *args, **kwargs)
+
+            impl_cls.pause = _guarded_pause
+        _GMS_CG_SHIM_STATE.update(
+            installed=True,
+            cls=impl_cls,
+            orig_cuda_graph=orig_cuda_graph,
+            orig_pause=orig_pause,
+        )
+        return True
+
+
+def uninstall_sglang_gms_nonpauseable_cuda_graph_shim():
+    """Restore original `GMSMemorySaverImpl.cuda_graph` and `pause` methods if patched."""
+    with _GMS_CG_SHIM_LOCK:
+        if not _GMS_CG_SHIM_STATE["installed"]:
+            return False
+        impl_cls = _GMS_CG_SHIM_STATE["cls"]
+        if impl_cls is not None:
+            if _GMS_CG_SHIM_STATE["orig_cuda_graph"] is not None:
+                impl_cls.cuda_graph = _GMS_CG_SHIM_STATE["orig_cuda_graph"]
+            if _GMS_CG_SHIM_STATE["orig_pause"] is not None:
+                impl_cls.pause = _GMS_CG_SHIM_STATE["orig_pause"]
+        _GMS_CG_SHIM_STATE.update(installed=False, cls=None, orig_cuda_graph=None, orig_pause=None)
+        return True
+
+
+def install_sglang_gms_meta_loader_shim():
+    """Fix upstream `GMSModelLoader._create_meta_model` leaking full CUDA weights on RO load.
+
+    Upstream `gpu_memory_service.integrations.sglang.model_loader.GMSModelLoader._create_meta_model`
+    calls `sglang.srt.model_loader.get_model(..., load_format="dummy", device_config=device_config)`
+    inside `with torch.device("meta"):`. SGLang's `DummyModelLoader.load_model` enters
+    `with torch.device(device_config.device):` (`cuda`), overriding the outer meta context,
+    allocating a full duplicate copy of all weights on GPU HBM and filling them with random
+    numbers before `materialize_module_from_gms` discards them into PyTorch's caching allocator.
+    Building the skeleton directly via `_initialize_model` under `with torch.device("meta"):`
+    allocates zero CUDA weight bytes while preserving `post_load_weights` and quant post-processing.
+    """
+    with _GMS_CG_SHIM_LOCK:
+        ml_mod = sys.modules.get("gpu_memory_service.integrations.sglang.model_loader")
+        if ml_mod is None:
+            try:
+                ml_mod = importlib.import_module("gpu_memory_service.integrations.sglang.model_loader")
+            except ImportError:
+                return False
+        loader_cls = getattr(ml_mod, "GMSModelLoader", None)
+        if loader_cls is None:
+            return False
+        if _GMS_META_SHIM_STATE["installed"] and _GMS_META_SHIM_STATE["cls"] is loader_cls:
+            return True
+        if _GMS_META_SHIM_STATE["installed"]:
+            uninstall_sglang_gms_meta_loader_shim()
+
+        orig_create_meta = getattr(loader_cls, "_create_meta_model", None)
+        if not callable(orig_create_meta):
+            return False
+        if getattr(orig_create_meta, "_rsibox_gms_meta_shim", False):
+            orig_create_meta = getattr(orig_create_meta, "__wrapped__", orig_create_meta)
+
+        @functools.wraps(orig_create_meta)
+        def _zero_copy_create_meta_model(self, model_config, device_config):
+            try:
+                sgl_loader = importlib.import_module("sglang.srt.model_loader.loader")
+                sgl_utils = importlib.import_module("sglang.srt.model_loader.utils")
+                init_fn = getattr(sgl_loader, "_initialize_model", None)
+                quant_fn = getattr(sgl_loader, "_get_quantization_config", None)
+                set_dtype = getattr(sgl_loader, "set_default_torch_dtype", None)
+                if not callable(set_dtype):
+                    set_dtype = getattr(sgl_utils, "set_default_torch_dtype", None)
+                if not (callable(init_fn) and callable(quant_fn) and callable(set_dtype)):
+                    return orig_create_meta(self, model_config, device_config)
+                torch_mod = sys.modules.get("torch") or importlib.import_module("torch")
+                common_utils = importlib.import_module("gpu_memory_service.integrations.common.utils")
+                cur_ml_mod = sys.modules.get("gpu_memory_service.integrations.sglang.model_loader") or ml_mod
+                setup_meta = getattr(common_utils, "setup_meta_tensor_workaround", None)
+                if callable(setup_meta):
+                    setup_meta()
+                strip_cfg = getattr(cur_ml_mod, "strip_gms_model_loader_config", None)
+                dummy_cfg = (
+                    strip_cfg(self.load_config, load_format="dummy")
+                    if callable(strip_cfg)
+                    else self.load_config
+                )
+                torch_dev_fn = getattr(cur_ml_mod, "torch_device", None)
+                original_device = torch_dev_fn().current_device() if callable(torch_dev_fn) else None
+                meta_device = torch_mod.device("meta")
+                try:
+                    quant_config = quant_fn(model_config, dummy_cfg)
+                    with set_dtype(model_config.dtype):
+                        with meta_device:
+                            model = init_fn(model_config, dummy_cfg, quant_config)
+                            post_fn = getattr(sgl_loader, "post_load_weights", None)
+                            if callable(post_fn):
+                                post_fn(model)
+                            for _, module in model.named_modules():
+                                qm = getattr(module, "quant_method", None)
+                                if qm is not None:
+                                    iwq = getattr(module, "is_weights_quantized", None)
+                                    if iwq() if callable(iwq) else bool(iwq):
+                                        continue
+                                    qm.process_weights_after_loading(module)
+                finally:
+                    if callable(torch_dev_fn) and original_device is not None:
+                        with contextlib.suppress(Exception):
+                            torch_dev_fn().set_device(original_device)
+                try:
+                    proc_after = getattr(sgl_utils, "process_model_weights_after_loading", None)
+                    if callable(proc_after):
+                        proc_after(model, model_config)
+                except Exception:
+                    pass
+                return model.eval()
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "zero-copy GMS meta loader fell back to upstream _create_meta_model: %s", exc
+                )
+                return orig_create_meta(self, model_config, device_config)
+
+        _zero_copy_create_meta_model._rsibox_gms_meta_shim = True
+        loader_cls._create_meta_model = _zero_copy_create_meta_model
+        _GMS_META_SHIM_STATE.update(
+            installed=True,
+            cls=loader_cls,
+            wrapper=_zero_copy_create_meta_model,
+            orig_create_meta_model=orig_create_meta,
+        )
+        return True
+
+
+def uninstall_sglang_gms_meta_loader_shim():
+    """Restore original `GMSModelLoader._create_meta_model` if patched."""
+    with _GMS_CG_SHIM_LOCK:
+        if not _GMS_META_SHIM_STATE["installed"]:
+            return False
+        loader_cls = _GMS_META_SHIM_STATE["cls"]
+        wrapper = _GMS_META_SHIM_STATE.get("wrapper")
+        if (
+            loader_cls is not None
+            and _GMS_META_SHIM_STATE["orig_create_meta_model"] is not None
+            and getattr(loader_cls, "_create_meta_model", None) is wrapper
+        ):
+            loader_cls._create_meta_model = _GMS_META_SHIM_STATE["orig_create_meta_model"]
+        _GMS_META_SHIM_STATE.update(installed=False, cls=None, wrapper=None, orig_create_meta_model=None)
+        return True
+
+
+def _resolve_server_arg(server_args, field):
+    try:
+        from sglang.srt.arg_groups.overrides import resolution_result
+        val = resolution_result(server_args, field)
+        if val is not None:
+            return val
+    except Exception:
+        for _src, declared in reversed(getattr(server_args, "_resolved_overrides", None) or ()):
+            if isinstance(declared, dict) and field in declared:
+                return declared[field]
+    return getattr(server_args, field, None)
+
+
+def _server_args_uses_gms(server_args):
+    lf = _resolve_server_arg(server_args, "load_format")
+    if isinstance(lf, str):
+        if lf.lower() == "gms":
+            return True
+    elif lf is not None:
+        name = getattr(lf, "__name__", "")
+        mod = getattr(lf, "__module__", "") or ""
+        if "GMSModelLoader" in name or mod.startswith("gpu_memory_service"):
+            return True
+    for src, _declared in getattr(server_args, "_resolved_overrides", None) or ():
+        if isinstance(src, str) and (src.startswith("dynamo.gms") or src.startswith("rsibox.gms")):
+            return True
+    return False
+
+
 def sync_sglang_gms_globals(server_args):
     """Sync `gpu_memory_service.integrations.sglang` lock-mode globals from `server_args`.
 
@@ -161,7 +398,8 @@ def sync_sglang_gms_globals(server_args):
     children unpickle `server_args` without re-running `setup_gms()`. Calling this in
     both the parent (after `setup_gms`) and `run_scheduler_entry` guarantees
     `gms_read_only` and `gms_ro_connect_timeout_ms` are honored in every process,
-    and installs the bare-metal `CUDA_VISIBLE_DEVICES` UUID shim when configured.
+    and installs the bare-metal `CUDA_VISIBLE_DEVICES` UUID shim and optional
+    non-pauseable CUDA-graph delegation shim when configured.
     """
     if os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"):
         try:
@@ -175,22 +413,21 @@ def sync_sglang_gms_globals(server_args):
             uninstall_visible_devices_uuid_shim()
         except Exception:
             pass
+    if os.environ.get(ENV_SGLANG_GMS_NONPAUSEABLE_CG) == "1":
+        install_sglang_gms_nonpauseable_cuda_graph_shim()
+    else:
+        uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
     if server_args is None:
+        uninstall_sglang_gms_meta_loader_shim()
         return
+    if not _server_args_uses_gms(server_args):
+        uninstall_sglang_gms_meta_loader_shim()
+        return
+    install_sglang_gms_meta_loader_shim()
     gms_sglang = sys.modules.get("gpu_memory_service.integrations.sglang")
     if gms_sglang is None:
         return
-    raw_extra = None
-    try:
-        from sglang.srt.arg_groups.overrides import resolution_result
-        raw_extra = resolution_result(server_args, "model_loader_extra_config")
-    except Exception:
-        for _src, declared in reversed(getattr(server_args, "_resolved_overrides", None) or ()):
-            if isinstance(declared, dict) and "model_loader_extra_config" in declared:
-                raw_extra = declared["model_loader_extra_config"]
-                break
-    if raw_extra is None:
-        raw_extra = getattr(server_args, "model_loader_extra_config", None)
+    raw_extra = _resolve_server_arg(server_args, "model_loader_extra_config")
     if isinstance(raw_extra, str):
         raw_str = raw_extra.strip()
         extra = json.loads(raw_str) if raw_str else {}
