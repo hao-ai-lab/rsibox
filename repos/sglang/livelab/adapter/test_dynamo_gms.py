@@ -238,6 +238,12 @@ class SglangDynamoGmsTests(unittest.TestCase):
                     self.assertEqual(ret, "ok")
                     self.assertEqual(seen_in_child, [("RO", 10000)])
 
+                    # Resetting back to empty extra config clears RO lock mode back to RW_OR_RO!
+                    sa_rw = mods["sglang.srt.server_args"].ServerArgs("m")
+                    agent.sync_sglang_gms_globals(sa_rw)
+                    self.assertEqual(gms_sglang_mod._gms_lock_mode, "RW_OR_RO")
+                    self.assertIsNone(gms_sglang_mod._gms_ro_connect_timeout_ms)
+
                 self.assertEqual(os.environ.get("GMS_SOCKET_DIR"), os.path.abspath(tmp))
                 self.assertIn(overlay, os.environ.get("PYTHONPATH", "").split(os.pathsep))
                 self.assertIn(overlay, sys.path)
@@ -373,6 +379,32 @@ class SglangDynamoGmsTests(unittest.TestCase):
                 weight_cache_dir="/tmp/wc",
                 weight_store=store,
             )
+
+    def test_stale_uuid_map_is_cleared_on_unremapped_sglang_lab(self):
+        uuid0 = "GPU-00000000-0000-0000-0000-000000000000"
+        mods, _, _, _, _ = _fake_sglang_and_gms_modules()
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="sglgms-") as tmp:
+            guards = [_MockGmsSock(os.path.join(tmp, socket_name(uuid0, tag)), committed=True) for tag in GMS_TAGS]
+            try:
+                store = DynamoGmsStore(
+                    socket_dir=tmp,
+                    target_resolver=lambda *a, **k: [(0, uuid0)],
+                )
+                lab = SglangLab.__new__(SglangLab)
+                lab.config = {"model_path": "m", "tp_size": 1}
+                lab.weight_store = store
+                lab._weight_cache_env_restore = None
+                with mock.patch.dict(
+                    os.environ,
+                    {"CUDA_VISIBLE_DEVICES": "0", "RSIBOX_GMS_DEVICE_UUID_MAP": '{"0":"GPU-stale"}'},
+                ), mock.patch.dict(sys.modules, mods):
+                    lab._prepare_weight_store()
+                    self.assertNotIn("RSIBOX_GMS_DEVICE_UUID_MAP", os.environ)
+                    lab._restore_weight_cache_env()
+                    self.assertEqual(os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"), '{"0":"GPU-stale"}')
+            finally:
+                for g in guards:
+                    g.close()
 
     def test_prepare_weight_store_fails_fast_when_sockets_missing(self):
         uuid = "GPU-12345678-1234-1234-1234-123456789abc"

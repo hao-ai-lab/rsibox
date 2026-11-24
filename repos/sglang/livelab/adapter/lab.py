@@ -18,6 +18,7 @@ def is_graph_module(module_name):
 class SglangLab(ConformanceHarness, BaseLab):
     name, scheduler_module, io_module = "sglang", "sglang.srt.managers.scheduler", "sglang.srt.managers.io_struct"
     threaded_check = True
+    supports_gms_uuid_shim = True
     def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0, fork_subprocs=False,
                  weight_cache_dir=None, weight_store=None, recovery_driver=None):
         self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
@@ -189,19 +190,15 @@ class SglangLab(ConformanceHarness, BaseLab):
         vis = os.environ.get("CUDA_VISIBLE_DEVICES")
         uuid_map_json = None
         if store.name == "dynamo_gms" and vis is not None and vis.strip():
-            from rsibox.warm.dynamo_gms import ENV_GMS_DEVICE_UUID_MAP, build_device_uuid_map
+            from rsibox.warm.dynamo_gms import build_device_uuid_map
             resolver = getattr(store, "_resolve_targets", None)
             targets = resolver(visible_devices=vis, tp=tp_size) if callable(resolver) else None
             if targets and any(logical != phys for logical, (phys, _) in enumerate(targets)):
                 uuid_map_json = json.dumps(build_device_uuid_map(targets))
-        prev_allow_remap = getattr(store, "allow_remapped_visible_devices", False)
-        if uuid_map_json and hasattr(store, "allow_remapped_visible_devices"):
-            store.allow_remapped_visible_devices = True
-        try:
-            pr = store.probe(tp=tp_size, visible_devices=vis)
-        finally:
-            if uuid_map_json and hasattr(store, "allow_remapped_visible_devices"):
-                store.allow_remapped_visible_devices = prev_allow_remap
+        probe_kw = {"tp": tp_size, "visible_devices": vis}
+        if uuid_map_json and store.name == "dynamo_gms":
+            probe_kw["allow_remapped"] = True
+        pr = store.probe(**probe_kw)
         if not pr.ok:
             raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
         explicit = {
@@ -216,8 +213,14 @@ class SglangLab(ConformanceHarness, BaseLab):
         self._restore_weight_cache_env()
         extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
         env_updates = dict(delta.env or {})
-        if uuid_map_json:
-            env_updates[ENV_GMS_DEVICE_UUID_MAP] = uuid_map_json
+        env_removals = []
+        if store.name == "dynamo_gms":
+            from rsibox.warm.dynamo_gms import ENV_GMS_DEVICE_UUID_MAP, uninstall_visible_devices_uuid_shim
+            if uuid_map_json:
+                env_updates[ENV_GMS_DEVICE_UUID_MAP] = uuid_map_json
+            else:
+                env_removals.append(ENV_GMS_DEVICE_UUID_MAP)
+                uninstall_visible_devices_uuid_shim()
         added_sys_paths = []
         if extra_py:
             cur_py = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
@@ -229,9 +232,12 @@ class SglangLab(ConformanceHarness, BaseLab):
                     added_sys_paths.append(entry)
             env_updates["PYTHONPATH"] = os.pathsep.join(cur_py)
 
-        if env_updates or added_sys_paths:
-            prev = {k: os.environ.get(k) for k in env_updates}
+        if env_updates or env_removals or added_sys_paths:
+            prev = {k: os.environ.get(k) for k in (*env_updates.keys(), *env_removals)}
             os.environ.update(env_updates)
+            for k in env_removals:
+                os.environ.pop(k, None)
+            is_gms = store.name == "dynamo_gms"
             def _restore():
                 for k, old in prev.items():
                     if old is None:
@@ -241,6 +247,10 @@ class SglangLab(ConformanceHarness, BaseLab):
                 for entry in reversed(added_sys_paths):
                     with contextlib.suppress(ValueError):
                         sys.path.remove(entry)
+                if is_gms:
+                    with contextlib.suppress(Exception):
+                        from rsibox.warm.dynamo_gms import uninstall_visible_devices_uuid_shim
+                        uninstall_visible_devices_uuid_shim()
             self._weight_cache_env_restore = _restore
 
         try:

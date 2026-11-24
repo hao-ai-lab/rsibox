@@ -169,6 +169,12 @@ def sync_sglang_gms_globals(server_args):
             install_visible_devices_uuid_shim()
         except Exception:
             pass
+    else:
+        try:
+            from rsibox.warm.dynamo_gms import uninstall_visible_devices_uuid_shim
+            uninstall_visible_devices_uuid_shim()
+        except Exception:
+            pass
     if server_args is None:
         return
     gms_sglang = sys.modules.get("gpu_memory_service.integrations.sglang")
@@ -192,7 +198,7 @@ def sync_sglang_gms_globals(server_args):
         extra = dict(raw_extra)
     else:
         extra = {}
-    if not isinstance(extra, dict) or not extra:
+    if not isinstance(extra, dict):
         return
     from gpu_memory_service.integrations.common.utils import (
         get_gms_lock_mode,
