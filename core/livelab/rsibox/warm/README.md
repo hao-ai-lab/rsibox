@@ -21,8 +21,8 @@ residency and crash/snapshot recovery**:
 |---|---|
 | `types.py` | `LaunchDelta`, `StoreProbe`, `QuiesceReceipt`, `Mutability`, `stamp_diff`. |
 | `weight_store.py` | `WeightStore` protocol, `DiskStore` (`"none"`), and backend registry. |
-| `dynamo_gms.py` | Optional `DynamoGmsStore` (`"dynamo_gms"`) for NVIDIA Dynamo's `gpu_memory_service` (CUDA VMM `gms_<uuid>_{weights,kv_cache}.sock`, `AF_UNIX` cap, stamp staleness guard, `LaunchDelta` for vLLM/SGLang/FastVideo). |
-| `recovery.py` | `QuiesceHooks`, `RecoveryDriver`, `DefaultRespawnDriver`, `StandbyShadowDriver`. |
+| `dynamo_gms.py` | Optional `DynamoGmsStore` (`"dynamo_gms"`) for NVIDIA Dynamo's `gpu_memory_service` (CUDA VMM `gms_<uuid>_{weights,kv_cache}.sock`, `AF_UNIX` cap, `RLIMIT_NOFILE` FD-limit guard, stamp staleness guard, `LaunchDelta` for vLLM/SGLang/FastVideo). |
+| `recovery.py` | `QuiesceHooks`, `RecoveryDriver`, `DefaultRespawnDriver`, `StandbyShadowDriver`, `AsyncShadowReplenisher`. |
 | `snapshot_contract.py` | `DynamoK8sSnapshotDriver` and `run_snapshot_lifecycle()` implementing `ai-dynamo/snapshot`'s 3-sentinel `$SNAPSHOT_CONTROL_DIR` Workload Contract (`ready-for-snapshot` -> `restore-complete` -> `<engine>-restore-ready`) for any RSIBox engine with `QuiesceHooks`. |
 
 ## Design invariants

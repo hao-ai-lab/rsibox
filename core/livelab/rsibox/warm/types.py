@@ -43,6 +43,7 @@ class StoreProbe:
     seconds: float = 0.0
     error: str | None = None
     finding: dict[str, Any] | None = None
+    details: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -58,6 +59,8 @@ class StoreProbe:
             out["error"] = self.error
         if self.finding:
             out["finding"] = self.finding
+        if self.details:
+            out["details"] = self.details
         return out
 
 

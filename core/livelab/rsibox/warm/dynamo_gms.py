@@ -11,6 +11,9 @@ Socket layout mirrors `gpu_memory_service/common/utils.py`:
 Key guarantees:
 - Pure Python stdlib at import time; never imports `torch`, `msgspec`, or `gpu_memory_service`.
 - Enforces `AF_UNIX` `MAX_SOCK_PATH` on both sample and resolved UUID paths before starting.
+- Enforces `RLIMIT_NOFILE` preflight (`min_nofile=4096` default, `RSIBOX_GMS_MIN_NOFILE` env
+  override): `probe()` checks strictly read-only, while `ensure_ready()` / `prepare_nofile()`
+  safely raises the soft limit only when `hard_limit >= min_nofile`.
 - Probes GMS sockets with the lock-free MsgPack `GetRuntimeStateRequest` frame so real GMS
   servers reply cleanly with zero `Handshake recv error` logs and expose `committed` state
   (failing fast when `read_only=True` against an uncommitted `EMPTY` GMS layout).
@@ -25,6 +28,10 @@ from __future__ import annotations
 
 import json
 import os
+try:
+    import resource
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    resource = None  # type: ignore[assignment]
 import socket
 import struct
 import subprocess
@@ -46,7 +53,10 @@ GMS_VLLM_LOAD_FORMAT = "gms"
 GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 GMS_SGLANG_LOAD_FORMAT = "gms"
 ENV_GMS_DEVICE_UUID_MAP = "RSIBOX_GMS_DEVICE_UUID_MAP"
+ENV_GMS_MIN_NOFILE = "RSIBOX_GMS_MIN_NOFILE"
 DEFAULT_RO_CONNECT_TIMEOUT_MS = 10_000
+DEFAULT_MIN_NOFILE = 4096
+RECOMMENDED_NOFILE = 65536
 _SAMPLE_UUID = "GPU-00000000-0000-0000-0000-000000000000"
 
 # Exact length-prefixed MsgPack wire frame for `GetRuntimeStateRequest()`
@@ -89,6 +99,116 @@ def long_socket_path_finding(
                     actions=["use a short --gms-socket-dir such as /tmp/rsibox-gms"],
                 )
     return None
+
+
+def _default_get_nofile() -> tuple[int, int] | None:
+    if resource is None or not hasattr(resource, "RLIMIT_NOFILE"):
+        return None
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    return int(soft_limit), int(hard_limit)
+
+
+def _default_set_nofile(soft_limit: int, hard_limit: int) -> None:
+    if resource is not None and hasattr(resource, "RLIMIT_NOFILE"):
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
+
+
+def _is_infinite_limit(limit_value: int) -> bool:
+    rlim_infinity = getattr(resource, "RLIM_INFINITY", -1) if resource is not None else -1
+    return limit_value == rlim_infinity or limit_value < 0
+
+
+def _limit_satisfies(limit_value: int, required: int) -> bool:
+    return _is_infinite_limit(limit_value) or limit_value >= required
+
+
+def _resolve_min_nofile(min_nofile: int | None) -> int:
+    """Resolve `min_nofile` from explicit argument, `RSIBOX_GMS_MIN_NOFILE`, or default."""
+    if min_nofile is None:
+        raw_env = os.environ.get(ENV_GMS_MIN_NOFILE)
+        if raw_env is None or not raw_env.strip():
+            return DEFAULT_MIN_NOFILE
+        try:
+            parsed = int(raw_env.strip())
+        except ValueError as error:
+            raise ValueError(f"{ENV_GMS_MIN_NOFILE} must be a non-negative integer, got {raw_env!r}") from error
+        if parsed < 0:
+            raise ValueError(f"{ENV_GMS_MIN_NOFILE} must be a non-negative integer, got {raw_env!r}")
+        return parsed
+    if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
+        raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
+    return int(min_nofile)
+
+
+def _read_nofile_state(
+    get_nofile: Callable[[], tuple[int, int] | None] | None,
+) -> tuple[int, int, bool] | None:
+    limits = (_default_get_nofile if get_nofile is None else get_nofile)()
+    if limits is None:
+        return None
+    soft_limit, hard_limit = int(limits[0]), int(limits[1])
+    soft_exceeds_hard = (not _is_infinite_limit(hard_limit)) and (
+        _is_infinite_limit(soft_limit) or soft_limit > hard_limit
+    )
+    return soft_limit, hard_limit, soft_exceeds_hard
+
+
+def nofile_limit_finding(
+    min_nofile: int = DEFAULT_MIN_NOFILE,
+    *,
+    auto_raise: bool = False,
+    get_nofile: Callable[[], tuple[int, int] | None] | None = None,
+    set_nofile: Callable[[int, int], None] | None = None,
+) -> dict[str, Any] | None:
+    """Return a `gms_nofile_limit` finding when `RLIMIT_NOFILE` soft limit is below `min_nofile`.
+
+    Read-only by default (`auto_raise=False`). When `auto_raise=True`, raises soft up to
+    `min(hard_limit, max(RECOMMENDED_NOFILE, min_nofile))` ONLY if `hard_limit >= min_nofile`.
+    """
+    if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
+        raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
+    if min_nofile == 0:
+        return None
+    state = _read_nofile_state(get_nofile)
+    if state is None:
+        return None
+    soft_limit, hard_limit, soft_exceeds_hard = state
+    if not soft_exceeds_hard and _limit_satisfies(soft_limit, min_nofile):
+        return None
+
+    effective_soft, raise_error = soft_limit, None
+    recommended = max(RECOMMENDED_NOFILE, min_nofile)
+    if auto_raise and not soft_exceeds_hard and _limit_satisfies(hard_limit, min_nofile):
+        target_soft = recommended if _is_infinite_limit(hard_limit) else min(hard_limit, recommended)
+        if target_soft > soft_limit:
+            apply_limits = set_nofile if set_nofile is not None else (_default_set_nofile if get_nofile is None else None)
+            if apply_limits is None:
+                raise_error = "set_nofile hook not provided for custom get_nofile"
+            else:
+                try:
+                    apply_limits(target_soft, hard_limit)
+                    effective_soft = target_soft
+                except (OSError, ValueError) as error:
+                    raise_error = str(error)
+        if _limit_satisfies(effective_soft, min_nofile):
+            return None
+
+    detail = f"invalid: soft > hard; required min_nofile={min_nofile}" if soft_exceeds_hard else f"below required min_nofile={min_nofile}"
+    observed = f"RLIMIT_NOFILE soft={effective_soft}, hard={hard_limit} ({detail})"
+    if raise_error:
+        observed = f"{observed}; auto-raise failed: {raise_error}"
+    return harness.plain_finding(
+        "gms_nofile_limit",
+        observed,
+        f"RLIMIT_NOFILE soft >= {min_nofile} (recommended {recommended})",
+        why="Dynamo GMS exports CUDA VMM handles over Unix SCM_RIGHTS; low FD caps (e.g. Docker's default 1024) exhaust FDs mid-load/restore with [Errno 24] Too many open files",
+        actions=[
+            f"raise container FD cap with --ulimit nofile={recommended}:{recommended}",
+            f"or raise shell limit with `ulimit -n {recommended}` before launching",
+            f"or set {ENV_GMS_MIN_NOFILE}=0 (or pass min_nofile=0) to disable this preflight check",
+        ],
+        risk="engine or GMS restore crashes mid-transfer with [Errno 24] Too many open files",
+    )
 
 
 def _query_nvml_gpus() -> list[tuple[int, str]] | None:
@@ -482,7 +602,12 @@ class DynamoGmsStore:
         stamp_path: str | None = None,
         uuid_resolver: Callable[..., list[str] | None] | None = None,
         target_resolver: Callable[..., list[tuple[int, str]] | None] | None = None,
+        min_nofile: int | None = None,
+        auto_raise_nofile: bool = True,
+        get_nofile: Callable[[], tuple[int, int] | None] | None = None,
+        set_nofile: Callable[[int, int], None] | None = None,
     ):
+        resolved_min_nofile = _resolve_min_nofile(min_nofile)
         self.socket_dir = os.path.abspath(socket_dir or default_socket_dir())
         self.tags = tuple(tags) if tags else GMS_TAGS
         self.read_only = bool(read_only)
@@ -498,11 +623,54 @@ class DynamoGmsStore:
         self.extra_pythonpath = tuple(str(p) for p in extra_pythonpath if p)
         self.log_dir = log_dir
         self.stamp_path = stamp_path or os.path.join(self.socket_dir, "rsibox_gms_stamp.json")
+        self.min_nofile = resolved_min_nofile
+        self.auto_raise_nofile = bool(auto_raise_nofile)
+        self._get_nofile = get_nofile
+        self._set_nofile = set_nofile
         self._uuid_resolver = uuid_resolver
         self._target_resolver = target_resolver
         self._owned_procs: list[subprocess.Popen] = []
         self._owned_pids: list[int] = []
         self._owned_start_times: dict[int, int | None] = {}
+
+    def check_nofile(self) -> dict[str, Any] | None:
+        """Read-only verification of `RLIMIT_NOFILE` against `self.min_nofile`."""
+        return nofile_limit_finding(self.min_nofile, auto_raise=False, get_nofile=self._get_nofile)
+
+    def _probe_nofile(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Read-only probe check: fail closed if unraisable/invalid, else return optional advisory."""
+        if self.min_nofile == 0:
+            return None, None
+        state = _read_nofile_state(self._get_nofile)
+        if state is None:
+            return None, None
+        soft_limit, hard_limit, soft_exceeds_hard = state
+        if not soft_exceeds_hard and _limit_satisfies(soft_limit, self.min_nofile):
+            return None, None
+        if soft_exceeds_hard or not _limit_satisfies(hard_limit, self.min_nofile):
+            return nofile_limit_finding(self.min_nofile, auto_raise=False, get_nofile=lambda: (soft_limit, hard_limit)), None
+        recommended = max(RECOMMENDED_NOFILE, self.min_nofile)
+        advisory_action = (
+            f"call DynamoGmsStore.prepare_nofile() / ensure_ready() or run `ulimit -n {recommended}`"
+            if self.auto_raise_nofile
+            else f"raise shell/container FD cap (`ulimit -n {recommended}` or `--ulimit nofile={recommended}:{recommended}`)"
+        )
+        return None, {
+            "soft": soft_limit,
+            "hard": hard_limit,
+            "min_nofile": self.min_nofile,
+            "recommended": recommended,
+            "action": advisory_action,
+        }
+
+    def prepare_nofile(self) -> dict[str, Any] | None:
+        """Verify `RLIMIT_NOFILE`, safely raising soft limit if `auto_raise_nofile=True`."""
+        return nofile_limit_finding(
+            self.min_nofile,
+            auto_raise=self.auto_raise_nofile,
+            get_nofile=self._get_nofile,
+            set_nofile=self._set_nofile,
+        )
 
     def _resolve_targets(
         self,
@@ -559,7 +727,7 @@ class DynamoGmsStore:
         connect_timeout_s: float = 1.0,
         allow_remapped: bool | None = None,
     ) -> StoreProbe:
-        """Probe every target `(gpu, tag)` GMS socket, RO commit state, and optional stamp."""
+        """Probe every target `(gpu, tag)` GMS socket, RLIMIT_NOFILE, RO commit state, and optional stamp."""
         t0 = time.monotonic()
         path_finding = long_socket_path_finding(self.socket_dir, self.tags)
         if path_finding is not None:
@@ -570,6 +738,17 @@ class DynamoGmsStore:
                 error=path_finding["observed"],
                 finding=path_finding,
             )
+
+        nofile_finding, nofile_advisory = self._probe_nofile()
+        if nofile_finding is not None:
+            return StoreProbe(
+                ok=False,
+                backend=self.name,
+                seconds=time.monotonic() - t0,
+                error=nofile_finding["observed"],
+                finding=nofile_finding,
+            )
+        probe_details = {"nofile_advisory": nofile_advisory} if nofile_advisory is not None else None
 
         targets = self._resolve_targets(gpus=gpus, visible_devices=visible_devices, tp=tp)
         if not targets:
@@ -664,6 +843,7 @@ class DynamoGmsStore:
                 seconds=time.monotonic() - t0,
                 error=finding["observed"],
                 finding=finding,
+                details=probe_details,
             )
 
         if uncommitted_weights:
@@ -716,6 +896,7 @@ class DynamoGmsStore:
             backend=self.name,
             sockets=tuple(paths),
             seconds=time.monotonic() - t0,
+            details=probe_details,
         )
 
     def _gms_server_env(self) -> dict[str, str]:
@@ -776,6 +957,17 @@ class DynamoGmsStore:
     ) -> StoreProbe:
         """Reuse already-running GMS servers, and spawn local GMS servers only for missing GPUs."""
         t0 = time.monotonic()
+        preflight_finding = long_socket_path_finding(self.socket_dir, self.tags)
+        if preflight_finding is None:
+            preflight_finding = self.prepare_nofile()
+        if preflight_finding is not None:
+            return StoreProbe(
+                ok=False,
+                backend=self.name,
+                seconds=time.monotonic() - t0,
+                error=preflight_finding["observed"],
+                finding=preflight_finding,
+            )
         first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, allow_remapped=True)
         if first.ok or not first.matched_gpus:
             return first
