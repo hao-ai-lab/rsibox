@@ -3,16 +3,54 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><b>Quick Start</b></a> ·
-  <a href="docs/engines.md"><b>Engines &amp; Benchmarks</b></a> ·
+  <a href="#use-with-your-coding-agent"><b>Agent Setup</b></a> ·
+  <a href="#features"><b>Features</b></a> ·
+  <a href="#supported-engines--results"><b>Engines &amp; Results</b></a> ·
+  <a href="#cli-quick-start"><b>CLI Quick Start</b></a> ·
   <a href="docs/mechanisms.md"><b>Mechanisms</b></a> ·
-  <a href="CONTRIBUTING.md"><b>Contributing</b></a> ·
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` is a live hot-reload sandbox for ML systems agents and engineers. Every edit to a serving or training engine normally pays a multi-minute restart to reload weights and rebuild CUDA graphs; `rsibox` hot-reloads Python, Triton, CUDA graphs, and C++/CUDA directly into the warm process so you iterate in seconds with execution proof and instant rollback.
+`rsibox` is a live hot-reload sandbox for ML engines. Instead of paying a multi-minute cold restart on every code edit to reload weights and recapture CUDA graphs, `rsibox` swaps Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
 
-## Quick Start
+## Use with Your Coding Agent
+
+*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — zero manual setup:*
+
+```text
+Install https://github.com/hao-ai-lab/rsibox.git and read core/agents/livelab_overview.md.
+Whenever we edit or benchmark an ML engine, use rsibox to hot-reload and verify changes in-place instead of restarting.
+```
+
+**Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
+
+```bash
+git clone https://github.com/hao-ai-lab/rsibox.git
+mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
+```
+
+## Features
+
+- **Python & Triton kernel hot-swap (`~80 ms`):** Atomically swap Python modules and Triton kernels across all multi-GPU ranks (`~0.08 s` install / `~0.05 s` rollback) with execution proof on every rank.
+- **CUDA Graph selective recapture:** Recapture only affected CUDA graphs in-place when an edit touches graph-captured kernels, avoiding full cold restarts.
+- **C++/CUDA (`.cu`) & live config reload:** Hot-reload compiled `.cu` kernels (`7.3–19.2 s` vs. `41–49 s`) and tune runtime flags (e.g., `max_num_seqs`) in-process in **`4.3 ms`**.
+- **Multi-GPU & multi-launcher:** Supports TP / DP / PP / VPP / SP workers and Ray actors via local, Docker, gVisor, and Slurm launchers.
+- **Pluggable fast recovery (NVIDIA Dynamo GMS & Snapshot):** Optional zero-dependency [`rsibox.warm`](core/livelab/rsibox/warm/README.md) hooks for persistent GPU weights, **`0.34 s`** Shadow failover (with Blue-Green code swap), and **`2.86 s`** CRIU + `cuda-checkpoint` restore.
+
+## Supported Engines & Results
+
+| Engine | Category | Supported Hot-Reload | Restart (Before) | `rsibox` Live (After) | Speedup |
+| :--- | :--- | :--- | ---: | ---: | ---: |
+| **`vLLM`** | Serving | Python, Triton, V1/V2 CUDA graphs, `.cu`, live reconfig, Dynamo GMS/Snapshot | `228 s` | **`2.4–23.6 s`** (`~0.08 s` swap) | **up to 95×** |
+| **`SGLang`** | Serving | Python, Triton, CUDA graphs, fork-subprocs, CUDA IPC, Dynamo GMS/Snapshot | `66.4 s` | **`0.38–1.77 s`** | **up to 176×** |
+| **`Megatron-LM`** | Training | Multi-GPU TP/DP/PP/VPP2 live swaps, pre-warmed fork server | `57.5 s` / `266.7 s` | **`0.50 s`** / **`8.0–17.0 s`** | **up to 115×** |
+| **`FastVideo`** | Video Gen | SP1–SP4 live swaps, FlashInfer preload, IPC weight holder | `206 s` | **`2.3–6.4 s`** | **up to 92×** |
+| **`veRL`** | RL Post-Training | 21 Ray actors (eager & FSDP CG) + coupled `S0` reset | `298 s` | **`36.4 s`** (`12.6 ms` replay) | **8.2×** |
+| **`miles`** | RL Post-Training | 21 Ray actors + coupled `S0` reset (`38 ms` median commit) | `82.4 s` | **`0.89 s`** | **up to 93×** |
+
+On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). Full engine tables, per-tier costs, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
+
+## CLI Quick Start
 
 Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
 
@@ -41,14 +79,8 @@ rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
   --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
 ```
 
-To use `rsibox` from Claude Code, Codex, Cursor, or Antigravity, point your agent at [`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) and [`AGENTS.md`](AGENTS.md):
-
-```text
-Read core/agents/livelab_overview.md and AGENTS.md, start an rsibox for <engine>,
-and iterate on <optimization> with rsibox install -> check -> uninstall without restarting.
-```
-
-## Hot-Reload Guarantees
+<details>
+<summary><b>How rsibox keeps live edits safe</b> (atomic step-gap swap, execution proof, rollback, restart boundaries)</summary>
 
 | Guarantee | What It Enforces |
 | :--- | :--- |
@@ -60,13 +92,7 @@ and iterate on <optimization> with rsibox install -> check -> uninstall without 
 
 See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CPU tests, and [`core/agents/`](core/agents/) for ready-to-use agent prompts.
 
-## Supported Engines & Highlights
-
-- **Serving (**`vLLM`**,** `SGLang`**):** Live Python, Triton, V1/V2 CUDA graph recapture, and C++/CUDA `.cu` hot-reload — up to **95×** faster on vLLM (`228 s → 2.4–23.6 s`) and **176×** on SGLang (`66.4 s → 0.38–1.77 s`).
-- **Training & Video (**`Megatron-LM`**,** `FastVideo`**):** Multi-GPU TP/DP/PP/VPP2 and SP4 live swaps + pre-warmed fork server / IPC weight holders — 82-iteration Megatron hill-climb without restarts and up to **92×** faster FastVideo checks.
-- **RL Post-Training (**`veRL`**,** `miles`**):** 21-actor Ray live swaps with coupled `S0` reset — up to **93×** faster on miles (`82.4 s → 0.89 s`) and **8.2×** live / `12.6 ms` offline replay on veRL.
-
-Full engine tables, verified benchmarks, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
+</details>
 
 ## Contributors
 
