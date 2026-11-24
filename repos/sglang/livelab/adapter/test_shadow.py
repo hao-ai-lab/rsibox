@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import os
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -413,6 +414,183 @@ class SglangShadowPromoterTests(unittest.TestCase):
                 self.assertTrue(res["ok"], res)
                 self.assertEqual(res["promoted_ranks"], 1)
                 self.assertFalse(primary.session.poisoned())
+        finally:
+            primary.close()
+            shadow.close()
+
+    def test_non_main_thread_respawn_does_not_raise_signal_value_error(self) -> None:
+        """Golden regression: `SandboxPool` calls `lab.reset('respawn')` from worker threads.
+        `SglangLab._start_engine()` must guard `signal.signal(SIGQUIT, SIG_IGN)` with a main-thread
+        check so multi-agent worker-thread fallback respawns do not fail with
+        `ValueError: signal only works in main thread of the main interpreter` and quarantine the slot."""
+        lab = ToySglangLab(tp_size=1)
+        try:
+            lab.session.fault("participant_failed", "simulated worker-thread crash", "clean")
+            lab.dirty = True
+            exc_box: list[BaseException] = []
+            res_box: list[dict] = []
+
+            def _worker() -> None:
+                try:
+                    res_box.append(lab.reset("respawn"))
+                except BaseException as exc:  # pragma: no cover - captured for assertion
+                    exc_box.append(exc)
+
+            t = threading.Thread(target=_worker, name="pool-recovery-worker")
+            t.start()
+            t.join(timeout=30.0)
+            self.assertFalse(t.is_alive(), "worker-thread respawn hung")
+            self.assertEqual(exc_box, [], f"unexpected worker-thread respawn exception: {exc_box!r}")
+            self.assertEqual(len(res_box), 1)
+            self.assertTrue(res_box[0]["ok"], res_box[0])
+            self.assertFalse(lab.session.poisoned())
+            self.assertTrue(lab.check()["ok"])
+        finally:
+            lab.close()
+
+    @unittest.skipUnless(sys.platform == "linux", "PR_SET_PDEATHSIG is Linux-specific")
+    def test_non_main_thread_respawn_child_survives_worker_thread_exit_under_pdeathsig(self) -> None:
+        """Golden Linux regression: SGLang scheduler/detokenizer children call
+        `prctl(PR_SET_PDEATHSIG, SIGKILL)`, which Linux binds to the spawning OS thread (TID).
+        Spawning through `SglangLab._start_engine()` -> `_run_on_persistent_spawner` ensures
+        children survive after the transient `SandboxPool` worker thread exits, and each
+        worker-thread respawn gets a fresh asyncio event loop."""
+        import asyncio
+        import subprocess
+        import time
+
+        child_code = (
+            "import ctypes, signal, sys, time; "
+            "libc = ctypes.CDLL(None); "
+            "rc = libc.prctl(1, signal.SIGKILL); "
+            "assert rc == 0, rc; "
+            "print('READY', flush=True); "
+            "time.sleep(30)"
+        )
+        proc_box: list[subprocess.Popen] = []
+        spawn_threads: list[str] = []
+        spawn_loops: list[int] = []
+        exc_box: list[BaseException] = []
+
+        lab = ToySglangLab(tp_size=1)
+        orig_engine_cls = lab.engine_class()
+
+        class _PdeathsigProbeEngine(orig_engine_cls):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                tname = threading.current_thread().name
+                spawn_threads.append(tname)
+                if tname == "rsibox-sglang-spawner":
+                    spawn_loops.append(id(asyncio.get_event_loop()))
+                    proc = subprocess.Popen(
+                        [sys.executable, "-c", child_code],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    proc_box.append(proc)
+                    assert proc.stdout is not None
+                    line = proc.stdout.readline().strip()
+                    if line != "READY":
+                        raise AssertionError(f"pdeathsig child did not print READY: {line!r}")
+
+        lab.engine_class = lambda: _PdeathsigProbeEngine  # type: ignore[method-assign]
+        try:
+            for round_idx in range(2):
+                lab.session.fault("participant_failed", f"worker-thread respawn #{round_idx}", "clean")
+                lab.dirty = True
+
+                def _transient_worker() -> None:
+                    try:
+                        res = lab.reset("respawn")
+                        if not res.get("ok"):
+                            raise AssertionError(f"respawn failed: {res!r}")
+                    except BaseException as exc:  # pragma: no cover
+                        exc_box.append(exc)
+
+                t = threading.Thread(target=_transient_worker, name=f"transient-pool-worker-{round_idx}")
+                t.start()
+                t.join(timeout=30.0)
+                self.assertFalse(t.is_alive())
+                self.assertEqual(exc_box, [], f"unexpected worker respawn exception: {exc_box!r}")
+
+            self.assertEqual(spawn_threads, ["rsibox-sglang-spawner", "rsibox-sglang-spawner"])
+            self.assertEqual(len(spawn_loops), 2)
+            self.assertNotEqual(spawn_loops[0], spawn_loops[1], "each worker-thread respawn must get a fresh loop")
+            self.assertEqual(len(proc_box), 2)
+            # Give the Linux kernel time to deliver PR_SET_PDEATHSIG if children were bound to transient threads.
+            time.sleep(0.15)
+            for proc in proc_box:
+                self.assertIsNone(
+                    proc.poll(),
+                    f"child died with rc={proc.returncode} after transient worker thread exited (PR_SET_PDEATHSIG bug)",
+                )
+        finally:
+            lab.close()
+            for proc in proc_box:
+                proc.kill()
+                proc.wait(timeout=5.0)
+                if proc.stdout is not None:
+                    proc.stdout.close()
+                if proc.stderr is not None:
+                    proc.stderr.close()
+
+    def test_closed_promoter_blocks_provider_and_replenish_error_preserves_promoted_slot(self) -> None:
+        """Golden regression: `close_parked()` blocks subsequent `promote()` even when a
+        `shadow_provider` is configured, and a `replenish_fn` failure after successful promotion
+        records `replenish_error` without failing `reset('respawn')` or poisoning the slot."""
+        primary = ToySglangLab(tp_size=1)
+        shadow = ToySglangLab(tp_size=1)
+        log: list[tuple[str, object]] = []
+        _attach_fake_memory_saver(shadow, log)
+        try:
+            with _patch_pause_io_types(primary.io_module):
+                called = [0]
+                closed_promoter = SglangShadowPromoter(
+                    shadow_provider=lambda _l, _s: called.__setitem__(0, called[0] + 1)
+                )
+                closed_promoter.close_parked()
+                res_closed = closed_promoter.promote(primary)
+                self.assertFalse(res_closed["ok"])
+                self.assertIn("closed", res_closed["error"])
+                self.assertEqual(called[0], 0)
+
+                # Close racing mid-flight with shadow_provider rejects promotion & stops returned shadow.
+                race_shadow = ToySglangLab(tp_size=1)
+                _attach_fake_memory_saver(race_shadow, log)
+                parked_race = park_shadow_lab(race_shadow)
+                self.assertTrue(parked_race["ok"], parked_race)
+                race_promoter_box: list[SglangShadowPromoter] = []
+
+                def _racing_provider(_l, _s):
+                    race_promoter_box[0].close_parked()
+                    return (race_shadow, parked_race["hooks"], parked_race["receipt"])
+
+                race_promoter = SglangShadowPromoter(shadow_provider=_racing_provider)
+                race_promoter_box.append(race_promoter)
+                res_race = race_promoter.promote(primary)
+                self.assertFalse(res_race["ok"])
+                self.assertIn("closed", res_race["error"])
+                self.assertIsNone(race_shadow.engine)
+
+                def _boom(_lab, _store) -> None:
+                    raise RuntimeError("background replenish failed")
+
+                driver = make_shadow_recovery_driver(replenish_fn=_boom)
+                self.assertTrue(driver.promoter.park_shadow(shadow)["ok"])
+                primary.recovery_driver = driver
+                primary.session.fault("participant_failed", "worker-thread shadow failover", "clean")
+                primary.dirty = True
+                res_box: list[dict] = []
+                t = threading.Thread(target=lambda: res_box.append(primary.reset("respawn")))
+                t.start()
+                t.join(timeout=30.0)
+                self.assertFalse(t.is_alive())
+                self.assertEqual(len(res_box), 1)
+                self.assertTrue(res_box[0]["ok"], res_box[0])
+                self.assertIn("RuntimeError: background replenish failed", res_box[0]["replenish_error"])
+                self.assertFalse(primary.session.poisoned())
+                self.assertTrue(primary.check()["ok"])
         finally:
             primary.close()
             shadow.close()

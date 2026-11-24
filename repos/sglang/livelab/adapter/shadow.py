@@ -359,16 +359,23 @@ class _SglangShadowDriver(StandbyShadowDriver):
         session = getattr(lab, "session", None)
         poisoned = bool(session.poisoned()) if session is not None else False
         ok = bool(promoted.get("ok", False)) and not poisoned
+        replenish_error: str | None = None
         if ok and self._replenish_fn is not None:
-            self._replenish_fn(lab, store)
+            try:
+                self._replenish_fn(lab, store)
+            except Exception as exc:
+                replenish_error = f"{type(exc).__name__}: {exc}"
         reserved = {"ok", "reset", "driver", "reason", "cost_s"}
+        extra = {k: v for k, v in promoted.items() if k not in reserved}
+        if replenish_error is not None:
+            extra["replenish_error"] = replenish_error
         return {
             "ok": ok,
             "reset": list(promoted.get("reset", ["shadow promoted", "session"])) if ok else [],
             "driver": self.name,
             "reason": reason,
             "cost_s": promote_cost_s,
-            **{k: v for k, v in promoted.items() if k not in reserved},
+            **extra,
         }
 
 
@@ -494,6 +501,8 @@ class SglangShadowPromoter:
     def _acquire_shadow(self, lab: Any, weight_store: Any) -> tuple[ParkedSglangShadow | None, str | None]:
         """Atomically validate and pop the next compatible queued shadow, or invoke `shadow_provider`."""
         with self._lock:
+            if self._closed:
+                return None, "SglangShadowPromoter is closed"
             if self._shadows:
                 candidate = self._shadows[0]
                 err, keep = self._validate_candidate(lab, candidate)
@@ -506,10 +515,18 @@ class SglangShadowPromoter:
         if self._shadow_provider is None:
             return None, "no parked standby shadow lab available"
         with self._provider_lock:
+            with self._lock:
+                if self._closed:
+                    return None, "SglangShadowPromoter is closed"
             try:
                 provided = _coerce_parked_shadow(self._shadow_provider(lab, weight_store))
             except Exception as exc:
                 return None, f"shadow_provider failed: {type(exc).__name__}: {exc}"
+            if provided is not None:
+                with self._lock:
+                    if self._closed:
+                        stop_sglang_engine_targeted(provided.lab, preserve_process_env=False)
+                        return None, "SglangShadowPromoter is closed"
         if provided is None:
             return None, "no parked standby shadow lab available"
         err, _keep = self._validate_candidate(lab, provided)
@@ -520,6 +537,12 @@ class SglangShadowPromoter:
     def promote(self, lab: Any, weight_store: Any = None) -> dict[str, Any]:
         """Stop primary cleanly, wake and verify the next parked standby `SglangLab`,
         and transfer ownership onto `lab`."""
+        lab_lock = getattr(lab, "lock", None)
+        lab_ctx = lab_lock if lab_lock is not None else contextlib.nullcontext()
+        with lab_ctx:
+            return self._promote_locked(lab, weight_store)
+
+    def _promote_locked(self, lab: Any, weight_store: Any = None) -> dict[str, Any]:
         t_promote = time.perf_counter()
         entry, acquire_err = self._acquire_shadow(lab, weight_store)
         if entry is None:

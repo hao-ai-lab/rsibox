@@ -1,5 +1,5 @@
 """SglangLab: live-lab verbs over `rsibox.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
-import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, sys, threading
+import asyncio, contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, queue, select, signal, socket, sys, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
@@ -11,6 +11,56 @@ EAGER_LAYERS = (".srt.layers.sampler", ".srt.layers.logits_processor")
 _counters = itertools.count(1)
 _FORK_SUBPROCS_LOCK = threading.Lock()
 _FORK_SUBPROCS_STATE = {"preloaded": False, "clear_nvml_env": False}
+_SPAWN_THREAD_LOCK = threading.Lock()
+_SPAWN_QUEUE = None
+_SPAWN_THREAD = None
+_SPAWN_LOOPS = []
+
+
+def _run_on_persistent_spawner(fn, *, fresh_event_loop=False):
+    """Run `fn` on the main thread (if already on it) or a process-lifetime daemon thread.
+
+    Linux binds `PR_SET_PDEATHSIG` (used by SGLang scheduler/detokenizer subprocesses) to the
+    spawning OS thread rather than the process. Spawning `sglang.Engine` directly from a transient
+    worker thread (e.g. a `SandboxPool` executor thread) causes the kernel to SIGKILL the live
+    engine as soon as that worker thread exits. Dispatching non-main-thread spawns onto a single
+    persistent daemon thread keeps `PR_SET_PDEATHSIG` anchored for the lifetime of the process
+    while still terminating children if the parent process itself exits.
+    """
+    global _SPAWN_QUEUE, _SPAWN_THREAD
+    cur = threading.current_thread()
+    if cur is threading.main_thread() or cur is _SPAWN_THREAD:
+        return fn()
+    with _SPAWN_THREAD_LOCK:
+        if _SPAWN_THREAD is None or not _SPAWN_THREAD.is_alive():
+            q = queue.Queue()
+
+            def _loop():
+                while True:
+                    work, need_loop, done, box = q.get()
+                    try:
+                        if need_loop:
+                            asyncio.events._set_running_loop(None)
+                            loop = asyncio.new_event_loop()
+                            _SPAWN_LOOPS.append(loop)
+                            asyncio.set_event_loop(loop)
+                        box["value"] = work()
+                    except BaseException as exc:
+                        box["error"] = exc
+                    finally:
+                        done.set()
+
+            t = threading.Thread(target=_loop, name="rsibox-sglang-spawner", daemon=True)
+            t.start()
+            _SPAWN_QUEUE, _SPAWN_THREAD = q, t
+        spawner_q = _SPAWN_QUEUE
+    done = threading.Event()
+    box = {}
+    spawner_q.put((fn, bool(fresh_event_loop), done, box))
+    done.wait()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 def is_graph_module(module_name):
     return not module_name.endswith(EAGER_LAYERS) and (".srt.models." in module_name or ".srt.layers." in module_name)
@@ -324,8 +374,10 @@ class SglangLab(ConformanceHarness, BaseLab):
                 engine_cfg = wc.client_config(self.config)
             else:
                 engine_cfg = self.config
-            self.engine = type(base_cls)("_HookedEngine", (base_cls,), {"run_scheduler_process_func": staticmethod(entry)})(**engine_cfg)
-            if hasattr(signal, "SIGQUIT"): signal.signal(signal.SIGQUIT, signal.SIG_IGN)
+            engine_cls = type(base_cls)("_HookedEngine", (base_cls,), {"run_scheduler_process_func": staticmethod(entry)})
+            self.engine = _run_on_persistent_spawner(lambda: engine_cls(**engine_cfg), fresh_event_loop=True)
+            if hasattr(signal, "SIGQUIT") and threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGQUIT, signal.SIG_IGN)
             with contextlib.suppress(Exception): self.engine.tokenizer_manager._subprocess_watchdog.stop()
             accept_thread.join(self.rpc_timeout)
             if errors or len(accepted) != tp_size:
