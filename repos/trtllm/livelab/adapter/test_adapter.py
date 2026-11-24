@@ -445,10 +445,28 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
             self.assertTrue(reply.get("transport_error"))
             self.assertLess(elapsed_s, 2.0, f"file-transport call stalled for {elapsed_s:.3f}s")
 
-            # 2. Quiesce hook on dead file-transport worker fails fast AND poisons lab via transport_error=True.
+            # 2. Mid-quiesce SIGKILL (worker dies right after preflight passes, before quiesce_memory)
+            #    must fast-fail with transport_error=True so TrtllmQuiesceHooks._poison_lab sets _dirty=True.
+            respawn0 = lab.reset("respawn")
+            self.assertTrue(respawn0["ok"], respawn0)
+            self.assertFalse(lab._dirty)
+            worker_q = lab.workers[0]
+            killed_after_preflight = False
+            orig_status = lab.status
+
+            def status_then_kill(*args: object, **kwargs: object) -> dict[str, object]:
+                nonlocal killed_after_preflight
+                result = orig_status(*args, **kwargs)
+                if not killed_after_preflight:
+                    killed_after_preflight = True
+                    os.kill(worker_q.process.pid, signal.SIGKILL)
+                    worker_q.process.wait(timeout=5.0)
+                return result
+
             hooks = lab.quiesce_hooks()
             t_q = time.perf_counter()
-            receipt = hooks.quiesce_for_snapshot()
+            with mock.patch.object(lab, "status", side_effect=status_then_kill):
+                receipt = hooks.quiesce_for_snapshot()
             self.assertFalse(receipt.ok)
             self.assertLess(time.perf_counter() - t_q, 2.0)
             self.assertTrue(lab._dirty)
@@ -478,7 +496,7 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
             killer.start()
             t_mid = time.perf_counter()
             try:
-                mid_reply = worker2.call("generate", lab.default_workload(), timeout=60.0)
+                mid_reply = worker2.call("generate", lab.workload, timeout=60.0)
                 mid_elapsed = time.perf_counter() - t_mid
             finally:
                 stop_killer.set()
