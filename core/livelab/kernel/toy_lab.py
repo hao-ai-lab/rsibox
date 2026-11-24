@@ -64,7 +64,7 @@ class ToyLab:
         self.check_timeout, self.hang_s = check_timeout, hang_s
         self.base_text = {m: toy.source(m.split(".", 1)[1]) for m in MODULES}
         self._spawn()
-        self.session = SS.Session(self.co, MODULES)
+        self.session = SS.Session(self.co, MODULES, base_sources=self.base_text)
 
     # -- process layout ------------------------------------------------------------------
     def _spawn(self):
@@ -178,7 +178,7 @@ class ToyLab:
         if kind == "respawn":
             self._halt()
             self._spawn()
-            r = self.session.recovered(self.co)
+            r = self.session.recovered(self.co, base_sources=self.base_text)
             return {"ok": r["ok"], "reset": ["worker group", "session"],
                     "cost_s": round(time.perf_counter() - t0, 6)}
 
@@ -201,7 +201,13 @@ class ToyLab:
         if n:
             del self.live_text[-n:]
         return {"ok": r["ok"], "undone": r.get("undone", []), "state": self.session.state(),
+                "recovery_required": r.get("recovery_required", False),
                 "findings": r.get("findings", []), "cost_s": round(time.perf_counter() - t0, 6)}
+
+    def plan(self, patch):
+        t0 = time.perf_counter()
+        res = self.session.plan(patch, base_sources=self.live_text[-1])
+        return {**res, "cost_s": round(time.perf_counter() - t0, 6)}
 
     def status(self):
         return self.session.status()

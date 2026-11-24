@@ -243,6 +243,14 @@ CATALOG = {
         [{"action": "respawn the worker group (reset kind respawn)", "cost": "respawn"},
          RESTART],
         "a change installed now would be measured against an unknown base", [], False),
+    "recovery_required": (
+        "a rollback, undo, or participant abort failed or left a participant unconfirmed; "
+        "the kernel latched a fail-closed recovery boundary and rejects further installs "
+        "and uninstalls until a clean respawn",
+        [{"action": "respawn the worker group (reset kind respawn) or start a fresh session",
+          "cost": "respawn"}, RESTART],
+        "continuing after a failed rollback risks split or corrupted code across ranks",
+        [], False),
     "analyze_fallback": (
         "prepare's text half (parse, compile, compare) was meant to run in the analyzer's "
         "child process but ran in this one: the child could not start, died or did not "
