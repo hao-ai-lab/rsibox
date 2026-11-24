@@ -321,3 +321,19 @@ proportionally to the process's size, and a file protocol must publish "next" be
 - Memoize path resolution per process; a module's file never moves.
 - In file-based gates, write the next request number first, then the response, and let the client
   wait out a briefly stale number instead of failing.
+
+### 18. Size multi-agent pools to stage service time, not equal role slices
+
+**What happened.** (Sources: companion PR #214, our 2026-11-24 B200 run on `Qwen/Qwen3-8B` / `vLLM 0.33.0`, CUDA graphs on; see [`agent-teams-and-contention.md`](agent-teams-and-contention.md).) With scripted worker threads sharing warm sandboxes via `SandboxPool`, a single B200 serving 8 workers (`68.3` edits/min) beat 3 B200s running live warm-cache restarts at `C = 3, N = 6` (`3.56` edits/min) by `19.2×`. Across `27` team-topology cells, pinning a dedicated Eval GPU (`Dev+Eval Split` and `Triad`) eliminated Eval queue stalls (`0/12` vs. `10–12/12` in `Monolithic`), but static 1:1:1 partitioning saturated Eval at `96–97%` (`1.38 s`/idea, `64.4%` of GPU-seconds) while capping throughput at `40.4–42.4` ideas/min and leaving `~70–77%` of Dev (`0.42 s`/idea) and Toolsmith (`0.34 s` amortized/idea) idle. Meanwhile, a 2-Eval / 1-shared-(Dev+Toolsmith) split would put Dev+Toolsmith at `~95%` busy at `75` ideas/min (`~78.6` ideas/min ceiling), close to monolithic's `74.7` ideas/min.
+
+**Rule.** Allocate static role GPUs proportionally to measured stage service time
+($C_{\text{eval}} / C \approx T_{\text{eval}} / T_{\text{total}}$) rather than equal 1:1:1 slices,
+and keep Dev and Toolsmith on a shared pool unless repair rebuilds dominate.
+
+**Apply it.**
+- Measure amortized busy time (`hold_s + cleanup_s`) per stage before splitting a `SandboxPool` into
+  fixed role sub-pools.
+- Reserve dedicated Eval slots when zero Eval queue wait is required, sized to Eval's measured share
+  of total GPU-seconds.
+- Treat elastic role borrowing and priority Eval scheduling as hypotheses to benchmark before relying
+  on them in production pools.
