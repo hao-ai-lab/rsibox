@@ -496,20 +496,11 @@ class SglangLab(ConformanceHarness, BaseLab):
                 self.session.fault("participant_failed", f"recapture_extend: {exc}", "gap completes")
                 return F.not_ok(str(exc), list(self.session.poisoned()))
     def _shutdown_engine(self):
-        for conn in list(self.rank_conns.values()):
-            with contextlib.suppress(OSError): conn.close()
-        self.rank_conns.clear()
-        if self.engine is not None:
-            with contextlib.suppress(Exception): self.engine.shutdown()
-            self.engine = None
-        if self.sock_path:
-            with contextlib.suppress(OSError): os.unlink(self.sock_path)
-            self.sock_path = None
-        if self._fork_subprocs_restore is not None:
-            with contextlib.suppress(Exception):
-                self._fork_subprocs_restore()
-            self._fork_subprocs_restore = None
-        self._restore_weight_cache_env()
+        # Use targeted teardown so respawn/close never triggers upstream sglang.Engine.shutdown()'s
+        # blanket kill_process_tree(os.getpid(), include_parent=False), which would kill co-process
+        # DynamoGmsStore daemons or parked shadow workers.
+        from adapter.shadow import stop_sglang_engine_targeted
+        stop_sglang_engine_targeted(self, preserve_process_env=False)
     def _build_plan(self, patch, live_map):
         modules = {name: {"source": new_src, "base_hash": L.text_hash(live_map.get(name) or self._base(name))}
                    for name, new_src in patch["files"].items()}

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from kernel import coordinator as C, session as SS
+from rsibox import proc as _proc
 from rsibox.lab import RecaptureCoordinator
 from rsibox.warm import QuiesceReceipt, StandbyShadowDriver
 
@@ -81,26 +82,79 @@ def _resolve_shadow_ranks(shadow_lab: Any) -> int:
     return raw
 
 
+def _proc_is_alive(proc: Any) -> bool:
+    if hasattr(proc, "is_alive"):
+        return bool(proc.is_alive())
+    if hasattr(proc, "poll"):
+        return proc.poll() is None
+    pid = getattr(proc, "pid", None)
+    return bool(pid) and _proc.pid_alive(int(pid))
+
+
+def _wait_proc(proc: Any, timeout_s: float) -> None:
+    if hasattr(proc, "join"):
+        proc.join(timeout=timeout_s)
+    elif hasattr(proc, "wait"):
+        proc.wait(timeout=timeout_s)
+
+
+def _close_socket_like(sock: Any) -> None:
+    if sock is None or not hasattr(sock, "close"):
+        return
+    try:
+        sock.close(linger=0)
+    except TypeError:
+        with contextlib.suppress(Exception):
+            sock.close()
+    except Exception:
+        pass
+
+
 def _terminate_child_processes(procs: Sequence[Any]) -> None:
-    """Terminate and reap a specific set of `multiprocessing.Process`-like children."""
+    """Terminate and reap owned `multiprocessing.Process` / `subprocess.Popen` children and descendants."""
     live = [p for p in procs if p is not None and getattr(p, "pid", None)]
+    if not live:
+        return
+    self_pid = os.getpid()
+    owned_pids = {int(p.pid) for p in live}
+    descendant_pids: list[int] = []
+    seen_desc: set[int] = set(owned_pids) | {self_pid}
+    for proc in live:
+        with contextlib.suppress(Exception):
+            for dpid in _proc.descendants(int(proc.pid)):
+                if dpid not in seen_desc:
+                    seen_desc.add(dpid)
+                    descendant_pids.append(dpid)
+
     for sig_method, sig_num, timeout_s in (
         ("terminate", signal.SIGTERM, _TARGETED_STOP_TERM_TIMEOUT_S),
         ("kill", signal.SIGKILL, _TARGETED_STOP_KILL_TIMEOUT_S),
     ):
+        any_alive = False
+        for dpid in reversed(descendant_pids):
+            with contextlib.suppress(OSError):
+                if _proc.pid_alive(dpid):
+                    any_alive = True
+                    os.kill(dpid, sig_num)
         for proc in live:
             with contextlib.suppress(Exception):
-                if hasattr(proc, "is_alive") and not proc.is_alive():
+                if not _proc_is_alive(proc):
                     continue
+                any_alive = True
                 if hasattr(proc, sig_method):
                     getattr(proc, sig_method)()
                 else:
                     os.kill(int(proc.pid), sig_num)
+        if not any_alive:
+            break
         deadline = time.monotonic() + timeout_s
         for proc in live:
             with contextlib.suppress(Exception):
-                if hasattr(proc, "join"):
-                    proc.join(timeout=max(0.0, deadline - time.monotonic()))
+                _wait_proc(proc, max(0.0, deadline - time.monotonic()))
+        while descendant_pids and time.monotonic() < deadline:
+            if not any(_proc.pid_alive(dpid) for dpid in descendant_pids):
+                break
+            time.sleep(0.02)
 
 
 def _shutdown_targeted_engine(engine: Any, tm: Any, watchdog: Any, owned_procs: Sequence[Any]) -> None:
@@ -119,11 +173,13 @@ def _shutdown_targeted_engine(engine: Any, tm: Any, watchdog: Any, owned_procs: 
         if obj is not None and hasattr(obj, method):
             with contextlib.suppress(Exception):
                 getattr(obj, method)()
-    with contextlib.suppress(Exception):
-        send_to_rpc = getattr(engine, "send_to_rpc", None)
-        if send_to_rpc is not None:
-            send_to_rpc.close(linger=0)
+    send_to_rpc = getattr(engine, "send_to_rpc", None)
+    if send_to_rpc is not None:
+        _close_socket_like(send_to_rpc)
+        with contextlib.suppress(Exception):
             engine.send_to_rpc = None
+    for attr in ("send_to_scheduler", "recv_from_detokenizer"):
+        _close_socket_like(getattr(tm, attr, None))
     with contextlib.suppress(Exception):
         daemon_procs = getattr(engine, "_weight_cache_daemon_procs", None)
         if daemon_procs and hasattr(engine, "_terminate_weight_cache_daemons"):

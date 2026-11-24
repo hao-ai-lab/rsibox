@@ -4,8 +4,11 @@ from __future__ import annotations
 import contextlib
 import importlib
 import os
+import signal
+import subprocess
 import sys
 import threading
+import types
 import unittest
 from unittest import mock
 
@@ -594,6 +597,83 @@ class SglangShadowPromoterTests(unittest.TestCase):
         finally:
             primary.close()
             shadow.close()
+
+    def test_sglang_lab_shutdown_and_respawn_preserve_sibling_processes(self) -> None:
+        """Golden regression: `SglangLab.reset('respawn')` and `close()` use targeted teardown
+        rather than upstream `sglang.Engine.shutdown()` (`kill_process_tree(os.getpid())`), so
+        co-process `DynamoGmsStore` servers and parked shadows survive engine respawn/close."""
+        sibling = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        owned_procs: list[subprocess.Popen] = []
+        watchdogs: list[object] = []
+        blanket_shutdown_calls = [0]
+
+        class _TargetedWatchdog:
+            def __init__(self, procs: list[object]) -> None:
+                self._processes = procs
+                self.stopped = False
+
+            def stop(self) -> None:
+                self.stopped = True
+
+        class _WatchdogAwareLab(ToySglangLab):
+            def _start_engine(self):
+                co, mods = super()._start_engine()
+                owned = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                owned_procs.append(owned)
+                wd = _TargetedWatchdog([*self.engine.procs, owned])
+                watchdogs.append(wd)
+                self.engine.tokenizer_manager = types.SimpleNamespace(_subprocess_watchdog=wd)
+                orig_shutdown = self.engine.shutdown
+
+                def _blanket_shutdown() -> None:
+                    blanket_shutdown_calls[0] += 1
+                    with contextlib.suppress(OSError):
+                        os.kill(sibling.pid, signal.SIGKILL)
+                    orig_shutdown()
+
+                self.engine.shutdown = _blanket_shutdown
+                return co, mods
+
+        lab: _WatchdogAwareLab | None = None
+        try:
+            lab = _WatchdogAwareLab(tp_size=1)
+            self.assertEqual(len(owned_procs), 1)
+            first_owned = owned_procs[0]
+            self.assertIsNone(first_owned.poll())
+            self.assertIsNone(sibling.poll())
+
+            # Respawn must terminate & reap the old owned engine worker WITHOUT killing the sibling.
+            res = lab.reset("respawn")
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(blanket_shutdown_calls[0], 0)
+            self.assertTrue(watchdogs[0].stopped)
+            self.assertIsNotNone(first_owned.returncode, "first owned Popen must be reaped by targeted teardown")
+            self.assertIsNone(sibling.poll(), "co-process sibling (e.g. DynamoGmsStore) must survive respawn")
+            self.assertEqual(len(owned_procs), 2)
+            second_owned = owned_procs[1]
+            self.assertIsNone(second_owned.poll())
+
+            # Close must terminate & reap the second owned worker WITHOUT killing the sibling.
+            lab.close()
+            self.assertEqual(blanket_shutdown_calls[0], 0)
+            self.assertTrue(watchdogs[1].stopped)
+            self.assertIsNotNone(second_owned.returncode, "second owned Popen must be reaped on lab.close()")
+            self.assertIsNone(sibling.poll(), "co-process sibling must survive lab.close()")
+        finally:
+            if lab is not None:
+                lab.close()
+            for proc in (*owned_procs, sibling):
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait(timeout=5.0)
 
 
 if __name__ == "__main__":
