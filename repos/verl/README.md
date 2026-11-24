@@ -1,6 +1,6 @@
 # verl (`repos/verl/`)
 
-Live-edit laboratory and offline replay probes for **verl** synchronous RL post-training
+Live-edit sandbox and offline replay probes for **verl** synchronous RL post-training
 (`PPOTrainerSync`, GRPO / PPO over Ray), built on `core/livelab/kernel/` and
 `core/livelab/ray_participants.py`.
 
@@ -16,7 +16,7 @@ in **12 ms**.
 
 ```text
 repos/verl/
-  README.md                  Overview, hardware receipts, and conformance quickstart
+  README.md                  Overview, verified benchmarks, and verification quickstart
   docs/
     architecture.md          Ray process tree, step-gap barrier, S0 state reset, blast radius
   kb/
@@ -57,10 +57,10 @@ repos/verl/
 PYTHONPATH=repos/verl/livelab \
   python3 -m unittest discover -s repos/verl/livelab/adapter -t repos/verl/livelab -v
 
-# 2. Full c0-c10 conformance suite on spawned multi-actor ToyVerlLab (11/11 pass)
+# 2. Full c0-c10 verification suite on spawned multi-actor ToyVerlLab (11/11 pass)
 cd core/livelab && PYTHONPATH=../../repos/verl/livelab \
   python3 -m conformance --lab adapter.toy_lab:ToyVerlLab
 ```
 
-On GPUs the same eleven cases run against a real gated job (`livelab/README.md`, "Running Conformance"):
+On GPUs the same eleven verification cases run against a real gated job (`livelab/README.md`, "Running Conformance"):
 `python3 -m tools.cli conformance --gate <dir> --reward examples/grpo-gsm8k/reward_gsm8k.py --launch '<job command>'`.
