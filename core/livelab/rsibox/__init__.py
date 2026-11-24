@@ -9,12 +9,13 @@ Provides shared, zero-dependency building blocks for rsibox live labs:
   and canonical `fail_apply` / `fail_commit` / `tamper` fault injection.
 - `diffs`: pure-stdlib + `git apply` unified-diff resolver (`apply`, `paths`, `module_of`).
 - `lab`: `BaseLab` (`LabUnderTest`), `RecaptureCoordinator`, and `RoleEndpoint`.
+- `pool`: `SandboxPool` multi-agent FIFO scheduler with clean-slate isolation and failover.
 - `cli`: unified engine-agnostic CLI (`rsibox list | conformance | survey | ctl | doctor`).
 """
 import os
 import sys
 
-from . import diffs, op_guard, warm
+from . import diffs, op_guard, pool, warm
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .op_guard import op_redefine_guard
 from .harness import (
@@ -58,6 +59,15 @@ from .ipc import (
     unix_json_stream,
 )
 from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
+from .pool import (
+    PoolClosedError,
+    PoolError,
+    PoolSlot,
+    PoolTimeoutError,
+    SandboxPool,
+    SlotLease,
+    verify_trace,
+)
 from .proc import (
     descendants,
     direct_children,
@@ -114,8 +124,14 @@ __all__ = [
     "MailboxServer",
     "OverlayFinder",
     "PackageOverlay",
+    "PoolClosedError",
+    "PoolError",
+    "PoolSlot",
+    "PoolTimeoutError",
     "RecaptureCoordinator",
     "RoleEndpoint",
+    "SandboxPool",
+    "SlotLease",
     "SourceStack",
     "UnixJsonServer",
     "append_jsonl",
@@ -147,6 +163,7 @@ __all__ = [
     "pg_alive",
     "pid_alive",
     "plain_finding",
+    "pool",
     "port_in_use",
     "ppid_map",
     "purge_modules",
@@ -164,5 +181,6 @@ __all__ = [
     "unbind_module",
     "unix_json_call",
     "unix_json_stream",
+    "verify_trace",
     "warm",
 ]
