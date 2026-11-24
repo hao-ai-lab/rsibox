@@ -149,10 +149,13 @@ def main(argv=None):
     if raw and raw[0] in _LAB_COMMANDS:
         from . import lab_cli
         return lab_cli.main(raw)
+    if raw and raw[0] == "promote":
+        from . import promote
+        return promote.main(raw[1:])
     ap = argparse.ArgumentParser(
         prog="rsibox",
         description="A live lab as a service.",
-        epilog="Lab commands: list, conformance, survey, ctl, doctor (run 'rsibox <cmd> --help').",
+        epilog="Lab commands: list, conformance, survey, ctl, doctor, promote (run 'rsibox <cmd> --help').",
     )
     sub = ap.add_subparsers(dest="command", required=True)
 
