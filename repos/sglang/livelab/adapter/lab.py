@@ -262,6 +262,8 @@ class SglangLab(ConformanceHarness, BaseLab):
                     if os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG) != "1":
                         with contextlib.suppress(Exception):
                             agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                    with contextlib.suppress(Exception):
+                        agent.uninstall_sglang_gms_meta_loader_shim()
             self._weight_cache_env_restore = _restore
 
         try:

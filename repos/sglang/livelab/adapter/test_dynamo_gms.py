@@ -238,8 +238,9 @@ class SglangDynamoGmsTests(unittest.TestCase):
                     self.assertEqual(ret, "ok")
                     self.assertEqual(seen_in_child, [("RO", 10000)])
 
-                    # Resetting back to empty extra config clears RO lock mode back to RW_OR_RO!
+                    # Resetting back to empty extra config on a GMS server_args clears RO lock mode back to RW_OR_RO!
                     sa_rw = mods["sglang.srt.server_args"].ServerArgs("m")
+                    sa_rw.load_format = loader_cls
                     agent.sync_sglang_gms_globals(sa_rw)
                     self.assertEqual(gms_sglang_mod._gms_lock_mode, "RW_OR_RO")
                     self.assertIsNone(gms_sglang_mod._gms_ro_connect_timeout_ms)
@@ -553,6 +554,237 @@ class SglangDynamoGmsTests(unittest.TestCase):
                     self.assertEqual(os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG), "1")
             finally:
                 agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                for g in guards:
+                    g.close()
+
+    def test_gms_meta_loader_shim_avoids_cuda_dummy_weight_allocation_and_falls_back(self):
+        events: list[tuple] = []
+        active_devices: list[str] = []
+
+        class _DeviceCtx:
+            def __init__(self, dev):
+                self.dev = dev
+
+            def __enter__(self):
+                active_devices.append(self.dev)
+                return self
+
+            def __exit__(self, *exc):
+                active_devices.pop()
+                return False
+
+        class _FakeTorch:
+            @staticmethod
+            def device(dev):
+                return _DeviceCtx(dev)
+
+        class _FakeTorchDev:
+            def __init__(self):
+                self.cur = 0
+                self.set_calls = []
+
+            def current_device(self):
+                return self.cur
+
+            def set_device(self, d):
+                self.set_calls.append(d)
+                self.cur = d
+
+        fake_dev = _FakeTorchDev()
+
+        class _FakeQuant:
+            def process_weights_after_loading(self, mod):
+                events.append(("quant_post", mod.name, tuple(active_devices)))
+
+        class _FakeModel:
+            def __init__(self):
+                self.eval_called = False
+                self._subs = [
+                    ("lin0", types.SimpleNamespace(
+                        name="lin0", quant_method=_FakeQuant(), is_weights_quantized=lambda: False,
+                    )),
+                    ("quant_fn", types.SimpleNamespace(
+                        name="quant_fn", quant_method=_FakeQuant(), is_weights_quantized=lambda: True,
+                    )),
+                    ("quant_bool", types.SimpleNamespace(
+                        name="quant_bool", quant_method=_FakeQuant(), is_weights_quantized=True,
+                    )),
+                ]
+
+            def named_modules(self):
+                return self._subs
+
+            def eval(self):
+                self.eval_called = True
+                return self
+
+        class _FakeGMSModelLoader:
+            def __init__(self):
+                self.load_config = {"load_format": "gms"}
+
+            def _create_meta_model(self, model_config, device_config):
+                events.append(("orig_create_meta", device_config.device))
+                return "orig_model"
+
+        sgl_loader_mod = types.ModuleType("sglang.srt.model_loader.loader")
+        sgl_utils_mod = types.ModuleType("sglang.srt.model_loader.utils")
+        ml_mod = types.ModuleType("gpu_memory_service.integrations.sglang.model_loader")
+        common_utils = types.ModuleType("gpu_memory_service.integrations.common.utils")
+        fail_init = [False]
+        fail_post = [False]
+
+        def _init_model(model_config, load_cfg, quant_cfg):
+            fake_dev.cur = 7  # verify finally restores original device 0
+            if fail_init[0]:
+                raise RuntimeError("exotic init failure")
+            events.append(("init_model", tuple(active_devices), load_cfg, quant_cfg))
+            return _FakeModel()
+
+        import contextlib
+
+        @contextlib.contextmanager
+        def _set_dtype(dt):
+            events.append(("dtype_enter", dt))
+            try:
+                yield
+            finally:
+                events.append(("dtype_exit", dt))
+
+        def _post_load(m):
+            events.append(("post_load", tuple(active_devices)))
+            if fail_post[0]:
+                raise NotImplementedError("meta tensor op")
+
+        sgl_loader_mod._initialize_model = _init_model
+        sgl_loader_mod._get_quantization_config = lambda mc, lc: "qcfg"
+        sgl_loader_mod.set_default_torch_dtype = _set_dtype
+        sgl_loader_mod.post_load_weights = _post_load
+        sgl_utils_mod.process_model_weights_after_loading = lambda m, mc: events.append(("proc_after",))
+        ml_mod.GMSModelLoader = _FakeGMSModelLoader
+        ml_mod.strip_gms_model_loader_config = lambda lc, load_format="dummy": {"load_format": load_format}
+        ml_mod.torch_device = lambda: fake_dev
+        common_utils.setup_meta_tensor_workaround = lambda: events.append(("meta_workaround",))
+
+        mods, _, _, gms_sglang_mod, _ = _fake_sglang_and_gms_modules()
+        mods.update({
+            "torch": _FakeTorch,
+            "sglang.srt.model_loader": types.ModuleType("sglang.srt.model_loader"),
+            "sglang.srt.model_loader.loader": sgl_loader_mod,
+            "sglang.srt.model_loader.utils": sgl_utils_mod,
+            "gpu_memory_service.integrations.sglang.model_loader": ml_mod,
+        })
+        mods["gpu_memory_service.integrations.common.utils"].setup_meta_tensor_workaround = (
+            common_utils.setup_meta_tensor_workaround
+        )
+        mc = types.SimpleNamespace(dtype="bfloat16")
+        dc = types.SimpleNamespace(device="cuda")
+
+        uuid = "GPU-12345678-1234-1234-1234-123456789abc"
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="sglgms-") as tmp:
+            guards = [_MockGmsSock(os.path.join(tmp, socket_name(uuid, tag)), committed=True) for tag in GMS_TAGS]
+            try:
+                store = DynamoGmsStore(
+                    socket_dir=tmp,
+                    read_only=True,
+                    target_resolver=lambda *a, **k: [(0, uuid)],
+                )
+                lab = SglangLab.__new__(SglangLab)
+                lab.config = {"model_path": "m", "tp_size": 1}
+                lab.weight_store = store
+                lab._weight_cache_env_restore = None
+                lab.allow_nonpauseable_cuda_graphs = False
+
+                with mock.patch.dict(sys.modules, mods):
+                    loader = _FakeGMSModelLoader()
+                    # Before _prepare_weight_store: original path runs with cuda device_config.
+                    self.assertEqual(loader._create_meta_model(mc, dc), "orig_model")
+                    self.assertEqual(events, [("orig_create_meta", "cuda")])
+                    events.clear()
+
+                    # _prepare_weight_store -> sync_sglang_gms_globals installs zero-copy meta shim (NO direct install call!).
+                    cfg = lab._prepare_weight_store()
+                    sa = cfg["server_args"]
+                    model = loader._create_meta_model(mc, dc)
+                    self.assertIsInstance(model, _FakeModel)
+                    self.assertTrue(model.eval_called)
+                    self.assertEqual(fake_dev.cur, 0)
+                    self.assertEqual(fake_dev.set_calls, [0])
+                    # Only lin0 runs quant_post; callable True & bool True skip cleanly without TypeError!
+                    self.assertEqual(
+                        events,
+                        [
+                            ("meta_workaround",),
+                            ("dtype_enter", "bfloat16"),
+                            ("init_model", ("meta",), {"load_format": "dummy"}, "qcfg"),
+                            ("post_load", ("meta",)),
+                            ("quant_post", "lin0", ("meta",)),
+                            ("dtype_exit", "bfloat16"),
+                            ("proc_after",),
+                        ],
+                    )
+                    self.assertTrue(agent.install_sglang_gms_meta_loader_shim())  # idempotent
+
+                    # post_load_weights meta error falls back to orig_create_meta so quantized/MLA layouts never corrupt.
+                    events.clear()
+                    fake_dev.set_calls.clear()
+                    fail_post[0] = True
+                    self.assertEqual(loader._create_meta_model(mc, dc), "orig_model")
+                    self.assertEqual(fake_dev.cur, 0)
+                    self.assertEqual(fake_dev.set_calls, [0])
+                    self.assertEqual(events[-1], ("orig_create_meta", "cuda"))
+                    fail_post[0] = False
+
+                    # If _initialize_model fails, device is still restored and falls back cleanly to original.
+                    events.clear()
+                    fake_dev.set_calls.clear()
+                    fail_init[0] = True
+                    self.assertEqual(loader._create_meta_model(mc, dc), "orig_model")
+                    self.assertEqual(fake_dev.cur, 0)
+                    self.assertEqual(fake_dev.set_calls, [0])
+                    self.assertEqual(events[-1], ("orig_create_meta", "cuda"))
+                    fail_init[0] = False
+
+                    # Spawned scheduler child reinstalls the shim via run_scheduler_entry even after uninstall.
+                    agent.uninstall_sglang_gms_meta_loader_shim()
+                    events.clear()
+                    self.assertEqual(_FakeGMSModelLoader()._create_meta_model(mc, dc), "orig_model")
+                    fake_sched_mod = types.ModuleType("fake_sched_mod_meta")
+
+                    class _FakeScheduler:
+                        def __init__(self):
+                            pass
+
+                    fake_sched_mod.Scheduler = _FakeScheduler
+                    child_res = []
+
+                    def fake_real_entry(_child_sa):
+                        events.clear()
+                        m = _FakeGMSModelLoader()._create_meta_model(mc, dc)
+                        child_res.append(isinstance(m, _FakeModel))
+                        return "child_ok"
+
+                    with mock.patch.dict(sys.modules, {"fake_sched_mod_meta": fake_sched_mod}):
+                        self.assertEqual(
+                            agent.run_scheduler_entry("/tmp/unused.sock", "fake_sched_mod_meta", fake_real_entry, sa),
+                            "child_ok",
+                        )
+                    self.assertEqual(child_res, [True])
+
+                    # Switching to a non-GMS server_args or None uninstalls the shim cleanly.
+                    sa_non_gms = mods["sglang.srt.server_args"].ServerArgs("m")
+                    agent.sync_sglang_gms_globals(sa_non_gms)
+                    events.clear()
+                    self.assertEqual(_FakeGMSModelLoader()._create_meta_model(mc, dc), "orig_model")
+                    self.assertEqual(events, [("orig_create_meta", "cuda")])
+
+                    # Re-prepare and verify teardown via _restore_weight_cache_env uninstalls the meta-loader shim!
+                    lab._prepare_weight_store()
+                    lab._restore_weight_cache_env()
+                    events.clear()
+                    self.assertEqual(_FakeGMSModelLoader()._create_meta_model(mc, dc), "orig_model")
+                    self.assertEqual(events, [("orig_create_meta", "cuda")])
+            finally:
+                agent.uninstall_sglang_gms_meta_loader_shim()
                 for g in guards:
                     g.close()
 
