@@ -6,6 +6,7 @@ strict priority queueing (FIFO tie-break), role routing, fenced leases, failover
 from __future__ import annotations
 
 from collections import deque, namedtuple
+from fractions import Fraction
 import contextlib, dataclasses, hashlib, json, math, operator, os, threading, time, types
 from typing import Any, Callable, Iterator, Sequence
 try:
@@ -35,6 +36,18 @@ def _validate_priority(priority: int) -> int:
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise TypeError(f"priority must be an int, not {type(priority).__name__}")
     return priority
+def _validate_priority_aging_s(priority_aging_s: float | None) -> float | None:
+    if priority_aging_s is None:
+        return None
+    if isinstance(priority_aging_s, bool) or not isinstance(priority_aging_s, (int, float)):
+        raise TypeError(f"priority_aging_s must be a positive finite number or None, not {type(priority_aging_s).__name__}")
+    try:
+        value = float(priority_aging_s)
+    except OverflowError as error:
+        raise ValueError(f"priority_aging_s must be a positive finite number, got {priority_aging_s!r}") from error
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"priority_aging_s must be a positive finite number, got {priority_aging_s!r}")
+    return value
 def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
         return None
@@ -198,9 +211,9 @@ class _SlotState:
         self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = False, None, True, 0.0, False
 
 class _Waiter:
-    __slots__ = ("role", "priority", "event", "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
-    def __init__(self, role: str | None, priority: int = 0) -> None:
-        self.role, self.priority = role, priority
+    __slots__ = ("role", "priority", "enqueued_mono", "event", "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
+    def __init__(self, role: str | None, priority: int = 0, enqueued_mono: float = 0.0) -> None:
+        self.role, self.priority, self.enqueued_mono = role, priority, enqueued_mono
         self.event, self.assigned_state, self.assigned_dirty = threading.Event(), None, True
         self.cancelled, self.failure, self.closed = False, None, False
 
@@ -246,10 +259,12 @@ class SandboxPool:
 
     def __init__(self, slots: Sequence[PoolSlot], *, trace_path: str | None = None,
                  clock: Callable[[], float] = time.monotonic, wall_clock: Callable[[], float] = time.time,
-                 close_labs: bool = False, drain_timeout_s: float | None = 5.0) -> None:
+                 close_labs: bool = False, drain_timeout_s: float | None = 5.0,
+                 priority_aging_s: float | None = None) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
         self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
+        self._priority_aging_s = _validate_priority_aging_s(priority_aging_s)
         self._slots: dict[str, _SlotState] = {}
         seen_targets: set[int] = set()
         for slot in slots:
@@ -287,6 +302,20 @@ class SandboxPool:
             return slot_state.lab
         return None
 
+    def _effective_priority(self, waiter: _Waiter, now_mono: float) -> int | float | Fraction:
+        if self._priority_aging_s is None:
+            return waiter.priority
+        elapsed = max(0.0, now_mono - waiter.enqueued_mono)
+        if not math.isfinite(elapsed):
+            return float("inf")
+        try:
+            bonus = elapsed / self._priority_aging_s
+            if math.isfinite(bonus) and abs(waiter.priority) <= (1 << 52) and bonus <= (1 << 52):
+                return waiter.priority + bonus
+        except OverflowError:
+            pass
+        return Fraction(waiter.priority) + Fraction(elapsed) / Fraction(self._priority_aging_s)
+
     def _complete_slot_locked(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                               *, preserve_dirty: bool = False, skip_close: bool = False) -> Any | None:
         slot_state = self._slots[slot_id]
@@ -297,12 +326,13 @@ class SandboxPool:
         slot_state.slot.quarantined, slot_state.slot.quarantine_reason = slot_state.quarantined, slot_state.quarantine_reason
         if not self._closed and healthy:
             best_index: int | None = None
-            best_priority = 0
+            best_priority: int | float | Fraction = 0
             for index, waiter in enumerate(self._waiters):
                 if waiter.cancelled or (waiter.role is not None and waiter.role != slot_state.role):
                     continue
-                if best_index is None or waiter.priority > best_priority:
-                    best_index, best_priority = index, waiter.priority
+                effective_priority = self._effective_priority(waiter, finish_mono)
+                if best_index is None or effective_priority > best_priority:
+                    best_index, best_priority = index, effective_priority
             if best_index is not None:
                 waiter = self._waiters[best_index]
                 del self._waiters[best_index]
@@ -341,17 +371,23 @@ class SandboxPool:
                 raise PoolClosedError("SandboxPool is closed")
             if not self._has_healthy_slot(role):
                 raise PoolTimeoutError(f"no healthy slot available for role={role!r}")
+            now_mono = self._clock() if (self._priority_aging_s is not None and self._waiters) else None
             for slot_state in self._slots.values():
                 if slot_state.in_use or slot_state.quarantined or (role is not None and slot_state.role != role):
                     continue
                 if any(not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role)
-                       and waiter.priority >= priority for waiter in self._waiters):
+                       and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
+                       for waiter in self._waiters):
                     continue
-                slot_state.in_use, slot_state.active_since = True, self._clock()
+                slot_state.in_use, slot_state.active_since = True, (now_mono if now_mono is not None else self._clock())
                 return slot_state, slot_state.dirty
-            if deadline is not None and self._clock() >= deadline:
-                raise PoolTimeoutError(f"timed out waiting for slot (role={role!r})")
+            if deadline is not None or self._priority_aging_s is not None:
+                now_mono = now_mono if now_mono is not None else self._clock()
+                if deadline is not None and now_mono >= deadline:
+                    raise PoolTimeoutError(f"timed out waiting for slot (role={role!r})")
             waiter = _Waiter(role, priority)
+            if now_mono is not None:
+                waiter.enqueued_mono = now_mono
             self._waiters.append(waiter)
         try:
             while True:
