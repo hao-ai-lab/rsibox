@@ -1,6 +1,6 @@
 {
  "shared_kernel": {
-  "what": "All eight engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
+  "what": "All nine engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
   "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
   "gpu_fix_receipt": "PR #136 (B200, TP=2)",
   "source": "core/livelab/kernel/README.md; core/livelab/rsibox/; PR #136"
@@ -627,6 +627,27 @@
      "status": "gpu_verified",
      "source": "repos/trtllm/kb/costs.md; repos/trtllm/livelab/adapter/snapshot_hooks.py",
      "note": "Live DynamoK8sSnapshotDriver sentinel handshake: on 1x B200 TP=1 freed 24,168.0 MiB (23.60 GiB) in 0.1875 s and resumed in 0.0074 s; on 2x B200 TP=2 MPI freed 46.67 GiB total (23.33 GiB/GPU: rank0 47,256->23,362 MiB, rank1 45,920->22,026 MiB) and resumed both GPUs in 0.0152 s (rank0 6.3 ms, rank1 7.1 ms, participants_ok=True) with post-restore Qwen3DecoderLayer.forward edit and bit-exact rollback."
+    }
+   ]
+  },
+  {
+   "engine": "TorchTitan",
+   "upstream": "pytorch/torchtitan",
+   "folder": "repos/torchtitan",
+   "mechanisms": [
+    {
+     "name": "Step-gap FSDP2 multi-rank live swap with deterministic `S0` `DTensor` reset (`TorchTitanLab`)",
+     "what": "Hosts `torchrun`-style rank worker subprocesses over per-rank `AF_UNIX` JSON channels (`rsibox.ipc.UnixJsonServer`), atomically hot-swaps forward/loss/grad-clip/optimizer helpers across all ranks in the step gap via `RecaptureCoordinator`, captures per-rank AST witnesses, and restores exact `S0` FSDP2 `DTensor` local shards, `AdamW` state, RNG, and CUDA cache on `reset('state')` and undo.",
+     "startup_cost_removed": "Worker Python/PyTorch imports, `nccl` process group bootstrap, and FSDP2 `fully_shard` model/optimizer initialization.",
+     "measured_saving": {
+      "before": "2.650 (+/- 0.044)",
+      "after": "0.075 (0.054 s install + 0.020 s check, 35.4x; 0.046 s bit-exact undo)",
+      "unit": "s",
+      "setup": "1x NVIDIA B200, PyTorch 2.14.0+cu130, FSDP2 fully_shard + nccl, 4-layer TitanMLPNet (hidden=256, ffn=512, batch=8, 3 steps), deterministic float32, 3x repeats, 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/torchtitan/docs/architecture.md; repos/torchtitan/kb/costs.md",
+     "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0155 s install / 0.0052 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 via rsibox conformance torchtitan --real -- --mode fsdp2 (c9 install median 0.0555 s / uninstall 0.0468 s, c8 respawns 2.65-2.78 s, c3 bit-exact visible & 3-edit chain vs fresh PackageOverlay subprocess, c10 zero_witness with fresh divergence, max_abs_loss_diff == 0.0, 0 MiB VRAM leaked on exit)."
     }
    ]
   }

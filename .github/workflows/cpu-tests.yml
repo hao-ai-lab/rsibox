@@ -264,6 +264,26 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
         run: python3 -m rsibox conformance trtllm
+  func-torchtitan-adapter:
+    # TorchTitan / FSDP2 adapter golden tests and conformance c0-c10 on 2-rank CPU fake-distributed workers (no torch/GPU)
+    name: "func: TorchTitan adapter (CPU)"
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run TorchTitan adapter golden tests and 2-rank conformance c0-c10 (CUDA FSDP2 case skips without GPU)
+        run: python3 -m unittest discover -s repos/torchtitan/livelab/adapter -t repos/torchtitan/livelab -v
+      - name: Run conformance c0-c10 against ToyTorchTitanLab via unified CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core/livelab
+        run: python3 -m rsibox conformance torchtitan
   func-modal-ci-runner:
     # Modal GPU CI runner and loop golden cases (CPU; real git mirror/archive, stand-in modal CLI, no GitHub calls)
     name: "func: GPU CI runner self-test (CPU)"

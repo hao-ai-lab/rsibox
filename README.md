@@ -51,6 +51,7 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 | **`FastVideo`** | Video Gen | SP1–SP4 live swaps, FlashInfer preload, IPC weight holder | `206 s` | **`2.3–6.4 s`** | **up to 92×** |
 | **`veRL`** | RL Post-Training | 21 Ray actors (eager & FSDP CG) + coupled `S0` reset | `298 s` | **`36.4 s`** (`12.6 ms` replay) | **8.2×** |
 | **`miles`** | RL Post-Training | Ray rollout + trainer actors + coupled `S0` reset (`38 ms` median commit) | `82.4 s` | **`0.89 s`** | **up to 93×** |
+| **`TorchTitan`** | Training (FSDP2) | `torchrun` rank workers, FSDP2 `fully_shard` step-gap swap + `S0` reset | `2.65 s` | **`0.075 s`** (`55 ms` install) | **35.4×** |
 
 On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). Full engine tables, per-tier costs, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
 

@@ -479,6 +479,29 @@
    "notes": [
     "Completes the NVIDIA Dynamo serving triad (vLLM + SGLang + TensorRT-LLM) with zero core/ edits."
    ]
+  },
+  {
+   "engine": "TorchTitan",
+   "folder": "repos/torchtitan",
+   "recorded_facts": [
+    {
+     "fact": "Onboarded PyTorch Native Distributed Training (torchrun-style rank workers + FSDP2 torch.distributed.fsdp.fully_shard) in 596 non-test adapter LOC reusing core/livelab unchanged.",
+     "source": "repos/torchtitan/README.md; repos/torchtitan/docs/architecture.md"
+    },
+    {
+     "fact": "Passed 11/11 CPU 2-rank conformance (ToyTorchTitanLab: c9 0.0155 s install / 0.0052 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 via rsibox conformance torchtitan --real -- --mode fsdp2 (0.075 s live install+check vs 2.650 s cold boot = 35.4x, c9 0.0555 s install / 0.0468 s undo, c8 respawns 2.65-2.78 s, max_abs_loss_diff == 0.0, 0 MiB exit).",
+     "source": "repos/torchtitan/kb/costs.md"
+    }
+   ],
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Runs against unmodified PyTorch FSDP2 (`torch.distributed.fsdp.fully_shard`) with zero upstream patches.",
+    "source": "repos/torchtitan/docs/architecture.md"
+   },
+   "notes": [
+    "596 non-test adapter LOC; 11/11 2-rank CPU conformance and 11/11 1x NVIDIA B200 FSDP2 real-GPU conformance verified."
+   ]
   }
  ]
 }
