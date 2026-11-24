@@ -255,11 +255,15 @@ class BaseLab:
         check_timeout: float = 60.0,
         rpc_timeout: float = 30.0,
         auto_spawn: bool = True,
+        weight_store=None,
+        recovery_driver=None,
     ):
         self.receipts = receipts
         self.writer = R.ReceiptWriter(receipts) if receipts else None
         self.check_timeout = float(check_timeout)
         self.rpc_timeout = float(rpc_timeout)
+        self.weight_store = weight_store
+        self.recovery_driver = recovery_driver
         self.lock = threading.RLock()
         self.costs: dict[str, float] = {}
         self.base_text: dict[str, str] = {}
@@ -283,6 +287,10 @@ class BaseLab:
 
     def _reset_state(self):
         return {"ok": True, "reset": ["state"]}
+
+    def quiesce_hooks(self):
+        """Optional `rsibox.warm.QuiesceHooks` for snapshot/shadow integration."""
+        return None
 
     # -- optional customization hooks ----------------------------------------------------
     def _base_source(self, key: str) -> str:
@@ -496,6 +504,10 @@ class BaseLab:
         t0 = time.perf_counter()
         with self.lock:
             if kind == "respawn":
+                if self.recovery_driver is not None:
+                    return self.recovery_driver.respawn(
+                        self, self.weight_store, reason="reset_respawn"
+                    )
                 with contextlib.suppress(Exception):
                     self._stop_engine()
                 self._spawn()
