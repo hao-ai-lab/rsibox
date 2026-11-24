@@ -8,6 +8,7 @@ took in the engine core, steps held for pause keep, and step durations during th
 import json
 import os
 import sys
+import time
 
 if not __package__:
     _livelab = os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(
@@ -18,8 +19,49 @@ if not __package__:
 from rsibox import ipc  # noqa: E402
 
 
-def send(root, cmd, timeout=300.0):
-    return ipc.file_channel_call(root, cmd, timeout=timeout, poll_s=0.005)
+def current_seq(root):
+    """Return the highest file-channel sequence number visible under `root`, or 0."""
+    root_path = os.fspath(root)
+    previous = ipc.read_json(os.path.join(root_path, "ctl.json"))
+    previous_seq = (
+        int(previous["seq"])
+        if isinstance(previous, dict) and isinstance(previous.get("seq"), int)
+        else 0
+    )
+    reply_dir = os.path.join(root_path, "reply")
+    existing = [
+        int(filename[:-5])
+        for filename in (os.listdir(reply_dir) if os.path.isdir(reply_dir) else ())
+        if filename.endswith(".json") and filename[:-5].isdigit()
+    ]
+    return max(previous_seq, max(existing, default=0))
+
+
+def send(root, cmd, timeout=300.0, *, min_seq=None):
+    if min_seq is None or int(min_seq) <= current_seq(root):
+        return ipc.file_channel_call(root, cmd, timeout=timeout, poll_s=0.005)
+    root_path = os.fspath(root)
+    ctl_path = os.path.join(root_path, "ctl.json")
+    reply_dir = os.path.join(root_path, "reply")
+    sequence = max(current_seq(root_path), int(min_seq)) + 1
+    payload = {**cmd, "seq": sequence}
+    start_time = time.monotonic()
+    ipc.atomic_write_json(ctl_path, payload)
+    reply_path = os.path.join(reply_dir, f"{sequence}.json")
+    deadline = start_time + timeout
+    while time.monotonic() < deadline:
+        reply = ipc.read_json(reply_path)
+        if isinstance(reply, dict):
+            reply["client_round_trip_s"] = round(time.monotonic() - start_time, 6)
+            return reply
+        time.sleep(0.005)
+    return {
+        "ok": False,
+        "error": f"no reply in {timeout} s",
+        "seq": sequence,
+        "lost": True,
+        "client_round_trip_s": round(time.monotonic() - start_time, 6),
+    }
 
 
 if __name__ == "__main__":
