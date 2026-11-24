@@ -1,5 +1,5 @@
 """SglangLab: live-lab verbs over `rsibox.lab.BaseLab` + `RecaptureCoordinator` across TP ranks."""
-import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, threading
+import contextlib, functools, hashlib, importlib, importlib.metadata, itertools, json, os, select, signal, socket, sys, threading
 from multiprocessing.connection import Listener
 from adapter import agent
 from adapter.fixture.harness import ConformanceHarness
@@ -18,15 +18,26 @@ def is_graph_module(module_name):
 class SglangLab(ConformanceHarness, BaseLab):
     name, scheduler_module, io_module = "sglang", "sglang.srt.managers.scheduler", "sglang.srt.managers.io_struct"
     threaded_check = True
+    supports_gms_uuid_shim = True
     def __init__(self, config, modules, receipts=None, rpc_timeout=30.0, check_timeout=120.0, fork_subprocs=False,
-                 weight_cache_dir=None):
+                 weight_cache_dir=None, weight_store=None, recovery_driver=None):
         self.config, self._init_modules = json.loads(json.dumps(config)), list(modules)
         self.engine, self.sock_path, self.ranks, self.rank_conns, self.rank_locks = None, None, 0, {}, {}
         self.fork_subprocs, self.fork_subprocs_fallback, self._fork_subprocs_restore = bool(fork_subprocs), [], None
         raw_wc = os.fspath(weight_cache_dir).strip() if weight_cache_dir else ""
         self.weight_cache_dir = os.path.abspath(raw_wc) if raw_wc else None
+        if self.weight_cache_dir and weight_store is not None and getattr(weight_store, "name", "none") != "none":
+            raise ValueError(
+                f"cannot pass both weight_cache_dir and weight_store ({getattr(weight_store, 'name', type(weight_store).__name__)})"
+            )
         self._weight_cache_env_restore = None
-        super().__init__(receipts=receipts, check_timeout=check_timeout, rpc_timeout=rpc_timeout)
+        super().__init__(
+            receipts=receipts,
+            check_timeout=check_timeout,
+            rpc_timeout=rpc_timeout,
+            weight_store=weight_store,
+            recovery_driver=recovery_driver,
+        )
     @property
     def dirty(self): return self._dirty
     @dirty.setter
@@ -131,13 +142,162 @@ class SglangLab(ConformanceHarness, BaseLab):
                     os.environ[k] = old
         self._weight_cache_env_restore = _restore
 
+    @staticmethod
+    def _build_gms_server_args(cfg):
+        """Construct SGLang `ServerArgs` and bind Dynamo GMS via `setup_gms()` + `declare_resolution()`.
+
+        Follows upstream `gpu_memory_service/examples/sglang_gms_smoke.py`: bare SGLang
+        rejects `load_format="gms"` unless `setup_gms(server_args)` registers `GMSModelLoader`
+        and enables the GMS memory saver via `declare_resolution()` (SGLang >=0.5.21).
+        """
+        try:
+            from sglang.srt.arg_groups.overrides import declare_resolution
+            from sglang.srt.server_args import ServerArgs
+        except ImportError as exc:
+            raise RuntimeError(
+                "Dynamo GMS for SGLang requires SGLang >=0.5.21 exposing "
+                "sglang.srt.arg_groups.overrides.declare_resolution()"
+            ) from exc
+        try:
+            from gpu_memory_service.integrations.sglang import setup_gms
+        except ImportError as exc:
+            raise RuntimeError(
+                "Dynamo GMS for SGLang requires `gpu_memory_service` installed "
+                "(or passed via DynamoGmsStore.extra_pythonpath)"
+            ) from exc
+
+        init_keys = {k: cfg[k] for k in ("model_path", "host", "port") if k in cfg}
+        overrides = {
+            k: v for k, v in cfg.items()
+            if k not in ("model_path", "host", "port", "load_format")
+        }
+        server_args = ServerArgs(**init_keys)
+        if overrides:
+            declare_resolution(server_args, "rsibox.gms", **overrides)
+        loader_cls = setup_gms(server_args)
+        declare_resolution(server_args, "rsibox.gms.loader", load_format=loader_cls)
+        # Upstream setup_gms() reads raw getattr(server_args, "model_loader_extra_config")
+        # which stays '{}' under SGLang >=0.5.21 declare_resolution(); sync from resolved overrides.
+        agent.sync_sglang_gms_globals(server_args)
+        return server_args
+
+    def _prepare_weight_store(self):
+        """Prepare an optional pluggable `rsibox.warm.WeightStore` (e.g. `DynamoGmsStore`)."""
+        store = self.weight_store
+        if store is None or getattr(store, "name", "none") == "none":
+            return None
+        tp_size = int(self.config.get("tp_size", 1))
+        vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+        uuid_map_json = None
+        if store.name == "dynamo_gms" and vis is not None and vis.strip():
+            from rsibox.warm.dynamo_gms import build_device_uuid_map
+            resolver = getattr(store, "_resolve_targets", None)
+            targets = resolver(visible_devices=vis, tp=tp_size) if callable(resolver) else None
+            if targets and any(logical != phys for logical, (phys, _) in enumerate(targets)):
+                uuid_map_json = json.dumps(build_device_uuid_map(targets))
+        probe_kw = {"tp": tp_size, "visible_devices": vis}
+        if uuid_map_json and store.name == "dynamo_gms":
+            probe_kw["allow_remapped"] = True
+        pr = store.probe(**probe_kw)
+        if not pr.ok:
+            raise RuntimeError(f"weight store ({store.name}) not ready: {pr.error}")
+        explicit = {
+            k for k in ("load_format", "model_loader_extra_config")
+            if self.config.get(k) is not None
+        }
+        delta = store.launch_delta(engine="sglang", explicit_flags=explicit, explicit_values=self.config)
+        if not delta.ok:
+            raise RuntimeError(f"weight store ({store.name}) config conflict: {delta.findings[0]['observed']}")
+
+        # Restore any previous store env/sys.path before re-computing additions (safe on re-entry).
+        self._restore_weight_cache_env()
+        extra_py = [p for p in (getattr(store, "extra_pythonpath", ()) or ()) if p]
+        env_updates = dict(delta.env or {})
+        env_removals = []
+        if store.name == "dynamo_gms":
+            from rsibox.warm.dynamo_gms import ENV_GMS_DEVICE_UUID_MAP, uninstall_visible_devices_uuid_shim
+            if uuid_map_json:
+                env_updates[ENV_GMS_DEVICE_UUID_MAP] = uuid_map_json
+            else:
+                env_removals.append(ENV_GMS_DEVICE_UUID_MAP)
+                uninstall_visible_devices_uuid_shim()
+        added_sys_paths = []
+        if extra_py:
+            cur_py = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
+            for entry in extra_py:
+                if entry not in cur_py:
+                    cur_py.append(entry)
+                if entry not in sys.path:
+                    sys.path.append(entry)
+                    added_sys_paths.append(entry)
+            env_updates["PYTHONPATH"] = os.pathsep.join(cur_py)
+
+        if env_updates or env_removals or added_sys_paths:
+            prev = {k: os.environ.get(k) for k in (*env_updates.keys(), *env_removals)}
+            os.environ.update(env_updates)
+            for k in env_removals:
+                os.environ.pop(k, None)
+            is_gms = store.name == "dynamo_gms"
+            def _restore():
+                for k, old in prev.items():
+                    if old is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = old
+                for entry in reversed(added_sys_paths):
+                    with contextlib.suppress(ValueError):
+                        sys.path.remove(entry)
+                if is_gms:
+                    with contextlib.suppress(Exception):
+                        from rsibox.warm.dynamo_gms import uninstall_visible_devices_uuid_shim
+                        uninstall_visible_devices_uuid_shim()
+            self._weight_cache_env_restore = _restore
+
+        try:
+            merged = dict(self.config)
+            if store.name == "dynamo_gms":
+                for cg_key in ("cuda_graph_backend_decode", "cuda_graph_backend_prefill"):
+                    cg_val = merged.get(cg_key)
+                    if cg_val is not None and cg_val != "disabled":
+                        raise RuntimeError(
+                            f"SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                            f"({cg_key}={cg_val!r}); set {cg_key}='disabled' or omit it"
+                        )
+                if merged.get("disable_cuda_graph") is False:
+                    raise RuntimeError(
+                        "SGLang with Dynamo GMS V0 does not support pauseable CUDA graphs "
+                        "(disable_cuda_graph=False)"
+                    )
+                merged.setdefault("cuda_graph_backend_decode", "disabled")
+                merged.setdefault("cuda_graph_backend_prefill", "disabled")
+                merged_extra = store.merged_loader_config(merged.get("model_loader_extra_config"))
+                if merged_extra:
+                    merged["model_loader_extra_config"] = json.dumps(merged_extra)
+                elif "model_loader_extra_config" in merged and merged["model_loader_extra_config"] is None:
+                    merged.pop("model_loader_extra_config", None)
+                return {"server_args": self._build_gms_server_args(merged)}
+            if delta.args:
+                raise RuntimeError(
+                    f"weight store ({store.name}) returned CLI args {list(delta.args)} "
+                    "that SglangLab cannot map automatically"
+                )
+            return merged
+        except BaseException:
+            self._restore_weight_cache_env()
+            raise
+
     def _start_engine(self):
         listener, accept_thread, accepted, errors = None, None, {}, []
         try:
+            # weight_cache_dir sets env vars only (before fork preload), whereas
+            # _prepare_weight_store() imports sglang/torch/GMS and must run AFTER forksafe guards.
             if self.weight_cache_dir:
                 self._prepare_weight_cache()
             if self.fork_subprocs:
                 self._prepare_fork_subprocs()
+            gms_cfg = None
+            if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
+                gms_cfg = self._prepare_weight_store()
             tp_size = int(self.config.get("tp_size", 1))
             self.sock_path = ipc.short_sock_path("fsgl")
             with contextlib.suppress(FileNotFoundError): os.unlink(self.sock_path)
@@ -157,7 +317,9 @@ class SglangLab(ConformanceHarness, BaseLab):
             accept_thread.start()
             base_cls = self.engine_class()
             entry = functools.partial(agent.run_scheduler_entry, self.sock_path, self.scheduler_module, base_cls.run_scheduler_process_func)
-            if self.weight_cache_dir:
+            if gms_cfg is not None:
+                engine_cfg = gms_cfg
+            elif self.weight_cache_dir:
                 from services import weights as wc
                 engine_cfg = wc.client_config(self.config)
             else:

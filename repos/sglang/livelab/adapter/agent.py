@@ -1,5 +1,5 @@
 """Scheduler-side agent: one kernel `LocalParticipant` per TP rank, parked via `rsibox_gap`."""
-import linecache, os, queue, random, sys, threading
+import json, linecache, os, queue, random, sys, threading
 from multiprocessing.connection import Client
 from adapter import recapture as R1
 from rsibox import harness
@@ -153,7 +153,66 @@ def _control_loop(scheduler, conn):
     except (EOFError, OSError):
         return
 
+def sync_sglang_gms_globals(server_args):
+    """Sync `gpu_memory_service.integrations.sglang` lock-mode globals from `server_args`.
+
+    SGLang >=0.5.21 `declare_resolution()` records overrides in `_resolved_overrides`
+    without mutating `server_args.model_loader_extra_config`, and spawned scheduler
+    children unpickle `server_args` without re-running `setup_gms()`. Calling this in
+    both the parent (after `setup_gms`) and `run_scheduler_entry` guarantees
+    `gms_read_only` and `gms_ro_connect_timeout_ms` are honored in every process,
+    and installs the bare-metal `CUDA_VISIBLE_DEVICES` UUID shim when configured.
+    """
+    if os.environ.get("RSIBOX_GMS_DEVICE_UUID_MAP"):
+        try:
+            from rsibox.warm.dynamo_gms import install_visible_devices_uuid_shim
+            install_visible_devices_uuid_shim()
+        except Exception:
+            pass
+    else:
+        try:
+            from rsibox.warm.dynamo_gms import uninstall_visible_devices_uuid_shim
+            uninstall_visible_devices_uuid_shim()
+        except Exception:
+            pass
+    if server_args is None:
+        return
+    gms_sglang = sys.modules.get("gpu_memory_service.integrations.sglang")
+    if gms_sglang is None:
+        return
+    raw_extra = None
+    try:
+        from sglang.srt.arg_groups.overrides import resolution_result
+        raw_extra = resolution_result(server_args, "model_loader_extra_config")
+    except Exception:
+        for _src, declared in reversed(getattr(server_args, "_resolved_overrides", None) or ()):
+            if isinstance(declared, dict) and "model_loader_extra_config" in declared:
+                raw_extra = declared["model_loader_extra_config"]
+                break
+    if raw_extra is None:
+        raw_extra = getattr(server_args, "model_loader_extra_config", None)
+    if isinstance(raw_extra, str):
+        raw_str = raw_extra.strip()
+        extra = json.loads(raw_str) if raw_str else {}
+    elif isinstance(raw_extra, dict):
+        extra = dict(raw_extra)
+    else:
+        extra = {}
+    if not isinstance(extra, dict):
+        return
+    from gpu_memory_service.integrations.common.utils import (
+        get_gms_lock_mode,
+        get_gms_ro_connect_timeout_ms,
+    )
+    gms_sglang._gms_lock_mode = get_gms_lock_mode(extra)
+    gms_sglang._gms_ro_connect_timeout_ms = get_gms_ro_connect_timeout_ms(extra)
+    gms_sglang._gms_initialized = True
+
+
 def run_scheduler_entry(sock_path, scheduler_module_name, real_entry, *args, **kwargs):
+    server_args = args[0] if args else kwargs.get("server_args")
+    if server_args is not None:
+        sync_sglang_gms_globals(server_args)
     scheduler_cls = __import__(scheduler_module_name, fromlist=["Scheduler"]).Scheduler
     if not getattr(scheduler_cls, "_rsibox_hooked", False):
         orig_init = scheduler_cls.__init__
