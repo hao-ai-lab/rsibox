@@ -24,9 +24,12 @@ if str(LIVELAB_DIR) not in sys.path:
 
 from rsibox import BaseLab  # noqa: E402
 from rsibox.warm import (  # noqa: E402
+    DEFAULT_MIN_NOFILE,
     GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
+    RECOMMENDED_NOFILE,
+    AsyncShadowReplenisher,
     DefaultRespawnDriver,
     DiskStore,
     DynamoGmsStore,
@@ -35,6 +38,7 @@ from rsibox.warm import (  # noqa: E402
     StandbyShadowDriver,
     get_weight_store,
     list_weight_stores,
+    nofile_limit_finding,
     run_snapshot_lifecycle,
     stamp_diff,
 )
@@ -479,6 +483,195 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertFalse(bad.ok)
         self.assertEqual(bad.findings[0]["check"], "gms_unsupported_engine")
 
+    def test_nofile_preflight_fails_closed_on_low_cap_and_blocks_daemon_spawn(self):
+        """Golden case: Docker-like RLIMIT_NOFILE=1024 fails closed before GMS daemon spawn.
+
+        Proves `probe()` and `ensure_ready()` emit `gms_nofile_limit` (recommending
+        `--ulimit nofile=65536:65536`) and spawn zero daemons when hard_limit < min_nofile
+        or auto_raise_nofile=False, while `min_nofile=0` explicitly opts out.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-nofile-") as temp_dir:
+            gpu_uuid = "GPU-33333333-2222-3333-4444-555555555555"
+            raised_calls: list[tuple[int, int]] = []
+            spawned_daemons: list[list[str]] = []
+
+            # 1. Hard cap == 1024 (Docker --ulimit nofile=1024:1024): cannot raise, fails closed.
+            capped_store = DynamoGmsStore(
+                socket_dir=temp_dir,
+                min_nofile=DEFAULT_MIN_NOFILE,
+                auto_raise_nofile=True,
+                get_nofile=lambda: (1024, 1024),
+                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+            )
+            probe_capped = capped_store.probe(gpus=[gpu_uuid])
+            self.assertFalse(probe_capped.ok)
+            self.assertEqual(probe_capped.finding["check"], "gms_nofile_limit")
+            self.assertIn("soft=1024, hard=1024", probe_capped.error)
+            self.assertTrue(
+                any(f"--ulimit nofile={RECOMMENDED_NOFILE}:{RECOMMENDED_NOFILE}" in action for action in probe_capped.finding["actions"])
+            )
+            self.assertEqual(raised_calls, [])
+
+            with mock.patch.object(
+                capped_store,
+                "_spawn_gms_daemon",
+                side_effect=lambda cmd, env, log_path: spawned_daemons.append(list(cmd)) or 999999,
+            ):
+                ensure_result = capped_store.ensure_ready(gpus=[gpu_uuid], timeout_s=0.1)
+            self.assertFalse(ensure_result.ok)
+            self.assertEqual(ensure_result.finding["check"], "gms_nofile_limit")
+            self.assertEqual(spawned_daemons, [])
+
+            # 2. Hard cap == 2048 (< 4096): raises soft to 2048 but STILL fails closed.
+            partial_store = DynamoGmsStore(
+                socket_dir=temp_dir,
+                min_nofile=4096,
+                auto_raise_nofile=True,
+                get_nofile=lambda: (1024, 2048),
+                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+            )
+            probe_partial = partial_store.probe(gpus=[gpu_uuid])
+            self.assertFalse(probe_partial.ok)
+            self.assertEqual(probe_partial.finding["check"], "gms_nofile_limit")
+            self.assertEqual(raised_calls, [(2048, 2048)])
+            self.assertIn("soft=2048, hard=2048", probe_partial.error)
+
+            # 3. auto_raise_nofile=False never calls set_nofile even when hard_limit is high.
+            raised_calls.clear()
+            strict_store = DynamoGmsStore(
+                socket_dir=temp_dir,
+                min_nofile=4096,
+                auto_raise_nofile=False,
+                get_nofile=lambda: (1024, 1048576),
+                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+            )
+            probe_strict = strict_store.probe(gpus=[gpu_uuid])
+            self.assertFalse(probe_strict.ok)
+            self.assertEqual(probe_strict.finding["check"], "gms_nofile_limit")
+            self.assertEqual(raised_calls, [])
+
+            # 4. min_nofile=0 disables the preflight guard cleanly; negative/bool rejected.
+            weights_guard = _UnixSocketGuard(
+                os.path.join(temp_dir, socket_name(gpu_uuid, "weights")), gms_state=("committed", True)
+            )
+            kv_guard = _UnixSocketGuard(
+                os.path.join(temp_dir, socket_name(gpu_uuid, "kv_cache")), gms_state=("empty", False)
+            )
+            try:
+                opt_out_store = DynamoGmsStore(
+                    socket_dir=temp_dir,
+                    min_nofile=0,
+                    get_nofile=lambda: (1024, 1024),
+                    target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+                )
+                self.assertTrue(opt_out_store.probe(gpus=[gpu_uuid]).ok)
+            finally:
+                weights_guard.close()
+                kv_guard.close()
+
+            with self.assertRaises(ValueError):
+                DynamoGmsStore(socket_dir=temp_dir, min_nofile=-1)
+            with self.assertRaises(ValueError):
+                DynamoGmsStore(socket_dir=temp_dir, min_nofile=True)
+
+    def test_nofile_preflight_auto_raises_soft_limit_and_handles_infinity_and_real_rlimit(self):
+        """Golden case: auto_raise lifts soft RLIMIT_NOFILE to min_nofile without breaking high hard caps.
+
+        Proves soft=1024 with hard=1048576 (or RLIM_INFINITY) raises to 4096 and passes probe(),
+        PermissionError during set_nofile fails closed cleanly, and real kernel getrlimit/setrlimit
+        works end-to-end inside an isolated subprocess.
+        """
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-raise-") as temp_dir:
+            gpu_uuid = "GPU-44444444-2222-3333-4444-555555555555"
+            weights_guard = _UnixSocketGuard(
+                os.path.join(temp_dir, socket_name(gpu_uuid, "weights")), gms_state=("committed", True)
+            )
+            kv_guard = _UnixSocketGuard(
+                os.path.join(temp_dir, socket_name(gpu_uuid, "kv_cache")), gms_state=("empty", False)
+            )
+            try:
+                applied_limits: list[tuple[int, int]] = []
+                store = DynamoGmsStore(
+                    socket_dir=temp_dir,
+                    min_nofile=4096,
+                    auto_raise_nofile=True,
+                    get_nofile=lambda: (1024, 1048576),
+                    set_nofile=lambda soft, hard: applied_limits.append((soft, hard)),
+                    target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+                )
+                probe_result = store.probe(gpus=[gpu_uuid])
+                self.assertTrue(probe_result.ok, probe_result.to_dict())
+                self.assertEqual(applied_limits, [(4096, 1048576)])
+            finally:
+                weights_guard.close()
+                kv_guard.close()
+
+        # RLIM_INFINITY (-1 on Linux) as soft passes untouched; as hard allows raising to min_nofile.
+        infinity_calls: list[tuple[int, int]] = []
+        self.assertIsNone(
+            nofile_limit_finding(
+                4096,
+                auto_raise=True,
+                get_nofile=lambda: (-1, -1),
+                set_nofile=lambda soft, hard: infinity_calls.append((soft, hard)),
+            )
+        )
+        self.assertEqual(infinity_calls, [])
+        self.assertIsNone(
+            nofile_limit_finding(
+                4096,
+                auto_raise=True,
+                get_nofile=lambda: (1024, -1),
+                set_nofile=lambda soft, hard: infinity_calls.append((soft, hard)),
+            )
+        )
+        self.assertEqual(infinity_calls, [(4096, -1)])
+
+        # PermissionError during set_nofile fails closed with the underlying OS error.
+        def deny_raise(soft: int, hard: int) -> None:
+            raise PermissionError("EPERM denied by seccomp")
+
+        denied = nofile_limit_finding(
+            4096,
+            auto_raise=True,
+            get_nofile=lambda: (1024, 1048576),
+            set_nofile=deny_raise,
+        )
+        self.assertIsNotNone(denied)
+        self.assertEqual(denied["check"], "gms_nofile_limit")
+        self.assertIn("EPERM denied by seccomp", denied["observed"])
+
+        # Real POSIX kernel getrlimit/setrlimit round-trip in an isolated child process.
+        child_script = "\n".join(
+            [
+                "import resource, sys",
+                f"sys.path.insert(0, {str(LIVELAB_DIR)!r})",
+                "from rsibox.warm import DynamoGmsStore",
+                "soft_orig, hard_orig = resource.getrlimit(resource.RLIMIT_NOFILE)",
+                "if hard_orig != resource.RLIM_INFINITY and hard_orig < 4096:",
+                "    print('SKIP_LOW_HARD')",
+                "    raise SystemExit(0)",
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard_orig))",
+                "store = DynamoGmsStore(socket_dir='/tmp', min_nofile=4096, auto_raise_nofile=True)",
+                "finding = store.check_nofile()",
+                "soft_after, _ = resource.getrlimit(resource.RLIMIT_NOFILE)",
+                "assert finding is None, finding",
+                "assert soft_after == 4096, soft_after",
+                "print('RAISED_OK')",
+            ]
+        )
+        proc_result = subprocess.run(
+            [sys.executable, "-c", child_script],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=True,
+        )
+        self.assertIn(proc_result.stdout.strip(), ("RAISED_OK", "SKIP_LOW_HARD"))
+
 
 class SnapshotContractAndRecoveryTests(unittest.TestCase):
     def test_snapshot_lifecycle_clears_stale_restore_complete_and_succeeds(self):
@@ -639,6 +832,224 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
         self.assertTrue(res_tp["ok"])
         self.assertEqual(probed_kwargs[-1]["tp"], 2)
         self.assertEqual(probed_kwargs[-1]["visible_devices"], "0,1")
+
+    def test_async_shadow_replenisher_runs_off_critical_path_with_standby_driver(self):
+        """Golden case: StandbyShadowDriver.respawn() returns immediately while replenishment runs concurrently.
+
+        Proves failover latency stays decoupled from background shadow boot time, and that
+        telemetry (`attempts`, `succeeded`, `failed`, `last_cost_s`, `in_flight`, `history`)
+        updates atomically once the background thread completes.
+        """
+        from kernel import coordinator as kernel_coordinator
+
+        class _StandbyDummyLab(BaseLab):
+            name = "standby_dummy"
+
+            def _start_engine(self):
+                participant = kernel_coordinator.LocalParticipant("participant")
+                return kernel_coordinator.StepGapCoordinator([participant], contextlib.nullcontext), []
+
+            def _stop_engine(self):
+                return None
+
+            def _run_workload(self, workload):
+                return {"ok": True}
+
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        received_stores: list[str] = []
+
+        def slow_replenish(lab, store):
+            received_stores.append(store.name if store is not None else "none")
+            worker_entered.set()
+            release_worker.wait(timeout=5.0)
+            return {"ok": True, "shadow": "ready"}
+
+        with AsyncShadowReplenisher(slow_replenish) as replenisher:
+            driver = StandbyShadowDriver(
+                promote_fn=lambda lab, store: (lab._spawn(), {"ok": True, "reset": ["shadow promoted"]})[1],
+                replenish_fn=replenisher,
+            )
+            lab = _StandbyDummyLab(weight_store=DiskStore(), recovery_driver=driver)
+
+            started_at = time.perf_counter()
+            respawn_result = lab.reset("respawn")
+            respawn_elapsed_s = time.perf_counter() - started_at
+
+            self.assertTrue(respawn_result["ok"])
+            self.assertEqual(respawn_result["replenish"], "started")
+            # Critical path returned while slow_replenish is still blocked on release_worker.
+            self.assertLess(respawn_elapsed_s, 1.0)
+            self.assertTrue(worker_entered.wait(timeout=2.0))
+            self.assertTrue(replenisher.in_flight)
+            self.assertFalse(replenisher.wait(timeout_s=0.02))
+
+            release_worker.set()
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+            self.assertFalse(replenisher.in_flight)
+            self.assertEqual(received_stores, ["none"])
+            self.assertEqual(replenisher.attempts, 1)
+            self.assertEqual(replenisher.succeeded, 1)
+            self.assertEqual(replenisher.failed, 0)
+            self.assertIsNone(replenisher.last_error)
+            self.assertIsNotNone(replenisher.last_cost_s)
+            self.assertGreaterEqual(replenisher.last_cost_s, 0.0)
+            self.assertEqual(len(replenisher.history), 1)
+            self.assertTrue(replenisher.history[0]["ok"])
+
+        self.assertTrue(replenisher.closed)
+
+    def test_async_shadow_replenisher_single_flight_coalescing_and_busy_mode(self):
+        """Golden case: rapid back-to-back failovers never spawn overlapping replenishments.
+
+        Proves `queue_when_busy=True` executes strictly single-flight (`max_concurrent == 1`)
+        and coalesces multiple in-flight triggers into at most one follow-up with the latest
+        request, while `queue_when_busy=False` reports `"busy"` without queueing.
+        """
+        state_lock = threading.Lock()
+        active_count = 0
+        max_concurrent = 0
+        executed_tags: list[str] = []
+        first_entered = threading.Event()
+        release_first = threading.Event()
+
+        def tracked_worker(lab, store):
+            nonlocal active_count, max_concurrent
+            with state_lock:
+                active_count += 1
+                max_concurrent = max(max_concurrent, active_count)
+                executed_tags.append(str(lab))
+            try:
+                if lab == "failover-1":
+                    first_entered.set()
+                    release_first.wait(timeout=5.0)
+            finally:
+                with state_lock:
+                    active_count -= 1
+
+        # 1. Default coalescing queue: 4 rapid triggers -> run #1 + single coalesced follow-up (#4).
+        replenisher = AsyncShadowReplenisher(tracked_worker, queue_when_busy=True)
+        try:
+            self.assertEqual(replenisher("failover-1", None), "started")
+            self.assertTrue(first_entered.wait(timeout=2.0))
+            self.assertEqual(replenisher("failover-2", None), "queued")
+            self.assertTrue(replenisher.pending)
+            self.assertEqual(replenisher("failover-3", None), "coalesced")
+            self.assertEqual(replenisher("failover-4", None), "coalesced")
+            self.assertEqual(replenisher.coalesced, 2)
+
+            release_first.set()
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+            self.assertEqual(max_concurrent, 1)
+            self.assertEqual(executed_tags, ["failover-1", "failover-4"])
+            self.assertEqual(replenisher.attempts, 2)
+            self.assertEqual(replenisher.succeeded, 2)
+            self.assertFalse(replenisher.pending)
+        finally:
+            self.assertTrue(replenisher.close(timeout_s=2.0))
+
+        # 2. queue_when_busy=False: rejects triggers while active with "busy".
+        busy_entered = threading.Event()
+        release_busy = threading.Event()
+
+        def busy_worker(lab, store):
+            busy_entered.set()
+            release_busy.wait(timeout=5.0)
+
+        busy_replenisher = AsyncShadowReplenisher(busy_worker, queue_when_busy=False)
+        try:
+            self.assertEqual(busy_replenisher("lab-a", None), "started")
+            self.assertTrue(busy_entered.wait(timeout=2.0))
+            self.assertEqual(busy_replenisher("lab-b", None), "busy")
+            self.assertEqual(busy_replenisher.busy_rejected, 1)
+            self.assertFalse(busy_replenisher.pending)
+            release_busy.set()
+            self.assertTrue(busy_replenisher.wait(timeout_s=2.0))
+            self.assertEqual(busy_replenisher.attempts, 1)
+        finally:
+            self.assertTrue(busy_replenisher.close(timeout_s=2.0))
+
+    def test_async_shadow_replenisher_failure_accounting_history_cap_and_clean_close(self):
+        """Golden case: background worker errors never leak uncaught thread exceptions.
+
+        Proves exceptions and `{"ok": False}` outcomes increment `failed` with structured
+        `last_error`, `max_history` bounds telemetry retention, and `close()` drops queued
+        work and refuses subsequent triggers cleanly.
+        """
+        unhandled_thread_errors: list[object] = []
+        orig_excepthook = threading.excepthook
+        threading.excepthook = lambda args: unhandled_thread_errors.append(args)
+        try:
+            call_index = 0
+            gate_entered = threading.Event()
+            release_gate = threading.Event()
+
+            def scripted_worker(lab, store):
+                nonlocal call_index
+                call_index += 1
+                if call_index == 1:
+                    raise RuntimeError("vmm handle exhausted")
+                if call_index == 2:
+                    return {"ok": False, "error": "shadow port busy"}
+                if call_index == 3:
+                    return {"ok": True}
+                gate_entered.set()
+                release_gate.wait(timeout=5.0)
+                return {"ok": True}
+
+            replenisher = AsyncShadowReplenisher(scripted_worker, max_history=2)
+            self.assertEqual(replenisher("run-1", None), "started")
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+            self.assertEqual(replenisher.attempts, 1)
+            self.assertEqual(replenisher.failed, 1)
+            self.assertEqual(replenisher.succeeded, 0)
+            self.assertEqual(replenisher.last_error, "RuntimeError: vmm handle exhausted")
+
+            self.assertEqual(replenisher("run-2", None), "started")
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+            self.assertEqual(replenisher.failed, 2)
+            self.assertEqual(replenisher.last_error, "shadow port busy")
+
+            self.assertEqual(replenisher("run-3", None), "started")
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+            self.assertEqual(replenisher.attempts, 3)
+            self.assertEqual(replenisher.succeeded, 1)
+            self.assertEqual(replenisher.failed, 2)
+            self.assertIsNone(replenisher.last_error)
+
+            # History capped at max_history=2 (attempts 2 and 3) and status() is JSON-serializable.
+            snapshot = replenisher.status()
+            json.dumps(snapshot)
+            self.assertEqual([entry["attempt"] for entry in snapshot["history"]], [2, 3])
+            self.assertEqual(snapshot["history"][0]["error"], "shadow port busy")
+            self.assertTrue(snapshot["history"][1]["ok"])
+
+            # close() drops pending queued work, joins active worker, and refuses new triggers.
+            self.assertEqual(replenisher("run-4", None), "started")
+            self.assertTrue(gate_entered.wait(timeout=2.0))
+            self.assertEqual(replenisher("run-5-dropped", None), "queued")
+
+            def release_once_closed() -> None:
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline and not replenisher.closed:
+                    time.sleep(0.005)
+                release_gate.set()
+
+            releaser_thread = threading.Thread(target=release_once_closed, daemon=True)
+            releaser_thread.start()
+            self.assertTrue(replenisher.close(timeout_s=2.0))
+            releaser_thread.join(timeout=2.0)
+            self.assertEqual(replenisher.attempts, 4)
+            self.assertEqual(replenisher("run-6-after-close", None), "closed")
+            self.assertEqual(replenisher.attempts, 4)
+            self.assertEqual(unhandled_thread_errors, [])
+        finally:
+            threading.excepthook = orig_excepthook
+
+        with self.assertRaises(TypeError):
+            AsyncShadowReplenisher("not-callable")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            AsyncShadowReplenisher(lambda lab, store: None, max_history=-1)
 
 
 if __name__ == "__main__":

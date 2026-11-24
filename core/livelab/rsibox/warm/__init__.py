@@ -7,17 +7,21 @@ Engine-agnostic, pure Python stdlib kit inside `rsibox.warm`:
 """
 from . import dynamo_gms, recovery, snapshot_contract, types, weight_store
 from .dynamo_gms import (
+    DEFAULT_MIN_NOFILE,
     ENV_GMS_DEVICE_UUID_MAP,
     GMS_SGLANG_LOAD_FORMAT,
     GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
+    RECOMMENDED_NOFILE,
     DynamoGmsStore,
     build_device_uuid_map,
     install_visible_devices_uuid_shim,
+    nofile_limit_finding,
     uninstall_visible_devices_uuid_shim,
 )
 from .recovery import (
+    AsyncShadowReplenisher,
     DefaultRespawnDriver,
     QuiesceHooks,
     RecoveryDriver,
@@ -41,6 +45,8 @@ from .weight_store import (
 )
 
 __all__ = [
+    "AsyncShadowReplenisher",
+    "DEFAULT_MIN_NOFILE",
     "DefaultRespawnDriver",
     "DiskStore",
     "DynamoGmsStore",
@@ -55,6 +61,7 @@ __all__ = [
     "Mutability",
     "QuiesceHooks",
     "QuiesceReceipt",
+    "RECOMMENDED_NOFILE",
     "RecoveryDriver",
     "SENTINEL_READY",
     "SENTINEL_RESTORE_COMPLETE",
@@ -67,6 +74,7 @@ __all__ = [
     "get_weight_store",
     "install_visible_devices_uuid_shim",
     "list_weight_stores",
+    "nofile_limit_finding",
     "recovery",
     "register_weight_store",
     "run_snapshot_lifecycle",
