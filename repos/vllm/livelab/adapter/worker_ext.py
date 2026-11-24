@@ -22,6 +22,7 @@ rank handles the same call between the same two steps. The rank's endpoint is ma
 call. Lab use only: it runs code sent to it.
 """
 import os
+import sys
 import traceback
 
 from rsibox.lab import ENDPOINT_METHODS as METHODS, RoleEndpoint as Endpoint  # noqa: F401
@@ -39,27 +40,56 @@ def _wrap(side, fn, first):
     return wrapped
 
 
+def _v1_entries(wrapper):
+    return next((d for a in ("concrete_cudagraph_entries", "entries") if isinstance(d := getattr(wrapper, a, None), dict)), None)
+
+def _stamp_entries(guard, entries, default_mode):
+    from .graph_guard import graph_key
+    for desc in (entries or ()):
+        guard.stamp(graph_key(getattr(desc, "cg_mode", None) or default_mode, desc))
+
+def _v1_call_desc(entries, mode, args, kwargs):
+    if (d := kwargs.get("batch_descriptor")) is not None or (d := kwargs.get("desc")) is not None: return d
+    if len(args) >= 2 and args[0] == mode: return args[1]
+    if args and isinstance(entries, dict) and args[0] in entries: return args[0]
+    get_fc = getattr(sys.modules.get("vllm.forward_context"), "get_forward_context", None)
+    if callable(get_fc):
+        try: return getattr(get_fc(), "batch_descriptor", None)
+        except Exception: pass
+    return args[0] if args else None
+
+def _hook_v1_callable(wrapper, guard):
+    from .graph_guard import graph_key
+    from .side import stream_capturing
+    cls = type(wrapper)
+    if not getattr(cls, "_rsibox_call_hooked", False):
+        orig_call = cls.__call__
+        def guarded_call(self, *args, **kwargs):
+            if (g := getattr(self, "_rsibox_guard", None)) is not None and not stream_capturing() and not getattr(getattr(self, "runner", None), "capturing", False):
+                entries, mode = _v1_entries(self), getattr(self, "runtime_mode", "FULL")
+                desc = _v1_call_desc(entries, mode, args, kwargs)
+                if desc is not None and isinstance(entries, dict) and desc in entries:
+                    g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, desc), kwargs.get("input_sig"))
+            return orig_call(self, *args, **kwargs)
+        guarded_call.__wrapped__, cls.__call__, cls._rsibox_call_hooked = orig_call, guarded_call, True
+    wrapper._rsibox_guard = guard
+
 def install_replay_guard(worker, guard):
-    """Attach `guard` onto replay-capable graph wrappers on `worker.model_runner` (idempotent)."""
-    runner = getattr(worker, "model_runner", None)
-    if runner is None:
-        return 0
-    attached = 0
-    candidates = []
-    mgr = getattr(runner, "cudagraph_manager", None)
-    if mgr is not None:
-        candidates.append(mgr)
-        br = getattr(mgr, "breakable_cg_runner", None)
-        if br is not None:
-            candidates.append(br)
-    for attr in ("cudagraph_wrappers", "graph_wrappers"):
-        extra = getattr(runner, attr, None)
-        if extra:
-            candidates.extend(extra)
-    for obj in candidates:
-        if callable(getattr(obj, "replay", None)):
-            guard.attach_wrapper(obj)
-            attached += 1
+    """Hook real vLLM V1 (`__call__`) and V2 (`run_fullgraph`) replay paths and stamp startup graphs."""
+    runner, attached = getattr(worker, "model_runner", None), 0
+    v1 = [w for m, c in (("vllm.compilation.cuda_graph", "CUDAGraphWrapper"), ("vllm.compilation.breakable_cudagraph", "BreakableCUDAGraphWrapper"))
+          if (cls := getattr(sys.modules.get(m), c, None)) is not None for w in list(getattr(cls, "_all_instances", ()))]
+    if runner is not None:
+        if (mgr := getattr(runner, "cudagraph_manager", None)) is not None:
+            for meth in ("run_fullgraph", "replay"):
+                if callable(getattr(mgr, meth, None)): guard.attach_wrapper(mgr, method=meth); attached += 1
+            _stamp_entries(guard, getattr(mgr, "graphs", None), "FULL")
+            if (br := getattr(mgr, "breakable_cg_runner", None)) is not None: v1.append(br)
+        for attr in ("cudagraph_wrappers", "graph_wrappers"): v1.extend(list(getattr(runner, attr, None) or ()))
+    for w in {id(x): x for x in v1}.values():
+        if callable(w): _hook_v1_callable(w, guard); attached += 1
+        elif callable(getattr(w, "replay", None)): guard.attach_wrapper(w, method="replay"); attached += 1
+        _stamp_entries(guard, _v1_entries(w), getattr(w, "runtime_mode", "FULL"))
     return attached
 
 

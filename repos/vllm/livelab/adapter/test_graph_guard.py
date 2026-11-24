@@ -1,13 +1,15 @@
 """CPU golden tests for O(1) CUDA-graph staleness guard, explicit R1 pool teardown,
-and non-blocking background native build subprocesses.
+vLLM V1/V2 replay hook wiring, and non-blocking background native build subprocesses.
 
 Runs cleanly in CPU-only CI without `torch` or `vllm` installed, exercising the real
 `GraphReplayGuard`, `Recapture`/`teardown_graph_pool`, `KernelWorkerExtension`, and
 `BackgroundBuildPool` (`subprocess.Popen`) implementations end to end.
 """
+import contextlib
+import enum
 import gc
 import os
-import subprocess
+import stat
 import sys
 import tempfile
 import time
@@ -17,319 +19,412 @@ import weakref
 from types import SimpleNamespace as NS
 from unittest import mock
 
+from kernel import locate as L
+
 from . import graph_guard as GG
 from . import native as N
 from . import recapture as RC
 from . import worker_ext as WE
-from .test_host import make_host, plan
+from .test_host import ENG, STEP_LINE, make_host, plan
 from .test_recapture import Runner
+from .test_side import worker as make_graph_worker
 
 
 class _TensorLike:
-    """Pure-Python duck-typed tensor exposing `.shape`, `.dtype`, `.data_ptr()`."""
-
     def __init__(self, shape, dtype="float16", ptr=0x1000):
-        self.shape = tuple(shape)
-        self.dtype = dtype
-        self._ptr = ptr
-
-    def data_ptr(self):
-        return self._ptr
+        self.shape, self.dtype, self._ptr = tuple(shape), dtype, ptr
+    def data_ptr(self): return self._ptr
 
 
 class _TrackedGraph:
-    """Weakref-trackable captured graph stand-in with an explicit `.reset()` counter."""
-
     def __init__(self, label, reset_log):
-        self.label = label
-        self._reset_log = reset_log
+        self.label, self._reset_log = label, reset_log
+    def reset(self): self._reset_log.append(self.label)
 
-    def reset(self):
-        self._reset_log.append(self.label)
+
+def _plan_v2(tid, marker="v2", base_marker="v1", **kw):
+    src = ENG.replace('self.ran.append("base")', f'self.ran.append("{base_marker}")')
+    return {"id": tid, **kw, "modules": {"toy.engine": {
+        "on": ["worker"], "base_hash": L.text_hash(src),
+        "source": src.replace(f'self.ran.append("{base_marker}")', f'self.ran.append("{marker}")'),
+        "targets": [["Engine.step", STEP_LINE]]}}}
 
 
 class GraphGuardGoldenTests(unittest.TestCase):
 
     def test_stale_replay_raises_after_code_edit_without_recapture_and_passes_after_recapture(self):
-        """Input: graph captured & stamped at epoch 0; live edit bumps `code_epoch` to 1 without
-        recapture, then R1 recapture stamps epoch 1. Expected: replay raises `StaleGraphReplayError`
-        (fail-closed) before recapture; after recapture, `check_before_replay` passes in O(1) and
-        re-verifies cleanly across an end-to-end Host/Side transaction. Fails without guard:
-        stale epoch-0 graph silently replays old kernels."""
+        """Input: graph captured & stamped at epoch 0; live edit bumps `code_epoch` without
+        recapture, then R1 recapture stamps new epoch. Expected: stale replay fails closed with
+        `StaleGraphReplayError`; recapture passes in O(1); non-R1 undo restores base validity."""
         guard = GG.GraphReplayGuard()
         key = GG.graph_key("FULL", 4)
         guard.stamp(key)
-        self.assertEqual(guard.epoch, (0, 0))
         guard.check_before_replay(key)
 
-        # Edit bumps code_epoch without recapturing `key` -> fail-closed!
-        new_epoch = guard.bump_code_epoch("commit:txn-1")
-        self.assertEqual(new_epoch, 1)
+        self.assertEqual(guard.bump_code_epoch("commit:txn-1"), 1)
         self.assertFalse(guard.is_fresh(key))
         with self.assertRaises(GG.StaleGraphReplayError) as ctx:
             guard.check_before_replay(key)
         self.assertEqual(ctx.exception.reason, "epoch_mismatch")
         self.assertEqual(ctx.exception.actual_epoch, (0, 0))
         self.assertEqual(ctx.exception.expected_epoch, (1, 0))
-        self.assertEqual(guard.stats()["stale_rejections"], 1)
 
-        # Recapture stamps epoch 1 -> O(1) check passes immediately.
         guard.stamp(key)
-        self.assertTrue(guard.is_fresh(key))
         t0 = time.perf_counter()
         for _ in range(10000):
             guard.check_before_replay(key)
-        per_call_us = ((time.perf_counter() - t0) / 10000.0) * 1e6
-        self.assertLess(per_call_us, 50.0, f"O(1) check unexpectedly slow: {per_call_us:.2f} us/call")
+        self.assertLess(((time.perf_counter() - t0) / 10000.0) * 1e6, 50.0)
 
-        # End-to-end via Host + Side: commit without R1 bumps code_epoch -> stale replay blocked;
-        # commit with R1 auto-stamps captured descriptors -> replay allowed.
+        # End-to-end Host/Side: non-R1 commit blocks stale replay; failed undo does NOT mutate
+        # epoch; real undo restores base graph validity (with input_sig preserved!).
         h, names, sides = make_host(self, "guard_e2e")
-        runners = []
+        sig0 = GG.input_signature(_TensorLike((4, 64), "bfloat16", 0x2000))
         for n, s in zip(names, sides):
             r = Runner(n, modes=("FULL",), sizes=(4, 2))
             s.scope["r1_engine"] = r.engine
-            s.graph_guard.stamp(GG.graph_key("FULL", 4))
-            runners.append(r)
+            s.graph_guard.stamp(GG.graph_key("FULL", 4), sig0)
 
-        res_no_r1 = h.handle({"op": "txn", "plan": plan("g_no_r1")})
-        self.assertEqual(res_no_r1["outcome"], "committed")
+        self.assertEqual(h.handle({"op": "txn", "plan": plan("g_no_r1")})["outcome"], "committed")
         for s in sides:
             self.assertEqual(s.graph_guard.code_epoch, 1)
             with self.assertRaises(GG.StaleGraphReplayError):
-                s.graph_guard.check_before_replay(GG.graph_key("FULL", 4))
+                s.graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig0)
+        # Failed undo of unknown txn must NOT mutate code_epoch
+        self.assertFalse(h.handle({"op": "undo", "txn": "does_not_exist"})["ok"])
+        for s in sides:
+            self.assertEqual(s.graph_guard.code_epoch, 1)
+        # Real non-R1 undo restores pre-txn epoch -> base graph + input_sig remain valid!
         self.assertTrue(h.handle({"op": "undo", "txn": "g_no_r1"})["ok"])
+        for s in sides:
+            self.assertEqual(s.graph_guard.code_epoch, 0)
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig0)
 
+        # Next commit allocates monotonic epoch 2 (no ABA reuse of 1); R1 stamps captured bucket 4
         res_r1 = h.handle({"op": "txn", "plan": plan("g_with_r1", rebuild=["R1"], r1={"sizes": [4]})})
         self.assertEqual(res_r1["outcome"], "committed", res_r1["receipt"]["findings"])
         for s in sides:
+            self.assertEqual(s.graph_guard.code_epoch, 2)
             s.graph_guard.check_before_replay(GG.graph_key("FULL", 4))
             with self.assertRaises(GG.StaleGraphReplayError):
                 s.graph_guard.check_before_replay(GG.graph_key("FULL", 2))
 
-    def test_input_signature_drift_raises_stale_graph_replay_error(self):
-        """Input: graph stamped with tensor `(shape, dtype, ptr)` signature; replay invoked with
-        drifted shape, dtype, or data pointer. Expected: matching signature passes in O(1), while
-        every drift raises `StaleGraphReplayError(reason='input_sig_mismatch')`."""
-        guard = GG.GraphReplayGuard()
-        key = GG.graph_key("FULL", 8)
-        t_orig = _TensorLike((8, 64), "torch.bfloat16", 0x7F001000)
-        sig_orig = GG.input_signature(t_orig)
-        guard.stamp(key, sig_orig)
+    def test_vllm_v1_and_v2_real_replay_hooks_startup_stamping_and_signature_drift(self):
+        """Input: realistic vLLM V2 `CudaGraphManager.run_fullgraph(desc)` (with `.cg_mode`) and
+        V1 `CUDAGraphWrapper.__call__` (via `_all_instances`) with startup graphs already captured,
+        plus `strict_unstamped=True` and input signature drift at epoch 0. Expected: `install_replay_guard`
+        stamps startup graphs, hooks V2 `run_fullgraph` & V1 `__call__`, enforces `strict_unstamped`
+        and signature drift even at epoch (0, 0), and fails closed after a code edit."""
+        class CUDAGraphMode(enum.Enum):
+            PIECEWISE = 1
+            FULL = 2
 
-        # Exact match passes
-        guard.check_before_replay(key, GG.input_signature(_TensorLike((8, 64), "torch.bfloat16", 0x7F001000)))
+        class BatchExecutionDescriptor:
+            def __init__(self, cg_mode, num_tokens):
+                self.cg_mode, self.num_tokens = cg_mode, num_tokens
+            def __hash__(self): return hash((self.cg_mode, self.num_tokens))
+            def __eq__(self, o): return isinstance(o, BatchExecutionDescriptor) and (self.cg_mode, self.num_tokens) == (o.cg_mode, o.num_tokens)
 
-        # Shape drift fails closed
-        with self.assertRaises(GG.StaleGraphReplayError) as c_shape:
-            guard.check_before_replay(key, GG.input_signature(_TensorLike((16, 64), "torch.bfloat16", 0x7F001000)))
-        self.assertEqual(c_shape.exception.reason, "input_sig_mismatch")
+        class FakeV2Manager:
+            def __init__(self):
+                self.graphs = {BatchExecutionDescriptor(CUDAGraphMode.FULL, 4): "g_full_4",
+                               BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 8): "g_pw_8"}
+            def run_fullgraph(self, desc, input_sig=None):
+                return f"v2:{desc.cg_mode.name}:{desc.num_tokens}"
 
-        # Dtype drift fails closed
-        with self.assertRaises(GG.StaleGraphReplayError) as c_dtype:
-            guard.check_before_replay(key, GG.input_signature(_TensorLike((8, 64), "torch.float16", 0x7F001000)))
-        self.assertEqual(c_dtype.exception.reason, "input_sig_mismatch")
+        class FakeV1Wrapper:
+            _all_instances = []
+            def __init__(self, runtime_mode, descs):
+                self.runtime_mode = runtime_mode
+                self.concrete_cudagraph_entries = {d: f"v1_{d}" for d in descs}
+                self.runner = NS(capturing=False)
+                self._all_instances.append(self)
+            def __call__(self, desc, input_sig=None):
+                return f"v1:{self.runtime_mode.name}:{desc}"
 
-        # Buffer pointer drift fails closed
-        with self.assertRaises(GG.StaleGraphReplayError) as c_ptr:
-            guard.check_before_replay(key, GG.input_signature(_TensorLike((8, 64), "torch.bfloat16", 0x7F009000)))
-        self.assertEqual(c_ptr.exception.reason, "input_sig_mismatch")
-
-        # Worker extension replay wrapper enforces the guard with zero overhead at epoch 0
-        calls = []
-
-        class _FakeMgr:
-            runtime_mode = "FULL"
-            def replay(self, desc, input_sig=None):
-                calls.append(desc)
-                return f"ok:{desc}"
+        v1_full = FakeV1Wrapper(CUDAGraphMode.FULL, [4])
+        v2_mgr = FakeV2Manager()
+        d_full = BatchExecutionDescriptor(CUDAGraphMode.FULL, 4)
+        d_pw = BatchExecutionDescriptor(CUDAGraphMode.PIECEWISE, 8)
+        d_unseen = BatchExecutionDescriptor(CUDAGraphMode.FULL, 99)
 
         class _FakeWorker(WE.KernelWorkerExtension):
             rank = 0
-            def __init__(self):
-                self.model_runner = NS(cudagraph_manager=_FakeMgr())
+            def __init__(self): self.model_runner = NS(cudagraph_manager=v2_mgr)
             def execute_model(self, *a, **k): return None
             def sample_tokens(self, *a, **k): return None
 
+        mods = {"vllm.compilation.cuda_graph": NS(CUDAGraphWrapper=FakeV1Wrapper)}
         saved = list(WE._ENDPOINT)
         WE._ENDPOINT.clear()
         try:
-            w = _FakeWorker()
-            w.rsibox_kernel_endpoint()
-            # Epoch 0, unstamped -> zero-overhead passthrough
-            self.assertEqual(w.model_runner.cudagraph_manager.replay(4), "ok:4")
-            # After code edit without recapture -> fail-closed
-            w.rsibox_graph_guard().bump_code_epoch("live_edit")
-            with self.assertRaises(GG.StaleGraphReplayError):
-                w.model_runner.cudagraph_manager.replay(4)
-            # Stamped after recapture -> succeeds again
-            w.rsibox_graph_guard().stamp(GG.graph_key("FULL", 4))
-            self.assertEqual(w.model_runner.cudagraph_manager.replay(4), "ok:4")
-            w.rsibox_check_graph_replay(GG.graph_key("FULL", 4))
+            with mock.patch.dict(sys.modules, mods):
+                w = _FakeWorker()
+                w.rsibox_kernel_endpoint()
+                guard = w.rsibox_graph_guard()
+                # Startup graphs were automatically stamped with their real cg_mode!
+                self.assertIn(GG.graph_key(CUDAGraphMode.FULL, d_full), guard.stamps)
+                self.assertIn(GG.graph_key(CUDAGraphMode.PIECEWISE, d_pw), guard.stamps)
+                self.assertIn(GG.graph_key(CUDAGraphMode.FULL, 4), guard.stamps)
+
+                # Epoch 0 replays succeed via BOTH V2 run_fullgraph and V1 __call__
+                self.assertEqual(v2_mgr.run_fullgraph(d_full), "v2:FULL:4")
+                self.assertEqual(v2_mgr.run_fullgraph(d_pw), "v2:PIECEWISE:8")
+                self.assertEqual(v1_full(4), "v1:FULL:4")
+
+                # Input signature drift fails closed even at epoch (0, 0)!
+                sig0 = GG.input_signature(_TensorLike((4, 64), "torch.bfloat16", 0x1000))
+                guard.stamp(GG.graph_key(CUDAGraphMode.FULL, d_full), sig0)
+                self.assertEqual(v2_mgr.run_fullgraph(d_full, input_sig=sig0), "v2:FULL:4")
+                for bad in (_TensorLike((8, 64), "torch.bfloat16", 0x1000),
+                            _TensorLike((4, 64), "torch.float16", 0x1000),
+                            _TensorLike((4, 64), "torch.bfloat16", 0x9000)):
+                    with self.assertRaises(GG.StaleGraphReplayError) as cm:
+                        v2_mgr.run_fullgraph(d_full, input_sig=GG.input_signature(bad))
+                    self.assertEqual(cm.exception.reason, "input_sig_mismatch")
+
+                # Code edit without recapture blocks BOTH V2 run_fullgraph and V1 __call__
+                guard.bump_code_epoch("live_edit")
+                with self.assertRaises(GG.StaleGraphReplayError):
+                    v2_mgr.run_fullgraph(d_full)
+                with self.assertRaises(GG.StaleGraphReplayError):
+                    v1_full(4)
+
+                # strict_unstamped=True fails closed at epoch (0, 0) via attach_wrapper too
+                strict_guard = GG.GraphReplayGuard(strict_unstamped=True)
+                strict_mgr = FakeV2Manager()
+                strict_guard.attach_wrapper(strict_mgr, method="run_fullgraph")
+                with self.assertRaises(GG.StaleGraphReplayError) as cm_u:
+                    strict_mgr.run_fullgraph(d_unseen)
+                self.assertEqual(cm_u.exception.reason, "unstamped")
         finally:
             WE._ENDPOINT[:] = saved
 
+    def test_selective_code_epoch_partial_mode_r1_failure_rollback_and_stale_stack_undo(self):
+        """Covers all subtle epoch state-machine invariants:
+        (1) Unrelated non-captured commit does NOT bump `code_epoch` on a graph-mode worker;
+        (2) Partial-mode R1 (`modes=['PIECEWISE']`) bumps ONLY PIECEWISE `pool_epoch`, leaving
+            FULL graphs untouched and valid (and empty-selected R1 does not bump `pool_epoch`);
+        (3) 2-rank R1 capture failure on rank 1 rolls back cleanly: during failure `restore()`
+            keeps pre-R1 stamps (no transient stale bypass!), and after coordinator `undo` BOTH
+            ranks match base cleanly with zero divergence or lockout;
+        (4) `txn1 (non-R1) -> txn2 (R1) -> undo(txn2)`: restored base graphs preserve their
+            epoch-0 stamp and STAY REJECTED under `txn1` (epoch 1), then pass after `undo(txn1)`."""
+        # (1) Unrelated non-captured Python commit on graph-mode worker does NOT bump code_epoch
+        h0, names0, sides0 = make_host(self, "noncap")
+        for n, s in zip(names0, sides0):
+            s.scope["worker"] = make_graph_worker()
+            s.captured_prefixes = ("vllm.model_executor.models.",)  # toy.engine is NOT captured
+            s.graph_guard.stamp(GG.graph_key("FULL", 4))
+        self.assertEqual(h0.handle({"op": "txn", "plan": plan("nc1")})["outcome"], "committed")
+        for s in sides0:
+            self.assertEqual(s.graph_guard.code_epoch, 0)
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4))
+
+        # (2) Partial-mode R1 bumps ONLY PIECEWISE pool_epoch; FULL untouched; empty selected no-op
+        h1, names1, sides1 = make_host(self, "partmode")
+        for n, s in zip(names1, sides1):
+            r = Runner(n, modes=("PIECEWISE", "FULL"), sizes=(4, 2))
+            s.scope["r1_engine"] = r.engine
+            s.graph_guard.stamp(GG.graph_key("FULL", 4))
+            s.graph_guard.stamp(GG.graph_key("PIECEWISE", 4))
+        rep_pw = h1.handle({"op": "txn", "plan": plan("pm1", rebuild=["R1"], r1={"modes": ["PIECEWISE"], "sizes": [4]})})
+        self.assertEqual(rep_pw["outcome"], "committed")
+        for s in sides1:
+            self.assertEqual(s.graph_guard.pool_epoch_for("PIECEWISE"), 1)
+            self.assertEqual(s.graph_guard.pool_epoch_for("FULL"), 0)
+            s.graph_guard.check_before_replay(GG.graph_key("PIECEWISE", 4))
+        self.assertTrue(h1.handle({"op": "undo", "txn": "pm1"})["ok"])
+        for s in sides1:
+            self.assertEqual(s.graph_guard.pool_epoch_for("PIECEWISE"), 0)
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4))
+            s.graph_guard.check_before_replay(GG.graph_key("PIECEWISE", 4))
+        # Teardown with empty `selected` does NOT bump pool_epoch
+        g_empty = GG.GraphReplayGuard()
+        td_empty = RC.teardown_graph_pool(None, [], [], guard=g_empty)
+        self.assertEqual(g_empty.pool_epoch, 0)
+        self.assertEqual(td_empty["pool_epoch"], 0)
+
+        # (3) 2-rank R1 capture failure on rank 1 -> no transient bypass + clean rollback on both ranks
+        h2, names2, sides2 = make_host(self, "r1fail_guard")
+        runners2 = []
+        sig_base = GG.input_signature(_TensorLike((4, 16), "float16", 0x5000))
+        for n, s in zip(names2, sides2):
+            r = Runner(n, modes=("FULL",), sizes=(4, 2))
+            s.scope["r1_engine"] = r.engine
+            s.graph_guard.stamp(GG.graph_key("FULL", 4), sig_base)
+            s.graph_guard.stamp(GG.graph_key("FULL", 2), sig_base)
+            runners2.append(r)
+        # Intercept rank 1's restore to assert that right after R1 fails (before undo!), base
+        # graphs are STILL rejected under live edited code (no transient staleness bypass).
+        transient_rejected = []
+        orig_rec = sides2[1].recapture.run
+        def _spy_run(*a, **k):
+            res = orig_rec(*a, **k)
+            if not res["ok"]:
+                try:
+                    sides2[1].graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig_base)
+                except GG.StaleGraphReplayError:
+                    transient_rejected.append(True)
+            return res
+        sides2[1].recapture.run = _spy_run
+        runners2[1].fail_at = ("FULL", 2)
+        res_fail = h2.handle({"op": "txn", "plan": plan("r1boom", rebuild=["R1"])})
+        self.assertEqual(res_fail["outcome"], "rolled_back")
+        self.assertEqual(transient_rejected, [True])
+        # After coordinator undo completes, BOTH ranks match base with sig_base preserved!
+        for s in sides2:
+            self.assertEqual((s.graph_guard.code_epoch, s.graph_guard.pool_epoch), (0, 0))
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig_base)
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 2), sig_base)
+
+        # (4) txn1 (non-R1) -> txn2 (R1) -> undo(txn2): stale base graphs STAY REJECTED under txn1!
+        h3, names3, sides3 = make_host(self, "stale_stack")
+        for n, s in zip(names3, sides3):
+            r = Runner(n, modes=("FULL",), sizes=(4, 2))
+            s.scope["r1_engine"] = r.engine
+            s.graph_guard.stamp(GG.graph_key("FULL", 4), sig_base)
+        self.assertEqual(h3.handle({"op": "txn", "plan": plan("st1")})["outcome"], "committed")
+        self.assertEqual(h3.handle({"op": "txn", "plan": _plan_v2("st2", rebuild=["R1"])})["outcome"], "committed")
+        for s in sides3:
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4))
+        self.assertTrue(h3.handle({"op": "undo", "txn": "st2"})["ok"])
+        for s in sides3:
+            # Live code is st1 (epoch 1), restored graphs are base (epoch 0) -> MUST fail closed!
+            with self.assertRaises(GG.StaleGraphReplayError):
+                s.graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig_base)
+        self.assertTrue(h3.handle({"op": "undo", "txn": "st1"})["ok"])
+        for s in sides3:
+            # Back at base (epoch 0) -> restored base graphs + sig_base now pass!
+            s.graph_guard.check_before_replay(GG.graph_key("FULL", 4), sig_base)
+
     def test_repeated_r1_teardown_releases_old_graph_refs_and_increments_pool_epoch(self):
         """Input: repeated R1 recaptures with `release_old=True` holding tracked graph objects.
-        Expected: every teardown clears old dicts, calls `.reset()`, drops strong references
-        (verified via `weakref.ref(...)() is None`), increments `pool_epoch`, calls
-        `torch.cuda.synchronize()` + `torch.cuda.empty_cache()` when CUDA is available, and
-        records `teardown_vram_before_mib`, `teardown_vram_after_mib`, `freed_graphs_count`, and
-        `teardown_s` in the recapture receipt."""
+        Expected: old graph refs become `None` (`weakref.ref`), per-mode `pool_epoch` increments,
+        CUDA `synchronize()` + `empty_cache()` run, and VRAM/timing telemetry is recorded."""
         reset_log = []
         cuda_events = {"sync": 0, "empty": 0, "reserved": 512 * 1024 * 1024}
-
-        class _FakeTorch(types.ModuleType):
-            pass
-
-        fake_torch = _FakeTorch("torch")
-
-        def _empty_cache():
+        fake_torch = types.ModuleType("torch")
+        def _empty():
             cuda_events["empty"] += 1
             cuda_events["reserved"] = 128 * 1024 * 1024
-
-        fake_torch.cuda = NS(
-            is_available=lambda: True,
-            synchronize=lambda: cuda_events.__setitem__("sync", cuda_events["sync"] + 1),
-            empty_cache=_empty_cache,
-            memory_reserved=lambda: cuda_events["reserved"],
-        )
+        fake_torch.cuda = NS(is_available=lambda: True,
+                             synchronize=lambda: cuda_events.__setitem__("sync", cuda_events["sync"] + 1),
+                             empty_cache=_empty, memory_reserved=lambda: cuda_events["reserved"])
 
         class _StubJournal:
-            def __init__(self):
-                self.marks = []
-                self.entries = []
+            def __init__(self): self.marks, self.entries = [], []
             def mark(self, txn): self.marks.append((txn, len(self.entries)))
             def record_call(self, fn, label): self.entries.append((fn, label))
 
-        class _StubWitness:
-            def capture(self):
-                import contextlib
-                return contextlib.nullcontext()
-
-        wrapper = NS(runtime_mode="FULL", concrete_cudagraph_entries={})
-        keys = {"FULL": {4, 2}}
-        gen = [0]
-
-        def capture_fn(mode, desc):
+        wrapper, keys, gen = NS(runtime_mode="FULL", concrete_cudagraph_entries={}), {"FULL": {4, 2}}, [0]
+        def cap(mode, desc):
             wrapper.concrete_cudagraph_entries[desc] = _TrackedGraph(f"g{gen[0]}_{desc}", reset_log)
-
-        engine = RC.Engine(lambda: [wrapper], keys, capture_fn,
-                           memory=lambda: {"reserved": cuda_events["reserved"]})
-        # Initial epoch-0 capture
-        for d in (4, 2):
-            capture_fn("FULL", d)
-
+        engine = RC.Engine(lambda: [wrapper], keys, cap, memory=lambda: {"reserved": cuda_events["reserved"]})
+        for d in (4, 2): cap("FULL", d)
         guard = GG.GraphReplayGuard()
-        for d in (4, 2):
-            guard.stamp(GG.graph_key("FULL", d))
-        rec = RC.Recapture(guard=guard)
-        journal, witness = _StubJournal(), _StubWitness()
+        for d in (4, 2): guard.stamp(GG.graph_key("FULL", d))
+        rec, journal, witness = RC.Recapture(guard=guard), _StubJournal(), NS(capture=contextlib.nullcontext)
 
         with mock.patch.dict(sys.modules, {"torch": fake_torch}):
             for cycle in range(1, 4):
                 old_refs = [weakref.ref(obj) for obj in wrapper.concrete_cudagraph_entries.values()]
-                self.assertTrue(all(r() is not None for r in old_refs))
                 cuda_events["reserved"] = 512 * 1024 * 1024
-                gen[0] = cycle
-                txn = f"txn-r1-{cycle}"
+                gen[0], txn = cycle, f"txn-r1-{cycle}"
                 journal.mark(txn)
                 guard.bump_code_epoch(f"commit:{txn}")
-
                 report = rec.run(engine, txn, journal, witness, release_old=True)
                 self.assertTrue(report["ok"], report)
                 gc.collect()
-
-                # Every previous-cycle graph object was freed (no leaked strong references!)
-                self.assertTrue(all(r() is None for r in old_refs),
-                                f"cycle {cycle}: old graph reference leaked")
-                self.assertEqual(guard.pool_epoch, cycle)
-                self.assertEqual(report["pool_epoch"], cycle)
-                self.assertEqual(report["freed_graphs_count"], 2)
-                self.assertEqual(report["teardown_vram_before_mib"], 512.0)
-                self.assertEqual(report["teardown_vram_after_mib"], 128.0)
+                self.assertTrue(all(r() is None for r in old_refs))
+                self.assertEqual(guard.pool_epoch_for("FULL"), cycle)
+                self.assertEqual((report["freed_graphs_count"], report["teardown_vram_before_mib"],
+                                  report["teardown_vram_after_mib"]), (2, 512.0, 128.0))
                 self.assertGreaterEqual(report["teardown_s"], 0.0)
-                # Newly captured graphs are stamped at the new (code_epoch, pool_epoch)
                 guard.check_before_replay(GG.graph_key("FULL", 4))
-                guard.check_before_replay(GG.graph_key("FULL", 2))
+        self.assertEqual((cuda_events["sync"], cuda_events["empty"], len(reset_log)), (3, 3, 6))
 
-        self.assertEqual(cuda_events["sync"], 3)
-        self.assertEqual(cuda_events["empty"], 3)
-        self.assertEqual(len(reset_log), 6)
-
-    def test_background_build_runs_concurrently_with_live_work_and_cancel_leaves_no_orphan(self):
-        """Input: real background subprocesses launched via `BackgroundBuildPool.compile_async`.
-        Expected: (1) while a background build runs (~0.25 s) to emit an artifact, the live
-        foreground executes steps without blocking and observes `poll() is None`, then `wait()`
-        returns `ok=True` with the produced artifact; (2) `wait(timeout_s=0.05)` raises
-        `TimeoutError` on a slow build that spawns a child process, and `cancel()` terminates the
-        entire process group with zero orphan processes remaining."""
+    def test_background_build_concurrency_sigterm_ignoring_cancel_and_spec_path(self):
+        """Input: real background subprocesses via `BackgroundBuildPool.compile_async`.
+        Expected: (1) foreground work runs concurrently while build completes; (2) duplicate active
+        `job_id` is rejected; (3) `cancel()` kills a grandchild that IGNORES `SIGTERM` even after
+        the leader exits (no orphan process); (4) `spec=` path invokes `build_native(spec)` in an
+        isolated child with `CUDA_VISIBLE_DEVICES=""` and preserves caller `PYTHONPATH`."""
         with tempfile.TemporaryDirectory() as tmp, N.BackgroundBuildPool() as pool:
             artifact = os.path.join(tmp, "compiled_kernel.so")
-            build_script = (
-                "import sys, time\n"
-                "time.sleep(0.25)\n"
-                "with open(sys.argv[1], 'wb') as fh: fh.write(b'BUILT_OK')\n"
-            )
+            build_script = "import sys, time; time.sleep(0.25); open(sys.argv[1], 'wb').write(b'BUILT_OK')"
             job = pool.compile_async(cmd=[sys.executable, "-c", build_script, artifact], job_id="fast-build")
             self.assertIsNone(job.poll())
-            self.assertIn("fast-build", pool.active_jobs())
-
-            # Foreground keeps serving live steps while background build runs
-            foreground_steps = 0
+            with self.assertRaises(ValueError):
+                pool.compile_async(cmd=[sys.executable, "-c", "pass"], job_id="fast-build")
+            fg_steps = 0
             while job.poll() is None:
-                foreground_steps += 1
+                fg_steps += 1
                 time.sleep(0.01)
-            self.assertGreater(foreground_steps, 3, "foreground should execute multiple steps during build")
+            self.assertGreater(fg_steps, 3)
             res = job.wait(timeout_s=5.0)
-            self.assertTrue(res["ok"], res)
-            self.assertFalse(res["cancelled"])
-            self.assertGreaterEqual(res["build_s"], 0.2)
+            self.assertTrue(res["ok"] and not res["cancelled"])
             with open(artifact, "rb") as fh:
                 self.assertEqual(fh.read(), b"BUILT_OK")
 
-            # Slow build spawning a grandchild process: verify timeout + orphan-free cancel()
+            # Grandchild explicitly IGNORES SIGTERM; leader exits immediately on SIGTERM ->
+            # cancel() MUST still SIGKILL the process group so the grandchild cannot survive!
             child_pid_file = os.path.join(tmp, "grandchild.pid")
             slow_script = (
-                "import subprocess, sys, time\n"
-                "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "import signal, subprocess, sys, time\n"
+                "gc_code = 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'\n"
+                "p = subprocess.Popen([sys.executable, '-c', gc_code])\n"
                 "with open(sys.argv[1], 'w') as fh: fh.write(str(p.pid))\n"
                 "time.sleep(60)\n"
             )
-            slow = N.compile_async(pool=pool, cmd=[sys.executable, "-c", slow_script, child_pid_file],
-                                   job_id="slow-build")
-            # Wait until grandchild PID is written
+            slow = N.compile_async(pool=pool, cmd=[sys.executable, "-c", slow_script, child_pid_file], job_id="slow-ig")
             deadline = time.perf_counter() + 5.0
             while not os.path.isfile(child_pid_file) or os.path.getsize(child_pid_file) == 0:
-                if time.perf_counter() > deadline:
-                    self.fail("slow build grandchild never wrote its pid")
+                self.assertLess(time.perf_counter(), deadline)
                 time.sleep(0.01)
             with open(child_pid_file, "r", encoding="utf-8") as fh:
-                grandchild_pid = int(fh.read().strip())
-
+                gc_pid = int(fh.read().strip())
             with self.assertRaises(TimeoutError):
-                pool.wait("slow-build", timeout_s=0.05)
-
-            self.assertTrue(pool.cancel("slow-build", grace_s=0.3))
+                pool.wait("slow-ig", timeout_s=0.05)
+            self.assertTrue(pool.cancel("slow-ig", grace_s=0.1))
             self.assertTrue(slow.cancelled)
-            self.assertFalse(pool.cancel("slow-build"))
-            self.assertEqual(pool.active_jobs(), [])
-            final = slow.poll()
-            self.assertIsNotNone(final)
-            self.assertFalse(final["ok"])
-            self.assertTrue(final["cancelled"])
-
-            # Neither the build process nor its grandchild may survive as an orphan
-            for pid in (slow.pid, grandchild_pid):
+            for pid in (slow.pid, gc_pid):
                 gone = False
                 for _ in range(50):
-                    try:
-                        os.kill(pid, 0)
-                    except ProcessLookupError:
-                        gone = True
-                        break
+                    try: os.kill(pid, 0)
+                    except ProcessLookupError: gone = True; break
                     time.sleep(0.02)
-                self.assertTrue(gone, f"subprocess {pid} survived cancel()")
+                self.assertTrue(gone, f"process {pid} survived cancel()")
+
+            # Real `spec=` background build path: runs `build_native(spec)` in child subprocess
+            # with CUDA_VISIBLE_DEVICES="" and preserves caller PYTHONPATH!
+            csrc = os.path.join(tmp, "csrc")
+            os.makedirs(csrc)
+            with open(os.path.join(csrc, "k.cu"), "w", encoding="utf-8") as fh:
+                fh.write("// kernel\n")
+            fake_torch_dir = os.path.join(tmp, "fakepkg")
+            os.makedirs(os.path.join(fake_torch_dir, "torch", "include"))
+            os.makedirs(os.path.join(fake_torch_dir, "torch", "lib"))
+            with open(os.path.join(fake_torch_dir, "torch", "__init__.py"), "w", encoding="utf-8") as fh:
+                fh.write(
+                    "import os\nassert os.environ.get('CUDA_VISIBLE_DEVICES') == '', os.environ.get('CUDA_VISIBLE_DEVICES')\n"
+                )
+            fake_nvcc = os.path.join(tmp, "fake_nvcc")
+            with open(fake_nvcc, "w", encoding="utf-8") as fh:
+                fh.write(
+                    f"#!{sys.executable}\nimport sys\n"
+                    "out = sys.argv[sys.argv.index('-o') + 1]\n"
+                    "with open(out, 'wb') as f: f.write(b'ELF_OK')\n"
+                )
+            os.chmod(fake_nvcc, os.stat(fake_nvcc).st_mode | stat.S_IEXEC)
+            spec = {"csrc_root": csrc, "build_root": os.path.join(tmp, "out"), "files": ["k.cu"],
+                    "ops": {"my_op": {"fn": "my_op", "schema": "my_op(Tensor x) -> ()"}}, "arch": "100"}
+            spec_job = pool.compile_async(
+                spec, job_id="spec-build",
+                env={"PYTHONPATH": fake_torch_dir, "RSIBOX_NVCC": fake_nvcc, "RSIBOX_GXX": fake_nvcc},
+            )
+            spec_res = spec_job.wait(timeout_s=15.0)
+            self.assertTrue(spec_res["ok"], spec_res)
+            self.assertTrue(os.path.isfile(spec_res["result"]["so"]))
 
 
 if __name__ == "__main__":

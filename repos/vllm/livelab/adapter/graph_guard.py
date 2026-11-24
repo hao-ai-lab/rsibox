@@ -1,10 +1,10 @@
 """O(1) runtime CUDA-graph staleness guard for vLLM live-lab workers.
 
-Tracks monotonic `code_epoch` (bumped on live edits/rollbacks) and `pool_epoch` (bumped on
-graph-pool teardown/recapture), plus per-graph `(code_epoch, pool_epoch, input_signature)`
-stamps. `check_before_replay(key, input_sig=None)` verifies freshness in O(1) nanoseconds and
-fails closed with `StaleGraphReplayError` on epoch or input-signature drift (no `torch` import).
+Tracks a monotonic `code_epoch` (ABA-free on undo) and per-mode `pool_epoch` counters,
+plus per-graph `(code_epoch, mode_pool_epoch, input_sig)` stamps. `check_before_replay`
+verifies freshness in O(1) and fails closed with `StaleGraphReplayError` (no `torch` import).
 """
+import threading
 from typing import Any
 
 
@@ -19,126 +19,152 @@ class StaleGraphReplayError(RuntimeError):
         self.expected_sig, self.actual_sig = expected_sig, actual_sig
 
 
+def _mode_name(mode: Any) -> str:
+    return getattr(mode, "name", None) or str(mode)
+
+
+def _key_mode(key: Any) -> str:
+    return key[0] if isinstance(key, tuple) and key and isinstance(key[0], str) else "*"
+
+
 def graph_key(mode: Any, desc: Any) -> tuple[str, Any]:
-    """Canonical hashable `(mode_name, descriptor)` key for a captured graph bucket."""
-    mode_name = getattr(mode, "name", None) or str(mode)
+    """Canonical hashable `(mode_name, descriptor)` key (never falls back to unsafe `id()`)."""
+    m = _mode_name(mode)
     try:
         hash(desc)
-        return (mode_name, desc)
+        return (m, desc)
     except TypeError:
-        return (mode_name, getattr(desc, "num_tokens", id(desc)))
+        attrs = tuple((a, getattr(desc, a)) for a in ("num_tokens", "num_reqs", "uniform", "has_lora") if hasattr(desc, a))
+        return (m, attrs or repr(desc))
 
 
 def input_signature(*items: Any) -> tuple[Any, ...]:
     """Immutable `(shape, dtype, data_ptr)` signature tuple for tensors or stand-ins."""
-    out = []
-    for x in items:
-        if hasattr(x, "shape") and hasattr(x, "dtype"):
-            ptr = getattr(x, "data_ptr", None)
-            out.append((tuple(int(d) for d in x.shape), str(x.dtype), int(ptr()) if callable(ptr) else None))
-        else:
-            out.append(x)
-    return tuple(out)
+    return tuple(
+        (tuple(int(d) for d in x.shape), str(x.dtype),
+         int(x.data_ptr()) if callable(getattr(x, "data_ptr", None)) else None)
+        if hasattr(x, "shape") and hasattr(x, "dtype") else x
+        for x in items
+    )
 
 
 class GraphReplayGuard:
-    """Per-rank O(1) staleness guard; `_epoch` is a shared tuple for pointer-fast equality."""
+    """Thread-safe per-rank O(1) staleness guard for CUDA-graph replay."""
 
-    __slots__ = ("_code_epoch", "_pool_epoch", "_epoch", "_stamps",
-                 "_strict_unstamped", "_stale_rejections", "_last_reason")
+    __slots__ = ("_code_epoch", "_next_code_epoch", "_pool_epochs", "_stamps",
+                 "_strict_unstamped", "_stale_rejections", "_last_reason", "_lock")
 
     def __init__(self, *, strict_unstamped: bool = False):
-        self._code_epoch = self._pool_epoch = self._stale_rejections = 0
-        self._epoch: tuple[int, int] = (0, 0)
-        self._stamps: dict[Any, tuple[tuple[int, int], Any]] = {}
-        self._strict_unstamped, self._last_reason = bool(strict_unstamped), ""
+        self._code_epoch, self._next_code_epoch, self._stale_rejections = 0, 1, 0
+        self._pool_epochs: dict[str, int] = {}
+        self._stamps: dict[Any, tuple[int, int, Any]] = {}
+        self._strict_unstamped, self._last_reason, self._lock = bool(strict_unstamped), "", threading.RLock()
 
     @property
     def code_epoch(self) -> int: return self._code_epoch
     @property
-    def pool_epoch(self) -> int: return self._pool_epoch
+    def pool_epoch(self) -> int: return sum(self._pool_epochs.values())
     @property
-    def epoch(self) -> tuple[int, int]: return self._epoch
+    def pool_epochs(self) -> dict[str, int]:
+        with self._lock: return dict(self._pool_epochs)
+    @property
+    def epoch(self) -> tuple[int, int]: return (self._code_epoch, self.pool_epoch)
     @property
     def stamps(self) -> dict[Any, tuple[int, int, Any]]:
-        return {k: (ep[0], ep[1], sig) for k, (ep, sig) in self._stamps.items()}
+        with self._lock: return dict(self._stamps)
+
+    def pool_epoch_for(self, mode: Any) -> int:
+        return self._pool_epochs.get(_mode_name(mode), 0)
 
     def bump_code_epoch(self, reason: str = "") -> int:
-        self._code_epoch += 1
-        self._epoch, self._last_reason = (self._code_epoch, self._pool_epoch), reason
-        return self._code_epoch
+        with self._lock:
+            self._code_epoch, self._next_code_epoch, self._last_reason = self._next_code_epoch, self._next_code_epoch + 1, reason
+            return self._code_epoch
 
-    def bump_pool_epoch(self, reason: str = "") -> int:
-        self._pool_epoch += 1
-        self._epoch, self._last_reason = (self._code_epoch, self._pool_epoch), reason
-        return self._pool_epoch
+    def restore_code_epoch(self, epoch: int, reason: str = "") -> int:
+        with self._lock:
+            self._code_epoch, self._last_reason = int(epoch), reason
+            self._next_code_epoch = max(self._next_code_epoch, self._code_epoch + 1)
+            return self._code_epoch
+
+    def bump_pool_epoch(self, reason: str = "", *, modes=None) -> int:
+        with self._lock:
+            names = ([_mode_name(m) for m in modes] if modes is not None
+                     else list(set(self._pool_epochs) | {_key_mode(k) for k in self._stamps} or {"*"}))
+            for m in names:
+                self._pool_epochs[m] = self._pool_epochs.get(m, 0) + 1
+            if names:
+                self._last_reason = reason
+            return self.pool_epoch
+
+    def snapshot_modes(self, modes) -> tuple[dict[str, int], dict[Any, tuple[int, int, Any]]]:
+        names = {_mode_name(m) for m in modes}
+        with self._lock:
+            return ({m: self._pool_epochs.get(m, 0) for m in names},
+                    {k: v for k, v in self._stamps.items() if _key_mode(k) in names})
+
+    def restore_modes(self, pool_epochs: dict[str, int], stamps: dict[Any, tuple[int, int, Any]]) -> None:
+        with self._lock:
+            self._invalidate_modes_unlocked(pool_epochs.keys())
+            for m, ep in pool_epochs.items():
+                if ep: self._pool_epochs[m] = ep
+                else: self._pool_epochs.pop(m, None)
+            self._stamps.update(stamps)
 
     def stamp(self, key: Any, input_sig: Any = None) -> tuple[int, int, Any]:
-        ep = self._epoch
-        self._stamps[key] = (ep, input_sig)
-        return (ep[0], ep[1], input_sig)
+        with self._lock:
+            val = (self._code_epoch, self._pool_epochs.get(_key_mode(key), 0), input_sig)
+            self._stamps[key] = val
+            return val
 
     def stamp_many(self, keys, input_sig: Any = None) -> int:
-        ep, stamps, count = self._epoch, self._stamps, 0
-        for key in keys:
-            stamps[key] = (ep, input_sig)
-            count += 1
-        return count
+        with self._lock:
+            ce, pe, stamps, n = self._code_epoch, self._pool_epochs, self._stamps, 0
+            for k in keys:
+                stamps[k] = (ce, pe.get(_key_mode(k), 0), input_sig); n += 1
+            return n
 
     def invalidate(self, key: Any = None) -> int:
-        if key is None:
-            n = len(self._stamps)
-            self._stamps.clear()
-            return n
-        return 1 if self._stamps.pop(key, None) is not None else 0
+        with self._lock:
+            if key is None:
+                n = len(self._stamps); self._stamps.clear(); return n
+            return int(self._stamps.pop(key, None) is not None)
 
-    def invalidate_modes(self, mode_names) -> int:
-        targets = set(mode_names)
-        drop = [k for k in self._stamps if isinstance(k, tuple) and k and k[0] in targets]
-        for k in drop:
-            self._stamps.pop(k, None)
+    def _invalidate_modes_unlocked(self, mode_names) -> int:
+        targets = {_mode_name(m) for m in mode_names}
+        drop = [k for k in self._stamps if _key_mode(k) in targets]
+        for k in drop: self._stamps.pop(k, None)
         return len(drop)
 
-    def check_before_replay(self, key: Any, input_sig: Any = None) -> None:
-        """O(1) staleness check; raises `StaleGraphReplayError` on epoch or input drift."""
-        stamp = self._stamps.get(key)
+    def invalidate_modes(self, mode_names) -> int:
+        with self._lock: return self._invalidate_modes_unlocked(mode_names)
+
+    def _mismatch_unlocked(self, key: Any, input_sig: Any):
+        live, stamp = (self._code_epoch, self._pool_epochs.get(_key_mode(key), 0)), self._stamps.get(key)
         if stamp is not None:
-            s_epoch, s_sig = stamp
-            if (s_epoch is self._epoch or s_epoch == self._epoch) and (
-                input_sig is None or (s_sig is not None and s_sig == input_sig)
-            ):
-                return
-            self._stale_rejections += 1
-            if s_epoch != self._epoch:
-                raise StaleGraphReplayError(
-                    f"stale CUDA graph replay for {key!r}: captured at {s_epoch}, live is {self._epoch}",
-                    graph_key=key, expected_epoch=self._epoch, actual_epoch=s_epoch, reason="epoch_mismatch",
-                )
-            raise StaleGraphReplayError(
-                f"CUDA graph input signature drift for {key!r}: captured {s_sig!r}, got {input_sig!r}",
-                graph_key=key, expected_epoch=self._epoch, actual_epoch=s_epoch,
-                expected_sig=s_sig, actual_sig=input_sig, reason="input_sig_mismatch",
-            )
-        if not self._strict_unstamped and self._code_epoch == 0 and self._pool_epoch == 0 and input_sig is None:
-            return
-        self._stale_rejections += 1
-        raise StaleGraphReplayError(
-            f"graph {key!r} has no capture stamp at {self._epoch}",
-            graph_key=key, expected_epoch=self._epoch, actual_epoch=None,
-            actual_sig=input_sig, reason="unstamped",
-        )
+            s_code, s_pool, s_sig = stamp
+            if s_code == live[0] and s_pool == live[1] and (input_sig is None or (s_sig is not None and s_sig == input_sig)):
+                return None
+            if (s_code, s_pool) != live:
+                return StaleGraphReplayError(f"stale CUDA graph replay for {key!r}: captured {(s_code, s_pool)}, live {live}",
+                                             graph_key=key, expected_epoch=live, actual_epoch=(s_code, s_pool), reason="epoch_mismatch")
+            return StaleGraphReplayError(f"CUDA graph input signature drift for {key!r}: captured {s_sig!r}, got {input_sig!r}",
+                                         graph_key=key, expected_epoch=live, actual_epoch=(s_code, s_pool),
+                                         expected_sig=s_sig, actual_sig=input_sig, reason="input_sig_mismatch")
+        if not self._strict_unstamped and live == (0, 0) and input_sig is None:
+            return None
+        return StaleGraphReplayError(f"graph {key!r} has no capture stamp at {live}",
+                                     graph_key=key, expected_epoch=live, actual_epoch=None, actual_sig=input_sig, reason="unstamped")
+
+    def check_before_replay(self, key: Any, input_sig: Any = None) -> None:
+        with self._lock:
+            if (err := self._mismatch_unlocked(key, input_sig)) is not None:
+                self._stale_rejections += 1; raise err
 
     def is_fresh(self, key: Any, input_sig: Any = None) -> bool:
-        stamp = self._stamps.get(key)
-        if stamp is not None:
-            s_epoch, s_sig = stamp
-            return (s_epoch is self._epoch or s_epoch == self._epoch) and (
-                input_sig is None or (s_sig is not None and s_sig == input_sig)
-            )
-        return not self._strict_unstamped and self._code_epoch == 0 and self._pool_epoch == 0 and input_sig is None
+        with self._lock: return self._mismatch_unlocked(key, input_sig) is None
 
     def wrap_replay(self, key: Any, replay_fn, *, sig_fn=None):
-        """Wrap `replay_fn` so `check_before_replay(key, ...)` guards every replay."""
         guard = self
         def guarded(*args, **kwargs):
             guard.check_before_replay(key, sig_fn(*args, **kwargs) if sig_fn is not None else None)
@@ -146,22 +172,22 @@ class GraphReplayGuard:
         guarded.__wrapped__ = replay_fn
         return guarded
 
-    def attach_wrapper(self, wrapper, *, mode: Any = None, key_fn=None):
-        """Attach an idempotent replay guard to `wrapper.replay` (zero overhead at epoch 0)."""
-        if getattr(wrapper, "_rsibox_guard", None) is self or not callable(getattr(wrapper, "replay", None)):
+    def attach_wrapper(self, wrapper, *, mode: Any = None, method: str = "replay", key_fn=None):
+        attr = f"_rsibox_guard_{method}"
+        if getattr(wrapper, attr, None) is self or not callable(getattr(wrapper, method, None)):
             return wrapper
-        replay_fn, guard = wrapper.replay, self
-        mode_obj = mode if mode is not None else getattr(wrapper, "runtime_mode", "FULL")
-        def guarded_replay(*args, **kwargs):
-            if guard._code_epoch or guard._pool_epoch or guard._stamps:
-                k = key_fn(*args, **kwargs) if key_fn else graph_key(mode_obj, args[0] if args else kwargs.get("desc"))
-                guard.check_before_replay(k, kwargs.get("input_sig"))
-            return replay_fn(*args, **kwargs)
-        guarded_replay.__wrapped__ = replay_fn
-        wrapper.replay = guarded_replay
-        wrapper._rsibox_guard = self
+        orig, guard = getattr(wrapper, method), self
+        def guarded(*args, **kwargs):
+            desc = args[0] if args else kwargs.get("desc", kwargs.get("batch_descriptor"))
+            m = getattr(desc, "cg_mode", None) or (mode if mode is not None else getattr(wrapper, "runtime_mode", "FULL"))
+            guard.check_before_replay(key_fn(*args, **kwargs) if key_fn else graph_key(m, desc), kwargs.get("input_sig"))
+            return orig(*args, **kwargs)
+        guarded.__wrapped__ = orig
+        setattr(wrapper, method, guarded); setattr(wrapper, attr, self)
         return wrapper
 
     def stats(self) -> dict[str, Any]:
-        return {"code_epoch": self._code_epoch, "pool_epoch": self._pool_epoch,
-                "stamped_graphs": len(self._stamps), "stale_rejections": self._stale_rejections}
+        with self._lock:
+            return {"code_epoch": self._code_epoch, "pool_epoch": sum(self._pool_epochs.values()),
+                    "pool_epochs": dict(self._pool_epochs), "stamped_graphs": len(self._stamps),
+                    "stale_rejections": self._stale_rejections}

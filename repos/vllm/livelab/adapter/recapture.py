@@ -367,71 +367,57 @@ def _cuda_vram_mib(engine) -> float:
     """Return CUDA reserved (or engine-reported) VRAM in MiB without importing `torch`."""
     cuda = getattr(sys.modules.get("torch"), "cuda", None)
     if callable(getattr(cuda, "is_available", None)) and cuda.is_available() and callable(getattr(cuda, "memory_reserved", None)):
-        return round(float(cuda.memory_reserved()) / (1024.0 * 1024.0), 3)
+        return round(float(cuda.memory_reserved()) / 1048576.0, 3)
     mem = engine.memory() if engine is not None else {}
     if isinstance(mem, dict):
-        for field in ("reserved", "allocated"):
-            if isinstance(mem.get(field), (int, float)):
-                return round(float(mem[field]) / (1024.0 * 1024.0), 3)
+        for k in ("reserved", "allocated"):
+            if isinstance(mem.get(k), (int, float)):
+                return round(float(mem[k]) / 1048576.0, 3)
     return 0.0
 
 
 def _cuda_sync_and_empty_cache() -> bool:
-    """Synchronize CUDA and release cached allocator blocks when `torch.cuda` is available."""
     cuda = getattr(sys.modules.get("torch"), "cuda", None)
-    if callable(getattr(cuda, "is_available", None)) and cuda.is_available():
-        for fn_name in ("synchronize", "empty_cache"):
-            fn = getattr(cuda, fn_name, None)
-            if callable(fn):
-                fn()
-        return True
-    return False
+    if not (callable(getattr(cuda, "is_available", None)) and cuda.is_available()):
+        return False
+    for fn_name in ("synchronize", "empty_cache"):
+        if callable(fn := getattr(cuda, fn_name, None)):
+            fn()
+    return True
 
 
 def _clear_entries(entry_dict: dict) -> int:
-    """Reset any CUDA graph handles in `entry_dict`, clear it, and return entries freed."""
     count = len(entry_dict)
     for entry in list(entry_dict.values()):
         for obj in (entry, getattr(entry, "cudagraph", None)):
-            reset = getattr(obj, "reset", None)
-            if callable(reset):
+            if callable(reset := getattr(obj, "reset", None)):
                 with contextlib.suppress(Exception):
                     reset()
     entry_dict.clear()
     return count
 
 
-def teardown_graph_pool(
-    engine, wrappers, selected, *, release_entries: bool = True,
-    guard: GraphReplayGuard | None = None, reason: str = "r1_teardown",
-) -> dict:
+def teardown_graph_pool(engine, wrappers, selected, *, release_entries: bool = True,
+                        guard: GraphReplayGuard | None = None, reason: str = "r1_teardown") -> dict:
     """Detach old graph dicts, optionally release strong refs, run GC + CUDA cache cleanup,
-    and advance `guard.pool_epoch` before R1 recapture."""
+    and advance per-mode `guard.pool_epoch` before R1 recapture (no-op bump if `selected` empty)."""
     t0, vram_before, freed, detached = time.perf_counter(), _cuda_vram_mib(engine), 0, []
+    selected_names = [name(mode) for mode in selected]
     for wrapper, attr in wrappers:
-        old_dict = getattr(wrapper, attr)
-        setattr(wrapper, attr, {})
-        if release_entries:
-            detached.append(old_dict)
+        old_dict = getattr(wrapper, attr); setattr(wrapper, attr, {})
+        if release_entries: detached.append(old_dict)
     for mode in selected:
         engine.keys[mode].clear()
     if release_entries:
-        for old_dict in detached:
-            freed += _clear_entries(old_dict)
+        freed = sum(_clear_entries(d) for d in detached)
         detached.clear()
-    gc.collect()
-    _cuda_sync_and_empty_cache()
-    pool_epoch = None
-    if guard is not None:
-        guard.invalidate_modes([name(mode) for mode in selected])
-        pool_epoch = guard.bump_pool_epoch(reason)
-    return {
-        "teardown_vram_before_mib": vram_before,
-        "teardown_vram_after_mib": _cuda_vram_mib(engine),
-        "freed_graphs_count": freed,
-        "teardown_s": round(time.perf_counter() - t0, 6),
-        **({"pool_epoch": pool_epoch} if pool_epoch is not None else {}),
-    }
+    gc.collect(); _cuda_sync_and_empty_cache()
+    if guard is not None and selected_names:
+        guard.invalidate_modes(selected_names)
+        guard.bump_pool_epoch(reason, modes=selected_names)
+    return {"teardown_vram_before_mib": vram_before, "teardown_vram_after_mib": _cuda_vram_mib(engine),
+            "freed_graphs_count": freed, "teardown_s": round(time.perf_counter() - t0, 6),
+            **({"pool_epoch": guard.pool_epoch, "pool_epochs": guard.pool_epochs} if guard is not None else {})}
 
 
 def _drop_descriptors(engine, wrappers, pairs, guard: GraphReplayGuard | None = None):
@@ -467,17 +453,10 @@ class Recapture:
                 for mode in selected}
         return selected, old_keys, wrappers, old_entries, chosen, left
 
-    def _swap_dicts(self, wrappers, selected, engine):
-        """Install empty entry dicts on selected wrappers and clear dispatcher keys."""
-        for wrapper, attr in wrappers:
-            setattr(wrapper, attr, {})
-        for mode in selected:
-            engine.keys[mode].clear()
-
     def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False):
         """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds, pool
-        teardown telemetry, and memory before/after; on failure the old graphs are restored
-        (or cleared when `release_old=True`) and the reply is not-ok."""
+        teardown telemetry, and memory before/after; on failure old graphs and exact pre-R1
+        guard stamps are restored (or cleared when `release_old=True`)."""
         if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
@@ -489,7 +468,9 @@ class Recapture:
         selected, old_keys, wrappers, old_entries, chosen, left = self._select(
             engine, modes, sizes
         )
+        selected_names = [name(mode) for mode in selected]
         guard = self.guard
+        pre_pool_epochs, pre_stamps = guard.snapshot_modes(selected_names)
         if release_old:
             old_entries.clear()
 
@@ -501,8 +482,9 @@ class Recapture:
                         _clear_entries(getattr(wrapper, attr))
                     for mode in selected:
                         engine.keys[mode].clear()
-                    guard.invalidate_modes([name(mode) for mode in selected])
-                    guard.bump_pool_epoch(f"restore:{txn}")
+                    if selected_names:
+                        guard.invalidate_modes(selected_names)
+                        guard.bump_pool_epoch(f"restore:{txn}", modes=selected_names)
                     gc.collect()
                     _cuda_sync_and_empty_cache()
                 engine.sync()
@@ -516,12 +498,8 @@ class Recapture:
                     for mode in selected:
                         engine.keys[mode].clear()
                         engine.keys[mode].update(old_keys[mode])
-                    guard.invalidate_modes([name(mode) for mode in selected])
-                    guard.stamp_many(
-                        graph_key(mode, desc)
-                        for mode in selected
-                        for desc in old_keys[mode]
-                    )
+                    if selected_names:
+                        guard.restore_modes(pre_pool_epochs, pre_stamps)
                     gc.collect()
                     _cuda_sync_and_empty_cache()
                 engine.sync()
