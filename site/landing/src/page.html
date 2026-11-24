@@ -109,7 +109,7 @@ Show me the result, then walk me through one install, check and uninstall on the
             <li><b>CRIU + cuda-checkpoint restore</b><span>2.7&ndash;7.0 s (GMS/0.6B)</span></li>
             <li><b>Warm-JIT or cold-JIT restart</b><span>11&ndash;1,840 s</span></li>
           </ol>
-          <p>If an edit fails its check, rsibox rolls it back in place. On NVIDIA B200, live swaps and selective recapture run up to 491 GiB TP4 (vLLM); when a change crashes a rank or crosses a process boundary, rsibox composes with NVIDIA Dynamo GMS shadow promotion (up to 151.5 GiB TP4) and CRIU + <code>cuda-checkpoint</code> restore (single-GPU vLLM up to 65.5 GB, plus 0.6B SGLang and TensorRT-LLM; plain CRIU on 29&ndash;65.5 GB takes 15.2&ndash;20.2 s), then resumes millisecond live edits.</p>
+          <p>If an edit fails its check, rsibox rolls it back in place. On NVIDIA B200, live swaps and selective recapture run up to 491 GiB TP4 (vLLM); when a change crashes a rank or crosses a process boundary, rsibox composes with NVIDIA Dynamo GMS shadow promotion (up to 151.5 GiB TP4) and CRIU + <code>cuda-checkpoint</code> restore (single-GPU vLLM up to 65.5 GB, plus 0.6B and 14B SGLang and TensorRT-LLM; plain CRIU on 29&ndash;65.5 GB takes 13.4&ndash;25.9 s), then resumes millisecond live edits.</p>
         </article>
         <article class="st-step" data-scene="probe">
           <p class="st-kicker">How rsibox fixes measurement</p>
