@@ -334,9 +334,9 @@ class VllmLab:
 
     def _server_at_base(self, srv):
         try:
-            ping = client.send(srv.kernel_dir, {"op": "ping"}, timeout=10.0)
+            ping = client.send(srv.kernel_dir, {"op": "ping"}, timeout=10.0, alive_fn=srv.alive)
             return bool(ping.get("ok") and not ping.get("poison")
-                        and client.send(srv.kernel_dir, {"op": "at_base"}, timeout=10.0).get("ok"))
+                        and client.send(srv.kernel_dir, {"op": "at_base"}, timeout=10.0, alive_fn=srv.alive).get("ok"))
         except Exception:
             return False
 
@@ -402,7 +402,7 @@ class VllmLab:
             _http_post(port, "/v1/completions",
                        {"model": "m", "prompt": PROMPTS[0], "max_tokens": 2, "temperature": 0.0, "seed": 0},
                        timeout=120.0)
-            ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0)
+            ping = client.send(kernel_dir, {"op": "ping"}, timeout=30.0, alive_fn=srv.alive)
             # Older callers can still select TP through arbitrary extra serve flags.
             _check_topology(ping, self.tp if "RSIBOX_VLLM_TP" in os.environ else None)
         except BaseException:
@@ -416,7 +416,7 @@ class VllmLab:
             return self._backend.ctl(cmd, timeout=wait_s)
         if not self.server.alive():
             return {"ok": False, "lost": True, "error": "engine process exited"}
-        reply = client.send(self.server.kernel_dir, cmd, timeout=wait_s)
+        reply = client.send(self.server.kernel_dir, cmd, timeout=wait_s, alive_fn=self.server.alive)
         if not reply.get("ok") and str(reply.get("error", "")).startswith("no reply in "):
             reply["lost"] = True
         return reply
