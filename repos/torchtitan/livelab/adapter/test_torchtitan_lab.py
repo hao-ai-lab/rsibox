@@ -121,15 +121,15 @@ class TorchTitanGoldenTests(unittest.TestCase):
         m_src = self.lab._base_source(m_mod)
         ctor_patch = harness.edit_once(
             m_src,
-            "self.weight_scale = init_weight_scale()",
-            "self.weight_scale = init_weight_scale() * 2.0",
+            "float(lr), init_weight_scale()",
+            "float(lr), init_weight_scale() * 2.0",
         )
         res = self.lab.install({"files": {m_mod: ctor_patch}})
         self.assertFalse(res["ok"], res)
         self.assertIn("constructor_edit", res["codes"], res)
-        st = self.lab.status()
-        self.assertEqual(st["state"], "base")
-        self.assertEqual(st["fingerprint"], fp0)
+        state = self.lab.status()
+        self.assertEqual(state["state"], "base")
+        self.assertEqual(state["fingerprint"], fp0)
         self.assertEqual(self.lab.check()["output"], out0)
 
     def test_crash_poisons_session_and_respawn_recovers_base(self):
@@ -140,8 +140,8 @@ class TorchTitanGoldenTests(unittest.TestCase):
         self.assertTrue(self.lab.inject("crash", rank=0)["ok"])
         failed = self.lab.check()
         self.assertFalse(failed["ok"])
-        st = self.lab.status()
-        self.assertEqual(st["state"], "poisoned")
+        state = self.lab.status()
+        self.assertEqual(state["state"], "poisoned")
         refused = self.lab.install(self.lab.patches()["visible"])
         self.assertFalse(refused["ok"])
         self.assertEqual(refused["codes"], ["session_poisoned"])
@@ -150,6 +150,40 @@ class TorchTitanGoldenTests(unittest.TestCase):
         self.assertTrue(respawn["ok"], respawn)
         self.assertEqual(self.lab.status()["state"], "base")
         self.assertEqual(self.lab.check()["output"], out0)
+
+    def test_fsdp2_world_size_gt_1_fails_closed(self):
+        """Input: `TorchTitanLab` and `run_fresh` configured with `mode='fsdp2', world_size=2`.
+        Expected: both refuse immediately with `ValueError` instead of deadlocking `init_process_group`."""
+        from adapter.worker import run_fresh
+
+        with self.assertRaisesRegex(ValueError, "fsdp2 mode currently supports world_size=1"):
+            TorchTitanLab({"mode": "fsdp2", "world_size": 2}, auto_spawn=False)
+        with self.assertRaisesRegex(ValueError, "fsdp2 mode currently supports world_size=1"):
+            run_fresh({"config": {"mode": "fsdp2", "world_size": 2}, "workload": {"steps": 1}})
+
+    def test_rng_state_restored_bit_exact_for_stochastic_hotswapped_op(self):
+        """Input: hot-swap `compute_loss` to add `random.random() * 1e-3` noise.
+        Expected: repeated checks with `reset('state')` produce bit-exact identical stochastic losses,
+        and `uninstall()` restores exact base output."""
+        base_out = self.lab.check()["output"]
+        module_name = DEFAULT_MODULES[0]
+        src = self.lab._base_source(module_name)
+        stochastic = harness.edit_once(
+            src,
+            "return sum(d * d for d in diffs) / max(len(diffs), 1)",
+            "import random as _r\n    return sum(d * d for d in diffs) / max(len(diffs), 1) + _r.random() * 1e-3",
+        )
+        res = self.lab.install({"files": {module_name: stochastic}})
+        self.assertTrue(res["ok"], res)
+        c1 = self.lab.check()
+        self.assertTrue(c1["ok"] and c1["proven"] is True)
+        self.assertNotEqual(c1["output"]["losses"], base_out["losses"])
+        rst = self.lab.reset("state")
+        self.assertTrue(rst["ok"] and "rng" in rst["reset"], rst)
+        c2 = self.lab.check()
+        self.assertEqual(c2["output"], c1["output"])
+        self.assertTrue(self.lab.uninstall()["ok"])
+        self.assertEqual(self.lab.check()["output"], base_out)
 
     def test_launch_environment_parses_flags_without_importing_torch(self):
         """Input: `TorchTitanLab.launch_environment(['--', '--mode', 'fsdp2', '--world-size', '2'])` in a clean subprocess.

@@ -11,13 +11,11 @@ def init_weight_scale() -> float:
     """Startup-only weight init scale (never called during training steps; used by c10)."""
     return INIT_WEIGHT_SCALE
 
-
 class TitanStepConfig:
     """Immutable step config captured at worker startup (editing `__init__` is refused)."""
 
     def __init__(self, hidden: int = 16, ffn: int = 32, layers: int = 2, lr: float = 0.01) -> None:
-        self.hidden, self.ffn, self.layers, self.lr = int(hidden), int(ffn), int(layers), float(lr)
-        self.weight_scale = init_weight_scale()
+        self.hidden, self.ffn, self.layers, self.lr, self.weight_scale = int(hidden), int(ffn), int(layers), float(lr), init_weight_scale()
 
 
 def mlp_forward(x: Any, w1: Any, w2: Any) -> Any:
@@ -58,8 +56,7 @@ def build_torch_model(cfg: TitanStepConfig, device: str, use_fsdp2: bool) -> Any
     class TitanMLPNet(nn.Module):
         def __init__(self, c: TitanStepConfig) -> None:
             super().__init__()
-            self.blocks = nn.ModuleList([TitanBlock(c.hidden, c.ffn) for _ in range(c.layers)])
-            self.head = nn.Linear(c.hidden, c.hidden, bias=False)
+            self.blocks, self.head = nn.ModuleList([TitanBlock(c.hidden, c.ffn) for _ in range(c.layers)]), nn.Linear(c.hidden, c.hidden, bias=False)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             for block in self.blocks:

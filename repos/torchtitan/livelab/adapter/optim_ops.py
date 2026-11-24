@@ -25,7 +25,6 @@ def clip_and_scale_grad(grads: Any, max_norm: float = GRAD_CLIP_NORM) -> float:
     grad_scale = 1.0
     if isinstance(grads, dict) and "params" in grads:
         import torch
-
         params = [p for p in grads["params"] if p.grad is not None]
         if not params:
             return 0.0

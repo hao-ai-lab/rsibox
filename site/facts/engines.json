@@ -636,18 +636,18 @@
    "folder": "repos/torchtitan",
    "mechanisms": [
     {
-     "name": "Step-gap FSDP2 multi-rank live swap with deterministic `S0` `DTensor` reset (`TorchTitanLab`)",
-     "what": "Hosts `torchrun`-style rank worker subprocesses over per-rank `AF_UNIX` JSON channels (`rsibox.ipc.UnixJsonServer`), atomically hot-swaps forward/loss/grad-clip/optimizer helpers across all ranks in the step gap via `RecaptureCoordinator`, captures per-rank AST witnesses, and restores exact `S0` FSDP2 `DTensor` local shards, `AdamW` state, RNG, and CUDA cache on `reset('state')` and undo.",
+     "name": "Step-gap FSDP2 live swap with deterministic `S0` `DTensor` & RNG reset (`TorchTitanLab`)",
+     "what": "Hosts isolated rank worker subprocesses over `AF_UNIX` JSON channels (`rsibox.ipc.UnixJsonServer`), atomically hot-swaps forward/loss/grad-clip/optimizer helpers in the step gap via `RecaptureCoordinator`, captures per-rank AST witnesses, and restores exact post-init `S0` FSDP2 `DTensor` local shards, `AdamW` state, saved Python/PyTorch/CUDA RNG state, and CUDA cache on `reset('state')` and undo. Real-GPU mode exercises PyTorch `fully_shard` (FSDP2) + `nccl` at `world_size=1` over a synthetic `TitanMLPNet` (upstream `pytorch/torchtitan` is not yet imported; `mode='fsdp2'` with `world_size > 1` fails closed with `ValueError`); 2-rank multi-process orchestration is exercised in CPU toy mode (`ToyTorchTitanLab`).",
      "startup_cost_removed": "Worker Python/PyTorch imports, `nccl` process group bootstrap, and FSDP2 `fully_shard` model/optimizer initialization.",
      "measured_saving": {
-      "before": "2.650 (+/- 0.044)",
-      "after": "0.075 (0.054 s install + 0.020 s check, 35.4x; 0.046 s bit-exact undo)",
+      "before": "2.689 (+/- 0.044)",
+      "after": "0.083 (0.059 s install + 0.024 s check, 32.5x; 0.048 s bit-exact undo)",
       "unit": "s",
-      "setup": "1x NVIDIA B200, PyTorch 2.14.0+cu130, FSDP2 fully_shard + nccl, 4-layer TitanMLPNet (hidden=256, ffn=512, batch=8, 3 steps), deterministic float32, 3x repeats, 2026-11-24"
+      "setup": "1x NVIDIA B200, PyTorch 2.14.0+cu130, FSDP2 fully_shard + nccl (world_size=1), synthetic 4-layer TitanMLPNet (hidden=256, ffn=512, batch_size=8, 3 steps), deterministic float32, 3x repeats, 2026-11-24"
      },
      "status": "merged_gpu_verified",
      "source": "repos/torchtitan/docs/architecture.md; repos/torchtitan/kb/costs.md",
-     "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0155 s install / 0.0052 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 via rsibox conformance torchtitan --real -- --mode fsdp2 (c9 install median 0.0555 s / uninstall 0.0468 s, c8 respawns 2.65-2.78 s, c3 bit-exact visible & 3-edit chain vs fresh PackageOverlay subprocess, c10 zero_witness with fresh divergence, max_abs_loss_diff == 0.0, 0 MiB VRAM leaked on exit)."
+     "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0142 s install / 0.0045 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 (world_size=1 synthetic TitanMLPNet) via rsibox conformance torchtitan --real -- --mode fsdp2 (c9 install median 0.0541 s / uninstall 0.0458 s, c8 respawns 2.58-2.80 s, c3 bit-exact visible & 3-edit chain vs fresh PackageOverlay subprocess, c10 zero_witness with fresh divergence, max_abs_loss_diff == 0.0, 0 MiB VRAM leaked on exit)."
     }
    ]
   }
