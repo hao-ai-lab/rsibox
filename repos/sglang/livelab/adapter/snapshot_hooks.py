@@ -148,6 +148,20 @@ class SglangQuiesceHooks:
             self.release_tags = ("weights", "kv_cache")
         else:
             self.release_tags = ("kv_cache",)
+        self._validate_release_tags(self.release_tags)
+
+    def _validate_release_tags(self, tags: Sequence[str] | None) -> None:
+        if (
+            tags
+            and getattr(self.lab, "allow_nonpauseable_cuda_graphs", False)
+            and getattr(getattr(self.lab, "weight_store", None), "name", None) == "dynamo_gms"
+            and "cuda_graph" in tags
+        ):
+            raise ValueError(
+                "cannot include 'cuda_graph' in release_tags when SglangLab uses "
+                "allow_nonpauseable_cuda_graphs=True under Dynamo GMS; release only "
+                "('weights', 'kv_cache')"
+            )
 
     def _rpc_timeout(self) -> float | None:
         timeout = getattr(self.lab, "rpc_timeout", None)
@@ -210,6 +224,14 @@ class SglangQuiesceHooks:
             )
 
         tags = self.release_tags
+        try:
+            self._validate_release_tags(tags)
+        except ValueError as error:
+            return QuiesceReceipt(
+                ok=False,
+                mutability=self.mutability,
+                error=f"{type(error).__name__}: {error}",
+            )
         paused = False
         try:
             self._call_pause_generation(engine)
@@ -258,6 +280,17 @@ class SglangQuiesceHooks:
             tags = list(receipt.released)
         else:
             tags = list(self.release_tags)
+        try:
+            self._validate_release_tags(tags)
+        except ValueError as error:
+            return {
+                "ok": False,
+                "error": f"{type(error).__name__}: {error}",
+                "resumed": [],
+                "resume_memory_s": 0.0,
+                "continue_s": 0.0,
+                "participants_ok": False,
+            }
         resume_memory_seconds = 0.0
         continue_seconds = 0.0
 

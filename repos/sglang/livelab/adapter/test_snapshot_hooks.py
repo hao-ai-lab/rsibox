@@ -717,6 +717,30 @@ class SglangQuiesceHooksTests(unittest.TestCase):
         self.assertIn(("release", ["weights", "kv_cache"]), recorded_calls)
         self.assertIn(("resume", ["weights", "kv_cache"]), recorded_calls)
 
+    def test_nonpauseable_cuda_graphs_under_gms_forbids_cuda_graph_release_tag(self) -> None:
+        """Fail closed when caller tries to release 'cuda_graph' under non-pauseable GMS graphs."""
+        events: list[tuple[str, Any]] = []
+        engine = _FakeSglangEngine(events, async_tokenizer=False)
+        lab = _make_fake_lab(engine, events, weight_store=DynamoGmsStore(socket_dir="/tmp/gms-unused"))
+        lab.allow_nonpauseable_cuda_graphs = True
+
+        # Default ('weights', 'kv_cache') works cleanly.
+        hooks = lab.quiesce_hooks()
+        self.assertEqual(hooks.release_tags, ("weights", "kv_cache"))
+
+        # Explicit 'cuda_graph' tag MUST fail closed at construction before touching engine.
+        with self.assertRaisesRegex(ValueError, "cannot include 'cuda_graph'"):
+            lab.quiesce_hooks(release_tags=("weights", "kv_cache", "cuda_graph"))
+
+        # Post-construction mutation of release_tags also fails closed inside quiesce_for_snapshot
+        # without calling pause_generation or release_memory_occupation.
+        hooks.release_tags = ("weights", "cuda_graph")
+        with mock.patch.dict(sys.modules, {FAKE_IO_MODULE: _make_fake_io_module()}):
+            receipt = hooks.quiesce_for_snapshot()
+        self.assertFalse(receipt.ok)
+        self.assertIn("cannot include 'cuda_graph'", receipt.error or "")
+        self.assertEqual(events, [])
+
 
 if __name__ == "__main__":
     unittest.main()

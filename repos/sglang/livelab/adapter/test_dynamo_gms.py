@@ -417,6 +417,145 @@ class SglangDynamoGmsTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 lab._prepare_weight_store()
 
+    def test_nonpauseable_decode_cuda_graphs_delegates_and_guards_pause_in_parent_and_child(self):
+        """Golden case: allow_nonpauseable_cuda_graphs=True enables decode='full' under GMS,
+        delegates GMSMemorySaverImpl.cuda_graph to torch.cuda.graph in parent + child,
+        refuses pause('cuda_graph'), and restores cleanly on teardown.
+        """
+        import contextlib
+
+        uuid = "GPU-12345678-1234-1234-1234-123456789abc"
+        mods, _, _, _, resolution_result = _fake_sglang_and_gms_modules()
+        graph_calls: list[tuple] = []
+        pause_calls: list[str | None] = []
+
+        class _FakeGMSMemorySaverImpl:
+            def cuda_graph(self, cuda_graph, pool, stream, capture_error_mode, tag, **backup_options):
+                raise RuntimeError("SGLang with GMS does not support pauseable CUDA graphs.")
+
+            def pause(self, tag=None):
+                pause_calls.append(tag)
+
+        ms_mod = types.ModuleType("gpu_memory_service.integrations.sglang.memory_saver")
+        ms_mod.GMSMemorySaverImpl = _FakeGMSMemorySaverImpl
+        mods["gpu_memory_service.integrations.sglang.memory_saver"] = ms_mod
+
+        fake_torch = types.ModuleType("torch")
+        fake_cuda = types.SimpleNamespace()
+
+        @contextlib.contextmanager
+        def _fake_cuda_graph(cuda_graph, pool=None, stream=None, capture_error_mode="global"):
+            graph_calls.append((cuda_graph, pool, stream, capture_error_mode))
+            yield
+
+        fake_cuda.graph = _fake_cuda_graph
+        fake_torch.cuda = fake_cuda
+        mods["torch"] = fake_torch
+
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="sglgms-") as tmp:
+            guards = [_MockGmsSock(os.path.join(tmp, socket_name(uuid, tag)), committed=True) for tag in GMS_TAGS]
+            try:
+                store = DynamoGmsStore(
+                    socket_dir=tmp,
+                    read_only=True,
+                    target_resolver=lambda *a, **k: [(0, uuid)],
+                )
+                lab = SglangLab.__new__(SglangLab)
+                lab.config = {"model_path": "m", "tp_size": 1}
+                lab.weight_store = store
+                lab._weight_cache_env_restore = None
+                lab.allow_nonpauseable_cuda_graphs = True
+
+                prev_cg = os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG)
+                with mock.patch.dict(sys.modules, mods):
+                    cfg = lab._prepare_weight_store()
+                    sa = cfg["server_args"]
+                    self.assertEqual(resolution_result(sa, "cuda_graph_backend_decode"), "full")
+                    self.assertEqual(resolution_result(sa, "cuda_graph_backend_prefill"), "disabled")
+                    self.assertEqual(os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG), "1")
+
+                    impl = _FakeGMSMemorySaverImpl()
+                    with impl.cuda_graph("g1", pool="p1", stream="s1", capture_error_mode="global", tag="cuda_graph"):
+                        pass
+                    self.assertEqual(graph_calls, [("g1", "p1", "s1", "global")])
+
+                    # Pausing weights/kv_cache/None works (positional & keyword), but pausing cuda_graph MUST fail closed!
+                    impl.pause("weights")
+                    impl.pause(tag="kv_cache")
+                    impl.pause()
+                    self.assertEqual(pause_calls, ["weights", "kv_cache", None])
+                    with self.assertRaisesRegex(RuntimeError, "cannot pause 'cuda_graph'"):
+                        impl.pause("cuda_graph")
+                    with self.assertRaisesRegex(RuntimeError, "cannot pause 'cuda_graph'"):
+                        impl.pause(tag="cuda_graph")
+
+                    # Simulate spawned scheduler child reinstalling the shim via run_scheduler_entry.
+                    agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                    with self.assertRaisesRegex(RuntimeError, "does not support pauseable CUDA graphs"):
+                        impl.cuda_graph("g0", "p0", "s0", "global", "cuda_graph")
+
+                    fake_sched_mod = types.ModuleType("fake_sched_mod_cg")
+
+                    class _FakeScheduler:
+                        def __init__(self):
+                            pass
+
+                    fake_sched_mod.Scheduler = _FakeScheduler
+                    child_captured: list[str] = []
+
+                    def fake_real_entry(_child_sa):
+                        with _FakeGMSMemorySaverImpl().cuda_graph("g_child", pool="pc", stream="sc", capture_error_mode="global", tag="cuda_graph"):
+                            child_captured.append("captured")
+                        return "child_ok"
+
+                    with mock.patch.dict(sys.modules, {"fake_sched_mod_cg": fake_sched_mod}):
+                        self.assertEqual(
+                            agent.run_scheduler_entry("/tmp/unused.sock", "fake_sched_mod_cg", fake_real_entry, sa),
+                            "child_ok",
+                        )
+                    self.assertEqual(child_captured, ["captured"])
+                    self.assertEqual(graph_calls[-1], ("g_child", "pc", "sc", "global"))
+
+                    # Teardown restores env and original GMSMemorySaverImpl.cuda_graph!
+                    lab._restore_weight_cache_env()
+                    self.assertEqual(os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG), prev_cg)
+                    with self.assertRaisesRegex(RuntimeError, "does not support pauseable CUDA graphs"):
+                        _FakeGMSMemorySaverImpl().cuda_graph("g2", "p2", "s2", "global", "cuda_graph")
+            finally:
+                agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                for g in guards:
+                    g.close()
+
+    def test_stale_nonpauseable_cg_env_is_cleared_when_flag_is_false(self):
+        uuid = "GPU-12345678-1234-1234-1234-123456789abc"
+        mods, _, _, _, resolution_result = _fake_sglang_and_gms_modules()
+        with tempfile.TemporaryDirectory(dir="/tmp", prefix="sglgms-") as tmp:
+            guards = [_MockGmsSock(os.path.join(tmp, socket_name(uuid, tag)), committed=True) for tag in GMS_TAGS]
+            try:
+                store = DynamoGmsStore(
+                    socket_dir=tmp,
+                    read_only=True,
+                    target_resolver=lambda *a, **k: [(0, uuid)],
+                )
+                lab = SglangLab.__new__(SglangLab)
+                lab.config = {"model_path": "m", "tp_size": 1}
+                lab.weight_store = store
+                lab._weight_cache_env_restore = None
+                lab.allow_nonpauseable_cuda_graphs = False
+                with mock.patch.dict(
+                    os.environ,
+                    {agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG: "1"},
+                ), mock.patch.dict(sys.modules, mods):
+                    cfg = lab._prepare_weight_store()
+                    self.assertNotIn(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG, os.environ)
+                    self.assertEqual(resolution_result(cfg["server_args"], "cuda_graph_backend_decode"), "disabled")
+                    lab._restore_weight_cache_env()
+                    self.assertEqual(os.environ.get(agent.ENV_SGLANG_GMS_NONPAUSEABLE_CG), "1")
+            finally:
+                agent.uninstall_sglang_gms_nonpauseable_cuda_graph_shim()
+                for g in guards:
+                    g.close()
+
 
 if __name__ == "__main__":
     unittest.main()
