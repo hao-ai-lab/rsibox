@@ -802,6 +802,54 @@ class PoolPriorityFailoverDaemonTests(unittest.TestCase):
             self.assertEqual(post_lease.slot_id, "s0")
             self.assertTrue(post_lease.lab.check()["ok"])
 
+    def test_remote_waiters_preserve_fifo_anti_starvation_and_true_queue_wait_s(self):
+        """Regression for Round-2 P1: in-place `cancel_check` keeps remote waiters in
+        `SandboxPool._waiters` across waits >0.25s so FIFO ordering, `max_priority_streak`
+        anti-starvation, and true `queue_wait_s` are all preserved."""
+        lab = self._make_toy_lab()
+        sock_path = short_sock_path("rsibox-r2-fifo")
+        pool = SandboxPool([PoolSlot("s0", lab)], max_priority_streak=2)
+        self.addCleanup(pool.close)
+        server = PoolServer(pool, sock_path)
+        self.addCleanup(server.close)
+
+        held = pool.acquire("initial-holder")
+        order: list[str] = []
+        waits: dict[str, float] = {}
+        order_lock = threading.Lock()
+
+        def remote_worker(agent_id: str, priority: str) -> None:
+            client = PoolClient(sock_path, timeout_s=15.0)
+            with client.acquire(agent_id, priority=priority, timeout_s=15.0) as leased:
+                with order_lock:
+                    order.append(agent_id)
+                    waits[agent_id] = leased.queue_wait_s
+
+        # Queue remote `dev` first, then 3 remote `eval` waiters while holding the slot > 0.25s.
+        threads: list[threading.Thread] = []
+        specs = [("remote-dev-1", "dev"), ("remote-eval-1", "eval"), ("remote-eval-2", "eval"), ("remote-eval-3", "eval")]
+        t_hold_start = time.monotonic()
+        for expected_q, (aid, prio) in enumerate(specs, start=1):
+            t = threading.Thread(target=remote_worker, args=(aid, prio))
+            t.start()
+            threads.append(t)
+            self._wait_for_waiters(pool, expected_q, timeout_s=5.0)
+
+        remaining_hold = 0.28 - (time.monotonic() - t_hold_start)
+        if remaining_hold > 0:
+            time.sleep(remaining_hold)
+        held.release()
+
+        for t in threads:
+            t.join(timeout=10.0)
+            self.assertFalse(t.is_alive())
+
+        # Anti-starvation: remote-dev-1 MUST run right after 2 evals (index 2, not starved to last!).
+        self.assertEqual(order, ["remote-eval-1", "remote-eval-2", "remote-dev-1", "remote-eval-3"])
+        self.assertGreaterEqual(pool.metrics()["starvation_yields"], 1)
+        # True total queue wait (> 0.20s), NOT truncated to <= 0.1s!
+        self.assertGreater(waits["remote-dev-1"], 0.20, waits)
+
 
 if __name__ == "__main__":
     unittest.main()

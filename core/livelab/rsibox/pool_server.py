@@ -6,7 +6,7 @@ to its connection; abrupt client disconnect/crash triggers immediate server-side
 """
 from __future__ import annotations
 
-import argparse, contextlib, json, operator, os, secrets, select, signal, socket, stat, sys, threading, time
+import argparse, contextlib, errno, json, operator, os, secrets, select, signal, socket, stat, sys, threading, time
 from typing import Any
 
 from . import box as _box
@@ -50,7 +50,7 @@ def _conn_disconnected(conn: socket.socket) -> bool:
     try:
         ready, _, _ = select.select([conn], [], [], 0.0)
         return not conn.recv(1, socket.MSG_PEEK) if ready else False
-    except OSError: return True
+    except (OSError, ValueError): return True
 def _read_lab_source(lab: Any, module: str) -> dict[str, Any]:
     if not isinstance(module, str) or not module: return {"ok": False, "error": "module is required"}
     text: Any = None
@@ -115,7 +115,9 @@ class PoolServer:
         try:
             probe.connect(self.sock_path)
             live = True
-        except OSError: pass
+        except OSError as exc:
+            if exc.errno not in (errno.ECONNREFUSED, errno.ENOENT):
+                raise PoolError(f"pool socket probe failed ({exc}): {self.sock_path}") from exc
         finally: _close_resources(probe)
         if live: raise PoolError(f"pool socket already active: {self.sock_path}")
         os.unlink(self.sock_path)
@@ -142,7 +144,7 @@ class PoolServer:
                 thread = threading.Thread(target=self._serve_conn, args=(conn,), daemon=True, name="rsibox-pool-conn")
                 self._conns.add(conn)
                 self._threads.add(thread)
-            thread.start()
+                thread.start()
     def _release_conn_lease(self, conn_leases: dict[str, SlotLease], token: str, reason: str) -> None:
         lease = conn_leases.pop(token, None)
         with self._state_lock: self._active_leases.pop(token, None)
@@ -174,32 +176,18 @@ class PoolServer:
             with self._state_lock:
                 self._conns.discard(conn)
                 self._threads.discard(threading.current_thread())
-    def _acquire_sliced(self, req: dict[str, Any], conn: socket.socket) -> SlotLease:
-        timeout_s = _validate_timeout(req.get("timeout_s"))
-        deadline, tried = (None if timeout_s is None else time.monotonic() + timeout_s), False
-        while True:
-            if self._closed.is_set(): raise PoolClosedError("PoolServer is closed")
-            if _conn_disconnected(conn): raise PoolError("client disconnected while waiting for slot")
-            if deadline is None: slice_t = 0.1
-            else:
-                rem = deadline - time.monotonic()
-                if rem <= 0.0 and tried: raise PoolTimeoutError(f"timed out waiting for slot (role={req.get('role')!r})")
-                slice_t = min(max(0.0, rem), 0.1)
-            try:
-                return self.pool.acquire(
-                    req.get("agent_id", ""), role=req.get("role"), idea_id=req.get("idea_id"),
-                    timeout_s=slice_t, priority=req.get("priority", DEFAULT_PRIORITY),
-                )
-            except PoolTimeoutError as exc:
-                tried = True
-                if "no healthy slot" in str(exc) or (deadline is not None and time.monotonic() >= deadline): raise
     def _handle_request(self, req: dict[str, Any], conn: socket.socket,
                         conn_leases: dict[str, SlotLease]) -> tuple[dict[str, Any], str | None]:
         op = req.get("op")
         if op in ("stats", "metrics"): return {"ok": True, **self.stats()}, None
         if op == "health": return self.health(), None
         if op == "acquire":
-            try: lease = self._acquire_sliced(req, conn)
+            try:
+                lease = self.pool.acquire(
+                    req.get("agent_id", ""), role=req.get("role"), idea_id=req.get("idea_id"),
+                    timeout_s=req.get("timeout_s"), priority=req.get("priority", DEFAULT_PRIORITY),
+                    cancel_check=lambda: self._closed.is_set() or _conn_disconnected(conn),
+                )
             except (PoolTimeoutError, PoolClosedError, PoolError, ValueError, TypeError) as exc: return _err_reply(exc), None
             token = secrets.token_urlsafe(18)
             conn_leases[token] = lease

@@ -378,7 +378,10 @@ class SandboxPool:
                                           preserve_dirty=waiter.assigned_dirty)
 
     def _claim_slot(self, role: str | None, deadline: float | None,
-                    priority: str = DEFAULT_PRIORITY, priority_rank: int = PRIORITY_RANKS[DEFAULT_PRIORITY]) -> tuple[_SlotState, bool]:
+                    priority: str = DEFAULT_PRIORITY, priority_rank: int = PRIORITY_RANKS[DEFAULT_PRIORITY],
+                    cancel_check: Callable[[], bool] | None = None) -> tuple[_SlotState, bool]:
+        if cancel_check is not None and cancel_check():
+            raise PoolClosedError("pool acquire cancelled")
         with self._lock:
             if self._closed:
                 raise PoolClosedError("SandboxPool is closed")
@@ -397,12 +400,19 @@ class SandboxPool:
             waiter = _Waiter(role)
             waiter.priority, waiter.priority_rank = priority, priority_rank
             self._waiters.append(waiter)
+        cancelled = False
         try:
             while True:
+                if cancel_check is not None and cancel_check():
+                    cancelled = True
+                    break
                 remaining_s = None if deadline is None else deadline - self._clock()
                 if remaining_s is not None and remaining_s <= 0.0:
                     break
-                if waiter.event.wait(timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX)):
+                wait_s = None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX)
+                if cancel_check is not None:
+                    wait_s = 0.1 if wait_s is None else min(wait_s, 0.1)
+                if waiter.event.wait(timeout=wait_s):
                     break
         except BaseException:
             with self._lock:
@@ -410,13 +420,13 @@ class SandboxPool:
             _close_quietly(lab_to_close)
             raise
         with self._lock:
-            if waiter.assigned_state is not None and not self._closed:
+            if not cancelled and waiter.assigned_state is not None and not self._closed:
                 return waiter.assigned_state, waiter.assigned_dirty
-            closed_error = self._closed or waiter.closed
+            closed_error = cancelled or self._closed or waiter.closed
             lab_to_close = self._cancel_waiter_locked(waiter)
         _close_quietly(lab_to_close)
         if closed_error:
-            raise PoolClosedError("SandboxPool closed while waiting for slot")
+            raise PoolClosedError("pool acquire cancelled" if cancelled else "SandboxPool closed while waiting for slot")
         raise PoolTimeoutError(waiter.failure or f"timed out waiting for slot (role={role!r})")
 
     def _cleanup_in_place(self, lab: Any, *, force_reset_state: bool) -> str | None:
@@ -469,11 +479,13 @@ class SandboxPool:
         verified = _safe_lab_call(candidate_lab, "status")
         if _is_clean_base(verified):
             if replaced:
-                old_lab = slot_state.lab
                 with self._lock:
+                    if any(o is not slot_state and _lab_identity(o.lab) == cand_id for o in self._slots.values()):
+                        return False, "replacement lab aliases another pool slot"
+                    old_lab, close_labs = slot_state.lab, self._close_labs
                     slot_state.lab = slot_state.slot.lab = candidate_lab
                     slot_state.slot.box = result if isinstance(result, Box) else None
-                if self._close_labs and old_lab is not candidate_lab: _close_quietly(old_lab)
+                if close_labs and old_lab is not candidate_lab: _close_quietly(old_lab)
             return True, None
         if replaced and self._close_labs: _close_quietly(candidate_lab)
         return False, str(verified.get("error") or f"not clean after recovery (state={verified.get('state')!r})")
@@ -512,7 +524,8 @@ class SandboxPool:
 
     def acquire(self, agent_id: str, *, role: str | None = None,
                 idea_id: str | None = None, timeout_s: float | None = None,
-                priority: str = DEFAULT_PRIORITY) -> SlotLease:
+                priority: str = DEFAULT_PRIORITY,
+                cancel_check: Callable[[], bool] | None = None) -> SlotLease:
         """Acquire an exclusive, clean-slate `SlotLease` with priority and anti-starvation scheduling."""
         if not isinstance(agent_id, str) or not agent_id.strip():
             raise ValueError("agent_id must be a non-empty string")
@@ -521,7 +534,7 @@ class SandboxPool:
         queue_start = self._clock()
         deadline = None if normalized_timeout is None else queue_start + normalized_timeout
         while True:
-            slot_state, slot_dirty = self._claim_slot(role, deadline, normalized_priority, priority_rank)
+            slot_state, slot_dirty = self._claim_slot(role, deadline, normalized_priority, priority_rank, cancel_check)
             slot_returned = False
             try:
                 claim_mono = self._clock()
