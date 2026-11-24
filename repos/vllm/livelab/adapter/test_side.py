@@ -137,6 +137,46 @@ class PrepareAndDeadlineTest(unittest.TestCase):
         time.sleep(0.6)                          # rank 1's late commit returns
         self.assertEqual([ran(n) for n in names], ["base", "base"])
 
+    def test_phase2_lane_binds_worker_cuda_device(self):
+        """Input: a worker rank owning `cuda:3` with a stubbed initialized `torch.cuda.device`;
+        bounded `commit` and `undo` calls run on the side's lane thread. Expected: each lane
+        call enters `torch.cuda.device("cuda:3")` on the lane thread so CUDA graph teardown and
+        sync never touch device 0. Fails before the fix: `entered_devices` is empty."""
+        import contextlib
+        import types
+        from unittest import mock
+
+        entered_devices = []
+        caller_thread_id = threading.get_ident()
+
+        @contextlib.contextmanager
+        def record_device(device):
+            entered_devices.append((device, threading.get_ident()))
+            yield
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = NS(
+            is_initialized=lambda: True,
+            is_current_stream_capturing=lambda: False,
+            device=record_device,
+        )
+        worker_stub = NS(model_runner=NS(device="cuda:3"))
+        side = Side("worker", scope={"worker": worker_stub}, rank=3)
+        target_plan = own_plan("lane_dev")
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            self.assertTrue(side.dispatch("prepare", target_plan)["ok"])
+            deadline_at = time.time() + 5.0
+            commit_reply = side.dispatch(
+                "commit", {"txn": target_plan["id"], "deadline_at": deadline_at}
+            )
+            undo_reply = side.dispatch(
+                "undo", {"txn": target_plan["id"], "deadline_at": deadline_at}
+            )
+        self.assertTrue(commit_reply["ok"], commit_reply)
+        self.assertTrue(undo_reply["ok"], undo_reply)
+        self.assertEqual([device for device, _ in entered_devices], ["cuda:3", "cuda:3"])
+        self.assertTrue(all(thread_id != caller_thread_id for _, thread_id in entered_devices))
+
 
 class IdentityTest(unittest.TestCase):
 
@@ -215,6 +255,131 @@ class GraphTest(unittest.TestCase):
         eager.captured_prefixes = side.captured_prefixes
         r = eager.dispatch("prepare", own_plan("eager"))
         self.assertEqual((r["ok"], r["findings"]), (True, []))
+
+    def test_vllm_models_and_kernel_prefixes_block_without_r1_and_commit_with_r1(self):
+        """Input: 2-rank graph-mode host using the default `CAPTURED_PREFIXES` (no override)
+        editing vLLM 0.33.0 top-level model and kernel modules (`vllm.models.deepseek_v41.*`,
+        `vllm.model_executor.kernels.*`, `vllm.kernels.*`) plus a non-model scheduler module.
+        Expected: model and kernel edits abort with blocking `captured_target` (route R1) when
+        `rebuild` is omitted, turn advisory and recapture graphs when `rebuild=["R1"]` is given,
+        route `zero_witness` to R1 if accepted without R1, commit with zero findings on an eager
+        worker, and leave non-model modules (`vllm.v1.core.sched.*`) unblocked. Fails before the
+        fix: `vllm.models.*`, `vllm.model_executor.kernels.*`, and `vllm.kernels.*` commit
+        silently without `captured_target` or R1 recapture."""
+        from .test_recapture import Runner
+
+        lab, rank_packages, sides = make_host(self, "vllm033")
+        runners = []
+        prefix_aliases = {
+            "vllm.models.deepseek_v41.nvidia": None,
+            "vllm.model_executor.kernels.attention": None,
+            "vllm.kernels.triton": None,
+            "vllm.v1.core.sched": None,
+        }
+        for package_name, side in zip(rank_packages, sides):
+            side.scope["worker"] = worker()
+            runner = Runner(package_name)
+            side.scope["r1_engine"] = runner.engine
+            runners.append(runner)
+            for alias_prefix in prefix_aliases:
+                side.lp.alias[alias_prefix] = package_name
+
+        def module_plan(txn_id, module_name, **extra):
+            return {
+                "id": txn_id,
+                **extra,
+                "modules": {
+                    module_name: {
+                        "on": ["worker"],
+                        "base_hash": L.text_hash(ENG),
+                        "source": ENG.replace(
+                            'self.ran.append("base")', 'self.ran.append("v1")'
+                        ),
+                        "targets": [["Engine.step", STEP_LINE]],
+                    }
+                },
+            }
+
+        captured_modules = (
+            "vllm.models.deepseek_v41.nvidia.engine",
+            "vllm.model_executor.kernels.attention.engine",
+            "vllm.kernels.triton.engine",
+        )
+        for index, module_name in enumerate(captured_modules):
+            refused = lab.handle(
+                {"op": "txn", "plan": module_plan(f"v033-block-{index}", module_name)}
+            )
+            blocking = [
+                (finding["check"], finding.get("rank"), finding.get("route"), finding.get("today"))
+                for finding in refused["receipt"]["findings"]
+            ]
+            self.assertEqual(
+                (refused["outcome"], blocking),
+                ("aborted", [("captured_target", 0, "R1", "T1"), ("captured_target", 1, "R1", "T1")]),
+                f"expected blocking captured_target for {module_name}",
+            )
+            self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
+
+            recaptured = lab.handle(
+                {
+                    "op": "txn",
+                    "plan": module_plan(
+                        f"v033-r1-{index}", module_name, rebuild=["R1"], r1={"sizes": [4]}
+                    ),
+                }
+            )
+            findings = recaptured["receipt"]["findings"]
+            self.assertEqual(recaptured["outcome"], "committed", findings)
+            self.assertEqual(
+                {(finding["check"], bool(finding.get("advisory"))) for finding in findings},
+                {("captured_target", True)},
+            )
+            self.assertEqual([runner.step(4) for runner in runners], [("v1", "FULL")] * 2)
+            self.assertTrue(lab.handle({"op": "undo", "txn": f"v033-r1-{index}"})["ok"])
+            self.assertEqual([runner.step(4) for runner in runners], [("base", "FULL")] * 2)
+
+        # Accepted without R1 still routes zero_witness to R1 via default CAPTURED_PREFIXES
+        subject_key = f"vllm.models.deepseek_v41.nvidia.engine:Engine.step:{STEP_LINE}"
+        accepted = lab.handle(
+            {
+                "op": "txn",
+                "plan": module_plan(
+                    "v033-acc",
+                    "vllm.models.deepseek_v41.nvidia.engine",
+                    accept=[{"check": "captured_target", "subject": subject_key}],
+                ),
+            }
+        )
+        self.assertEqual(accepted["outcome"], "committed")
+        proof = lab.handle({"op": "prove", "txn": "v033-acc"})["receipt"]
+        zero_witness_findings = [
+            (finding["check"], finding.get("route"), finding.get("today"))
+            for finding in proof["findings"]
+            if finding["check"] == "zero_witness"
+        ]
+        self.assertEqual(zero_witness_findings, [("zero_witness", "R1", "T1")] * 2)
+        self.assertTrue(lab.handle({"op": "undo", "txn": "v033-acc"})["ok"])
+
+        # Non-model scheduler module is unaffected by CAPTURED_PREFIXES
+        non_model = lab.handle(
+            {"op": "txn", "plan": module_plan("v033-sched", "vllm.v1.core.sched.engine")}
+        )
+        self.assertEqual((non_model["outcome"], non_model["receipt"]["findings"]), ("committed", []))
+        self.assertTrue(lab.handle({"op": "undo", "txn": "v033-sched"})["ok"])
+
+        # Eager worker has no captured_target finding on vllm.models.*
+        eager_package = f"ads{next(_n)}_eager_v033"
+        toy.load_copy(eager_package)
+        eager_side = Side(
+            "worker",
+            scope={"worker": worker(eager=True)},
+            rank=0,
+            alias={"vllm.models.deepseek_v41.nvidia": eager_package},
+        )
+        eager_reply = eager_side.dispatch(
+            "prepare", module_plan("v033-eager", "vllm.models.deepseek_v41.nvidia.engine")
+        )
+        self.assertEqual((eager_reply["ok"], eager_reply["findings"]), (True, []))
 
 
 GDN = '''"""A stand-in for a vLLM layer module: a custom op that splits the graph calls the

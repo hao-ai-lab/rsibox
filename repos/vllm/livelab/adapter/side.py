@@ -18,8 +18,9 @@
 - **Graph detection** (graphs.py). On a worker whose config runs CUDA graphs or torch.compile,
   the split decorator itself (`eager_break_during_capture`, in any module, and code nested in
   it) is a blocking `captured_target` at prepare: it runs only when ops are decorated (import)
-  or graphs captured (vLLM #59941). A target in model code (`vllm.model_executor.models` /
-  `.layers`) is checked at prepare:
+  or graphs captured (vLLM #59941). A target in model or kernel code (`vllm.models.*`,
+  `vllm.model_executor.models.*`, `.layers.*`, `.kernels.*`, `vllm.kernels.*`) is checked at
+  prepare:
   reached only through an op that splits the graph (Python on prefill, graphs on decode) is an
   advisory `captured_partly`; captured only, or undecided, is a blocking `captured_target`.
   Both route R1. A plan with `"rebuild": ["R1"]` asks for the recapture (recapture.py, run by
@@ -39,6 +40,7 @@
 - **Fault hook** (tests): `plan["faults"] = {role or "role:rank": method or {"method",
   "delay_s", "fail"}}` makes that method fail on that role (or rank), or delays it.
 """
+import contextlib
 import importlib
 import os
 import sys
@@ -56,7 +58,13 @@ from . import native as N
 from . import recapture as RC
 from .worker_ext import Endpoint
 
-CAPTURED_PREFIXES = ("vllm.model_executor.models.", "vllm.model_executor.layers.")
+CAPTURED_PREFIXES = (
+    "vllm.models.",
+    "vllm.model_executor.models.",
+    "vllm.model_executor.layers.",
+    "vllm.model_executor.kernels.",
+    "vllm.kernels.",
+)
 R1_NOT_HERE = ("add \"rebuild\": [\"R1\"] to the plan to recapture the graphs in the commit's "
                "gap, or restart with the edit, or run eager")
 R1_ASKED = "the plan asks for R1: the host recaptures the graphs in the commit's gap"
@@ -84,6 +92,31 @@ def stream_capturing():
     torch = sys.modules.get("torch")
     return bool(torch is not None and torch.cuda.is_initialized()
                 and torch.cuda.is_current_stream_capturing())
+
+
+def _worker_device_context(worker_obj):
+    """Bind `torch.cuda.device(device)` when the worker owns an initialized CUDA device, so a
+    phase-2 lane thread never creates a stray CUDA context on device 0 during undo/sync."""
+    if worker_obj is None:
+        return contextlib.nullcontext()
+    runner = getattr(worker_obj, "model_runner", None)
+    device = getattr(runner, "device", None) if runner is not None else None
+    if device is None:
+        device = getattr(worker_obj, "device", None)
+    if device is None:
+        return contextlib.nullcontext()
+    torch_module = sys.modules.get("torch")
+    cuda_module = getattr(torch_module, "cuda", None) if torch_module is not None else None
+    device_context = getattr(cuda_module, "device", None) if cuda_module is not None else None
+    is_initialized = getattr(cuda_module, "is_initialized", None)
+    if not callable(device_context) or (callable(is_initialized) and not is_initialized()):
+        return contextlib.nullcontext()
+    device_type = getattr(device, "type", None)
+    if device_type is not None and device_type != "cuda":
+        return contextlib.nullcontext()
+    if isinstance(device, str) and not device.startswith("cuda"):
+        return contextlib.nullcontext()
+    return device_context(device)
 
 
 class Side(Endpoint):
@@ -420,8 +453,10 @@ class Side(Endpoint):
             self._lane = C.Lane(self.who().replace(" rank ", ""))
         def call():
             try:
-                return self._fault(method, payload) or super(Side, self)._dispatch(method,
-                                                                                   payload)
+                with _worker_device_context(self.scope.get("worker")):
+                    return self._fault(method, payload) or super(Side, self)._dispatch(
+                        method, payload
+                    )
             except BaseException as error:         # named here, not by the lane
                 return F.not_ok(f"{method} on {self.who()}: {type(error).__name__}: {error}",
                                 traceback=traceback.format_exc()[-1500:])

@@ -69,11 +69,27 @@ class Engine:
 _STREAMS = {}         # device -> the capture stream every R1 on it uses
 
 
-def _cuda_memory(torch_mod):
-    torch_mod.cuda.synchronize()
-    free, _total = torch_mod.cuda.mem_get_info()
-    return {"reserved": torch_mod.cuda.memory_reserved(),
-            "allocated": torch_mod.cuda.memory_allocated(), "device_free": free}
+def _device_context(torch_module, device):
+    """Enter `torch.cuda.device(device)` when available so sync and memory queries bind the
+    worker's own device even when invoked from a phase-2 lane thread."""
+    cuda_module = getattr(torch_module, "cuda", None)
+    device_context = getattr(cuda_module, "device", None) if cuda_module is not None else None
+    if device is None or not callable(device_context):
+        return contextlib.nullcontext()
+    return device_context(device)
+
+
+def _cuda_sync(torch_module, device=None):
+    with _device_context(torch_module, device):
+        torch_module.cuda.synchronize()
+
+
+def _cuda_memory(torch_module, device=None):
+    with _device_context(torch_module, device):
+        torch_module.cuda.synchronize()
+        free_bytes, _total_bytes = torch_module.cuda.mem_get_info()
+        return {"reserved": torch_module.cuda.memory_reserved(),
+                "allocated": torch_module.cuda.memory_allocated(), "device_free": free_bytes}
 
 
 @contextlib.contextmanager
@@ -196,7 +212,7 @@ def _vllm_v2_engine(runner, mgr, kinds, torch_mod, set_capturing, parallel_state
                 pcp_manager=pcp, has_lora=lora_cfg is not None,
                 use_aux_hidden_state_outputs=getattr(runner, "use_aux_hidden_state_outputs", False),
                 lora_capture_hook=lora_hook(lora_cfg, runner))
-            torch_mod.cuda.synchronize()
+            _cuda_sync(torch_mod, runner.device)
         finally:
             mgr._capture_descs = orig
 
@@ -223,8 +239,14 @@ def _vllm_v2_engine(runner, mgr, kinds, torch_mod, set_capturing, parallel_state
 
         return _capture_session(runner.device, torch_mod, parallel_state, set_capturing, on_enter, on_exit)
 
-    return Engine(wrappers, r1_keys, capture, session, lambda: _cuda_memory(torch_mod),
-                  torch_mod.cuda.synchronize)
+    return Engine(
+        wrappers,
+        r1_keys,
+        capture,
+        session,
+        lambda: _cuda_memory(torch_mod, runner.device),
+        lambda: _cuda_sync(torch_mod, runner.device),
+    )
 
 
 def vllm_engine(worker):
@@ -257,7 +279,7 @@ def vllm_engine(worker):
 
     def capture(mode, desc):
         runner._warmup_and_capture(desc, cudagraph_runtime_mode=mode)
-        torch.cuda.synchronize()
+        _cuda_sync(torch, runner.device)
 
     def session():
         return _capture_session(
@@ -266,8 +288,14 @@ def vllm_engine(worker):
             lambda: runner.maybe_remove_all_loras(runner.lora_config),
         )
 
-    return Engine(wrappers, dispatcher.cudagraph_keys, capture, session,
-                  lambda: _cuda_memory(torch), torch.cuda.synchronize)
+    return Engine(
+        wrappers,
+        dispatcher.cudagraph_keys,
+        capture,
+        session,
+        lambda: _cuda_memory(torch, runner.device),
+        lambda: _cuda_sync(torch, runner.device),
+    )
 
 
 def _attr(wrapper):
@@ -344,11 +372,13 @@ class Recapture:
         )
 
         def restore():
+            engine.sync()
             for wrapper, attr, old_dict in old_entries:
                 setattr(wrapper, attr, old_dict)
             for mode in selected:
                 engine.keys[mode].clear()
                 engine.keys[mode].update(old_keys[mode])
+            engine.sync()
 
         mem0 = engine.memory()
         try:
@@ -356,11 +386,9 @@ class Recapture:
             result = self._capture(engine, chosen, witness)
             if not result["ok"]:
                 restore()
-                engine.sync()
                 return result
         except BaseException:
             restore()
-            engine.sync()
             raise
 
         journal.record_call(restore, f"R1 graphs of {txn}")
@@ -401,11 +429,13 @@ class Recapture:
         wrappers = state["wrappers"]
 
         def unextend():
+            engine.sync()
             _drop_descriptors(engine, wrappers,
                               [(mode, desc) for mode, descs in chosen.items() for desc in descs])
             for mode in chosen:
                 state["left"][mode] = [desc for desc in state["old_keys"][mode]
                                        if desc not in engine.keys[mode]]
+            engine.sync()
 
         journal.record_call(unextend, f"R1 extend of {txn}")
         if extend_id is not None:
