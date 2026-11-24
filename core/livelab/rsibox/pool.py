@@ -310,7 +310,7 @@ class SandboxPool:
             return float("inf")
         try:
             bonus = elapsed / self._priority_aging_s
-            if math.isfinite(bonus) and abs(waiter.priority) <= (1 << 52) and bonus <= (1 << 52):
+            if math.isfinite(bonus) and abs(waiter.priority) <= (1 << 24) and bonus <= (1 << 24):
                 return waiter.priority + bonus
         except OverflowError:
             pass

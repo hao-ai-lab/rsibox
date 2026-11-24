@@ -1825,6 +1825,41 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertEqual(big_errors, [])
         self.assertEqual(big_order, ["big-1", "big-0"])
 
+        # Exact large-int priority ordering WITH aging enabled (no float64 rounding inversion near 2**52).
+        now_big_aged = [0.0]
+        pool_big_aged = SandboxPool(
+            [PoolSlot("slot-big-aged", self._make_toy_lab())],
+            clock=lambda: now_big_aged[0],
+            priority_aging_s=1.0,
+        )
+        self.addCleanup(pool_big_aged.close)
+        holder_big_aged = pool_big_aged.acquire("holder")
+        big_aged_order: list[str] = []
+        big_aged_errors: list[BaseException] = []
+
+        def spawn_big_aged(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool_big_aged.lease(agent_id, priority=priority, timeout_s=60.0):
+                        big_aged_order.append(agent_id)
+                except BaseException as err:
+                    big_aged_errors.append(err)
+            worker_thread = threading.Thread(target=run)
+            worker_thread.start()
+            return worker_thread
+
+        t_lower = spawn_big_aged("near52-lower", (1 << 52) - 1)
+        self._wait_for_waiters(pool_big_aged, 1)
+        now_big_aged[0] = 0.8  # true eff = (1<<52) - 0.2 < (1<<52)
+        t_higher = spawn_big_aged("near52-higher", (1 << 52))
+        self._wait_for_waiters(pool_big_aged, 2)
+        holder_big_aged.release()
+        for worker_thread in (t_lower, t_higher):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(big_aged_errors, [])
+        self.assertEqual(big_aged_order, ["near52-higher", "near52-lower"])
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
