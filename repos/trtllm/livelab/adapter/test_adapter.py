@@ -80,9 +80,13 @@ class LazyImportAndConfigTest(unittest.TestCase):
             TrtllmLab.launch_environment(["--", "--", "--model", "Qwen/Qwen3-0.6B"])
         self.assertEqual(double_delim_exit.exception.code, 2)
 
-    def test_real_mode_refuses_tp_gt_1_and_explicit_args_override_env(self) -> None:
+    def test_real_mode_tp_validation_and_explicit_args_override_env(self) -> None:
         with self.assertRaises(ValueError):
-            TrtllmLab(model="dummy", tensor_parallel_size=2, auto_spawn=False)
+            TrtllmLab(model="dummy", tensor_parallel_size=0, auto_spawn=False)
+        tp2 = TrtllmLab(model="dummy", tensor_parallel_size=2, auto_spawn=False)
+        self.assertEqual(tp2.rank_count, 2)
+        self.assertTrue(tp2._use_mpi_mode())
+        self.assertEqual(TrtllmLab.launch_environment(["--tp", "2"]), {"RSIBOX_TRTLLM_TP": "2"})
         for parallel_key in ("tensor_parallel_size", "pipeline_parallel_size", "context_parallel_size"):
             with self.assertRaises(ValueError):
                 TrtllmLab(model="dummy", extra_kwargs={parallel_key: 2}, auto_spawn=False)
@@ -516,3 +520,43 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrtllmRecaptureAndMpiTest(unittest.TestCase):
+    def test_recapture_and_undo_invalidate_cuda_graphs_on_all_ranks(self) -> None:
+        lab = ToyTrtllmLab(ranks=2)
+        try:
+            patch = dict(lab.patches()["visible"])
+            patch["rebuild"] = ["recapture"]
+            installed = lab.install(patch)
+            self.assertTrue(installed["ok"], installed)
+            receipt = installed.get("receipt") or {}
+            rebuild_info = receipt.get("rebuild") or {}
+            self.assertEqual(len(rebuild_info.get("ranks") or []), 2)
+            self.assertTrue(all(r.get("ok") for r in (rebuild_info["ranks"].values() if isinstance(rebuild_info["ranks"], dict) else rebuild_info["ranks"])))
+            checked = lab.check()
+            self.assertTrue(checked["ok"] and checked["proven"])
+            undone = lab.uninstall(installed["id"])
+            self.assertTrue(undone["ok"], undone)
+            restored = lab.check()
+            self.assertTrue(restored["ok"])
+        finally:
+            lab.close()
+
+    def test_captured_prefix_auto_attaches_r1_rebuild(self) -> None:
+        lab = TrtllmLab(model="dummy", tensor_parallel_size=2, auto_spawn=False)
+        plan, _extra = lab._build_plan(
+            {"files": {"tensorrt_llm._torch.models.modeling_qwen3": "x = 1\n"}},
+            {"tensorrt_llm._torch.models.modeling_qwen3": "x = 0\n"},
+        )
+        self.assertEqual(plan.get("rebuild"), ["recapture"])
+        plan_optout, _ = lab._build_plan(
+            {"files": {"tensorrt_llm._torch.models.modeling_qwen3": "x = 1\n"}, "rebuild": []},
+            {"tensorrt_llm._torch.models.modeling_qwen3": "x = 0\n"},
+        )
+        self.assertEqual(plan_optout.get("rebuild"), [])
+
+    def test_mpi_hook_stays_lazy_without_gpu_imports(self) -> None:
+        import adapter.mpi_hook as mh
+        self.assertIn("RSIBOX_TRTLLM_MPI_SOCK_DIR", mh.SITECUSTOMIZE_SOURCE)
+        self.assertNotIn("tensorrt_llm", sys.modules)

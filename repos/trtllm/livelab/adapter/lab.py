@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import contextlib
 import importlib.util
 import json
@@ -14,6 +15,8 @@ import time
 from typing import Any
 
 import adapter
+from adapter import agent as trt_agent
+from adapter import mpi_hook
 from adapter.fixture.patches import (
     MODEL_ENGINE_MODULE,
     PY_EXECUTOR_MODULE,
@@ -22,7 +25,7 @@ from adapter.fixture.patches import (
 )
 from adapter.snapshot_hooks import TrtllmQuiesceHooks
 from kernel import coordinator, findings
-from rsibox import BaseLab, harness, ipc, proc
+from rsibox import BaseLab, harness, ipc, lab as lab_base, proc
 
 DEFAULT_WORKLOAD: dict[str, Any] = {
     "prompts": [
@@ -72,6 +75,10 @@ class _WorkerHandle:
         livelab_dir: str,
         rpc_timeout: float,
         boot_timeout: float,
+        *,
+        extra_env: dict[str, str] | None = None,
+        extra_pythonpath: list[str] | None = None,
+        single_process: bool = True,
     ) -> None:
         self.name = name
         self.transport = config["transport"]
@@ -85,12 +92,17 @@ class _WorkerHandle:
                 json.dump(config, handle)
 
             env = dict(os.environ)
-            python_paths = [livelab_dir, adapter.LIVELAB]
+            python_paths = list(extra_pythonpath or ()) + [livelab_dir, adapter.LIVELAB]
             if env.get("PYTHONPATH"):
                 python_paths.append(env["PYTHONPATH"])
             env["PYTHONPATH"] = os.pathsep.join(python_paths)
+            if extra_env:
+                env.update(extra_env)
             if config["mode"] == "real":
-                env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                if single_process:
+                    env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+                else:
+                    env.pop("TLLM_WORKER_USE_SINGLE_PROCESS", None)
 
             with open(self.stderr_path, "w", encoding="utf-8") as log_handle:
                 self.process = subprocess.Popen(
@@ -161,6 +173,47 @@ class _WorkerHandle:
         shutil.rmtree(self.work_dir, ignore_errors=True)
 
 
+class _RankClient:
+    """RPC handle for an MPI-spawned TensorRT-LLM worker rank (`TP >= 2`)."""
+
+    def __init__(self, name: str, endpoint: str, rpc_timeout: float, transport: str = "unix") -> None:
+        self.name = name
+        self.transport = transport
+        self.endpoint = endpoint
+        self.rpc_timeout = float(rpc_timeout)
+
+    def wait_ready(self, driver: _WorkerHandle, boot_timeout: float) -> None:
+        deadline = time.monotonic() + boot_timeout
+        while time.monotonic() < deadline:
+            if driver.process.poll() is not None:
+                raise RuntimeError(
+                    f"driver exited while waiting for {self.name} (rc={driver.process.returncode}): "
+                    f"{driver._stderr_tail()}"
+                )
+            if os.path.exists(self.endpoint) and self.call("ping", timeout=1.0).get("ok"):
+                return
+            time.sleep(0.05)
+        raise TimeoutError(f"{self.name} did not answer ping within {boot_timeout} s: {driver._stderr_tail()}")
+
+    def call(self, method: str, payload: Any = None, timeout: float | None = None) -> dict[str, Any]:
+        call_timeout = self.rpc_timeout if timeout is None else float(timeout)
+        request = {"method": method, "payload": payload}
+        try:
+            caller = ipc.file_channel_call if self.transport == "file" else ipc.unix_json_call
+            return caller(self.endpoint, request, timeout=call_timeout)
+        except Exception as error:
+            return findings.not_ok(
+                f"{self.name} {method}: {type(error).__name__}: {error}",
+                transport_error=True,
+            )
+
+    def close(self, *, force: bool = False) -> None:
+        if not force:
+            with contextlib.suppress(Exception):
+                self.call("shutdown", timeout=1.0)
+        _cleanup_endpoint(self.transport, self.endpoint)
+
+
 class TrtllmLab(BaseLab):
     """Live RSIBox lab for NVIDIA TensorRT-LLM (PyTorch backend)."""
 
@@ -175,7 +228,7 @@ class TrtllmLab(BaseLab):
         self,
         model: str | None = None,
         *,
-        tensor_parallel_size: int = 1,
+        tensor_parallel_size: int | None = None,
         free_gpu_memory_fraction: float | None = None,
         max_batch_size: int = 4,
         max_num_tokens: int = 2048,
@@ -195,14 +248,16 @@ class TrtllmLab(BaseLab):
         weight_store: Any = None,
         recovery_driver: Any = None,
     ) -> None:
-        self.rank_count = int(tensor_parallel_size)
+        resolved_tp = (
+            int(tensor_parallel_size)
+            if tensor_parallel_size is not None
+            else int(os.environ.get("RSIBOX_TRTLLM_TP", "1"))
+        )
+        if resolved_tp < 1:
+            raise ValueError(f"tensor_parallel_size must be >= 1 (got {resolved_tp})")
+        self.rank_count = resolved_tp
         extra_config = dict(extra_kwargs or {})
         if self.engine_mode == "real":
-            if self.rank_count != 1:
-                raise ValueError(
-                    f"TrtllmLab currently supports tensor_parallel_size == 1 (got {self.rank_count}); "
-                    "multi-rank MPI GenerationExecutorProxy is not yet supported"
-                )
             forbidden_parallel = sorted(
                 key
                 for key in ("tensor_parallel_size", "pipeline_parallel_size", "context_parallel_size")
@@ -210,7 +265,7 @@ class TrtllmLab(BaseLab):
             )
             if forbidden_parallel:
                 raise ValueError(
-                    f"extra_kwargs cannot override parallelism keys in single-process mode: {forbidden_parallel}"
+                    f"extra_kwargs cannot override parallelism keys directly: {forbidden_parallel}"
                 )
         self.livelab_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         self.transport = transport
@@ -233,7 +288,10 @@ class TrtllmLab(BaseLab):
         self._tracked_modules = (
             tuple(modules) if modules is not None else (SAMPLER_MODULE, PY_EXECUTOR_MODULE, MODEL_ENGINE_MODULE)
         )
-        self.workers: list[_WorkerHandle] = []
+        self.workers: list[Any] = []
+        self._driver: _WorkerHandle | None = None
+        self._mpi_hook_dir: str | None = None
+        self._mpi_sock_dir: str | None = None
         super().__init__(
             receipts=receipts,
             check_timeout=_resolve_float_option(check_timeout, "RSIBOX_TRTLLM_CHECK_TIMEOUT", 60.0),
@@ -251,6 +309,7 @@ class TrtllmLab(BaseLab):
             clean_args = clean_args[1:]
         parser = argparse.ArgumentParser(prog="rsibox conformance trtllm --real", allow_abbrev=False)
         parser.add_argument("--model", type=str, default=None, help="local model path or repo id")
+        parser.add_argument("--tp", type=int, default=None, help="tensor parallel degree (1=single-process, >=2=MPI)")
         parser.add_argument("--mem-fraction", type=float, default=None, help="KV cache free GPU memory fraction")
         parser.add_argument("--check-timeout", type=float, default=None, help="workload check timeout (s)")
         parser.add_argument("--rpc-timeout", type=float, default=None, help="control RPC timeout (s)")
@@ -258,6 +317,7 @@ class TrtllmLab(BaseLab):
         parsed = parser.parse_args(clean_args)
         env_mapping = (
             ("model", "RSIBOX_TRTLLM_MODEL"),
+            ("tp", "RSIBOX_TRTLLM_TP"),
             ("mem_fraction", "RSIBOX_TRTLLM_MEM_FRACTION"),
             ("check_timeout", "RSIBOX_TRTLLM_CHECK_TIMEOUT"),
             ("rpc_timeout", "RSIBOX_TRTLLM_RPC_TIMEOUT"),
@@ -293,20 +353,111 @@ class TrtllmLab(BaseLab):
             self.base_text[key] = harness.read_module(key)
         return self.base_text[key]
 
+    def _use_mpi_mode(self) -> bool:
+        return self.engine_mode == "real" and self.rank_count > 1
+
+    def _fanout(self, method: str, payload: Any = None, *, timeout: float | None = None) -> list[dict[str, Any]]:
+        if len(self.workers) <= 1:
+            return [w.call(method, payload, timeout=timeout) for w in self.workers]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.workers)) as pool:
+            futs = [pool.submit(w.call, method, payload, timeout) for w in self.workers]
+            return [f.result() for f in futs]
+
     def _step_gap(self, action: Any) -> Any:
-        for worker in self.workers:
-            reply = worker.call("park")
+        replies = self._fanout("park")
+        for worker, reply in zip(self.workers, replies):
             if not reply.get("ok"):
                 raise RuntimeError(f"failed to park {worker.name}: {reply.get('error')}")
         try:
             return action()
         finally:
-            for worker in reversed(self.workers):
-                with contextlib.suppress(Exception):
-                    worker.call("release_gap")
+            with contextlib.suppress(Exception):
+                self._fanout("release_gap")
+
+    def _rebuild_all_ranks(self, txn: str, spec: dict[str, Any]) -> dict[str, Any]:
+        payload = {"txn": txn, **dict(spec or {})}
+        replies = self._fanout("recapture", payload, timeout=self.quiesce_timeout)
+        ok = all(r.get("ok") for r in replies)
+        out: dict[str, Any] = {"ok": ok, "ranks": replies}
+        if not ok:
+            errs = [str(r.get("error") or "recapture failed") for r in replies if not r.get("ok")]
+            out["error"] = "; ".join(errs)
+        return out
+
+    def _build_plan(self, patch: dict[str, Any], live_map: dict[str, str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        plan, extra = super()._build_plan(patch, live_map)
+        if "recapture" in patch:
+            plan["recapture"] = dict(patch["recapture"] or {})
+        if "rebuild" in patch:
+            plan["rebuild"] = list(patch["rebuild"] or ())
+            return plan, extra
+        extra_cfg = self.engine_config.get("extra_kwargs") or {}
+        use_cg = bool(extra_cfg.get("use_cuda_graph", True))
+        if use_cg and any(trt_agent._is_captured_module(mod) for mod in (plan.get("modules") or ())):
+            plan["rebuild"] = ["recapture"]
+        return plan, extra
+
+    def _start_mpi_engine(self) -> tuple[lab_base.RecaptureCoordinator, list[str]]:
+        self._mpi_hook_dir = tempfile.mkdtemp(prefix="rsibox-trtllm-hook-")
+        self._mpi_sock_dir = tempfile.mkdtemp(prefix="rsibox-trtllm-mpi-", dir="/tmp")
+        with open(os.path.join(self._mpi_hook_dir, "sitecustomize.py"), "w", encoding="utf-8") as handle:
+            handle.write(mpi_hook.SITECUSTOMIZE_SOURCE)
+
+        driver_endpoint = ipc.short_sock_path(prefix="rsibox-trtllm-drv")
+        driver_config = {
+            "action": "driver",
+            "mode": self.engine_mode,
+            "parent_pid": os.getpid(),
+            "transport": "unix",
+            "endpoint": driver_endpoint,
+            "engine_config": self.engine_config,
+        }
+        mpi_env = {
+            mpi_hook.ENV_MPI_SOCK_DIR: self._mpi_sock_dir,
+            mpi_hook.ENV_MPI_MODULES: json.dumps(list(self._tracked_modules)),
+            mpi_hook.ENV_MPI_ENABLE_BLOCK_REUSE: "1" if self.engine_config.get("enable_block_reuse") else "0",
+            mpi_hook.ENV_MPI_SEED: "0",
+        }
+        self._driver = _WorkerHandle(
+            "driver",
+            0,
+            driver_config,
+            self.livelab_dir,
+            self.rpc_timeout,
+            self.boot_timeout,
+            extra_env=mpi_env,
+            extra_pythonpath=[self._mpi_hook_dir],
+            single_process=False,
+        )
+        participants: list[coordinator.CallParticipant] = []
+        for rank_index in range(self.rank_count):
+            worker_name = f"rank{rank_index}"
+            sock_path = os.path.join(self._mpi_sock_dir, f"rank-{rank_index}.sock")
+            client = _RankClient(worker_name, sock_path, self.rpc_timeout, transport="unix")
+            client.wait_ready(self._driver, self.boot_timeout)
+            self.workers.append(client)
+            participants.append(coordinator.CallParticipant(worker_name, client.call, bounded=True))
+        for module_name in self._tracked_modules:
+            self._base_source(module_name)
+        return (
+            lab_base.RecaptureCoordinator(
+                participants,
+                gap=self._step_gap,
+                writer=self.writer,
+                rebuild=self._rebuild_all_ranks,
+            ),
+            list(self._tracked_modules),
+        )
 
     def _start_engine(self) -> tuple[coordinator.StepGapCoordinator, list[str]]:
         self.workers = []
+        self._driver = None
+        if self._use_mpi_mode():
+            try:
+                return self._start_mpi_engine()
+            except BaseException:
+                self._stop_engine()
+                raise
         participants: list[coordinator.CallParticipant] = []
         parent_pid = os.getpid()
         try:
@@ -347,8 +498,14 @@ class TrtllmLab(BaseLab):
         except BaseException:
             self._stop_engine()
             raise
-        return coordinator.StepGapCoordinator(participants, gap=self._step_gap, writer=self.writer), list(
-            self._tracked_modules
+        return (
+            lab_base.RecaptureCoordinator(
+                participants,
+                gap=self._step_gap,
+                writer=self.writer,
+                rebuild=self._rebuild_all_ranks,
+            ),
+            list(self._tracked_modules),
         )
 
     def _stop_engine(self) -> None:
@@ -356,9 +513,24 @@ class TrtllmLab(BaseLab):
         for worker in reversed(self.workers):
             worker.close(force=force_stop)
         self.workers = []
+        if self._driver is not None:
+            self._driver.close(force=force_stop)
+            self._driver = None
+        if self._mpi_sock_dir:
+            shutil.rmtree(self._mpi_sock_dir, ignore_errors=True)
+            self._mpi_sock_dir = None
+        if self._mpi_hook_dir:
+            shutil.rmtree(self._mpi_hook_dir, ignore_errors=True)
+            self._mpi_hook_dir = None
 
     def _run_workload(self, workload: dict[str, Any] | None) -> dict[str, Any]:
         merged = {**self.workload, **(workload or {})}
+        if self._driver is not None:
+            reply = self._driver.call("generate", merged, timeout=self.check_timeout + 5.0)
+            if not reply.get("ok"):
+                raise RuntimeError(reply.get("error") or "driver: generate failed")
+            tokens = reply["output"]
+            return {worker.name: tokens for worker in self.workers}
         outputs: dict[str, Any] = {}
         for worker in self.workers:
             reply = worker.call("generate", merged, timeout=self.check_timeout + 5.0)
@@ -369,8 +541,8 @@ class TrtllmLab(BaseLab):
 
     def _reset_state(self) -> dict[str, Any]:
         reset_items: list[str] = []
-        for worker in self.workers:
-            reply = worker.call("reset", "state")
+        replies = self._fanout("reset", "state")
+        for worker, reply in zip(self.workers, replies):
             if not reply.get("ok"):
                 return {"ok": False, "error": reply.get("error") or f"{worker.name}: reset failed", "reset": []}
             for item in reply.get("result") or reply.get("reset") or ():
@@ -410,4 +582,6 @@ class TrtllmLab(BaseLab):
         elif fault == "tamper":
             payload.setdefault("module", self.default_tamper_module)
             payload.setdefault("function", self.default_tamper_function)
+        if self._driver is not None and fault in ("crash", "hang"):
+            return self._driver.call("inject", payload)
         return worker.call("inject", payload)
