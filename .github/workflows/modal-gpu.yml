@@ -1,0 +1,225 @@
+name: Modal GPU CI
+# Opt-in GPU test suite on Modal (.github/modal-ci/), triggered by a `/run-gpu-ci` PR comment
+# from a repo maintainer (OWNER/MEMBER/COLLABORATOR) or via workflow_dispatch.
+# Pushes to PRs touching .github/modal-ci/** or this workflow run only the offline stdlib self-test.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths: ['.github/modal-ci/**', '.github/workflows/modal-gpu.yml']
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Optional PR number to test (omit to test main)
+        required: false
+        type: string
+      gpu:
+        description: Modal GPU spec (e.g. L4, A10G, A100, H100)
+        required: false
+        default: L4
+        type: string
+      suites:
+        description: Optional comma-separated suite names (empty runs all suites)
+        required: false
+        type: string
+      vllm_model:
+        description: Optional vLLM model ID for vllm-services GPU E2E
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  modal-ci-selftest:
+    # Offline stdlib golden tests for run_modal_ci, modal_ci_loop, modal_app, and comment parser
+    name: "modal: Runner & parser self-test"
+    if: github.event_name == 'pull_request'
+    # Runs PR code on a GitHub-hosted runner with read-only permissions and zero secrets.
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 .github/modal-ci/test_modal_ci.py -v
+
+  modal-gpu:
+    # Runs core + multi-engine + real-vLLM suites on Modal GPUs and posts the `modal-gpu` status
+    name: "modal: GPU test suite"
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/run-gpu-ci') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    # Job-level so unrelated comments never cancel an in-flight GPU run; parallel PRs stay isolated.
+    concurrency:
+      group: modal-gpu-${{ github.event.issue.number || inputs.pr || 'main' }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: read
+      issues: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Always run workflow scripts from the default branch (github.sha), never from PR head code,
+      # because this job holds MODAL_TOKEN_ID/MODAL_TOKEN_SECRET and statuses:write.
+      # The verified same-repo commit is exported as a clean git archive tarball for Modal.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Parse and validate trigger arguments
+        id: parse
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_GPU: ${{ inputs.gpu }}
+          INPUT_SUITES: ${{ inputs.suites }}
+          INPUT_VLLM_MODEL: ${{ inputs.vllm_model }}
+        run: |
+          python3 .github/modal-ci/parse_comment_cmd.py --github-output "$GITHUB_OUTPUT"
+
+      - name: Acknowledge the /run-gpu-ci comment
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=eyes >/dev/null || true
+
+      - name: Verify Modal secrets are configured
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.issue.number || '' }}
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::Modal GPU CI cannot run: configure both repository secrets MODAL_TOKEN_ID and MODAL_TOKEN_SECRET."
+            if [ "$EVENT_NAME" = "issue_comment" ] && [ -n "$PR_NUMBER" ]; then
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+                -f body="Modal GPU CI cannot run because repository secrets \`MODAL_TOKEN_ID\` and \`MODAL_TOKEN_SECRET\` are not both configured." \
+                >/dev/null || true
+            fi
+            exit 1
+          fi
+
+      - name: Resolve target SHA and verify same-repo PR
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number || '' }}
+          PARSED_PR: ${{ steps.parse.outputs.pr }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          event_name = os.environ["EVENT_NAME"]
+          pr_number = os.environ["ISSUE_NUMBER"] if event_name == "issue_comment" else os.environ["PARSED_PR"]
+          pr_number = pr_number.strip()
+
+          if pr_number:
+              if not re.fullmatch(r"[1-9][0-9]{0,9}", pr_number):
+                  print(f"::error::Invalid PR number: {pr_number!r}", file=sys.stderr)
+                  sys.exit(1)
+              pr_data = json.loads(
+                  subprocess.check_output(["gh", "api", f"repos/{repo}/pulls/{pr_number}"], text=True)
+              )
+              head = pr_data.get("head") or {}
+              head_repo = (head.get("repo") or {}).get("full_name")
+              if head_repo != repo:
+                  print(
+                      f"::error::Refusing PR #{pr_number}: fork PRs (head repo {head_repo!r}) are not run on Modal GPU CI.",
+                      file=sys.stderr,
+                  )
+                  if event_name == "issue_comment":
+                      subprocess.run(
+                          [
+                              "gh", "api", "-X", "POST",
+                              f"repos/{repo}/issues/{pr_number}/comments",
+                              "-f",
+                              f"body=Modal GPU CI refused PR #{pr_number}: fork PRs are not executed on Modal GPU CI.",
+                          ],
+                          stdout=subprocess.DEVNULL,
+                          check=False,
+                      )
+                  sys.exit(1)
+              head_sha = (head.get("sha") or "").strip()
+          else:
+              default_branch = (os.environ.get("DEFAULT_BRANCH") or "main").strip()
+              head_sha = subprocess.check_output(
+                  ["gh", "api", f"repos/{repo}/commits/{default_branch}", "--jq", ".sha"],
+                  text=True,
+              ).strip()
+
+          if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+              print(f"::error::Resolved invalid commit SHA: {head_sha!r}", file=sys.stderr)
+              sys.exit(1)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"head_sha={head_sha}\n")
+              handle.write(f"pr={pr_number}\n")
+          print(f"Resolved target SHA {head_sha} (pr={pr_number or 'none'})")
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Modal CLI
+        run: python3 -m pip install --no-cache-dir modal
+
+      - name: Run Modal GPU CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          PR: ${{ steps.resolve.outputs.pr }}
+          GPU: ${{ steps.parse.outputs.gpu }}
+          SUITES: ${{ steps.parse.outputs.suites }}
+          VLLM_MODEL: ${{ steps.parse.outputs.vllm_model }}
+        run: |
+          args=(
+            python3 .github/modal-ci/run_modal_ci.py
+            --source "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+            --sha "$HEAD_SHA"
+            --work "${RUNNER_TEMP}/modal-ci"
+            --gpu "$GPU"
+            --post
+          )
+          if [ -n "$PR" ]; then
+            args+=(--pr "$PR")
+          fi
+          if [ -n "$SUITES" ]; then
+            args+=(--suites "$SUITES")
+          fi
+          if [ -n "$VLLM_MODEL" ]; then
+            args+=(--vllm-model "$VLLM_MODEL")
+          fi
+          "${args[@]}"
+
+      - name: Publish Modal GPU summary
+        if: always()
+        run: |
+          summary_file=$(ls -1t "${RUNNER_TEMP}/modal-ci/runs/"*/summary.md 2>/dev/null | head -n 1 || true)
+          if [ -n "$summary_file" ] && [ -f "$summary_file" ]; then
+            cat "$summary_file" >> "$GITHUB_STEP_SUMMARY"
+          fi
