@@ -46,7 +46,7 @@ Measured in our 2026-11-24 B200 run via
 Measured in our 2026-11-24 CPU run via `rsibox conformance torchtitan` (2 worker processes, no
 `torch` or GPU required):
 
-- **Result**: **11/11 PASS** (`c0–c10`), total `4.66 s`
+- **Result**: **11/11 PASS** (`c0–c10`), total `4.46 s`
 - **Per-rank witness**: `[2, 2]` across `rank0` and `rank1` for `adapter.model_ops:compute_loss:35`
 - **`c9_soak` (20 cycles)**: install median `0.0142 s`, uninstall median `0.0045 s`
 - **`c8_crash_and_hang` respawns**: `0.097–0.320 s` across `crash`, `hang`, `lost`, and `tamper`
