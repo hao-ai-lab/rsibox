@@ -984,6 +984,18 @@ class SandboxPoolTests(unittest.TestCase):
             first_lease.slot.role = "eval"
         with self.assertRaises(TypeError):
             first_lease.slot.metadata["gpu"] = 99
+        for attr_name, bad_value in (
+            ("slot_id", "other"),
+            ("slot", None),
+            ("agent_id", "other"),
+            ("role", "eval"),
+            ("idea_id", "tampered"),
+            ("acquired_at", 0.0),
+            ("queue_wait_s", 0.0),
+            ("lab", None),
+        ):
+            with self.assertRaises(AttributeError):
+                setattr(first_lease, attr_name, bad_value)
         with self.assertRaises(PoolError):
             first_lease.lab.close()
 
@@ -1160,6 +1172,84 @@ class SandboxPoolTests(unittest.TestCase):
         release_hang.set()
         hung_thread.join(timeout=5.0)
         self.assertFalse(hung_thread.is_alive())
+
+        # Case C (P1-2): KeyboardInterrupt during drain wait must quarantine fail-closed,
+        # never leak in_use=True, wake unservable waiters, and re-raise on duplicate release().
+        interrupt_lab = self._make_toy_lab()
+        entered_interrupt = threading.Event()
+        release_interrupt = threading.Event()
+        self.addCleanup(release_interrupt.set)
+        interrupt_resets = [0]
+        orig_interrupt_check, orig_interrupt_reset = interrupt_lab.check, interrupt_lab.reset
+
+        def interrupt_check(workload=None):
+            entered_interrupt.set()
+            release_interrupt.wait(timeout=5.0)
+            return orig_interrupt_check(workload)
+
+        def counted_interrupt_reset(kind="state"):
+            interrupt_resets[0] += 1
+            return orig_interrupt_reset(kind)
+
+        interrupt_lab.check = interrupt_check
+        interrupt_lab.reset = counted_interrupt_reset
+
+        interrupt_pool = SandboxPool([PoolSlot("interrupt-0", interrupt_lab)], drain_timeout_s=5.0)
+        self.addCleanup(interrupt_pool.close)
+        interrupt_lease = interrupt_pool.acquire("agent-interrupt")
+        resets_before_interrupt = interrupt_resets[0]
+        active_thread = threading.Thread(target=lambda: interrupt_lease.lab.check())
+        active_thread.start()
+        self.assertTrue(entered_interrupt.wait(timeout=5.0))
+
+        blocked_errors: list[BaseException] = []
+        blocked_waiter = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: interrupt_pool.acquire("agent-waiter", timeout_s=5.0),
+                blocked_errors,
+            )
+        )
+        blocked_waiter.start()
+        self._wait_for_waiters(interrupt_pool, 1)
+
+        with mock.patch.object(
+            interrupt_lease._call_cond,
+            "wait",
+            side_effect=KeyboardInterrupt("interrupted during drain"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                interrupt_lease.release()
+
+        with interrupt_pool._lock:
+            slot_state = interrupt_pool._slots["interrupt-0"]
+            self.assertFalse(slot_state.in_use)
+            self.assertTrue(slot_state.quarantined)
+        self.assertEqual(interrupt_pool.metrics()["quarantined_slots"], ["interrupt-0"])
+        self.assertEqual(interrupt_resets[0], resets_before_interrupt)
+        blocked_waiter.join(timeout=2.0)
+        self.assertFalse(blocked_waiter.is_alive())
+        self.assertEqual(len(blocked_errors), 1)
+        self.assertIsInstance(blocked_errors[0], PoolTimeoutError)
+        # Duplicate release() must re-raise the original KeyboardInterrupt rather than returning {}.
+        with self.assertRaises(KeyboardInterrupt):
+            interrupt_lease.release()
+        release_interrupt.set()
+        active_thread.join(timeout=5.0)
+        self.assertFalse(active_thread.is_alive())
+
+        # Failing _format_error(error) inside release() must also quarantine fail-closed and re-raise.
+        class _BrokenStr:
+            def __str__(self) -> str:
+                raise RuntimeError("unprintable error")
+
+        bad_err_pool = SandboxPool([PoolSlot("bad-err-0", self._make_toy_lab())])
+        self.addCleanup(bad_err_pool.close)
+        bad_err_lease = bad_err_pool.acquire("agent-bad-err")
+        with self.assertRaises(RuntimeError):
+            bad_err_lease.release(error=_BrokenStr())
+        self.assertEqual(bad_err_pool.metrics()["quarantined_slots"], ["bad-err-0"])
+        with self.assertRaises(RuntimeError):
+            bad_err_lease.release()
 
     def test_multi_writer_shared_trace_chain_and_expected_head_truncation_detection(self):
         """Regression for P1-3: two independent SandboxPool instances writing concurrently to

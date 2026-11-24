@@ -6,7 +6,7 @@ strict FIFO queueing, role routing, fenced leases, failover/quarantine, and JSON
 from __future__ import annotations
 
 from collections import deque, namedtuple
-import contextlib, dataclasses, hashlib, json, math, os, threading, time, types
+import contextlib, dataclasses, hashlib, json, math, operator, os, threading, time, types
 from typing import Any, Callable, Iterator, Sequence
 try:
     import fcntl
@@ -142,7 +142,7 @@ class _FencedLabProxy:
         lease = self._lease
         with lease._call_cond:
             if lease._released:
-                raise PoolError(f"lease for slot {lease.slot_id!r} has already been released")
+                raise PoolError(f"lease for slot {lease._slot_id!r} has already been released")
             lease._active_calls += 1
         try:
             return operation(*args, **kwargs)
@@ -201,19 +201,33 @@ class _Waiter:
 
 class SlotLease:
     """Exclusive lease over one `PoolSlot`; supports `with` and idempotent `release()`."""
+    slot = property(operator.attrgetter("_slot_view"))
+    slot_id = property(operator.attrgetter("_slot_id"))
+    agent_id = property(operator.attrgetter("_agent_id"))
+    role = property(operator.attrgetter("_role"))
+    idea_id = property(operator.attrgetter("_idea_id"))
+    acquired_at = property(operator.attrgetter("_acquired_at"))
+    queue_wait_s = property(operator.attrgetter("_queue_wait_s"))
+    lab = property(operator.attrgetter("_lab_proxy"))
+    released = property(operator.attrgetter("_released"))
+
     def __init__(self, pool: SandboxPool, slot_state: _SlotState, agent_id: str, role: str | None,
                  idea_id: str | None, acquired_at: float, acquired_mono: float,
                  queue_wait_s: float, preparation: _CleanupOutcome) -> None:
-        self._pool, self._lab, self.slot, self.slot_id = pool, slot_state.lab, slot_state.view, slot_state.slot_id
-        self.agent_id, self.role, self.idea_id = agent_id, role, idea_id
-        self.acquired_at, self._acquired_mono, self.queue_wait_s = acquired_at, acquired_mono, queue_wait_s
+        self._pool, self._lab, self._slot_view, self._slot_id = (
+            pool, slot_state.lab, slot_state.view, slot_state.slot_id,
+        )
+        self._agent_id, self._role, self._idea_id = agent_id, role, idea_id
+        self._acquired_at, self._acquired_mono, self._queue_wait_s = acquired_at, acquired_mono, queue_wait_s
         self._preparation = preparation
         self.cleanup_s, self.recovery_s, self.recovered = preparation.cleanup_s, preparation.recovery_s, preparation.recovered
         self.released_at = self.hold_s = self.error = self.status_after = None
-        self._released, self._release_lock, self._call_cond, self._active_calls = False, threading.Lock(), threading.Condition(), 0
-        self._trace_record, self._trace_error, self.lab = None, None, _FencedLabProxy(self, slot_state.lab)
-    @property
-    def released(self) -> bool: return self._released
+        self._released, self._release_lock, self._call_cond, self._active_calls = (
+            False, threading.Lock(), threading.Condition(), 0,
+        )
+        self._trace_record, self._trace_error = None, None
+        self._lab_proxy: Any = _FencedLabProxy(self, slot_state.lab)
+
     def release(self, error: str | BaseException | None = None) -> dict[str, Any]:
         return self._pool._release_lease(self, error=error)
     def __enter__(self) -> SlotLease: return self
@@ -449,21 +463,27 @@ class SandboxPool:
                         raise lease._trace_error
                     return dict(lease._trace_record or {})
                 lease._released = True
-                drain_deadline = None if self._drain_timeout_s is None else time.monotonic() + self._drain_timeout_s
-                while lease._active_calls > 0:
-                    remaining_s = None if drain_deadline is None else drain_deadline - time.monotonic()
-                    if remaining_s is not None and remaining_s <= 0.0:
-                        break
-                    lease._call_cond.wait(timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX))
-                undrained = lease._active_calls > 0
-            release_mono = self._safe_clock(fallback=lease._acquired_mono)
-            hold_s, caller_error = max(0.0, release_mono - lease._acquired_mono), _format_error(error)
-            cleanup, finish_mono, finalized = None, None, None
+            release_mono = lease._acquired_mono
+            undrained, cleanup, finish_mono, finalized = True, None, None, None
             try:
+                release_mono = self._safe_clock(fallback=lease._acquired_mono)
+                with lease._call_cond:
+                    drain_deadline = None if self._drain_timeout_s is None else time.monotonic() + self._drain_timeout_s
+                    while lease._active_calls > 0:
+                        remaining_s = None if drain_deadline is None else drain_deadline - time.monotonic()
+                        if remaining_s is not None and remaining_s <= 0.0:
+                            break
+                        lease._call_cond.wait(
+                            timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX)
+                        )
+                    undrained = lease._active_calls > 0
+                hold_s, caller_error = max(0.0, release_mono - lease._acquired_mono), _format_error(error)
                 released_at = self._wall_clock()
-                cleanup = (_CleanupOutcome(False, 0.0, 0.0, False, "quarantined",
-                                           "in-flight fenced call did not drain before release")
-                           if undrained else self._clean_and_recover_slot(lease._lab, force_reset_state=True))
+                cleanup = (
+                    _CleanupOutcome(False, 0.0, 0.0, False, "quarantined",
+                                    "in-flight fenced call did not drain before release")
+                    if undrained else self._clean_and_recover_slot(lease._lab, force_reset_state=True)
+                )
                 finish_mono = self._clock()
                 raw_cleanup_s = lease._preparation.cleanup_s + cleanup.cleanup_s
                 raw_recovery_s = lease._preparation.recovery_s + cleanup.recovery_s
@@ -474,28 +494,36 @@ class SandboxPool:
                 lease.cleanup_s, lease.recovery_s = round(raw_cleanup_s, 6), round(raw_recovery_s, 6)
                 lease.recovered, lease.error, lease.status_after = recovered, combined_error, cleanup.status_after
                 record = {
-                    "agent_id": lease.agent_id, "role": lease.role, "slot_role": lease.slot.role,
-                    "idea_id": lease.idea_id, "slot_id": lease.slot_id,
-                    "acquired_at": round(lease.acquired_at, 6), "released_at": lease.released_at,
-                    "queue_wait_s": lease.queue_wait_s, "hold_s": lease.hold_s,
+                    "agent_id": lease._agent_id, "role": lease._role, "slot_role": lease._slot_view.role,
+                    "idea_id": lease._idea_id, "slot_id": lease._slot_id,
+                    "acquired_at": round(lease._acquired_at, 6), "released_at": lease.released_at,
+                    "queue_wait_s": lease._queue_wait_s, "hold_s": lease.hold_s,
                     "cleanup_s": lease.cleanup_s, "recovery_s": lease.recovery_s,
                     "recovered": recovered, "error": combined_error, "status_after": cleanup.status_after,
                 }
                 with self._lock:
                     self._total_leases, self._recoveries = self._total_leases + 1, self._recoveries + int(recovered)
                     self._total_recovery_s += raw_recovery_s
-                    self._queue_waits.append(lease.queue_wait_s)
+                    self._queue_waits.append(lease._queue_wait_s)
                     self._hold_times.append(hold_s)
                 try:
                     finalized = lease._trace_record = self._append_trace(record)
                 except BaseException as trace_error:
                     lease._trace_error, lease._trace_record = trace_error, record
                     raise
+            except BaseException as release_error:
+                if lease._trace_error is None:
+                    lease._trace_error = release_error
+                if lease.status_after is None:
+                    lease.status_after = "quarantined"
+                raise
             finally:
                 done_mono = finish_mono if finish_mono is not None else self._safe_clock(fallback=release_mono)
-                self._finish_slot(lease.slot_id, done_mono, bool(cleanup.healthy) if cleanup is not None else False,
-                                  cleanup.error if cleanup is not None else "lease release interrupted",
-                                  skip_close=undrained)
+                self._finish_slot(
+                    lease._slot_id, done_mono, bool(cleanup.healthy) if cleanup is not None else False,
+                    cleanup.error if cleanup is not None else "lease release interrupted",
+                    skip_close=undrained,
+                )
             return dict(finalized)
     def _append_trace(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._trace_lock:
@@ -531,7 +559,7 @@ class SandboxPool:
                     "recovered": False, "status_after": None, "error": _format_error(error)}
         action_result, caught_error = None, None
         try:
-            action_result = action_fn(slot_lease.lab, slot_lease)
+            action_result = action_fn(slot_lease._lab_proxy, slot_lease)
         except BaseException as error:
             caught_error = error
             if not isinstance(error, Exception):
@@ -539,7 +567,7 @@ class SandboxPool:
         finally:
             trace_record = slot_lease.release(error=caught_error)
         return {"ok": caught_error is None, "result": action_result if caught_error is None else None,
-                "slot_id": slot_lease.slot_id, **{key: trace_record[key] for key in _RUN_RESULT_KEYS}}
+                "slot_id": slot_lease._slot_id, **{key: trace_record[key] for key in _RUN_RESULT_KEYS}}
 
     def metrics(self) -> dict[str, Any]:
         """Compute exact aggregate queue, hold, recovery, quarantine, and slot utilization stats."""
