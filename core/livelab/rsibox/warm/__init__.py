@@ -15,6 +15,7 @@ from .dynamo_gms import (
     DynamoGmsStore,
     build_device_uuid_map,
     install_visible_devices_uuid_shim,
+    uninstall_visible_devices_uuid_shim,
 )
 from .recovery import (
     DefaultRespawnDriver,
@@ -72,5 +73,6 @@ __all__ = [
     "snapshot_contract",
     "stamp_diff",
     "types",
+    "uninstall_visible_devices_uuid_shim",
     "weight_store",
 ]

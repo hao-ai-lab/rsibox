@@ -199,10 +199,16 @@ def install_visible_devices_uuid_shim(
         return False
     if not isinstance(parsed, dict) or not parsed:
         return False
-    try:
-        int_map = {int(k): str(v) for k, v in parsed.items() if str(v)}
-    except (TypeError, ValueError):
-        return False
+    int_map: dict[int, str] = {}
+    for k, v in parsed.items():
+        if isinstance(k, bool) or not isinstance(v, str) or not v.strip():
+            continue
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue
+        if idx >= 0:
+            int_map[idx] = v.strip()
     if not int_map:
         return False
     try:
@@ -211,7 +217,11 @@ def install_visible_devices_uuid_shim(
         return False
 
     cache = getattr(gms_utils, "_uuid_cache", None)
+    prev_map = getattr(gms_utils, "_rsibox_device_uuid_map", None)
     if isinstance(cache, dict):
+        if isinstance(prev_map, dict):
+            for old_k in prev_map:
+                cache.pop(old_k, None)
         cache.update(int_map)
 
     orig_get = getattr(gms_utils, "_rsibox_orig_get_socket_path", gms_utils.get_socket_path)
@@ -238,6 +248,26 @@ def install_visible_devices_uuid_shim(
     gms_utils.get_socket_path = _mapped_get_socket_path
     gms_utils.invalidate_uuid_cache = _mapped_invalidate_uuid_cache
     return True
+
+
+def uninstall_visible_devices_uuid_shim() -> bool:
+    """Restore original `gpu_memory_service.common.utils` socket routing and clear shim cache."""
+    gms_utils = sys.modules.get("gpu_memory_service.common.utils")
+    if gms_utils is None:
+        return False
+    prev_map = getattr(gms_utils, "_rsibox_device_uuid_map", None)
+    cache = getattr(gms_utils, "_uuid_cache", None)
+    if isinstance(cache, dict) and isinstance(prev_map, dict):
+        for old_k in prev_map:
+            cache.pop(old_k, None)
+    orig_get = getattr(gms_utils, "_rsibox_orig_get_socket_path", None)
+    if orig_get is not None:
+        gms_utils.get_socket_path = orig_get
+    orig_inv = getattr(gms_utils, "_rsibox_orig_invalidate_uuid_cache", None)
+    if orig_inv is not None:
+        gms_utils.invalidate_uuid_cache = orig_inv
+    gms_utils._rsibox_device_uuid_map = {}
+    return prev_map is not None
 
 
 def _visible_devices_remap_finding(
@@ -472,6 +502,7 @@ class DynamoGmsStore:
         self._target_resolver = target_resolver
         self._owned_procs: list[subprocess.Popen] = []
         self._owned_pids: list[int] = []
+        self._owned_start_times: dict[int, int | None] = {}
 
     def _resolve_targets(
         self,
@@ -526,6 +557,7 @@ class DynamoGmsStore:
         tp: int | None = None,
         expected_stamp: dict[str, Any] | None = None,
         connect_timeout_s: float = 1.0,
+        allow_remapped: bool | None = None,
     ) -> StoreProbe:
         """Probe every target `(gpu, tag)` GMS socket, RO commit state, and optional stamp."""
         t0 = time.monotonic()
@@ -576,7 +608,10 @@ class DynamoGmsStore:
                 finding=resolved_path_finding,
             )
 
-        if not self.allow_remapped_visible_devices:
+        effective_allow_remapped = (
+            self.allow_remapped_visible_devices if allow_remapped is None else bool(allow_remapped)
+        )
+        if not effective_allow_remapped:
             remap_finding = _visible_devices_remap_finding(targets, visible_devices)
             if remap_finding is not None:
                 return StoreProbe(
@@ -692,6 +727,7 @@ class DynamoGmsStore:
         env = dict(os.environ)
         env.pop("CUDA_VISIBLE_DEVICES", None)
         env.pop("DYN_GMS_USE_V1", None)
+        env.pop(ENV_GMS_DEVICE_UUID_MAP, None)
         env["GMS_SOCKET_DIR"] = self.socket_dir
         if self.extra_pythonpath:
             existing = env.get("PYTHONPATH", "")
@@ -740,7 +776,7 @@ class DynamoGmsStore:
     ) -> StoreProbe:
         """Reuse already-running GMS servers, and spawn local GMS servers only for missing GPUs."""
         t0 = time.monotonic()
-        first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp)
+        first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, allow_remapped=True)
         if first.ok or not first.matched_gpus:
             return first
         if first.finding and first.finding.get("check") != "dynamo_gms_daemon":
@@ -790,6 +826,7 @@ class DynamoGmsStore:
                 daemon_pid = self._spawn_gms_daemon(cmd, env, log_path)
                 started.append((dev, daemon_pid))
                 self._owned_pids.append(daemon_pid)
+                self._owned_start_times[daemon_pid] = self._proc_start_time(daemon_pid)
 
             deadline = time.monotonic() + float(timeout_s)
             while time.monotonic() < deadline:
@@ -799,7 +836,13 @@ class DynamoGmsStore:
                             f"GMS server for GPU {dev} (pid={daemon_pid}) exited early "
                             f"(see {os.path.join(log_root, f'gms-server-gpu{dev}.log')})"
                         )
-                pr = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, connect_timeout_s=0.3)
+                pr = self.probe(
+                    gpus=gpus,
+                    visible_devices=visible_devices,
+                    tp=tp,
+                    connect_timeout_s=0.3,
+                    allow_remapped=True,
+                )
                 if pr.ok or (pr.finding and pr.finding.get("check") == "dynamo_gms_not_committed"):
                     # In read_only mode, sockets are alive even before a writer commits.
                     return StoreProbe(
@@ -816,7 +859,8 @@ class DynamoGmsStore:
         except BaseException as exc:
             # Never leave half-started GMS daemons holding GPU resources.
             for _, daemon_pid in started:
-                proc.stop_session(daemon_pid, grace=3.0)
+                st = self._owned_start_times.pop(daemon_pid, None)
+                self._stop_detached_pid(daemon_pid, st, grace=3.0)
                 if daemon_pid in self._owned_pids:
                     self._owned_pids.remove(daemon_pid)
             if not isinstance(exc, Exception):
@@ -1031,6 +1075,32 @@ class DynamoGmsStore:
         )
 
     @staticmethod
+    def _proc_start_time(pid: int) -> int | None:
+        """Read Linux `/proc/<pid>/stat` field 22 (starttime ticks) to guard against PID reuse."""
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+                fields = fh.read().rsplit(")", 1)[1].split()
+            return int(fields[19])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _reap_pid_nohang(pid: int) -> None:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except OSError:
+            pass
+
+    @classmethod
+    def _stop_detached_pid(cls, pid: int, recorded_start: int | None, grace: float = 5.0) -> None:
+        if recorded_start is not None:
+            cur_start = cls._proc_start_time(pid)
+            if cur_start is None or cur_start != recorded_start:
+                return
+        proc.stop_session(pid, grace=grace, reap=lambda: cls._reap_pid_nohang(pid))
+        cls._reap_pid_nohang(pid)
+
+    @staticmethod
     def _stop_child(child: subprocess.Popen, grace: float = 5.0) -> None:
         proc.stop_session(child.pid, grace=grace, reap=child.poll)
         try:
@@ -1043,8 +1113,10 @@ class DynamoGmsStore:
         """Stop every GMS server process spawned by this instance (leaves external sidecars alone)."""
         pids = list(self._owned_pids)
         self._owned_pids.clear()
+        starts = dict(self._owned_start_times)
+        self._owned_start_times.clear()
         for pid in pids:
-            proc.stop_session(pid, grace=5.0)
+            self._stop_detached_pid(pid, starts.get(pid), grace=5.0)
         procs = list(self._owned_procs)
         self._owned_procs.clear()
         for child in procs:

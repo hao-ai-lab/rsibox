@@ -48,6 +48,7 @@ from rsibox.warm.dynamo_gms import (  # noqa: E402
     long_socket_path_finding,
     resolve_target_gpus,
     socket_name,
+    uninstall_visible_devices_uuid_shim,
 )
 
 
@@ -227,6 +228,13 @@ class DynamoGmsStoreTests(unittest.TestCase):
             fake_utils.invalidate_uuid_cache()
             self.assertEqual(fake_utils.get_socket_path(0, "weights"), want0)
             self.assertEqual(orig_get_socket_path(1, "weights"), want1_w)
+
+            # Rejects JSON null/bool entries and evicts old keys on uninstall!
+            self.assertFalse(install_visible_devices_uuid_shim({"0": None}))
+            self.assertTrue(uninstall_visible_devices_uuid_shim())
+            self.assertIs(fake_utils.get_socket_path, orig_get_socket_path)
+            self.assertNotIn(0, fake_utils._uuid_cache)
+            self.assertNotIn(1, fake_utils._uuid_cache)
 
     def test_probe_uses_msgpack_runtime_state_and_fails_closed_on_uncommitted_ro_and_missing_stamp(self):
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:
@@ -419,11 +427,19 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertEqual(stamp_diff({"files": "corrupt"}, {"files": {"a": "1"}}), ("files:invalid",))
         self.assertEqual(stamp_diff("bad", {"files": {}}), ("stamp_invalid",))
 
-        # 3. _gms_server_env strips BOTH CUDA_VISIBLE_DEVICES and DYN_GMS_USE_V1.
-        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "4", "DYN_GMS_USE_V1": "true"}):
+        # 3. _gms_server_env strips CUDA_VISIBLE_DEVICES, DYN_GMS_USE_V1, and RSIBOX_GMS_DEVICE_UUID_MAP.
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CUDA_VISIBLE_DEVICES": "4",
+                "DYN_GMS_USE_V1": "true",
+                ENV_GMS_DEVICE_UUID_MAP: '{"0":"GPU-444"}',
+            },
+        ):
             env = DynamoGmsStore(socket_dir="/tmp/gms")._gms_server_env()
             self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
             self.assertNotIn("DYN_GMS_USE_V1", env)
+            self.assertNotIn(ENV_GMS_DEVICE_UUID_MAP, env)
 
         # 4. ensure_ready() spawns ONLY the missing tag (kv_cache) when weights is already live.
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-") as tmp:

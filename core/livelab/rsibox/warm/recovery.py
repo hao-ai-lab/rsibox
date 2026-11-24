@@ -87,10 +87,13 @@ class DefaultRespawnDriver:
         t0 = time.perf_counter()
         store_probe = None
         if store is not None and store.name != "none":
-            store_probe = store.probe(
-                tp=_resolve_lab_tp(lab),
-                visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
-            )
+            probe_kw: dict[str, Any] = {
+                "tp": _resolve_lab_tp(lab),
+                "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            }
+            if store.name == "dynamo_gms" and getattr(lab, "supports_gms_uuid_shim", False):
+                probe_kw["allow_remapped"] = True
+            store_probe = store.probe(**probe_kw)
             if not store_probe.ok:
                 return {
                     "ok": False,
