@@ -25,6 +25,7 @@ if str(LIVELAB_DIR) not in sys.path:
 from rsibox import BaseLab  # noqa: E402
 from rsibox.warm import (  # noqa: E402
     DEFAULT_MIN_NOFILE,
+    ENV_GMS_MIN_NOFILE,
     GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
@@ -484,18 +485,48 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertEqual(bad.findings[0]["check"], "gms_unsupported_engine")
 
     def test_nofile_preflight_fails_closed_on_low_cap_and_blocks_daemon_spawn(self):
-        """Golden case: Docker-like RLIMIT_NOFILE=1024 fails closed before GMS daemon spawn.
+        """Golden case: RLIMIT_NOFILE preflight is strictly read-only in probe() and blocks unsafe spawns.
 
-        Proves `probe()` and `ensure_ready()` emit `gms_nofile_limit` (recommending
-        `--ulimit nofile=65536:65536`) and spawn zero daemons when hard_limit < min_nofile
-        or auto_raise_nofile=False, while `min_nofile=0` explicitly opts out.
+        Proves `probe()` never calls `set_nofile`, `nofile_limit_finding(..., auto_raise=True)`
+        never mutates limits when `hard_limit < min_nofile`, `ensure_ready()` spawns zero daemons
+        on low hard caps, `soft > hard` and missing `set_nofile` fail closed cleanly, `min_nofile > 65536`
+        clamps the recommended ulimit, and `RSIBOX_GMS_MIN_NOFILE=0` disables the gate.
         """
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-nofile-") as temp_dir:
             gpu_uuid = "GPU-33333333-2222-3333-4444-555555555555"
             raised_calls: list[tuple[int, int]] = []
             spawned_daemons: list[list[str]] = []
 
-            # 1. Hard cap == 1024 (Docker --ulimit nofile=1024:1024): cannot raise, fails closed.
+            # 1. probe() is strictly read-only even when auto_raise_nofile=True and hard_limit is high!
+            readonly_store = DynamoGmsStore(
+                socket_dir=temp_dir,
+                min_nofile=DEFAULT_MIN_NOFILE,
+                auto_raise_nofile=True,
+                get_nofile=lambda: (1024, 1048576),
+                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+            )
+            probe_readonly = readonly_store.probe(gpus=[gpu_uuid])
+            self.assertFalse(probe_readonly.ok)
+            self.assertEqual(probe_readonly.finding["check"], "gms_nofile_limit")
+            self.assertEqual(raised_calls, [], "probe() must never mutate RLIMIT_NOFILE")
+            self.assertTrue(
+                any(f"{ENV_GMS_MIN_NOFILE}=0" in action for action in probe_readonly.finding["actions"])
+            )
+
+            # 2. Hard cap == 1024 or 2048 (< 4096): auto_raise=True NEVER mutates rlimit and blocks spawn.
+            for hard_cap in (1024, 2048):
+                raised_calls.clear()
+                finding = nofile_limit_finding(
+                    4096,
+                    auto_raise=True,
+                    get_nofile=lambda cap=hard_cap: (1024, cap),
+                    set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+                )
+                self.assertIsNotNone(finding)
+                self.assertEqual(finding["check"], "gms_nofile_limit")
+                self.assertEqual(raised_calls, [], "must not call set_nofile when hard < min_nofile")
+
             capped_store = DynamoGmsStore(
                 socket_dir=temp_dir,
                 min_nofile=DEFAULT_MIN_NOFILE,
@@ -504,15 +535,6 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
                 target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
             )
-            probe_capped = capped_store.probe(gpus=[gpu_uuid])
-            self.assertFalse(probe_capped.ok)
-            self.assertEqual(probe_capped.finding["check"], "gms_nofile_limit")
-            self.assertIn("soft=1024, hard=1024", probe_capped.error)
-            self.assertTrue(
-                any(f"--ulimit nofile={RECOMMENDED_NOFILE}:{RECOMMENDED_NOFILE}" in action for action in probe_capped.finding["actions"])
-            )
-            self.assertEqual(raised_calls, [])
-
             with mock.patch.object(
                 capped_store,
                 "_spawn_gms_daemon",
@@ -522,38 +544,30 @@ class DynamoGmsStoreTests(unittest.TestCase):
             self.assertFalse(ensure_result.ok)
             self.assertEqual(ensure_result.finding["check"], "gms_nofile_limit")
             self.assertEqual(spawned_daemons, [])
-
-            # 2. Hard cap == 2048 (< 4096): raises soft to 2048 but STILL fails closed.
-            partial_store = DynamoGmsStore(
-                socket_dir=temp_dir,
-                min_nofile=4096,
-                auto_raise_nofile=True,
-                get_nofile=lambda: (1024, 2048),
-                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
-                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
-            )
-            probe_partial = partial_store.probe(gpus=[gpu_uuid])
-            self.assertFalse(probe_partial.ok)
-            self.assertEqual(probe_partial.finding["check"], "gms_nofile_limit")
-            self.assertEqual(raised_calls, [(2048, 2048)])
-            self.assertIn("soft=2048, hard=2048", probe_partial.error)
-
-            # 3. auto_raise_nofile=False never calls set_nofile even when hard_limit is high.
-            raised_calls.clear()
-            strict_store = DynamoGmsStore(
-                socket_dir=temp_dir,
-                min_nofile=4096,
-                auto_raise_nofile=False,
-                get_nofile=lambda: (1024, 1048576),
-                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
-                target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
-            )
-            probe_strict = strict_store.probe(gpus=[gpu_uuid])
-            self.assertFalse(probe_strict.ok)
-            self.assertEqual(probe_strict.finding["check"], "gms_nofile_limit")
             self.assertEqual(raised_calls, [])
 
-            # 4. min_nofile=0 disables the preflight guard cleanly; negative/bool rejected.
+            # 3. Custom get_nofile without set_nofile, soft > hard, and min_nofile > 65536 recommendation clamp.
+            no_setter = nofile_limit_finding(4096, auto_raise=True, get_nofile=lambda: (1024, 1048576))
+            self.assertIsNotNone(no_setter)
+            self.assertIn("set_nofile hook not provided", no_setter["observed"])
+
+            invalid_soft_gt_hard = nofile_limit_finding(
+                4096,
+                auto_raise=True,
+                get_nofile=lambda: (8192, 1024),
+                set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
+            )
+            self.assertIsNotNone(invalid_soft_gt_hard)
+            self.assertIn("invalid: soft > hard", invalid_soft_gt_hard["observed"])
+            self.assertEqual(raised_calls, [])
+
+            high_min_finding = nofile_limit_finding(131072, auto_raise=False, get_nofile=lambda: (65536, 1048576))
+            self.assertIsNotNone(high_min_finding)
+            self.assertTrue(
+                any("--ulimit nofile=131072:131072" in action for action in high_min_finding["actions"])
+            )
+
+            # 4. RSIBOX_GMS_MIN_NOFILE env override and validation.
             weights_guard = _UnixSocketGuard(
                 os.path.join(temp_dir, socket_name(gpu_uuid, "weights")), gms_state=("committed", True)
             )
@@ -561,13 +575,23 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 os.path.join(temp_dir, socket_name(gpu_uuid, "kv_cache")), gms_state=("empty", False)
             )
             try:
-                opt_out_store = DynamoGmsStore(
-                    socket_dir=temp_dir,
-                    min_nofile=0,
-                    get_nofile=lambda: (1024, 1024),
-                    target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
-                )
-                self.assertTrue(opt_out_store.probe(gpus=[gpu_uuid]).ok)
+                with mock.patch.dict(os.environ, {ENV_GMS_MIN_NOFILE: "0"}):
+                    env_disabled = DynamoGmsStore(
+                        socket_dir=temp_dir,
+                        get_nofile=lambda: (1024, 1024),
+                        target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
+                    )
+                    self.assertEqual(env_disabled.min_nofile, 0)
+                    self.assertTrue(env_disabled.probe(gpus=[gpu_uuid]).ok)
+                with mock.patch.dict(os.environ, {ENV_GMS_MIN_NOFILE: "8192"}):
+                    self.assertEqual(DynamoGmsStore(socket_dir=temp_dir).min_nofile, 8192)
+                    self.assertEqual(DynamoGmsStore(socket_dir=temp_dir, min_nofile=2048).min_nofile, 2048)
+                with mock.patch.dict(os.environ, {ENV_GMS_MIN_NOFILE: "not-a-number"}):
+                    with self.assertRaises(ValueError):
+                        DynamoGmsStore(socket_dir=temp_dir)
+                with mock.patch.dict(os.environ, {ENV_GMS_MIN_NOFILE: "-5"}):
+                    with self.assertRaises(ValueError):
+                        DynamoGmsStore(socket_dir=temp_dir)
             finally:
                 weights_guard.close()
                 kv_guard.close()
@@ -577,12 +601,14 @@ class DynamoGmsStoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 DynamoGmsStore(socket_dir=temp_dir, min_nofile=True)
 
-    def test_nofile_preflight_auto_raises_soft_limit_and_handles_infinity_and_real_rlimit(self):
-        """Golden case: auto_raise lifts soft RLIMIT_NOFILE to min_nofile without breaking high hard caps.
+    def test_nofile_preflight_auto_raises_in_ensure_ready_and_real_rlimit_subprocesses(self):
+        """Golden case: prepare_nofile()/ensure_ready() lifts soft limit when hard >= min_nofile.
 
-        Proves soft=1024 with hard=1048576 (or RLIM_INFINITY) raises to 4096 and passes probe(),
-        PermissionError during set_nofile fails closed cleanly, and real kernel getrlimit/setrlimit
-        works end-to-end inside an isolated subprocess.
+        Proves (a) ensure_ready() raises soft=1024 -> 4096 once and passes with live sockets,
+        (b) RLIM_INFINITY and PermissionError behave cleanly, (c) real POSIX subprocess with
+        (1024, high_hard) keeps probe() read-only while prepare_nofile() raises to 4096, and
+        (d) real POSIX subprocess with (1024, 1024) fails closed by default and bypasses via
+        RSIBOX_GMS_MIN_NOFILE=0.
         """
         with tempfile.TemporaryDirectory(dir="/tmp", prefix="gms-raise-") as temp_dir:
             gpu_uuid = "GPU-44444444-2222-3333-4444-555555555555"
@@ -593,18 +619,32 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 os.path.join(temp_dir, socket_name(gpu_uuid, "kv_cache")), gms_state=("empty", False)
             )
             try:
+                current_limits = [1024, 1048576]
                 applied_limits: list[tuple[int, int]] = []
+
+                def apply_stateful(soft: int, hard: int) -> None:
+                    applied_limits.append((soft, hard))
+                    current_limits[0], current_limits[1] = soft, hard
+
                 store = DynamoGmsStore(
                     socket_dir=temp_dir,
                     min_nofile=4096,
                     auto_raise_nofile=True,
-                    get_nofile=lambda: (1024, 1048576),
-                    set_nofile=lambda soft, hard: applied_limits.append((soft, hard)),
+                    get_nofile=lambda: (current_limits[0], current_limits[1]),
+                    set_nofile=apply_stateful,
                     target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
                 )
-                probe_result = store.probe(gpus=[gpu_uuid])
-                self.assertTrue(probe_result.ok, probe_result.to_dict())
+                # probe() stays read-only and reports gms_nofile_limit before prepare_nofile().
+                self.assertEqual(store.probe(gpus=[gpu_uuid]).finding["check"], "gms_nofile_limit")
+                self.assertEqual(applied_limits, [])
+
+                # ensure_ready() raises soft limit once via prepare_nofile() and succeeds!
+                ready_probe = store.ensure_ready(gpus=[gpu_uuid], timeout_s=1.0)
+                self.assertTrue(ready_probe.ok, ready_probe.to_dict())
                 self.assertEqual(applied_limits, [(4096, 1048576)])
+                # Subsequent probe() calls succeed with zero further set_nofile calls.
+                self.assertTrue(store.probe(gpus=[gpu_uuid]).ok)
+                self.assertEqual(len(applied_limits), 1)
             finally:
                 weights_guard.close()
                 kv_guard.close()
@@ -644,8 +684,8 @@ class DynamoGmsStoreTests(unittest.TestCase):
         self.assertEqual(denied["check"], "gms_nofile_limit")
         self.assertIn("EPERM denied by seccomp", denied["observed"])
 
-        # Real POSIX kernel getrlimit/setrlimit round-trip in an isolated child process.
-        child_script = "\n".join(
+        # Real POSIX kernel test 1: (1024, high_hard) -> probe() read-only, prepare_nofile() raises to 4096.
+        raise_script = "\n".join(
             [
                 "import resource, sys",
                 f"sys.path.insert(0, {str(LIVELAB_DIR)!r})",
@@ -656,21 +696,50 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 "    raise SystemExit(0)",
                 "resource.setrlimit(resource.RLIMIT_NOFILE, (1024, hard_orig))",
                 "store = DynamoGmsStore(socket_dir='/tmp', min_nofile=4096, auto_raise_nofile=True)",
-                "finding = store.check_nofile()",
-                "soft_after, _ = resource.getrlimit(resource.RLIMIT_NOFILE)",
-                "assert finding is None, finding",
-                "assert soft_after == 4096, soft_after",
+                "probe_before = store.probe(gpus=['GPU-0'])",
+                "assert not probe_before.ok and probe_before.finding['check'] == 'gms_nofile_limit'",
+                "assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == 1024",
+                "assert store.prepare_nofile() is None",
+                "assert resource.getrlimit(resource.RLIMIT_NOFILE)[0] == 4096",
                 "print('RAISED_OK')",
             ]
         )
-        proc_result = subprocess.run(
-            [sys.executable, "-c", child_script],
+        raise_result = subprocess.run(
+            [sys.executable, "-c", raise_script],
             capture_output=True,
             text=True,
             timeout=10.0,
             check=True,
         )
-        self.assertIn(proc_result.stdout.strip(), ("RAISED_OK", "SKIP_LOW_HARD"))
+        self.assertIn(raise_result.stdout.strip(), ("RAISED_OK", "SKIP_LOW_HARD"))
+
+        # Real POSIX kernel test 2: hard-capped (1024, 1024) -> default fails closed; RSIBOX_GMS_MIN_NOFILE=0 bypasses.
+        capped_script = "\n".join(
+            [
+                "import os, resource, sys",
+                f"sys.path.insert(0, {str(LIVELAB_DIR)!r})",
+                "from rsibox.warm import DynamoGmsStore, ENV_GMS_MIN_NOFILE",
+                "resource.setrlimit(resource.RLIMIT_NOFILE, (1024, 1024))",
+                "os.environ.pop(ENV_GMS_MIN_NOFILE, None)",
+                "default_store = DynamoGmsStore(socket_dir='/tmp', target_resolver=lambda *a, **k: [(0, 'GPU-0')])",
+                "probe_default = default_store.probe(gpus=['GPU-0'])",
+                "assert not probe_default.ok and probe_default.finding['check'] == 'gms_nofile_limit'",
+                "assert resource.getrlimit(resource.RLIMIT_NOFILE) == (1024, 1024)",
+                "os.environ[ENV_GMS_MIN_NOFILE] = '0'",
+                "bypass_store = DynamoGmsStore(socket_dir='/tmp', target_resolver=lambda *a, **k: [(0, 'GPU-0')])",
+                "probe_bypass = bypass_store.probe(gpus=['GPU-0'])",
+                "assert probe_bypass.finding['check'] == 'dynamo_gms_daemon', probe_bypass.to_dict()",
+                "print('CAPPED_BYPASS_OK')",
+            ]
+        )
+        capped_result = subprocess.run(
+            [sys.executable, "-c", capped_script],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=True,
+        )
+        self.assertEqual(capped_result.stdout.strip(), "CAPPED_BYPASS_OK")
 
 
 class SnapshotContractAndRecoveryTests(unittest.TestCase):
@@ -1050,6 +1119,235 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             AsyncShadowReplenisher("not-callable")  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
             AsyncShadowReplenisher(lambda lab, store: None, max_history=-1)
+
+    def test_standby_shadow_driver_guards_back_to_back_failover_and_fallback(self):
+        """Golden case: back-to-back failover during in-flight or failed replenish never kills primary blindly.
+
+        Proves (a) bounded `replenish_wait_timeout_s` waits for replenishment and promotes cleanly,
+        (b) wait timeout returns `standby_not_ready` WITHOUT stopping the primary, (c) `fallback_driver`
+        cleanly delegates on timeout, (d) failed replenishment refuses to stop primary and schedules a
+        background retry, and (e) bound `.trigger` and reserved `"replenish"` keys are handled cleanly.
+        """
+        from kernel import coordinator as kernel_coordinator
+
+        stop_calls: list[str] = []
+        promote_calls: list[str] = []
+
+        class _GuardedLab(BaseLab):
+            name = "guarded_lab"
+
+            def _start_engine(self):
+                participant = kernel_coordinator.LocalParticipant("participant")
+                return kernel_coordinator.StepGapCoordinator([participant], contextlib.nullcontext), []
+
+            def _stop_engine(self):
+                stop_calls.append("stop")
+
+            def _run_workload(self, workload):
+                return {"ok": True}
+
+        def promote_with_spoofed_key(lab, store):
+            promote_calls.append("promote")
+            lab._spawn()
+            return {"ok": True, "reset": ["shadow promoted"], "replenish": "spoofed"}
+
+        # Case A: back-to-back failover succeeds when gated replenish completes within wait timeout.
+        gate_entered = threading.Event()
+        release_gate = threading.Event()
+        replenish_runs = 0
+
+        def gated_worker(lab, store):
+            nonlocal replenish_runs
+            replenish_runs += 1
+            if replenish_runs == 1:
+                gate_entered.set()
+                release_gate.wait(timeout=5.0)
+            return {"ok": True}
+
+        with AsyncShadowReplenisher(gated_worker) as replenisher:
+            # Also exercises bound `.trigger` detection and reserved "replenish" key protection!
+            driver = StandbyShadowDriver(
+                promote_fn=promote_with_spoofed_key,
+                replenish_fn=replenisher.trigger,
+                replenish_wait_timeout_s=2.0,
+            )
+            lab = _GuardedLab(weight_store=DiskStore(), recovery_driver=driver)
+            first_failover = lab.reset("respawn")
+            self.assertTrue(first_failover["ok"])
+            self.assertEqual(first_failover["replenish"], "started")
+            self.assertTrue(gate_entered.wait(timeout=2.0))
+
+            def release_soon() -> None:
+                time.sleep(0.05)
+                release_gate.set()
+
+            releaser = threading.Thread(target=release_soon, daemon=True)
+            releaser.start()
+            second_failover = lab.reset("respawn")
+            releaser.join(timeout=2.0)
+            self.assertTrue(second_failover["ok"])
+            self.assertEqual(len(promote_calls), 2)
+            self.assertTrue(replenisher.wait(timeout_s=2.0))
+
+        # Case B: wait timeout returns standby_not_ready WITHOUT calling _stop_engine() on primary!
+        stop_calls.clear()
+        promote_calls.clear()
+        stuck_entered = threading.Event()
+        release_stuck = threading.Event()
+
+        def stuck_worker(lab, store):
+            stuck_entered.set()
+            release_stuck.wait(timeout=5.0)
+            return {"ok": True}
+
+        with AsyncShadowReplenisher(stuck_worker) as stuck_replenisher:
+            strict_driver = StandbyShadowDriver(
+                promote_fn=promote_with_spoofed_key,
+                replenish_fn=stuck_replenisher,
+                replenish_wait_timeout_s=0.05,
+            )
+            lab_b = _GuardedLab(weight_store=DiskStore(), recovery_driver=strict_driver)
+            self.assertTrue(lab_b.reset("respawn")["ok"])
+            self.assertTrue(stuck_entered.wait(timeout=2.0))
+            stops_before = len(stop_calls)
+
+            blocked_failover = lab_b.reset("respawn")
+            self.assertFalse(blocked_failover["ok"])
+            self.assertEqual(blocked_failover["recovery_mode"], "standby_shadow")
+            self.assertIn("standby_not_ready", blocked_failover["error"])
+            self.assertEqual(len(stop_calls), stops_before, "primary must NOT be stopped when standby is not ready")
+
+            # Case C: with fallback_driver configured, timeout delegates cleanly to DefaultRespawnDriver.
+            lab_b.recovery_driver = StandbyShadowDriver(
+                promote_fn=promote_with_spoofed_key,
+                replenish_fn=stuck_replenisher,
+                replenish_wait_timeout_s=0.02,
+                fallback_driver=DefaultRespawnDriver(),
+            )
+            fallback_failover = lab_b.reset("respawn")
+            self.assertTrue(fallback_failover["ok"])
+            self.assertEqual(fallback_failover["driver"], "default_respawn")
+            self.assertEqual(fallback_failover["fallback_from"], "standby_shadow")
+            release_stuck.set()
+
+        # Case D: previous replenish failed -> refuses to kill primary and triggers background retry.
+        stop_calls.clear()
+        promote_calls.clear()
+        flaky_attempts = 0
+
+        def flaky_worker(lab, store):
+            nonlocal flaky_attempts
+            flaky_attempts += 1
+            if flaky_attempts == 1:
+                raise RuntimeError("standby boot OOM")
+            return {"ok": True}
+
+        with AsyncShadowReplenisher(flaky_worker) as flaky_replenisher:
+            flaky_driver = StandbyShadowDriver(
+                promote_fn=promote_with_spoofed_key,
+                replenish_fn=flaky_replenisher,
+            )
+            lab_d = _GuardedLab(weight_store=DiskStore(), recovery_driver=flaky_driver)
+            self.assertTrue(lab_d.reset("respawn")["ok"])
+            self.assertTrue(flaky_replenisher.wait(timeout_s=2.0))
+            self.assertFalse(flaky_replenisher.last_ok)
+
+            stops_before_retry = len(stop_calls)
+            retry_result = lab_d.reset("respawn")
+            self.assertFalse(retry_result["ok"])
+            self.assertIn("standby_not_ready", retry_result["error"])
+            self.assertEqual(retry_result["replenish"], "started")
+            self.assertEqual(len(stop_calls), stops_before_retry)
+            self.assertTrue(flaky_replenisher.wait(timeout_s=2.0))
+            self.assertTrue(flaky_replenisher.last_ok)
+
+            # Once the background retry succeeded, failover promotes cleanly again!
+            recovered = lab_d.reset("respawn")
+            self.assertTrue(recovered["ok"])
+
+    def test_async_shadow_replenisher_cancel_dispose_timeout_warning_and_thread_start_error(self):
+        """Golden case: cooperative cancellation, post-close disposal, live-worker close warning, and start failure.
+
+        Proves (a) 0-arg, 1-arg `cancel_event`, and 3-arg workers receive cancellation signals,
+        (b) `dispose_fn` cleans up outcomes returned after `close()`, (c) `close()` timeout sets
+        `closed_with_live_worker=True` and `__exit__` logs a warning, (d) `Thread.start()`
+        `RuntimeError` resets `in_flight` cleanly, and (e) calling `wait()` inside the worker
+        raises `RuntimeError` instead of deadlocking.
+        """
+        # 1. 0-arg worker & 1-arg cooperative cancel_event worker + dispose_fn on post-close outcome.
+        zero_arg_calls: list[str] = []
+        with AsyncShadowReplenisher(lambda: zero_arg_calls.append("ran")) as zero_replenisher:
+            self.assertEqual(zero_replenisher("lab", None), "started")
+            self.assertTrue(zero_replenisher.wait(timeout_s=2.0))
+        self.assertEqual(zero_arg_calls, ["ran"])
+
+        worker_started = threading.Event()
+        disposed_items: list[dict] = []
+
+        def cooperative_worker(cancel_event: threading.Event) -> dict:
+            worker_started.set()
+            cancel_event.wait(timeout=5.0)
+            return {"shadow_pid": 4242, "cancelled": cancel_event.is_set()}
+
+        coop_replenisher = AsyncShadowReplenisher(
+            cooperative_worker,
+            dispose_fn=lambda outcome: disposed_items.append(dict(outcome)),
+        )
+        self.assertEqual(coop_replenisher("lab", None), "started")
+        self.assertTrue(worker_started.wait(timeout=2.0))
+        self.assertTrue(coop_replenisher.close(timeout_s=2.0))
+        self.assertTrue(coop_replenisher.cancel_event.is_set())
+        self.assertEqual(disposed_items, [{"shadow_pid": 4242, "cancelled": True}])
+        self.assertEqual(coop_replenisher.disposed_after_close, 1)
+        self.assertTrue(coop_replenisher.history[-1]["disposed"])
+
+        # 2. close() timeout sets closed_with_live_worker=True and __exit__ logs a warning.
+        unblock_stuck = threading.Event()
+        stuck_started = threading.Event()
+
+        def uninterruptible_worker(lab, store, cancel_event):
+            stuck_started.set()
+            unblock_stuck.wait(timeout=5.0)
+            return {"ok": True}
+
+        stuck_replenisher = AsyncShadowReplenisher(uninterruptible_worker)
+        orig_close = stuck_replenisher.close
+        try:
+            with self.assertLogs("rsibox.warm.recovery", level="WARNING") as captured_logs:
+                with mock.patch.object(
+                    stuck_replenisher, "close", side_effect=lambda: orig_close(timeout_s=0.02)
+                ):
+                    with stuck_replenisher:
+                        self.assertEqual(stuck_replenisher("lab", None), "started")
+                        self.assertTrue(stuck_started.wait(timeout=2.0))
+            self.assertTrue(stuck_replenisher.status()["closed_with_live_worker"])
+            self.assertTrue(any("timed out" in message for message in captured_logs.output))
+        finally:
+            unblock_stuck.set()
+            orig_close(timeout_s=2.0)
+
+        # 3. Thread.start() RuntimeError resets in_flight cleanly and records failure.
+        start_fail_replenisher = AsyncShadowReplenisher(lambda lab, store: {"ok": True})
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")):
+            dispatch_status = start_fail_replenisher("lab", None)
+        self.assertEqual(dispatch_status, "failed")
+        self.assertFalse(start_fail_replenisher.in_flight)
+        self.assertEqual(start_fail_replenisher.failed, 1)
+        self.assertIn("can't start new thread", start_fail_replenisher.last_error)
+        self.assertTrue(start_fail_replenisher.close())
+
+        # 4. Calling wait() from inside the active replenishment thread raises RuntimeError (no deadlock).
+        self_wait_holder: list[AsyncShadowReplenisher] = []
+
+        def self_waiting_worker(lab, store):
+            self_wait_holder[0].wait(timeout_s=1.0)
+
+        with AsyncShadowReplenisher(self_waiting_worker) as self_wait_replenisher:
+            self_wait_holder.append(self_wait_replenisher)
+            self.assertEqual(self_wait_replenisher("lab", None), "started")
+            self.assertTrue(self_wait_replenisher.wait(timeout_s=2.0))
+            self.assertEqual(self_wait_replenisher.failed, 1)
+            self.assertIn("cannot call wait()", self_wait_replenisher.last_error)
 
 
 if __name__ == "__main__":

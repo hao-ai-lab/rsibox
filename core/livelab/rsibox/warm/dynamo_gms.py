@@ -11,9 +11,9 @@ Socket layout mirrors `gpu_memory_service/common/utils.py`:
 Key guarantees:
 - Pure Python stdlib at import time; never imports `torch`, `msgspec`, or `gpu_memory_service`.
 - Enforces `AF_UNIX` `MAX_SOCK_PATH` on both sample and resolved UUID paths before starting.
-- Enforces `RLIMIT_NOFILE` preflight (`min_nofile=4096` default, safe soft-limit raise up to
-  `min(min_nofile, hard_limit)` or fail-closed finding) so GMS VMM `SCM_RIGHTS` FD exports
-  do not crash mid-load or mid-restore with `[Errno 24] Too many open files`.
+- Enforces `RLIMIT_NOFILE` preflight (`min_nofile=4096` default, `RSIBOX_GMS_MIN_NOFILE` env
+  override): `probe()` checks strictly read-only, while `ensure_ready()` / `prepare_nofile()`
+  safely raises the soft limit only when `hard_limit >= min_nofile`.
 - Probes GMS sockets with the lock-free MsgPack `GetRuntimeStateRequest` frame so real GMS
   servers reply cleanly with zero `Handshake recv error` logs and expose `committed` state
   (failing fast when `read_only=True` against an uncommitted `EMPTY` GMS layout).
@@ -53,6 +53,7 @@ GMS_VLLM_LOAD_FORMAT = "gms"
 GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 GMS_SGLANG_LOAD_FORMAT = "gms"
 ENV_GMS_DEVICE_UUID_MAP = "RSIBOX_GMS_DEVICE_UUID_MAP"
+ENV_GMS_MIN_NOFILE = "RSIBOX_GMS_MIN_NOFILE"
 DEFAULT_RO_CONNECT_TIMEOUT_MS = 10_000
 DEFAULT_MIN_NOFILE = 4096
 RECOMMENDED_NOFILE = 65536
@@ -112,22 +113,44 @@ def _default_set_nofile(soft_limit: int, hard_limit: int) -> None:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
 
 
-def _limit_satisfies(limit_value: int, required: int) -> bool:
+def _is_infinite_limit(limit_value: int) -> bool:
     rlim_infinity = getattr(resource, "RLIM_INFINITY", -1) if resource is not None else -1
-    return limit_value == rlim_infinity or limit_value < 0 or limit_value >= required
+    return limit_value == rlim_infinity or limit_value < 0
+
+
+def _limit_satisfies(limit_value: int, required: int) -> bool:
+    return _is_infinite_limit(limit_value) or limit_value >= required
+
+
+def _resolve_min_nofile(min_nofile: int | None) -> int:
+    """Resolve `min_nofile` from explicit argument, `RSIBOX_GMS_MIN_NOFILE`, or default."""
+    if min_nofile is None:
+        raw_env = os.environ.get(ENV_GMS_MIN_NOFILE)
+        if raw_env is None or not raw_env.strip():
+            return DEFAULT_MIN_NOFILE
+        try:
+            parsed = int(raw_env.strip())
+        except ValueError as error:
+            raise ValueError(f"{ENV_GMS_MIN_NOFILE} must be a non-negative integer, got {raw_env!r}") from error
+        if parsed < 0:
+            raise ValueError(f"{ENV_GMS_MIN_NOFILE} must be a non-negative integer, got {raw_env!r}")
+        return parsed
+    if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
+        raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
+    return int(min_nofile)
 
 
 def nofile_limit_finding(
     min_nofile: int = DEFAULT_MIN_NOFILE,
     *,
-    auto_raise: bool = True,
+    auto_raise: bool = False,
     get_nofile: Callable[[], tuple[int, int] | None] | None = None,
     set_nofile: Callable[[int, int], None] | None = None,
 ) -> dict[str, Any] | None:
     """Return a `gms_nofile_limit` finding when `RLIMIT_NOFILE` soft limit is below `min_nofile`.
 
-    When `auto_raise` is True and `hard_limit` exceeds `soft_limit`, safely raises the soft
-    limit up to `min(min_nofile, hard_limit)`. Fails closed if still below `min_nofile`.
+    Read-only by default (`auto_raise=False`). When `auto_raise=True`, calls `set_nofile`
+    ONLY if `hard_limit >= min_nofile` so process-global limits are never mutated on failure.
     """
     if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
         raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
@@ -137,43 +160,45 @@ def nofile_limit_finding(
     if limits is None:
         return None
     soft_limit, hard_limit = int(limits[0]), int(limits[1])
-    if _limit_satisfies(soft_limit, min_nofile):
+    soft_exceeds_hard = (not _is_infinite_limit(hard_limit)) and (
+        _is_infinite_limit(soft_limit) or soft_limit > hard_limit
+    )
+    if not soft_exceeds_hard and _limit_satisfies(soft_limit, min_nofile):
         return None
 
     effective_soft, raise_error = soft_limit, None
-    if auto_raise:
-        target_soft = min_nofile if _limit_satisfies(hard_limit, min_nofile) else hard_limit
-        if target_soft > soft_limit:
-            apply_limits = set_nofile if set_nofile is not None else (
-                _default_set_nofile if get_nofile is None else None
-            )
+    if auto_raise and not soft_exceeds_hard and _limit_satisfies(hard_limit, min_nofile):
+        if min_nofile > soft_limit:
+            apply_limits = set_nofile if set_nofile is not None else (_default_set_nofile if get_nofile is None else None)
             if apply_limits is None:
                 raise_error = "set_nofile hook not provided for custom get_nofile"
             else:
                 try:
-                    apply_limits(target_soft, hard_limit)
-                    effective_soft = target_soft
+                    apply_limits(min_nofile, hard_limit)
+                    effective_soft = min_nofile
                 except (OSError, ValueError) as error:
                     raise_error = str(error)
         if _limit_satisfies(effective_soft, min_nofile):
             return None
 
-    observed = f"RLIMIT_NOFILE soft={effective_soft}, hard={hard_limit} (below required min_nofile={min_nofile})"
+    recommended = max(RECOMMENDED_NOFILE, min_nofile)
+    detail = f"invalid: soft > hard; required min_nofile={min_nofile}" if soft_exceeds_hard else f"below required min_nofile={min_nofile}"
+    observed = f"RLIMIT_NOFILE soft={effective_soft}, hard={hard_limit} ({detail})"
     if raise_error:
         observed = f"{observed}; auto-raise failed: {raise_error}"
     return harness.plain_finding(
         "gms_nofile_limit",
         observed,
-        f"RLIMIT_NOFILE soft >= {min_nofile} (recommended {RECOMMENDED_NOFILE})",
+        f"RLIMIT_NOFILE soft >= {min_nofile} (recommended {recommended})",
         why=(
             "Dynamo GMS exports per-allocation CUDA VMM handles as file descriptors over "
             "Unix SCM_RIGHTS; low FD caps (such as Docker's default 1024) exhaust open FDs "
             "mid-load or mid-restore with [Errno 24] Too many open files"
         ),
         actions=[
-            f"raise container FD cap with --ulimit nofile={RECOMMENDED_NOFILE}:{RECOMMENDED_NOFILE}",
-            f"or raise shell limit with `ulimit -n {RECOMMENDED_NOFILE}` before launching",
-            "or pass min_nofile=0 to DynamoGmsStore to disable this preflight check",
+            f"raise container FD cap with --ulimit nofile={recommended}:{recommended}",
+            f"or raise shell limit with `ulimit -n {recommended}` before launching",
+            f"or set {ENV_GMS_MIN_NOFILE}=0 (or pass min_nofile=0) to disable this preflight check",
         ],
         risk="engine or GMS restore crashes mid-transfer with [Errno 24] Too many open files",
     )
@@ -570,13 +595,12 @@ class DynamoGmsStore:
         stamp_path: str | None = None,
         uuid_resolver: Callable[..., list[str] | None] | None = None,
         target_resolver: Callable[..., list[tuple[int, str]] | None] | None = None,
-        min_nofile: int = DEFAULT_MIN_NOFILE,
+        min_nofile: int | None = None,
         auto_raise_nofile: bool = True,
         get_nofile: Callable[[], tuple[int, int] | None] | None = None,
         set_nofile: Callable[[int, int], None] | None = None,
     ):
-        if isinstance(min_nofile, bool) or not isinstance(min_nofile, int) or min_nofile < 0:
-            raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
+        resolved_min_nofile = _resolve_min_nofile(min_nofile)
         self.socket_dir = os.path.abspath(socket_dir or default_socket_dir())
         self.tags = tuple(tags) if tags else GMS_TAGS
         self.read_only = bool(read_only)
@@ -592,7 +616,7 @@ class DynamoGmsStore:
         self.extra_pythonpath = tuple(str(p) for p in extra_pythonpath if p)
         self.log_dir = log_dir
         self.stamp_path = stamp_path or os.path.join(self.socket_dir, "rsibox_gms_stamp.json")
-        self.min_nofile = int(min_nofile)
+        self.min_nofile = resolved_min_nofile
         self.auto_raise_nofile = bool(auto_raise_nofile)
         self._get_nofile = get_nofile
         self._set_nofile = set_nofile
@@ -603,7 +627,15 @@ class DynamoGmsStore:
         self._owned_start_times: dict[int, int | None] = {}
 
     def check_nofile(self) -> dict[str, Any] | None:
-        """Verify (or safely raise) `RLIMIT_NOFILE` against `self.min_nofile`."""
+        """Read-only verification of `RLIMIT_NOFILE` against `self.min_nofile`."""
+        return nofile_limit_finding(
+            self.min_nofile,
+            auto_raise=False,
+            get_nofile=self._get_nofile,
+        )
+
+    def prepare_nofile(self) -> dict[str, Any] | None:
+        """Verify `RLIMIT_NOFILE`, safely raising soft limit if `auto_raise_nofile=True`."""
         return nofile_limit_finding(
             self.min_nofile,
             auto_raise=self.auto_raise_nofile,
@@ -893,6 +925,15 @@ class DynamoGmsStore:
     ) -> StoreProbe:
         """Reuse already-running GMS servers, and spawn local GMS servers only for missing GPUs."""
         t0 = time.monotonic()
+        for preflight_finding in (long_socket_path_finding(self.socket_dir, self.tags), self.prepare_nofile()):
+            if preflight_finding is not None:
+                return StoreProbe(
+                    ok=False,
+                    backend=self.name,
+                    seconds=time.monotonic() - t0,
+                    error=preflight_finding["observed"],
+                    finding=preflight_finding,
+                )
         first = self.probe(gpus=gpus, visible_devices=visible_devices, tp=tp, allow_remapped=True)
         if first.ok or not first.matched_gpus:
             return first

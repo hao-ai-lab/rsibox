@@ -9,6 +9,7 @@ from . import dynamo_gms, recovery, snapshot_contract, types, weight_store
 from .dynamo_gms import (
     DEFAULT_MIN_NOFILE,
     ENV_GMS_DEVICE_UUID_MAP,
+    ENV_GMS_MIN_NOFILE,
     GMS_SGLANG_LOAD_FORMAT,
     GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
@@ -52,6 +53,7 @@ __all__ = [
     "DynamoGmsStore",
     "DynamoK8sSnapshotDriver",
     "ENV_GMS_DEVICE_UUID_MAP",
+    "ENV_GMS_MIN_NOFILE",
     "ENV_SNAPSHOT_CONTROL_DIR",
     "GMS_SGLANG_LOAD_FORMAT",
     "GMS_TAGS",
