@@ -39,11 +39,35 @@ def _wrap(side, fn, first):
     return wrapped
 
 
+def install_replay_guard(worker, guard):
+    """Attach `guard` onto replay-capable graph wrappers on `worker.model_runner` (idempotent)."""
+    runner = getattr(worker, "model_runner", None)
+    if runner is None:
+        return 0
+    attached = 0
+    candidates = []
+    mgr = getattr(runner, "cudagraph_manager", None)
+    if mgr is not None:
+        candidates.append(mgr)
+        br = getattr(mgr, "breakable_cg_runner", None)
+        if br is not None:
+            candidates.append(br)
+    for attr in ("cudagraph_wrappers", "graph_wrappers"):
+        extra = getattr(runner, attr, None)
+        if extra:
+            candidates.extend(extra)
+    for obj in candidates:
+        if callable(getattr(obj, "replay", None)):
+            guard.attach_wrapper(obj)
+            attached += 1
+    return attached
+
+
 class KernelWorkerExtension:
     def rsibox_kernel_endpoint(self):
         """This rank's side (side.py), made at the first call. It wraps this rank's
         execute_model (a step starts) and sample_tokens (the same step, later) to keep the
-        side's per-step version log."""
+        side's per-step version log and installs zero-overhead CUDA-graph replay guards."""
         if not _ENDPOINT:
             from .side import Side
             side = Side("worker", scope={"worker": self}, rank=getattr(self, "rank", None))
@@ -53,7 +77,20 @@ class KernelWorkerExtension:
                 self.sample_tokens = _wrap(side, self.sample_tokens, False)
             except Exception:              # the version log is optional; the protocol is not
                 pass
+            try:
+                install_replay_guard(self, side.graph_guard)
+            except Exception:
+                pass
         return _ENDPOINT[0]
+
+    def rsibox_graph_guard(self):
+        """Return this rank's `GraphReplayGuard`."""
+        return self.rsibox_kernel_endpoint().graph_guard
+
+    def rsibox_check_graph_replay(self, key, input_sig=None):
+        """O(1) fail-closed check before replaying `key` (zero overhead at epoch 0)."""
+        guard = self.rsibox_kernel_endpoint().graph_guard
+        guard.check_before_replay(key, input_sig)
 
     def rsibox_kernel(self, method, payload=None):
         """The kernel participant protocol on this rank. Returns an ok-dict, never raises."""

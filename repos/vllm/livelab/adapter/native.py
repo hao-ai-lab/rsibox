@@ -16,11 +16,14 @@ import fcntl
 import glob
 import hashlib
 import importlib
+import itertools
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import weakref
@@ -752,3 +755,215 @@ class NativeManager:
         if not st:
             return {}
         return {_witness_key(op_spec, op_name, st["key"]): [st["key"]] for op_name, op_spec in st["ops"].items()}
+
+
+_BG_BUILD_RUNNER = (
+    "import json, sys, traceback\n"
+    "from adapter.native import build_native\n"
+    "try:\n"
+    "    with open(sys.argv[1], 'r', encoding='utf-8') as fh: spec = json.load(fh)\n"
+    "    payload = {'ok': True, 'result': build_native(spec)}\n"
+    "except BaseException as exc:\n"
+    "    payload = {'ok': False, 'error': f'{type(exc).__name__}: {exc}', 'traceback': traceback.format_exc()[-1500:]}\n"
+    "with open(sys.argv[2], 'w', encoding='utf-8') as fh: json.dump(payload, fh)\n"
+    "sys.exit(0 if payload['ok'] else 1)\n"
+)
+
+
+def _terminate_process_group(proc: subprocess.Popen, grace_s: float = 0.5) -> None:
+    """Terminate `proc` and its entire session process group without leaving orphans."""
+    if proc.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=0.1)
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGTERM)
+    try:
+        proc.wait(timeout=max(0.0, float(grace_s)))
+        return
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(pgid, signal.SIGKILL)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5.0)
+
+
+class BackgroundBuildJob:
+    """One non-blocking background native compilation subprocess (`subprocess.Popen`)."""
+
+    def __init__(self, job_id: str, proc: subprocess.Popen, tmp_dir: str,
+                 stdout_path: str, stderr_path: str, *, result_path: str | None = None,
+                 key: str | None = None):
+        self.job_id, self.key = job_id, key
+        self._proc, self._tmp_dir = proc, tmp_dir
+        self._stdout_path, self._stderr_path, self._result_path = stdout_path, stderr_path, result_path
+        self._t0, self._lock, self._result, self._cancelled = time.perf_counter(), threading.Lock(), None, False
+
+    @property
+    def pid(self) -> int: return self._proc.pid
+
+    @property
+    def cancelled(self) -> bool: return self._cancelled
+
+    @property
+    def elapsed_s(self) -> float: return round(time.perf_counter() - self._t0, 6)
+
+    @property
+    def done(self) -> bool: return self._result is not None or self._proc.poll() is not None
+
+    def _read_tail(self, path: str, limit: int = 2000) -> str:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()[-limit:]
+        except OSError:
+            return ""
+
+    def _finalize(self, rc: int) -> dict:
+        if self._result is not None:
+            return dict(self._result)
+        elapsed = self.elapsed_s
+        stdout, stderr, payload = self._read_tail(self._stdout_path), self._read_tail(self._stderr_path), None
+        if self._result_path and os.path.isfile(self._result_path):
+            with contextlib.suppress(OSError, json.JSONDecodeError):
+                with open(self._result_path, "r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+        if self._tmp_dir:
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = ""
+        if self._cancelled:
+            res = {"ok": False, "job_id": self.job_id, "key": self.key, "cancelled": True,
+                   "returncode": rc, "build_s": elapsed, "error": "background build cancelled"}
+        elif isinstance(payload, dict):
+            res = {"ok": bool(payload.get("ok")), "job_id": self.job_id,
+                   "key": (payload.get("result") or {}).get("key", self.key), "cancelled": False,
+                   "returncode": rc, "build_s": elapsed,
+                   **({"result": payload["result"]} if "result" in payload else {}),
+                   **({"error": payload["error"]} if "error" in payload else {})}
+        else:
+            err = (stderr or stdout).strip()[-1200:]
+            res = {"ok": rc == 0, "job_id": self.job_id, "key": self.key, "cancelled": False,
+                   "returncode": rc, "build_s": elapsed, "stdout": stdout, "stderr": stderr,
+                   **({"error": err or f"build subprocess exited with code {rc}"} if rc != 0 else {})}
+        self._result = res
+        return dict(res)
+
+    def poll(self) -> dict | None:
+        """Non-blocking check: returns `None` while running, or the final result dict."""
+        with self._lock:
+            if self._result is not None:
+                return dict(self._result)
+            rc = self._proc.poll()
+            return None if rc is None else self._finalize(rc)
+
+    def wait(self, timeout_s: float | None = None) -> dict:
+        """Block up to `timeout_s` seconds for completion; raises `TimeoutError` on timeout."""
+        if self._result is not None:
+            return dict(self._result)
+        try:
+            rc = self._proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"background build {self.job_id} did not finish within {timeout_s} s") from exc
+        with self._lock:
+            return self._finalize(rc)
+
+    def cancel(self, grace_s: float = 0.5) -> bool:
+        """Terminate the background build subprocess group and reap it with no orphans."""
+        with self._lock:
+            if self._result is not None:
+                return False
+            if (rc := self._proc.poll()) is not None:
+                self._finalize(rc)
+                return False
+            self._cancelled = True
+            _terminate_process_group(self._proc, grace_s=grace_s)
+            final_rc = self._proc.poll()
+            self._finalize(final_rc if final_rc is not None else -signal.SIGKILL)
+            return True
+
+
+class BackgroundBuildPool:
+    """Pool of non-blocking background native build subprocesses."""
+
+    def __init__(self):
+        self._jobs: dict[str, BackgroundBuildJob] = {}
+        self._seq = itertools.count(1)
+        self._lock = threading.Lock()
+
+    def _spawn_env(self, extra_env: dict | None = None) -> dict[str, str]:
+        env = dict(os.environ)
+        pkg_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+        core_root = os.path.abspath(os.path.join(pkg_root, "..", "..", "..", "core", "livelab"))
+        parts = [p for p in [pkg_root, core_root, *env.get("PYTHONPATH", "").split(os.pathsep)] if p]
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
+        if extra_env:
+            env.update({str(k): str(v) for k, v in extra_env.items()})
+        return env
+
+    def compile_async(self, spec: dict | None = None, *, job_id: str | None = None,
+                      cmd: list[str] | None = None, cwd: str | None = None,
+                      env: dict | None = None) -> BackgroundBuildJob:
+        """Launch a non-blocking subprocess build for `spec` (or an explicit compiler `cmd`)."""
+        if spec is None and not cmd:
+            raise ValueError("compile_async requires either a native build `spec` or an explicit `cmd`")
+        key = spec_key(spec) if spec is not None else None
+        jid = job_id or (f"native-{key}-{next(self._seq)}" if key else f"build-{next(self._seq)}")
+        tmp_dir = tempfile.mkdtemp(prefix="rsibox-bgbuild-")
+        stdout_path, stderr_path, result_path = os.path.join(tmp_dir, "stdout.log"), os.path.join(tmp_dir, "stderr.log"), None
+        try:
+            if cmd is not None:
+                argv, spawn_env = [str(a) for a in cmd], self._spawn_env(env) if env is not None else None
+            else:
+                spec_path, result_path = os.path.join(tmp_dir, "spec.json"), os.path.join(tmp_dir, "result.json")
+                with open(spec_path, "w", encoding="utf-8") as fh:
+                    json.dump(spec, fh)
+                argv, spawn_env = [sys.executable, "-c", _BG_BUILD_RUNNER, spec_path, result_path], self._spawn_env(env)
+            with open(stdout_path, "wb") as out_fh, open(stderr_path, "wb") as err_fh:
+                proc = subprocess.Popen(argv, cwd=cwd, env=spawn_env, stdin=subprocess.DEVNULL,
+                                        stdout=out_fh, stderr=err_fh, start_new_session=True)
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        job = BackgroundBuildJob(jid, proc, tmp_dir, stdout_path, stderr_path, result_path=result_path, key=key)
+        with self._lock:
+            self._jobs[jid] = job
+        return job
+
+    def get(self, job_id: str) -> BackgroundBuildJob | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def _require(self, job_id: str) -> BackgroundBuildJob:
+        if (job := self.get(job_id)) is None:
+            raise KeyError(f"unknown background build job: {job_id!r}")
+        return job
+
+    def poll(self, job_id: str) -> dict | None: return self._require(job_id).poll()
+    def wait(self, job_id: str, timeout_s: float | None = None) -> dict: return self._require(job_id).wait(timeout_s=timeout_s)
+    def cancel(self, job_id: str, grace_s: float = 0.5) -> bool:
+        job = self.get(job_id)
+        return False if job is None else job.cancel(grace_s=grace_s)
+
+    def active_jobs(self) -> list[str]:
+        with self._lock:
+            items = list(self._jobs.items())
+        return [jid for jid, job in items if job.poll() is None]
+
+    def cancel_all(self, grace_s: float = 0.5) -> int:
+        with self._lock:
+            jobs = list(self._jobs.values())
+        return sum(1 for job in jobs if job.cancel(grace_s=grace_s))
+
+    def __enter__(self) -> "BackgroundBuildPool": return self
+    def __exit__(self, *_exc) -> None: self.cancel_all()
+
+
+_DEFAULT_BUILD_POOL = BackgroundBuildPool()
+
+
+def compile_async(spec: dict | None = None, *, pool: BackgroundBuildPool | None = None, **kwargs) -> BackgroundBuildJob:
+    """Start a non-blocking background compilation job on `pool` (or the default pool)."""
+    return (pool if pool is not None else _DEFAULT_BUILD_POOL).compile_async(spec, **kwargs)

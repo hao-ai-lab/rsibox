@@ -55,6 +55,7 @@ from kernel import coordinator as C
 from kernel import findings as F
 from kernel import locate as L
 
+from . import graph_guard as GG
 from . import graphs as G
 from . import native as N
 from . import recapture as RC
@@ -156,7 +157,8 @@ class Side(Endpoint):
         self._tags = {}        # id(code) -> (code, tag); the code ref keeps the id unique
         self.steps, self.vlog, self.mid_step_changes, self._cur = 0, [], [], None
         self._plan = threading.local()    # the plan this thread prepares (graph checks read it)
-        self.recapture = RC.Recapture()
+        self.graph_guard = GG.GraphReplayGuard()
+        self.recapture = RC.Recapture(guard=self.graph_guard)
         self.r1 = self.recapture
         self.native = N.NativeManager()
 
@@ -301,8 +303,12 @@ class Side(Endpoint):
         return r
 
     def local(self, method, payload):
-        """Include staged native validation, cleanup on abort/undo, and native hashes in proof."""
+        """Include staged native validation, graph-guard epoch bumps, cleanup on abort/undo,
+        and native hashes in proof."""
         txn, _ = C.txn_ref(payload)
+        was_committed = (
+            method == "undo" and isinstance(txn, str) and self.lp._state.get(txn) == "committed"
+        )
         if isinstance(txn, str):
             if method == "validate" and self.native.has_staged(txn):
                 nr = self.native.validate(txn)
@@ -310,7 +316,16 @@ class Side(Endpoint):
                     return nr
             elif method in ("abort", "undo"):
                 self.native.abort(txn)
+        if was_committed:
+            self.graph_guard.bump_code_epoch(f"undo:{txn}")
         r = super().local(method, payload)
+        if (
+            method == "commit"
+            and isinstance(txn, str)
+            and r.get("ok")
+            and not r.get("abstain")
+        ):
+            self.graph_guard.bump_code_epoch(f"commit:{txn}")
         if method == "proof" and isinstance(txn, str) and r.get("ok") and isinstance(r.get("hashes"), dict):
             nh = self.native.hashes(txn)
             if nh:
@@ -429,7 +444,7 @@ class Side(Endpoint):
             return F.not_ok(f"recapture: {type(e).__name__}: {e}", [F.finding(
                 "rebuild_failed", f"{type(e).__name__}: {e}", "recapture can reach this rank's graphs")])
         if method == "graphs":
-            return F.ok(**RC.graphs(eng))
+            return F.ok(**RC.graphs(eng), guard=self.graph_guard.stats())
         if method in ("recapture_extend", "r1_extend"):
             return self.recapture.extend(eng, p["txn"], self.lp.journal, self.lp.witness,
                                          p.get("sizes"), p.get("extend_id"))
@@ -438,7 +453,8 @@ class Side(Endpoint):
         if self.lp._state.get(p["txn"]) != "committed":
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
-                                  p.get("modes"), p.get("sizes"))
+                                  p.get("modes"), p.get("sizes"),
+                                  release_old=bool(p.get("release_old", False)))
 
     _r1 = _recapture
 
