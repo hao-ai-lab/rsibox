@@ -13,7 +13,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 | **veRL** | CPU CI & 4× GB200 (21 Ray actors, eager & FSDP CG) | 298 s cold / 180 s warm → **36.4 s** live + S0 reset (8.2×); offline `replay-adv` 12.6 ms | [adapter](../repos/verl/livelab/README.md) · [costs](../repos/verl/kb/costs.md) · [grpo-gsm8k](../repos/verl/examples/grpo-gsm8k/README.md) |
 | **miles** | CPU CI & 2× B200 / GB200 | 82.4 s cold / 53.5 s warm → **0.89 s** live + S0 reset (93×); 38 ms median commit | [costs](../repos/miles/kb/costs.md) |
 | **Transformers** | CPU CI & 1× B200 (`Qwen3-0.6B` / `Qwen3-8B`) | 7.75 s cold → **0.61 s** live (12.8×); H2D hook resume **0.31 s** (15.4 GiB freed) | [architecture](../repos/transformers/docs/architecture.md) · [costs](../repos/transformers/kb/costs.md) |
-| **TRT-LLM** | CPU CI (`ToyTrtllmLab` 11/11) & 1× B200 (`TrtllmLab` live + `TrtllmQuiesceHooks`) | 26.7 s cold-JIT / 12.4 s warm-JIT → **0.107 s** live (249× / 116×); KV quiesce frees 23.6 GiB | [architecture](../repos/trtllm/docs/architecture.md) · [costs](../repos/trtllm/kb/costs.md) |
+| **TRT-LLM** | CPU CI (`ToyTrtllmLab` 11/11) & 1× B200 (`rsibox conformance trtllm --real` **11/11** + `TrtllmQuiesceHooks`) | 26.7 s cold-JIT / 12.4 s warm-JIT → **0.107 s** live (249× / 116×); `c9` 59 ms / 7.2 ms; KV quiesce frees 23.6 GiB | [architecture](../repos/trtllm/docs/architecture.md) · [costs](../repos/trtllm/kb/costs.md) |
 | **Toy sandbox** | CPU CI (2-rank stdlib reference) | ~1.5 s for all 11 verification cases on a laptop | [verification suite](../core/livelab/conformance/README.md) |
 
 ## Repository layout

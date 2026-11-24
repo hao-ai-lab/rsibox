@@ -13,14 +13,15 @@ from pathlib import Path
 from unittest import mock
 
 import adapter
+from adapter.fixture.py_executor import ToyPyExecutor
 from adapter.lab import TrtllmLab
 from adapter.snapshot_hooks import TrtllmQuiesceHooks
 from adapter.toy_lab import ToyTrtllmLab
 from rsibox.warm import DynamoK8sSnapshotDriver, QuiesceReceipt, SENTINEL_READY, SENTINEL_RESTORE_COMPLETE
 
 
-class LazyImportTest(unittest.TestCase):
-    """Importing the TRT-LLM adapter modules must never eagerly import GPU or TRT-LLM libraries."""
+class LazyImportAndConfigTest(unittest.TestCase):
+    """Importing the TRT-LLM adapter must never eagerly import GPU or TRT-LLM libraries."""
 
     def test_adapter_imports_stay_gpu_free(self) -> None:
         livelab_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -35,13 +36,27 @@ class LazyImportTest(unittest.TestCase):
         )
         completed = subprocess.run(
             [sys.executable, "-I", "-c", probe, livelab_dir, adapter.LIVELAB],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.assertEqual(json.loads(completed.stdout.strip()), [])
 
-    def test_launch_environment_translates_cli_flags(self) -> None:
+    def test_launch_environment_flags_leading_delimiter_help_and_unknown(self) -> None:
         translated = TrtllmLab.launch_environment(
-            ["--", "--model", "Qwen/Qwen3-0.6B", "--mem-fraction", "0.2", "--check-timeout", "45", "--rpc-timeout", "15"]
+            [
+                "--",
+                "--model",
+                "Qwen/Qwen3-0.6B",
+                "--mem-fraction",
+                "0.2",
+                "--check-timeout",
+                "45",
+                "--rpc-timeout",
+                "15",
+                "--quiesce-timeout",
+                "90",
+            ]
         )
         self.assertEqual(
             translated,
@@ -50,8 +65,60 @@ class LazyImportTest(unittest.TestCase):
                 "RSIBOX_TRTLLM_MEM_FRACTION": "0.2",
                 "RSIBOX_TRTLLM_CHECK_TIMEOUT": "45.0",
                 "RSIBOX_TRTLLM_RPC_TIMEOUT": "15.0",
+                "RSIBOX_TRTLLM_QUIESCE_TIMEOUT": "90.0",
             },
         )
+        with self.assertRaises(SystemExit) as help_exit:
+            TrtllmLab.launch_environment(["--help"])
+        self.assertEqual(help_exit.exception.code, 0)
+
+        with self.assertRaises(SystemExit) as unknown_exit:
+            TrtllmLab.launch_environment(["--unknown-flag", "1"])
+        self.assertEqual(unknown_exit.exception.code, 2)
+
+        with self.assertRaises(SystemExit) as double_delim_exit:
+            TrtllmLab.launch_environment(["--", "--", "--model", "Qwen/Qwen3-0.6B"])
+        self.assertEqual(double_delim_exit.exception.code, 2)
+
+    def test_real_mode_refuses_tp_gt_1_and_explicit_args_override_env(self) -> None:
+        with self.assertRaises(ValueError):
+            TrtllmLab(model="dummy", tensor_parallel_size=2, auto_spawn=False)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RSIBOX_TRTLLM_MEM_FRACTION": "0.5",
+                "RSIBOX_TRTLLM_CHECK_TIMEOUT": "99",
+                "RSIBOX_TRTLLM_RPC_TIMEOUT": "88",
+                "RSIBOX_TRTLLM_QUIESCE_TIMEOUT": "77",
+            },
+            clear=False,
+        ):
+            explicit_lab = TrtllmLab(
+                model="dummy",
+                free_gpu_memory_fraction=0.2,
+                check_timeout=12.0,
+                rpc_timeout=8.0,
+                quiesce_timeout=30.0,
+                auto_spawn=False,
+            )
+            self.assertEqual(explicit_lab.engine_config["free_gpu_memory_fraction"], 0.2)
+            self.assertEqual(explicit_lab.check_timeout, 12.0)
+            self.assertEqual(explicit_lab.rpc_timeout, 8.0)
+            self.assertEqual(explicit_lab.quiesce_timeout, 30.0)
+
+    def test_toy_executor_validates_refreshed_pool_pointers_and_mapping(self) -> None:
+        executor = ToyPyExecutor()
+        self.assertTrue(executor.generate([[1, 2]], max_tokens=2))
+
+        executor.kv_cache_manager.kv_cache_pool_pointers = []
+        with self.assertRaises(RuntimeError):
+            executor.generate([[1, 2]], max_tokens=2)
+
+        executor.kv_cache_manager.kv_cache_pool_pointers = [1]
+        executor.kv_cache_manager.kv_cache_pool_mapping = []
+        with self.assertRaises(RuntimeError):
+            executor.generate([[1, 2]], max_tokens=2)
 
 
 class ToyTrtllmAdapterTest(unittest.TestCase):
@@ -202,12 +269,26 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
         self.assertTrue(self.lab.uninstall()["ok"])
         self.assertEqual(self.lab.check()["output"], base_output)
 
-    def test_quiesce_blocks_generation_until_resumed(self) -> None:
+    def test_quiesce_state_machine_refuses_duplicate_quiesce_unreleased_resume_and_check(self) -> None:
         hooks = self.lab.quiesce_hooks()
+
+        # Resume without prior quiesce must fail closed.
+        self.assertFalse(hooks.resume_after_restore(QuiesceReceipt(ok=False, error="failed"))["ok"])
+        self.assertFalse(hooks.resume_after_restore(None)["ok"])
+        unquiesced_resume = hooks.resume_after_restore(QuiesceReceipt(ok=True, released=("kv_cache",)))
+        self.assertFalse(unquiesced_resume["ok"])
+        self.assertIn("not quiesced", unquiesced_resume["error"])
+
         receipt = hooks.quiesce_for_snapshot()
         self.assertTrue(receipt.ok)
         self.assertEqual(receipt.released, ("kv_cache",))
 
+        # Double quiesce must fail closed.
+        duplicate_receipt = hooks.quiesce_for_snapshot()
+        self.assertFalse(duplicate_receipt.ok)
+        self.assertIn("already quiesced", duplicate_receipt.error or "")
+
+        # Generation / check while quiesced must fail cleanly.
         with self.assertRaises(RuntimeError):
             self.lab._run_workload(None)
 
@@ -216,7 +297,14 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
         self.assertEqual(resume_reply["resumed"], ["kv_cache"])
         self.assertTrue(self.lab.check()["ok"])
 
-    def test_fail_closed_validation_and_partial_quiesce_rollback(self) -> None:
+        # Verify lab.check() itself rejects while quiesced (and recovers cleanly via respawn).
+        receipt_two = hooks.quiesce_for_snapshot()
+        self.assertTrue(receipt_two.ok)
+        quiesced_check = self.lab.check()
+        self.assertFalse(quiesced_check["ok"])
+        self.assertIn("quiesced", quiesced_check.get("error", ""))
+
+    def test_fail_closed_validation_partial_rollback_and_dirty_poison_on_failed_rollback(self) -> None:
         with self.assertRaises(TypeError):
             TrtllmQuiesceHooks(self.lab, release_tags="kv_cache")
 
@@ -240,16 +328,42 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
                 self.assertIn("injected rank1 quiesce failure", failed.error or "")
                 self.assertFalse((Path(control_dir) / SENTINEL_READY).exists())
 
-        # rank0 must have been rolled back so generation still works cleanly.
+        # rank0 must have been rolled back cleanly so generation still works.
         self.assertTrue(self.lab.check()["ok"])
 
-        # Dirty and stopped labs must fail closed.
-        self.lab._dirty = True
+        # If rank0 rollback ITSELF fails when rank1 quiesce fails, lab must become _dirty and poisoned.
+        original_rank0_call = self.lab.workers[0].call
+        with (
+            mock.patch.object(
+                self.lab.workers[1],
+                "call",
+                side_effect=lambda method, payload=None, timeout=None: (
+                    {"ok": False, "error": "rank1 quiesce boom"}
+                    if method == "quiesce_memory"
+                    else original_rank1_call(method, payload, timeout)
+                ),
+            ),
+            mock.patch.object(
+                self.lab.workers[0],
+                "call",
+                side_effect=lambda method, payload=None, timeout=None: (
+                    {"ok": False, "error": "rank0 rollback boom"}
+                    if method == "resume_memory"
+                    else original_rank0_call(method, payload, timeout)
+                ),
+            ),
+        ):
+            poisoned_receipt = hooks.quiesce_for_snapshot()
+            self.assertFalse(poisoned_receipt.ok)
+            self.assertIn("rank0 rollback boom", poisoned_receipt.error or "")
+            self.assertTrue(self.lab._dirty)
+            self.assertEqual(self.lab.status()["state"], "poisoned")
+
+        # Dirty/poisoned and stopped labs must fail closed.
         self.assertFalse(hooks.quiesce_for_snapshot().ok)
         self.assertFalse(hooks.resume_after_restore(QuiesceReceipt(ok=True, released=("kv_cache",)))["ok"])
         with self.assertRaises(RuntimeError):
             hooks.warmup_for_snapshot()
-        self.lab._dirty = False
 
         self.lab.close()
         self.assertFalse(hooks.quiesce_for_snapshot().ok)

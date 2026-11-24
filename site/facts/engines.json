@@ -612,7 +612,7 @@
      },
      "status": "gpu_verified",
      "source": "repos/trtllm/kb/costs.md; repos/trtllm/docs/architecture.md",
-     "note": "11/11 CPU conformance on ToyTrtllmLab (2 spawned ranks, c9 0.0097 s install / 0.0041 s undo), 9/9 unit tests, 9/9 rsibox doctor (0 GPU import violations). Live 1x B200 verification on Qwen3-0.6B: Cold-JIT boot 26.6563 s, Warm-JIT boot 12.4021 +/- 0.1442 s, live edit+check 0.1072 +/- 0.0118 s (248.55x vs cold-JIT / 115.64x vs warm-JIT, 17 witness calls on TorchSampler._process_requests, fresh PackageOverlay parity 15.3054 s bit-exact, 6.2 ms bit-exact rollback)."
+     "note": "11/11 CPU conformance on ToyTrtllmLab (2 spawned ranks, c9 0.0100 s install / 0.0048 s undo), 11/11 real-GPU conformance via rsibox conformance trtllm --real on 1x B200 Qwen3-0.6B (c3 visible & 3-chain bit-exact 41.23 s, c5 multi 3-target rollback, c6 closure_changed, c8 respawns 11.54-12.55 s, c9 20-cycle median 0.0592 s install / 0.0072 s undo, c10 zero_witness with fresh divergence, 0% exit), 11/11 unit tests, 9/9 rsibox doctor (0 GPU import violations). Live 1x B200 benchmark: Cold-JIT boot 26.6563 s (N=1), Warm-JIT boot 12.4021 +/- 0.1442 s (N=2), live edit+check 0.1072 +/- 0.0118 s (248.55x vs cold-JIT / 115.64x vs warm-JIT, 17 witness calls on TorchSampler._process_requests, fresh PackageOverlay parity 15.3054 s bit-exact, 6.2 ms bit-exact rollback)."
     },
     {
      "name": "Snapshot KV-cache pool quiesce/resume (`TrtllmQuiesceHooks`)",
