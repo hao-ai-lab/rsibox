@@ -1,6 +1,6 @@
 {
  "shared_kernel": {
-  "what": "All seven engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
+  "what": "All eight engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
   "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
   "gpu_fix_receipt": "PR #136 (B200, TP=2)",
   "source": "core/livelab/kernel/README.md; core/livelab/rsibox/; PR #136"
