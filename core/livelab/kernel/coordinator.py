@@ -1295,7 +1295,7 @@ class Coordinator:
             if reason and reason not in self._recovery_reasons:
                 self._recovery_reasons.append(reason)
             if poison_check is not None:
-                if (participant, poison_check) not in {(f.get("participant"), f.get("check")) for f in self.poison}:
+                if (participant, poison_check) not in {(f.get("participant"), f.get("check")) for f in self.poison} and (poison_check != "participant_failed" or participant not in {f.get("participant") for f in self.poison}):
                     self.poison.append({**F.finding(
                         poison_check, reason, "clean rollback or abort on every participant"),
                         "participant": participant})
