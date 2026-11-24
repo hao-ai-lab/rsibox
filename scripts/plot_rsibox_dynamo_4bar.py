@@ -30,7 +30,7 @@ DATA = [
     ("Qwen3-14B",      "vLLM · TP1 · 29.5 GB",   174.50,  4.54,   False, 42.275 + 7.34,   0.0828),
     ("Qwen3-14B",      "SGLang · TP1 · 29.5 GB",  73.14,  4.18,   False, 28.05 + 6.11,    0.0579),
     ("Qwen3.8-27B",    "vLLM · TP1 · 52 GB",     219.03,  5.9571, False, 63.765 + 9.0823, 0.080945),
-    ("65.5 GB Tier*",  "vLLM · TP1 · 65.5 GB",   183.61,  5.1584, False, 38.42 + 7.0297,  0.075993),
+    ("gpt-oss-120b*",  "vLLM · TP1 · 65.5 GB",   183.61,  5.1584, False, 38.42 + 7.0297,  0.075993),
     ("DeepSeek-V4.1",  "vLLM · TP4 · 491 GiB",  1840.35, 30.96,   True,  296.393,         0.092029),
 ]
 
@@ -171,11 +171,11 @@ def draw_chart(theme_name: str, out_dir: Path) -> Path:
                   color=th["sub"], fontweight="semibold", labelpad=10)
 
     fig.text(0.055, 0.945,
-             "Cold Start vs. Dynamo Snapshot vs. RSIBox Live Code Edit (NVIDIA B200)",
-             fontsize=16.5, fontweight="bold", color=th["text"])
+             "RSIBox + NVIDIA Dynamo: Sub-100ms Live Edits with Fast Snapshot Fault Recovery",
+             fontsize=16.0, fontweight="bold", color=th["text"])
     fig.text(0.055, 0.902,
-             "Dynamo Snapshot restores unchanged code in seconds; editing 1 line forces a restart + re-dump — RSIBox hot-swaps in 58–92 ms (badges = speedup vs. Bar 3).",
-             fontsize=10.3, color=th["sub"])
+             "RSIBox handles live edits in 58–92 ms; on a fault, Dynamo Snapshot restores in 3.6–6.0 s (+80 ms to re-apply edits) vs. 34–296 s to re-snapshot without RSIBox.",
+             fontsize=10.1, color=th["sub"])
 
     leg = ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.125), ncol=2,
                     frameon=False, fontsize=9.6, handlelength=1.4, columnspacing=2.2)
@@ -185,7 +185,7 @@ def draw_chart(theme_name: str, out_dir: Path) -> Path:
 
     fig.text(0.055, 0.022,
              "All runs on NVIDIA B200 with CUDA Graphs ON and bit-exact logprobs=5 verification.  "
-             "*65.5 GB Tier uses a deterministic 32.8B BF16 checkpoint matching gpt-oss-120b size.  "
+             "*gpt-oss-120b tier uses a 65.5 GB BF16 size-matched checkpoint.  "
              "†DeepSeek-V4.1 Snapshot bar uses official Dynamo TEP8 ref (31.0s); Bar 3 excludes re-dump.",
              fontsize=8.2, color=th["muted"])
 
