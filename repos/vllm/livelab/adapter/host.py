@@ -294,7 +294,10 @@ class Host:
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None},
-            rebuild=self._run_recapture)
+            rebuild=self._run_recapture,
+            rank_fields=lab_base.RecaptureCoordinator.DEFAULT_RANK_FIELDS + (
+                "tier", "patched_nodes", "patched_graphs", "compiled_specializations",
+                "fallback_reason", "patch_ms", "compile_ms"))
 
     def _recapture_undo_deadline(self, base_deadline_s):
         """Deadline for undoing R1 graphs (destroying captured CUDA graphs across TP ranks can

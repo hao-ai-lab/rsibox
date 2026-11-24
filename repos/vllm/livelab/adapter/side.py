@@ -58,6 +58,7 @@ from kernel import locate as L
 from . import graph_guard as GG
 from . import graphs as G
 from . import native as N
+from . import pointer_swap as PS
 from . import recapture as RC
 from .worker_ext import Endpoint
 
@@ -160,6 +161,7 @@ class Side(Endpoint):
         self.graph_guard = GG.GraphReplayGuard()
         self._txn_graph_affect: set[str] = set()
         self._txn_pre_epoch: dict[str, int] = {}
+        self._txn_jit_snapshots: dict[str, dict] = {}
         self.recapture = RC.Recapture(guard=self.graph_guard)
         self.r1 = self.recapture
         self.native = N.NativeManager()
@@ -324,14 +326,25 @@ class Side(Endpoint):
                 nr = self.native.validate(txn)
                 if not nr["ok"]:
                     return nr
+            elif method == "commit" and self.role == "worker" and txn not in self._abstain and txn in self._txn_graph_affect:
+                if (staged_entry := self.lp._staged.get(txn)) is not None:
+                    try: self._txn_jit_snapshots[txn] = PS.snapshot_triton_commit(staged_entry[0], staged_entry[1])
+                    except Exception as error: self._txn_jit_snapshots[txn] = {"eligible": False, "reason": f"snapshot_failed:{type(error).__name__}"}
             elif method in ("abort", "undo"):
                 self.native.abort(txn)
+                self._txn_jit_snapshots.pop(txn, None)
         r = super().local(method, payload)
+        if isinstance(txn, str) and method == "commit" and (not r.get("ok") or r.get("abstain")):
+            self._txn_jit_snapshots.pop(txn, None)
         if isinstance(txn, str) and r.get("ok") and not r.get("abstain"):
             if method == "commit" and txn in self._txn_graph_affect:
                 self._txn_pre_epoch[txn] = self.graph_guard.code_epoch
                 self.graph_guard.bump_code_epoch(f"commit:{txn}")
             elif method == "undo":
+                for cascaded_txn in r.get("also_undone") or ():
+                    self._txn_jit_snapshots.pop(cascaded_txn, None)
+                    self._txn_pre_epoch.pop(cascaded_txn, None)
+                    self._txn_graph_affect.discard(cascaded_txn)
                 self._txn_graph_affect.discard(txn)
                 if (pre := self._txn_pre_epoch.pop(txn, None)) is not None:
                     self.graph_guard.restore_code_epoch(pre, f"undo:{txn}")
@@ -466,15 +479,23 @@ class Side(Endpoint):
             return self.recapture.drop_extend(p["txn"], self.lp.journal, p.get("extend_id"))
         if self.lp._state.get(p["txn"]) != "committed":
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
+        jit_snapshot = self._txn_jit_snapshots.pop(p["txn"], None)
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
                                   p.get("modes"), p.get("sizes"),
-                                  release_old=bool(p.get("release_old", False)))
+                                  release_old=bool(p.get("release_old", False)),
+                                  jit_snapshot=jit_snapshot,
+                                  pointer_swap=bool(p.get("pointer_swap", True)),
+                                  pointer_swap_driver=self.scope.get("pointer_swap_driver"),
+                                  pointer_swap_compiler=self.scope.get("pointer_swap_compiler"))
 
     _r1 = _recapture
 
     def _dispatch(self, method, payload):
         if method in ("recapture", "recapture_extend", "recapture_extend_drop", "r1_extend",
                       "graphs"):
+            if self.role == "worker":
+                with RC.cuda_device_context(self._resolve_worker_cuda_device()):
+                    return self._recapture(method, payload or {})
             return self._recapture(method, payload or {})
         if method == "versions":
             return self.versions()

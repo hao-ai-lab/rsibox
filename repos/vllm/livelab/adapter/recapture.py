@@ -45,6 +45,7 @@ import time
 
 from kernel import findings as F
 
+from . import pointer_swap as pointer_swap_mod
 from .graph_guard import GraphReplayGuard, graph_key
 
 ENTRY_ATTRS = ("concrete_cudagraph_entries", "entries")
@@ -389,6 +390,7 @@ def _cuda_sync_and_empty_cache() -> bool:
 def _clear_entries(entry_dict: dict) -> int:
     count = len(entry_dict)
     for entry in list(entry_dict.values()):
+        pointer_swap_mod.release_graph_kernels(entry)
         for obj in (entry, getattr(entry, "cudagraph", None)):
             if callable(reset := getattr(obj, "reset", None)):
                 with contextlib.suppress(Exception):
@@ -458,10 +460,12 @@ class Recapture:
                 for mode in selected}
         return selected, old_keys, wrappers, old_entries, chosen, left
 
-    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False):
-        """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds, pool
-        teardown telemetry, and memory before/after; on failure old graphs and exact pre-R1
-        guard stamps are restored (or cleared when `release_old=True`)."""
+    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False,
+            jit_snapshot=None, pointer_swap=True, pointer_swap_driver=None,
+            pointer_swap_compiler=None):
+        """Recapture after txn's commit. Attempts Tier-A in-place pointer swap when eligible
+        and falls back cleanly to R1 (Tier C) recapture otherwise; on failure old graphs and
+        exact pre-R1 guard stamps are restored (or cleared when `release_old=True`)."""
         if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
@@ -475,7 +479,30 @@ class Recapture:
         )
         selected_names = [name(mode) for mode in selected]
         guard = self.guard
+        mem0 = engine.memory()
+        fallback_reason = None
+        if pointer_swap and not release_old and jit_snapshot is not None:
+            swap_result = pointer_swap_mod.try_pointer_swap(
+                engine, txn, journal, witness, guard, selected, wrappers, chosen, left, jit_snapshot,
+                driver=pointer_swap_driver, compiler=pointer_swap_compiler,
+            )
+            if swap_result.get("applied"):
+                self.live[txn] = {"left": left, "restore": swap_result["restore"], "wrappers": wrappers, "old_keys": old_keys, "tier": "A"}
+                journal.record_call(lambda: self.live.pop(txn, None), f"R1 state of {txn}")
+                return F.ok(**swap_result["report"], modes=selected_names, wrappers=len(wrappers),
+                            eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True) for mode, descriptors in left.items() if descriptors},
+                            memory={"before": mem0, "after": engine.memory()})
+            fallback_reason = swap_result.get("fallback_reason")
+            if swap_result.get("poisoned"):
+                if selected_names:
+                    guard.invalidate_modes(selected_names)
+                    guard.bump_pool_epoch(f"poison:{txn}", modes=selected_names)
+                return F.not_ok(f"Tier-A pointer swap rollback failed: {fallback_reason}", [F.finding("rebuild_failed", f"Tier-A partial patch rollback failed: {fallback_reason}", "atomic pointer swap or rollback")], poisoned=True)
+        elif pointer_swap and release_old and jit_snapshot is not None:
+            fallback_reason = "release_old_requested"
+
         pre_pool_epochs, pre_stamps = guard.snapshot_modes(selected_names)
+        pre_replay_witnesses = guard.snapshot_replay_witnesses(selected_names)
         if release_old:
             old_entries.clear()
 
@@ -505,11 +532,11 @@ class Recapture:
                         engine.keys[mode].update(old_keys[mode])
                     if selected_names:
                         guard.restore_modes(pre_pool_epochs, pre_stamps)
+                        guard.restore_replay_witnesses(pre_replay_witnesses, modes=selected_names)
                     gc.collect()
                     _cuda_sync_and_empty_cache()
                 engine.sync()
 
-        mem0 = engine.memory()
         try:
             teardown = teardown_graph_pool(
                 engine, wrappers, selected,
@@ -537,7 +564,9 @@ class Recapture:
             self.live.pop(txn, None)
         journal.record_call(forget, f"R1 state of {txn}")
 
-        return F.ok(**result["report"], **teardown, modes=[name(mode) for mode in selected],
+        return F.ok(**result["report"], **teardown, tier="C",
+                    **({"fallback_reason": fallback_reason} if fallback_reason else {}),
+                    modes=selected_names,
                     wrappers=len(wrappers),
                     eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
                            for mode, descriptors in left.items() if descriptors},
