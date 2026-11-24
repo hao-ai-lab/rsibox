@@ -524,6 +524,9 @@ class DynamoGmsStoreTests(unittest.TestCase):
                 set_nofile=lambda soft, hard: raised_calls.append((soft, hard)),
                 target_resolver=lambda *args, **kwargs: [(0, gpu_uuid)],
             )
+            strict_probe = strict_ensure_store.probe(gpus=[gpu_uuid])
+            self.assertIn("--ulimit nofile=", strict_probe.details["nofile_advisory"]["action"])
+            self.assertNotIn("prepare_nofile()", strict_probe.details["nofile_advisory"]["action"])
             strict_ensure = strict_ensure_store.ensure_ready(gpus=[gpu_uuid], timeout_s=0.1)
             self.assertFalse(strict_ensure.ok)
             self.assertEqual(strict_ensure.finding["check"], "gms_nofile_limit")
@@ -638,9 +641,9 @@ class DynamoGmsStoreTests(unittest.TestCase):
     def test_nofile_preflight_auto_raises_in_ensure_ready_and_real_rlimit_subprocesses(self):
         """Golden case: prepare_nofile()/ensure_ready() lifts soft limit when hard >= min_nofile.
 
-        Proves (a) ensure_ready() raises soft=1024 -> 4096 once and passes with live sockets,
+        Proves (a) ensure_ready() raises soft=1024 -> min(hard, 65536) once and passes with live sockets,
         (b) RLIM_INFINITY and PermissionError behave cleanly, (c) real POSIX subprocess with
-        (1024, high_hard) keeps probe() read-only while prepare_nofile() raises to 4096, and
+        (1024, high_hard) keeps probe() read-only while prepare_nofile() raises to min(hard, 65536), and
         (d) real POSIX subprocess with (1024, 1024) fails closed by default and bypasses via
         RSIBOX_GMS_MIN_NOFILE=0.
         """
@@ -1365,6 +1368,37 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
         self.assertEqual(closed_failover["replenish"], "closed")
         self.assertEqual(stop_calls, [])
 
+        # Case F: fallback_driver skips redundant retry when last_failed + still_busy or last_failed + is_closed.
+        for state_override in (
+            {"attempts": 1, "last_ok": False, "last_error": "oom", "in_flight": True, "pending": False, "closed": False},
+            {"attempts": 1, "last_ok": False, "last_error": "oom", "in_flight": False, "pending": False, "closed": True},
+        ):
+            retry_calls: list[str] = []
+
+            class _FakeAsyncReplenisher:
+                def status(self) -> dict:
+                    return dict(state_override)
+
+                def wait(self, timeout_s: float | None = None) -> bool:
+                    return False
+
+                def __call__(self, lab, store=None) -> str:
+                    retry_calls.append("called")
+                    return "started"
+
+            lab_f = _GuardedLab(
+                weight_store=DiskStore(),
+                recovery_driver=StandbyShadowDriver(
+                    promote_fn=promote_with_spoofed_key,
+                    replenish_fn=_FakeAsyncReplenisher(),
+                    fallback_driver=DefaultRespawnDriver(),
+                ),
+            )
+            fallback_out = lab_f.reset("respawn")
+            self.assertTrue(fallback_out["ok"])
+            self.assertEqual(fallback_out["driver"], "default_respawn")
+            self.assertEqual(retry_calls, [], f"must not trigger retry for state={state_override}")
+
     def test_async_shadow_replenisher_cancel_dispose_timeout_warning_and_thread_start_error(self):
         """Golden case: cooperative cancellation, post-close disposal, live-worker close warning, and start failure.
 
@@ -1401,7 +1435,28 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
         self.assertEqual(coop_replenisher.disposed_after_close, 1)
         self.assertTrue(coop_replenisher.history[-1]["disposed"])
 
-        # 2. close() timeout sets closed_with_live_worker=True and __exit__ logs a warning.
+        # Raising dispose_fn records error without incrementing disposed_after_close or setting history["disposed"].
+        bad_dispose_started = threading.Event()
+
+        def failing_dispose_worker(cancel_event: threading.Event) -> dict:
+            bad_dispose_started.set()
+            cancel_event.wait(timeout=5.0)
+            return {"shadow_pid": 9999}
+
+        bad_dispose_replenisher = AsyncShadowReplenisher(
+            failing_dispose_worker,
+            dispose_fn=lambda outcome: (_ for _ in ()).throw(RuntimeError("teardown crashed")),
+        )
+        self.assertEqual(bad_dispose_replenisher("lab", None), "started")
+        self.assertTrue(bad_dispose_started.wait(timeout=2.0))
+        self.assertTrue(bad_dispose_replenisher.close(timeout_s=2.0))
+        self.assertEqual(bad_dispose_replenisher.disposed_after_close, 0)
+        self.assertEqual(bad_dispose_replenisher.failed, 1)
+        self.assertNotIn("disposed", bad_dispose_replenisher.history[-1])
+        self.assertIn("dispose_fn failed", bad_dispose_replenisher.last_error)
+
+        # 2. close() timeout sets closed_with_live_worker=True and __exit__ logs a warning;
+        # once the late worker finishes, _run_loop() clears closed_with_live_worker BEFORE any second close().
         unblock_stuck = threading.Event()
         stuck_started = threading.Event()
 
@@ -1422,10 +1477,12 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
                         self.assertTrue(stuck_started.wait(timeout=2.0))
             self.assertTrue(stuck_replenisher.status()["closed_with_live_worker"])
             self.assertTrue(any("timed out" in message for message in captured_logs.output))
+            unblock_stuck.set()
+            self.assertTrue(stuck_replenisher.wait(timeout_s=2.0))
+            self.assertFalse(stuck_replenisher.status()["closed_with_live_worker"])
         finally:
             unblock_stuck.set()
             orig_close(timeout_s=2.0)
-        self.assertFalse(stuck_replenisher.status()["closed_with_live_worker"])
 
         # 3. Thread.start() RuntimeError resets in_flight cleanly and records failure.
         start_fail_replenisher = AsyncShadowReplenisher(lambda lab, store: {"ok": True})

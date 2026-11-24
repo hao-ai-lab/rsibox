@@ -141,7 +141,6 @@ def _resolve_min_nofile(min_nofile: int | None) -> int:
 
 
 def _read_nofile_state(
-    min_nofile: int,
     get_nofile: Callable[[], tuple[int, int] | None] | None,
 ) -> tuple[int, int, bool] | None:
     limits = (_default_get_nofile if get_nofile is None else get_nofile)()
@@ -170,7 +169,7 @@ def nofile_limit_finding(
         raise ValueError(f"min_nofile must be a non-negative integer, got {min_nofile!r}")
     if min_nofile == 0:
         return None
-    state = _read_nofile_state(min_nofile, get_nofile)
+    state = _read_nofile_state(get_nofile)
     if state is None:
         return None
     soft_limit, hard_limit, soft_exceeds_hard = state
@@ -642,7 +641,7 @@ class DynamoGmsStore:
         """Read-only probe check: fail closed if unraisable/invalid, else return optional advisory."""
         if self.min_nofile == 0:
             return None, None
-        state = _read_nofile_state(self.min_nofile, self._get_nofile)
+        state = _read_nofile_state(self._get_nofile)
         if state is None:
             return None, None
         soft_limit, hard_limit, soft_exceeds_hard = state
@@ -651,12 +650,17 @@ class DynamoGmsStore:
         if soft_exceeds_hard or not _limit_satisfies(hard_limit, self.min_nofile):
             return nofile_limit_finding(self.min_nofile, auto_raise=False, get_nofile=lambda: (soft_limit, hard_limit)), None
         recommended = max(RECOMMENDED_NOFILE, self.min_nofile)
+        advisory_action = (
+            f"call DynamoGmsStore.prepare_nofile() / ensure_ready() or run `ulimit -n {recommended}`"
+            if self.auto_raise_nofile
+            else f"raise shell/container FD cap (`ulimit -n {recommended}` or `--ulimit nofile={recommended}:{recommended}`)"
+        )
         return None, {
             "soft": soft_limit,
             "hard": hard_limit,
             "min_nofile": self.min_nofile,
             "recommended": recommended,
-            "action": f"call DynamoGmsStore.prepare_nofile() / ensure_ready() or run `ulimit -n {recommended}`",
+            "action": advisory_action,
         }
 
     def prepare_nofile(self) -> dict[str, Any] | None:

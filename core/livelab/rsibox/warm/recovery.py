@@ -317,10 +317,10 @@ class AsyncShadowReplenisher:
 
                 cost_s = round(time.perf_counter() - started_monotonic, 6)
                 finished_wall = time.time()
-                disposed = False
+                disposed = dispose_attempted = False
                 while True:
                     with self._condition:
-                        need_dispose = (not disposed) and self._closed and attempt_ok and outcome is not None and self._dispose_fn is not None
+                        need_dispose = (not dispose_attempted) and self._closed and attempt_ok and outcome is not None and self._dispose_fn is not None
                         if not need_dispose:
                             self._record_attempt_locked(
                                 attempt_ok=attempt_ok, cost_s=cost_s, started_wall=started_wall,
@@ -334,13 +334,13 @@ class AsyncShadowReplenisher:
                             self._closed_with_live_worker = False
                             self._mark_idle_locked()
                             return
+                    dispose_attempted = True
                     try:
                         self._dispose_fn(outcome)
                         disposed = True
                     except BaseException as dispose_error:
                         attempt_ok = False
                         error_message = f"dispose_fn failed: {type(dispose_error).__name__}: {dispose_error}"
-                        disposed = True
         except BaseException:  # pragma: no cover - defensive state cleanup
             with self._condition:
                 self._closed_with_live_worker = False
@@ -409,12 +409,12 @@ class AsyncShadowReplenisher:
             self._condition.notify_all()
         if active_thread is not None and active_thread is not threading.current_thread():
             active_thread.join(timeout=timeout_s)
-            still_alive = active_thread.is_alive()
             with self._condition:
+                still_alive = self._in_flight and active_thread.is_alive()
                 self._closed_with_live_worker = still_alive
             return not still_alive
-        still_in_flight = self.in_flight
         with self._condition:
+            still_in_flight = self._in_flight
             self._closed_with_live_worker = still_in_flight
         return not still_in_flight
 
