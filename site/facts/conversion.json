@@ -456,6 +456,29 @@
    "notes": [
     "11/11 CPU + 11/11 1x B200 GPU conformance and TransformersQuiesceHooks snapshot lifecycle verified on Qwen3-0.6B and Qwen3-8B."
    ]
+  },
+  {
+   "engine": "TRT-LLM",
+   "folder": "repos/trtllm",
+   "recorded_facts": [
+    {
+     "fact": "Onboarded NVIDIA TensorRT-LLM PyTorch backend in <= 600 non-test Python LOC under repos/trtllm/livelab/adapter/ reusing core/livelab BaseLab, StepGapCoordinator, rsibox.ipc, and rsibox.warm.",
+     "source": "repos/trtllm/livelab/README.md; repos/trtllm/docs/architecture.md"
+    },
+    {
+     "fact": "Passed 11/11 CPU conformance on ToyTrtllmLab (2 spawned ranks, c9 0.0097 s / 0.0041 s), 9/9 unit tests, 9/9 rsibox doctor, and live 1x NVIDIA B200 GPU verification on Qwen3-0.6B inside TensorRT-LLM 1.0.0rc6 (26.66 s cold-JIT / 12.40 s warm-JIT boot -> 0.1072 s live edit+check [248.55x / 115.64x], 17 witness calls, fresh PackageOverlay parity 15.31 s bit-exact, TrtllmQuiesceHooks + DynamoK8sSnapshotDriver freeing 24,168.0 MiB KV pool VRAM and resuming in 7.4 ms with bit-exact post-restore generation and live swap).",
+     "source": "repos/trtllm/kb/costs.md"
+    }
+   ],
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Runs against unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend via TLLM_WORKER_USE_SINGLE_PROCESS=1 with zero upstream patches.",
+    "source": "repos/trtllm/docs/architecture.md"
+   },
+   "notes": [
+    "Completes the NVIDIA Dynamo serving triad (vLLM + SGLang + TensorRT-LLM) with zero core/ edits."
+   ]
   }
  ]
 }

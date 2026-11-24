@@ -594,6 +594,41 @@
      "note": "Bit-exact generation and full post-resume RSIBox live hot-swap verified after restore on both Qwen3-0.6B and Qwen3-8B (0 MiB cleanup)."
     }
    ]
+  },
+  {
+   "engine": "TRT-LLM",
+   "upstream": "NVIDIA/TensorRT-LLM",
+   "folder": "repos/trtllm",
+   "mechanisms": [
+    {
+     "name": "Live code swap (transaction kernel + TensorRT-LLM PyTorch backend adapter)",
+     "what": "Runs TensorRT-LLM PyTorch backend (`tensorrt_llm.LLM(..., backend='pytorch')`, `TLLM_WORKER_USE_SINGLE_PROCESS=1`) inside spawned RSIBox worker subprocess(es) over `rsibox.ipc` with step-gap atomic Python hot-swaps, witness proof, and `PackageOverlay` fresh parity.",
+     "startup_cost_removed": "Full TensorRT-LLM worker restart (imports, FlashInfer JIT, weight load, paged KV cache pool allocation, warmup).",
+     "measured_saving": {
+      "before": "26.66 cold-JIT / 12.40 warm-JIT",
+      "after": "0.1072 (0.0564 s install + 0.0509 s check; 0.0062 s bit-exact undo)",
+      "unit": "s",
+      "setup": "1x NVIDIA B200, TensorRT-LLM 1.0.0rc6 PyTorch backend, Qwen3-0.6B TP=1, 2x16 greedy tokens, N=3, 2026-11-24"
+     },
+     "status": "gpu_verified",
+     "source": "repos/trtllm/kb/costs.md; repos/trtllm/docs/architecture.md",
+     "note": "11/11 CPU conformance on ToyTrtllmLab (2 spawned ranks, c9 0.0097 s install / 0.0041 s undo), 9/9 unit tests, 9/9 rsibox doctor (0 GPU import violations). Live 1x B200 verification on Qwen3-0.6B: Cold-JIT boot 26.6563 s, Warm-JIT boot 12.4021 +/- 0.1442 s, live edit+check 0.1072 +/- 0.0118 s (248.55x vs cold-JIT / 115.64x vs warm-JIT, 17 witness calls on TorchSampler._process_requests, fresh PackageOverlay parity 15.3054 s bit-exact, 6.2 ms bit-exact rollback)."
+    },
+    {
+     "name": "Snapshot KV-cache pool quiesce/resume (`TrtllmQuiesceHooks`)",
+     "what": "Implements `rsibox.warm.QuiesceHooks` for `ai-dynamo/snapshot` via `kv_cache_manager.impl.release_pools()` and `allocate_pools(False)` + pool pointer/mapping refresh.",
+     "startup_cost_removed": "Paged KV cache VRAM inside CRIU/cuda-checkpoint snapshots.",
+     "measured_saving": {
+      "before": 46283.94,
+      "after": 22115.94,
+      "unit": "MiB",
+      "setup": "1x NVIDIA B200, TensorRT-LLM 1.0.0rc6 PyTorch backend, Qwen3-0.6B, free_gpu_memory_fraction=0.15, 2026-11-24"
+     },
+     "status": "gpu_verified",
+     "source": "repos/trtllm/kb/costs.md; repos/trtllm/livelab/adapter/snapshot_hooks.py",
+     "note": "Live DynamoK8sSnapshotDriver sentinel handshake on 1x B200 freed 24,168.0 MiB (23.60 GiB) in 0.1875 s and resumed in 0.0074 s (0.0054 s worker alloc) with bit-exact post-restore generation and post-restore live swap (proven=True, 17 witness calls, bit-exact rollback)."
+    }
+   ]
   }
  ],
  "caveats": [
