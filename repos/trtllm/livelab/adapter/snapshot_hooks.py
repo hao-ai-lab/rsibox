@@ -93,6 +93,7 @@ class TrtllmQuiesceHooks:
             try:
                 for worker in self.lab.workers:
                     failing_worker = worker
+                    failing_reply = None
                     reply = worker.call("quiesce_memory", {"tags": tags}, timeout=timeout_seconds)
                     failing_reply = reply
                     if not reply.get("ok"):
@@ -160,11 +161,16 @@ class TrtllmQuiesceHooks:
             timeout_seconds = self._quiesce_timeout()
             start_time = time.perf_counter()
             rank_details: dict[str, Any] = {}
+            resumed_any_worker = False
             try:
                 for worker in self.lab.workers:
                     reply = worker.call("resume_memory", {"tags": tags}, timeout=timeout_seconds)
                     if not reply.get("ok"):
-                        raise RuntimeError(f"{worker.name}: {reply.get('error', 'resume_memory failed')}")
+                        error_message = f"{worker.name}: {reply.get('error', 'resume_memory failed')}"
+                        if resumed_any_worker or not reply.get("rejected"):
+                            self._poison_lab(f"resume_memory failed: {error_message}")
+                        raise RuntimeError(error_message)
+                    resumed_any_worker = True
                     rank_details[worker.name] = {
                         "resumed": list(reply.get("resumed") or ()),
                         "vram_before_mib": reply.get("vram_before_mib"),
@@ -184,6 +190,7 @@ class TrtllmQuiesceHooks:
             resume_seconds = round(time.perf_counter() - start_time, 6)
             probe_ok, probe_error = self.lab._probe_participants()
             if not probe_ok:
+                self._poison_lab(f"participant probe failed after restore: {probe_error}")
                 return {
                     "ok": False,
                     "error": f"participant probe failed after restore: {probe_error}",

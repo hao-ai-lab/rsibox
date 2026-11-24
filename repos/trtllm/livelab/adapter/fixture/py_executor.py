@@ -3,29 +3,33 @@ from adapter.fixture import sampler
 
 
 class ToyKVCacheImpl:
-    def __init__(self) -> None:
+    def __init__(self, *, shift_pointers_on_alloc: bool = False) -> None:
         self.allocated = True
         self.entries: dict[tuple[int, ...], list[int]] = {}
-        self.last_enable_block_reuse: bool | None = None
+        self.pointer_base = 1
+        self.shift_pointers_on_alloc = bool(shift_pointers_on_alloc)
+        self.last_use_uvm: bool | None = None
 
     def release_pools(self) -> None:
         self.allocated = False
         self.entries.clear()
 
-    def allocate_pools(self, enable_block_reuse: bool = False) -> None:
-        self.last_enable_block_reuse = bool(enable_block_reuse)
+    def allocate_pools(self, use_uvm: bool = False) -> None:
+        self.last_use_uvm = bool(use_uvm)
+        if self.shift_pointers_on_alloc:
+            self.pointer_base += 1
         self.allocated = True
 
     def get_block_pool_pointers(self) -> list[int]:
-        return [1] if self.allocated else []
+        return [self.pointer_base] if self.allocated else []
 
     def get_layer_to_pool_mapping(self) -> list[int]:
         return [0] if self.allocated else []
 
 
 class ToyKVCacheManager:
-    def __init__(self) -> None:
-        self.impl = ToyKVCacheImpl()
+    def __init__(self, *, shift_pointers_on_alloc: bool = False) -> None:
+        self.impl = ToyKVCacheImpl(shift_pointers_on_alloc=shift_pointers_on_alloc)
         self.kv_cache_pool_pointers = self.impl.get_block_pool_pointers()
         self.kv_cache_pool_mapping = self.impl.get_layer_to_pool_mapping()
 
@@ -35,9 +39,9 @@ def format_token_step(token_id: int, step_index: int) -> int:
 
 
 class ToyPyExecutor:
-    def __init__(self) -> None:
+    def __init__(self, *, shift_pointers_on_alloc: bool = False) -> None:
         self.startup_bias = sampler.initial_logit_bias()
-        self.kv_cache_manager = ToyKVCacheManager()
+        self.kv_cache_manager = ToyKVCacheManager(shift_pointers_on_alloc=shift_pointers_on_alloc)
         self.active_requests: list[int] = []
         self.history: list[int] = []
 

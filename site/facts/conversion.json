@@ -466,7 +466,7 @@
      "source": "repos/trtllm/livelab/README.md; repos/trtllm/docs/architecture.md"
     },
     {
-     "fact": "Passed 11/11 CPU conformance on ToyTrtllmLab, 11/11 real-GPU conformance via rsibox conformance trtllm --real on 1x NVIDIA B200 Qwen3-0.6B inside TensorRT-LLM 1.0.0rc6 (c9 20-cycle median 0.0592 s install / 0.0072 s undo, c8 respawns 11.54-12.55 s, c3 visible & 3-chain bit-exact 41.23 s, c10 zero_witness with fresh divergence), 11/11 unit tests, 9/9 rsibox doctor, and live 1x B200 benchmark (26.66 s cold-JIT / 12.40 s warm-JIT boot -> 0.1072 s live edit+check [248.55x / 115.64x], TrtllmQuiesceHooks + DynamoK8sSnapshotDriver freeing 24,168.0 MiB KV pool VRAM and resuming in 7.4 ms with bit-exact post-restore generation and live swap).",
+     "fact": "Passed 11/11 CPU conformance on ToyTrtllmLab, 11/11 real-GPU conformance via rsibox conformance trtllm --real on 1x NVIDIA B200 Qwen3-0.6B inside TensorRT-LLM 1.0.0rc6 (c9 20-cycle median 0.0592 s install / 0.0072 s undo, c8 respawns 11.54-12.55 s, c3 visible & 3-chain bit-exact 41.23 s, c10 zero_witness with fresh divergence), 14/14 unit tests, 9/9 rsibox doctor, and live 1x B200 benchmark (26.66 s cold-JIT / 12.40 s warm-JIT boot -> 0.1072 s live edit+check [248.55x / 115.64x], TrtllmQuiesceHooks + DynamoK8sSnapshotDriver freeing 24,168.0 MiB KV pool VRAM and resuming in 7.4 ms with bit-exact post-restore generation and live swap).",
      "source": "repos/trtllm/kb/costs.md"
     }
    ],

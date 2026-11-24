@@ -83,6 +83,13 @@ class LazyImportAndConfigTest(unittest.TestCase):
     def test_real_mode_refuses_tp_gt_1_and_explicit_args_override_env(self) -> None:
         with self.assertRaises(ValueError):
             TrtllmLab(model="dummy", tensor_parallel_size=2, auto_spawn=False)
+        for parallel_key in ("tensor_parallel_size", "pipeline_parallel_size", "context_parallel_size"):
+            with self.assertRaises(ValueError):
+                TrtllmLab(model="dummy", extra_kwargs={parallel_key: 2}, auto_spawn=False)
+
+        no_worker_lab = TrtllmLab(model="dummy", auto_spawn=False)
+        with self.assertRaises(RuntimeError):
+            no_worker_lab._base_source("tensorrt_llm._torch.pyexecutor.sampler")
 
         with mock.patch.dict(
             os.environ,
@@ -157,6 +164,22 @@ class ToyTrtllmAdapterTest(unittest.TestCase):
         restored_check = self.lab.check()
         self.assertEqual(restored_status["fingerprint"], base_status["fingerprint"])
         self.assertEqual(restored_check["output"], base_check["output"])
+
+    def test_worker_linecache_tracks_install_and_restores_base_on_uninstall(self) -> None:
+        sampler_module = "adapter.fixture.sampler"
+        base_source = self.lab._base_source(sampler_module)
+        visible_patch = self.lab.patches()["visible"]
+        patched_source = visible_patch["files"][sampler_module]
+
+        self.assertTrue(self.lab.install(visible_patch)["ok"])
+        after_install = self.lab.workers[0].call("read_source", {"module": sampler_module})
+        self.assertTrue(after_install["ok"])
+        self.assertEqual(after_install["linecache"], patched_source)
+
+        self.assertTrue(self.lab.uninstall()["ok"])
+        after_uninstall = self.lab.workers[0].call("read_source", {"module": sampler_module})
+        self.assertTrue(after_uninstall["ok"])
+        self.assertEqual(after_uninstall["linecache"], base_source)
 
     def test_fresh_subprocess_parity_and_unreached_detection(self) -> None:
         base_output = self.lab.check()["output"]
@@ -370,6 +393,32 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
         self.assertFalse(hooks.resume_after_restore(QuiesceReceipt(ok=True, released=("kv_cache",)))["ok"])
         with self.assertRaises(RuntimeError):
             hooks.warmup_for_snapshot()
+
+    def test_pointer_shift_on_resume_fails_closed_and_poisons_lab(self) -> None:
+        shift_lab = ToyTrtllmLab(ranks=1, extra_kwargs={"shift_pointers_on_alloc": True})
+        try:
+            hooks = shift_lab.quiesce_hooks()
+            receipt = hooks.quiesce_for_snapshot()
+            self.assertTrue(receipt.ok)
+
+            resume_reply = hooks.resume_after_restore(receipt)
+            self.assertFalse(resume_reply["ok"])
+            self.assertIn("shifted", resume_reply.get("error", ""))
+            self.assertTrue(shift_lab._dirty)
+            self.assertEqual(shift_lab.status()["state"], "poisoned")
+        finally:
+            shift_lab.close()
+
+    def test_block_reuse_enabled_fails_closed_on_quiesce(self) -> None:
+        reuse_lab = ToyTrtllmLab(ranks=1, enable_block_reuse=True)
+        try:
+            hooks = reuse_lab.quiesce_hooks()
+            receipt = hooks.quiesce_for_snapshot()
+            self.assertFalse(receipt.ok)
+            self.assertIn("enable_block_reuse=True", receipt.error or "")
+            self.assertTrue(reuse_lab.check()["ok"])
+        finally:
+            reuse_lab.close()
 
 
 if __name__ == "__main__":

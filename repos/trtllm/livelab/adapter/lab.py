@@ -80,25 +80,30 @@ class _WorkerHandle:
         self.work_dir = tempfile.mkdtemp(prefix=f"rsibox-trtllm-r{rank_index}-")
         self.stderr_path = os.path.join(self.work_dir, "worker.stderr.log")
         config_path = os.path.join(self.work_dir, "worker.json")
-        with open(config_path, "w", encoding="utf-8") as handle:
-            json.dump(config, handle)
+        try:
+            with open(config_path, "w", encoding="utf-8") as handle:
+                json.dump(config, handle)
 
-        env = dict(os.environ)
-        python_paths = [livelab_dir, adapter.LIVELAB]
-        if env.get("PYTHONPATH"):
-            python_paths.append(env["PYTHONPATH"])
-        env["PYTHONPATH"] = os.pathsep.join(python_paths)
-        if config["mode"] == "real":
-            env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
+            env = dict(os.environ)
+            python_paths = [livelab_dir, adapter.LIVELAB]
+            if env.get("PYTHONPATH"):
+                python_paths.append(env["PYTHONPATH"])
+            env["PYTHONPATH"] = os.pathsep.join(python_paths)
+            if config["mode"] == "real":
+                env["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
 
-        with open(self.stderr_path, "w", encoding="utf-8") as stderr_handle:
-            self.process = subprocess.Popen(
-                [sys.executable, "-m", "adapter.agent", config_path],
-                env=env,
-                stderr=stderr_handle,
-                start_new_session=True,
-                text=True,
-            )
+            with open(self.stderr_path, "w", encoding="utf-8") as log_handle:
+                self.process = subprocess.Popen(
+                    [sys.executable, "-m", "adapter.agent", config_path],
+                    env=env,
+                    stdout=log_handle,
+                    stderr=log_handle,
+                    start_new_session=True,
+                    text=True,
+                )
+        except BaseException:
+            shutil.rmtree(self.work_dir, ignore_errors=True)
+            raise
         self._wait_ready(boot_timeout)
 
     def _stderr_tail(self) -> str:
@@ -182,11 +187,22 @@ class TrtllmLab(BaseLab):
         recovery_driver: Any = None,
     ) -> None:
         self.rank_count = int(tensor_parallel_size)
-        if self.engine_mode == "real" and self.rank_count != 1:
-            raise ValueError(
-                f"TrtllmLab currently supports tensor_parallel_size == 1 (got {self.rank_count}); "
-                "multi-rank MPI GenerationExecutorProxy is not yet supported"
+        extra_config = dict(extra_kwargs or {})
+        if self.engine_mode == "real":
+            if self.rank_count != 1:
+                raise ValueError(
+                    f"TrtllmLab currently supports tensor_parallel_size == 1 (got {self.rank_count}); "
+                    "multi-rank MPI GenerationExecutorProxy is not yet supported"
+                )
+            forbidden_parallel = sorted(
+                key
+                for key in ("tensor_parallel_size", "pipeline_parallel_size", "context_parallel_size")
+                if key in extra_config
             )
+            if forbidden_parallel:
+                raise ValueError(
+                    f"extra_kwargs cannot override parallelism keys in single-process mode: {forbidden_parallel}"
+                )
         self.livelab_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
         self.transport = transport
         self.boot_timeout = float(boot_timeout)
@@ -203,7 +219,7 @@ class TrtllmLab(BaseLab):
             "max_num_tokens": int(max_num_tokens),
             "disable_overlap_scheduler": bool(disable_overlap_scheduler),
             "enable_block_reuse": bool(enable_block_reuse),
-            "extra_kwargs": dict(extra_kwargs or {}),
+            "extra_kwargs": extra_config,
         }
         self._tracked_modules = (
             tuple(modules) if modules is not None else (SAMPLER_MODULE, PY_EXECUTOR_MODULE, MODEL_ENGINE_MODULE)
@@ -253,11 +269,18 @@ class TrtllmLab(BaseLab):
 
     def _base_source(self, key: str) -> str:
         if key not in self.base_text:
+            worker_error: str | None = None
             if self.workers:
                 reply = self.workers[0].call("read_source", {"module": key})
                 if reply.get("ok") and isinstance(reply.get("source"), str):
                     self.base_text[key] = reply["source"]
                     return self.base_text[key]
+                worker_error = str(reply.get("error") or "read_source returned no source")
+            if self.engine_mode == "real" and key.startswith(f"{self.overlay_package}."):
+                raise RuntimeError(
+                    f"failed to read {key!r} from worker without importing {self.overlay_package} in host"
+                    + (f": {worker_error}" if worker_error else "")
+                )
             self.base_text[key] = harness.read_module(key)
         return self.base_text[key]
 
@@ -310,11 +333,11 @@ class TrtllmLab(BaseLab):
                     raise
                 self.workers.append(worker)
                 participants.append(coordinator.CallParticipant(worker_name, worker.call, bounded=True))
+            for module_name in self._tracked_modules:
+                self._base_source(module_name)
         except BaseException:
             self._stop_engine()
             raise
-        for module_name in self._tracked_modules:
-            self._base_source(module_name)
         return coordinator.StepGapCoordinator(participants, gap=self._step_gap, writer=self.writer), list(
             self._tracked_modules
         )

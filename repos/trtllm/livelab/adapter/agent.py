@@ -77,7 +77,8 @@ def _build_engine(mode: str, engine_config: dict[str, Any]) -> Any:
     if mode == "toy":
         from adapter.fixture.py_executor import ToyPyExecutor
 
-        return ToyPyExecutor()
+        extra = engine_config.get("extra_kwargs") or {}
+        return ToyPyExecutor(shift_pointers_on_alloc=bool(extra.get("shift_pointers_on_alloc", False)))
 
     os.environ["TLLM_WORKER_USE_SINGLE_PROCESS"] = "1"
     from tensorrt_llm import LLM
@@ -164,7 +165,6 @@ def _resume_single_tag(
     py_executor: Any,
     tag: str,
     tags_being_resumed: list[str],
-    enable_block_reuse: bool,
     memory_state: dict[str, Any],
 ) -> None:
     if tag == "kv_cache":
@@ -172,23 +172,20 @@ def _resume_single_tag(
         kv_impl = getattr(kv_manager, "impl", None)
         if kv_impl is None or not hasattr(kv_impl, "allocate_pools"):
             raise RuntimeError("kv_cache_manager.impl.allocate_pools is unavailable")
-        kv_impl.allocate_pools(enable_block_reuse)
+        kv_impl.allocate_pools(False)
         if hasattr(kv_impl, "get_block_pool_pointers"):
             kv_manager.kv_cache_pool_pointers = kv_impl.get_block_pool_pointers()
         if hasattr(kv_impl, "get_layer_to_pool_mapping"):
             kv_manager.kv_cache_pool_mapping = kv_impl.get_layer_to_pool_mapping()
-        model_engine = getattr(py_executor, "model_engine", None)
-        has_cuda_graphs = bool(getattr(model_engine, "_cuda_graphs", None))
         pointers_before = memory_state.get("pool_pointers_before")
         pointers_after = _snapshot_pool_pointers(kv_impl)
         if (
-            has_cuda_graphs
-            and "cuda_graphs" not in tags_being_resumed
+            "cuda_graphs" not in tags_being_resumed
             and pointers_before is not None
             and pointers_after != pointers_before
         ):
             raise RuntimeError(
-                "KV cache pool pointers shifted across quiesce/resume while CUDA graphs remain captured"
+                f"KV cache pool pointers shifted across quiesce/resume ({pointers_before!r} -> {pointers_after!r})"
             )
         return
     if tag == "cuda_graphs":
@@ -202,6 +199,17 @@ def _resume_single_tag(
     vm_mod.materialize_with_tag(tag)
 
 
+def _ordered_resume_tags(tags: list[str]) -> list[str]:
+    ordered = list(reversed(list(dict.fromkeys(tags))))
+    if "kv_cache" in ordered and "cuda_graphs" in ordered:
+        kv_idx = ordered.index("kv_cache")
+        graph_idx = ordered.index("cuda_graphs")
+        if kv_idx > graph_idx:
+            ordered.pop(kv_idx)
+            ordered.insert(graph_idx, "kv_cache")
+    return ordered
+
+
 def _transition_worker_memory(
     engine: Any,
     tags: list[str],
@@ -213,34 +221,38 @@ def _transition_worker_memory(
     py_executor = _extract_py_executor(engine)
     quiesced_tags: set[str] = memory_state["quiesced_tags"]
     if not tags:
-        return findings.not_ok("memory transition requires at least one tag")
+        return findings.not_ok("memory transition requires at least one tag", rejected=True)
     if release:
+        ordered_tags = list(dict.fromkeys(tags))
+        if "kv_cache" in ordered_tags and enable_block_reuse:
+            return findings.not_ok("quiesce_memory is unsupported when enable_block_reuse=True", rejected=True)
         if quiesced_tags:
-            return findings.not_ok(f"worker is already quiesced ({sorted(quiesced_tags)})")
+            return findings.not_ok(f"worker is already quiesced ({sorted(quiesced_tags)})", rejected=True)
         if getattr(py_executor, "active_requests", None):
-            return findings.not_ok("cannot quiesce while requests are active")
+            return findings.not_ok("cannot quiesce while requests are active", rejected=True)
     else:
-        missing = [tag for tag in tags if tag not in quiesced_tags]
+        ordered_tags = _ordered_resume_tags(tags)
+        missing = [tag for tag in ordered_tags if tag not in quiesced_tags]
         if missing:
-            return findings.not_ok(f"cannot resume tag(s) not quiesced: {missing}")
+            return findings.not_ok(f"cannot resume tag(s) not quiesced: {missing}", rejected=True)
 
     vram_before = _cuda_vram_mib()
     touched: list[str] = []
     start_time = time.perf_counter()
     try:
-        for tag in tags:
+        for tag in ordered_tags:
             if release:
                 _release_single_tag(py_executor, tag, memory_state)
             else:
-                _resume_single_tag(py_executor, tag, tags, enable_block_reuse, memory_state)
+                _resume_single_tag(py_executor, tag, ordered_tags, memory_state)
             touched.append(tag)
     except Exception as error:
         if release and touched:
             unwound: list[str] = []
             unwind_errors: list[str] = []
-            for prev_tag in reversed(touched):
+            for prev_tag in _ordered_resume_tags(touched):
                 try:
-                    _resume_single_tag(py_executor, prev_tag, touched, enable_block_reuse, memory_state)
+                    _resume_single_tag(py_executor, prev_tag, touched, memory_state)
                     unwound.append(prev_tag)
                 except Exception as unwind_error:
                     unwind_errors.append(f"{prev_tag}: {type(unwind_error).__name__}: {unwind_error}")
@@ -294,6 +306,7 @@ def _serve_worker(config: dict[str, Any]) -> None:
         resets={"state": reset_hook, "R3": reset_hook},
     )
     staged_modules: dict[str, set[str]] = {}
+    touched_modules: set[str] = set()
     fault_state: dict[str, Any] = {}
     memory_state: dict[str, Any] = {"quiesced_tags": set(), "pool_pointers_before": None}
     should_stop = False
@@ -311,7 +324,9 @@ def _serve_worker(config: dict[str, Any]) -> None:
             return findings.ok(rank=rank_index, pid=os.getpid())
         if method == "read_source":
             module_name = str((payload or {}).get("module") or "")
-            return findings.ok(module=module_name, source=harness.read_module(module_name))
+            file_path = getattr(sys.modules.get(module_name), "__file__", None) or harness.module_file(module_name)
+            cached_text = "".join(linecache.getlines(file_path)) if file_path else ""
+            return findings.ok(module=module_name, source=harness.read_module(module_name), linecache=cached_text)
         if method in ("park", "release_gap", "shutdown"):
             should_stop = should_stop or (method == "shutdown")
             return findings.ok(rank=rank_index, parked=(method == "park"))
@@ -342,6 +357,7 @@ def _serve_worker(config: dict[str, Any]) -> None:
             )
         if method == "prepare":
             specs = (payload or {}).get("modules") or {}
+            touched_modules.update(specs)
             for module_name, module_spec in specs.items():
                 file_path = getattr(sys.modules.get(module_name), "__file__", None) or harness.module_file(module_name)
                 source_text = module_spec.get("source")
@@ -354,11 +370,13 @@ def _serve_worker(config: dict[str, Any]) -> None:
                 staged_modules.pop(str(reply.get("txn")), None)
             return reply
         if method in PARTICIPANT_METHODS:
+            if method == "commit":
+                _sync_linecache(participant, touched_modules)
             reply = getattr(participant, method)(payload)
             if method in ("commit", "abort", "undo"):
                 txn_id, _deadline = coordinator.txn_ref(payload)
                 popped = staged_modules.pop(str(txn_id), set())
-                tracked = popped | {name for names in staged_modules.values() for name in names}
+                tracked = touched_modules | popped | {name for names in staged_modules.values() for name in names}
                 _sync_linecache(participant, tracked)
             return reply
         return findings.not_ok(f"unknown method {method!r}")

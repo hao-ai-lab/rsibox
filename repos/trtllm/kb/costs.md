@@ -2,7 +2,7 @@
 
 Measured timings on `1x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `PyTorch 2.8.0a0+5228986c39.nv25.6`, `Python 3.12.3`, `Qwen3-0.6B`, `TP=1`, default PyTorch-backend `use_cuda_graph=True`, `KvCacheConfig(free_gpu_memory_fraction=0.15, enable_block_reuse=False)`, `disable_overlap_scheduler=True`, 2 prompts × 16 greedy tokens), recorded in our `2026-11-24` live GPU verification runs.
 
-## Real-GPU `11/11` Conformance (`rsibox conformance trtllm --real`, `1x NVIDIA B200`, `Qwen3-0.6B`)
+## Real-GPU `11/11` Conformance (`rsibox conformance trtllm --real -- --check-timeout 15`, `1x NVIDIA B200`, `Qwen3-0.6B`)
 
 | Case | Result | Wall (s) | Evidence |
 |---|---|---:|---|
@@ -40,7 +40,7 @@ Measured timings on `1x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `PyTorch 2.8.0a0+
 |---|---:|---|
 | `warmup_for_snapshot()` | **0.0167 s** | 1-prompt 2-token deterministic warmup + participant probe |
 | `quiesce_for_snapshot()` (`kv_cache_manager.impl.release_pools()`) | **0.1875 s** | `ok=True`, `released=("kv_cache",)`, `token="trtllm:kv_cache"` |
-| `resume_after_restore()` (`allocate_pools(...)` + pointer refresh) | **0.0074 s** (`0.0054 s` worker alloc) | `ok=True`, `participants_ok=True`, `trtllm-restore-ready` sentinel written |
+| `resume_after_restore()` (`allocate_pools(False)` + pointer refresh) | **0.0074 s** (`0.0054 s` worker alloc) | `ok=True`, `participants_ok=True`, `trtllm-restore-ready` sentinel written |
 | VRAM before quiesce | **46,283.94 MiB** | Model weights + `23.60 GiB` paged KV cache + runtime workspaces |
 | VRAM while quiesced | **22,115.94 MiB** | **`24,168.0 MiB` (`23.60 GiB`) cleanly released** |
 | VRAM after resume | **46,283.94 MiB** | Full paged KV cache pool restored |
@@ -53,4 +53,4 @@ Measured timings on `1x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `PyTorch 2.8.0a0+
 |---|---|---|
 | `rsibox conformance trtllm` (`c0–c10`) | **11/11 pass** | ~4.9 s total; `c9_soak` 20-cycle median `0.0100 s` install / `0.0048 s` undo |
 | `rsibox doctor` | **9/9 labs ok (7/7 engines)** | `0` GPU import violations (`torch`/`tensorrt_llm` stay lazy) |
-| `adapter/test_adapter.py` | **11/11 pass** | ~3.5 s (lazy imports, live swap, fresh parity, faults, file channel, snapshot hooks + fail-closed) |
+| `adapter/test_adapter.py` | **14/14 pass** | ~5.5 s (lazy imports, live swap, linecache undo, fresh parity, faults, file channel, snapshot hooks + pointer-shift & block-reuse guards) |
