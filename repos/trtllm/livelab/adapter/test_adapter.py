@@ -420,6 +420,81 @@ class TrtllmQuiesceHooksTest(unittest.TestCase):
         finally:
             reuse_lab.close()
 
+    def test_file_transport_worker_sigkill_fast_fails_with_transport_error_and_recovers(self) -> None:
+        """Golden regression: under `transport='file'` (used for CRIU/snapshot and SandboxPool),
+        a real `SIGKILL` of the TRT-LLM worker must fail fast (< 2.0 s vs. 60 s timeout) with
+        `lost=True` and `transport_error=True` (so `TrtllmQuiesceHooks` poisons cleanly instead of
+        stalling), and `reset('respawn')` must recover a clean worker."""
+        import signal
+        import threading
+        import time
+        from rsibox import ipc
+
+        lab = ToyTrtllmLab(ranks=1, transport="file", rpc_timeout=60.0, check_timeout=60.0)
+        try:
+            self.assertTrue(lab.check()["ok"])
+            worker = lab.workers[0]
+            # 1. Pre-send SIGKILL fast-fails in milliseconds with lost=True + transport_error=True.
+            os.kill(worker.process.pid, signal.SIGKILL)
+            worker.process.wait(timeout=5.0)
+            t0 = time.perf_counter()
+            reply = worker.call("ping", timeout=60.0)
+            elapsed_s = time.perf_counter() - t0
+            self.assertFalse(reply["ok"])
+            self.assertTrue(reply.get("lost"))
+            self.assertTrue(reply.get("transport_error"))
+            self.assertLess(elapsed_s, 2.0, f"file-transport call stalled for {elapsed_s:.3f}s")
+
+            # 2. Quiesce hook on dead file-transport worker fails fast AND poisons lab via transport_error=True.
+            hooks = lab.quiesce_hooks()
+            t_q = time.perf_counter()
+            receipt = hooks.quiesce_for_snapshot()
+            self.assertFalse(receipt.ok)
+            self.assertLess(time.perf_counter() - t_q, 2.0)
+            self.assertTrue(lab._dirty)
+            self.assertEqual(lab.status()["state"], "poisoned")
+
+            # 3. Mid-call SIGKILL on a freshly respawned worker fails fast instead of waiting 60 s.
+            respawn = lab.reset("respawn")
+            self.assertTrue(respawn["ok"], respawn)
+            self.assertTrue(lab.check()["ok"])
+            worker2 = lab.workers[0]
+            # Arm a 30 s hang synchronously first, then SIGKILL mid-generate once ctl.json advances.
+            self.assertTrue(worker2.call("inject", {"fault": "hang", "hang_s": 30.0}, timeout=10.0)["ok"])
+            ctl_path = os.path.join(worker2.endpoint, "ctl.json")
+            before_seq = ipc.read_json(ctl_path).get("seq", 0) if os.path.exists(ctl_path) else 0
+            stop_killer = threading.Event()
+
+            def kill_after_next_ctl() -> None:
+                while not stop_killer.is_set():
+                    cur = ipc.read_json(ctl_path)
+                    if isinstance(cur, dict) and cur.get("seq", 0) > before_seq:
+                        os.kill(worker2.process.pid, signal.SIGKILL)
+                        worker2.process.wait(timeout=5.0)
+                        return
+                    time.sleep(0.002)
+
+            killer = threading.Thread(target=kill_after_next_ctl, daemon=True)
+            killer.start()
+            t_mid = time.perf_counter()
+            try:
+                mid_reply = worker2.call("generate", lab.default_workload(), timeout=60.0)
+                mid_elapsed = time.perf_counter() - t_mid
+            finally:
+                stop_killer.set()
+                killer.join(timeout=5.0)
+            self.assertFalse(mid_reply["ok"])
+            self.assertTrue(mid_reply.get("lost"))
+            self.assertTrue(mid_reply.get("transport_error"))
+            self.assertLess(mid_elapsed, 2.0, f"mid-call SIGKILL stalled for {mid_elapsed:.3f}s")
+
+            # 4. Respawn recovers cleanly after mid-call SIGKILL.
+            lab.session.fault("participant_failed", "worker killed mid-call", "clean")
+            self.assertTrue(lab.reset("respawn")["ok"])
+            self.assertTrue(lab.check()["ok"])
+        finally:
+            lab.close()
+
 
 if __name__ == "__main__":
     unittest.main()
