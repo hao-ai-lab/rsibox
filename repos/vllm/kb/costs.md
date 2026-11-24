@@ -395,6 +395,19 @@ Source: our `2× B200` `Qwen3-8B` TP=2 run (`--no-enforce-eager`, CUDA graphs en
 - Verified V2 `GPUModelRunner` KV-cache snapshot replay on `1× B200` (`vllm 0.33.0`, `Qwen2.5-1.5B-Instruct`): **`16/16`** replayed steps token-identical & logprob-equal (`fresh["finals"] == replay["finals"]`, `restore_ms=1.47 ms`, `0 MiB` exit).
 - Linux container `pytest`: `137 passed, 4 skipped` (`core/livelab`: `248 passed, 2 skipped`).
 
+## Tier-A CUDA graph kernel-node pointer swap vs R1 whole-sweep recapture (`1× B200`, `2026-11-24`)
+
+Source: our 2026-11-24 B200 run on `vllm 0.33.0`, `Qwen/Qwen3-0.6B`, TP=1, `--attention-backend TRITON_ATTN`, `FULL_AND_PIECEWISE` CUDA graphs ON (`30` wrappers, `83` batch buckets `1..1024`, `2,490` captured `CUDAGraph`s), editing `@triton.jit kernel_unified_attention` (`score_scale = scale` -> `scale * 0.1`):
+
+| Path | Worker rebuild | End-to-end `txn` wall | Dummy forwards / captures | Patched nodes / specs | VRAM delta (`reserved` / `device_free`) | Witness & undo |
+|---|---:|---:|---:|---:|---:|---|
+| **Tier-A pointer swap (warm Triton cache)** (`cuGraphExecKernelNodeSetParams`) | **`94.6 ms`** (`compile_s = 8.0 ms`, `patch_s = 79.3 ms`; repeat `90.4 ms`) | **`0.446 s`** (repeat `0.433 s`) | **`0`** | `2,324` nodes across `83` `FULL` graphs (`3` specs) | **`0 B`** / **`0 B`** | **`PASS`** (`capture 2324, live 117`); undo **`15.5–20.6 ms`**, `0.0` max logprob diff |
+| **Tier-A pointer swap (cold Triton compile)** (`cuGraphExecKernelNodeSetParams`) | **`1.040 s`** (`compile_s = 0.947 s`, `patch_s = 85.0 ms`) | **`1.368 s`** | **`0`** | `2,324` nodes across `83` `FULL` graphs (`3` specs) | **`0 B`** / **`0 B`** | **`PASS`** (`capture 2324, live 117`); undo **`20.6 ms`**, `0.0` max logprob diff |
+| **Tier-C R1 whole-sweep recapture (same edit, `pointer_swap=False`)** | **`6.08–6.66 s`** (`67–70×` slower than warm Tier A) | **`6.40–6.99 s`** | `166` mode-descriptors (`83` `PIECEWISE` + `83` `FULL`) | N/A | `+52.4 MB` / `-436.2 MB` | `undo` ok (`0.0` max logprob diff verified against base after subsequent fallback undo) |
+| **Automatic R1 fallback** (non-JIT `Qwen3ForCausalLM.forward` edit) | `0.67–0.76 s` (`sizes=[1, 2, 4]`, 6 graphs) | — | `6` captures | N/A (`non_jit_target_present`) | — | Routed automatically to `tier_c_r1_recapture`; `0.0` max logprob diff after undo |
+
+Standalone 16-bucket B200 microbenchmark (`32` kernel nodes across `16` captured `CUDAGraph`s, `1` specialization): `patch_s = 0.60–0.62 ms` (`0.21–0.23 ms` chained), `undo = 0.17–0.20 ms`, `witness_check = PASS`, `at_base = True`.
+
 ## Not measured yet
 
 - DeepSeek-V4.1-Flash on 4× GB200 EP4DP4 (the target workload): restart breakdown and each

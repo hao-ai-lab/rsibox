@@ -46,6 +46,7 @@ import time
 from kernel import findings as F
 
 from .graph_guard import GraphReplayGuard, graph_key
+from . import graph_patch as GP
 
 ENTRY_ATTRS = ("concrete_cudagraph_entries", "entries")
 ORDER = ("PIECEWISE", "FULL")      # capture_model's order
@@ -457,10 +458,12 @@ class Recapture:
                 for mode in selected}
         return selected, old_keys, wrappers, old_entries, chosen, left
 
-    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False):
-        """Recapture after txn's commit. Returns an ok-dict with per-descriptor seconds, pool
-        teardown telemetry, and memory before/after; on failure old graphs and exact pre-R1
-        guard stamps are restored (or cleared when `release_old=True`)."""
+    def run(self, engine, txn, journal, witness, modes=None, sizes=None, release_old=False,
+            jit_snap=None, pointer_swap=True, pre_epoch=None, world_size=None, driver=None):
+        """Recapture or Tier-A pointer-swap after txn's commit. Attempts Tier-A in-place
+        `cuGraphExecKernelNodeSetParams` first when eligible (`jit_snap`, `pointer_swap=True`,
+        `not release_old`), falling back automatically to R1 selective stream recapture if any
+        precondition fails. On rollback failure fails closed; on R1 failure restores base state."""
         if engine is None:
             return F.ok(skipped="this worker runs no graphs", seconds=0.0)
         if txn in self.live:
@@ -469,12 +472,33 @@ class Recapture:
             return F.not_ok(f"{txn} is not this rank's newest committed transaction: its undo "
                             "would not restore the graphs R1 replaces")
 
+        fallback_reason = None
+        if pointer_swap and not release_old and jit_snap is not None:
+            tier_a = GP.patch_graphs(
+                engine, txn, journal, witness, self.guard, jit_snap,
+                modes=modes, sizes=sizes, pre_epoch=pre_epoch, world_size=world_size, driver=driver,
+            )
+            if tier_a.get("ok"):
+                self.live[txn] = {"left": {}, "wrappers": [], "old_keys": {}, "tier": tier_a["tier"]}
+
+                def forget_tier_a():
+                    self.live.pop(txn, None)
+                journal.record_call(forget_tier_a, f"Tier-A state of {txn}")
+                return tier_a
+            if not tier_a.get("fallback", True):
+                return F.not_ok(f"Tier-A rollback failed: {tier_a.get('reason')}")
+            fallback_reason = tier_a.get("reason")
+        elif not pointer_swap:
+            fallback_reason = "pointer_swap_disabled"
+        elif release_old:
+            fallback_reason = "release_old_requested"
+
         selected, old_keys, wrappers, old_entries, chosen, left = self._select(
             engine, modes, sizes
         )
         selected_names = [name(mode) for mode in selected]
         guard = self.guard
-        pre_pool_epochs, pre_stamps = guard.snapshot_modes(selected_names)
+        pre_pool_epochs, pre_stamps, pre_bindings = guard.snapshot_modes_with_witness(selected_names)
         if release_old:
             old_entries.clear()
 
@@ -503,7 +527,7 @@ class Recapture:
                         engine.keys[mode].clear()
                         engine.keys[mode].update(old_keys[mode])
                     if selected_names:
-                        guard.restore_modes(pre_pool_epochs, pre_stamps)
+                        guard.restore_modes_with_witness(pre_pool_epochs, pre_stamps, pre_bindings)
                     gc.collect()
                     _cuda_sync_and_empty_cache()
                 engine.sync()
@@ -536,7 +560,9 @@ class Recapture:
             self.live.pop(txn, None)
         journal.record_call(forget, f"R1 state of {txn}")
 
-        return F.ok(**result["report"], **teardown, modes=[name(mode) for mode in selected],
+        return F.ok(**result["report"], **teardown, tier="tier_c_r1_recapture",
+                    **({"tier_a_fallback_reason": fallback_reason} if fallback_reason else {}),
+                    modes=[name(mode) for mode in selected],
                     wrappers=len(wrappers),
                     eager={name(mode): sorted((_size(desc) for desc in descriptors), reverse=True)
                            for mode, descriptors in left.items() if descriptors},
@@ -613,11 +639,11 @@ class Recapture:
                         engine.capture(mode, desc)
                         self.guard.stamp(graph_key(mode, desc))
                         timings.append([name(mode), _size(desc), round(time.perf_counter() - t, 6)])
-            active_modes = {name(m) for m, ds in chosen.items() if ds}
-            for wrapper in engine.wrappers():
-                if (attr := _attr(wrapper)) and (w_mode := name(_wrapper_mode(wrapper))) in active_modes:
-                    for entry_key in getattr(wrapper, attr):
-                        self.guard.stamp(graph_key(getattr(entry_key, "cg_mode", None) or w_mode, entry_key))
+                    mode_name = name(mode)
+                    for wrapper in engine.wrappers():
+                        if (attr := _attr(wrapper)) and name(_wrapper_mode(wrapper)) == mode_name:
+                            for entry_key in getattr(wrapper, attr):
+                                self.guard.stamp(graph_key(getattr(entry_key, "cg_mode", None) or mode_name, entry_key))
         except Exception as e:
             wrappers = [(wrapper, _attr(wrapper)) for wrapper in engine.wrappers() if _attr(wrapper)]
             _drop_descriptors(engine, wrappers, done, guard=self.guard)

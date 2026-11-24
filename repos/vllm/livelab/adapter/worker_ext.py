@@ -27,6 +27,10 @@ import traceback
 
 from rsibox.lab import ENDPOINT_METHODS as METHODS, RoleEndpoint as Endpoint  # noqa: F401
 from kernel import findings as F
+from . import graph_patch as _GP
+
+if os.environ.get("RSIBOX_KERNEL_DIR"):
+    _GP.enable_keep_graph()
 
 
 _ENDPOINT = []

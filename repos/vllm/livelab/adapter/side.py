@@ -56,6 +56,7 @@ from kernel import findings as F
 from kernel import locate as L
 
 from . import graph_guard as GG
+from . import graph_patch as GP
 from . import graphs as G
 from . import native as N
 from . import recapture as RC
@@ -160,6 +161,7 @@ class Side(Endpoint):
         self.graph_guard = GG.GraphReplayGuard()
         self._txn_graph_affect: set[str] = set()
         self._txn_pre_epoch: dict[str, int] = {}
+        self._txn_jit_snap: dict[str, dict] = {}
         self.recapture = RC.Recapture(guard=self.graph_guard)
         self.r1 = self.recapture
         self.native = N.NativeManager()
@@ -319,24 +321,39 @@ class Side(Endpoint):
         """Include staged native validation, selective graph-guard epoch tracking, cleanup on
         abort/undo, and native hashes in proof."""
         txn, _ = C.txn_ref(payload)
+        pre_jit_snap = None
         if isinstance(txn, str):
             if method == "validate" and self.native.has_staged(txn):
                 nr = self.native.validate(txn)
                 if not nr["ok"]:
                     return nr
+            elif method == "commit" and self.role == "worker":
+                pre_jit_snap = GP.snapshot_jit_specs(
+                    self.lp, txn, is_native=self.native.has_staged(txn)
+                )
             elif method in ("abort", "undo"):
                 self.native.abort(txn)
+                self._txn_jit_snap.pop(txn, None)
         r = super().local(method, payload)
         if isinstance(txn, str) and r.get("ok") and not r.get("abstain"):
-            if method == "commit" and txn in self._txn_graph_affect:
-                self._txn_pre_epoch[txn] = self.graph_guard.code_epoch
-                self.graph_guard.bump_code_epoch(f"commit:{txn}")
+            if method == "commit":
+                if pre_jit_snap is not None:
+                    self._txn_jit_snap[txn] = pre_jit_snap
+                if txn in self._txn_graph_affect:
+                    self._txn_pre_epoch[txn] = self.graph_guard.code_epoch
+                    self.graph_guard.bump_code_epoch(f"commit:{txn}")
             elif method == "undo":
-                self._txn_graph_affect.discard(txn)
-                if (pre := self._txn_pre_epoch.pop(txn, None)) is not None:
-                    self.graph_guard.restore_code_epoch(pre, f"undo:{txn}")
+                earliest_pre = None
+                for u_txn in (txn, *(r.get("also_undone") or ())):
+                    self._txn_graph_affect.discard(u_txn)
+                    self._txn_jit_snap.pop(u_txn, None)
+                    if (pre := self._txn_pre_epoch.pop(u_txn, None)) is not None:
+                        earliest_pre = pre if earliest_pre is None else min(earliest_pre, pre)
+                if earliest_pre is not None:
+                    self.graph_guard.restore_code_epoch(earliest_pre, f"undo:{txn}")
             elif method == "abort":
                 self._txn_graph_affect.discard(txn)
+                self._txn_jit_snap.pop(txn, None)
         if method == "proof" and isinstance(txn, str) and r.get("ok") and isinstance(r.get("hashes"), dict):
             nh = self.native.hashes(txn)
             if nh:
@@ -468,7 +485,12 @@ class Side(Endpoint):
             return F.not_ok(f"{p['txn']} is not committed on {self.who()}")
         return self.recapture.run(eng, p["txn"], self.lp.journal, self.lp.witness,
                                   p.get("modes"), p.get("sizes"),
-                                  release_old=bool(p.get("release_old", False)))
+                                  release_old=bool(p.get("release_old", False)),
+                                  jit_snap=self._txn_jit_snap.pop(p["txn"], None),
+                                  pointer_swap=bool(p.get("pointer_swap", True)),
+                                  pre_epoch=self._txn_pre_epoch.get(p["txn"]),
+                                  world_size=p.get("world_size"),
+                                  driver=self.scope.get("cuda_driver"))
 
     _r1 = _recapture
 

@@ -79,6 +79,7 @@ from kernel import findings as F
 from kernel import receipt as R
 from services import core_hook
 
+from . import graph_patch as _GP
 from .side import Side, wants_recapture
 
 TAG = "RSIBOX_KERNEL"
@@ -294,7 +295,11 @@ class Host:
             phase2_deadline_s=PHASE2_DEADLINE_S,
             writer=R.ReceiptWriter(os.path.join(root, "receipts.jsonl")),
             engine={"name": "vllm", "version": vllm.__version__, "commit": None},
-            rebuild=self._run_recapture)
+            rebuild=self._run_recapture,
+            rank_fields=lab_base.RecaptureCoordinator.DEFAULT_RANK_FIELDS + (
+                "tier", "patched_nodes", "patched_graphs", "total_graphs",
+                "compiled_specs", "compile_s", "patch_s", "tier_a_fallback_reason",
+            ))
 
     def _recapture_undo_deadline(self, base_deadline_s):
         """Deadline for undoing R1 graphs (destroying captured CUDA graphs across TP ranks can
@@ -323,7 +328,7 @@ class Host:
         return False
 
     def _run_recapture(self, txn_id, spec):
-        reply = self.workers.recapture({"txn": txn_id, **spec})
+        reply = self.workers.recapture({**spec, "txn": txn_id, "world_size": self.dp["world"]})
         if not reply.get("ok") and not self._explicit_phase2_deadline:
             self.co.phase2_deadline_s = self._recapture_undo_deadline(
                 self.co.phase2_deadline_s
@@ -574,4 +579,5 @@ class _After(hooks.AfterImportHook):
 
 
 if DIR:
+    _GP.enable_keep_graph()
     core_hook.install()

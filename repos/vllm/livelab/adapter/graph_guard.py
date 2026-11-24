@@ -44,12 +44,13 @@ class GraphReplayGuard:
     """Thread-safe per-rank O(1) staleness guard for CUDA-graph replay."""
 
     __slots__ = ("_code_epoch", "_next_code_epoch", "_pool_epochs", "_stamps",
-                 "_strict_unstamped", "_stale_rejections", "_last_reason", "_lock")
+                 "_witness_bindings", "_strict_unstamped", "_stale_rejections", "_last_reason", "_lock")
 
     def __init__(self, *, strict_unstamped: bool = False):
         self._code_epoch, self._next_code_epoch, self._stale_rejections = 0, 1, 0
         self._pool_epochs: dict[str, int] = {}
         self._stamps: dict[Any, tuple[int, int, Any]] = {}
+        self._witness_bindings: dict[Any, tuple[tuple[Any, tuple[str, ...]], ...]] = {}
         self._strict_unstamped, self._last_reason, self._lock = bool(strict_unstamped), "", threading.RLock()
 
     @property
@@ -91,6 +92,13 @@ class GraphReplayGuard:
             return ({m: self._pool_epochs.get(m, 0) for m in names},
                     {k: v for k, v in self._stamps.items() if _key_mode(k) in names})
 
+    def snapshot_modes_with_witness(self, modes):
+        names = {_mode_name(m) for m in modes}
+        with self._lock:
+            return ({m: self._pool_epochs.get(m, 0) for m in names},
+                    {k: v for k, v in self._stamps.items() if _key_mode(k) in names},
+                    {k: v for k, v in self._witness_bindings.items() if _key_mode(k) in names})
+
     def restore_modes(self, pool_epochs: dict[str, int], stamps: dict[Any, tuple[int, int, Any]]) -> None:
         with self._lock:
             self._invalidate_modes_unlocked(pool_epochs.keys())
@@ -98,6 +106,36 @@ class GraphReplayGuard:
                 if ep: self._pool_epochs[m] = ep
                 else: self._pool_epochs.pop(m, None)
             self._stamps.update(stamps)
+
+    def restore_modes_with_witness(self, pool_epochs, stamps, bindings) -> None:
+        with self._lock:
+            self._invalidate_modes_unlocked(pool_epochs.keys())
+            for m, ep in pool_epochs.items():
+                if ep: self._pool_epochs[m] = ep
+                else: self._pool_epochs.pop(m, None)
+            self._stamps.update(stamps)
+            self._witness_bindings.update(bindings)
+
+    def bind_replay_witness(self, key: Any, witness: Any, witness_keys: tuple[str, ...]) -> None:
+        if not witness_keys:
+            return
+        with self._lock:
+            existing = list(self._witness_bindings.get(key, ()))
+            for idx, (w_obj, keys) in enumerate(existing):
+                if w_obj is witness:
+                    merged = tuple(dict.fromkeys((*keys, *witness_keys)))
+                    existing[idx] = (w_obj, merged)
+                    self._witness_bindings[key] = tuple(existing)
+                    return
+            existing.append((witness, tuple(dict.fromkeys(witness_keys))))
+            self._witness_bindings[key] = tuple(existing)
+
+    def is_fresh_at(self, key: Any, code_epoch: int) -> bool:
+        with self._lock:
+            pool_ep = self._pool_epochs.get(_key_mode(key), 0)
+            if (stamp := self._stamps.get(key)) is not None:
+                return stamp[0] == code_epoch and stamp[1] == pool_ep
+            return not self._strict_unstamped and code_epoch == 0 and pool_ep == 0
 
     def stamp(self, key: Any, input_sig: Any = None) -> tuple[int, int, Any]:
         with self._lock:
@@ -115,13 +153,16 @@ class GraphReplayGuard:
     def invalidate(self, key: Any = None) -> int:
         with self._lock:
             if key is None:
-                n = len(self._stamps); self._stamps.clear(); return n
+                n = len(self._stamps); self._stamps.clear(); self._witness_bindings.clear(); return n
+            self._witness_bindings.pop(key, None)
             return int(self._stamps.pop(key, None) is not None)
 
     def _invalidate_modes_unlocked(self, mode_names) -> int:
         targets = {_mode_name(m) for m in mode_names}
         drop = [k for k in self._stamps if _key_mode(k) in targets]
         for k in drop: self._stamps.pop(k, None)
+        for k in [k for k in self._witness_bindings if _key_mode(k) in targets]:
+            self._witness_bindings.pop(k, None)
         return len(drop)
 
     def invalidate_modes(self, mode_names) -> int:
@@ -148,6 +189,11 @@ class GraphReplayGuard:
         with self._lock:
             if (err := self._mismatch_unlocked(key, input_sig)) is not None:
                 self._stale_rejections += 1; raise err
+            bindings = self._witness_bindings.get(key)
+        if bindings:
+            for witness_obj, w_keys in bindings:
+                for wk in w_keys:
+                    witness_obj.hit(wk)
 
     def is_fresh(self, key: Any, input_sig: Any = None) -> bool:
         with self._lock: return self._mismatch_unlocked(key, input_sig) is None
