@@ -31,7 +31,7 @@ the Python standard library (`unittest`):
 Run from the repository root:
 
 ```bash
-python3 -m unittest core/livelab/kernel/test_formal_protocol.py -v
+PYTHONPATH=core/livelab python3 -m unittest kernel.test_formal_protocol -v
 ```
 
 ## Honest Scope & Limitations

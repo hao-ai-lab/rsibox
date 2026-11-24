@@ -14,7 +14,7 @@ VARIABLES
     active_txn,      \* Active transaction id (0 when idle)
     live_incs,       \* Subset of 1..MaxIncarnation currently permitted to commit
     in_flight,       \* Set of reply records [p |-> p, inc |-> i, txn |-> t]
-    accepted_replies \* Set of reply records accepted by the coordinator
+    accepted_replies \* Set of [p, inc, txn, accepted_at_inc, accepted_at_txn]
 
 vars == <<active_inc, active_txn, live_incs, in_flight, accepted_replies>>
 
@@ -45,7 +45,9 @@ DeliverFreshReply(r) ==
     /\ r \in in_flight
     /\ r.inc = active_inc
     /\ r.txn = active_txn
-    /\ accepted_replies' = accepted_replies \cup {r}
+    /\ accepted_replies' = accepted_replies \cup
+           {[p |-> r.p, inc |-> r.inc, txn |-> r.txn,
+             accepted_at_inc |-> active_inc, accepted_at_txn |-> active_txn]}
     /\ in_flight' = in_flight \ {r}
     /\ UNCHANGED <<active_inc, active_txn, live_incs>>
 
@@ -81,7 +83,8 @@ SingleActiveIncarnation ==
     /\ live_incs = {active_inc}
 
 StaleReplyRejection ==
-    \A r \in accepted_replies : r.inc <= active_inc
+    \A r \in accepted_replies :
+        r.inc = r.accepted_at_inc /\ r.txn = r.accepted_at_txn
 
 Spec == Init /\ [][Next]_vars
 =============================================================================

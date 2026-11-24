@@ -23,7 +23,6 @@ Never raises to the caller: every call returns an ok-dict.
 from . import coordinator as C
 from . import findings as F
 from . import identity as ID
-from . import jit as JIT
 from . import locate as L
 from . import swap as S
 import ast
@@ -267,8 +266,7 @@ class Session:
         if mod_obj is not None:
             run, held = L.index_module(mod_obj, L.module_functions(mod_obj))
             return {kl: True for kl, cs in run.items() if any(held.get(c) for c in cs)}
-        live, top_live = {}, set()
-        prefixes = (f"{mod_name}:", f"{mod_name}#actor:")
+        live, top_live, prefixes = {}, set(), (f"{mod_name}:", f"{mod_name}#actor:")
         for entries in (self.expected[-1] if self.expected else {}).values():
             for key in (entries or ()):
                 bare = key.split("/", 1)[1] if key.startswith("rank") and "/" in key else key
@@ -289,13 +287,10 @@ class Session:
 
     def _plan_base_source(self, mod_name, spec, extra_sources):
         mod_obj = sys.modules.get(ID._resolve_alias(mod_name, self._alias_map()))
-        for cand in (
-            extra_sources.get(mod_name) if isinstance(extra_sources, dict) else None,
-            self._source_stack[-1].get(mod_name),
-            *(p._live_source(mod_name) for p in getattr(self.co, "participants", ())
-              if isinstance(p, C.LocalParticipant)),
-            spec.get("base_source") if isinstance(spec, dict) else None,
-        ):
+        for cand in (extra_sources.get(mod_name) if isinstance(extra_sources, dict) else None,
+                     self._source_stack[-1].get(mod_name),
+                     *(p._live_source(mod_name) for p in getattr(self.co, "participants", ()) if isinstance(p, C.LocalParticipant)),
+                     spec.get("base_source") if isinstance(spec, dict) else None):
             if isinstance(cand, str):
                 return cand, mod_obj
         mod_file = getattr(mod_obj, "__file__", None) if mod_obj is not None else None
@@ -303,34 +298,36 @@ class Session:
             try:
                 with open(mod_file, encoding="utf-8") as fh:
                     return fh.read(), mod_obj
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 pass
         return None, mod_obj
 
     def plan(self, patch, base_sources=None):
-        """Non-mutating dry-run planner: inspect `patch` without touching any participant,
-        module dict, witness, or transaction journal."""
+        """Non-mutating dry-run planner: inspect `patch` without mutating participants or journals."""
         ident = self.identity()
 
         def refused(affected, findings):
-            return {"ok": False, "affected_modules": affected, "targets": {},
-                    "mechanisms": ["refused"], "restart_boundary": "refused",
-                    "refusal_findings": findings, "findings": findings, "identity": ident}
+            return {"ok": False, "affected_modules": affected, "targets": {}, "mechanisms": ["refused"],
+                    "restart_boundary": "refused", "refusal_findings": findings, "findings": findings, "identity": ident}
 
         if not isinstance(patch, dict):
             return refused([], [F.finding("patch_invalid", "patch must be a dict", "a patch dict")])
-        modules = (patch.get("modules") or {} if "modules" in patch else
-                   {m: {"source": src} for m, src in (patch.get("files") or {}).items()})
-        repairs, accept, affected = patch.get("repairs") or [], patch.get("accept", ()), sorted(modules)
+        key_name = "modules" if "modules" in patch else ("files" if "files" in patch else None)
+        if key_name is not None and not isinstance(patch[key_name], dict):
+            return refused([], [F.finding("patch_invalid", f"patch[{key_name!r}] must be a dict", "a dict")])
+        modules = ({} if key_name is None else patch["modules"] if key_name == "modules"
+                   else {m: {"source": src} for m, src in patch["files"].items()})
+        repairs, accept, affected = patch.get("repairs", ()), patch.get("accept", ()), sorted(str(m) for m in modules)
+        if not isinstance(repairs, (list, tuple)) or (accept != "all" and not isinstance(accept, (list, tuple, set))):
+            return refused(affected, [F.finding("patch_invalid", "invalid repairs or accept", "list/tuple")])
         if self.poisoned() or self.recovery_required():
             return refused(affected, self._refuse("plan").get("findings", []))
         if not modules and not repairs:
-            return refused([], [F.finding("empty_change", "patch has no modules or repair cells",
-                                          "at least one module edit or repair cell")])
+            return refused([], [F.finding("empty_change", "patch has no modules or repair cells", "at least one change")])
         fs, mechs, targets_out, any_change = [], [], {}, bool(repairs)
         for mod_name, spec in modules.items():
-            if not isinstance(spec, dict) or not isinstance(spec.get("source"), str):
-                fs.append(F.finding("patch_invalid", f"{mod_name}: missing source", "string source", subject=mod_name))
+            if not isinstance(mod_name, str) or not isinstance(spec, dict) or not isinstance(spec.get("source"), str):
+                fs.append(F.finding("patch_invalid", f"{mod_name}: missing source", "string source", subject=str(mod_name)))
                 continue
             base_src, mod_obj = self._plan_base_source(mod_name, spec, base_sources)
             if base_src is None:
@@ -338,9 +335,13 @@ class Session:
                 continue
             if spec.get("base_hash") and spec["base_hash"] != L.text_hash(base_src):
                 fs.append(F.finding("base_mismatch", f"{mod_name}: base_hash differs", spec["base_hash"], subject=mod_name))
-            ana = S.analyze(base_src, spec["source"], spec.get("targets", "auto"),
-                            getattr(mod_obj, "__file__", None) or f"<{mod_name}>",
-                            mod_name, self._plan_live_for(mod_name, base_src, mod_obj))
+            try:
+                ana = S.analyze(base_src, spec["source"], spec.get("targets", "auto"),
+                                getattr(mod_obj, "__file__", None) or f"<{mod_name}>",
+                                mod_name, self._plan_live_for(mod_name, base_src, mod_obj))
+            except Exception as exc:
+                fs.append(F.finding("patch_invalid", f"{type(exc).__name__}: {exc}", "valid targets/source", subject=mod_name))
+                continue
             if "error" in ana or ana.get("new_error"):
                 fs.append(F.finding("patch_invalid", ana.get("error") or ana["new_error"], "valid Python", subject=mod_name))
                 continue
@@ -349,16 +350,15 @@ class Session:
             new_codes = L.code_tree(ana["new_units"][0])[0] if ana["new_units"] else {}
             any_change = any_change or bool(ana["added"] or ana["removed"] or any(i.get("changed") for i in ana["imports"]))
             for (q, line), tr in zip(ana["resolved"], ana["targets"]):
-                key, st = L.key_of(mod_name, q, line), tr["status"]
-                if st in ("no_definition", "count", "no_live_function"):
-                    chk = "no_live_function" if st == "no_live_function" else "not_in_patch"
-                    fs.append(F.finding(chk, f"{key}: {st}", "live matching definition", subject=key))
+                key, target_status = L.key_of(mod_name, q, line), tr["status"]
+                if target_status in ("no_definition", "count", "no_live_function"):
+                    fs.append(F.finding("no_live_function" if target_status == "no_live_function" else "not_in_patch",
+                                        f"{key}: {target_status}", "live matching definition", subject=key))
                     continue
                 any_change = any_change or bool(tr.get("changed"))
                 bc, nc = (base_codes.get((q, line)) or [None])[0], (new_codes.get((q, tr["new_line"])) or [None])[0]
                 if bc is not None and nc is not None and bc.co_freevars != nc.co_freevars:
-                    fs.append(F.finding("closure_changed", f"{bc.co_freevars} -> {nc.co_freevars}",
-                                        f"same free variables {bc.co_freevars}", subject=key))
+                    fs.append(F.finding("closure_changed", f"{bc.co_freevars} -> {nc.co_freevars}", f"same freevars {bc.co_freevars}", subject=key))
                 if tr.get("nested_signature"):
                     fs.append(F.finding("nested_signature", tr["nested_signature"], "unchanged signature", subject=key))
                 jit_kind = tr.get("jit") or (S._jit_holder(mod_obj, q) if mod_obj else None)
@@ -381,29 +381,30 @@ class Session:
                 mechs.append("in_place_python")
             if ana["removed"]:
                 fs.append(F.finding("removed_definition", ", ".join(ana["removed"]), "explicit accept", subject=mod_name))
-            fs += [F.finding("new_fields", f"{nf['cls']}.{nf['field']}", "existing field", subject=mod_name)
-                   for nf in ana["new_fields"]]
+            fs += [F.finding("new_fields", f"{nf['cls']}.{nf['field']}", "existing field", subject=mod_name) for nf in ana["new_fields"]]
             if ana["outside_changes"]:
                 fs.append(F.finding("outside_changes", f"{mod_name}: changes outside targets", "target bodies only", subject=mod_name))
         for rep in repairs:
             try:
+                if not isinstance(rep, dict) or not isinstance(rep.get("cell"), str):
+                    raise TypeError("repair cell must be a dict with string 'cell'")
                 compile(rep["cell"], "<plan-repair>", "exec")
                 mechs.append("repair_cell")
             except Exception as e:
                 fs.append(F.finding("patch_invalid", f"repair cell: {type(e).__name__}: {e}", "valid repair cell"))
-        if not fs and not any_change:
+        if not any_change and all(f["overridable"] for f in fs):
             fs.append(F.finding("empty_change", "no definition changed, added, or removed", "at least one change"))
-        dec = F.decide(fs, accept)
+        try:
+            dec = F.decide(fs, accept)
+        except Exception as exc:
+            return refused(affected, [F.finding("patch_invalid", f"invalid accept: {exc}", "valid accept list")])
         ok = bool(dec["proceed"])
         uniq = list(dict.fromkeys(mechs)) if ok else ["refused"]
-        boundary = ("refused" if not ok else
-                    "triton_rejit" if "triton_rejit" in uniq else
+        boundary = ("refused" if not ok else "triton_rejit" if "triton_rejit" in uniq else
                     "constructor_reinit" if "constructor_reinit" in uniq else
-                    "repair_cell" if "repair_cell" in uniq and "in_place_python" not in uniq else
-                    "in_place_python")
-        return {"ok": ok, "affected_modules": affected, "targets": targets_out,
-                "mechanisms": uniq, "restart_boundary": boundary,
-                "refusal_findings": [f for f in dec["findings"] if not f.get("accepted")],
+                    "repair_cell" if "repair_cell" in uniq and "in_place_python" not in uniq else "in_place_python")
+        return {"ok": ok, "affected_modules": affected, "targets": targets_out, "mechanisms": uniq,
+                "restart_boundary": boundary, "refusal_findings": [f for f in dec["findings"] if not f.get("accepted")],
                 "findings": dec["findings"], "identity": ident}
 
     # -- verbs ---------------------------------------------------------------------------
@@ -418,8 +419,8 @@ class Session:
         res = self.co.run(plan, **kw)
         outcome = res["outcome"]
         if outcome == "in-doubt":
-            st = self.co.status(res["txn"])
-            outcome = st.get("outcome") if st.get("state") != "in-doubt" else None
+            status_info = self.co.status(res["txn"])
+            outcome = status_info.get("outcome") if status_info.get("state") != "in-doubt" else None
             if outcome is None:
                 self.fault("participant_failed", f"transaction {res['txn']} still in doubt",
                            "a known outcome", subject=res["txn"])
@@ -488,12 +489,14 @@ class Session:
             u = self.co.undo(t)
             results.append(u)
             if not u["ok"]:
-                status_label = (u.get("receipt") or {}).get("status", u.get("status", "partial"))
-                self._latch_recovery(f"undo of {t}: {status_label}")
+                status_label = u.get("status") or (u.get("receipt") or {}).get("status", "partial")
+                if status_label != "cancelled":
+                    self._latch_recovery(f"undo of {t}: {status_label}")
                 self.fault("undo_incomplete", f"undo of {t}: {status_label}",
                            "undone on every participant", subject=t)
                 return F.not_ok("undo failed", self.poisoned(), undone=undone,
-                                results=results, state=self.state(), recovery_required=True)
+                                results=results, state=self.state(),
+                                recovery_required=self.recovery_required())
             self.stack.pop()
             self.expected.pop()
             if len(self._source_stack) > 1:
@@ -505,13 +508,19 @@ class Session:
 
     def recovered(self, coordinator=None, base_sources=None):
         """After the lab respawned its participants: a new base, no poison, empty stack."""
-        if coordinator is not None:
+        old_inc = getattr(self.co, "incarnation", 1)
+        if coordinator is not None and coordinator is not self.co:
             self.co = coordinator
+            if hasattr(self.co, "incarnation"):
+                lock = getattr(self.co, "_lock", None)
+                if lock is not None:
+                    with lock:
+                        self.co.incarnation = max(self.co.incarnation, old_inc + 1)
+                else:
+                    self.co.incarnation = max(self.co.incarnation, old_inc + 1)
         elif hasattr(self.co, "recovered"):
             self.co.recovered()
-        self.stack, self.poison = [], []
-        self._recovery_required = False
-        self._recovery_reasons = []
+        self.stack, self.poison, self._recovery_required, self._recovery_reasons = [], [], False, []
         if base_sources is not None:
             self._base_sources = dict(base_sources)
         self._source_stack = [dict(self._base_sources)]
@@ -520,6 +529,5 @@ class Session:
         if fp is None:
             self.fault("tampered", "a participant gave no fingerprint after respawn",
                        "every participant answers")
-        return F.ok(state=self.state(), recovery_required=False,
-                    incarnation=getattr(self.co, "incarnation", 1),
-                    identity=self.identity(fp_raw=fp))
+        return F.ok(state=self.state(), recovery_required=self.recovery_required(),
+                    incarnation=getattr(self.co, "incarnation", 1), identity=self.identity(fp_raw=fp))

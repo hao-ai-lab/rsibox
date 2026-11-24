@@ -17,6 +17,8 @@ VARIABLES
 
 vars == <<coord_state, p_state, recovery_required, poisoned>>
 
+TerminalStates == {"idle", "committed", "aborted", "rolled_back", "recovery_required"}
+
 TypeOK ==
     /\ coord_state \in {"idle", "preparing", "validating", "committing",
                         "committed", "aborted", "rolling_back", "rolled_back",
@@ -33,11 +35,12 @@ Init ==
     /\ poisoned = FALSE
 
 StartPrepare ==
-    /\ coord_state = "idle"
+    /\ coord_state \in TerminalStates
     /\ ~recovery_required
     /\ ~poisoned
     /\ coord_state' = "preparing"
-    /\ UNCHANGED <<p_state, recovery_required, poisoned>>
+    /\ p_state' = [p \in Participants |-> "idle"]
+    /\ UNCHANGED <<recovery_required, poisoned>>
 
 ParticipantPrepare(p) ==
     /\ coord_state = "preparing"
@@ -107,7 +110,7 @@ FinalizeRollbackClean ==
     /\ coord_state = "rolling_back"
     /\ \A p \in Participants : p_state[p] \in {"undone", "aborted", "idle"}
     /\ coord_state' = "rolled_back"
-    /\ UNCHANGED <<p_state, recovery_required, poisoned>>
+    /\ UNCHANGED <<recovery_required, poisoned>>
 
 Respawn ==
     /\ coord_state' = "idle"

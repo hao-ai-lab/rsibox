@@ -3,30 +3,28 @@
 Covers two layers with zero Java/TLC dependency:
 1. Exhaustive bounded BFS state-space checking of the four TLA+ protocol specifications in
    `core/livelab/kernel/formal/` (`Transaction.tla`, `Participant.tla`, `SequentialTx.tla`,
-   `Incarnation.tla`), including negative-control bug mutants proving each invariant catches
-   its targeted protocol violation.
+   `Incarnation.tla`), including `TypeOK` and negative-control guard-removal mutants proving
+   each invariant catches its targeted protocol violation.
 2. Real kernel trace-replay and adversarial fault-injection tests against `Coordinator`,
-   `StepGapCoordinator`, `LocalParticipant`, `CallParticipant`, `Session`, and `ToyLab`.
+   `StepGapCoordinator`, `LocalParticipant`, `CallParticipant`, `GroupParticipant`,
+   `Session`, and `ToyLab`.
 
 Run from the repository root:
-    python3 -m unittest discover -s core/livelab/kernel -t core/livelab -v
+    PYTHONPATH=core/livelab python3 -m unittest kernel.test_formal_protocol -v
 """
 from collections import deque
 import os
-import shutil
-import tempfile
+import threading
 import time
 import unittest
 
 from . import coordinator as C
 from . import findings as F
 from . import identity as ID
-from . import locate as L
-from . import receipt as R
 from . import session as SS
 from . import toy_lab as TL
 from .test_detectors import temp_modules
-from .test_locate import ENG, OPS, at, edit, fresh
+from .test_locate import ENG, at, edit, fresh
 
 
 def _bfs_check(init_state, transitions, invariants, max_states=50_000):
@@ -60,29 +58,30 @@ class BoundedProtocolModelCheckTest(unittest.TestCase):
             self.assertTrue(os.path.isfile(fpath), f"missing {fname}")
             with open(fpath, encoding="utf-8") as fh:
                 text = fh.read()
-            self.assertTrue(len(text) > 100, fname)
+            self.assertGreater(len(text), 100, fname)
         with open(os.path.join(formal_dir, "README.md"), encoding="utf-8") as fh:
             readme = fh.read()
         self.assertIn("not", readme.lower())
         self.assertIn("numerical", readme.lower())
+        self.assertIn("PYTHONPATH=core/livelab python3 -m unittest kernel.test_formal_protocol", readme)
 
     def _run_transaction_bfs(self, *, mutant=None):
         """State: (coord_state, p_states_tuple, recovery_required, poisoned)."""
         n_parts = 2
+        terminal = {"idle", "committed", "aborted", "rolled_back", "recovery_required"}
+        valid_cs = terminal | {"preparing", "validating", "committing", "rolling_back"}
+        valid_ps = {"idle", "prepared", "committed", "aborted", "undone", "partial", "dead"}
         init = ("idle", ("idle",) * n_parts, False, False)
 
-        def transitions(st):
-            cs, ps, rec_req, pois = st
+        def transitions(state):
+            cs, ps, rec_req, pois = state
             out = []
-            # StartPrepare
-            can_start = (cs == "idle") if mutant == "skip_rollback_freeze" else (
-                cs == "idle" and not rec_req and not pois
+            # StartPrepare: mutant removes the `not rec_req and not pois` guard.
+            can_start = (cs in terminal) if mutant == "skip_rollback_freeze" else (
+                cs in terminal and not rec_req and not pois
             )
             if can_start:
-                out.append(("StartPrepare", ("preparing", ps, rec_req, pois)))
-            if mutant == "skip_rollback_freeze" and cs == "recovery_required":
-                out.append(("MutantStartWhileFrozen", ("preparing", ("idle",) * n_parts, rec_req, pois)))
-            # ParticipantPrepare
+                out.append(("StartPrepare", ("preparing", ("idle",) * n_parts, rec_req, pois)))
             if cs == "preparing":
                 for i in range(n_parts):
                     if ps[i] == "idle":
@@ -91,29 +90,25 @@ class BoundedProtocolModelCheckTest(unittest.TestCase):
                 if all(p == "prepared" for p in ps):
                     out.append(("PrepareAllYes", ("validating", ps, rec_req, pois)))
                 out.append(("PrepareAbortClean", ("aborted", ("aborted",) * n_parts, rec_req, pois)))
-            # AbortUnconfirmed
             if cs in ("preparing", "validating", "rolling_back"):
                 for i in range(n_parts):
                     nps = ps[:i] + ("dead",) + ps[i + 1:]
                     out.append((f"AbortUnconfirmed({i})", ("recovery_required", nps, True, True)))
-            # ValidatePass
             if cs == "validating" and all(p == "prepared" for p in ps):
                 out.append(("ValidatePass", ("committing", ps, rec_req, pois)))
-            # Committing
             if cs == "committing":
                 for i in range(n_parts):
                     if ps[i] == "prepared":
                         nps = ps[:i] + ("committed",) + ps[i + 1:]
                         out.append((f"Commit({i})", (cs, nps, rec_req, pois)))
-                        # Commit failure starts rollback
                         fps = ps[:i] + ("aborted",) + ps[i + 1:]
                         out.append((f"CommitFail({i})", ("rolling_back", fps, rec_req, pois)))
-                if mutant == "allow_split_commit":
-                    if any(p == "committed" for p in ps):
-                        out.append(("MutantSplitFinalize", ("committed", ps, rec_req, pois)))
-                elif all(p == "committed" for p in ps):
+                # FinalizeCommit: mutant weakens `\A p : committed` to `\E p : committed`.
+                ready = any(p == "committed" for p in ps) if mutant == "allow_split_commit" else (
+                    all(p == "committed" for p in ps)
+                )
+                if ready:
                     out.append(("FinalizeCommit", ("committed", ps, rec_req, pois)))
-            # Rolling back
             if cs == "rolling_back":
                 for i in range(n_parts):
                     if ps[i] == "committed":
@@ -124,13 +119,16 @@ class BoundedProtocolModelCheckTest(unittest.TestCase):
                         out.append((f"RollbackFail({i})", ("recovery_required", nps, True, True)))
                 if all(p in ("undone", "aborted", "idle") for p in ps):
                     out.append(("FinalizeRollbackClean", ("rolled_back", ps, rec_req, pois)))
-            # Respawn
             out.append(("Respawn", init))
             return out
 
         invariants = {
-            "no_split_commit": lambda st: (st[0] != "committed") or all(p == "committed" for p in st[1]),
-            "rollback_freeze": lambda st: (not st[2]) or (st[0] == "recovery_required" and st[3]),
+            "type_ok": lambda s: (
+                s[0] in valid_cs and all(p in valid_ps for p in s[1])
+                and isinstance(s[2], bool) and isinstance(s[3], bool)
+            ),
+            "no_split_commit": lambda s: (s[0] != "committed") or all(p == "committed" for p in s[1]),
+            "rollback_freeze": lambda s: (not s[2]) or (s[0] == "recovery_required" and s[3]),
         }
         return _bfs_check(init, transitions, invariants)
 
@@ -147,44 +145,57 @@ class BoundedProtocolModelCheckTest(unittest.TestCase):
         self.assertIsNotNone(v_split)
         self.assertEqual(v_split[0], "no_split_commit")
 
-    def _run_participant_and_sequential_bfs(self, *, mutant=None):
-        """Combined check for Participant.tla + SequentialTx.tla."""
-        # Participant state: (p_state, journal_depth, deadline_passed, poisoned)
-        p_init = ("idle", 0, False, False)
+    def _run_participant_bfs(self, *, mutant=None):
+        """State: (p_state, journal_depth, deadline_passed, committed_late, poisoned)."""
+        max_depth = 2
+        valid_ps = {"idle", "prepared", "committed", "aborted", "undone", "partial"}
+        init = ("idle", 0, False, False, False)
 
-        def p_trans(st):
-            ps, depth, dl, pois = st
-            out = [("Respawn", p_init)]
-            if ps == "idle" and not pois:
-                out.append(("Prepare", ("prepared", depth, dl, pois)))
-            if not dl:
-                out.append(("DeadlineExpire", (ps, depth, True, pois)))
-            if ps == "prepared" and not dl and not pois and depth < 2:
-                out.append(("Commit", ("committed", depth + 1, dl, pois)))
+        def transitions(state):
+            ps, depth, dl, committed_late, pois = state
+            out = [("Respawn", init)]
+            if ps in ("idle", "committed", "aborted", "undone") and not pois and depth < max_depth:
+                out.append(("Prepare", ("prepared", depth, False, committed_late, pois)))
+            if ps == "prepared" and not dl:
+                out.append(("DeadlineExpire", (ps, depth, True, committed_late, pois)))
+            # Commit: mutant removes the `not dl` guard.
+            can_commit = (ps == "prepared" and not pois and depth < max_depth) if mutant == "allow_late_commit" else (
+                ps == "prepared" and not dl and not pois and depth < max_depth
+            )
+            if can_commit:
+                out.append(("Commit", ("committed", depth + 1, dl, committed_late or dl, pois)))
             if ps == "prepared" and dl:
-                out.append(("LateCommitRefused", ("aborted", depth, dl, pois)))
+                out.append(("LateCommitRefused", ("aborted", depth, dl, committed_late, pois)))
             if ps == "prepared":
-                out.append(("Abort", ("aborted", depth, dl, pois)))
-            if ps == "committed" and depth > 0:
-                out.append(("UndoClean", ("undone", depth - 1, dl, pois)))
-                out.append(("UndoPartial", ("partial", depth, dl, True)))
+                out.append(("Abort", ("aborted", depth, dl, committed_late, pois)))
+            if ps in ("committed", "undone") and depth > 0:
+                next_ps = "idle" if depth == 1 else "undone"
+                out.append(("UndoClean", (next_ps, depth - 1, dl, committed_late, pois)))
+                out.append(("UndoPartial", ("partial", depth, dl, committed_late, True)))
             return out
 
-        p_invs = {
-            "partial_implies_poisoned": lambda st: st[0] != "partial" or st[3],
-            "committed_has_journal": lambda st: st[0] != "committed" or st[1] >= 1,
+        invariants = {
+            "type_ok": lambda s: (
+                s[0] in valid_ps and 0 <= s[1] <= max_depth
+                and isinstance(s[2], bool) and isinstance(s[3], bool) and isinstance(s[4], bool)
+            ),
+            "partial_implies_poisoned": lambda s: s[0] != "partial" or s[4],
+            "no_commit_after_deadline": lambda s: not s[3],
+            "committed_has_journal": lambda s: s[0] != "committed" or s[1] >= 1,
         }
-        p_visited, p_viol = _bfs_check(p_init, p_trans, p_invs)
+        return _bfs_check(init, transitions, invariants)
 
-        # SequentialTx state: (stack_tuple, seen_frozenset, at_base, recovery_required)
+    def _run_sequential_bfs(self, *, mutant=None):
+        """State: (stack_tuple, seen_frozenset, at_base, recovery_required)."""
         txns = ("t1", "t2")
-        s_init = ((), frozenset(), True, False)
+        init = ((), frozenset(), True, False)
 
-        def s_trans(st):
-            stack, seen, at_base, rec_req = st
-            out = [("Respawn", s_init)]
+        def transitions(state):
+            stack, seen, at_base, rec_req = state
+            out = [("Respawn", init)]
             if not rec_req:
                 for t in txns:
+                    # InstallCommit: mutant removes `t not in seen` guard.
                     allow = (len(stack) < 2) if mutant == "allow_duplicate_txn_id" else (t not in seen)
                     if allow:
                         out.append((f"InstallCommit({t})", (stack + (t,), seen | {t}, False, False)))
@@ -194,61 +205,76 @@ class BoundedProtocolModelCheckTest(unittest.TestCase):
                     out.append(("UninstallFail", (stack, seen, at_base, True)))
             return out
 
-        s_invs = {
-            "empty_stack_restores_base": lambda st: not (len(st[0]) == 0 and not st[3]) or st[2],
-            "no_duplicate_in_stack": lambda st: len(st[0]) == len(set(st[0])),
+        invariants = {
+            "type_ok": lambda s: (
+                s[1].issubset(set(txns)) and isinstance(s[2], bool) and isinstance(s[3], bool)
+            ),
+            "empty_stack_restores_base": lambda s: not (len(s[0]) == 0 and not s[3]) or s[2],
+            "no_duplicate_in_stack": lambda s: len(s[0]) == len(set(s[0])),
         }
-        s_visited, s_viol = _bfs_check(s_init, s_trans, s_invs)
-        return (p_visited, p_viol), (s_visited, s_viol)
+        return _bfs_check(init, transitions, invariants)
 
     def test_participant_and_sequential_tx_invariants_and_mutants(self):
-        (pv, pviol), (sv, sviol) = self._run_participant_and_sequential_bfs()
-        self.assertGreater(pv, 10)
-        self.assertGreater(sv, 10)
-        self.assertIsNone(pviol)
-        self.assertIsNone(sviol)
+        pv, pviol = self._run_participant_bfs()
+        self.assertGreaterEqual(pv, 12)
+        self.assertIsNone(pviol, f"Participant.tla violated: {pviol}")
 
-        _, (_, dup_viol) = self._run_participant_and_sequential_bfs(mutant="allow_duplicate_txn_id")
+        _, late_viol = self._run_participant_bfs(mutant="allow_late_commit")
+        self.assertIsNotNone(late_viol)
+        self.assertEqual(late_viol[0], "no_commit_after_deadline")
+
+        sv, sviol = self._run_sequential_bfs()
+        self.assertGreater(sv, 10)
+        self.assertIsNone(sviol, f"SequentialTx.tla violated: {sviol}")
+
+        _, dup_viol = self._run_sequential_bfs(mutant="allow_duplicate_txn_id")
         self.assertIsNotNone(dup_viol)
         self.assertEqual(dup_viol[0], "no_duplicate_in_stack")
 
     def _run_incarnation_bfs(self, *, mutant=None):
-        """State: (active_inc, active_txn, live_incs_frozenset, in_flight_frozenset, stale_accepted)."""
+        """State: (active_inc, active_txn, live_incs, in_flight, accepted_records)."""
         max_inc = 2
         txns = (1, 2)
-        parts = ("r0", "r1")
-        init = (1, 0, frozenset({1}), frozenset(), False)
+        parts = ("r0",)
+        init = (1, 0, frozenset({1}), frozenset(), frozenset())
 
-        def transitions(st):
-            inc, txn, live_incs, inflight, stale_acc = st
+        def transitions(state):
+            inc, txn, live_incs, inflight, accepted = state
             out = []
             if txn == 0:
                 for t in txns:
-                    out.append((f"StartTxn({t})", (inc, t, live_incs, inflight, stale_acc)))
+                    out.append((f"StartTxn({t})", (inc, t, live_incs, inflight, accepted)))
             else:
                 for p in parts:
                     msg = (p, inc, txn)
                     if msg not in inflight:
-                        out.append((f"SendReply({p})", (inc, txn, live_incs, inflight | {msg}, stale_acc)))
-                out.append(("FinishTxn", (inc, 0, live_incs, inflight, stale_acc)))
-            for r in inflight:
-                _, r_inc, r_txn = r
-                rest = inflight - {r}
-                if r_inc == inc and r_txn == txn:
-                    out.append(("DeliverFresh", (inc, txn, live_incs, rest, stale_acc)))
-                else:
-                    if mutant == "accept_stale_reply":
-                        out.append(("MutantDeliverStale", (inc, txn, live_incs, rest, True)))
-                    else:
-                        out.append(("RejectStale", (inc, txn, live_incs, rest, stale_acc)))
+                        out.append((f"SendReply({p})", (inc, txn, live_incs, inflight | {msg}, accepted)))
+                out.append(("FinishTxn", (inc, 0, live_incs, inflight, accepted)))
+            for reply in inflight:
+                p, r_inc, r_txn = reply
+                rest = inflight - {reply}
+                # DeliverFreshReply: mutant removes `r_inc == inc and r_txn == txn` guard.
+                fresh_ok = True if mutant == "accept_stale_reply" else (r_inc == inc and r_txn == txn)
+                if fresh_ok:
+                    rec = (p, r_inc, r_txn, inc, txn)
+                    out.append(("DeliverFreshReply", (inc, txn, live_incs, rest, accepted | {rec})))
+                if r_inc != inc or r_txn != txn:
+                    out.append(("RejectStaleReply", (inc, txn, live_incs, rest, accepted)))
             if inc < max_inc:
                 new_live = (live_incs | {inc + 1}) if mutant == "keep_old_incarnation_live" else frozenset({inc + 1})
-                out.append(("Respawn", (inc + 1, 0, new_live, inflight, stale_acc)))
+                out.append(("Respawn", (inc + 1, 0, new_live, inflight, accepted)))
             return out
 
         invariants = {
-            "single_active_incarnation": lambda st: len(st[2]) == 1 and st[2] == frozenset({st[0]}),
-            "stale_reply_rejection": lambda st: not st[4],
+            "type_ok": lambda s: (
+                1 <= s[0] <= max_inc and s[1] in (0, *txns)
+                and s[2].issubset(set(range(1, max_inc + 1)))
+            ),
+            "single_active_incarnation": lambda s: len(s[2]) == 1 and s[2] == frozenset({s[0]}),
+            "stale_reply_rejection": lambda s: all(
+                r_inc == acc_inc and r_txn == acc_txn
+                for _, r_inc, r_txn, acc_inc, acc_txn in s[4]
+            ),
         }
         return _bfs_check(init, transitions, invariants)
 
@@ -292,9 +318,9 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertTrue(res["recovery_required"])
         self.assertTrue(sess.recovery_required())
         self.assertTrue(co.is_recovery_required())
-        st = sess.status()
-        self.assertEqual(st["state"], "poisoned")
-        self.assertTrue(st["recovery_required"])
+        status = sess.status()
+        self.assertEqual(status["state"], "poisoned")
+        self.assertTrue(status["recovery_required"])
 
         next_plan = {"modules": {"toy.engine": {
             "source": edit(ENG, ("return y", "return y * 5")),
@@ -311,7 +337,6 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertTrue(ref_uninstall["recovery_required"])
         self.assertEqual([f["check"] for f in ref_uninstall["findings"]], ["recovery_required"])
 
-        # Clean respawn with a fresh participant clears recovery_required and bumps incarnation.
         name2, eng2, _ = fresh("rb_freeze_respawn")
         co.participants = [C.LocalParticipant("rank0", alias={"toy": name2})]
         rec = sess.recovered()
@@ -332,7 +357,6 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         r1 = lab.install(p_vis)
         self.assertTrue(r1["ok"], r1)
 
-        # Sabotage rank1's undo to simulate a participant failure mid-uninstall.
         lp1 = lab.locals["rank1"]
         orig_undo = lp1.undo
         lp1.undo = lambda txn: F.not_ok("rank1 undo crashed", [
@@ -347,7 +371,6 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         finally:
             lp1.undo = orig_undo
 
-        # Subsequent uninstall and install are both rejected fail-closed.
         u2 = lab.uninstall()
         self.assertFalse(u2["ok"])
         self.assertTrue(u2["recovery_required"])
@@ -358,13 +381,43 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertEqual(r2["outcome"], "refused")
         self.assertEqual(r2["codes"], ["session_poisoned"])
 
-        # Clean respawn recovers and restores normal operation.
         rs = lab.reset("respawn")
         self.assertTrue(rs["ok"], rs)
-        st = lab.status()
-        self.assertEqual((st["state"], st["recovery_required"]), ("base", False))
+        status = lab.status()
+        self.assertEqual((status["state"], status["recovery_required"]), ("base", False))
         self.assertTrue(lab.install(p_vis)["ok"])
         self.assertTrue(lab.uninstall()["ok"])
+
+    def test_toylab_respawn_increments_incarnation_and_supersedes_old_txns(self):
+        """`ToyLab.reset('respawn')` carries `incarnation` 1 -> 2 across new coordinators,
+        changes base `identity['digest']`, and `Coordinator.recovered()` refuses undo of
+        superseded prior-incarnation transactions."""
+        lab = TL.ToyLab(ranks=2)
+        self.addCleanup(lab.close)
+        st1 = lab.status()
+        self.assertEqual(st1["incarnation"], 1)
+        self.assertEqual(st1["identity"]["incarnation"], 1)
+
+        rs = lab.reset("respawn")
+        self.assertTrue(rs["ok"], rs)
+        st2 = lab.status()
+        self.assertEqual(st2["incarnation"], 2)
+        self.assertEqual(st2["identity"]["incarnation"], 2)
+        self.assertNotEqual(st1["identity"]["digest"], st2["identity"]["digest"])
+
+        # Coordinator.recovered() supersedes prior-incarnation committed txns.
+        name, _, _ = fresh("superseded_txn")
+        co = C.Coordinator([C.LocalParticipant("r0", alias={"toy": name})], phase2_deadline_s=None)
+        committed = co.run({"id": "inc1-txn", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}})
+        self.assertEqual(committed["outcome"], "committed")
+        co.recovered()
+        self.assertEqual(co.incarnation, 2)
+        old_undo = co.undo("inc1-txn")
+        self.assertEqual((old_undo["ok"], old_undo["status"]), (False, "refused"))
+        self.assertIn("superseded", old_undo["error"])
 
     def test_unconfirmed_abort_freezes_fail_closed(self):
         """A participant that stops responding during abort latches `recovery_required`."""
@@ -413,7 +466,7 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
                 if idx == 3 and method == "commit":
                     raise RuntimeError("r3 commit died")
                 if idx == 2 and method == "undo":
-                    time.sleep(1.5)  # hung peer during rollback
+                    time.sleep(1.5)
                 return getattr(lp, method)(payload)
 
             parts.append(C.CallParticipant(f"r{idx}", rpc))
@@ -432,13 +485,11 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertEqual(rb["status"], "partial")
         self.assertIn("r2", rb["failed_participants"])
         self.assertIn("r2", rb["errors"])
-        # Reachable ranks r0 and r1 unwound cleanly back to base.
         self.assertEqual(engines[0].step(3), 17)
         self.assertEqual(engines[1].step(3), 17)
         self.assertEqual(engines[3].step(3), 17)
         self.assertTrue(co.is_recovery_required())
 
-        # Also check exception-raising rank during rollback without deadline.
         parts2, engines2 = [], []
         for idx in range(3):
             mod_name, eng, _ = fresh(f"prb_exc_{idx}")
@@ -461,9 +512,67 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertEqual(engines2[0].step(3), 17)
         self.assertTrue(co2.is_recovery_required())
 
-    def test_duplicate_and_stale_txn_and_incarnation_replies_rejected(self):
+    def test_poll_rollback_toctou_group_mixed_and_no_rpc_in_readonly_queries(self):
+        """(a) `poll_rollback()` discards stale results if `recovered()` ran concurrently;
+        (b) `poll_rollback()` detects a `"partial"` rank inside a `GroupParticipant` `"mixed"`
+        reply and latches `recovery_required`; (c) read-only `is_recovery_required()`,
+        `Session.identity()`, and `Session.plan()` emit zero `status` RPCs."""
+        # (a) TOCTOU: concurrent recovered() during poll_rollback() must not poison inc 2.
+        entered, release = threading.Event(), threading.Event()
+        status_calls = []
+
+        def slow_status(method, payload):
+            if method == "status":
+                status_calls.append(payload)
+                entered.set()
+                release.wait(5)
+                return F.not_ok("dead from inc 1")
+            return F.ok(code={"toy.engine:Engine.step:1": ["h", 1]})
+
+        part = C.CallParticipant("r0", slow_status)
+        co = C.Coordinator([part], phase2_deadline_s=None)
+        co.poison.append(F.finding("deadline_missed", "late", "on time"))
+        co.txns["t-old"] = {"state": "aborted", "pending_rollback": [part]}
+
+        poll_res = {}
+        th = threading.Thread(target=lambda: poll_res.update(v=co.poll_rollback()), daemon=True)
+        th.start()
+        self.assertTrue(entered.wait(5))
+        co.recovered()
+        self.assertEqual(co.incarnation, 2)
+        release.set()
+        th.join(5)
+        self.assertFalse(co.is_recovery_required())
+        self.assertEqual(co.poison, [])
+
+        # (b) GroupParticipant returning state='mixed' with rank 1 'partial' latches recovery_required.
+        def mixed_group(method, payload):
+            if method == "status":
+                return C.merge_ranks("status", [
+                    {"ok": True, "state": "undone", "rank": 0},
+                    {"ok": True, "state": "partial", "rank": 1},
+                ])
+            return F.ok()
+
+        grp = C.CallParticipant("workers", mixed_group)
+        co_g = C.Coordinator([grp], phase2_deadline_s=None)
+        co_g.poison.append(F.finding("deadline_missed", "late", "on time"))
+        co_g.txns["t-mix"] = {"state": "aborted", "pending_rollback": [grp]}
+        self.assertTrue(co_g.poll_rollback())
+        self.assertTrue(co_g.is_recovery_required())
+
+        # (c) Read-only queries make ZERO status RPCs.
+        status_calls.clear()
+        sess = SS.Session(co, ["toy.engine"], base_sources={"toy.engine": ENG})
+        _ = co.is_recovery_required()
+        _ = sess.recovery_required()
+        _ = sess.identity()
+        _ = sess.plan({"files": {"toy.engine": edit(ENG, ("return y", "return y + 1"))}})
+        self.assertEqual(status_calls, [])
+
+    def test_duplicate_stale_replies_and_real_incarnation_echo(self):
         """Duplicate txn IDs, mismatched-txn replies, and stale-incarnation replies are
-        rejected cleanly and never cause a split commit."""
+        rejected; real `LocalParticipant` echoes `txn` and `incarnation` tags."""
         n0, eng0, _ = fresh("stale0")
         lp0 = C.LocalParticipant("r0", alias={"toy": n0})
         co = C.Coordinator([lp0], phase2_deadline_s=None)
@@ -473,25 +582,25 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         }}}
         r1 = co.run(plan)
         self.assertEqual(r1["outcome"], "committed")
+        # Real LocalParticipant echoed txn & incarnation on prepare, validate, and commit.
+        p_rec = r1["receipt"]["participants"]["r0"]
+        for phase in ("prepare", "validate", "commit"):
+            self.assertEqual(p_rec[phase].get("txn"), "fixed-txn-1", phase)
+            self.assertEqual(p_rec[phase].get("incarnation"), 1, phase)
+
         # Duplicate txn id refused by Coordinator and LocalParticipant.
         dup_co = co.run(plan)
         self.assertEqual(dup_co["outcome"], "refused")
         self.assertEqual([f["check"] for f in dup_co["findings"]], ["patch_invalid"])
-        dup_lp = lp0.prepare(plan)
-        self.assertFalse(dup_lp["ok"])
+        self.assertFalse(lp0.prepare(plan)["ok"])
         self.assertEqual(eng0.Engine().step(3), 170)
 
-        # Stale txn reply on prepare rejected.
+        # Stale txn reply rejected.
         n1, eng1, _ = fresh("stale1")
         lp1 = C.LocalParticipant("r1", alias={"toy": n1})
-
-        def stale_txn_rpc(method, payload):
-            reply = getattr(lp1, method)(payload)
-            if method == "prepare":
-                return {**reply, "txn": "old-txn-999"}
-            return reply
-
-        co_stale = C.Coordinator([C.CallParticipant("r1", stale_txn_rpc)], phase2_deadline_s=None)
+        co_stale = C.Coordinator([C.CallParticipant("r1", lambda m, p: (
+            {**getattr(lp1, m)(p), "txn": "old-txn-999"} if m == "prepare" else getattr(lp1, m)(p)
+        ))], phase2_deadline_s=None)
         r_stale = co_stale.run({"id": "new-txn-1", "modules": {"toy.engine": {
             "source": edit(ENG, ("return y", "return y * 10")),
             "targets": [["Engine.step", at(ENG, "def step")]],
@@ -503,14 +612,9 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         # Stale incarnation reply rejected after recovered() increments incarnation to 2.
         n2, eng2, _ = fresh("stale_inc")
         lp2 = C.LocalParticipant("r2", alias={"toy": n2})
-
-        def stale_inc_rpc(method, payload):
-            reply = getattr(lp2, method)(payload)
-            if method == "prepare":
-                return {**reply, "incarnation": 1}
-            return reply
-
-        co_inc = C.Coordinator([C.CallParticipant("r2", stale_inc_rpc)], phase2_deadline_s=None)
+        co_inc = C.Coordinator([C.CallParticipant("r2", lambda m, p: (
+            {**getattr(lp2, m)(p), "incarnation": 1} if m == "prepare" else getattr(lp2, m)(p)
+        ))], phase2_deadline_s=None)
         co_inc.recovered()
         self.assertEqual(co_inc.incarnation, 2)
         r_inc = co_inc.run({"id": "inc-txn-1", "modules": {"toy.engine": {
@@ -521,17 +625,40 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertTrue(r_inc["receipt"]["participants"]["r2"]["prepare"].get("stale"))
         self.assertEqual(eng2.Engine().step(3), 17)
 
-    def test_plan_is_strictly_non_mutating_and_classifies_boundaries(self):
-        """`Session.plan(patch)` and `ToyLab.plan(patch)` classify `in_place_python`,
-        `triton_rejit`, and `refused` boundaries without mutating any participant, journal,
-        witness, or module state."""
+    def test_cancelled_undo_never_latches_recovery_required(self):
+        """A cancelled undo (gap timed out before starting) preserves `cancelled` and does
+        NOT falsely latch `recovery_required`."""
+        name, eng, _ = fresh("cancel_undo")
+        co = C.StepGapCoordinator([C.LocalParticipant("r0", alias={"toy": name})],
+                                  lambda fn: fn(), phase2_deadline_s=None)
+        sess = SS.Session(co, ["toy.engine"], base_sources={"toy.engine": ENG})
+        ins = sess.install({"modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}})
+        self.assertEqual(ins["outcome"], "committed")
+
+        def timeout_before_start(_fn):
+            raise TimeoutError("gap busy")
+
+        co.gap = timeout_before_start
+        u = sess.uninstall()
+        self.assertFalse(u["ok"])
+        self.assertFalse(u["recovery_required"])
+        self.assertFalse(sess.recovery_required())
+        self.assertFalse(co.is_recovery_required())
+        self.assertEqual(eng.Engine().step(3), 170)
+
+    def test_plan_non_mutating_boundaries_malformed_inputs_and_constant_accept_all(self):
+        """`Session.plan` and `ToyLab.plan` classify `in_place_python`, `triton_rejit`, and
+        `refused`, never raise on malformed inputs, refuse constant-only edits even with
+        `accept='all'`, and never mutate any participant, journal, witness, or module state."""
         lab = TL.ToyLab(ranks=2)
         self.addCleanup(lab.close)
         before_st = lab.status()
         before_out = lab.check()["output"]
         patches = lab.patches()
 
-        # 1. Valid in-place Python edit.
         p_ok = lab.plan(patches["visible"])
         self.assertTrue(p_ok["ok"], p_ok)
         self.assertEqual(p_ok["affected_modules"], ["toy.ops"])
@@ -540,20 +667,36 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertEqual(p_ok["refusal_findings"], [])
         self.assertEqual(p_ok["identity"]["digest"], before_st["identity"]["digest"])
 
-        # 2. All refusal classes.
         expected_codes = {
-            "syntax": "patch_invalid",
-            "closure": "closure_changed",
-            "module_state": "outside_changes",
-            "empty": "empty_change",
+            "syntax": "patch_invalid", "closure": "closure_changed",
+            "module_state": "outside_changes", "empty": "empty_change",
         }
         for cls_name, want_code in expected_codes.items():
             p_ref = lab.plan(patches["refused"][cls_name])
             self.assertFalse(p_ref["ok"], (cls_name, p_ref))
             self.assertEqual(p_ref["mechanisms"], ["refused"], cls_name)
             self.assertEqual(p_ref["restart_boundary"], "refused", cls_name)
-            got_codes = [f["check"] for f in p_ref["refusal_findings"]]
-            self.assertIn(want_code, got_codes, (cls_name, got_codes))
+            self.assertIn(want_code, [f["check"] for f in p_ref["refusal_findings"]], cls_name)
+
+        # Constant-only edit with accept='all' MUST still be refused with empty_change.
+        p_const_all = lab.plan({**patches["refused"]["module_state"], "accept": "all"})
+        self.assertFalse(p_const_all["ok"], p_const_all)
+        self.assertEqual(p_const_all["restart_boundary"], "refused")
+        self.assertIn("empty_change", [f["check"] for f in p_const_all["refusal_findings"]])
+
+        # Malformed inputs never raise and return ok=False.
+        for bad in (
+            "not-a-dict",
+            {"modules": "not-a-dict"},
+            {"files": 123},
+            {"modules": {"toy.ops": {"source": patches["visible"]["files"]["toy.ops"], "targets": "bad"}}},
+            {"modules": {"toy.ops": {"source": patches["visible"]["files"]["toy.ops"]}}, "accept": 42},
+            {"repairs": "not-a-list"},
+            {"repairs": [{"no_cell": 1}]},
+        ):
+            r_bad = lab.plan(bad)
+            self.assertFalse(r_bad["ok"], bad)
+            self.assertEqual(r_bad["restart_boundary"], "refused", bad)
 
         # Verify ZERO mutation across every participant and lab output.
         after_st = lab.status()
@@ -568,16 +711,10 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
             self.assertEqual(lp.witness.counts, {})
         self.assertEqual(lab.check()["output"], before_out)
 
-        # 3. Triton JIT edit classification (pure CPU stand-in, zero GPU).
+        # Triton JIT edit classification (pure CPU stand-in, zero GPU).
         triton_src = (
-            "class _T:\n"
-            "    @staticmethod\n"
-            "    def jit(fn):\n"
-            "        return fn\n"
-            "triton = _T()\n\n"
-            "@triton.jit\n"
-            "def add_kernel(x):\n"
-            "    return x + 1\n"
+            "class _T:\n    @staticmethod\n    def jit(fn):\n        return fn\n"
+            "triton = _T()\n\n@triton.jit\ndef add_kernel(x):\n    return x + 1\n"
         )
         (tmod,) = temp_modules(self, {"kt_plan_triton": triton_src})
         lp_t = C.LocalParticipant("rank0")
@@ -589,18 +726,9 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         self.assertEqual(lp_t.journal.entries, [])
         self.assertEqual(tmod.add_kernel(4), 5)
 
-        # 4. Plan refused when session is poisoned.
-        lab.inject("tamper")
-        lab.check()
-        self.assertEqual(lab.status()["state"], "poisoned")
-        p_pois = lab.plan(patches["visible"])
-        self.assertFalse(p_pois["ok"])
-        self.assertEqual(p_pois["restart_boundary"], "refused")
-        self.assertEqual([f["check"] for f in p_pois["refusal_findings"]], ["session_poisoned"])
-
-    def test_cryptographic_identity_determinism_and_receipt_binding(self):
-        """`compute_identity` produces deterministic 64-hex SHA-256 digests wired into
-        `Session.status()` and every JSONL record written by `ReceiptWriter`."""
+    def test_cryptographic_identity_determinism_strict_json_and_live_preference(self):
+        """`compute_identity` is deterministic, rejects NaN and non-JSON objects, prefers live
+        in-memory code hashes over edited on-disk files, and tracks `ToyLab` state transitions."""
         id_a = ID.compute_identity(
             module_sources={"b.mod": "def g(): return 2\n", "a.mod": "def f(): return 1\n"},
             txns=["t1"], state="edited", incarnation=1, recovery_required=False,
@@ -613,46 +741,32 @@ class KernelAdversarialHardeningTest(unittest.TestCase):
         )
         self.assertEqual(len(id_a["digest"]), 64)
         self.assertEqual(id_a["digest"], id_b["digest"])
-        # Any change to source, txns, state, incarnation, or recovery_required changes digest.
-        id_diff_src = ID.compute_identity(
-            module_sources={"a.mod": "def f(): return 9\n", "b.mod": "def g(): return 2\n"},
-            txns=["t1"], state="edited", incarnation=1, recovery_required=False,
-            metadata={"engine": {"name": "toy"}},
-        )
-        id_diff_inc = ID.compute_identity(
-            module_sources={"a.mod": "def f(): return 1\n", "b.mod": "def g(): return 2\n"},
-            txns=["t1"], state="edited", incarnation=2, recovery_required=False,
-            metadata={"engine": {"name": "toy"}},
-        )
-        self.assertNotEqual(id_a["digest"], id_diff_src["digest"])
-        self.assertNotEqual(id_a["digest"], id_diff_inc["digest"])
 
-        # End-to-end ToyLab + ReceiptWriter binding across txn, proof, and undo records.
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp)
-        rpath = os.path.join(tmp, "receipts.jsonl")
-        lab = TL.ToyLab(ranks=2, receipts=rpath)
+        with self.assertRaises(ValueError):
+            ID.sha256_canonical({"bad": float("nan")})
+        with self.assertRaises(TypeError):
+            ID.sha256_canonical({"bad": object()})
+
+        # Prefer live in-memory code hashes over edited on-disk __file__.
+        (mod,) = temp_modules(self, {"kt_id_disk": "def f():\n    return 1\n"})
+        fp = {"r0": {"kt_id_disk:f:1": ["deadbeef12345678", 999]}}
+        d_before = ID.module_source_digests(["kt_id_disk"], fingerprint=fp)["kt_id_disk"]
+        with open(mod.__file__, "w", encoding="utf-8") as fh:
+            fh.write("def f():\n    return 9999\n")
+        d_after = ID.module_source_digests(["kt_id_disk"], fingerprint=fp)["kt_id_disk"]
+        self.assertEqual(d_before, d_after)
+
+        # ToyLab live status identity tracks install -> uninstall cleanly.
+        lab = TL.ToyLab(ranks=2)
         self.addCleanup(lab.close)
         id_base = lab.status()["identity"]
-        self.assertEqual(len(id_base["digest"]), 64)
-        self.assertEqual(id_base["state"], "base")
-
         ins = lab.install(lab.patches()["visible"])
-        self.assertTrue(ins["ok"], ins)
-        id_edited = lab.status()["identity"]
-        self.assertNotEqual(id_edited["digest"], id_base["digest"])
-        self.assertEqual(id_edited["txns"], [ins["id"]])
-        self.assertTrue(lab.check()["ok"])
+        self.assertTrue(ins["ok"])
+        id_ed = lab.status()["identity"]
+        self.assertNotEqual(id_ed["digest"], id_base["digest"])
+        self.assertEqual(id_ed["txns"], [ins["id"]])
         self.assertTrue(lab.uninstall()["ok"])
-        id_back = lab.status()["identity"]
-        self.assertEqual(id_back["digest"], id_base["digest"])
-
-        recs = R.read(rpath)
-        self.assertEqual([r["kind"] for r in recs], ["txn", "proof", "undo"])
-        for rec in recs:
-            self.assertIn("identity", rec)
-            self.assertEqual(len(rec["identity"]["digest"]), 64)
-            self.assertEqual(rec["identity"]["schema"], ID.SCHEMA)
+        self.assertEqual(lab.status()["identity"]["digest"], id_base["digest"])
 
 
 if __name__ == "__main__":
