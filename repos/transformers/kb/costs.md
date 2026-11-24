@@ -1,8 +1,8 @@
 # Measured Costs
 
-All GPU numbers below were measured on 1× NVIDIA B200 (180 GiB HBM3e), Python 3.12.11,
-PyTorch 2.14.0+cu130, Transformers 5.20.2 (`bfloat16`), 3 repeats per measurement (mean ± std),
-using the fixed 2-prompt × 16-token greedy workload in [workload.md](workload.md).
+All GPU numbers below were measured in our 2026-11-24 B200 run on 1× NVIDIA B200 (180 GiB HBM3e),
+Python 3.12.11, PyTorch 2.14.0+cu130, Transformers 5.20.2 (`bfloat16`), 3 repeats per measurement
+(mean ± std), using the fixed 2-prompt × 16-token greedy workload in [workload.md](workload.md).
 
 ## Cold Boot vs. Warm `TransformersLab` Live Edit
 
@@ -24,7 +24,8 @@ using the fixed 2-prompt × 16-token greedy workload in [workload.md](workload.m
 
 ## Snapshot Quiesce & Resume (`DynamoK8sSnapshotDriver` + `TransformersQuiesceHooks`)
 
-Measured over 3 consecutive `checkpoint_and_wait()` cycles with `offload_to_cpu=True, pin_memory=True`:
+Measured in our 2026-11-24 B200 run over 3 consecutive `checkpoint_and_wait()` cycles with
+`offload_to_cpu=True, pin_memory=True`:
 
 | Model | Warmup (s) | Quiesce Run 1 (Cold Pinning) | Quiesce Steady (Runs 2–3) | Resume (3× mean ± std) | VRAM Freed During Quiesce | Post-Resume Bit-Exact & Live Edit |
 |---|---|---|---|---|---|---|
@@ -32,6 +33,8 @@ Measured over 3 consecutive `checkpoint_and_wait()` cycles with `offload_to_cpu=
 | **Qwen3-8B** | `0.048 ± 0.019` | `15.644 s` | `8.758 s`, `8.976 s` | **`0.310 ± 0.011 s`** | `15,740–15,778 MiB` | Yes (`0.287 s` install, `0.307 s` check) |
 
 ## CPU Conformance (`ToyTransformersLab`)
+
+Measured on CPU (2026-11-24):
 
 - `rsibox conformance transformers`: **11/11 PASS** (`c0–c10`), total ~2.4 s on CPU.
 - `c9_soak` (20 cycles): install median `~0.007 s`, uninstall median `~0.002 s`.
