@@ -38,7 +38,10 @@ Contract:
     `--max-num-seqs`, `--max-num-batched-tokens`, each at most its boot value, and `--scheduling-policy`). The launcher
     sends it to the engine core's live agent (started by engine.py in every engine it starts),
     which sets the scheduler's limits between two steps and reads them back. PID keeps
-    running; only an acknowledged change updates the recorded state.
+    running; only an acknowledged change updates the recorded state. When the override consists
+    strictly of `LIVE_FIELDS` flags and the live agent is ready within boot limits, a stdlib
+    fast path applies the update directly without importing vLLM's parser, falling back to the
+    full parser and preflight path on any other flag, invalid value, or unavailable agent.
   - `restart`: everything else (`--max-model-len`, `--enable-prefix-caching`, `--enforce-eager`,
     CUDA graph flags, `--gpu-memory-utilization`, ...), and any live change the agent does not
     acknowledge: PID is stopped (verified) and the engine starts with the new argv; the
@@ -1144,6 +1147,97 @@ def _check_zygote_for_reconfig(launcher_args, env, reconfig, **extra):
     return reply
 
 
+def _has_arity_mismatch(parsed_vllm):
+    """True when `parsed_vllm["arities"]` recorded any parser/tokenizer arity mismatch."""
+    for arity_info in (parsed_vllm.get("arities") or {}).values():
+        if any(
+            parser_count != tokenizer_count
+            for parser_count, tokenizer_count in (arity_info.get("pairs") or ())
+        ):
+            return True
+    return False
+
+
+def _try_fast_live_reconfigure(launcher_args, state, patch_vargv, raw_argv):
+    """Fast stdlib path for `reconfigure` when `patch_vargv` only updates `LIVE_FIELDS`
+    and the running engine's live agent can apply the delta without importing vLLM's parser.
+
+    Returns `(report, None)` on success, `(None, failure_reason)` if live apply was attempted
+    and refused/timed out (caller falls back to restart without retrying live apply), or
+    `(None, None)` if any precondition fails (caller falls back cleanly to the full path).
+    Exits 0 directly when the validated live patch is a verified no-op.
+    """
+    if getattr(launcher_args, "reconfigure_restart", False) or getattr(
+        launcher_args, "zygote_check", False
+    ):
+        return None, None
+    live_values, live_arities = vllm_args.parse_live_patch(patch_vargv)
+    if live_values is None:
+        return None, None
+    old_parsed = state.get("vllm_args")
+    if (
+        not isinstance(old_parsed, dict)
+        or not old_parsed.get("ok")
+        or not isinstance(old_parsed.get("args"), dict)
+        or not isinstance(state.get("launcher"), dict)
+        or not isinstance(state.get("vargv"), list)
+        or _has_arity_mismatch(old_parsed)
+    ):
+        return None, None
+    live_dir = state.get("live_dir")
+    ready = live_reconfig.read_ready(live_dir) if live_dir else None
+    if not isinstance(ready, dict) or ready.get("api_pid") != state.get("pid"):
+        return None, None
+    core_pid = ready.get("pid")
+    if (
+        not isinstance(core_pid, int)
+        or isinstance(core_pid, bool)
+        or core_pid <= 0
+        or zygote._exited(core_pid)
+    ):
+        return None, None
+    boot = ready.get("boot")
+    if not isinstance(boot, dict) or live_reconfig.check_values(live_values, boot):
+        return None, None
+    new_parsed = vllm_args.synthesize_live_parsed(old_parsed, live_values, live_arities)
+    cli_tokens = raw_argv[:raw_argv.index("--")] if "--" in raw_argv else list(raw_argv)
+    effective_launcher = argparse.Namespace(**vars(launcher_args))
+    if weights_backend(effective_launcher, new_parsed) == "dynamo_gms":
+        if not _has_cli_flag(cli_tokens, "--kvplan"):
+            effective_launcher.kvplan = None
+    launcher_changed = (
+        _launcher_backend_signature(state["launcher"], old_parsed)
+        != _launcher_backend_signature(effective_launcher, new_parsed)
+    )
+    if launcher_changed or argv_findings(effective_launcher, new_parsed):
+        return None, None
+    if value_finding(new_parsed) is not None:
+        return None, None
+    if vllm_args.override_finding(patch_vargv, old_parsed, new_parsed) is not None:
+        return None, None
+    old_port = state.get("port") or (old_parsed.get("args") or {}).get("port")
+    new_port = new_parsed["args"].get("port")
+    if new_port is None or new_port != old_port:
+        return None, None
+    reconfig = vllm_args.classify_reconfig(old_parsed, new_parsed)
+    if reconfig.get("tier") == "noop":
+        _exit_json(
+            {"reconfig": {**reconfig, "path": "noop", "restarted": False},
+             "pid": launcher_args.pid, "note": "nothing changed"},
+            code=0,
+        )
+    plan_values, _ = live_reconfig_plan(state, reconfig)
+    if plan_values is None:
+        return None, None
+    new_vargv = vllm_args.override(state["vargv"], patch_vargv)
+    report, failure_reason = apply_in_process_reconfig(
+        effective_launcher, state, new_vargv, new_parsed, {}, reconfig, plan_values
+    )
+    if report is not None:
+        return report, None
+    return None, failure_reason
+
+
 def reconfigure(launcher_args, patch_vargv, raw_argv=()):
     """Reconfigure a running engine (`--pid PID`) with `patch_vargv` overrides (preflight first,
     then live in-process apply, holder-to-holder reshard, or verified stop + restart)."""
@@ -1164,6 +1258,11 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
             actions=["use the same --cache-root as `engine.py start`", "use `engine.py start` with the full argv instead"],
         )], "note": "not started"})
     _inherit_launcher(launcher_args, state.get("launcher"), raw_argv)
+    fast_report, fast_live_failure = _try_fast_live_reconfigure(
+        launcher_args, state, patch_vargv, raw_argv
+    )
+    if fast_report is not None:
+        return fast_report
     env, old_vargv = engine_env(launcher_args), state["vargv"]
     new_vargv = vllm_args.override(old_vargv, patch_vargv)
     old_parsed = state.get("vllm_args")
@@ -1199,7 +1298,8 @@ def reconfigure(launcher_args, patch_vargv, raw_argv=()):
         _exit_json({"reconfig": {**reconfig, "path": "noop", "restarted": False},
                     "pid": launcher_args.pid, "note": "nothing changed"}, code=0)
     live_values, live_reason = (
-        (None, "the weight key changes (holder reshard)") if reshard
+        (None, fast_live_failure) if fast_live_failure is not None
+        else (None, "the weight key changes (holder reshard)") if reshard
         else (None, "launcher weights/GMS settings changed") if launcher_changed
         else (None, "--reconfigure-restart given") if getattr(launcher_args, "reconfigure_restart", False)
         else (None, "the port changes") if new_port != old_port

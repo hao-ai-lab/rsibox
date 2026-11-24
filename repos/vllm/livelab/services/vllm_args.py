@@ -543,6 +543,98 @@ def _build_control_actions(changed, new_args):
              "fields": fields}]
 
 
+_LIVE_FLAG_TO_FIELD = {
+    f"--{field_name.replace('_', '-')}": field_name for field_name in LIVE_FIELDS
+}
+_LIVE_INT_FIELDS = frozenset(("max_num_seqs", "max_num_batched_tokens"))
+_LIVE_POLICY_CHOICES = frozenset(("fcfs", "priority"))
+
+
+def parse_live_patch(patch_argv):
+    """Fast stdlib parser for a `patch_argv` consisting strictly of `LIVE_FIELDS` flags.
+
+    Accepts `--flag value` and `--flag=value` (hyphen or underscore spelling) for
+    `--max-num-seqs`, `--max-num-batched-tokens`, and `--scheduling-policy`.
+    Returns `(values, arities)` when every token is a syntactically valid live-field
+    override with a valid primitive value, else `(None, None)` so the caller falls back
+    to vLLM's full parser.
+    """
+    tokens = list(patch_argv)
+    if not tokens:
+        return None, None
+    values = {}
+    arities = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token.startswith("--"):
+            return None, None
+        if "=" in token:
+            raw_option, raw_value = token.split("=", 1)
+            consumed = 0
+            index += 1
+        else:
+            raw_option = token
+            if index + 1 >= len(tokens):
+                return None, None
+            raw_value = tokens[index + 1]
+            consumed = 1
+            index += 2
+        canonical_option = "--" + raw_option[2:].replace("_", "-")
+        field_name = _LIVE_FLAG_TO_FIELD.get(canonical_option)
+        if field_name is None:
+            return None, None
+        if field_name in _LIVE_INT_FIELDS:
+            if not raw_value.isascii() or not raw_value.isdigit():
+                return None, None
+            parsed_value = int(raw_value)
+            if parsed_value < 1:
+                return None, None
+        elif field_name == "scheduling_policy":
+            if raw_value not in _LIVE_POLICY_CHOICES:
+                return None, None
+            parsed_value = raw_value
+        else:
+            return None, None
+        values[field_name] = parsed_value
+        entry = arities.setdefault(
+            canonical_option, {"dest": field_name, "nargs": "None", "pairs": []}
+        )
+        entry["pairs"].append([consumed, consumed])
+    return values, arities
+
+
+def synthesize_live_parsed(old_parsed, live_values, live_arities):
+    """Build a `parse()`-compatible dict by overlaying validated `LIVE_FIELDS` values
+    onto `old_parsed`, avoiding vLLM's parser import on the live reconfigure fast path."""
+    merged_args = {**(old_parsed.get("args") or {}), **live_values}
+    explicit_set = set(old_parsed.get("explicit") or ()) | set(live_values)
+    field_order = {
+        field_name: field_index for field_index, field_name in enumerate(FIELDS)
+    }
+    merged_explicit = sorted(
+        explicit_set,
+        key=lambda field_name: (field_order.get(field_name, len(FIELDS)), field_name),
+    )
+    merged_explicit_values = {
+        **(old_parsed.get("explicit_values") or {}),
+        **live_values,
+    }
+    merged_arities = {
+        **(old_parsed.get("arities") or {}),
+        **live_arities,
+    }
+    return {
+        "ok": True,
+        "args": merged_args,
+        "explicit": merged_explicit,
+        "explicit_values": merged_explicit_values,
+        "arities": merged_arities,
+        "seconds": {"import": 0.0, "build": 0.0, "parse": 0.0},
+        "via": "live_fast_path",
+    }
+
+
 def classify_reconfig(old_parsed, new_parsed):
     """Classify the config delta between two parsed `vllm serve` argvs (`old_parsed`, `new_parsed`
     from `parse()`) into 4 operational tiers (documented in `repos/vllm/kb/reconfiguration_matrix.md`):

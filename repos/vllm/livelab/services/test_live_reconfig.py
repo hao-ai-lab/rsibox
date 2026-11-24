@@ -496,3 +496,353 @@ def test_core_hook_refuses_duplicate_control_dir(tmp_path, capsys):
     reply = ipc.read_json(tmp_path / "shared" / "reply" / "1.json")
     assert reply == {"ok": True, "who": "lr"}
     assert len(seen) == 1
+
+
+def _start_local_live_agent(tmp_path, monkeypatch, *, api_pid, boot_seqs=128,
+                            boot_tokens=4096, max_model_len=4096, chunked_prefill=True):
+    """Run a real live_reconfig.Agent + core_hook._ChannelMux on local background threads."""
+    import enum
+    import os
+    import queue
+    import threading
+    import time
+    import types
+
+    livelab = str(HERE.parent)
+    if livelab not in sys.path:
+        sys.path.insert(0, livelab)
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import live_reconfig
+    from rsibox import ipc
+    from services import core_hook
+
+    class LocalPolicy(enum.Enum):
+        FCFS = "fcfs"
+        PRIORITY = "priority"
+
+    class LocalQueue(list):
+        def __init__(self, policy):
+            super().__init__()
+            self.policy = policy
+
+        def add_request(self, item):
+            self.append(item)
+
+    request_queue_module = types.ModuleType("vllm.v1.core.sched.request_queue")
+    request_queue_module.SchedulingPolicy = LocalPolicy
+    request_queue_module.create_request_queue = lambda policy: LocalQueue(policy)
+    for package_name in ("vllm", "vllm.v1", "vllm.v1.core", "vllm.v1.core.sched"):
+        monkeypatch.setitem(sys.modules, package_name, types.ModuleType(package_name))
+    monkeypatch.setitem(sys.modules, "vllm.v1.core.sched.request_queue", request_queue_module)
+
+    live_dir = tmp_path / "live"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    scheduler_config = types.SimpleNamespace(
+        policy="fcfs", enable_chunked_prefill=chunked_prefill
+    )
+    scheduler = types.SimpleNamespace(
+        policy=LocalPolicy.FCFS,
+        scheduler_config=scheduler_config,
+        running=[],
+        waiting=LocalQueue(LocalPolicy.FCFS),
+        max_num_running_reqs=boot_seqs,
+        max_num_scheduled_tokens=boot_tokens,
+    )
+    stop_event = threading.Event()
+    input_queue = queue.Queue()
+    core = types.SimpleNamespace(
+        scheduler=scheduler,
+        input_queue=input_queue,
+        vllm_config=types.SimpleNamespace(
+            scheduler_config=scheduler_config,
+            model_config=types.SimpleNamespace(max_model_len=max_model_len),
+        ),
+    )
+    agent = live_reconfig.Agent(core, str(live_dir))
+    ipc.atomic_write_json(
+        live_dir / "ready.json",
+        {
+            "pid": os.getpid(),
+            "api_pid": api_pid,
+            "boot": agent.boot,
+            "live_fields": list(live_reconfig.LIVE_FIELDS),
+            "dp_size": 1,
+            "t": time.time(),
+        },
+    )
+    channel_mux = core_hook._ChannelMux(
+        [("live_reconfig", str(live_dir), agent.handle, 0.002)]
+    )
+
+    def busy_loop():
+        while not stop_event.is_set():
+            tag, payload = input_queue.get()
+            if tag == "STOP":
+                break
+            if tag == live_reconfig.TAG:
+                payload.run()
+
+    loop_thread = threading.Thread(target=busy_loop, daemon=True)
+    loop_thread.start()
+    ctl_thread = channel_mux.start()
+
+    def shutdown():
+        stop_event.set()
+        channel_mux.stop()
+        input_queue.put_nowait(("STOP", None))
+        loop_thread.join(timeout=5.0)
+        ctl_thread.join(timeout=5.0)
+
+    return str(live_dir), agent, scheduler, shutdown
+
+
+def _seed_engine_state(cache_root, log_path, api_pid, live_dir, *,
+                       boot_seqs=128, boot_tokens=4096, port=8123):
+    import engine
+    import test_engine
+
+    base_vargv = [
+        "Qwen/Qwen3-8B", "--port", str(port),
+        "--max-num-seqs", str(boot_seqs),
+        "--max-num-batched-tokens", str(boot_tokens),
+    ]
+    old_parsed = {**test_engine._stub_parser()(base_vargv), "via": "direct"}
+    start_args, _ = engine.parse([
+        "start", "--cache-root", str(cache_root), "--log", str(log_path), *base_vargv
+    ])
+    start_args.live_dir = live_dir
+    command = engine.serve_cmd(start_args, base_vargv, old_parsed)
+    engine.save_engine_state(start_args, api_pid, port, base_vargv, command, old_parsed)
+    return base_vargv, old_parsed
+
+
+def test_reconfigure_live_fast_path_bypasses_vllm_parser_and_updates_state(tmp_path, monkeypatch):
+    """Input: a running local live_reconfig file-channel agent + persisted engine state file,
+    with `vllm_args.parse`, `engine.read_vllm_args`, `engine.engine_env`, and `engine.preflight`
+    wired to fail if called. Action: call `engine.reconfigure` with (1) `--max-num-seqs 64`,
+    (2) `--max-num-seqs=32 --max_num_batched_tokens=2048 --scheduling-policy=priority`, and
+    (3) repeated `--max-num-seqs 32` (noop). Expect: all succeed in < 0.5 s without ever calling
+    vLLM's parser, the scheduler mutates in-place, `policy.json` and `engines/<pid>.json` are
+    updated consistently with the slow-path contract, and a follow-up non-live `override_finding`
+    accepts the fast-path persisted state cleanly."""
+    import json
+    import os
+    import time
+    import pytest
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import engine
+    import vllm_args
+
+    api_pid = os.getpid()
+    cache_root = tmp_path / "cache"
+    log_path = tmp_path / "serve.log"
+    live_dir, agent, scheduler, shutdown = _start_local_live_agent(
+        tmp_path, monkeypatch, api_pid=api_pid, boot_seqs=128, boot_tokens=4096
+    )
+    try:
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+
+        def fail_if_called(*_args, **_kwargs):
+            raise AssertionError("slow parser/env/preflight path must not run on live fast path")
+
+        monkeypatch.setattr(vllm_args, "parse", fail_if_called)
+        monkeypatch.setattr(engine, "read_vllm_args", fail_if_called)
+        monkeypatch.setattr(engine, "engine_env", fail_if_called)
+        monkeypatch.setattr(engine, "preflight", fail_if_called)
+
+        raw_argv_first = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv_first)
+        started_at = time.perf_counter()
+        report_first = engine.reconfigure(launcher_args, patch_vargv, raw_argv_first)
+        elapsed_first = time.perf_counter() - started_at
+
+        assert elapsed_first < 0.5, f"fast path took {elapsed_first:.3f}s"
+        assert report_first["reconfig"]["path"] == "in_process_live"
+        assert report_first["reconfig"]["restarted"] is False
+        assert report_first["vllm_args"]["via"] == "live_fast_path"
+        assert scheduler.max_num_running_reqs == 64
+        assert agent.target_seqs == 64
+
+        raw_argv_second = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--",
+            "--max-num-seqs=32", "--max_num_batched_tokens=2048", "--scheduling-policy=priority",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv_second)
+        started_at = time.perf_counter()
+        report_second = engine.reconfigure(launcher_args, patch_vargv, raw_argv_second)
+        elapsed_second = time.perf_counter() - started_at
+
+        assert elapsed_second < 0.5, f"fast path took {elapsed_second:.3f}s"
+        assert report_second["reconfig"]["path"] == "in_process_live"
+        assert scheduler.max_num_running_reqs == 32
+        assert scheduler.max_num_scheduled_tokens == 2048
+        assert scheduler.policy.value == "priority"
+        assert json.loads((Path(live_dir) / "policy.json").read_text()) == {
+            "scheduling_policy": "priority"
+        }
+
+        persisted = engine.load_engine_state(cache_root, api_pid)
+        assert persisted["vargv"] == [
+            "Qwen/Qwen3-8B", "--port", "8123",
+            "--max-num-seqs=32", "--max_num_batched_tokens=2048", "--scheduling-policy=priority",
+        ]
+        assert persisted["vllm_args"]["args"]["max_num_seqs"] == 32
+        assert persisted["vllm_args"]["args"]["max_num_batched_tokens"] == 2048
+        assert persisted["vllm_args"]["args"]["scheduling_policy"] == "priority"
+        assert {"max_num_seqs", "max_num_batched_tokens", "scheduling_policy"} <= set(
+            persisted["vllm_args"]["explicit"]
+        )
+        assert persisted["vllm_args"]["explicit_values"]["scheduling_policy"] == "priority"
+
+        # A follow-up slow-path override against persisted state must not trigger override_finding.
+        followup_new = {
+            **persisted["vllm_args"],
+            "args": {**persisted["vllm_args"]["args"], "max_model_len": 2048},
+            "explicit": [*persisted["vllm_args"]["explicit"], "max_model_len"],
+            "explicit_values": {**persisted["vllm_args"]["explicit_values"], "max_model_len": 2048},
+        }
+        assert vllm_args.override_finding(["--max-model-len", "2048"], persisted["vllm_args"], followup_new) is None
+
+        # Setting an already-applied value is a fast-path noop (exit 0, parser still not called).
+        raw_argv_noop = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "32",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv_noop)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv_noop)
+        assert exit_info.value.code == 0
+    finally:
+        shutdown()
+
+
+def test_reconfigure_live_fast_path_falls_back_on_non_live_invalid_or_missing_ready(
+    tmp_path, monkeypatch, capsys
+):
+    """Input: a live agent with boot max_num_seqs=128 and stubbed slow parser. Action: invoke
+    `engine.reconfigure` for (1) non-live `--max-model-len 2048`, (2) mixed live + non-live,
+    (3) `--max-num-seqs 99999` above boot limit, (4) invalid `--max-num-seqs 0`, (5) missing
+    `ready.json`, and (6) live agent returning `ok=False`. Expect: every case falls back cleanly
+    to `read_vllm_args`, reports exact findings or restart reasons, leaves the live scheduler
+    untouched on invalid/non-live inputs, and never sends a duplicate live request on failure."""
+    import json
+    import os
+    import pytest
+
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import engine
+    import live_reconfig
+    import test_engine
+
+    api_pid = os.getpid()
+    cache_root = tmp_path / "cache"
+    log_path = tmp_path / "serve.log"
+    live_dir, _agent, scheduler, shutdown = _start_local_live_agent(
+        tmp_path, monkeypatch, api_pid=api_pid, boot_seqs=128, boot_tokens=4096
+    )
+    stub_parse = test_engine._stub_parser()
+    parser_calls = []
+
+    def tracking_read_vllm_args(_launcher_args, target_vargv, _env):
+        parser_calls.append(list(target_vargv))
+        return {**stub_parse(target_vargv), "via": "direct"}
+
+    try:
+        _seed_engine_state(cache_root, log_path, api_pid, live_dir)
+        monkeypatch.setattr(engine, "read_vllm_args", tracking_read_vllm_args)
+        monkeypatch.setattr(engine, "stop_engine", lambda *_args, **_kwargs: {"stopped": True})
+        monkeypatch.setattr(
+            engine,
+            "_launch_process",
+            lambda _launcher_args, new_vargv, new_parsed, _process_env, _preflight, extra_report=None: {
+                "pid": api_pid + 1, "port": new_parsed["args"]["port"], "vargv": new_vargv,
+                "vllm_args": new_parsed, **(extra_report or {}),
+            },
+        )
+
+        # (1) Non-live flag and (2) mixed live + non-live flag both fall back to full path.
+        for patch_flags in (["--max-model-len", "2048"], ["--max-num-seqs", "64", "--max-model-len", "2048"]):
+            parser_calls.clear()
+            raw_argv = [
+                "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+                "--log", str(log_path), "--", *patch_flags,
+            ]
+            launcher_args, patch_vargv = engine.parse(raw_argv)
+            report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+            assert len(parser_calls) == 1, patch_flags
+            assert report["reconfig"]["path"] == "restart"
+            assert scheduler.max_num_running_reqs == 128
+
+        # (3) Live field exceeding boot limit (99999 > 128) falls back and restarts with boot reason.
+        parser_calls.clear()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "99999",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert len(parser_calls) == 1
+        assert report["reconfig"]["path"] == "restart"
+        assert "boot value 128" in report["reconfig"]["restart_reason"]
+        assert scheduler.max_num_running_reqs == 128
+
+        # (4) Invalid value (--max-num-seqs 0) falls back and exits 2 with exact vllm_value finding.
+        parser_calls.clear()
+        capsys.readouterr()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "0",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        with pytest.raises(SystemExit) as exit_info:
+            engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert exit_info.value.code == 2
+        assert len(parser_calls) == 1
+        finding_payload = json.loads(capsys.readouterr().out.strip())
+        assert finding_payload["findings"][0]["check"] == "vllm_value"
+        assert scheduler.max_num_running_reqs == 128
+
+        # (5) Live agent refusal during fast-path apply falls back to restart without retrying request.
+        live_request_calls = []
+        original_request = live_reconfig.request
+
+        def refusing_request(*args, **kwargs):
+            live_request_calls.append((args, kwargs))
+            return {"ok": False, "error": "simulated refusal"}
+
+        monkeypatch.setattr(live_reconfig, "request", refusing_request)
+        parser_calls.clear()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert len(live_request_calls) == 1, "must not retry live agent on fallback"
+        assert len(parser_calls) == 1
+        assert report["reconfig"]["path"] == "restart"
+        assert "simulated refusal" in report["reconfig"]["restart_reason"]
+        monkeypatch.setattr(live_reconfig, "request", original_request)
+
+        # (6) Missing ready.json falls back cleanly to full path and restarts.
+        (Path(live_dir) / "ready.json").unlink()
+        parser_calls.clear()
+        raw_argv = [
+            "reconfigure", "--pid", str(api_pid), "--cache-root", str(cache_root),
+            "--log", str(log_path), "--", "--max-num-seqs", "64",
+        ]
+        launcher_args, patch_vargv = engine.parse(raw_argv)
+        report = engine.reconfigure(launcher_args, patch_vargv, raw_argv)
+        assert len(parser_calls) == 1
+        assert report["reconfig"]["path"] == "restart"
+        assert "no live agent" in report["reconfig"]["restart_reason"]
+    finally:
+        shutdown()
