@@ -1860,6 +1860,269 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertEqual(big_aged_errors, [])
         self.assertEqual(big_aged_order, ["near52-higher", "near52-lower"])
 
+    def test_elastic_role_borrowing_prefers_primary_blocks_theft_and_survives_quarantine(self):
+        """Golden case (work-conserving Triad): on a 3-role pool (`eval`, `fixer`, `dev`),
+        `fallback_roles=("fixer", "dev")` lets `eval` prefer `eval-0` first, borrow `fixer-0`
+        then `dev-0` when `eval-0` is busy, never steal a home slot from a queued primary-role
+        waiter (even with higher priority), survive quarantine of its primary slot via fallback,
+        and record `borrowed` provenance in the SHA-256 hash-chained trace and `metrics()`."""
+        with tempfile.TemporaryDirectory(prefix="rsibox-elastic-") as tmpdir:
+            trace_path = os.path.join(tmpdir, "elastic-roles.jsonl")
+            self._run_elastic_role_borrowing_assertions(trace_path)
+
+    def _run_elastic_role_borrowing_assertions(self, trace_path: str) -> None:
+        eval_lab = self._make_toy_lab()
+        fixer_lab = self._make_toy_lab()
+        dev_lab = self._make_toy_lab()
+        pool = SandboxPool(
+            [
+                PoolSlot("dev-0", dev_lab, role="dev"),
+                PoolSlot("fixer-0", fixer_lab, role="fixer"),
+                PoolSlot("eval-0", eval_lab, role="eval"),
+            ],
+            trace_path=trace_path,
+        )
+        self.addCleanup(pool.close)
+
+        # 1. Fail-closed validation (including bytearray/memoryview, empty role, and empty sequence no-op).
+        with self.assertRaises(ValueError):
+            pool.acquire("bad-none", role=None, fallback_roles=("dev",))
+        with self.assertRaises(ValueError):
+            pool.acquire("bad-empty-role", role="  ", fallback_roles=("dev",))
+        with self.assertRaises(TypeError):
+            pool.acquire("bad-int-role", role=123, fallback_roles=("dev",))  # type: ignore[arg-type]
+        for bad_fb in ("dev", b"dev", bytearray(b""), memoryview(b""), {"dev"}, 123):
+            with self.assertRaises(TypeError):
+                pool.acquire("bad-type", role="eval", fallback_roles=bad_fb)  # type: ignore[arg-type]
+        for bad_entry in (["  "], [""], [123]):
+            exc_type = TypeError if isinstance(bad_entry[0], int) else ValueError
+            with self.assertRaises(exc_type):
+                pool.acquire("bad-entry", role="eval", fallback_roles=bad_entry)  # type: ignore[arg-type]
+        with pool.lease("gen-empty-fb", role=None, fallback_roles=(), timeout_s=2.0) as gen_lease:
+            self.assertFalse(gen_lease.borrowed)
+            self.assertEqual(gen_lease.fallback_roles, ())
+            with self.assertRaises(AttributeError):
+                gen_lease.borrowed = True  # type: ignore[misc]
+            with self.assertRaises(AttributeError):
+                gen_lease.fallback_roles = ("dev",)  # type: ignore[misc]
+
+        # 2. Primary-first preference & ordered fallback (`eval-0` -> `fixer-0` -> `dev-0`),
+        #    deduplicating repeated/primary entries.
+        l_primary = pool.acquire("eval-a", role="eval", fallback_roles=("eval", "fixer", "dev", "fixer"), timeout_s=2.0)
+        self.assertEqual(l_primary.slot_id, "eval-0")
+        self.assertFalse(l_primary.borrowed)
+        self.assertEqual(l_primary.fallback_roles, ("fixer", "dev"))
+
+        l_fb1 = pool.acquire("eval-b", role="eval", fallback_roles=("fixer", "dev"), timeout_s=2.0)
+        self.assertEqual(l_fb1.slot_id, "fixer-0")
+        self.assertTrue(l_fb1.borrowed)
+
+        l_fb2 = pool.acquire("eval-c", role="eval", fallback_roles=("fixer", "dev"), timeout_s=2.0)
+        self.assertEqual(l_fb2.slot_id, "dev-0")
+        self.assertTrue(l_fb2.borrowed)
+
+        # 3. Zero primary-role theft on handoff: while all 3 slots are held, queue a HIGH-priority
+        #    `eval` borrower (priority=10, fallback=("dev",)) AND a LOW-priority primary `dev` waiter
+        #    (priority=0, role="dev"). Releasing `dev-0` must hand off to primary `dev` FIRST!
+        handoff_order: list[str] = []
+        handoff_errors: list[BaseException] = []
+        dev_entered = threading.Event()
+        dev_release = threading.Event()
+        self.addCleanup(dev_release.set)
+
+        def queue_worker(
+            agent_id: str,
+            role: str,
+            priority: int,
+            fallback_roles: tuple[str, ...] | None,
+            gate: tuple[threading.Event, threading.Event] | None = None,
+        ) -> threading.Thread:
+            def runner() -> None:
+                try:
+                    with pool.lease(
+                        agent_id, role=role, priority=priority, fallback_roles=fallback_roles, timeout_s=5.0,
+                    ) as leased:
+                        handoff_order.append(f"{agent_id}:{leased.slot_id}:borrowed={leased.borrowed}")
+                        if gate is not None:
+                            gate[0].set()
+                            gate[1].wait(timeout=5.0)
+                except BaseException as err:
+                    handoff_errors.append(err)
+
+            worker_thread = threading.Thread(target=runner)
+            worker_thread.start()
+            return worker_thread
+
+        borrow_eval_t = queue_worker("eval-borrower", "eval", 10, ("dev",))
+        self._wait_for_waiters(pool, 1)
+        primary_dev_t = queue_worker("dev-home", "dev", 0, None, gate=(dev_entered, dev_release))
+        self._wait_for_waiters(pool, 2)
+
+        l_fb2.release()  # releases dev-0
+        self.assertTrue(dev_entered.wait(timeout=5.0))
+        self.assertEqual(handoff_order, ["dev-home:dev-0:borrowed=False"])
+
+        # Once dev-home releases dev-0 and no primary dev waiter remains, dev-0 is lent to eval-borrower!
+        dev_release.set()
+        for worker_thread in (primary_dev_t, borrow_eval_t):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(handoff_errors, [])
+        self.assertEqual(
+            handoff_order,
+            ["dev-home:dev-0:borrowed=False", "eval-borrower:dev-0:borrowed=True"],
+        )
+
+        # Release remaining initial leases.
+        l_fb1.release()
+        l_primary.release()
+
+        # 4. Quarantine resilience: quarantine `eval-0`, confirm `eval` with `fallback_roles=("dev",)`
+        #    still completes via `run_isolated` by borrowing `dev-0`!
+        eval_lab.status = lambda: {"ok": False, "state": "poisoned", "error": "eval gpu dead"}
+        eval_lab.reset = lambda kind="state": {"ok": False, "error": "respawn failed"}
+        res_iso = pool.run_isolated(
+            "eval-resilient",
+            lambda leased_lab, lease: (lease.slot_id, lease.borrowed, leased_lab.status()["state"]),
+            role="eval",
+            fallback_roles=("dev",),
+            timeout_s=5.0,
+        )
+        self.assertTrue(res_iso["ok"], res_iso)
+        self.assertEqual(res_iso["slot_id"], "dev-0")
+        self.assertTrue(res_iso["borrowed"])
+        self.assertEqual(res_iso["result"], ("dev-0", True, "base"))
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["eval-0"])
+
+        # Strict eval caller without fallback fails immediately once eval-0 is quarantined.
+        strict_fail = pool.run_isolated("eval-strict", lambda _l, _s: "nope", role="eval", timeout_s=5.0)
+        self.assertFalse(strict_fail["ok"])
+        self.assertFalse(strict_fail["borrowed"])
+        self.assertIn("no healthy slot", strict_fail["error"])
+
+        # 5. Competing borrowers (Tier 2 priority + FIFO) AND generalist Tier 1 precedence over borrowers.
+        hold_dev = pool.acquire("hold-dev", role="dev", timeout_s=2.0)
+        hold_fix = pool.acquire("hold-fix", role="fixer", timeout_s=2.0)
+        comp_order: list[str] = []
+        comp_errors: list[BaseException] = []
+
+        def spawn_comp(agent_id: str, role: str | None, priority: int, fb: tuple[str, ...] | None) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool.lease(agent_id, role=role, priority=priority, fallback_roles=fb, timeout_s=5.0) as leased:
+                        comp_order.append(f"{agent_id}:{leased.slot_id}:b={leased.borrowed}")
+                except BaseException as err:
+                    comp_errors.append(err)
+            th = threading.Thread(target=run)
+            th.start()
+            return th
+
+        t_b_low = spawn_comp("borrow-low", "eval", 2, ("dev",))
+        self._wait_for_waiters(pool, 1)
+        t_b_hi1 = spawn_comp("borrow-hi1", "eval", 10, ("dev",))
+        self._wait_for_waiters(pool, 2)
+        t_b_hi2 = spawn_comp("borrow-hi2", "eval", 10, ("dev",))
+        self._wait_for_waiters(pool, 3)
+        t_gen = spawn_comp("gen-t1", None, 0, None)
+        self._wait_for_waiters(pool, 4)
+
+        hold_dev.release()  # Tier 1 generalist beats all borrowers; then Tier 2 borrowers run hi1 -> hi2 -> low
+        for th in (t_gen, t_b_hi1, t_b_hi2, t_b_low):
+            th.join(timeout=5.0)
+            self.assertFalse(th.is_alive())
+        hold_fix.release()
+        self.assertEqual(comp_errors, [])
+        self.assertEqual(
+            comp_order,
+            [
+                "gen-t1:dev-0:b=False",
+                "borrow-hi1:dev-0:b=True",
+                "borrow-hi2:dev-0:b=True",
+                "borrow-low:dev-0:b=True",
+            ],
+        )
+
+        # 6. Queued-borrower quarantine wakeup:
+        #    (a) Primary `eval-0` dies while `dev-0` is held & healthy -> strict eval waiter wakes with
+        #        PoolTimeoutError, while co-queued borrower stays alive and borrows `dev-0` on release.
+        #    (b) All primary+fallback slots (`eval-0` + `dev-0`) die while `fixer-0` is healthy ->
+        #        queued borrower (`timeout_s=None`) wakes immediately with PoolTimeoutError.
+        q_eval = self._make_toy_lab()
+        q_dev = self._make_toy_lab()
+        q_fixer = self._make_toy_lab()
+        q_pool = SandboxPool(
+            [
+                PoolSlot("q-eval", q_eval, role="eval"),
+                PoolSlot("q-dev", q_dev, role="dev"),
+                PoolSlot("q-fixer", q_fixer, role="fixer"),
+            ]
+        )
+        self.addCleanup(q_pool.close)
+        h_q_eval = q_pool.acquire("h-eval", role="eval", timeout_s=2.0)
+        h_q_dev = q_pool.acquire("h-dev", role="dev", timeout_s=2.0)
+        strict_errs: list[BaseException] = []
+        borrow_got: list[tuple[str, bool]] = []
+        borrow_errs: list[BaseException] = []
+
+        t_strict = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: q_pool.acquire("q-strict", role="eval", timeout_s=None),
+                strict_errs,
+            )
+        )
+        def run_q_borrow() -> None:
+            with q_pool.lease("q-borrow", role="eval", fallback_roles=("dev",), timeout_s=None) as leased:
+                borrow_got.append((leased.slot_id, leased.borrowed))
+
+        t_borrow = threading.Thread(target=run_q_borrow)
+        t_strict.start()
+        self._wait_for_waiters(q_pool, 1)
+        t_borrow.start()
+        self._wait_for_waiters(q_pool, 2)
+
+        # Kill q-eval so releasing h_q_eval quarantines it.
+        q_eval.status = lambda: {"ok": False, "state": "poisoned", "error": "dead"}
+        q_eval.reset = lambda kind="state": {"ok": False, "error": "respawn failed"}
+        h_q_eval.release()
+        t_strict.join(timeout=5.0)
+        self.assertFalse(t_strict.is_alive())
+        self.assertEqual(len(strict_errs), 1)
+        self.assertIsInstance(strict_errs[0], PoolTimeoutError)
+        # Borrower stays queued until q-dev is released, then borrows q-dev!
+        self.assertTrue(t_borrow.is_alive())
+        h_q_dev.release()
+        t_borrow.join(timeout=5.0)
+        self.assertFalse(t_borrow.is_alive())
+        self.assertEqual(borrow_got, [("q-dev", True)])
+
+        # Now hold q-dev, queue another borrower (timeout_s=None), and kill q-dev -> immediate wakeup!
+        h_q_dev2 = q_pool.acquire("h-dev-2", role="dev", timeout_s=2.0)
+        t_borrow_all_dead = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: q_pool.acquire("q-borrow-dead", role="eval", fallback_roles=("dev",), timeout_s=None),
+                borrow_errs,
+            )
+        )
+        t_borrow_all_dead.start()
+        self._wait_for_waiters(q_pool, 1)
+        q_dev.status = lambda: {"ok": False, "state": "poisoned", "error": "dev dead"}
+        q_dev.reset = lambda kind="state": {"ok": False, "error": "dev respawn failed"}
+        h_q_dev2.release()
+        t_borrow_all_dead.join(timeout=5.0)
+        self.assertFalse(t_borrow_all_dead.is_alive())
+        self.assertEqual(len(borrow_errs), 1)
+        self.assertIsInstance(borrow_errs[0], PoolTimeoutError)
+        self.assertEqual(q_pool.metrics()["quarantined_slots"], ["q-eval", "q-dev"])
+
+        # 7. SHA-256 trace & metrics verification on main pool.
+        metrics = pool.metrics()
+        self.assertEqual(metrics["total_leases"], 13)
+        self.assertEqual(metrics["borrowed_leases"], 7)
+        verified = verify_trace(trace_path, expected_head=metrics["trace_head"])
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["count"], 13)
+        self.assertEqual(sum(1 for rec in verified["records"] if rec["borrowed"]), 7)
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
