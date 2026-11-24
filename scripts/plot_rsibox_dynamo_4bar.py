@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate Light and Dark 4-bar comparison charts for RSIBox + NVIDIA Dynamo on NVIDIA B200.
+"""Generate Light and Dark 5-bar comparison charts for RSIBox + NVIDIA Dynamo on NVIDIA B200.
 
 Bar order (left -> right per model):
   1. Cold Start (no Snapshot)
   2. Dynamo Snapshot (same code, no edit)
-  3. Dynamo Snapshot + 1-line code edit (without RSIBox: warm/GMS restart + re-dump)
-  4. Dynamo + RSIBox + 1-line code edit (live in-place swap, bit-exact)
+  3. Dynamo Snapshot + 1-line edit (without RSIBox: restart + re-dump)
+  4. Fault + 1-line edit (Dynamo Snapshot restore + RSIBox live edit)
+  5. Live 1-line edit (RSIBox hot-swap on Dynamo, bit-exact)
 
 Usage:
   python3 scripts/plot_rsibox_dynamo_4bar.py
@@ -46,10 +47,12 @@ THEMES = {
         "c_cold": "#94A3B8",
         "c_snap": "#76B900",
         "c_edit": "#EA580C",
+        "c_fault": "#0D9488",
         "c_rsi": "#2563EB",
         "t_cold": "#475569",
         "t_snap": "#3F6212",
         "t_edit": "#C2410C",
+        "t_fault": "#0F766E",
         "t_rsi": "#1D4ED8",
         "pill_bg": "#EFF6FF",
         "pill_edge": "#93C5FD",
@@ -65,10 +68,12 @@ THEMES = {
         "c_cold": "#64748B",
         "c_snap": "#76B900",
         "c_edit": "#F59E0B",
+        "c_fault": "#14B8A6",
         "c_rsi": "#38BDF8",
         "t_cold": "#CBD5E1",
         "t_snap": "#A3E635",
         "t_edit": "#FCD34D",
+        "t_fault": "#5EEAD4",
         "t_rsi": "#7DD3FC",
         "pill_bg": "#0C4A6E",
         "pill_edge": "#38BDF8",
@@ -91,19 +96,20 @@ def draw_chart(theme_name: str, out_dir: Path) -> Path:
     plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.sans-serif"] = ["SF Pro Display", "Helvetica Neue", "DejaVu Sans", "Arial"]
 
-    fig, ax = plt.subplots(figsize=(14.5, 6.8), dpi=220)
+    fig, ax = plt.subplots(figsize=(15.5, 7.0), dpi=220)
     fig.patch.set_facecolor(th["bg"])
     ax.set_facecolor(th["panel"])
 
     n = len(DATA)
     x = np.arange(n)
-    w = 0.19
-    offsets = [-1.5 * w, -0.5 * w, 0.5 * w, 1.5 * w]
+    w = 0.16
+    offsets = [-2.0 * w, -1.0 * w, 0.0, 1.0 * w, 2.0 * w]
 
-    cold_vals = [d[2] for d in DATA]
-    snap_vals = [d[3] for d in DATA]
-    edit_vals = [d[5] for d in DATA]
-    rsi_vals = [d[6] for d in DATA]
+    cold_vals  = [d[2] for d in DATA]
+    snap_vals  = [d[3] for d in DATA]
+    edit_vals  = [d[5] for d in DATA]
+    fault_vals = [d[3] + d[6] for d in DATA]
+    rsi_vals   = [d[6] for d in DATA]
 
     ax.set_yscale("log")
     ax.set_ylim(0.02, 6500)
@@ -117,44 +123,49 @@ def draw_chart(theme_name: str, out_dir: Path) -> Path:
     ax.grid(axis="y", color=th["grid"], linewidth=0.9, zorder=0)
     ax.set_axisbelow(True)
 
-    b1 = ax.bar(x + offsets[0], cold_vals, width=w * 0.88, color=th["c_cold"],
-                label="1. Cold Start (no Snapshot)", zorder=3, edgecolor="none")
-    b2 = ax.bar(x + offsets[1], snap_vals, width=w * 0.88, color=th["c_snap"],
-                label="2. Dynamo Snapshot (same code, no edit)", zorder=3, edgecolor="none")
-    b3 = ax.bar(x + offsets[2], edit_vals, width=w * 0.88, color=th["c_edit"],
-                label="3. Dynamo Snapshot + 1-line edit (without RSIBox: restart + re-dump)", zorder=3, edgecolor="none")
-    b4 = ax.bar(x + offsets[3], rsi_vals, width=w * 0.88, color=th["c_rsi"],
-                label="4. Dynamo + RSIBox + 1-line edit (live hot-swap, bit-exact)", zorder=3, edgecolor="none")
+    bw = w * 0.86
+    b1 = ax.bar(x + offsets[0], cold_vals,  width=bw, color=th["c_cold"],
+                label="1. Cold Start (no Snapshot)", zorder=3)
+    b2 = ax.bar(x + offsets[1], snap_vals,  width=bw, color=th["c_snap"],
+                label="2. Dynamo Snapshot (same code, no edit)", zorder=3)
+    b3 = ax.bar(x + offsets[2], edit_vals,  width=bw, color=th["c_edit"],
+                label="3. Snapshot + 1-line edit (no RSIBox: restart + re-dump)", zorder=3)
+    b4 = ax.bar(x + offsets[3], fault_vals, width=bw, color=th["c_fault"],
+                label="4. Fault + 1-line edit (Snapshot restore + RSIBox live edit)", zorder=3)
+    b5 = ax.bar(x + offsets[4], rsi_vals,   width=bw, color=th["c_rsi"],
+                label="5. Live 1-line edit (RSIBox hot-swap on Dynamo)", zorder=3)
 
     for idx, d in enumerate(DATA):
         if d[4]:
-            b2[idx].set_hatch("//")
-            b2[idx].set_edgecolor(th["bg"])
-            b2[idx].set_linewidth(0.8)
+            for bar in (b2[idx], b4[idx]):
+                bar.set_hatch("//")
+                bar.set_edgecolor(th["bg"])
+                bar.set_linewidth(0.8)
 
     bar_groups = [
-        (b1, cold_vals, th["t_cold"], False),
-        (b2, snap_vals, th["t_snap"], False),
-        (b3, edit_vals, th["t_edit"], False),
-        (b4, rsi_vals, th["t_rsi"], True),
+        (b1, cold_vals,  th["t_cold"],  "cold"),
+        (b2, snap_vals,  th["t_snap"],  "snap"),
+        (b3, edit_vals,  th["t_edit"],  "edit"),
+        (b4, fault_vals, th["t_fault"], "fault"),
+        (b5, rsi_vals,   th["t_rsi"],   "rsi"),
     ]
-    for bars, vals, col, is_rsi in bar_groups:
+    for bars, vals, col, kind in bar_groups:
         for idx, (rect, val) in enumerate(zip(bars, vals)):
             cx = rect.get_x() + rect.get_width() / 2.0
             lbl = fmt_val(val)
-            if is_rsi:
+            if kind == "rsi":
                 ax.text(cx, val * 1.24, lbl, ha="center", va="bottom",
-                        fontsize=8.8, fontweight="bold", color=col, zorder=5)
+                        fontsize=8.3, fontweight="bold", color=col, zorder=5)
                 sp = edit_vals[idx] / val
                 ax.text(cx, val * 2.55, f"{sp:,.0f}×", ha="center", va="bottom",
-                        fontsize=8.2, fontweight="bold", color=th["t_rsi"],
-                        bbox=dict(boxstyle="round,pad=0.22", facecolor=th["pill_bg"],
+                        fontsize=7.8, fontweight="bold", color=th["t_rsi"],
+                        bbox=dict(boxstyle="round,pad=0.20", facecolor=th["pill_bg"],
                                   edgecolor=th["pill_edge"], linewidth=0.9),
                         zorder=6)
             else:
-                suffix = "†" if (bars is b2 and DATA[idx][4]) else ""
+                suffix = "†" if (kind in ("snap", "fault") and DATA[idx][4]) else ""
                 ax.text(cx, val * 1.18, lbl + suffix, ha="center", va="bottom",
-                        fontsize=8.3, fontweight="semibold", color=col, zorder=5)
+                        fontsize=7.8, fontweight="semibold", color=col, zorder=5)
 
     ax.set_xticks(x)
     ax.set_xticklabels([f"{d[0]}\n{d[1]}" for d in DATA],
@@ -174,22 +185,22 @@ def draw_chart(theme_name: str, out_dir: Path) -> Path:
              "RSIBox + NVIDIA Dynamo: Sub-100ms Live Edits with Fast Snapshot Fault Recovery",
              fontsize=16.0, fontweight="bold", color=th["text"])
     fig.text(0.055, 0.902,
-             "RSIBox handles live edits in 58–92 ms; on a fault, Dynamo Snapshot restores in 3.6–6.0 s (+80 ms to re-apply edits) vs. 34–296 s to re-snapshot without RSIBox.",
-             fontsize=10.1, color=th["sub"])
+             "RSIBox hot-swaps live edits in 58–92 ms; on a fault, Dynamo Snapshot restores in 3.6–6.0 s and RSIBox re-applies the edit in ~80 ms (vs. 34–296 s to re-snapshot).",
+             fontsize=10.0, color=th["sub"])
 
-    leg = ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.125), ncol=2,
-                    frameon=False, fontsize=9.6, handlelength=1.4, columnspacing=2.2)
+    leg = ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.155), ncol=3,
+                    frameon=False, fontsize=8.9, handlelength=1.3, columnspacing=1.5)
     for txt in leg.get_texts():
         txt.set_color(th["text"])
         txt.set_fontweight("medium")
 
-    fig.text(0.055, 0.022,
+    fig.text(0.055, 0.020,
              "All runs on NVIDIA B200 with CUDA Graphs ON and bit-exact logprobs=5 verification.  "
              "*gpt-oss-120b tier uses a 65.5 GB BF16 size-matched checkpoint.  "
              "†DeepSeek-V4.1 Snapshot bar uses official Dynamo TEP8 ref (31.0s); Bar 3 excludes re-dump.",
              fontsize=8.2, color=th["muted"])
 
-    plt.subplots_adjust(left=0.075, right=0.975, top=0.79, bottom=0.14)
+    plt.subplots_adjust(left=0.070, right=0.980, top=0.77, bottom=0.14)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"rsibox-dynamo-4bar-{theme_name}.png"
     fig.savefig(out_path, dpi=220, facecolor=th["bg"])
