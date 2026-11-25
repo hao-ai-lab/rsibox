@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RSIBox 交付看板 · hao-ai-lab/rsibox</title>
+  <link rel="stylesheet" href="/site/dashboard/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-group">
+        <a class="brand-link" href="#overview" aria-label="RSIBox 交付看板首页">
+          <span class="brand-badge" aria-hidden="true">
+            <svg viewBox="0 0 28 28" width="22" height="22" fill="none">
+              <rect x="2" y="2" width="24" height="24" rx="6" fill="#0f172a"/>
+              <path d="M9 20V8h5.5a3.7 3.7 0 0 1 0 7.4H9m4.8 0L18.5 20" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="20.5" cy="8.5" r="2.2" fill="#f97316"/>
+            </svg>
+          </span>
+          <span class="brand-titles">
+            <span class="brand-name">RSIBox 交付看板</span>
+            <span class="brand-repo mono" id="repo-slug">hao-ai-lab/rsibox</span>
+          </span>
+        </a>
+
+        <div class="status-pills" aria-label="运行状态摘要">
+          <a href="#cluster" class="pill pill-mode" id="pill-mode" title="查看集群与主机状态">
+            <span class="pill-dot" aria-hidden="true"></span>
+            <span id="pill-mode-text">Static Mode</span>
+          </a>
+          <a href="#activity" class="pill pill-mono" id="pill-head" title="查看提交记录">
+            <span class="pill-label">HEAD</span>
+            <span class="mono" id="pill-head-text">—</span>
+          </a>
+          <a href="#activity" class="pill pill-neutral" id="pill-activity" title="查看 Open PRs 与工作区状态">
+            <span id="pill-activity-text">Snapshot</span>
+          </a>
+        </div>
+      </div>
+
+      <div class="poll-controls" aria-label="轮询控制">
+        <span class="poll-status" id="poll-status">
+          <span class="status-dot is-static" id="status-dot" aria-hidden="true"></span>
+          <span class="poll-time mono" id="last-updated">初始化中…</span>
+        </span>
+        <button type="button" class="btn-ctrl" id="btn-pause" aria-pressed="false">暂停</button>
+        <button type="button" class="btn-ctrl" id="btn-refresh" title="立即刷新数据">刷新</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="alert-strip" id="alert-strip" aria-live="polite">
+      <div class="alert-icon" aria-hidden="true">!</div>
+      <div class="alert-body" id="alert-body">正在加载交付基线数据…</div>
+      <a class="alert-action" id="alert-action" href="#tracks">查看 Targets →</a>
+    </section>
+
+    <section class="kpi-grid" id="kpi-grid" aria-label="核心交付指标">
+      <!-- Populated by app.js -->
+    </section>
+
+    <nav class="tab-nav" aria-label="看板导航视图" id="tab-nav">
+      <a class="tab-link" href="#overview" data-tab="overview" aria-current="page">总览 Overview</a>
+      <a class="tab-link" href="#charts" data-tab="charts">技术图表 Charts</a>
+      <a class="tab-link" href="#tracks" data-tab="tracks">未完目标 Targets</a>
+      <a class="tab-link" href="#cluster" data-tab="cluster">集群与 GPU Cluster</a>
+      <a class="tab-link" href="#matrix" data-tab="matrix">验收矩阵 Matrix</a>
+      <a class="tab-link" href="#activity" data-tab="activity">提交与动态 Activity</a>
+    </nav>
+
+    <div id="facts-error-banner" class="error-banner" hidden></div>
+
+    <section class="tab-panel" id="panel-overview" data-panel="overview" aria-label="总览 Overview"></section>
+    <section class="tab-panel" id="panel-charts" data-panel="charts" aria-label="技术图表 Charts" hidden></section>
+    <section class="tab-panel" id="panel-tracks" data-panel="tracks" aria-label="未完目标 Targets" hidden></section>
+    <section class="tab-panel" id="panel-cluster" data-panel="cluster" aria-label="集群与 GPU Cluster" hidden></section>
+    <section class="tab-panel" id="panel-matrix" data-panel="matrix" aria-label="验收矩阵 Matrix" hidden></section>
+    <section class="tab-panel" id="panel-activity" data-panel="activity" aria-label="提交与动态 Activity" hidden></section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <span>RSIBox Delivery Dashboard · Read-only Engineering Telemetry</span>
+      <span class="mono" id="facts-generated-at">facts: —</span>
+    </div>
+  </footer>
+
+  <script src="/site/dashboard/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,422 @@
+{
+ "generated_at": "2026-11-24",
+ "repo": "hao-ai-lab/rsibox",
+ "kpis": {
+  "engines_done": 9,
+  "engines_target": 10,
+  "invariants_done": 12,
+  "invariants_total": 12,
+  "experiments_done": 16,
+  "experiments_total": 16,
+  "traces_verified": "110/110",
+  "leases_verified": 2919,
+  "targets_done": 0,
+  "targets_total": 5
+ },
+ "engines": [
+  {
+   "id": "vllm",
+   "name": "vLLM",
+   "category": "Inference",
+   "status": "done",
+   "conformance": "11/11 CPU & 1x/2x B200 (eager, TP2 V1, V2 FULL_DECODE_ONLY graphs)",
+   "tiers": "R0 Python/Triton + Tier-A node patch (#240, 8.3-11.9 ms) + Tier-C R1 + .cu NATIVE + Live Reconfig + TP2<->EP2 Reshard + Dynamo GMS/Snapshot & Standby Shadow (#209/#244/#247)",
+   "speedup": "up to 95x (228 s -> 2.4-23.6 s); Tier-A 49x-60x vs R1; Shadow 53.2x-53.6x",
+   "summary": "Live swaps (~0.08 s), Tier-A surgical CUDA graph kernel-node pointer swap (#240: 8.3-11.9 ms patch, 0.102-0.135 s warm vs 5.55-8.04 s R1 on Qwen3-0.6B/8B), C++/CUDA reload (7.3-19.2 s vs 41-49 s), 4.3 ms live reconfig, and 0.68-0.75 s SIGKILL Standby Shadow recovery.",
+   "evidence": "repos/vllm/kb/costs.md"
+  },
+  {
+   "id": "sglang",
+   "name": "SGLang",
+   "category": "Inference",
+   "status": "done",
+   "conformance": "11/11 CPU, 2x GB200 (TP2), & 1x/2x B200 (TP1/TP2, --fork-subprocs)",
+   "tiers": "R0 Python/Triton + R1 52-CG Decode Recapture + SglangZygote (--fork-subprocs) + CUDA IPC Weights + SglangShadowPromoter (#218/#232/#248)",
+   "speedup": "up to 176x (66.4 s -> 0.38-1.77 s); 52-CG Shadow 34.51x (EXP-F2) / 38.06x (EXP-G2c)",
+   "summary": "784 non-test LOC adapter with 0.059-0.106 s swaps, 0.785-1.20 s selective R1 decode graph recapture, SglangShadowPromoter + targeted GMS-safe teardown preserving 52 decode CUDA graphs (0.484-0.534 s recovery, 0 GMS errors), and 4.48 s 65.5 GB GMS+CRIU restore.",
+   "evidence": "repos/sglang/kb/costs.md"
+  },
+  {
+   "id": "trtllm",
+   "name": "TRT-LLM",
+   "category": "Inference",
+   "status": "done",
+   "conformance": "11/11 CPU & 1x/2x B200 (TP=1 & TP=2 MPI)",
+   "tiers": "R0 Python + TP>=2 MPIPoolExecutor Hook (#241) + R1 Lazy CUDA Graph Recapture + TrtllmQuiesceHooks (#215)",
+   "speedup": "up to 249x cold / 116x warm (26.7 s / 12.4 s -> 0.107 s TP=1)",
+   "summary": "Unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend across TP=1 and TP=2 MPI (#215/#241): 0.107 s edit+check, 0.275 s Qwen3DecoderLayer.forward R1 install (224/224 witness/rank), 0.173 ms alive_fn SIGKILL fast-fail, and TrtllmQuiesceHooks freeing 23.6 GiB (TP=1) / 46.7 GiB (TP=2) in 7.4-15.2 ms resume.",
+   "evidence": "repos/trtllm/kb/costs.md"
+  },
+  {
+   "id": "transformers",
+   "name": "Transformers",
+   "category": "Inference",
+   "status": "done",
+   "conformance": "11/11 CPU & 1x B200 (Qwen3-0.6B / Qwen3-8B)",
+   "tiers": "R0 Persistent Subprocess Multi-Module Swap + TransformersQuiesceHooks (#213)",
+   "speedup": "9.05x (0.6B) / 12.81x (8B: 7.75 s -> 0.605 s)",
+   "summary": "Unmodified HuggingFace Transformers 5.20.2 persistent AF_UNIX worker (#213): atomic swaps across generation/model modules (0.521-0.605 s edit+check) and pinned-CPU TransformersQuiesceHooks freeing 15,778 MiB (15.4 GiB) on Qwen3-8B with 0.310 s H2D DMA resume.",
+   "evidence": "repos/transformers/kb/costs.md"
+  },
+  {
+   "id": "megatron",
+   "name": "Megatron-LM",
+   "category": "Training",
+   "status": "done",
+   "conformance": "11/11 CPU & 2x/4x GB200 (TP2, TP2/DP2, TP4, TP2/PP2, TP2/PP2/VPP2)",
+   "tiers": "R0 Train-Step Gap Swap + Reinit + Pinned Host S0 Restore + Zygote Fork + Import Overlay",
+   "speedup": "up to 115x (57.5 s -> 0.50 s tiny); 33.3x 1-step (266.7 s -> 8.02 s 30B EP4)",
+   "summary": "Multi-rank step-gap swaps (0.043-0.047 s install), 0.21-0.27 s byte-identical S0 restore (23.5-106.8 GiB/rank), and an autonomous 82-iteration zero-restart hill-climb delivering +5.1% tokens/s/GPU on 14B TP2 (+7.1% on 32B TP4).",
+   "evidence": "repos/megatron/kb/costs.md"
+  },
+  {
+   "id": "fastvideo",
+   "name": "FastVideo",
+   "category": "Video Gen",
+   "status": "done",
+   "conformance": "11/11 CPU & 1x/2x/4x GB200 (SP1, SP2, SP4 incl. --zygote --holder)",
+   "tiers": "R0 Request-Gap Swap + R1 Triton + In-Place Rebuild + Zygote + CUDA IPC Holder + Path-Stable JIT",
+   "speedup": "up to 92x-107x (200-206 s cold -> 1.87-2.30 s 2-fwd screen)",
+   "summary": "SP1-SP4 video generation swaps (0.034-0.114 s install), in-place module rebuild (0.19-1.27 s), concurrent CUDA IPC weight holder + audio_vae IPC + FlashInfer preload, and a 20-patch bit-exact H3 hill-climb (1.43x-1.52x faster per video).",
+   "evidence": "repos/fastvideo/kb/costs.md"
+  },
+  {
+   "id": "verl",
+   "name": "veRL",
+   "category": "RL Post-Training",
+   "status": "done",
+   "conformance": "11/11 CPU & 4x GB200 (21-participant FSDP eager & FSDP CUDA-graph GRPO)",
+   "tiers": "RayActorParticipant Multi-Actor Swap + Coupled 4-GPU S0 + TransferQueue Mini-Batch & Offline Replay",
+   "speedup": "10.9x full step (298 s -> 27.46 s); 110.3x online 8-traj replay (2.70 s); 12.57 ms offline adv",
+   "summary": "Coordinates 21 Ray GRPO participants via shared ray_participants.py with PEP 578 + AST compile negative caching (0.404 s mean install, 0.127 s uninstall), 1.13 s coupled S0 restore, and bit-exact 2.70 s TransferQueue mini-batch FSDP replay.",
+   "evidence": "repos/verl/kb/costs.md"
+  },
+  {
+   "id": "miles",
+   "name": "miles",
+   "category": "RL Post-Training",
+   "status": "done",
+   "conformance": "11/11 CPU & 2x B200 / GB200 (MilesConformanceLab & RealSlime11Lab)",
+   "tiers": "RayActorParticipant Swap (337 prod LOC) + EpochDataBuffer Drain + Coupled S0 + Megatron Replay",
+   "speedup": "up to 127.3x (88.8 s -> 0.697 s S0 replay); 54.3x (102.6 s -> 1.89 s 64-traj replay)",
+   "summary": "Under-400-LOC derived RL adapter reusing ray_participants.py: 0.0384 s median commit, EpochDataBuffer code_epoch drain, coupled S0 weight sync, and 1.89-14.07 s two-stage GRPO / recorded-rollout Megatron replay.",
+   "evidence": "repos/miles/kb/costs.md"
+  },
+  {
+   "id": "torchtitan",
+   "name": "TorchTitan",
+   "category": "Training (FSDP2)",
+   "status": "done",
+   "conformance": "11/11 CPU (2-rank toy) & 1x/2x B200 (FSDP2 world_size=1 & world_size=2 NCCL)",
+   "tiers": "Step-Gap FSDP2 Live Swap + DTensor/AdamW/RNG S0 Reset + Parallel PackageOverlay Fresh Check (#222/#254/#255)",
+   "speedup": "32.5x (1x B200: 2.689 -> 0.083 s); 21.63x (2x B200 EXP-F7: 5.515 -> 0.255 s)",
+   "summary": "PyTorch Native FSDP2 (fully_shard) training lab across 1x B200 (32.5x) and 2x B200 NCCL ranks (#222/#254/#255, EXP-F7: 21.63x, 0.101 s install / 0.054 s check / 0.099 s undo, max_abs_loss_diff == 0.0, 239.00 s c0-c10) + EXP-F6 SandboxPool priority.",
+   "evidence": "repos/torchtitan/kb/costs.md"
+  }
+ ],
+ "invariants": [
+  {
+   "id": "I1",
+   "title": "Pure-Stdlib Core Kernel",
+   "status": "done",
+   "detail": "core/livelab/ runs strictly on Python standard library with zero third-party, torch, or engine dependencies, enforced by AST checks across all engine labs via rsibox doctor."
+  },
+  {
+   "id": "I2",
+   "title": "Zero Cross-Engine Imports",
+   "status": "done",
+   "detail": "Each engine adapter under repos/<engine>/livelab/ stays strictly isolated behind the shared 5-verb INTERFACE.md contract (install, check, reset, uninstall, status) with zero cross-engine imports."
+  },
+  {
+   "id": "I3",
+   "title": "Two-Ledger Witness Proof",
+   "status": "done",
+   "detail": "Witness separates live counts from capture_counts (plus generation-matched GraphReplayGuard crediting for Tier-A patched graphs), refusing unexecuted startup-only edits as proven=False (zero_witness)."
+  },
+  {
+   "id": "I4",
+   "title": "Deterministic S0 Rollback",
+   "status": "done",
+   "detail": "Journaled undo and S0 state/RNG resets achieve max_abs_logprob_diff == 0.0 across inference engines and max_abs_loss_diff == 0.0 across Megatron-LM, veRL, miles, and TorchTitan FSDP2."
+  },
+  {
+   "id": "I5",
+   "title": "Fail-Closed Transaction Refusal",
+   "status": "done",
+   "detail": "Conformance c5/c6 verifies fail_apply, fail_commit, patch_invalid, closure_changed, outside_changes, empty_change, captured_target, and constructor_edit roll back or refuse before mutating live state."
+  },
+  {
+   "id": "I6",
+   "title": "SHA-256 Hash-Chained Pool Traces",
+   "status": "done",
+   "detail": "Every SandboxPool lease writes an append-only JSONL record chaining prev_sha256 -> record_sha256; verify_trace(..., expected_head=...) passed 110/110 traces across 2,919 real B200 leases."
+  },
+  {
+   "id": "I7",
+   "title": "Priority + Anti-Starvation Aging + Elastic Role Borrowing",
+   "status": "done",
+   "detail": "SandboxPool priority (#226), tunable priority_aging_s (#233, 2.07x lower Dev max starvation wait), and work-conserving fallback_roles (#237, 1.60x-1.65x Triad, 2.60x Phase-Shift) eliminate starvation with zero primary-role theft."
+  },
+  {
+   "id": "I8",
+   "title": "Per-Agent Circuit Breaker & max_slots_per_agent",
+   "status": "done",
+   "detail": "Per-agent max_agent_faults quarantine (#243, 3.08x lower recovery downtime) paired with max_slots_per_agent=1 (#250) bounds multi-threaded rogue blast radius to 1/3 GPU and delivers 12.40x healthy team speedup."
+  },
+  {
+   "id": "I9",
+   "title": "Online Slot Rehabilitation (heal_slot) & Elastic Scaling (add_slot/drain_slot)",
+   "status": "done",
+   "detail": "heal_slot() (#253) rehabilitates quarantined slots online while add_slot()/drain_slot() (#256) scale pools live under load (3->2->3 EXP-H4: 0.176 s drain, 58 us attach, 0 aborted edits)."
+  },
+  {
+   "id": "I10",
+   "title": "Multi-Shadow Early-Wake Guard (StandbyShadowDriver)",
+   "status": "done",
+   "detail": "ready_count_fn + AsyncShadowReplenisher.wait(..., until=...) (#244/#247/#248) skips false in_flight stalls when parked shadows exist, cutting vLLM Restart #2 by 30.60x (EXP-G2b) and SGLang sh2 promote to 0.484 s (EXP-G2c)."
+  },
+  {
+   "id": "I11",
+   "title": "Sub-Millisecond Unassisted SIGKILL Fast-Fail",
+   "status": "done",
+   "detail": "alive_fn peer-liveness checks + transport_error=True (#229/#230/#235) eliminate dead-channel timeout stalls, cutting cleanup latency to 0.502 ms on vLLM (358,566x vs 180 s timeout) and 0.173 ms on TRT-LLM (346,821x vs 60 s timeout)."
+  },
+  {
+   "id": "I12",
+   "title": "Facts Consistency & Leak-Free CI",
+   "status": "done",
+   "detail": "verify_facts.py --strict enforces 0 schema/math/join errors and 0 split-brain drifts across 7 fact files and 9 repo engines alongside site/build.py --check, leak-check.sh, and -W error::ResourceWarning CPU test suites (including 24/24 warm checks)."
+  }
+ ],
+ "experiments": [
+  {
+   "id": "EXP-A",
+   "title": "Multi-Agent Contention Matrix (C in {1,2,3} x N in {1,2,4,8})",
+   "status": "done",
+   "result": "43.7x-54.4x clean speedup (68.3-190.4 edits/min vs 1.31-3.82 FIFO restart); 1 B200 at N=8 beats 3 restarting B200s at N=6 by 19.2x; 28.7x lower mean queue wait at C=1, N=4; max_abs_logprob_diff == 0.0.",
+   "traces": "12/12 (180 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-B",
+   "title": "Multi-Agent Team Topologies (Monolithic, Dev+Eval Split, 3-Pool Triad)",
+   "status": "done",
+   "result": "27 cells (324 pipeline runs): 66.7% 1st-pass -> 100.0% post-Toolsmith completion (10/12 proven + 2/12 host-config); dedicated Eval eliminates stalls (0/12, 0.000 s wait) while static 1:1:1 caps at 40.4-42.4 ideas/min.",
+   "traces": "27/27 (756 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-C",
+   "title": "vLLM & SGLang Standby Shadow Crash Failover (C=1, N in {4,8})",
+   "status": "done",
+   "result": "vLLM live SIGKILL recovery drops 36.27-39.98 s -> 0.677-0.752 s (53.2x-53.6x, 3.91x-6.99x burst throughput, 12.75x-24.59x p95 wait); SGLang eager recovery drops 11.41-11.52 s -> 0.449-0.490 s (23.5x-25.4x).",
+   "traces": "8/8 (192 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-D",
+   "title": "Proportional 2-Eval:1-Dev Split & Priority Shared Pool Sizing (3x B200)",
+   "status": "done",
+   "result": "2 Eval : 1 Dev+Toolsmith lifts throughput +53% to +61% over 1:1:1 triad (64.0-67.2 ideas/min, 0/12 Eval stalls); priority_shared reaches 76.3-80.7 ideas/min with 4.68x-8.65x lower mean Eval wait.",
+   "traces": "16/16 (448 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-E1",
+   "title": "Continuous 3-Crash SIGKILL Stress with AsyncShadowReplenisher",
+   "status": "done",
+   "result": "3 consecutive live SIGKILL crashes recovered in 0.803 s, 0.726 s, and 0.647 s (2.176 s total downtime) with 208 R0 edits completed during background restock (154.69 proven edits/min, 99.997% util, 0 GMS errors).",
+   "traces": "1/1 (226 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F1 / EXP-F5",
+   "title": "Zero-Sleep Unassisted SIGKILL Fast-Fail (vLLM & TensorRT-LLM)",
+   "status": "done",
+   "result": "alive_fn liveness checks cut dead-channel cleanup to 0.502 ms on vLLM EXP-F1 (358,566x vs 180 s timeout, 0.805 s Shadow recovery, 137.59 edits/min) and 0.173 ms pre-send / 0.329 s quiesce on TRT-LLM EXP-F5 (346,821x vs 60 s RPC timeout).",
+   "traces": "1/1 (16 leases; EXP-F5 direct TrtllmLab RPC)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F2",
+   "title": "SGLang 52-Decode-CG Standby Shadow + Targeted Shutdown",
+   "status": "done",
+   "result": "stop_sglang_engine_targeted + SglangShadowPromoter preserves all 52 decode CUDA graphs and co-process GMS (0 errors), cutting recovery 34.51x (18.417 -> 0.534 s), boosting throughput 4.67x (42.85 -> 200.16 edits/min), and cutting p95 wait 11.31x.",
+   "traces": "2/2 (32 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F3",
+   "title": "Anti-Starvation Priority Aging Under Sustained Eval Flood",
+   "status": "done",
+   "result": "priority_aging_s=0.30 cuts Dev max starvation wait 2.07x (14.620 -> 7.069 s) and moves Dev completion ranks from [1,22,23,24] to [1,10,12,20] with max_abs_logprob_diff == 0.0.",
+   "traces": "3/3 (72 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F4",
+   "title": "Work-Conserving Elastic Role Borrowing (3x B200 Triad & Phase-Shift)",
+   "status": "done",
+   "result": "fallback_roles boosts 1:1:1 Triad 1.60x-1.65x (60.4-66.2 vs 37.8-40.2 ideas/min; 0.000015 s Eval wait at N=4) and accelerates explore-then-validate Phase-Shift 2.60x vs static triad (31.6 -> 82.4 ideas/min) and 1.61x vs 2E+1D.",
+   "traces": "9/9 (240 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F6",
+   "title": "Cross-Framework 5-Engine SandboxPool & Priority Portability (incl. TorchTitan FSDP2)",
+   "status": "done",
+   "result": "Same SandboxPool priority=10/0 cuts Eval wait 7.08x on SGLang 52-CG (500.6 edits/min), 6.98x on TRT-LLM (486.5 edits/min), 5.47x on TorchTitan FSDP2 EXP-F6 (357.3 edits/min, max_abs_loss_diff == 0.0), and 7.21x on Transformers (89.7 edits/min).",
+   "traces": "16/16 (336 leases: 4/4 EXP-F6 TorchTitan + 12/12 SGLang/TRT-LLM/HF)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-F7",
+   "title": "TorchTitan 2-Rank FSDP2 NCCL Live-Lab (2x B200)",
+   "status": "done",
+   "result": "Real 2-rank NCCL fully_shard across 2x B200 achieves 21.63x speedup (5.515 s cold boot+check -> 0.255 s warm cycle: 0.1011 s install, 0.0535 s check, 0.0989 s undo+S0), max_abs_loss_diff == 0.0, and 11/11 conformance (239.00 s c0-c10).",
+   "traces": "0/0 (2-rank conformance & benchmark suite)",
+   "evidence": "repos/torchtitan/kb/costs.md"
+  },
+  {
+   "id": "EXP-G1",
+   "title": "Realistic LLM Think-Time Scaling & Little's Law Validation (1x-3x B200)",
+   "status": "done",
+   "result": "With t_hold ~ 0.34 s and t_think = 5.0 s, 1 B200 serves N=8 at 0.02 ms mean wait (90.83 edits/min, N*=15.47); at t_think = 3.0 s, 3 B200s sustain N=24 concurrent agents at 399.17 edits/min (0.132 s mean / 0.426 s p95 wait).",
+   "traces": "5/5 (240 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-G2 / EXP-G2b / EXP-G2c",
+   "title": "50/50 Mixed Hot-Swap + Restart-Tier & Multi-Shadow Guard Fix (vLLM & SGLang)",
+   "status": "done",
+   "result": "2.78x-2.82x vs plain GMS RO (6.89x vs 6x warm restarts); PR #244/#247 cuts vLLM Restart #2 by 30.60x (36.533 -> 1.194 s), mean wait 8.78x (1.516 s), p95 wait 13.22x (2.895 s); SGLang EXP-G2c promotes sh2 in 0.484 s (38.06x) with 52 CGs & 0 GMS errors.",
+   "traces": "4/4 (33 leases: 12 EXP-G2 + 6 EXP-G2b + 15 EXP-G2c)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-G3",
+   "title": "Per-Agent Fault Circuit Breaker Under Rogue Poisoning Storm (3x B200)",
+   "status": "done",
+   "result": "Latched max_agent_faults=1 (#243) quarantines rogue_0 on fault #1 and rejects 2 repeat attacks in-lock, cutting real respawns 3 -> 1, GPU recovery downtime 3.08x (136.54 -> 44.32 s, -92.23 s), and campaign wall 3.07x.",
+   "traces": "2/2 (44 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-H1",
+   "title": "Full-Stack 6-Layer Integration Under Active Eval-Slot Attack (3x B200)",
+   "status": "done",
+   "result": "All 6 layers active simultaneously cut 12-idea pipeline wall 11.30x (151.12 -> 13.37 s, 4.76 -> 53.86 ideas/min), Eval mean wait 23.60x (35.654 -> 1.511 s, p95 16.67x), total campaign wall 3.30x, and GPU recovery 2.93x.",
+   "traces": "2/2 (60 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-H2",
+   "title": "Concurrent-Rogue Blast-Radius Containment via max_slots_per_agent=1 (3x B200)",
+   "status": "done",
+   "result": "Capping max_slots_per_agent=1 (#250) bounds simultaneous 3-thread rogue attack from 3/3 blackout to 1/3 GPU, accelerating healthy team 12.40x (54.32 -> 4.38 s, 273.97 edits/min), cutting p95 wait 60.58x, and cutting GPU recovery 3.31x.",
+   "traces": "2/2 (44 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  }
+ ],
+ "targets": [
+  {
+   "id": "T1",
+   "title": "New Engines & Upstream Models",
+   "status": "planned",
+   "progress_pct": 15,
+   "owner_track": "Engine Onboarding",
+   "summary": "Onboard NVIDIA NeMo-RL (AutoModel FSDP2 + SGLang GRPO, reusing core/livelab/ray_participants.py) and replay real upstream pytorch/torchtitan Llama3/PR workloads beyond synthetic TitanMLPNet.",
+   "items": [
+    "Onboard NVIDIA NeMo-RL (AutoModel FSDP2 + SGLang) GRPO adapter reusing ray_participants.py",
+    "Add real upstream pytorch/torchtitan Llama3 config & PR replay on 2x B200 FSDP2 NCCL",
+    "Pass 11/11 CPU and real-GPU conformance for NeMo-RL (10th engine)"
+   ],
+   "evidence": "repos/torchtitan/docs/architecture.md"
+  },
+  {
+   "id": "T2",
+   "title": "High-Order Engine Mechanisms",
+   "status": "in_progress",
+   "progress_pct": 25,
+   "owner_track": "Kernel & Graph Tiers",
+   "summary": "Extend Tier-A surgical pointer swap and live mechanisms to vLLM TP>=2 + Component Restart / KV Holder, SGLang dp_size>1 & PD disaggregation, Transformers multi-GPU device_map='auto', and torch.compile / Inductor region live swap.",
+   "items": [
+    "vLLM Tier-A surgical pointer swap at TP >= 2 + Component Restart & KV Memory Holder",
+    "SGLang dp_size > 1 (--enable-dp-attention) and PD disaggregation (--disaggregation-mode)",
+    "Transformers multi-GPU (device_map='auto') worker orchestration",
+    "torch.compile / Inductor region live swap and Tier-B cuGraphExecUpdate"
+   ],
+   "evidence": "docs/kernels-and-graphs.md"
+  },
+  {
+   "id": "T3",
+   "title": "Real LLM Coding Agent End-to-End Campaigns",
+   "status": "in_progress",
+   "progress_pct": 20,
+   "owner_track": "Autonomous Agent Loops",
+   "summary": "Expand beyond the Megatron 82-iteration (+5.1% tokens/s/GPU) autonomous hill-climb to live multi-agent LLM hill-climbs on vLLM Tier-A, SGLang, and RL post-training workloads.",
+   "items": [
+    "Run live autonomous LLM agent hill-climb on vLLM Tier-A Triton kernel optimizations",
+    "Run live multi-agent LLM campaigns on SGLang and veRL/miles GRPO",
+    "Measure stochastic LLM edit mixes, refusal-repair loops, and end-to-end throughput vs restart"
+   ],
+   "evidence": "repos/megatron/examples/codex-hillclimb/README.md"
+  },
+  {
+   "id": "T4",
+   "title": "Codebase Robustness & pstack Tech-Debt Sweep",
+   "status": "in_progress",
+   "progress_pct": 30,
+   "owner_track": "Core Reliability",
+   "summary": "Resolve P1/P2 audit findings across warm recovery, SGLang shadow guards, pool drain ordering, and TorchTitan parallel teardown, add barrier regression tests, and run blast-radius scan.",
+   "items": [
+    "Fix #244 AsyncShadowReplenisher.wait(until) close() check ordering",
+    "Fix #248 SglangShadowPromoter head-dead shadow skipping & deduplicate guard helper",
+    "Fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
+    "Add barrier regression tests and run full blast-radius scan"
+   ],
+   "evidence": "core/livelab/rsibox/pool.py"
+  },
+  {
+   "id": "T5",
+   "title": "Delivery Dashboard & Agent-Native Workflow v2",
+   "status": "in_progress",
+   "progress_pct": 40,
+   "owner_track": "Platform & CI",
+   "summary": "Ship rsibox.fastrsi.ai/dashboard, fix .github/review/review.py comma number regex, land Claim Board + DAG Merge Train, and enable Mac -> B200 Native Web App Orchestration + nightly 4-engine GPU regression.",
+   "items": [
+    "Deploy interactive rsibox.fastrsi.ai/dashboard backed by site/facts/delivery-matrix.json",
+    "Fix .github/review/review.py comma-formatted number regex in fact preservation check",
+    "Land Claim Board + DAG Merge Train for parallel multi-agent PR integration",
+    "Enable Mac -> B200 Native Web App Orchestration and nightly 4-engine GPU regression"
+   ],
+   "evidence": ".github/review/review.py"
+  }
+ ],
+ "charts": [
+  {
+   "id": "dynamo-3engine-4case-benchmark",
+   "title": "RSIBox + NVIDIA Dynamo (GMS & Snapshot) on NVIDIA B200",
+   "path": "assets/dynamo-3engine-4case-benchmark.svg",
+   "caption": "Matched 3-engine scaling across 1.5 GB, 29.5 GB, and 65.5 GB TP1 models on NVIDIA B200 (vLLM, SGLang, TensorRT-LLM): cold/warm boot, plain CRIU, Dynamo GMS+CRIU/Shadow, R1 recapture, live swap, and live config."
+  },
+  {
+   "id": "agent-teams-contention-and-elastic-triad",
+   "title": "RSIBox Multi-Agent GPU Contention, Crash Failover & Elastic Role Borrowing",
+   "path": "assets/agent-teams-contention-and-elastic-triad.svg",
+   "caption": "EXP-A multi-agent throughput (43.7x-54.4x clean, 19.2x 1-GPU vs 3-GPU), EXP-C/F1/F2/F5 Standby Shadow failover & sub-ms alive_fn SIGKILL cleanup, and EXP-F4 elastic role borrowing."
+  },
+  {
+   "id": "agent-teams-scaling-mixed-and-isolation",
+   "title": "Wave 8-9: Think-Time Scaling, 50/50 Mixed Restart-Tier & Circuit-Breaker Isolation",
+   "path": "assets/agent-teams-scaling-mixed-and-isolation.svg",
+   "caption": "EXP-G1 Little's Law think-time scaling up to N=24 on 3x B200 (399.2 edits/min), EXP-G2/G2b/G2c multi-shadow guard fix (30.60x Restart #2 speedup), and EXP-G3 per-agent circuit breaker (3.08x lower recovery)."
+  },
+  {
+   "id": "agent-teams-fullstack-and-blast-radius",
+   "title": "Wave 10-12: Full-Stack Resilience, Blast-Radius Cap & 5-Engine Portability",
+   "path": "assets/agent-teams-fullstack-and-blast-radius.svg",
+   "caption": "EXP-H1 6-layer full-stack campaign under Eval-slot attack (11.30x pipeline), EXP-H2 max_slots_per_agent=1 blast-radius containment (12.40x healthy speedup), and EXP-F6 5-engine SandboxPool portability (110/110 traces, 2,919 leases)."
+  }
+ ]
+}
