@@ -14,7 +14,10 @@ from kernel import receipt as R
 from kernel import swap as S
 from kernel import toy
 from kernel import witness as W
-from rsibox.pool import PoolError, PoolSlot, SandboxPool
+from rsibox.autoscaler import AutoScalerPolicy, PoolAutoScaler
+from rsibox.lab import BaseLab
+from rsibox.pool import PoolError, PoolSlot, PoolTimeoutError, SandboxPool
+from rsibox.warm import AsyncShadowReplenisher, DefaultRespawnDriver, DiskStore, StandbyShadowDriver
 
 
 class _TrackingLab:
@@ -204,3 +207,148 @@ class TlaConformanceTests(unittest.TestCase):
                 if td in sys.path:
                     sys.path.remove(td)
                 sys.modules.pop("tla_swap_mod", None)
+
+    def test_standby_shadow_tla_single_flight_fallback_and_close(self) -> None:
+        class _DummyShadowLab(BaseLab):
+            name = "tla_shadow_dummy"
+
+            def _start_engine(self):
+                part = C.CallParticipant("r0", lambda *_a: {"ok": True, "code": {"m": "x"}})
+                return C.StepGapCoordinator([part], lambda fn: fn()), []
+
+            def _stop_engine(self):
+                return None
+
+            def _run_workload(self, _workload):
+                return {"ok": True}
+
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        disposed: list[dict] = []
+        started = [0]
+
+        def _slow_rep(_lab, _store=None):
+            started[0] += 1
+            entered.set()
+            release.wait(timeout=5.0)
+            return {"ok": True, "shadow": f"s-{started[0]}"}
+
+        rep = AsyncShadowReplenisher(_slow_rep, queue_when_busy=True, dispose_fn=disposed.append)
+        self.addCleanup(rep.close)
+
+        # SingleFlightReplenisher: coalesces concurrent triggers while in flight.
+        self.assertEqual(rep.trigger(None), "started")
+        self.assertTrue(entered.wait(timeout=2.0))
+        self.assertEqual(rep.trigger(None), "queued")
+        self.assertEqual(rep.trigger(None), "coalesced")
+
+        # NeverWaitWhenClosed + ZeroOrphanOnClose: close() wakes waiter, skips queued item, and disposes outcome.
+        wait_res: list[bool] = []
+        t_wait = threading.Thread(target=lambda: wait_res.append(rep.wait(timeout_s=5.0, until=lambda: False)))
+        t_wait.start()
+        time.sleep(0.03)
+        close_ok = rep.close(timeout_s=0.05)
+        t_wait.join(timeout=2.0)
+        self.assertFalse(t_wait.is_alive())
+        self.assertEqual(wait_res, [False])
+        release.set()
+        rep.wait(timeout_s=2.0)
+        if not close_ok:
+            # Wait briefly for worker thread post-close cleanup to finish disposing outcome.
+            deadline = time.monotonic() + 2.0
+            while rep.status()["in_flight"] and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(rep.status()["attempts"], 1)
+        self.assertEqual(len(disposed), 1)
+        self.assertEqual(rep.status()["disposed_after_close"], 1)
+
+        # Failed promote_fn with fallback_driver recovers cleanly via DefaultRespawnDriver.
+        rep_calls = [0]
+        driver = StandbyShadowDriver(
+            promote_fn=lambda _lab, _store: {"ok": False, "error": "shadow vanished"},
+            replenish_fn=lambda _lab, _store: (rep_calls.__setitem__(0, rep_calls[0] + 1), {"ok": True})[1],
+            fallback_driver=DefaultRespawnDriver(),
+        )
+        lab = _DummyShadowLab(weight_store=DiskStore(), recovery_driver=driver)
+        self.addCleanup(lab.close)
+        res = lab.reset("respawn")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["fallback_from"], "standby_shadow")
+        self.assertEqual(res["driver"], "default_respawn")
+        self.assertEqual(rep_calls[0], 1)
+
+    def test_autoscaler_tla_undrained_replace_retry_and_start_stop_lock(self) -> None:
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        lab = _TrackingLab(entered=entered, release=release)
+        pool = SandboxPool([PoolSlot("s0", lab)], drain_timeout_s=0.05, close_labs=True)
+        self.addCleanup(pool.close)
+
+        lease = pool.acquire("agent-a")
+        t_call = threading.Thread(target=lease.lab.check)
+        t_call.start()
+        self.assertTrue(entered.wait(timeout=2.0))
+        lease.release()
+
+        now = [0.0]
+        fail_respawn = [True]
+        orig_reset = lab.reset
+
+        def _reset(kind="state"):
+            if kind == "respawn" and fail_respawn[0]:
+                return {"ok": False, "error": "down"}
+            return orig_reset(kind)
+
+        lab.status = lambda: {"ok": True, "state": "poisoned", "txns": []}  # type: ignore[method-assign]
+        lab.reset = _reset  # type: ignore[method-assign]
+        orig_drain = pool.drain_slot
+        fail_drain = [True]
+
+        def _drain(slot_id, **kw):
+            if fail_drain[0]:
+                raise PoolTimeoutError("transient drain timeout")
+            return orig_drain(slot_id, **kw)
+
+        pool.drain_slot = _drain  # type: ignore[method-assign]
+        scaler = PoolAutoScaler(
+            pool,
+            lambda sid, role: PoolSlot(sid, _TrackingLab(), role=role),
+            policy=AutoScalerPolicy(
+                min_slots=1, max_slots=1, max_heal_attempts=2,
+                heal_backoff_s=4.0, replace_on_heal_exhausted=True,
+                poll_interval_s=0.01,
+            ),
+            clock=lambda: now[0],
+        )
+        self.addCleanup(scaler.stop)
+
+        # UndrainedNeverExhaustsDirectly: undrained PoolError backs off with heals_attempted == 0.
+        self.assertEqual(scaler.reconcile_once()["action"], "noop")
+        self.assertEqual(scaler.status()["heals_attempted"], 0)
+        self.assertEqual(scaler.status()["exhausted_slots"], [])
+
+        # Once active call exits, 2 heal failures exhaust -> drain_slot fails -> retries replace without re-healing.
+        release.set()
+        t_call.join(timeout=2.0)
+        now[0] = 5.0
+        self.assertEqual(scaler.reconcile_once()["action"], "heal_failed")
+        now[0] = 10.0
+        self.assertEqual(scaler.reconcile_once()["action"], "replace_failed")
+        self.assertEqual(scaler.status()["heals_attempted"], 2)
+        self.assertEqual(scaler.status()["exhausted_slots"], ["s0"])
+
+        fail_drain[0] = False
+        now[0] = 15.0
+        self.assertEqual(scaler.reconcile_once()["action"], "replace")
+        self.assertEqual(scaler.status()["heals_attempted"], 2)
+        self.assertEqual(scaler.status()["exhausted_slots"], [])  # RemovedClearsTracking
+
+        # Concurrent start()/stop() lock ordering never leaves running thread after stop().
+        for _ in range(15):
+            scaler.start()
+            scaler.stop(timeout_s=2.0)
+            self.assertFalse(scaler.status()["running"])
+
+        pool.close(close_labs=True)
+        self.assertEqual(scaler.reconcile_once()["action"], "noop")  # ClosedYieldsNoop

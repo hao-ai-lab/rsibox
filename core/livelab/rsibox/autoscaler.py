@@ -541,6 +541,17 @@ class PoolAutoScaler:
                 drain_err = str(dr.get("error") or "drain_slot returned not drained")
         except PoolClosedError as err:
             return self._record_event({"action": "noop", "reason": f"pool_closed: {err}"})
+        except ValueError as err:
+            with self._lock:
+                self._heal_failures.pop(dead_slot_id, None)
+                self._heal_backoff.pop(dead_slot_id, None)
+                self._exhausted_slots.discard(dead_slot_id)
+                self._replace_pending.discard(dead_slot_id)
+                self._replace_heal_errors.pop(dead_slot_id, None)
+                self._replace_failures.pop(dead_slot_id, None)
+                self._idle_since.pop(dead_slot_id, None)
+                self._auto_slots.discard(dead_slot_id)
+            return self._record_event({"action": "noop", "reason": f"slot_removed: {err}"})
         except Exception as err:
             drain_err = f"{type(err).__name__}: {err}"
 
@@ -738,6 +749,8 @@ class PoolAutoScaler:
                                 "slots": dr.get("slots"),
                                 "cost_s": round(max(0.0, finish_mono - t0), 6),
                             })
+                        with self._lock:
+                            self._idle_since.pop(victim_id, None)
                         return self._record_event({
                             "action": "scale_down_skipped",
                             "slot_id": victim_id,
@@ -777,8 +790,8 @@ class PoolAutoScaler:
 
     def stop(self, *, timeout_s: float | None = 5.0) -> None:
         """Signal the background thread to stop and wait for clean exit (idempotent)."""
-        self._stop_event.set()
         with self._lock:
+            self._stop_event.set()
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             join_timeout = None if timeout_s is None else min(timeout_s, threading.TIMEOUT_MAX)

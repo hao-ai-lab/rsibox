@@ -47,14 +47,16 @@ jobs:
           assert actual == expected, f"tla2tools.jar sha256 mismatch: got {actual} (size={jar.stat().st_size})"
           print(f"Verified {jar} ({jar.stat().st_size} bytes, sha256={actual})")
           PY
-      - name: Run TLC model checks across Pool, Coordinator, and Swap specs
+      - name: Run TLC model checks across Pool, Coordinator, Swap, Shadow, and AutoScaler specs
         run: |
           set -euo pipefail
           JAR="$PWD/.tla-cache/tla2tools.jar"
           for pair in \
             "core/livelab/formal/pool/SandboxPool.tla core/livelab/formal/pool/SandboxPool.cfg" \
             "core/livelab/formal/coordinator/Coordinator.tla core/livelab/formal/coordinator/Coordinator.cfg" \
-            "core/livelab/formal/swap/SwapLifecycle.tla core/livelab/formal/swap/SwapLifecycle.cfg"
+            "core/livelab/formal/swap/SwapLifecycle.tla core/livelab/formal/swap/SwapLifecycle.cfg" \
+            "core/livelab/formal/shadow/StandbyShadow.tla core/livelab/formal/shadow/StandbyShadow.cfg" \
+            "core/livelab/formal/autoscaler/PoolAutoScaler.tla core/livelab/formal/autoscaler/PoolAutoScaler.cfg"
           do
             spec="${pair%% *}"
             cfg="${pair##* }"
