@@ -39,6 +39,7 @@ py-modules = [
   "conformance.cases",
   "conformance.lab",
   "rsibox.__main__",
+  "rsibox.autoscaler",
   "rsibox.cli",
   "rsibox.lab_cli",
   "rsibox.diffs",
