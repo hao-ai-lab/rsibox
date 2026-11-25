@@ -28,7 +28,7 @@ LIVELAB_DIR = REPO_ROOT / "core" / "livelab"
 
 RUNTIME_ROOT_MODULES = ("forksafe", "livestream", "ray_participants")
 RUNTIME_ROOT_PACKAGES = ("conformance", "kernel", "rsibox", "survey")
-EXPECTED_PACKAGES = ("conformance", "kernel", "kernel.toy", "rsibox", "rsibox.warm", "survey")
+EXPECTED_PACKAGES = ("conformance", "kernel", "kernel.toy", "rsibox", "rsibox.services", "rsibox.warm", "survey")
 EXPECTED_TOP_LEVEL = sorted((*RUNTIME_ROOT_MODULES, *RUNTIME_ROOT_PACKAGES))
 
 _HAS_SETUPTOOLS = importlib.util.find_spec("setuptools") is not None
@@ -330,9 +330,9 @@ class SetuptoolsBuildTests(unittest.TestCase):
             }
             import_check = (
                 "import pathlib, kernel, kernel.toy, conformance, survey, "
-                "rsibox, rsibox, forksafe, livestream, ray_participants\n"
+                "rsibox, rsibox.services, rsibox.services.memory, forksafe, livestream, ray_participants\n"
                 f"site = pathlib.Path({str(site_dir)!r}).resolve()\n"
-                "for mod in (kernel, kernel.toy, conformance, survey, rsibox, rsibox, forksafe, livestream, ray_participants):\n"
+                "for mod in (kernel, kernel.toy, conformance, survey, rsibox, rsibox.services, rsibox.services.memory, forksafe, livestream, ray_participants):\n"
                 "    assert pathlib.Path(mod.__file__).resolve().is_relative_to(site), mod.__file__\n"
             )
             _run_python(import_check, cwd=tmp_path, env=clean_env)

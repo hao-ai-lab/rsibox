@@ -15,7 +15,7 @@ Provides shared, zero-dependency building blocks for rsibox live labs:
 import os
 import sys
 
-from . import diffs, doctor, op_guard, pool, promote, warm
+from . import diffs, doctor, op_guard, pool, promote, services, warm
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .doctor import check_rlimit_nofile, run_preflight
 from .op_guard import op_redefine_guard
@@ -176,6 +176,7 @@ __all__ = [
     "run_fresh_subprocess",
     "run_preflight",
     "run_promotion",
+    "services",
     "short_sock_path",
     "sock_path_error",
     "stat_ppid",
