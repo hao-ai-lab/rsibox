@@ -5,6 +5,8 @@ description: Use when changing, testing or profiling code in an ML engine (vLLM,
 
 # Live lab
 
+> For the complete codebase directory map, live-sandbox probing commands, and fail-closed refusal vs. bug triage guide, see [`.claude/skills/rsibox/SKILL.md`](../../.claude/skills/rsibox/SKILL.md).
+
 A live lab is a warm, running engine you can change without restarting it. Restarting spends
 most of a check on setup (77–90% in our vLLM, Megatron and FastVideo measurements); a live
 lab keeps that state resident.
