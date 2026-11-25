@@ -58,6 +58,41 @@ def _v1_call_desc(entries, mode, args, kwargs):
         except Exception: pass
     return args[0] if args else None
 
+def _v1_fc_should_replay(mode):
+    """Return False when vLLM's active forward context bypasses replay (`NONE` or mode mismatch).
+
+    Mirrors `CUDAGraphWrapper.__call__` and `BreakableCUDAGraphWrapper.__call__`:
+    when `mode is None` (e.g., `BreakableCUDAGraphWrapper(runtime_mode=None)`), any non-`NONE`
+    forward-context runtime mode is eligible for replay, so stale checks stay fail-closed.
+    """
+    fc_mod = sys.modules.get("vllm.forward_context")
+    if fc_mod is None:
+        return True
+    is_avail = getattr(fc_mod, "is_forward_context_available", None)
+    if callable(is_avail):
+        try:
+            if not is_avail():
+                return False
+        except Exception:
+            pass
+    get_fc = getattr(fc_mod, "get_forward_context", None)
+    if callable(get_fc):
+        try:
+            fc = get_fc()
+        except Exception:
+            return True
+        fc_mode = getattr(fc, "cudagraph_runtime_mode", None)
+        if fc_mode is not None:
+            fc_name = getattr(fc_mode, "name", None) or str(fc_mode)
+            if fc_name == "NONE":
+                return False
+            if mode is not None:
+                w_name = getattr(mode, "name", None) or str(mode)
+                if fc_name != w_name:
+                    return False
+    return True
+
+
 def _hook_v1_callable(wrapper, guard):
     from .graph_guard import graph_key
     from .side import stream_capturing
@@ -66,10 +101,18 @@ def _hook_v1_callable(wrapper, guard):
         orig_call = cls.__call__
         def guarded_call(self, *args, **kwargs):
             if (g := getattr(self, "_rsibox_guard", None)) is not None and not stream_capturing() and not getattr(getattr(self, "runner", None), "capturing", False):
-                entries, mode = _v1_entries(self), getattr(self, "runtime_mode", None) or "PIECEWISE"
-                desc = _v1_call_desc(entries, mode, args, kwargs)
-                if desc is not None and isinstance(entries, dict) and desc in entries:
-                    g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, desc), kwargs.get("input_sig"))
+                raw_mode = getattr(self, "runtime_mode", None)
+                entries, mode = _v1_entries(self), ("PIECEWISE" if raw_mode is None else raw_mode)
+                if _v1_fc_should_replay(raw_mode):
+                    desc = _v1_call_desc(entries, mode, args, kwargs)
+                    if desc is not None and isinstance(entries, dict) and desc in entries:
+                        entry = entries[desc]
+                        capturing_entry = (
+                            (hasattr(entry, "cudagraph") and entry.cudagraph is None)
+                            or (hasattr(entry, "capture") and entry.capture is None)
+                        )
+                        if not capturing_entry:
+                            g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, desc), kwargs.get("input_sig"))
             return orig_call(self, *args, **kwargs)
         guarded_call.__wrapped__, cls.__call__, cls._rsibox_call_hooked = orig_call, guarded_call, True
     wrapper._rsibox_guard = guard
@@ -89,7 +132,8 @@ def install_replay_guard(worker, guard):
     for w in {id(x): x for x in v1}.values():
         if callable(w): _hook_v1_callable(w, guard); attached += 1
         elif callable(getattr(w, "replay", None)): guard.attach_wrapper(w, method="replay"); attached += 1
-        _stamp_entries(guard, _v1_entries(w), getattr(w, "runtime_mode", None) or "PIECEWISE")
+        raw_mode = getattr(w, "runtime_mode", None)
+        _stamp_entries(guard, _v1_entries(w), "PIECEWISE" if raw_mode is None else raw_mode)
     return attached
 
 
