@@ -12,13 +12,15 @@ Provides engine-agnostic control-plane services composed beneath `core/livelab/k
 - `auxiliary` (`S4`): Shared Auxiliary & Frozen Stage Pool (`AuxiliaryModelService`,
   `AuxStageKind`, `AuxStageSpec`, `AuxInvocationReceipt`) managing frozen VAE, text
   encoder, reward, reference, and judge stages with S1 RO weight leases and LRU caching.
+- `buffers` (`S5`): Indexed Prefetch & Versioned RL Replay Buffers (`IndexedPrefetchService`,
+  `VersionedReplayBufferService`, `PrefetchItem`, `VersionedEntry`, `BufferResetReceipt`).
 - `recovery_service` (`S6`): Unified Recovery & Health Service (`RecoveryService`,
   `RecoveryTier`, `ServiceHealthStatus`, `ServiceHealth`, `RecoveryReceipt`) unifying
   `RecoveryDriver` escalation, `QuiesceHooks` checkpoints, and `SandboxPool` health.
 """
 from __future__ import annotations
 
-from . import auxiliary, cache, memory, recovery_service, zygote
+from . import auxiliary, buffers, cache, memory, recovery_service, zygote
 from .auxiliary import (
     AuxClosedError,
     AuxiliaryModelService,
@@ -29,6 +31,19 @@ from .auxiliary import (
     AuxStageSpec,
     StageExistsError,
     StageNotFoundError,
+)
+from .buffers import (
+    BufferClosedError,
+    BufferResetReceipt,
+    BufferServiceError,
+    CursorOutOfRangeError,
+    EmptyBufferError,
+    IndexCorruptError,
+    IndexedPrefetchService,
+    PrefetchItem,
+    StaleVersionError,
+    VersionedEntry,
+    VersionedReplayBufferService,
 )
 from .cache import (
     CacheArtifactKind,
@@ -86,25 +101,33 @@ __all__ = [
     "AuxStageKind",
     "AuxStageSpec",
     "AuxiliaryModelService",
+    "BufferClosedError",
+    "BufferResetReceipt",
+    "BufferServiceError",
     "CacheArtifactKind",
     "CacheClosedError",
     "CacheCorruptError",
     "CacheEntry",
     "CompileCacheError",
     "CompileCacheService",
+    "CursorOutOfRangeError",
     "DEFAULT_S0_STATE_KEYS",
+    "EmptyBufferError",
     "EndpointNotFoundError",
     "EnvFingerprint",
     "EscalationFailedError",
     "FingerprintMismatchError",
     "ForkPoisonedError",
     "HandleNotFoundError",
+    "IndexCorruptError",
+    "IndexedPrefetchService",
     "LeaseError",
     "MemoryHandle",
     "MemoryPoolKind",
     "MemoryService",
     "MemoryServiceError",
     "PoolAccessError",
+    "PrefetchItem",
     "READ_ONLY_POOLS",
     "RecoveryClosedError",
     "RecoveryInProgressError",
@@ -119,13 +142,17 @@ __all__ = [
     "SpawnedChild",
     "StageExistsError",
     "StageNotFoundError",
+    "StaleVersionError",
     "StampMismatchError",
+    "VersionedEntry",
+    "VersionedReplayBufferService",
     "ZygoteClosedError",
     "ZygoteError",
     "ZygoteProfile",
     "ZygoteService",
     "ZygoteState",
     "auxiliary",
+    "buffers",
     "cache",
     "list_profiles",
     "memory",
