@@ -322,8 +322,13 @@ class TrtllmShadowPromoterTests(unittest.TestCase):
         core_dir = str(Path(__file__).resolve().parents[4] / "core" / "livelab")
         probe = (
             "import importlib, json, sys\n"
+            "baseline = set(sys.modules)\n"
             "importlib.import_module('adapter.shadow')\n"
-            "bad = [m for m in ('torch', 'tensorrt_llm', 'cuda', 'triton') if m in sys.modules]\n"
+            "bad = sorted({\n"
+            "    m.split('.')[0]\n"
+            "    for m in (set(sys.modules) - baseline)\n"
+            "    if m.split('.')[0] in ('torch', 'tensorrt_llm', 'cuda', 'triton')\n"
+            "})\n"
             "print(json.dumps({'bad': bad}))\n"
         )
         proc_res = subprocess.run(

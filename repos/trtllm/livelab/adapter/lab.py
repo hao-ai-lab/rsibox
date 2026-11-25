@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,137 @@ def _cleanup_endpoint(transport: str, endpoint: str) -> None:
             os.unlink(endpoint)
 
 
+def _proc_stat_info(pid: int) -> tuple[str, int, int, int | None] | None:
+    """Return `(state, pgrp, sid, start_ticks)` from Linux `/proc/<pid>/stat`, or `None`."""
+    try:
+        with open(os.path.join("/proc", str(pid), "stat"), encoding="utf-8", errors="replace") as handle:
+            fields = handle.read().rsplit(")", 1)[1].split()
+        start_ticks = int(fields[19]) if len(fields) > 19 else None
+        return (fields[0], int(fields[2]), int(fields[3]), start_ticks)
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _pid_start_ticks(pid: int) -> int | None:
+    """Return Linux `/proc/<pid>/stat` start ticks when `/proc` is available, else `None`."""
+    if not pid or pid <= 0 or not os.path.isdir("/proc"):
+        return None
+    info = _proc_stat_info(pid)
+    return info[3] if info is not None else None
+
+
+def _process_pgid_sid_start(pid: int) -> tuple[int, int, int | None] | None:
+    """Return `(pgid, sid, start_ticks)` for live `pid`, or `None` if dead/zombie."""
+    if not pid or pid <= 0:
+        return None
+    if os.path.isdir("/proc"):
+        info = _proc_stat_info(pid)
+        if info is None or info[0] == "Z":
+            return None
+        return (info[1], info[2], info[3])
+    try:
+        return (os.getpgid(pid), os.getsid(pid), None)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+
+
+def _verified_pg_members(
+    pgid: int,
+    *,
+    expected_sid: int | None = None,
+    min_start_ticks: int | None = None,
+) -> list[int]:
+    """Enumerate verified live non-zombie PIDs belonging to `(pgid, expected_sid)`."""
+    if not pgid or pgid <= 0 or not proc.pg_alive(pgid):
+        return []
+    members: list[int] = []
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid_val = int(entry)
+            info = _proc_stat_info(pid_val)
+            if info is None:
+                continue
+            state, pgrp, sid, start_ticks = info
+            if state == "Z" or pgrp != pgid:
+                continue
+            if expected_sid is not None and sid != expected_sid:
+                continue
+            if min_start_ticks is not None and start_ticks is not None and start_ticks < min_start_ticks:
+                continue
+            members.append(pid_val)
+        return sorted(members)
+    try:
+        with subprocess.Popen(
+            ["ps", "-A", "-o", "pid=,pgid=,state="],
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as ps_proc:
+            try:
+                stdout, _ = ps_proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                ps_proc.kill()
+                ps_proc.communicate()
+                return []
+            ps_pid = ps_proc.pid
+    except (OSError, subprocess.SubprocessError):
+        return []
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid_val, pgrp, state = int(parts[0]), int(parts[1]), parts[2]
+        if pid_val == ps_pid or pgrp != pgid or state.startswith("Z"):
+            continue
+        if expected_sid is not None:
+            try:
+                if os.getsid(pid_val) != expected_sid:
+                    continue
+            except OSError:
+                continue
+        members.append(pid_val)
+    return sorted(members)
+
+
+def _pg_has_live_members(
+    pgid: int,
+    *,
+    expected_sid: int | None = None,
+    min_start_ticks: int | None = None,
+) -> bool:
+    """True when process group `pgid` has at least one verified non-zombie process."""
+    return bool(_verified_pg_members(pgid, expected_sid=expected_sid, min_start_ticks=min_start_ticks))
+
+
+def _sweep_process_group(
+    pgid: int,
+    *,
+    grace_s: float,
+    reap: Any,
+    expected_sid: int | None = None,
+    min_start_ticks: int | None = None,
+) -> None:
+    """Terminate verified non-zombie members of `(pgid, expected_sid)` without `kill_tree`."""
+    if not _verified_pg_members(pgid, expected_sid=expected_sid, min_start_ticks=min_start_ticks):
+        return
+    steps = ((signal.SIGTERM, grace_s), (signal.SIGKILL, 5.0)) if grace_s > 0.0 else ((signal.SIGKILL, 5.0),)
+    for sig, wait_s in steps:
+        members = _verified_pg_members(pgid, expected_sid=expected_sid, min_start_ticks=min_start_ticks)
+        if not members:
+            return
+        for member_pid in reversed(members):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(member_pid, sig)
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline:
+            reap()
+            if not _verified_pg_members(pgid, expected_sid=expected_sid, min_start_ticks=min_start_ticks):
+                return
+            time.sleep(0.02)
+    reap()
+
+
 class _WorkerHandle:
     """Subprocess handle communicating with one `adapter.agent` worker over `rsibox.ipc`."""
 
@@ -84,6 +216,11 @@ class _WorkerHandle:
         self.transport = config["transport"]
         self.endpoint = config["endpoint"]
         self.rpc_timeout = float(rpc_timeout)
+        self._closed = False
+        self._pg_swept = False
+        self._extra_pgids: list[tuple[int, int, int | None]] = []
+        self._leader_sid = 0
+        self._spawn_start_ticks: int | None = None
         self.work_dir = tempfile.mkdtemp(prefix=f"rsibox-trtllm-r{rank_index}-")
         self.stderr_path = os.path.join(self.work_dir, "worker.stderr.log")
         config_path = os.path.join(self.work_dir, "worker.json")
@@ -113,10 +250,16 @@ class _WorkerHandle:
                     start_new_session=True,
                     text=True,
                 )
+            self._leader_sid = self.process.pid
+            self._spawn_start_ticks = _pid_start_ticks(self.process.pid)
         except BaseException:
             shutil.rmtree(self.work_dir, ignore_errors=True)
             raise
-        self._wait_ready(boot_timeout)
+        try:
+            self._wait_ready(boot_timeout)
+        except BaseException:
+            self.close(force=True)
+            raise
 
     def _stderr_tail(self) -> str:
         try:
@@ -127,13 +270,19 @@ class _WorkerHandle:
 
     def _wait_ready(self, boot_timeout: float) -> None:
         deadline = time.monotonic() + boot_timeout
+        next_capture = 0.0
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_capture:
+                self.capture_tree_pgids()
+                next_capture = now + 0.1
             if self.process.poll() is not None:
                 stderr_tail = self._stderr_tail()
                 returncode = self.process.returncode
                 self.close(force=True)
                 raise RuntimeError(f"{self.name} exited during boot (rc={returncode}): {stderr_tail}")
             if self.call("ping", timeout=1.0).get("ok"):
+                self.capture_tree_pgids()
                 return
             time.sleep(0.05)
         stderr_tail = self._stderr_tail()
@@ -161,16 +310,63 @@ class _WorkerHandle:
                 transport_error=True,
             )
 
+    def capture_tree_pgids(self) -> None:
+        """Record distinct descendant `(pgid, sid, start_ticks)` tuples (e.g., OpenMPI `orted --set-sid` ranks)."""
+        if self.process.poll() is not None:
+            return
+        own_pgid = os.getpgrp()
+        seen_pgids = {self.process.pid, own_pgid, *(pgid for pgid, _sid, _ticks in self._extra_pgids)}
+        for child_pid in proc.descendants(self.process.pid):
+            triple = _process_pgid_sid_start(child_pid)
+            if triple is not None and triple[0] > 0 and triple[0] not in seen_pgids:
+                seen_pgids.add(triple[0])
+                self._extra_pgids.append(triple)
+
     def close(self, *, force: bool = False) -> None:
-        if self.process.poll() is None:
-            if not force:
-                with contextlib.suppress(Exception):
-                    self.call("shutdown", timeout=1.5)
-            proc.stop_tree(self.process.pid, grace_s=0.0 if force else 3.0, include_pg=True)
+        if self._closed and self._pg_swept:
+            return
+        try:
+            alive = self.process.poll() is None
+            if alive:
+                self.capture_tree_pgids()
+                if not force and not self._closed:
+                    with contextlib.suppress(Exception):
+                        self.call("shutdown", timeout=1.5)
+                    self.capture_tree_pgids()
+            self._closed = True
+            if not self._pg_swept:
+                grace_s = 0.0 if (force or not alive) else 3.0
+                proc.stop_tree(
+                    self.process.pid,
+                    grace_s=grace_s,
+                    include_pg=True,
+                )
+                # `proc.stop_tree` returns early when the leader PID has already exited, and
+                # OpenMPI (`orted --set-sid`) spawns ranks in separate process groups; sweep all
+                # verified non-zombie members across tracked `(pgid, sid, start_ticks)` tuples.
+                sweep_grace = 0.0 if (force or not alive) else 1.0
+                for pgid, sid, start_ticks in reversed(self._extra_pgids):
+                    _sweep_process_group(
+                        pgid,
+                        grace_s=sweep_grace,
+                        reap=self.process.poll,
+                        expected_sid=sid,
+                        min_start_ticks=start_ticks,
+                    )
+                _sweep_process_group(
+                    self.process.pid,
+                    grace_s=sweep_grace,
+                    reap=self.process.poll,
+                    expected_sid=self._leader_sid or self.process.pid,
+                    min_start_ticks=self._spawn_start_ticks,
+                )
+                self._pg_swept = True
             with contextlib.suppress(Exception):
                 self.process.wait(timeout=2.0)
-        _cleanup_endpoint(self.transport, self.endpoint)
-        shutil.rmtree(self.work_dir, ignore_errors=True)
+        finally:
+            self._closed = True
+            _cleanup_endpoint(self.transport, self.endpoint)
+            shutil.rmtree(self.work_dir, ignore_errors=True)
 
 
 class _RankClient:
@@ -184,15 +380,22 @@ class _RankClient:
 
     def wait_ready(self, driver: _WorkerHandle, boot_timeout: float) -> None:
         deadline = time.monotonic() + boot_timeout
+        next_capture = 0.0
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_capture:
+                driver.capture_tree_pgids()
+                next_capture = now + 0.1
             if driver.process.poll() is not None:
                 raise RuntimeError(
                     f"driver exited while waiting for {self.name} (rc={driver.process.returncode}): "
                     f"{driver._stderr_tail()}"
                 )
             if os.path.exists(self.endpoint) and self.call("ping", timeout=1.0).get("ok"):
+                driver.capture_tree_pgids()
                 return
             time.sleep(0.05)
+        driver.capture_tree_pgids()
         raise TimeoutError(f"{self.name} did not answer ping within {boot_timeout} s: {driver._stderr_tail()}")
 
     def call(self, method: str, payload: Any = None, timeout: float | None = None) -> dict[str, Any]:

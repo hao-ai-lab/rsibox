@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -14,9 +15,16 @@ from unittest import mock
 
 import adapter
 from adapter.fixture.py_executor import ToyPyExecutor
-from adapter.lab import TrtllmLab
+from adapter.lab import (
+    TrtllmLab,
+    _WorkerHandle,
+    _pg_has_live_members,
+    _pid_start_ticks,
+    _sweep_process_group,
+)
 from adapter.snapshot_hooks import TrtllmQuiesceHooks
 from adapter.toy_lab import ToyTrtllmLab
+from rsibox import proc
 from rsibox.warm import DynamoK8sSnapshotDriver, QuiesceReceipt, SENTINEL_READY, SENTINEL_RESTORE_COMPLETE
 
 
@@ -29,9 +37,10 @@ class LazyImportAndConfigTest(unittest.TestCase):
             "import importlib, json, sys\n"
             "sys.path[:0] = [sys.argv[1], sys.argv[2]]\n"
             "forbidden = {'torch', 'cuda', 'triton', 'pynvml', 'nvidia', 'tensorrt', 'tensorrt_llm'}\n"
+            "baseline = set(sys.modules)\n"
             "for mod_name in ('adapter', 'adapter.lab', 'adapter.toy_lab', 'adapter.snapshot_hooks'):\n"
             "    importlib.import_module(mod_name)\n"
-            "loaded = sorted({name.split('.')[0] for name in sys.modules if name.split('.')[0] in forbidden})\n"
+            "loaded = sorted({name.split('.')[0] for name in (set(sys.modules) - baseline) if name.split('.')[0] in forbidden})\n"
             "print(json.dumps(loaded))\n"
         )
         completed = subprocess.run(
@@ -560,3 +569,233 @@ class TrtllmRecaptureAndMpiTest(unittest.TestCase):
         import adapter.mpi_hook as mh
         self.assertIn("RSIBOX_TRTLLM_MPI_SOCK_DIR", mh.SITECUSTOMIZE_SOURCE)
         self.assertNotIn("tensorrt_llm", sys.modules)
+
+    def test_worker_handle_close_sweeps_dead_leader_pg_and_is_idempotent(self) -> None:
+        """`_WorkerHandle.close()` must still call `proc.stop_tree(..., include_pg=True)` and
+        kill live process-group children when the leader already exited, and repeat calls are no-ops."""
+        work_dir = tempfile.mkdtemp(prefix="rsibox-trtllm-close-test-")
+        endpoint = os.path.join(work_dir, "driver.sock")
+        Path(endpoint).touch()
+        leader_script = (
+            "import os, subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            "print(child.pid, flush=True)\n"
+            "os._exit(1)\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_script],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        assert leader.stdout is not None
+        child_pid = int(leader.stdout.readline().strip())
+        leader.stdout.close()
+        self.addCleanup(lambda: proc.kill_tree(leader.pid, signal.SIGKILL, include_pg=True))
+        deadline = time.monotonic() + 5.0
+        while leader.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIsNotNone(leader.poll())
+        self.assertTrue(proc.pid_alive(child_pid))
+        self.assertTrue(_pg_has_live_members(leader.pid))
+
+        handle = _WorkerHandle.__new__(_WorkerHandle)
+        handle.name = "driver"
+        handle.transport = "unix"
+        handle.endpoint = endpoint
+        handle.rpc_timeout = 1.0
+        handle.work_dir = work_dir
+        handle.process = leader
+        handle._closed = False
+        handle._pg_swept = False
+        handle._extra_pgids = []
+        handle._leader_sid = leader.pid
+        handle._spawn_start_ticks = _pid_start_ticks(leader.pid)
+
+        with (
+            mock.patch.object(proc, "stop_tree", wraps=proc.stop_tree) as stop_tree_spy,
+            mock.patch("adapter.lab.os.kill", wraps=os.kill) as os_kill_spy,
+            mock.patch.object(handle, "call") as call_spy,
+        ):
+            handle.close()
+            stop_tree_spy.assert_called_once_with(leader.pid, grace_s=0.0, include_pg=True)
+            os_kill_spy.assert_called_with(child_pid, signal.SIGKILL)
+            call_spy.assert_not_called()
+            self.assertFalse(proc.pid_alive(child_pid))
+            self.assertFalse(_pg_has_live_members(leader.pid, expected_sid=leader.pid))
+            self.assertFalse(os.path.exists(endpoint))
+            self.assertFalse(os.path.exists(work_dir))
+
+            # Subsequent close() calls must be strict no-ops and never re-signal the PID.
+            kill_calls_after_first = os_kill_spy.call_count
+            handle.close()
+            handle.close(force=True)
+            self.assertEqual(stop_tree_spy.call_count, 1)
+            self.assertEqual(os_kill_spy.call_count, kill_calls_after_first)
+            call_spy.assert_not_called()
+
+    def test_worker_handle_close_sweeps_captured_subsession_pgids_after_leader_exit(self) -> None:
+        """Simulate OpenMPI (`orted --set-sid`): a child in its own session/pgid survives
+        leader `os._exit(1)` and is still swept by `_WorkerHandle.close()` via captured PGIDs."""
+        work_dir = tempfile.mkdtemp(prefix="rsibox-trtllm-mpi-pg-test-")
+        endpoint = os.path.join(work_dir, "driver.sock")
+        Path(endpoint).touch()
+        leader_script = (
+            "import os, signal, subprocess, sys, time\n"
+            "sub = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)\n"
+            "print(sub.pid, flush=True)\n"
+            "while True:\n"
+            "    time.sleep(0.05)\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_script],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        assert leader.stdout is not None
+        sub_pid = int(leader.stdout.readline().strip())
+        leader.stdout.close()
+        self.addCleanup(lambda: proc.kill_tree(sub_pid, signal.SIGKILL, include_pg=True))
+        self.addCleanup(lambda: proc.kill_tree(leader.pid, signal.SIGKILL, include_pg=True))
+
+        handle = _WorkerHandle.__new__(_WorkerHandle)
+        handle.name = "driver"
+        handle.transport = "unix"
+        handle.endpoint = endpoint
+        handle.rpc_timeout = 1.0
+        handle.work_dir = work_dir
+        handle.process = leader
+        handle._closed = False
+        handle._pg_swept = False
+        handle._extra_pgids = []
+        handle._leader_sid = leader.pid
+        handle._spawn_start_ticks = _pid_start_ticks(leader.pid)
+
+        handle.capture_tree_pgids()
+        self.assertIn(sub_pid, [pg for pg, _sid, _ticks in handle._extra_pgids])
+
+        # Kill only the leader (leaving sub-session child alive as an orphan).
+        os.kill(leader.pid, signal.SIGKILL)
+        leader.wait(timeout=5.0)
+        self.assertIsNotNone(leader.poll())
+        self.assertTrue(proc.pid_alive(sub_pid))
+
+        handle.close()
+        self.assertFalse(proc.pid_alive(sub_pid))
+        self.assertFalse(_pg_has_live_members(sub_pid, expected_sid=sub_pid))
+
+    def test_sweep_process_group_never_calls_descendants_and_ignores_reused_pgid(self) -> None:
+        """`_sweep_process_group` must never invoke `proc.descendants`/`proc.kill_tree` on a
+        potentially reused PGID and must leave mismatched-SID or older-start-tick processes untouched."""
+        unrelated = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        self.addCleanup(lambda: (unrelated.kill(), unrelated.wait()))
+        self.assertTrue(proc.pid_alive(unrelated.pid))
+
+        with (
+            mock.patch.object(proc, "descendants", side_effect=AssertionError("descendants must not be called")),
+            mock.patch.object(proc, "kill_tree", side_effect=AssertionError("kill_tree must not be called")),
+        ):
+            _sweep_process_group(
+                unrelated.pid,
+                grace_s=0.0,
+                reap=unrelated.poll,
+                expected_sid=unrelated.pid + 999999,
+            )
+            self.assertTrue(proc.pid_alive(unrelated.pid))
+            if os.path.isdir("/proc"):
+                _sweep_process_group(
+                    unrelated.pid,
+                    grace_s=0.0,
+                    reap=unrelated.poll,
+                    expected_sid=unrelated.pid,
+                    min_start_ticks=10**15,
+                )
+                self.assertTrue(proc.pid_alive(unrelated.pid))
+
+    def test_wait_ready_captures_subsession_pgids_and_cleans_up_on_base_exception(self) -> None:
+        """`_wait_ready()` captures sub-session PGIDs during boot polling, and a `BaseException`
+        during `_wait_ready()` triggers `close(force=True)` (cleaning children and work_dir)
+        plus interrupted `close()` retry safety."""
+        leader_script = (
+            "import subprocess, sys, time\n"
+            "sub = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)\n"
+            "print(sub.pid, flush=True)\n"
+            "while True:\n"
+            "    time.sleep(0.05)\n"
+        )
+        leader = subprocess.Popen(
+            [sys.executable, "-c", leader_script],
+            stdout=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        assert leader.stdout is not None
+        sub_pid = int(leader.stdout.readline().strip())
+        leader.stdout.close()
+        self.addCleanup(lambda: proc.kill_tree(sub_pid, signal.SIGKILL, include_pg=True))
+        self.addCleanup(lambda: proc.kill_tree(leader.pid, signal.SIGKILL, include_pg=True))
+
+        work_dir = tempfile.mkdtemp(prefix="rsibox-trtllm-wait-test-")
+        endpoint = os.path.join(work_dir, "driver.sock")
+        handle = _WorkerHandle.__new__(_WorkerHandle)
+        handle.name = "driver"
+        handle.transport = "unix"
+        handle.endpoint = endpoint
+        handle.rpc_timeout = 1.0
+        handle.work_dir = work_dir
+        handle.stderr_path = os.path.join(work_dir, "worker.stderr.log")
+        handle.process = leader
+        handle._closed = False
+        handle._pg_swept = False
+        handle._extra_pgids = []
+        handle._leader_sid = leader.pid
+        handle._spawn_start_ticks = _pid_start_ticks(leader.pid)
+
+        ping_calls = [0]
+
+        def fake_call(method: str, payload: object = None, timeout: float | None = None) -> dict[str, object]:
+            if method == "ping":
+                ping_calls[0] += 1
+                return {"ok": ping_calls[0] >= 2}
+            return {"ok": True}
+
+        with mock.patch.object(handle, "call", side_effect=fake_call):
+            handle._wait_ready(5.0)
+        self.assertGreaterEqual(ping_calls[0], 2)
+        self.assertIn(sub_pid, [pg for pg, _sid, _ticks in handle._extra_pgids])
+
+        # Verify interrupted close(force=False) can be retried with close(force=True).
+        with mock.patch.object(proc, "stop_tree", side_effect=KeyboardInterrupt("interrupted")):
+            with self.assertRaises(KeyboardInterrupt):
+                handle.close(force=False)
+        self.assertTrue(handle._closed)
+        self.assertFalse(handle._pg_swept)
+        self.assertTrue(proc.pid_alive(sub_pid))
+
+        handle.close(force=True)
+        self.assertTrue(handle._pg_swept)
+        self.assertFalse(proc.pid_alive(sub_pid))
+        self.assertFalse(proc.pid_alive(leader.pid))
+        self.assertFalse(os.path.exists(work_dir))
+
+        # Verify BaseException during _WorkerHandle.__init__->_wait_ready triggers close(force=True).
+        sub2 = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(lambda: proc.kill_tree(sub2.pid, signal.SIGKILL, include_pg=True))
+        with (
+            mock.patch("adapter.lab.subprocess.Popen", return_value=sub2),
+            mock.patch.object(_WorkerHandle, "_wait_ready", side_effect=KeyboardInterrupt("boot-abort")),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                _WorkerHandle(
+                    "driver",
+                    0,
+                    {"transport": "unix", "endpoint": os.path.join(tempfile.gettempdir(), "unused.sock"), "mode": "toy"},
+                    os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                    1.0,
+                    1.0,
+                )
+        self.assertFalse(proc.pid_alive(sub2.pid))
