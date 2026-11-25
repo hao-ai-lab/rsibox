@@ -327,30 +327,71 @@ def file_channel_call(
     poll_s: float = 0.005,
     ctl_name: str = "ctl.json",
     reply_dir: str = "reply",
+    min_seq: int | None = None,
+    alive_fn=None,
 ) -> dict:
-    """Send one command over `<root>/ctl.json` and wait for `<root>/reply/<seq>.json`."""
+    """Send one command over `<root>/ctl.json` and wait for `<root>/reply/<seq>.json`.
+
+    Optional `min_seq` guarantees `seq > min_seq` (used after CRIU/snapshot restore).
+    Optional `alive_fn` (`() -> bool`) is checked on every poll tick so a crashed/SIGKILLed
+    peer fails fast with `lost=True` instead of stalling for the full `timeout`.
+    """
+    if min_seq is not None:
+        if isinstance(min_seq, bool) or not isinstance(min_seq, int):
+            raise TypeError(f"min_seq must be an int or None, got {type(min_seq).__name__}")
+        if min_seq < 0:
+            raise ValueError(f"min_seq must be >= 0, got {min_seq}")
+    if alive_fn is not None and not callable(alive_fn):
+        raise TypeError(f"alive_fn must be callable or None, got {type(alive_fn).__name__}")
+    if isinstance(poll_s, bool) or not isinstance(poll_s, (int, float)) or not (0.0 <= poll_s < float("inf")):
+        raise ValueError(f"poll_s must be a finite number >= 0, got {poll_s!r}")
     root_str = os.fspath(root)
     ctl_path = os.path.join(root_str, ctl_name)
     rdir = os.path.join(root_str, reply_dir)
     prev = read_json(ctl_path)
-    prev_seq = int(prev["seq"]) if isinstance(prev, dict) and isinstance(prev.get("seq"), int) else 0
+    raw_prev_seq = prev.get("seq") if isinstance(prev, dict) else None
+    prev_seq = raw_prev_seq if isinstance(raw_prev_seq, int) and not isinstance(raw_prev_seq, bool) else 0
     existing = [
         int(name[:-5])
         for name in (os.listdir(rdir) if os.path.isdir(rdir) else ())
         if name.endswith(".json") and name[:-5].isdigit()
     ]
-    seq = max(prev_seq, max(existing, default=0)) + 1
-    payload = {**cmd, "seq": seq}
+    floor_seq = max(prev_seq, max(existing, default=0), min_seq if min_seq is not None else 0)
+    seq = floor_seq + 1
     t0 = time.perf_counter()
+    if alive_fn is not None and not alive_fn():
+        return {
+            "ok": False,
+            "error": "peer process exited before send",
+            "seq": seq,
+            "lost": True,
+            "client_round_trip_s": round(time.perf_counter() - t0, 6),
+        }
+    payload = {**cmd, "seq": seq}
     atomic_write_json(ctl_path, payload)
     reply_path = os.path.join(rdir, f"{seq}.json")
     deadline = t0 + timeout
-    while time.perf_counter() < deadline:
+    while True:
         reply = read_json(reply_path)
         if isinstance(reply, dict):
             reply["client_round_trip_s"] = round(time.perf_counter() - t0, 6)
             return reply
-        time.sleep(poll_s)
+        if alive_fn is not None and not alive_fn():
+            final_reply = read_json(reply_path)
+            if isinstance(final_reply, dict):
+                final_reply["client_round_trip_s"] = round(time.perf_counter() - t0, 6)
+                return final_reply
+            return {
+                "ok": False,
+                "error": "peer process exited before reply",
+                "seq": seq,
+                "lost": True,
+                "client_round_trip_s": round(time.perf_counter() - t0, 6),
+            }
+        remaining = deadline - time.perf_counter()
+        if not (remaining > 0.0):
+            break
+        time.sleep(min(poll_s, remaining))
     return {
         "ok": False,
         "error": f"no reply in {timeout} s",
@@ -439,17 +480,24 @@ def mailbox_call(
     timeout: float = 600.0,
     *,
     poll_s: float = 0.02,
+    alive_fn=None,
 ) -> dict:
     """Send one JSON request through a `MailboxServer` directory and wait for its reply."""
+    if alive_fn is not None and not callable(alive_fn):
+        raise TypeError(f"alive_fn must be callable or None, got {type(alive_fn).__name__}")
+    if isinstance(poll_s, bool) or not isinstance(poll_s, (int, float)) or not (0.0 <= poll_s < float("inf")):
+        raise ValueError(f"poll_s must be a finite number >= 0, got {poll_s!r}")
+    label = req.get("verb") or req.get("op") or "request"
+    if alive_fn is not None and not alive_fn():
+        raise ConnectionError(f"peer process exited before sending {label}")
     root_str = os.fspath(root)
     os.makedirs(root_str, exist_ok=True)
     rid = uuid.uuid4().hex[:12]
     req_path = os.path.join(root_str, f"req-{rid}.json")
     resp_path = os.path.join(root_str, f"resp-{rid}.json")
     atomic_write_json(req_path, req)
-    label = req.get("verb") or req.get("op") or "request"
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         with contextlib.suppress(OSError):
             os.listdir(root_str)  # revalidate directory attribute cache on NFS
         reply = read_json(resp_path)
@@ -457,5 +505,19 @@ def mailbox_call(
             with contextlib.suppress(OSError):
                 os.unlink(resp_path)
             return reply
-        time.sleep(poll_s)
+        if alive_fn is not None and not alive_fn():
+            with contextlib.suppress(OSError):
+                os.listdir(root_str)  # revalidate NFS dentry cache before final reply check
+            final_reply = read_json(resp_path)
+            if final_reply is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(resp_path)
+                return final_reply
+            with contextlib.suppress(OSError):
+                os.unlink(req_path)
+            raise ConnectionError(f"peer process exited before answering {label}")
+        remaining = deadline - time.monotonic()
+        if not (remaining > 0.0):
+            break
+        time.sleep(min(poll_s, remaining))
     raise TimeoutError(f"no answer to {label} in {timeout} s")
