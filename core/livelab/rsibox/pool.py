@@ -18,7 +18,7 @@ from .box import Box
 __all__ = ["PoolClosedError", "PoolError", "PoolSlot", "PoolTimeoutError", "SandboxPool", "SlotLease", "verify_trace"]
 _GENESIS_HASH = "genesis"
 _CleanupOutcome = namedtuple("_CleanupOutcome", "healthy cleanup_s recovery_s recovered status_after error")
-_RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recovered", "status_after", "error")
+_RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recovered", "borrowed", "status_after", "error")
 
 class PoolError(RuntimeError): """Base error raised by `SandboxPool`."""
 class PoolTimeoutError(TimeoutError, PoolError): """Raised when waiting for a healthy matching slot times out."""
@@ -32,6 +32,30 @@ def _close_quietly(lab: Any) -> None:
     if lab is not None:
         with contextlib.suppress(Exception):
             lab.close()
+def _validate_fallback_roles(role: str | None, fallback_roles: Sequence[str] | None) -> tuple[str, ...]:
+    if fallback_roles is None:
+        return ()
+    if isinstance(fallback_roles, (str, bytes, bytearray, memoryview)) or not isinstance(fallback_roles, Sequence):
+        raise TypeError(f"fallback_roles must be a sequence of role strings or None, not {type(fallback_roles).__name__}")
+    if not fallback_roles:
+        return ()
+    if role is None:
+        raise ValueError("fallback_roles requires an explicit primary role (role=None already matches all slots)")
+    if not isinstance(role, str):
+        raise TypeError(f"role must be a non-empty str when fallback_roles is set, not {type(role).__name__}")
+    if not role.strip():
+        raise ValueError("role must be a non-empty string when fallback_roles is set")
+    seen = {role}
+    normalized: list[str] = []
+    for entry in fallback_roles:
+        if not isinstance(entry, str):
+            raise TypeError(f"fallback_roles entries must be str, not {type(entry).__name__}")
+        if not entry.strip():
+            raise ValueError("fallback_roles entries must be non-empty strings")
+        if entry not in seen:
+            seen.add(entry)
+            normalized.append(entry)
+    return tuple(normalized)
 def _validate_priority(priority: int) -> int:
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise TypeError(f"priority must be an int, not {type(priority).__name__}")
@@ -211,9 +235,11 @@ class _SlotState:
         self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = False, None, True, 0.0, False
 
 class _Waiter:
-    __slots__ = ("role", "priority", "enqueued_mono", "event", "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
-    def __init__(self, role: str | None, priority: int = 0, enqueued_mono: float = 0.0) -> None:
-        self.role, self.priority, self.enqueued_mono = role, priority, enqueued_mono
+    __slots__ = ("role", "fallback_roles", "priority", "enqueued_mono", "event",
+                 "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
+    def __init__(self, role: str | None, priority: int = 0, enqueued_mono: float = 0.0,
+                 fallback_roles: tuple[str, ...] = ()) -> None:
+        self.role, self.fallback_roles, self.priority, self.enqueued_mono = role, fallback_roles, priority, enqueued_mono
         self.event, self.assigned_state, self.assigned_dirty = threading.Event(), None, True
         self.cancelled, self.failure, self.closed = False, None, False
 
@@ -223,6 +249,8 @@ class SlotLease:
     slot_id = property(operator.attrgetter("_slot_id"))
     agent_id = property(operator.attrgetter("_agent_id"))
     role = property(operator.attrgetter("_role"))
+    fallback_roles = property(operator.attrgetter("_fallback_roles"))
+    borrowed = property(operator.attrgetter("_borrowed"))
     priority = property(operator.attrgetter("_priority"))
     idea_id = property(operator.attrgetter("_idea_id"))
     acquired_at = property(operator.attrgetter("_acquired_at"))
@@ -232,11 +260,14 @@ class SlotLease:
 
     def __init__(self, pool: SandboxPool, slot_state: _SlotState, agent_id: str, role: str | None,
                  idea_id: str | None, acquired_at: float, acquired_mono: float,
-                 queue_wait_s: float, preparation: _CleanupOutcome, *, priority: int = 0) -> None:
+                 queue_wait_s: float, preparation: _CleanupOutcome, *, priority: int = 0,
+                 fallback_roles: tuple[str, ...] = ()) -> None:
         self._pool, self._lab, self._slot_view, self._slot_id = (
             pool, slot_state.lab, slot_state.view, slot_state.slot_id,
         )
-        self._agent_id, self._role, self._priority, self._idea_id = agent_id, role, priority, idea_id
+        self._agent_id, self._role, self._fallback_roles = agent_id, role, fallback_roles
+        self._borrowed = role is not None and slot_state.role != role
+        self._priority, self._idea_id = priority, idea_id
         self._acquired_at, self._acquired_mono, self._queue_wait_s = acquired_at, acquired_mono, queue_wait_s
         self._preparation = preparation
         self.cleanup_s, self.recovery_s, self.recovered = preparation.cleanup_s, preparation.recovery_s, preparation.recovered
@@ -280,7 +311,7 @@ class SandboxPool:
         self._trace_path, self._clock, self._wall_clock = trace_path, clock, wall_clock
         self._close_labs, self._created_mono = close_labs, clock()
         self._lock, self._trace_lock, self._waiters = threading.Lock(), threading.Lock(), deque()
-        self._closed, self._total_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0.0
+        self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0, 0.0
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         if trace_path and os.path.isfile(trace_path):
             verified = verify_trace(trace_path)
@@ -293,9 +324,12 @@ class SandboxPool:
             return self._clock()
         except Exception:
             return self._created_mono if fallback is None else fallback
-    def _has_healthy_slot(self, role: str | None) -> bool:
-        return any(not slot_state.quarantined and (role is None or slot_state.role == role)
-                   for slot_state in self._slots.values())
+    def _has_healthy_slot(self, role: str | None, fallback_roles: tuple[str, ...] = ()) -> bool:
+        return any(
+            not slot_state.quarantined
+            and (role is None or slot_state.role == role or slot_state.role in fallback_roles)
+            for slot_state in self._slots.values()
+        )
     def _mark_lab_to_close_locked(self, slot_state: _SlotState) -> Any | None:
         if self._closed and self._close_labs and not slot_state.lab_closed:
             slot_state.lab_closed = True
@@ -327,12 +361,21 @@ class SandboxPool:
         if not self._closed and healthy:
             best_index: int | None = None
             best_priority: int | float | Fraction = 0
+            # Tier 1: primary-role (or generalist) waiters always take precedence on their home slot.
             for index, waiter in enumerate(self._waiters):
                 if waiter.cancelled or (waiter.role is not None and waiter.role != slot_state.role):
                     continue
                 effective_priority = self._effective_priority(waiter, finish_mono)
                 if best_index is None or effective_priority > best_priority:
                     best_index, best_priority = index, effective_priority
+            # Tier 2: elastic role borrowing only when no primary waiter wants this slot.
+            if best_index is None and slot_state.role is not None:
+                for index, waiter in enumerate(self._waiters):
+                    if waiter.cancelled or slot_state.role not in waiter.fallback_roles:
+                        continue
+                    effective_priority = self._effective_priority(waiter, finish_mono)
+                    if best_index is None or effective_priority > best_priority:
+                        best_index, best_priority = index, effective_priority
             if best_index is not None:
                 waiter = self._waiters[best_index]
                 del self._waiters[best_index]
@@ -343,7 +386,7 @@ class SandboxPool:
         slot_state.in_use, slot_state.active_since = False, None
         if not healthy:
             for waiter in self._waiters:
-                if not waiter.cancelled and not self._has_healthy_slot(waiter.role):
+                if not waiter.cancelled and not self._has_healthy_slot(waiter.role, waiter.fallback_roles):
                     waiter.failure = f"no healthy slot available for role={waiter.role!r}"
                     waiter.event.set()
             self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
@@ -365,22 +408,43 @@ class SandboxPool:
         return self._complete_slot_locked(waiter.assigned_state.slot_id, self._safe_clock(), True, None,
                                           preserve_dirty=waiter.assigned_dirty)
 
-    def _claim_slot(self, role: str | None, deadline: float | None, *, priority: int = 0) -> tuple[_SlotState, bool]:
+    def _claim_slot(self, role: str | None, deadline: float | None, *, priority: int = 0,
+                    fallback_roles: tuple[str, ...] = ()) -> tuple[_SlotState, bool]:
         with self._lock:
             if self._closed:
                 raise PoolClosedError("SandboxPool is closed")
-            if not self._has_healthy_slot(role):
+            if not self._has_healthy_slot(role, fallback_roles):
                 raise PoolTimeoutError(f"no healthy slot available for role={role!r}")
             now_mono = self._clock() if (self._priority_aging_s is not None and self._waiters) else None
-            for slot_state in self._slots.values():
-                if slot_state.in_use or slot_state.quarantined or (role is not None and slot_state.role != role):
-                    continue
-                if any(not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role)
-                       and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
-                       for waiter in self._waiters):
-                    continue
-                slot_state.in_use, slot_state.active_since = True, (now_mono if now_mono is not None else self._clock())
-                return slot_state, slot_state.dirty
+            # Prefer primary-role slots first, then fallback roles in caller-specified order.
+            candidate_roles: tuple[tuple[str | None, bool], ...] = ((role, False),) + tuple(
+                (fb_role, True) for fb_role in fallback_roles
+            )
+            for target_role, is_borrow in candidate_roles:
+                for slot_state in self._slots.values():
+                    if slot_state.in_use or slot_state.quarantined or (target_role is not None and slot_state.role != target_role):
+                        continue
+                    # Primary waiters for this slot block borrowers unconditionally and block equal/lower primary arrivals.
+                    if is_borrow:
+                        if any(
+                            not waiter.cancelled and (
+                                waiter.role is None or waiter.role == slot_state.role or (
+                                    slot_state.role is not None
+                                    and slot_state.role in waiter.fallback_roles
+                                    and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
+                                )
+                            )
+                            for waiter in self._waiters
+                        ):
+                            continue
+                    elif any(
+                        not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role)
+                        and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
+                        for waiter in self._waiters
+                    ):
+                        continue
+                    slot_state.in_use, slot_state.active_since = True, (now_mono if now_mono is not None else self._clock())
+                    return slot_state, slot_state.dirty
             if deadline is not None or self._priority_aging_s is not None:
                 now_mono = now_mono if now_mono is not None else self._clock()
                 if deadline is not None and now_mono >= deadline:
@@ -388,6 +452,8 @@ class SandboxPool:
             waiter = _Waiter(role, priority)
             if now_mono is not None:
                 waiter.enqueued_mono = now_mono
+            if fallback_roles:
+                waiter.fallback_roles = fallback_roles
             self._waiters.append(waiter)
         try:
             while True:
@@ -455,16 +521,19 @@ class SandboxPool:
 
     def acquire(self, agent_id: str, *, role: str | None = None,
                 idea_id: str | None = None, timeout_s: float | None = None,
-                priority: int = 0) -> SlotLease:
-        """Acquire an exclusive, clean-slate `SlotLease` (highest priority first, FIFO tie-break)."""
+                priority: int = 0, fallback_roles: Sequence[str] | None = None) -> SlotLease:
+        """Acquire an exclusive, clean-slate `SlotLease` (primary role first, optional elastic borrowing)."""
         if not isinstance(agent_id, str) or not agent_id.strip():
             raise ValueError("agent_id must be a non-empty string")
         normalized_priority = _validate_priority(priority)
+        normalized_fallbacks = _validate_fallback_roles(role, fallback_roles)
         normalized_timeout = _validate_timeout(timeout_s)
         queue_start = self._clock()
         deadline = None if normalized_timeout is None else queue_start + normalized_timeout
         while True:
-            slot_state, slot_dirty = self._claim_slot(role, deadline, priority=normalized_priority)
+            slot_state, slot_dirty = self._claim_slot(
+                role, deadline, priority=normalized_priority, fallback_roles=normalized_fallbacks,
+            )
             slot_returned = False
             try:
                 claim_mono = self._clock()
@@ -478,7 +547,7 @@ class SandboxPool:
                             slot_state.dirty = False
                             return SlotLease(self, slot_state, agent_id, role, idea_id, ready_wall, ready_mono,
                                              round(max(0.0, claim_mono - queue_start), 6), preparation,
-                                             priority=normalized_priority)
+                                             priority=normalized_priority, fallback_roles=normalized_fallbacks)
                         lab_to_close = self._complete_slot_locked(slot_state.slot_id, ready_mono, True, None)
                         slot_returned = True
                     _close_quietly(lab_to_close)
@@ -496,9 +565,12 @@ class SandboxPool:
     @contextlib.contextmanager
     def lease(self, agent_id: str, *, role: str | None = None,
               idea_id: str | None = None, timeout_s: float | None = None,
-              priority: int = 0) -> Iterator[SlotLease]:
-        """Context manager acquiring (by highest `priority`, FIFO tie-break) and releasing a `SlotLease`."""
-        slot_lease = self.acquire(agent_id, role=role, idea_id=idea_id, timeout_s=timeout_s, priority=priority)
+              priority: int = 0, fallback_roles: Sequence[str] | None = None) -> Iterator[SlotLease]:
+        """Context manager acquiring and releasing a `SlotLease` (with optional `fallback_roles` borrowing)."""
+        slot_lease = self.acquire(
+            agent_id, role=role, idea_id=idea_id, timeout_s=timeout_s,
+            priority=priority, fallback_roles=fallback_roles,
+        )
         caught_error: BaseException | None = None
         try:
             yield slot_lease
@@ -548,14 +620,16 @@ class SandboxPool:
                 lease.recovered, lease.error, lease.status_after = recovered, combined_error, cleanup.status_after
                 record = {
                     "agent_id": lease._agent_id, "role": lease._role, "slot_role": lease._slot_view.role,
-                    "priority": lease._priority, "idea_id": lease._idea_id, "slot_id": lease._slot_id,
-                    "acquired_at": round(lease._acquired_at, 6), "released_at": lease.released_at,
-                    "queue_wait_s": lease._queue_wait_s, "hold_s": lease.hold_s,
+                    "borrowed": lease._borrowed, "priority": lease._priority, "idea_id": lease._idea_id,
+                    "slot_id": lease._slot_id, "acquired_at": round(lease._acquired_at, 6),
+                    "released_at": lease.released_at, "queue_wait_s": lease._queue_wait_s, "hold_s": lease.hold_s,
                     "cleanup_s": lease.cleanup_s, "recovery_s": lease.recovery_s,
                     "recovered": recovered, "error": combined_error, "status_after": cleanup.status_after,
                 }
                 with self._lock:
-                    self._total_leases, self._recoveries = self._total_leases + 1, self._recoveries + int(recovered)
+                    self._total_leases = self._total_leases + 1
+                    self._borrowed_leases = self._borrowed_leases + int(lease._borrowed)
+                    self._recoveries = self._recoveries + int(recovered)
                     self._total_recovery_s += raw_recovery_s
                     self._queue_waits.append(lease._queue_wait_s)
                     self._hold_times.append(hold_s)
@@ -600,16 +674,20 @@ class SandboxPool:
 
     def run_isolated(self, agent_id: str, action_fn: Callable[[Any, SlotLease], Any], *,
                      role: str | None = None, idea_id: str | None = None,
-                     timeout_s: float | None = None, priority: int = 0) -> dict[str, Any]:
-        """Acquire a lease (highest `priority` first, FIFO tie-break), run `action_fn`, and release cleanly."""
+                     timeout_s: float | None = None, priority: int = 0,
+                     fallback_roles: Sequence[str] | None = None) -> dict[str, Any]:
+        """Acquire a lease (with optional `fallback_roles` borrowing), run `action_fn`, and release cleanly."""
         start_mono = self._clock()
         try:
-            slot_lease = self.acquire(agent_id, role=role, idea_id=idea_id, timeout_s=timeout_s, priority=priority)
+            slot_lease = self.acquire(
+                agent_id, role=role, idea_id=idea_id, timeout_s=timeout_s,
+                priority=priority, fallback_roles=fallback_roles,
+            )
         except PoolError as error:
             return {"ok": False, "result": None, "slot_id": None,
                     "queue_wait_s": round(max(0.0, self._clock() - start_mono), 6),
                     "hold_s": 0.0, "cleanup_s": 0.0, "recovery_s": 0.0,
-                    "recovered": False, "status_after": None, "error": _format_error(error)}
+                    "recovered": False, "borrowed": False, "status_after": None, "error": _format_error(error)}
         action_result, caught_error = None, None
         try:
             action_result = action_fn(slot_lease._lab_proxy, slot_lease)
@@ -636,6 +714,7 @@ class SandboxPool:
                 per_slot_utilization[slot_id] = round(0.0 if (elapsed_s <= 0.0 or busy <= 0.0) else min(1.0, busy / elapsed_s), 6)
             return {
                 "total_leases": total_leases,
+                "borrowed_leases": self._borrowed_leases,
                 "mean_queue_wait_s": round(sum(self._queue_waits) / total_leases, 6) if total_leases else 0.0,
                 "p95_queue_wait_s": round(_percentile(self._queue_waits, 0.95), 6),
                 "mean_hold_s": round(sum(self._hold_times) / total_leases, 6) if total_leases else 0.0,
