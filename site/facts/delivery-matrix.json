@@ -3,7 +3,7 @@
  "repo": "hao-ai-lab/rsibox",
  "kpis": {
   "engines_done": 9,
-  "engines_target": 10,
+  "engines_target": 14,
   "invariants_done": 12,
   "invariants_total": 12,
   "experiments_done": 16,
@@ -321,74 +321,77 @@
  "targets": [
   {
    "id": "T1",
-   "title": "New Engines & Upstream Models",
-   "status": "planned",
-   "progress_pct": 15,
+   "title": "Phase 2 & 3 · New Engines: NeMo-RL, *-Omni, Dynamo & Isaac Lab",
+   "status": "in_progress",
+   "progress_pct": 20,
    "owner_track": "Engine Onboarding",
-   "summary": "Onboard NVIDIA NeMo-RL (AutoModel FSDP2 + SGLang GRPO, reusing core/livelab/ray_participants.py) and replay real upstream pytorch/torchtitan Llama3/PR workloads beyond synthetic TitanMLPNet.",
+   "summary": "Expand from 9 to 14 live-lab engines: NVIDIA NeMo-RL (Engine #10, AutoModel FSDP2 + SGLang GRPO), vLLM-Omni & SGLang-Omni (#11-#12, multi-stage multimodal), NVIDIA Dynamo (#13, Python Planner live swap + Rust Frontend/cdylib micro-restart + GMS), Isaac Lab (#14, 4,096-env GPU PhysX + RL live swap), and TorchTitan real upstream Llama3 PR replay.",
    "items": [
-    "Onboard NVIDIA NeMo-RL (AutoModel FSDP2 + SGLang) GRPO adapter reusing ray_participants.py",
-    "Add real upstream pytorch/torchtitan Llama3 config & PR replay on 2x B200 FSDP2 NCCL",
-    "Pass 11/11 CPU and real-GPU conformance for NeMo-RL (10th engine)"
+    "NVIDIA NeMo-RL (Engine #10): AutoModel FSDP2 + SGLang GRPO reusing ray_participants.py (CPU 11/11 in progress -> B200 Qwen3/Inkling2 live GRPO)",
+    "vLLM-Omni & SGLang-Omni (Engines #11-#12): multi-stage Thinker/Talker/DiT/Vocoder live swap, Tier-A/R1, targeted teardown & stage-buffer S0 reset",
+    "NVIDIA Dynamo (Engine #13): Python Planner/Router live swap (~50 ms) + Rust Frontend/cdylib micro-restart (2-6 s) atop GMS-resident GPU workers",
+    "Isaac Lab (Engine #14): resident 4,096-env GPU PhysX/USD simulation + RL reward/observation/policy sub-second swap + seeded S0 reset",
+    "TorchTitan: add real upstream pytorch/torchtitan Llama3 config & PR replay on 2x B200 FSDP2 NCCL"
    ],
    "evidence": "repos/torchtitan/docs/architecture.md"
   },
   {
    "id": "T2",
-   "title": "High-Order Engine Mechanisms",
+   "title": "Phase 3 · High-Order Mechanisms: Tier-A TP>=2, Inductor & Checkpoint-S0",
    "status": "in_progress",
    "progress_pct": 25,
    "owner_track": "Kernel & Graph Tiers",
-   "summary": "Extend Tier-A surgical pointer swap and live mechanisms to vLLM TP>=2 + Component Restart / KV Holder, SGLang dp_size>1 & PD disaggregation, Transformers multi-GPU device_map='auto', and torch.compile / Inductor region live swap.",
+   "summary": "Generalize Tier-A surgical pointer swap across vLLM TP>=2, SGLang 52-CG, and TRT-LLM; add Checkpoint-to-Live-Sandbox S0 mounting, torch.compile/Inductor selective recompile, SGLang dp_size>1 & PD disagg, and Transformers multi-GPU.",
    "items": [
-    "vLLM Tier-A surgical pointer swap at TP >= 2 + Component Restart & KV Memory Holder",
-    "SGLang dp_size > 1 (--enable-dp-attention) and PD disaggregation (--disaggregation-mode)",
-    "Transformers multi-GPU (device_map='auto') worker orchestration",
-    "torch.compile / Inductor region live swap and Tier-B cuGraphExecUpdate"
+    "Shared Tier-A cuGraphExecKernelNodeSetParams primitive across vLLM TP >= 2, SGLang 52-CG, and TRT-LLM + Component Restart & KV Memory Holder",
+    "Checkpoint-to-Live-Sandbox: mount mid-run training/RL failure checkpoints as S0 for 1 s root-cause iteration & bit-exact rollback",
+    "Selective torch.compile / Inductor guard invalidation and Tier-B cuGraphExecUpdate across Megatron jit_fuser, FastVideo VAE, and TorchTitan",
+    "SGLang dp_size > 1 / PD disaggregation and Transformers multi-GPU (device_map='auto') worker orchestration"
    ],
    "evidence": "docs/kernels-and-graphs.md"
   },
   {
    "id": "T3",
-   "title": "Real LLM Coding Agent End-to-End Campaigns",
+   "title": "Phase 4 · Real LLM Agent Campaigns & SandboxPool AutoScaler",
    "status": "in_progress",
    "progress_pct": 20,
    "owner_track": "Autonomous Agent Loops",
-   "summary": "Expand beyond the Megatron 82-iteration (+5.1% tokens/s/GPU) autonomous hill-climb to live multi-agent LLM hill-climbs on vLLM Tier-A, SGLang, and RL post-training workloads.",
+   "summary": "Scale beyond Megatron 82-iteration (+5.1% tokens/s/GPU) to autonomous LLM coding agent hill-climbs on vLLM Tier-A, SGLang, and RL, plus self-healing SandboxPool AutoScaling via add_slot()/drain_slot()/heal_slot().",
    "items": [
-    "Run live autonomous LLM agent hill-climb on vLLM Tier-A Triton kernel optimizations",
-    "Run live multi-agent LLM campaigns on SGLang and veRL/miles GRPO",
-    "Measure stochastic LLM edit mixes, refusal-repair loops, and end-to-end throughput vs restart"
+    "Run live autonomous LLM agent hill-climb on vLLM Tier-A Triton kernel optimizations and *-Omni pipelines",
+    "Run live multi-agent LLM campaigns on SGLang, NeMo-RL, and veRL/miles GRPO",
+    "SandboxPool AutoScaler: auto-expand via add_slot(), reclaim idle VRAM via drain_slot(), and self-heal faults via heal_slot()",
+    "Measure stochastic LLM edit mixes, refusal-repair loops, and end-to-end throughput vs cold/warm restarts"
    ],
    "evidence": "repos/megatron/examples/codex-hillclimb/README.md"
   },
   {
    "id": "T4",
-   "title": "Codebase Robustness & pstack Tech-Debt Sweep",
+   "title": "Phase 1 · Codebase Robustness & pstack Tech-Debt Sweep",
    "status": "in_progress",
-   "progress_pct": 30,
+   "progress_pct": 60,
    "owner_track": "Core Reliability",
-   "summary": "Resolve P1/P2 audit findings across warm recovery, SGLang shadow guards, pool drain ordering, and TorchTitan parallel teardown, add barrier regression tests, and run blast-radius scan.",
+   "summary": "PR #264 opened with all 5 P1/P2 audit fixes across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py with deterministic regression tests; next: merge #264 and run blast-radius scan.",
    "items": [
-    "Fix #244 AsyncShadowReplenisher.wait(until) close() check ordering",
-    "Fix #248 SglangShadowPromoter head-dead shadow skipping & deduplicate guard helper",
-    "Fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
-    "Add barrier regression tests and run full blast-radius scan"
+    "Merged-ready PR #264: fix #244 AsyncShadowReplenisher.wait(until) close() race + barrier regression tests",
+    "Merged-ready PR #264: fix #248 SglangShadowPromoter head-dead shadow skipping & bystander survival test",
+    "Merged-ready PR #264: fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
+    "Merge PR #264 and run full pstack blast-radius & deduplication scan across core/livelab/ and adapters"
    ],
    "evidence": "core/livelab/rsibox/pool.py"
   },
   {
    "id": "T5",
-   "title": "Delivery Dashboard & Agent-Native Workflow v2",
+   "title": "Phase 1 · Delivery Dashboard & Agent-Native Workflow v2",
    "status": "in_progress",
-   "progress_pct": 40,
+   "progress_pct": 65,
    "owner_track": "Platform & CI",
-   "summary": "Ship rsibox.fastrsi.ai/dashboard, fix .github/review/review.py comma number regex, land Claim Board + DAG Merge Train, and enable Mac -> B200 Native Web App Orchestration + nightly 4-engine GPU regression.",
+   "summary": "Live rsibox.fastrsi.ai/dashboard deployed on B200 with real-time 8x B200 telemetry and review.py comma fix in PR #264; next: Claim Board + DAG Merge Train, Mac -> B200 Native Web App Handoff, and nightly 4-engine GPU regression.",
    "items": [
-    "Deploy interactive rsibox.fastrsi.ai/dashboard backed by site/facts/delivery-matrix.json",
-    "Fix .github/review/review.py comma-formatted number regex in fact preservation check",
-    "Land Claim Board + DAG Merge Train for parallel multi-agent PR integration",
-    "Enable Mac -> B200 Native Web App Orchestration and nightly 4-engine GPU regression"
+    "Deployed live rsibox.fastrsi.ai/dashboard (#261) backed by site/facts/delivery-matrix.json and real-time /api/state",
+    "Fixed .github/review/review.py trailing-comma NUMBER_RE bug (PR #264)",
+    "Land Claim Board + DAG Merge Train skill/script to eliminate duplicate multi-agent PR races",
+    "Enable Mac -> B200 Native Web App Orchestration and nightly 4-engine GPU conformance regression"
    ],
    "evidence": ".github/review/review.py"
   }
