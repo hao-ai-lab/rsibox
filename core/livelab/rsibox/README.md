@@ -128,6 +128,40 @@ that guarantee. gVisor has no GPU proxy for AMD accelerators.
 - Per call: one local HTTP round trip. `box.wall_s` minus the lab's `cost_s` is the overhead
   the box adds.
 
+## Multi-agent scheduling (`SandboxPool`)
+
+`rsibox.pool` multiplexes `N` concurrent agents over `C` warm `Lab` or ready `Box` slots
+(`PoolSlot(slot_id, lab, role=None, metadata=None)`) with fenced leases (`SlotLease`),
+automatic clean-slate rollback (`uninstall` + `reset("state")`, falling back to
+`reset("respawn")` or fail-closed slot quarantine on fault), and SHA-256 hash-chained JSONL
+traces verified via `verify_trace(trace_path, expected_head=...)`.
+
+```python
+from rsibox import PoolSlot, SandboxPool, verify_trace
+
+pool = SandboxPool(
+    [PoolSlot("slot-dev", dev_lab, role="dev"), PoolSlot("slot-eval", eval_lab, role="eval")],
+    trace_path="/tmp/pool-trace.jsonl",
+    priority_aging_s=2.0,       # anti-starvation aging: effective_priority = priority + wait_s / aging_s
+    max_agent_faults=1,         # per-agent fault circuit breaker (AgentQuarantinedError)
+    max_slots_per_agent=1,      # concurrent blast-radius cap per agent_id
+)
+with pool.lease("eval-0", role="eval", fallback_roles=("dev",), priority=10) as lease:
+    chk = lease.lab.check()
+```
+
+| Capability | API | What it enforces |
+|---|---|---|
+| **Priority & anti-starvation** | `acquire(..., priority=0)` / `SandboxPool(..., priority_aging_s=...)` | Higher priority wakes first (FIFO tie-break); optional aging prevents low-priority starvation. |
+| **Work-conserving elastic borrowing** | `acquire(..., role=..., fallback_roles=(...))` | Unconditional Tier-1 primary-role precedence; idle fallback roles are borrowed only when no primary waiter can run. |
+| **Per-agent circuit breaker** | `max_agent_faults`, `agent_fault_window_s`, `agent_cooldown_s`, `reset_agent_circuit(agent_id)` | Quarantines repeat-faulting agents in-lock (`AgentQuarantinedError`) and wakes their queued waiters before slot handoff. |
+| **Blast-radius concurrency cap** | `max_slots_per_agent` | Bounds simultaneous active leases held by any single `agent_id` across the pool. |
+| **Online slot healing** | `heal_slot(slot_id, *, lab=None, close_replaced=False)` | Runs recovery or swaps a clean replacement `Lab`/`Box` outside the pool lock while sibling slots keep serving. |
+| **Live elastic fleet scaling** | `add_slot(slot)` / `drain_slot(slot_id, *, timeout_s=30.0, close_lab=False)` | Attaches warm slots on the fly and drains slots cleanly without aborting in-flight leases. |
+| **Tamper-evident telemetry** | `metrics()` / `verify_trace(path, expected_head=...)` | Reports queue wait, hold, recovery, borrowing, quarantine, and utilization stats plus SHA-256 chain verification. |
+
+See [`docs/agent-teams-and-contention.md`](../../../docs/agent-teams-and-contention.md) for the empirical NVIDIA B200 multi-agent study.
+
 ## Contract
 
 - `box.py` owns the box state, the call order, the event list and the token. The lab's
