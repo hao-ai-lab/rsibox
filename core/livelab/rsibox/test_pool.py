@@ -2433,6 +2433,356 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertTrue(verified["ok"], verified)
         self.assertEqual(verified["count"], metrics["total_leases"])
 
+    def test_max_slots_per_agent_blast_radius_fairness_and_cross_role_wakeup(self) -> None:
+        # 1. Input validation for max_slots_per_agent.
+        for bad_val, expected_exc in (
+            (True, TypeError),
+            (False, TypeError),
+            (1.5, TypeError),
+            ("1", TypeError),
+            (0, ValueError),
+            (-2, ValueError),
+        ):
+            with self.assertRaises(expected_exc):
+                SandboxPool([PoolSlot("v", self._make_toy_lab())], max_slots_per_agent=bad_val)  # type: ignore[arg-type]
+
+        # 2. Concurrent-rogue blast-radius containment (C=3, max_slots_per_agent=1, max_agent_faults=1):
+        #    3 parallel threads from "rogue" attack simultaneously while 2 healthy agents run live edits.
+        #    Without max_slots_per_agent=1, rogue would claim and poison all 3 slots concurrently before
+        #    lease #1 released to trip max_agent_faults=1. With cap=1, blast radius is strictly 1 slot.
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        trace_path = os.path.join(tmpdir.name, "cap_blast_radius.jsonl")
+        pool = SandboxPool(
+            [PoolSlot(f"g{i}", self._make_toy_lab()) for i in range(3)],
+            trace_path=trace_path,
+            max_slots_per_agent=1,
+            max_agent_faults=1,
+            agent_cooldown_s=None,
+        )
+        self.addCleanup(pool.close)
+        rogue_entered = threading.Event()
+        rogue_release = threading.Event()
+        rogue_lock = threading.Lock()
+        rogue_in_flight = [0]
+        rogue_max_concurrent = [0]
+        rogue_results: list[dict[str, Any]] = []
+
+        def rogue_attack(idx: int) -> None:
+            def _action(lab, _lease):
+                with rogue_lock:
+                    rogue_in_flight[0] += 1
+                    rogue_max_concurrent[0] = max(rogue_max_concurrent[0], rogue_in_flight[0])
+                rogue_entered.set()
+                rogue_release.wait(timeout=5.0)
+                lab.session.fault("participant_failed", f"rogue-burst-{idx}", "clean")
+                with rogue_lock:
+                    rogue_in_flight[0] -= 1
+                raise RuntimeError(f"rogue-burst-{idx}")
+
+            res = pool.run_isolated("rogue", _action, idea_id=f"rogue-{idx}", timeout_s=5.0)
+            with rogue_lock:
+                rogue_results.append(res)
+
+        rogue_threads = [threading.Thread(target=rogue_attack, args=(i,)) for i in range(3)]
+        for th in rogue_threads:
+            th.start()
+        self.assertTrue(rogue_entered.wait(timeout=5.0))
+        # Give sibling rogue threads time to enqueue behind the cap; verify live active-slot count == 1
+        # and that healthy agents immediately claim the other 2 slots with zero head-of-line blocking.
+        deadline = time.monotonic() + 2.0
+        while len(pool._waiters) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(pool.metrics()["agent_active_slots"], {"rogue": 1})
+        self.assertEqual(pool.metrics()["max_slots_per_agent"], 1)
+
+        healthy_ok: list[bool] = []
+        h_lock = threading.Lock()
+
+        def run_healthy(aid: str) -> None:
+            r = pool.run_isolated(aid, lambda lab, _l: lab.check(), idea_id=f"{aid}-edit", timeout_s=2.0)
+            with h_lock:
+                healthy_ok.append(bool(r["ok"]))
+
+        h_threads = [threading.Thread(target=run_healthy, args=(f"healthy-{i}",)) for i in range(2)]
+        for th in h_threads:
+            th.start()
+        for th in h_threads:
+            th.join(timeout=5.0)
+        self.assertEqual(healthy_ok, [True, True])
+
+        # Release rogue lease #1: trips circuit breaker and rejects both queued rogue siblings in-lock!
+        rogue_release.set()
+        for th in rogue_threads:
+            th.join(timeout=5.0)
+            self.assertFalse(th.is_alive())
+        self.assertEqual(rogue_max_concurrent[0], 1)
+        m = pool.metrics()
+        self.assertEqual(m["recoveries"], 1)
+        self.assertEqual(m["circuit_breaker_rejections"], 2)
+        self.assertEqual(m["quarantined_agents"], ["rogue"])
+        self.assertEqual(m["agent_active_slots"], {})
+        self.assertEqual(sum(1 for r in rogue_results if "AgentQuarantinedError" in str(r.get("error", ""))), 2)
+        vt = verify_trace(trace_path, expected_head=m["trace_head"])
+        self.assertTrue(vt["ok"] and vt["count"] == m["total_leases"], vt)
+
+        # 3. Fairness: capped high-priority waiter must NOT head-of-line block uncapped low-priority agent;
+        #    timeout_s=0.0 at cap fails fast with PoolTimeoutError.
+        fair_pool = SandboxPool(
+            [PoolSlot("s0", self._make_toy_lab()), PoolSlot("s1", self._make_toy_lab())],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(fair_pool.close)
+        g_lease = fair_pool.acquire("greedy", timeout_s=2.0)
+        with self.assertRaises(PoolTimeoutError):
+            fair_pool.acquire("greedy", timeout_s=0.0)
+        g2_acquired = threading.Event()
+        g2_errors: list[BaseException] = []
+
+        def greedy_second() -> None:
+            try:
+                with fair_pool.lease("greedy", priority=10, timeout_s=5.0):
+                    g2_acquired.set()
+            except BaseException as err:
+                g2_errors.append(err)
+
+        t_g2 = threading.Thread(target=greedy_second)
+        t_g2.start()
+        deadline = time.monotonic() + 2.0
+        while len(fair_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertFalse(g2_acquired.is_set())
+        # Uncapped low-priority agent immediately claims idle s1 despite greedy's priority=10 waiter!
+        with fair_pool.lease("fair-agent", priority=0, timeout_s=2.0) as fl:
+            self.assertEqual(fl.slot_id, "s1")
+            self.assertEqual(fair_pool.metrics()["agent_active_slots"], {"fair-agent": 1, "greedy": 1})
+        g_lease.release()
+        t_g2.join(timeout=5.0)
+        self.assertFalse(t_g2.is_alive())
+        self.assertEqual(g2_errors, [])
+        self.assertTrue(g2_acquired.is_set())
+        self.assertEqual(fair_pool.metrics()["agent_active_slots"], {})
+
+        # 4. Cross-role idle-slot wakeup (clean release AND quarantined release):
+        #    agent-x holds role="dev" while waiting for idle role="eval"; releasing dev MUST wake eval!
+        for quarantine_dev in (False, True):
+            lab_dev = self._make_toy_lab()
+            if quarantine_dev:
+                orig_dev_reset = lab_dev.reset
+                lab_dev.reset = lambda kind="state", _orig=orig_dev_reset: (  # type: ignore[method-assign]
+                    {"ok": False, "error": "forced-respawn-fail"} if kind == "respawn" else _orig(kind)
+                )
+            role_pool = SandboxPool(
+                [PoolSlot("s-dev", lab_dev, role="dev"), PoolSlot("s-eval", self._make_toy_lab(), role="eval")],
+                max_slots_per_agent=1,
+            )
+            self.addCleanup(role_pool.close)
+            dev_lease = role_pool.acquire("agent-x", role="dev", timeout_s=2.0)
+            eval_got: list[str] = []
+            eval_errs: list[BaseException] = []
+
+            def wait_eval() -> None:
+                try:
+                    with role_pool.lease("agent-x", role="eval", timeout_s=3.0) as el:
+                        eval_got.append(el.slot_id)
+                except BaseException as err:
+                    eval_errs.append(err)
+
+            t_ev = threading.Thread(target=wait_eval)
+            t_ev.start()
+            deadline = time.monotonic() + 2.0
+            while len(role_pool._waiters) < 1 and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertEqual(eval_got, [])
+            if quarantine_dev:
+                dev_lease.lab.session.fault("participant_failed", "kill-dev", "clean")
+            dev_lease.release()
+            t_ev.join(timeout=5.0)
+            self.assertFalse(t_ev.is_alive())
+            self.assertEqual(eval_errs, [], f"quarantine_dev={quarantine_dev}")
+            self.assertEqual(eval_got, ["s-eval"], f"quarantine_dev={quarantine_dev}")
+            self.assertEqual(role_pool.metrics()["agent_active_slots"], {})
+            if quarantine_dev:
+                self.assertEqual(role_pool.metrics()["quarantined_slots"], ["s-dev"])
+
+        # 5. Pre-acquire failure accounting zero-leak: failed pre-acquire recovery must release agent permit.
+        lab_bad = self._make_toy_lab()
+        lab_bad.reset = lambda kind="state": {"ok": False, "error": "prep-fail"}  # type: ignore[method-assign]
+        lab_bad.session.fault("participant_failed", "pre-poisoned", "clean")
+        lab_good = self._make_toy_lab()
+        prep_pool = SandboxPool(
+            [PoolSlot("bad", lab_bad), PoolSlot("good", lab_good)],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(prep_pool.close)
+        # First claim hits bad (quarantines it), loops cleanly to good without leaking agent permit!
+        with prep_pool.lease("agent-p", timeout_s=2.0) as pl:
+            self.assertEqual(pl.slot_id, "good")
+            self.assertEqual(prep_pool.metrics()["agent_active_slots"], {"agent-p": 1})
+        self.assertEqual(prep_pool.metrics()["agent_active_slots"], {})
+        self.assertEqual(prep_pool.metrics()["quarantined_slots"], ["bad"])
+
+        # 6. Regression for P1-1: global priority across idle slots (no cross-role priority inversion).
+        #    agent-prio holds s-dev while queueing (dev, priority=0) then (eval, priority=100) with s-eval idle.
+        #    Releasing s-dev MUST wake (eval, priority=100) FIRST instead of re-assigning s-dev to priority=0.
+        prio_pool = SandboxPool(
+            [PoolSlot("s-dev", self._make_toy_lab(), role="dev"), PoolSlot("s-eval", self._make_toy_lab(), role="eval")],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(prio_pool.close)
+        p_dev = prio_pool.acquire("agent-prio", role="dev", timeout_s=2.0)
+        prio_order: list[tuple[int, str]] = []
+        prio_lock = threading.Lock()
+        first_done = threading.Event()
+
+        def prio_waiter(role_name: str, prio: int) -> None:
+            with prio_pool.lease("agent-prio", role=role_name, priority=prio, timeout_s=3.0) as lease:
+                with prio_lock:
+                    prio_order.append((prio, lease.slot_id))
+                    if len(prio_order) == 1:
+                        first_done.set()
+
+        t_low = threading.Thread(target=prio_waiter, args=("dev", 0))
+        t_high = threading.Thread(target=prio_waiter, args=("eval", 100))
+        t_low.start()
+        deadline = time.monotonic() + 2.0
+        while len(prio_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        t_high.start()
+        while len(prio_pool._waiters) < 2 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        p_dev.release()
+        t_high.join(timeout=5.0)
+        t_low.join(timeout=5.0)
+        self.assertEqual(prio_order, [(100, "s-eval"), (0, "s-dev")])
+        self.assertEqual(prio_pool.metrics()["agent_active_slots"], {})
+
+        # 7. Regression for P1-2: primary-before-borrow when releasing a fallback slot while primary is idle.
+        pb_pool = SandboxPool(
+            [PoolSlot("s-dev", self._make_toy_lab(), role="dev"), PoolSlot("s-eval", self._make_toy_lab(), role="eval")],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(pb_pool.close)
+        pb_dev = pb_pool.acquire("agent-pb", role="dev", timeout_s=2.0)
+        pb_got: list[tuple[str, bool]] = []
+
+        def pb_waiter() -> None:
+            with pb_pool.lease("agent-pb", role="eval", fallback_roles=("dev",), timeout_s=3.0) as lease:
+                pb_got.append((lease.slot_id, lease.borrowed))
+
+        t_pb = threading.Thread(target=pb_waiter)
+        t_pb.start()
+        deadline = time.monotonic() + 2.0
+        while len(pb_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        pb_dev.release()
+        t_pb.join(timeout=5.0)
+        self.assertEqual(pb_got, [("s-eval", False)])
+
+        # 8. Regression for P2-1: caller-specified fallback_roles order + uncapped borrower bypassing capped waiter.
+        fb_pool = SandboxPool(
+            [
+                PoolSlot("s-c", self._make_toy_lab(), role="c"),
+                PoolSlot("s-b", self._make_toy_lab(), role="b"),
+                PoolSlot("s-a", self._make_toy_lab(), role="a"),
+            ],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(fb_pool.close)
+        fb_hold = fb_pool.acquire("agent-fb", role="c", timeout_s=2.0)
+        fb_got: list[tuple[str, bool]] = []
+
+        def fb_waiter() -> None:
+            with fb_pool.lease("agent-fb", role="missing", fallback_roles=("a", "b"), priority=50, timeout_s=3.0) as lease:
+                fb_got.append((lease.slot_id, lease.borrowed))
+
+        t_fb = threading.Thread(target=fb_waiter)
+        t_fb.start()
+        deadline = time.monotonic() + 2.0
+        while len(fb_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        # Uncapped borrower (priority=0) must NOT be blocked on idle s-a by capped agent-fb (priority=50).
+        with fb_pool.lease("uncapped-borrower", role="missing", fallback_roles=("a",), priority=0, timeout_s=2.0) as ub:
+            self.assertEqual((ub.slot_id, ub.borrowed), ("s-a", True))
+        # After uncapped-borrower releases s-a and agent-fb releases s-c, agent-fb MUST pick "a" over "b"!
+        fb_hold.release()
+        t_fb.join(timeout=5.0)
+        self.assertEqual(fb_got, [("s-a", True)])
+        self.assertEqual(fb_pool.metrics()["agent_active_slots"], {})
+
+        # 9. max_slots_per_agent > 1 (cap=2 on C=3), timeout_s=inf at cap, priority_aging_s interaction,
+        #    reset_agent_circuit() preserving active permits, post-handoff cancel, and close(close_labs=True).
+        now_t = [100.0]
+        cap2_pool = SandboxPool(
+            [PoolSlot(f"c{i}", self._make_toy_lab()) for i in range(3)],
+            clock=lambda: now_t[0],
+            priority_aging_s=1.0,
+            max_slots_per_agent=2,
+            max_agent_faults=2,
+            close_labs=True,
+        )
+        self.addCleanup(cap2_pool.close)
+        l1 = cap2_pool.acquire("multi", timeout_s=2.0)
+        l2 = cap2_pool.acquire("multi", timeout_s=2.0)
+        self.assertEqual(cap2_pool.metrics()["agent_active_slots"], {"multi": 2})
+        # 3rd concurrent acquire with timeout_s=inf blocks behind cap=2 while uncapped peer grabs c2.
+        l3_got: list[str] = []
+
+        def multi_third() -> None:
+            with cap2_pool.lease("multi", priority=0, timeout_s=float("inf")) as l3:
+                l3_got.append(l3.slot_id)
+
+        t_m3 = threading.Thread(target=multi_third)
+        t_m3.start()
+        deadline = time.monotonic() + 2.0
+        while len(cap2_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        now_t[0] += 50.0  # Aged capped waiter has huge effective priority, still must NOT block uncapped peer!
+        with cap2_pool.lease("peer", priority=0, timeout_s=2.0) as pl:
+            self.assertEqual(pl.slot_id, "c2")
+        self.assertFalse(cap2_pool.reset_agent_circuit("multi"))
+        self.assertEqual(cap2_pool.metrics()["agent_active_slots"], {"multi": 2})
+        l1.release()
+        t_m3.join(timeout=5.0)
+        self.assertEqual(len(l3_got), 1)
+        self.assertEqual(cap2_pool.metrics()["agent_active_slots"], {"multi": 1})
+        l2.release()
+        self.assertEqual(cap2_pool.metrics()["agent_active_slots"], {})
+
+        # Post-handoff cancellation (_cancel_waiter_locked with assigned_state != None) leaks zero permits.
+        cancel_pool = SandboxPool(
+            [PoolSlot("k0", self._make_toy_lab())],
+            max_slots_per_agent=1,
+            close_labs=True,
+        )
+        k_hold = cancel_pool.acquire("agent-k", timeout_s=2.0)
+        from rsibox.pool import _Waiter
+        fake_waiter = _Waiter(None, priority=0, agent_id="agent-k")
+        with cancel_pool._lock:
+            cancel_pool._waiters.append(fake_waiter)
+        k_hold.release()
+        self.assertIsNotNone(fake_waiter.assigned_state)
+        self.assertEqual(cancel_pool.metrics()["agent_active_slots"], {"agent-k": 1})
+        with cancel_pool._lock:
+            cancel_pool._cancel_waiter_locked(fake_waiter)
+        self.assertEqual(cancel_pool.metrics()["agent_active_slots"], {})
+        # Close with active lease and queued capped waiter must close cleanly with zero leaked permits.
+        k_hold2 = cancel_pool.acquire("agent-k", timeout_s=2.0)
+        closed_errs: list[BaseException] = []
+        t_closed = threading.Thread(
+            target=lambda: self._capture_error(lambda: cancel_pool.acquire("agent-k", timeout_s=5.0), closed_errs)
+        )
+        t_closed.start()
+        deadline = time.monotonic() + 2.0
+        while len(cancel_pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        cancel_pool.close(close_labs=True)
+        t_closed.join(timeout=5.0)
+        self.assertEqual(len(closed_errs), 1)
+        self.assertIsInstance(closed_errs[0], PoolClosedError)
+        k_hold2.release()
+        self.assertEqual(cancel_pool.metrics()["agent_active_slots"], {})
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
