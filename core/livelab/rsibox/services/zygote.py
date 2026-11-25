@@ -179,19 +179,20 @@ class ZygoteService:
         self._pending_handlers: dict[str, Callable[[dict[str, Any], list[int]], int]] = {}
         self._cancelled_reqs: set[str] = set(); self._armed_by_self: set[str] = set()
         self._guard_report: dict[str, Any] = {}; self._preload_report: dict[str, Any] = {}; self._gc_report: dict[str, Any] = {}
-        self._stop_event, self._teardown_done = threading.Event(), threading.Event()
-        _LIVE_SERVICES.add(self)
+        self._stop_event, self._teardown_done, self._start_lock = threading.Event(), threading.Event(), threading.Lock(); _LIVE_SERVICES.add(self)
 
     def _on_fork_child(self) -> None:
         self._lock = threading.RLock(); self._active_pids.clear(); self._pending_handlers.clear()
+        if (fin := getattr(self._temp_dir, "_finalizer", None)) is not None:
+            with contextlib.suppress(Exception): fin.detach()
+        self._temp_dir = self._listener = None; self._started = False
 
     @property
     def profile(self) -> ZygoteProfile: return _copy_profile(self._profile)
     @property
     def socket_path(self) -> Path | None:
         with self._lock: return self._socket_path
-    def __enter__(self) -> ZygoteService:
-        self.start(); return self
+    def __enter__(self) -> ZygoteService: self.start(); return self
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None: self.close()
     def _require_open(self) -> None:
         if self._closed: raise ZygoteClosedError("ZygoteService is closed")
@@ -201,8 +202,9 @@ class ZygoteService:
     def _rollback_guards(self, cuda_mod: Any, armed: set[str], clear_nvml: bool, saved_env: dict[str, str | None], gc_frozen: bool) -> None:
         if "cuda_python" in armed:
             with contextlib.suppress(Exception): forksafe.unguard_cuda_python()
-        if "torch_cuda" in armed or clear_nvml:
-            with contextlib.suppress(Exception): forksafe.unpatch(cuda_mod, clear_env=clear_nvml)
+        if "torch_cuda" in armed and cuda_mod is not None:
+            with contextlib.suppress(Exception): forksafe.unpatch(cuda_mod, clear_env=False)
+        if clear_nvml: os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
         if gc_frozen and hasattr(gc, "unfreeze"):
             with contextlib.suppress(Exception): gc.unfreeze()
         for k, old in saved_env.items():
@@ -255,7 +257,7 @@ class ZygoteService:
             except BaseException:
                 if not was_cuinit and getattr(forksafe, "_CUINIT", None): armed.add("cuda_python")
                 if not was_torch and cuda_mod is not None: armed.add("torch_cuda")
-                self._rollback_guards(cuda_mod, armed, bool(guard_report.get("nvml_env_set")) or saved_env.get("PYTORCH_NVML_BASED_CUDA_CHECK") is None, saved_env, gc_frozen)
+                self._rollback_guards(cuda_mod, armed, False, saved_env, gc_frozen)
                 raise
             self._cuda_mod, self._armed_by_self, self._guard_report = cuda_mod, armed, dict(guard_report)
             self._preload_report, self._gc_report, self._gc_frozen, self._guards_armed = preload_report, dict(gc_report), gc_frozen, True
@@ -267,40 +269,45 @@ class ZygoteService:
     ) -> Path:
         """Arm pre-fork guards (if needed) and start the `AF_UNIX` `SCM_RIGHTS` server loop."""
         self._assert_not_poisoned()
-        with self._lock:
-            self._require_open()
-            if self._started: assert self._socket_path is not None; return self._socket_path
-            if not self._guards_armed:
-                self.arm_guards(capability=capability, nvml=nvml, probe=probe, preload=preload, importer=importer)
-            tdir: tempfile.TemporaryDirectory[str] | None = None; srv_sock: socket.socket | None = None
-            owns_listener = listener is None; wake_r = wake_w = -1
-            try:
-                if listener is not None:
-                    try: raw = listener.getsockname()
-                    except OSError as exc: raise ZygoteError(f"invalid listener socket: {exc}") from exc
-                    sock_path, srv_sock = _check_sock_len(Path(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))), listener
-                else:
-                    if self._explicit_socket_path is not None:
-                        sock_path = _check_sock_len(self._explicit_socket_path); sock_path.parent.mkdir(parents=True, exist_ok=True)
-                        with contextlib.suppress(FileNotFoundError): sock_path.unlink()
-                    else: tdir = tempfile.TemporaryDirectory(prefix="zyg_"); sock_path = _check_sock_len(Path(tdir.name) / "z.sock")
-                    srv_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv_sock.bind(os.fspath(sock_path)); os.chmod(sock_path, 0o600); srv_sock.listen(16)
-                wake_r, wake_w = os.pipe(); os.set_blocking(wake_r, False); os.set_blocking(wake_w, False)
-                self._temp_dir, self._listener, self._socket_path, self._owns_listener = tdir, srv_sock, sock_path, owns_listener
-                self._wakeup_r, self._wakeup_w, self._start_error = wake_r, wake_w, None
-                self._stop_event.clear(); ready = threading.Event()
-                self._server_thread = threading.Thread(target=self._serve_loop, args=(srv_sock, wake_r, ready), name=f"zygote-{self._profile.engine}", daemon=True)
-                self._server_thread.start()
-            except BaseException:
-                _close_fds((wake_r, wake_w))
-                if owns_listener and srv_sock is not None: srv_sock.close()
-                if tdir is not None: tdir.cleanup()
-                raise
-        if not ready.wait(timeout=5.0) or self._start_error is not None:
-            err = self._start_error or TimeoutError("zygote server thread failed to initialize")
-            self.teardown(grace_s=0.1); raise ZygoteError(f"zygote server failed to start: {err}") from err
-        with self._lock: self._started = True
-        return sock_path
+        with self._start_lock:
+            with self._lock:
+                self._require_open()
+                if self._started: assert self._socket_path is not None; return self._socket_path
+                if not self._guards_armed:
+                    self.arm_guards(capability=capability, nvml=nvml, probe=probe, preload=preload, importer=importer)
+                tdir: tempfile.TemporaryDirectory[str] | None = None; srv_sock: socket.socket | None = None
+                owns_listener = listener is None; wake_r = wake_w = -1
+                try:
+                    if listener is not None:
+                        try: raw = listener.getsockname()
+                        except OSError as exc: raise ZygoteError(f"invalid listener socket: {exc}") from exc
+                        sock_path, srv_sock = _check_sock_len(Path(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))), listener
+                    else:
+                        if self._explicit_socket_path is not None:
+                            sock_path = _check_sock_len(self._explicit_socket_path); sock_path.parent.mkdir(parents=True, exist_ok=True)
+                            with contextlib.suppress(FileNotFoundError): sock_path.unlink()
+                        else: tdir = tempfile.TemporaryDirectory(prefix="zyg_"); sock_path = _check_sock_len(Path(tdir.name) / "z.sock")
+                        srv_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); srv_sock.bind(os.fspath(sock_path)); os.chmod(sock_path, 0o600); srv_sock.listen(16)
+                    wake_r, wake_w = os.pipe(); os.set_blocking(wake_r, False); os.set_blocking(wake_w, False)
+                    self._temp_dir, self._listener, self._socket_path, self._owns_listener = tdir, srv_sock, sock_path, owns_listener
+                    self._wakeup_r, self._wakeup_w, self._start_error = wake_r, wake_w, None
+                    self._stop_event.clear(); ready = threading.Event()
+                    self._server_thread = threading.Thread(target=self._serve_loop, args=(srv_sock, wake_r, ready), name=f"zygote-{self._profile.engine}", daemon=True)
+                    self._server_thread.start()
+                except BaseException:
+                    _close_fds((wake_r, wake_w))
+                    if owns_listener and srv_sock is not None: srv_sock.close()
+                    if tdir is not None: tdir.cleanup()
+                    raise
+            if not ready.wait(timeout=5.0) or self._start_error is not None:
+                err = self._start_error or TimeoutError("zygote server thread failed to initialize")
+                self.teardown(grace_s=0.1); raise ZygoteError(f"zygote server failed to start: {err}") from err
+            with self._lock:
+                closed_mid = self._closed or self._stop_event.is_set()
+                if not closed_mid: self._started = True
+            if closed_mid:
+                self._teardown_done.wait(timeout=5.0); raise ZygoteClosedError("ZygoteService closed during start")
+            return sock_path
 
     def _serve_loop(self, listener: socket.socket, wake_r: int, ready: threading.Event) -> None:
         sel = selectors.DefaultSelector()
@@ -337,8 +344,8 @@ class ZygoteService:
         if not role: raise SpawnError("spawn request missing non-empty 'role'")
         if not isinstance(raw_env, dict): raise SpawnError("spawn request 'env' must be a JSON object")
         expected_fds = payload.get("fds_count")
-        if expected_fds is not None and int(expected_fds) != len(received_fds):
-            raise SpawnError(f"SCM_RIGHTS FD count mismatch: expected {expected_fds}, got {len(received_fds)}")
+        if expected_fds is not None and (isinstance(expected_fds, bool) or not isinstance(expected_fds, int) or expected_fds != len(received_fds)):
+            raise SpawnError(f"SCM_RIGHTS FD count mismatch: expected {expected_fds!r}, got {len(received_fds)}")
         env_overrides, req_id = {str(k): str(v) for k, v in raw_env.items()}, payload.get("req_id")
         self._assert_not_poisoned()
         with self._lock:

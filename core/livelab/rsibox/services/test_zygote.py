@@ -175,7 +175,7 @@ class ZygoteGuardAndPoisonTests(unittest.TestCase):
                 svc2.close()
 
     def test_unarmed_teardown_does_not_unpatch_armed_sibling(self) -> None:
-        """Closing an unarmed `ZygoteService` leaves another armed service's guards intact."""
+        """Closing an unarmed or second service leaves pre-existing `torch_cuda` guards intact."""
         fake_cuda = _make_fake_cuda()
         prof = ZygoteProfile("vllm", preload_modules=(), freeze_gc=False)
         with mock.patch.dict(os.environ, {}, clear=False):
@@ -189,6 +189,34 @@ class ZygoteGuardAndPoisonTests(unittest.TestCase):
             finally:
                 svc_armed.close()
             self.assertFalse(getattr(fake_cuda.get_device_capability, "_rsibox_forksafe", False))
+
+        # Pre-existing forksafe.install(fake_cuda) + unset PYTORCH_NVML_BASED_CUDA_CHECK survives close() and rollback.
+        fake_pre = _make_fake_cuda()
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
+            forksafe.install(fake_pre, capability=lambda: ((10, 0), 1))
+            try:
+                svc_pre = ZygoteService(ZygoteProfile("vllm", preload_modules=("evil_mod",), freeze_gc=False),
+                                        cuda_module_fn=lambda: fake_pre, importer=lambda _n: object())
+                try:
+                    with mock.patch.object(forksafe, "cuda_initialized", side_effect=[False, True]):
+                        with self.assertRaises(ForkPoisonedError):
+                            svc_pre.arm_guards(capability=(10, 0), probe=_FAKE_PROBE)
+                    self.assertTrue(getattr(fake_pre.get_device_capability, "_rsibox_forksafe", False))
+                finally:
+                    svc_pre.close()
+                self.assertTrue(getattr(fake_pre.get_device_capability, "_rsibox_forksafe", False))
+
+                svc_pre2 = ZygoteService(prof, cuda_module_fn=lambda: fake_pre)
+                try:
+                    svc_pre2.arm_guards(capability=(10, 0), probe=_FAKE_PROBE, preload=False)
+                    self.assertEqual(os.environ.get("PYTORCH_NVML_BASED_CUDA_CHECK"), "1")
+                finally:
+                    svc_pre2.close()
+                self.assertTrue(getattr(fake_pre.get_device_capability, "_rsibox_forksafe", False))
+                self.assertNotIn("PYTORCH_NVML_BASED_CUDA_CHECK", os.environ)
+            finally:
+                forksafe.unpatch(fake_pre, clear_env=True)
 
 
 class ZygoteForkAndScmRightsTests(unittest.TestCase):
@@ -311,22 +339,25 @@ class ZygoteForkAndScmRightsTests(unittest.TestCase):
         """Stalled client cancels cleanly on teardown, child dying pre-report leaves 0 zombies, `fds_count` mismatch fails."""
         prof = ZygoteProfile("transformers", preload_modules=(), freeze_gc=False)
         with mock.patch.dict(os.environ, {}, clear=False):
-            with ZygoteService(prof) as svc:
+            svc = ZygoteService(prof)
+            try:
+                svc.start(capability=(9, 0), probe=_FAKE_PROBE, preload=False)
                 sock_path = svc.socket_path
                 assert sock_path is not None
 
-                # P2: fds_count mismatch over raw AF_UNIX frame.
-                body = json.dumps({"role": "w", "fds_count": 2}).encode("utf-8")
-                frame = struct.pack("!I", len(body)) + body
-                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw_cli:
-                    raw_cli.settimeout(2.0)
-                    raw_cli.connect(os.fspath(sock_path))
-                    raw_cli.sendall(frame)
-                    hdr = raw_cli.recv(4)
-                    (rlen,) = struct.unpack("!I", hdr)
-                    rep = json.loads(raw_cli.recv(rlen).decode("utf-8"))
-                self.assertFalse(rep["ok"])
-                self.assertIn("FD count mismatch", rep["error"])
+                # P2: fds_count mismatch (and bool fds_count) over raw AF_UNIX frame.
+                for bad_fds_count in (2, True):
+                    body = json.dumps({"role": "w", "fds_count": bad_fds_count}).encode("utf-8")
+                    frame = struct.pack("!I", len(body)) + body
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw_cli:
+                        raw_cli.settimeout(2.0)
+                        raw_cli.connect(os.fspath(sock_path))
+                        raw_cli.sendall(frame)
+                        hdr = raw_cli.recv(4)
+                        (rlen,) = struct.unpack("!I", hdr)
+                        rep = json.loads(raw_cli.recv(rlen).decode("utf-8"))
+                    self.assertFalse(rep["ok"])
+                    self.assertIn("FD count mismatch", rep["error"])
 
                 # P1-4: Child crashes before writing report_w -> SpawnError + 0 zombie left behind.
                 with mock.patch.object(forksafe, "unpatch_child", side_effect=RuntimeError("boom-pre-report")):
@@ -344,6 +375,8 @@ class ZygoteForkAndScmRightsTests(unittest.TestCase):
                     self.assertLess(time.monotonic() - t0, 1.5)
                 finally:
                     stalled.close()
+            finally:
+                svc.close()
 
     def test_validation_child_process_error_and_start_failure_propagation(self) -> None:
         """NaN/inf/bool timeouts, fast `ChildProcessError` fail, external listener, and bad-listener `start()` fail."""
@@ -355,8 +388,32 @@ class ZygoteForkAndScmRightsTests(unittest.TestCase):
                 srv.bind(os.fspath(ext_sock))
                 srv.listen(4)
                 with mock.patch.dict(os.environ, {}, clear=False):
-                    with ZygoteService(prof_plain) as _unused:
-                        pass
+                    svc_conc = ZygoteService(prof_plain)
+                    try:
+                        with ThreadPoolExecutor(max_workers=4) as pool:
+                            paths = list(pool.map(lambda _: svc_conc.start(capability=(9, 0), probe=_FAKE_PROBE, preload=False), range(4)))
+                        self.assertEqual(len(set(paths)), 1)
+                    finally:
+                        svc_conc.close()
+
+                    # start()-vs-teardown() race: neither leaks FDs/threads nor leaves started=True, closed=True.
+                    for _ in range(5):
+                        svc_race = ZygoteService(prof_plain)
+                        try:
+                            with ThreadPoolExecutor(max_workers=2) as pool:
+                                f_start = pool.submit(svc_race.start, capability=(9, 0), probe=_FAKE_PROBE, preload=False)
+                                f_stop = pool.submit(svc_race.teardown, grace_s=0.1)
+                                try:
+                                    f_start.result(timeout=5.0)
+                                except ZygoteClosedError:
+                                    pass
+                                f_stop.result(timeout=5.0)
+                            st = svc_race.status()
+                            self.assertTrue(st.closed)
+                            self.assertFalse(st.started and st.closed)
+                        finally:
+                            svc_race.close()
+
                     svc = ZygoteService(prof_plain)
                     try:
                         svc.start(listener=srv, capability=(9, 0), probe=_FAKE_PROBE, preload=False)
