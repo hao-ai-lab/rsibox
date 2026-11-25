@@ -7,7 +7,7 @@ EXTENDS Naturals
  * and fail-closed poisoning whenever an undo/rollback leaves partial state.
  *)
 
-CONSTANTS MaxJournalDepth
+CONSTANTS MaxJournalDepth, Bug
 
 VARIABLES
     state,          \* "idle" | "prepared" | "committed" | "aborted" | "undone" | "partial"
@@ -48,7 +48,7 @@ DeadlineExpire ==
 
 Commit ==
     /\ state = "prepared"
-    /\ ~deadline_passed
+    /\ (Bug = "AllowLateCommit" \/ ~deadline_passed)
     /\ ~poisoned
     /\ journal_depth < MaxJournalDepth
     /\ state' = "committed"
@@ -107,6 +107,10 @@ NoCommitAfterDeadline ==
 
 CommittedHasJournal ==
     (state = "committed") => (journal_depth >= 1)
+
+\* Reachability witness invariants (expected to fail on non-mutant model)
+NeverCommitted == state # "committed"
+NeverPartialPoisoned == ~(state = "partial" /\ poisoned)
 
 Spec == Init /\ [][Next]_vars
 =============================================================================

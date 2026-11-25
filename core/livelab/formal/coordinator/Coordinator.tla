@@ -96,4 +96,7 @@ NoUndoAfterInDoubt ==
 SupersededNeverOverwritten ==
     superseded_seen => t1 = Superseded
 
+NeverSuperseded ==
+    ~superseded_seen
+
 ====

@@ -94,4 +94,7 @@ Next ==
 FailedApplyRestoresAll ==
     (phase = RolledBack) => (~witness_dirty /\ ~staged_dirty /\ ~hit_stub_leaked)
 
+NeverRolledBack ==
+    phase # RolledBack
+
 ====

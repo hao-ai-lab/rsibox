@@ -538,6 +538,7 @@ class RstackGatesTest(unittest.TestCase):
             "plain",
             "distill",
             "report",
+            "formal",
         }
         actual_skills = {p.parent.name for p in (plugin_root / "skills").glob("*/SKILL.md")}
         self.assertEqual(actual_skills, expected_skills)

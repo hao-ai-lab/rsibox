@@ -34,3 +34,4 @@ Route every non-trivial RSIBox task into the matching SOP playbook and enforce e
 - `/distill`: mine active conversation lessons into `rstack` skill updates or deterministic gates.
 - `/report`: format substantive code/doc changes with 1-line file summaries and verbatim `Before -> After` excerpts inline.
 - `/polish`: keep public docs plain-English and aligned with `docs_lint.py` + `facts_sync.py`.
+- `/formal`: run TLC model checking, mutant/witness checks, spec pin/anchor/assumption gates, and Mermaid trace rendering.

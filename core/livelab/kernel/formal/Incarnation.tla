@@ -7,7 +7,7 @@ EXTENDS Naturals, FiniteSets
  * and out-of-order/replayed participant replies.
  *)
 
-CONSTANTS Participants, TxnIds, MaxIncarnation
+CONSTANTS Participants, TxnIds, MaxIncarnation, Bug
 
 VARIABLES
     active_inc,      \* Current coordinator incarnation in 1..MaxIncarnation
@@ -43,8 +43,7 @@ SendReply(p) ==
 
 DeliverFreshReply(r) ==
     /\ r \in in_flight
-    /\ r.inc = active_inc
-    /\ r.txn = active_txn
+    /\ (Bug = "AcceptStaleReply" \/ (r.inc = active_inc /\ r.txn = active_txn))
     /\ accepted_replies' = accepted_replies \cup
            {[p |-> r.p, inc |-> r.inc, txn |-> r.txn,
              accepted_at_inc |-> active_inc, accepted_at_txn |-> active_txn]}
@@ -66,7 +65,9 @@ Respawn ==
     /\ active_inc < MaxIncarnation
     /\ active_inc' = active_inc + 1
     /\ active_txn' = 0
-    /\ live_incs' = {active_inc + 1}
+    /\ live_incs' = IF Bug = "KeepOldIncarnation"
+                    THEN live_incs \cup {active_inc + 1}
+                    ELSE {active_inc + 1}
     /\ UNCHANGED <<in_flight, accepted_replies>>
 
 Next ==
@@ -85,6 +86,10 @@ SingleActiveIncarnation ==
 StaleReplyRejection ==
     \A r \in accepted_replies :
         r.inc = r.accepted_at_inc /\ r.txn = r.accepted_at_txn
+
+\* Reachability witness invariants (expected to fail on non-mutant model)
+NeverAccepted == accepted_replies = {}
+NeverRespawned == active_inc = 1
 
 Spec == Init /\ [][Next]_vars
 =============================================================================
