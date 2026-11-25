@@ -19,7 +19,7 @@ Measured locally on CPU via `PYTHONPATH=core/livelab python3 -m rsibox conforman
 | `c8_crash_and_hang` | pass | `2.708` | Poisoned on `crash`/`hang`/`lost`/`tamper`; respawns `0.114–0.220 s` (`0.161 s` / `0.220 s` / `0.164 s` / `0.114 s`) |
 | `c9_soak` | pass | `0.340` | 20 cycles: install median **`0.0085 s`**, uninstall median **`0.0016 s`** |
 | `c10_not_proven` | pass | `0.113` | `proven=False` (`zero_witness`) on startup-only `init_policy_scale`; fresh diverges |
-| **Total (`c0–c10`)** | **11/11** | **3.848 s** | **Sum of `c0–c10` case times; 9/9 unit tests pass in `6.500 s` (`-W error::ResourceWarning`)** |
+| **Total (`c0–c10`)** | **11/11** | **3.823 s** | **Sum of `c0–c10` case times; 11/11 unit tests pass in `6.605 s` (`-W error::ResourceWarning`)** |
 
 ## 2. Real GPU (`1×` / `2× NVIDIA B200`, Colocated AutoModel FSDP2 + SGLang GRPO)
 

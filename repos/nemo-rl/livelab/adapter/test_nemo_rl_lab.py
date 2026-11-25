@@ -294,10 +294,14 @@ class NemoRlGoldenTests(unittest.TestCase):
             "class PolicyWorker:\n"
             "    def step(self, x):\n"
             "        return x + 1\n"
+            "    def reset_state(self):\n"
+            "        return ['weights_s0']\n"
             "@TRP.fake_remote\n"
             "class SGLangWorker:\n"
             "    def generate(self, x):\n"
             "        return x * 2\n"
+            "    def reset_state(self):\n"
+            "        return ['rollout_weights']\n"
         )
         with open(os.path.join(temp_dir, f"{mod_name}.py"), "w", encoding="utf-8") as fh:
             fh.write(src)
@@ -343,6 +347,165 @@ class NemoRlGoldenTests(unittest.TestCase):
         self.assertIn("trainer0", checked["witness"])
         self.assertTrue(lab.uninstall()["ok"])
         self.assertEqual(lab.check()["output"], {"val": 7})
+
+    def test_build_plan_preserves_base_hash_unprimed_and_across_multi_module_chain(self):
+        """Input: fresh `ToyNemoRlLab` before `patches()`/`check()` (empty `base_text`), then
+        chained edits across `adapter.grpo_ops` and `adapter.rollout_ops`.
+        Expected: `_build_plan` populates `base_hash` on both the unprimed first edit and the
+        second-module chained edit."""
+        from rsibox import harness as H
+
+        g_mod, r_mod, _ = DEFAULT_MODULES
+        fresh_lab = ToyNemoRlLab()
+        self.addCleanup(fresh_lab.close)
+        # Clear any pre-seeded base_text to simulate an unprimed session.
+        fresh_lab.base_text.clear()
+        fresh_lab.live_text = [{}]
+
+        g_src = H.read_module(g_mod)
+        g_edit = H.edit_once(
+            g_src,
+            "total_loss += (pg_loss + kl_pen) * GRPO_LOSS_SCALE",
+            "total_loss += (pg_loss + kl_pen) * GRPO_LOSS_SCALE * 2.0",
+        )
+        plan1, findings1 = fresh_lab._build_plan({"files": {g_mod: g_edit}}, fresh_lab.live_text[-1])
+        self.assertEqual(findings1, [])
+        self.assertIsNotNone(plan1)
+        self.assertIn("base_hash", plan1["modules"][g_mod])
+        res1 = fresh_lab.install({"files": {g_mod: g_edit}})
+        self.assertTrue(res1["ok"], res1)
+
+        r_src = H.read_module(r_mod)
+        r_edit = H.edit_once(r_src, "0.05 * step_idx", "0.25 * step_idx")
+        plan2, findings2 = fresh_lab._build_plan({"files": {r_mod: r_edit}}, fresh_lab.live_text[-1])
+        self.assertEqual(findings2, [])
+        self.assertIsNotNone(plan2)
+        self.assertIn("base_hash", plan2["modules"][r_mod])
+
+    def test_real_mode_s0_reset_fail_closed_and_cpu_optimizer_offload(self):
+        """Input: `coupled_nemo_rl_reset` with empty trainers or missing `flush_cache`,
+        `serve_nemo_rl_actor` on an actor without `reset_state()`, and `snapshot_automodel_s0` /
+        `restore_automodel_s0` with fake CUDA tensors.
+        Expected: missing trainers, missing `flush_cache`, and missing `reset_state()` fail closed,
+        and optimizer tensor state is offloaded to CPU via `.detach().cpu().clone()`."""
+        import contextlib
+        import types
+        from unittest import mock
+        from adapter.worker import (
+            coupled_nemo_rl_reset,
+            restore_automodel_s0,
+            snapshot_automodel_s0,
+        )
+
+        # 1. Empty trainers must fail closed (never vacuous ok=True).
+        fake_ray = types.SimpleNamespace(get=lambda refs, timeout=None: list(refs))
+        with self.assertRaisesRegex(RuntimeError, "no trainer actors"):
+            coupled_nemo_rl_reset(
+                policy_group=types.SimpleNamespace(workers=[]),
+                rollout_group=None,
+                ray_mod=fake_ray,
+            )
+
+        # 2. Missing flush_cache on rollout actor must fail closed.
+        class _DummyTrainer:
+            def __init__(self):
+                self.__ray_call__ = types.SimpleNamespace(
+                    remote=lambda fn: {"ok": True, "reset": ["weights_s0"]}
+                )
+
+        with self.assertRaisesRegex(RuntimeError, "flush_cache"):
+            coupled_nemo_rl_reset(
+                policy_group=types.SimpleNamespace(
+                    workers=[_DummyTrainer()],
+                    refit_policy_generation=lambda rg: None,
+                ),
+                rollout_group=types.SimpleNamespace(sglang_workers=[types.SimpleNamespace()]),
+                ray_mod=fake_ray,
+            )
+
+        # 3. Actor without reset_state() must fail closed on reset('state') instead of no-op ok=True.
+        import ray_participants as RP
+
+        no_reset_host = types.SimpleNamespace()
+        self.addCleanup(RP._LOCAL.pop, "missing_reset_actor", None)
+        reply = serve_nemo_rl_actor(no_reset_host, "missing_reset_actor", "reset", "state")
+        self.assertFalse(reply["ok"], reply)
+        self.assertEqual(reply["findings"][0]["check"], "reset_failed", reply)
+        self.assertIn("reset_state", reply["findings"][0]["observed"], reply)
+
+        # 4. snapshot_automodel_s0 offloads parameter and optimizer tensors to CPU; restore uses strict zip.
+        class _FakeTensor:
+            def __init__(self, data, device="cuda:0"):
+                self.data = list(data)
+                self.device = device
+                self.dtype = "float32"
+                self.grad = [0.1]
+                self.cpu_calls = 0
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                self.cpu_calls += 1
+                return _FakeTensor(self.data, device="cpu")
+
+            def clone(self):
+                return _FakeTensor(self.data, device=self.device)
+
+            def to(self, device=None, dtype=None):
+                return _FakeTensor(self.data, device=device or self.device)
+
+            def copy_(self, other):
+                self.data = list(other.data)
+
+        p_cuda = _FakeTensor([1.0, 2.0], device="cuda:0")
+        opt_m = _FakeTensor([0.5, -0.5], device="cuda:0")
+        opt_v = _FakeTensor([0.25, 0.25], device="cuda:0")
+        loaded_states = []
+
+        class _FakeModel:
+            def parameters(self):
+                return [p_cuda]
+
+        class _FakeOptimizer:
+            def state_dict(self):
+                return {"state": {0: {"exp_avg": opt_m, "exp_avg_sq": opt_v}}, "param_groups": [{"lr": 0.01}]}
+
+            def load_state_dict(self, st):
+                loaded_states.append(st)
+
+        fake_torch = types.SimpleNamespace(
+            is_tensor=lambda obj: isinstance(obj, _FakeTensor),
+            get_rng_state=lambda: ("torch", 0),
+            set_rng_state=lambda s: None,
+            no_grad=contextlib.nullcontext,
+            cuda=types.SimpleNamespace(
+                is_available=lambda: False,
+                get_rng_state=lambda: None,
+                set_rng_state=lambda s: None,
+                synchronize=lambda: None,
+                empty_cache=lambda: None,
+            ),
+        )
+        actor = types.SimpleNamespace(model=_FakeModel(), optimizer=_FakeOptimizer(), step_counter=3)
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            snap_rep = snapshot_automodel_s0(actor)
+            self.assertTrue(snap_rep["ok"])
+            self.assertEqual(opt_m.cpu_calls, 1)
+            self.assertEqual(opt_v.cpu_calls, 1)
+            self.assertEqual(actor._rsibox_s0_snapshot["optimizer"]["state"][0]["exp_avg"].device, "cpu")
+            p_cuda.data = [99.0, 99.0]
+            actor.step_counter = 10
+            rst_rep = restore_automodel_s0(actor)
+            self.assertTrue(rst_rep["ok"])
+            self.assertEqual(p_cuda.data, [1.0, 2.0])
+            self.assertEqual(actor.step_counter, 3)
+            self.assertIsNone(p_cuda.grad)
+            self.assertEqual(len(loaded_states), 1)
+            # strict zip rejects mismatched parameter count
+            actor._rsibox_s0_snapshot["params"].append(_FakeTensor([3.0], device="cpu"))
+            with self.assertRaises(ValueError):
+                restore_automodel_s0(actor)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@ import time
 from typing import Any
 
 from adapter.worker import (
-    NemoRlRayParticipant,
     build_nemo_rl_plan,
     clean_nemo_rl_witness,
     execute_grpo_episode,
@@ -150,19 +149,23 @@ class NemoRlLab(BaseLab):
                 raise RuntimeError(f"weight store ({self.weight_store.name}) not ready: {probe_result.error}")
 
         if callable(self._runtime_factory):
-            rt = self._runtime = self._runtime_factory()
-            self.base_text = dict(rt["base_text"])
-            parts = list(rt["participants"])
-            co = RecaptureCoordinator(
-                parts,
-                gap=rt.get("gap", lambda fn: fn()),
-                writer=self.writer,
-                interface_version="1-draft",
-                engine={"name": self.name, "version": "nemo-rl", "commit": os.environ.get("RSIBOX_ENGINE_COMMIT")},
-                phase2_deadline_s=self.rpc_timeout,
-                post_commit_reset="state",
-            )
-            return co, list(rt["modules"])
+            try:
+                rt = self._runtime = self._runtime_factory()
+                self.base_text = dict(rt["base_text"])
+                parts = list(rt["participants"])
+                co = RecaptureCoordinator(
+                    parts,
+                    gap=rt.get("gap", lambda fn: fn()),
+                    writer=self.writer,
+                    interface_version="1-draft",
+                    engine={"name": self.name, "version": "nemo-rl", "commit": os.environ.get("RSIBOX_ENGINE_COMMIT")},
+                    phase2_deadline_s=self.rpc_timeout,
+                    post_commit_reset="state",
+                )
+                return co, list(rt["modules"])
+            except BaseException:
+                self._stop_engine()
+                raise
 
         if str(self.config.get("mode", "ray")) != "cpu":
             require_nemo_rl_deps()
@@ -215,8 +218,8 @@ class NemoRlLab(BaseLab):
                 pending_paths.clear()
             self._wait_for_workers()
             # Sync trainer0 S0 weights to rollout0 as initial refit_version=0.
-            s0_weights = self._worker_call("trainer0", "get_weights")["result"]
-            self._worker_call("rollout0", "set_s0_weights", s0_weights)
+            s0_weights = self._rpc_result("trainer0", "get_weights")
+            self._rpc_result("rollout0", "set_s0_weights", s0_weights)
             parts = [
                 _WorkerParticipant(
                     role_name, lambda m, pay, rn=role_name: self._worker_call(rn, m, pay)
@@ -265,10 +268,10 @@ class NemoRlLab(BaseLab):
             raise TimeoutError(f"nemo-rl workers not ready in {self.startup_timeout} s")
 
     def _stop_engine(self) -> None:
-        if callable(shutdown := self._runtime.get("shutdown")):
+        rt, self._runtime = self._runtime, {}
+        if callable(shutdown := rt.get("shutdown")):
             with contextlib.suppress(Exception):
                 shutdown()
-            self._runtime = {}
         self._gen += 1
         workers, self._workers = self._workers, {}
         for w in workers.values():
@@ -355,14 +358,27 @@ class NemoRlLab(BaseLab):
         return {"ok": True, "reset": items}
 
     def _build_plan(self, patch: dict[str, Any], live_map: dict[str, str]):
-        return build_nemo_rl_plan(self.co.participants, patch, live_map or self.base_text)
+        merged_base = {**self.base_text, **(live_map or {})}
+        for key in (patch.get("files") or {}):
+            if key not in merged_base:
+                with contextlib.suppress(ImportError, OSError):
+                    merged_base[key] = self._base_source(key)
+        return build_nemo_rl_plan(self.co.participants, patch, merged_base)
 
     def _clean_witness(self, raw_witness: dict[str, dict[str, int]], proof_ok: bool) -> dict[str, dict[str, int]]:
         return clean_nemo_rl_witness(raw_witness, proof_ok)
 
-    def _after_uninstall(self, undone: list[str]) -> None:
+    def _run_runtime_reset(self, phase: str) -> None:
         if self._runtime and callable(rst_fn := self._runtime.get("reset_state")):
-            rst_fn()
+            res = rst_fn()
+            if isinstance(res, dict) and not res.get("ok", True):
+                raise RuntimeError(f"{phase} S0 reset failed: {res}")
+
+    def _after_commit(self, patch: dict[str, Any], receipt: dict | None) -> None:
+        self._run_runtime_reset("post-commit")
+
+    def _after_uninstall(self, undone: list[str]) -> None:
+        self._run_runtime_reset("post-uninstall")
 
     def fresh_check(self, patch: dict[str, Any] | None, workload: dict[str, Any] | None = None) -> dict[str, Any]:
         if callable(custom_fresh := self._runtime.get("fresh_check")):

@@ -121,7 +121,7 @@
    "conformance": "11/11 CPU (3-participant ToyNemoRlLab); real GPU pending hardware/env staging",
    "tiers": "RayActorParticipant Colocated AutoModel FSDP2 + SGLang GRPO + Coupled S0 Trainer/Rollout Reset",
    "speedup": "CPU 11/11 verified (c9 8.5 ms install / 1.6 ms undo); GPU pending hardware/env staging",
-   "summary": "Onboarded NVIDIA-NeMo/RL live-lab adapter reusing ray_participants.py: 3-participant CPU toy (coordinator0 + trainer0 + rollout0) passes 11/11 conformance and 9/9 golden tests; real 1x/2x B200 GPU run pending hardware/env staging.",
+   "summary": "Onboarded NVIDIA-NeMo/RL live-lab adapter reusing ray_participants.py: 3-participant CPU toy (coordinator0 + trainer0 + rollout0) passes 11/11 conformance and 11/11 unit/golden tests; real 1x/2x B200 GPU run pending hardware/env staging.",
    "evidence": "repos/nemo-rl/kb/costs.md"
   }
  ],

@@ -512,7 +512,7 @@
      "source": "repos/nemo-rl/README.md; repos/nemo-rl/docs/architecture.md"
     },
     {
-     "fact": "Passed 11/11 CPU 3-participant conformance (ToyNemoRlLab: 3.848 s c0-c10, c9 0.0085 s install / 0.0016 s undo, c8 respawns 0.114-0.220 s) and 9/9 golden tests with -W error::ResourceWarning; real 1x/2x B200 GPU NeMo-RL benchmarks are pending hardware/env staging.",
+     "fact": "Passed 11/11 CPU 3-participant conformance (ToyNemoRlLab: 3.823 s c0-c10, c9 0.0076 s install / 0.0015 s undo, c8 respawns 0.105-0.223 s) and 11/11 unit/golden tests with -W error::ResourceWarning; real 1x/2x B200 GPU NeMo-RL benchmarks are pending hardware/env staging.",
      "source": "repos/nemo-rl/kb/costs.md"
     }
    ],

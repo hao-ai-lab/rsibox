@@ -22,17 +22,14 @@ import math
 import os
 import queue
 import random
-import signal
-import subprocess
 import sys
-import tempfile
 import time
 import types
 from typing import Any
 
 import ray_participants as RP
 from kernel import coordinator, findings, locate
-from rsibox import harness, ipc, proc
+from rsibox import harness, ipc
 from rsibox.lab import ENDPOINT_METHODS
 
 PARTICIPANT_METHODS = frozenset(ENDPOINT_METHODS)
@@ -532,20 +529,36 @@ def serve_nemo_rl_actor(host: Any, name: str, method: str, payload: Any) -> dict
     local = RP._LOCAL.get(name)
     if local is None:
         reset_fn = getattr(host, "reset_state", None)
-        resets = {"state": reset_fn} if callable(reset_fn) else {"state": lambda: ["actor_state"]}
+
+        def _missing_reset() -> list[str]:
+            raise RuntimeError(
+                f"actor {name!r} ({type(host).__name__}) has no reset_state() for coupled S0 reset"
+            )
+
+        resets = {"state": reset_fn if callable(reset_fn) else _missing_reset}
         local = RP._LOCAL.setdefault(name, coordinator.LocalParticipant(name, resets=resets))
     if (view := RP.actor_view(host)) is not None:
         local.alias[view[0] + RP.ACTOR] = view[1]
     if method == "fingerprint":
         scoped = []
         for entry in payload:
-            if entry.endswith(".py") or os.sep in entry:
+            if isinstance(entry, dict):
+                path = entry.get("file")
+                mod_name = entry.get("name")
+                if isinstance(path, str) and path:
+                    actual, loaded_mod = RP.file_namespace(path)
+                    if loaded_mod is not None:
+                        local.alias[mod_name or RP.file_module(path)] = actual
+                        scoped.append(entry)
+                elif isinstance(mod_name, str) and (mod_name in sys.modules or mod_name in local.alias):
+                    scoped.append(entry)
+            elif isinstance(entry, str) and (entry.endswith(".py") or os.sep in entry):
                 actual, loaded_mod = RP.file_namespace(entry)
                 if loaded_mod is not None:
                     key = RP.file_module(entry)
                     local.alias[key] = actual
                     scoped.append(key)
-            elif entry in sys.modules or entry in local.alias:
+            elif isinstance(entry, str) and (entry in sys.modules or entry in local.alias):
                 scoped.append(entry)
         payload = scoped
     return RP.serve(host, name, method, payload)
@@ -593,17 +606,31 @@ def _local_tensor(tensor: Any) -> Any:
     return tensor.to_local() if hasattr(tensor, "to_local") else tensor
 
 
+def _cpu_clone(obj: Any, torch: Any) -> Any:
+    if torch.is_tensor(obj):
+        return _local_tensor(obj).detach().cpu().clone()
+    if isinstance(obj, dict):
+        return {k: _cpu_clone(v, torch) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cpu_clone(v, torch) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_cpu_clone(v, torch) for v in obj)
+    return copy.deepcopy(obj)
+
+
 def snapshot_automodel_s0(actor: Any) -> dict[str, Any]:
-    """Capture FSDP2 `DTensor`/tensor weights, AdamW optimizer buffers, and RNG inside a policy worker."""
+    """Capture FSDP2 `DTensor`/tensor weights, CPU-offloaded AdamW optimizer buffers, and RNG."""
     import torch
 
     model = getattr(actor, "model", None) or getattr(actor, "policy", None)
     optimizer = getattr(actor, "optimizer", None)
     if model is None:
         raise RuntimeError("AutoModel policy actor exposes neither `.model` nor `.policy`")
-    params = [_local_tensor(p).detach().to("cpu", copy=True) for p in model.parameters()]
+    params = [_local_tensor(p).detach().cpu().clone() for p in model.parameters()]
     opt_state = (
-        copy.deepcopy(optimizer.state_dict()) if optimizer is not None and hasattr(optimizer, "state_dict") else None
+        _cpu_clone(optimizer.state_dict(), torch)
+        if optimizer is not None and hasattr(optimizer, "state_dict")
+        else None
     )
     snap = {
         "params": params,
@@ -625,9 +652,11 @@ def restore_automodel_s0(actor: Any) -> dict[str, Any]:
     if snap is None:
         raise RuntimeError("AutoModel S0 snapshot missing; call snapshot_automodel_s0 first")
     model = getattr(actor, "model", None) or getattr(actor, "policy", None)
+    if model is None:
+        raise RuntimeError("AutoModel policy actor exposes neither `.model` nor `.policy`")
     optimizer = getattr(actor, "optimizer", None)
     with torch.no_grad():
-        for param, saved in zip(model.parameters(), snap["params"]):
+        for param, saved in zip(model.parameters(), snap["params"], strict=True):
             local_p = _local_tensor(param)
             local_p.copy_(saved.to(device=local_p.device, dtype=local_p.dtype))
             param.grad = None
@@ -656,12 +685,14 @@ def coupled_nemo_rl_reset(
     if ray_mod is None:
         import ray as ray_mod
     trainers = discover_nemo_rl_actors(policy_group=policy_group)[1]
+    if not trainers:
+        raise RuntimeError("no trainer actors found for coupled S0 reset")
     rollouts = discover_nemo_rl_actors(rollout_group=rollout_group)[2]
     results = ray_mod.get(
         [h.__ray_call__.remote(restore_automodel_s0) for h in trainers.values()],
         timeout=timeout_s,
     )
-    if not all(isinstance(r, dict) and r.get("ok") for r in results):
+    if len(results) != len(trainers) or not all(isinstance(r, dict) and r.get("ok") for r in results):
         raise RuntimeError(f"AutoModel S0 restore failed: {results}")
     reset_items = ["weights_s0", "optimizer_state", "rng", "step_counter"]
     if callable(refit_fn):
@@ -670,15 +701,23 @@ def coupled_nemo_rl_reset(
     elif hasattr(policy_group, "refit_policy_generation"):
         policy_group.refit_policy_generation(rollout_group)
         reset_items.extend(["rollout_weights", "rollout_refit_version"])
+    elif rollout_group is not None or rollouts:
+        raise RuntimeError(
+            "coupled S0 reset requires refit_fn or policy_group.refit_policy_generation for rollout actors"
+        )
     if hasattr(rollout_group, "flush_cache"):
         rollout_group.flush_cache()
         reset_items.append("kv_cache")
     elif rollouts:
-        for h in rollouts.values():
-            if hasattr(h, "flush_cache"):
-                ray_mod.get(h.flush_cache.remote(), timeout=timeout_s)
-        if "kv_cache" not in reset_items:
-            reset_items.append("kv_cache")
+        missing_flush = [name for name, h in rollouts.items() if not hasattr(h, "flush_cache")]
+        if missing_flush:
+            raise RuntimeError(
+                f"rollout actor(s) missing flush_cache for coupled S0 reset: {missing_flush}"
+            )
+        ray_mod.get([h.flush_cache.remote() for h in rollouts.values()], timeout=timeout_s)
+        reset_items.append("kv_cache")
+    elif rollout_group is not None:
+        raise RuntimeError("rollout_group has no flush_cache or rollout actors for coupled S0 reset")
     return {"ok": True, "reset": reset_items}
 
 
