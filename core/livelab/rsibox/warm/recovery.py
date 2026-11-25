@@ -412,7 +412,7 @@ class AsyncShadowReplenisher:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         return False
-                    self._condition.wait(timeout=remaining)
+                    self._condition.wait(timeout=min(remaining, threading.TIMEOUT_MAX))
 
     def wake(self) -> None:
         """Wake any callers blocked in `wait(..., until=...)` so external predicates re-evaluate immediately."""
@@ -614,6 +614,13 @@ class StandbyShadowDriver:
         promoted = self._promote_fn(lab, store) or {}
         promote_cost_s = round(time.perf_counter() - started_at, 6)
         ok = bool(promoted.get("ok", True)) and not lab.session.poisoned()
+        if not ok and self._fallback_driver is not None:
+            fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
+            fallback_result["fallback_from"] = self.name
+            fallback_result["promote_error"] = promoted.get("error")
+            if fallback_result.get("ok") and self._replenish_fn is not None:
+                fallback_result["replenish"] = self._replenish_fn(lab, store)
+            return fallback_result
         replenish_outcome: Any = None
         if ok and self._replenish_fn is not None:
             replenish_outcome = self._replenish_fn(lab, store)
