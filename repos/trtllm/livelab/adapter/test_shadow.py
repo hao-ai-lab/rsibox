@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from adapter import ParkedTrtllmShadow, TrtllmShadowPromoter, park_shadow_lab
@@ -331,6 +332,68 @@ class TrtllmShadowPromoterTests(unittest.TestCase):
             capture_output=True, text=True, timeout=15, check=True,
         )
         self.assertEqual(proc_res.stdout.strip().splitlines()[-1], '{"bad": []}')
+
+    def test_promoter_close_wakes_replenisher_wait_and_fallback_restocks_after_failed_promote(self) -> None:
+        """Promoter.close() wakes blocked AsyncShadowReplenisher.wait() early, and fallback restocks shadows."""
+        primary = ToyTrtllmLab(ranks=2)
+        self.addCleanup(primary.close)
+        base_out = primary.check()["output"]
+
+        started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def _slow_rep(_lab: Any, _store: Any = None) -> dict[str, Any]:
+            started.set()
+            release.wait(timeout=5.0)
+            return {"ok": True}
+
+        rep = AsyncShadowReplenisher(_slow_rep)
+        self.addCleanup(rep.close)
+        rep.trigger(primary)
+        self.assertTrue(started.wait(timeout=3.0))
+
+        promoter = TrtllmShadowPromoter(replenish_fn=rep)
+        driver = promoter.as_recovery_driver(replenish_wait_timeout_s=5.0)
+        self.addCleanup(promoter.close)
+        wait_res: list[dict[str, Any]] = []
+        t = threading.Thread(target=lambda: wait_res.append(driver.respawn(primary)))
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.05)
+        promoter.close()
+        t.join(timeout=2.0)
+        elapsed = time.monotonic() - t0
+        self.assertFalse(t.is_alive())
+        self.assertLess(elapsed, 2.0, f"promoter.close() did not wake replenisher wait (took {elapsed:.3f}s)")
+        self.assertEqual(wait_res[0]["replenish"], "closed")
+        release.set()
+        rep.wait(timeout_s=2.0)
+
+        # Fallback restocks via trigger_replenish=True when promote() fails on dead sole shadow.
+        p_restock = TrtllmShadowPromoter()
+        self.addCleanup(p_restock.close)
+        sh_only = ToyTrtllmLab(ranks=2)
+        self.addCleanup(sh_only.close)
+        pk = p_restock.park_shadow(sh_only)
+        self.assertTrue(pk["ok"])
+        pk["hooks"].resume_after_restore = lambda _r: {"ok": False, "error": "pointer-shift"}
+        rep_calls = [0]
+
+        def _count_replenish(_lab: Any, _store: Any = None) -> dict[str, Any]:
+            rep_calls[0] += 1
+            return {"ok": True, "restocked": rep_calls[0]}
+
+        primary.recovery_driver = p_restock.as_recovery_driver(
+            replenish_fn=_count_replenish,
+            fallback_driver=DefaultRespawnDriver(),
+        )
+        res = primary.reset("respawn")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["driver"], "default_respawn")
+        self.assertEqual(rep_calls[0], 1)
+        self.assertEqual(res.get("replenish"), {"ok": True, "restocked": 1})
+        self.assertEqual(primary.check()["output"], base_out)
 
 
 if __name__ == "__main__":

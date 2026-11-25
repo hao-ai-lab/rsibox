@@ -15,6 +15,7 @@ import contextlib
 import os
 import threading
 import time
+import weakref
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -290,6 +291,8 @@ class _TrtllmShadowDriver(StandbyShadowDriver):
     def _guard_async_replenisher(
         self, async_replenisher: Any, lab: Any, store: Any, *, reason: str, started_at: float
     ) -> dict[str, Any] | None:
+        if isinstance(async_replenisher, AsyncShadowReplenisher):
+            self.promoter._track_replenisher(async_replenisher)
         if self.promoter.is_closed():
             return self._closed_response(lab, store, reason=reason, started_at=started_at)
         state = async_replenisher.status()
@@ -402,7 +405,7 @@ class _TrtllmShadowDriver(StandbyShadowDriver):
         ok = bool(promoted.get("ok", False)) and not poisoned
 
         if not ok and self._fallback_driver is not None:
-            fb = self._run_fallback(lab, store, reason=reason, trigger_replenish=False)
+            fb = self._run_fallback(lab, store, reason=reason, trigger_replenish=True)
             fb["promote_error"] = promoted.get("error")
             return fb
 
@@ -441,10 +444,27 @@ class TrtllmShadowPromoter:
         self._provider_lock = threading.Lock()
         self._closed = False
         self._shadows: collections.deque[ParkedTrtllmShadow] = collections.deque()
+        self._attached_replenishers: weakref.WeakSet[Any] = weakref.WeakSet()
         if shadow is not None:
             self.register_shadow(shadow)
         self._shadow_provider = shadow_provider
         self._replenish_fn = replenish_fn
+
+    def _track_replenisher(self, replenisher: Any) -> None:
+        if replenisher is None:
+            return
+        with self._lock:
+            self._attached_replenishers.add(replenisher)
+            already_closed = self._closed
+        if already_closed:
+            self._wake_replenisher(replenisher)
+
+    @staticmethod
+    def _wake_replenisher(replenisher: Any) -> None:
+        wake_fn = getattr(replenisher, "wake", None)
+        if callable(wake_fn):
+            with contextlib.suppress(Exception):
+                wake_fn()
 
     def _entry_is_clean_standby(self, entry: ParkedTrtllmShadow) -> bool:
         return (
@@ -692,6 +712,9 @@ class TrtllmShadowPromoter:
     ) -> StandbyShadowDriver:
         """Build a promoter-aware `StandbyShadowDriver` (deferring primary stop until candidate validation)."""
         effective_replenish = replenish_fn if replenish_fn is not None else self._replenish_fn
+        async_rep = _resolve_async_replenisher(effective_replenish)
+        if async_rep is not None:
+            self._track_replenisher(async_rep)
         ready_fn = self.pending_count if self._shadow_provider is None else None
         return _TrtllmShadowDriver(
             self,
@@ -707,6 +730,9 @@ class TrtllmShadowPromoter:
             self._closed = True
             remaining = list(self._shadows)
             self._shadows.clear()
+            replenishers = list(self._attached_replenishers)
+        for rep in replenishers:
+            self._wake_replenisher(rep)
         for entry in remaining:
             _close_shadow_quietly(entry.lab)
 

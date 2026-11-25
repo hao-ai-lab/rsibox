@@ -48,10 +48,13 @@ class Client:
                 return {**json.loads(resp.read()), "http": resp.status}
         except urllib.error.HTTPError as exc:
             try:
-                payload = json.loads(exc.read())
-            except ValueError:
-                payload = {"ok": False, "error": str(exc)}
-            return {**payload, "http": exc.code}
+                try:
+                    payload = json.loads(exc.read())
+                except ValueError:
+                    payload = {"ok": False, "error": str(exc)}
+                return {**payload, "http": exc.code}
+            finally:
+                exc.close()
         except (OSError, ValueError) as exc:
             return {"ok": False, "http": 0, "error": f"{type(exc).__name__}: {exc}"}
 
