@@ -1,6 +1,6 @@
 # Contributing to rsibox
 
-Thank you for your interest in contributing to **rsibox (rsibox)**!
+Thank you for your interest in contributing to **rsibox**!
 
 ## Getting Started
 
@@ -12,14 +12,15 @@ cd rsibox
 python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 
-# Verify your local environment and run the 11-case toy conformance suite
+# Verify your local environment and run the toy sandbox verification suite
+# (checks repeatability, live execution proof, fresh-process parity, safe rollback, and fault recovery)
 python3 -m rsibox doctor
 python3 -m rsibox conformance toy
 ```
 
 ## Running Tests
 
-Before opening a pull request, run the CPU test suites relevant to your change (full list in [`README.md`](README.md#tests) and [`.github/workflows/cpu-tests.yml`](.github/workflows/cpu-tests.yml)):
+Before opening a pull request, run the CPU test suites relevant to your change (overview in [`docs/concepts.md`](docs/concepts.md), full CI matrix in [`.github/workflows/cpu-tests.yml`](.github/workflows/cpu-tests.yml)):
 
 ```sh
 python3 -m unittest discover -s core/livelab/kernel -t core/livelab

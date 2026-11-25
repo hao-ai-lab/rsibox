@@ -1,0 +1,58 @@
+# RSIBox Concepts
+
+`rsibox` is a live hot-reload sandbox for ML engines. Instead of paying a multi-minute cold restart on every edit to reload model weights and re-capture CUDA graphs, it swaps changes directly into the running engine, proves the new code ran, and rolls back bit-for-bit on undo.
+
+## Product vs. Runtime: `rsibox` and `core/livelab`
+
+- **`rsibox` (CLI & HTTP box):** The user-facing package, CLI (`rsibox up`, `install`, `check`, `uninstall`), and local HTTP daemon that coding agents and developers drive.
+- **`core/livelab/` (internal runtime):** The engine-agnostic standard-library runtime inside this repository. Every engine adapter under `repos/<engine>/livelab/` implements the shared five-verb contract in [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md): `install`, `check`, `reset`, `uninstall`, and `status`.
+
+## Hot-Reload Layers (Cheapest First)
+
+RSIBox applies each edit at the lowest layer that can safely update what the hardware actually runs:
+
+1. **Live config & Python bytecode (`~4–90 ms`):** Update runtime scheduler flags in process or atomically swap Python function code objects across all GPU ranks between steps.
+2. **Triton kernels (`@triton.jit`):** Rebuild modified Triton kernels and any callers that inline them, while keeping the prior binaries cached for instant undo.
+3. **Selective CUDA graph recapture (`~0.5–3.7 s`):** Re-capture only the CUDA graphs touched by an edit instead of restarting the worker process.
+4. **C++/CUDA (`.cu`) side-library reload (`~7–19 s`):** Compile edited native kernels into a versioned side library, rebind PyTorch ops, and recapture affected graphs.
+5. **Warm fork / Dynamo GMS & Snapshot fallback (`~0.3–7 s`):** When an edit crosses a process boundary or crashes a worker, fall back to a pre-warmed fork server or NVIDIA Dynamo GPU Memory Service (GMS) and Snapshot restore so weights stay resident in GPU memory.
+
+## How a Live Edit Flows
+
+Every live edit runs as an atomic two-phase transaction across all worker ranks:
+
+1. **Stage (while the engine runs):** Parse the edited module, verify the live base matches, and check for unsupported changes without interrupting active inference or training steps.
+2. **Commit (in a step gap):** Pause briefly between steps so every rank swaps together—or aborts together if any rank hits a conflict.
+3. **Verify & undo:** Run `rsibox check` to confirm output and execution proof, then keep the change or call `rsibox uninstall` to revert cleanly.
+
+## Execution Proof (`witness`)
+
+Swapping a function in memory does not prove the workload ever executed it. Every live swap inserts a lightweight call counter (`witness`) on every rank so `rsibox check` distinguishes real execution (`proven: True`) from unreachable or startup-only code (`proven: False` with `zero_witness`).
+
+## Journaled Rollback
+
+Before touching live state, each rank records the exact inverse of every mutation in an ordered journal. Calling `rsibox uninstall` replays the journal in reverse order—restoring original Python code objects, cached Triton binaries, and CUDA graphs without recompiling or restarting.
+
+## Restart Boundaries
+
+Long-lived state (constructors, module-level constants, changed closures, or launch flags) cannot be patched safely in place. RSIBox checks every patch before mutating state, refuses unsupported edits fail-closed, and names the cheapest restart boundary that handles them. See [`docs/mechanisms.md`](mechanisms.md) and [`docs/kernels-and-graphs.md`](kernels-and-graphs.md).
+
+## The 11-Check Verification Suite
+
+Every engine adapter must pass 11 deterministic checks ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) before its measurements count:
+
+- **Repeatability (`c0`):** Repeated checks after state resets produce identical outputs.
+- **Execution & fresh parity (`c1`–`c3`, `c10`):** Edits execute on every rank, match a fresh process started from the edited files, and report `zero_witness` when code never runs.
+- **Safe refusal & rollback (`c4`–`c7`, `c9`):** Unsupported or mid-fault edits refuse or roll back cleanly, and repeated install/undo cycles restore exact base code identity.
+- **Fault detection & recovery (`c8`):** Crashed, hung, lost, or tampered workers mark the sandbox `poisoned` and block edits until respawned.
+
+## Multi-Agent GPU Pool
+
+When multiple coding agents share a small GPU budget, `SandboxPool` multiplexes concurrent workers across warm slots with priority scheduling, elastic role borrowing, per-agent fault isolation, and hash-chained trace logs (`112/112` verified traces; see [`docs/agent-teams-and-contention.md`](agent-teams-and-contention.md)).
+
+## Where to Go Next
+
+- [`docs/engines.md`](engines.md): supported ML engines, measured speedups, and repository layout.
+- [`docs/mechanisms.md`](mechanisms.md): full restart-boundary table, Dynamo GMS + Snapshot benchmarks, and CPU test commands.
+- [`docs/kernels-and-graphs.md`](kernels-and-graphs.md): deep dive into bytecode swaps, Triton kernel rebuilds, and CUDA graph replay.
+
