@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Any
 import unittest
 from unittest import mock
 
@@ -2581,12 +2582,12 @@ class SandboxPoolTests(unittest.TestCase):
             eval_got: list[str] = []
             eval_errs: list[BaseException] = []
 
-            def wait_eval() -> None:
+            def wait_eval(_role_pool=role_pool, _eval_got=eval_got, _eval_errs=eval_errs) -> None:
                 try:
-                    with role_pool.lease("agent-x", role="eval", timeout_s=3.0) as el:
-                        eval_got.append(el.slot_id)
+                    with _role_pool.lease("agent-x", role="eval", timeout_s=3.0) as el:
+                        _eval_got.append(el.slot_id)
                 except BaseException as err:
-                    eval_errs.append(err)
+                    _eval_errs.append(err)
 
             t_ev = threading.Thread(target=wait_eval)
             t_ev.start()
@@ -4022,6 +4023,296 @@ class SandboxPoolTests(unittest.TestCase):
         self.addCleanup(p_zero.close)
         self.assertTrue(p_zero.drain_slot("z0")["drained"])
         self.assertEqual(p_zero.slot_states(), [])
+
+    def test_init_rejects_box_adapter_aliasing_non_ready_box_and_fenced_proxy(self) -> None:
+        """Regression for P2: SandboxPool.__init__ unwraps _BoxLabAdapter, rejects non-ready Box,
+        rejects _FencedLabProxy, detects duplicate underlying Box/Lab IDs, and avoids mutating slot.box."""
+        box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box.boot()
+        self.addCleanup(box.close)
+        s0 = PoolSlot("s0", box, role="dev")
+        s1 = PoolSlot("s1", s0.lab, role="dev")
+        with self.assertRaises(ValueError):
+            SandboxPool([s0, s1])
+        self.assertIsNone(s1.box)
+
+        box2 = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box2.boot()
+        adapter = PoolSlot("tmp", box2).lab
+        box2.close()
+        closed_slot = PoolSlot("s-closed", adapter)
+        with self.assertRaises(ValueError):
+            SandboxPool([closed_slot])
+        self.assertIsNone(closed_slot.box)
+
+        pool = SandboxPool([PoolSlot("live", self._make_toy_lab())])
+        self.addCleanup(pool.close)
+        with pool.acquire("holder") as lease:
+            with self.assertRaises(TypeError):
+                SandboxPool([PoolSlot("fenced", lease.lab)])
+
+    def test_fenced_proxy_blocks_internal_attrs_delattr_and_subobjects(self) -> None:
+        """Regression for P3: _FencedLabProxy blocks _lease/_target/__dict__, fences __delattr__,
+        and wraps returned sub-objects with callable methods (e.g. .session) in a fenced sub-proxy."""
+        lab = self._make_toy_lab()
+        pool = SandboxPool([PoolSlot("s0", lab)], drain_timeout_s=0.1)
+        self.addCleanup(pool.close)
+
+        lease = pool.acquire("agent-1")
+        for internal_attr in ("_target", "_lease", "__dict__"):
+            with self.assertRaises(PoolError):
+                getattr(lease.lab, internal_attr)
+        sub_session = lease.lab.session
+        with self.assertRaises(PoolError):
+            _ = sub_session._target
+        with self.assertRaises(AttributeError):
+            del lease.lab._target
+        self.assertEqual(lease.lab.status()["state"], "base")
+
+        lease.release()
+        with self.assertRaises(PoolError):
+            sub_session.fault("participant_failed", "post-release-poison", "clean")
+        self.assertEqual(lab.status()["state"], "base")
+        with self.assertRaises(PoolError):
+            del lease.lab._target
+        with self.assertRaises(PoolError):
+            _ = lease.lab._target
+
+    def test_circuit_breaker_out_of_order_finish_mono_preserves_quarantine_and_window(self) -> None:
+        """Regression for P4: out-of-order _finish_slot completion after _append_trace I/O must
+        neither shrink an active quarantine deadline nor falsely trip a sliding fault window."""
+        # A. Out-of-order stale release must not shrink active _agent_quarantined_until.
+        now = [100.0]
+        l0, l1 = self._make_toy_lab(), self._make_toy_lab()
+        for lx in (l0, l1):
+            orig_r = lx.reset
+            lx.reset = lambda kind="state", _o=orig_r: {"ok": False, "error": "fail"} if kind == "respawn" else _o(kind)  # type: ignore[method-assign]
+        pool = SandboxPool(
+            [PoolSlot("s0", l0), PoolSlot("s1", l1)],
+            clock=lambda: now[0],
+            max_agent_faults=1,
+            agent_cooldown_s=1.0,
+        )
+        self.addCleanup(pool.close)
+        lease0 = pool.acquire("agent-x")
+        lease1 = pool.acquire("agent-x")
+
+        entered_trace = threading.Event()
+        allow_trace = threading.Event()
+        self.addCleanup(allow_trace.set)
+        orig_append = pool._append_trace
+
+        def slow_append(record: dict[str, Any]) -> dict[str, Any]:
+            if record["slot_id"] == "s0":
+                entered_trace.set()
+                allow_trace.wait(timeout=5.0)
+            return orig_append(record)
+
+        pool._append_trace = slow_append  # type: ignore[method-assign]
+
+        def poison_release(target_lease: Any) -> None:
+            try:
+                target_lease.lab.session.fault("participant_failed", "boom", "clean")
+            finally:
+                target_lease.release()
+
+        t0 = threading.Thread(target=poison_release, args=(lease0,))
+        t0.start()
+        self.assertTrue(entered_trace.wait(timeout=5.0))
+        now[0] = 102.0
+        poison_release(lease1)
+        self.assertEqual(pool._agent_quarantined_until.get("agent-x"), 103.0)
+        allow_trace.set()
+        t0.join(timeout=5.0)
+        self.assertFalse(t0.is_alive())
+        self.assertEqual(pool._agent_quarantined_until.get("agent-x"), 103.0)
+        self.assertEqual(pool.metrics()["quarantined_agents"], ["agent-x"])
+
+        # B. Stale fault outside agent_fault_window_s completing late must not falsely trip breaker.
+        now_w = [100.0]
+        w0, w1 = self._make_toy_lab(), self._make_toy_lab()
+        for wx in (w0, w1):
+            orig_rw = wx.reset
+            wx.reset = lambda kind="state", _o=orig_rw: {"ok": False, "error": "fail"} if kind == "respawn" else _o(kind)  # type: ignore[method-assign]
+        wpool = SandboxPool(
+            [PoolSlot("s0", w0), PoolSlot("s1", w1)],
+            clock=lambda: now_w[0],
+            max_agent_faults=2,
+            agent_fault_window_s=1.0,
+            agent_cooldown_s=5.0,
+        )
+        self.addCleanup(wpool.close)
+        wl0 = wpool.acquire("agent-w")
+        wl1 = wpool.acquire("agent-w")
+
+        w_entered = threading.Event()
+        w_allow = threading.Event()
+        self.addCleanup(w_allow.set)
+        orig_w_append = wpool._append_trace
+
+        def slow_w_append(record: dict[str, Any]) -> dict[str, Any]:
+            if record["slot_id"] == "s0":
+                w_entered.set()
+                w_allow.wait(timeout=5.0)
+            return orig_w_append(record)
+
+        wpool._append_trace = slow_w_append  # type: ignore[method-assign]
+        tw0 = threading.Thread(target=poison_release, args=(wl0,))
+        tw0.start()
+        self.assertTrue(w_entered.wait(timeout=5.0))
+        now_w[0] = 102.0
+        poison_release(wl1)
+        w_allow.set()
+        tw0.join(timeout=5.0)
+        self.assertFalse(tw0.is_alive())
+        self.assertEqual(wpool.metrics()["quarantined_agents"], [])
+
+    def test_append_trace_repairs_missing_trailing_newline(self) -> None:
+        """Regression for P5: _append_trace writes a separator newline if an existing JSONL file lacks one."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = os.path.join(tmpdir, "trace.jsonl")
+            p1 = SandboxPool([PoolSlot("s0", self._make_toy_lab())], trace_path=trace_path)
+            self.addCleanup(p1.close)
+            self.assertTrue(p1.run_isolated("a1", lambda lab, _l: lab.check())["ok"])
+            p1.close()
+
+            with open(trace_path, encoding="utf-8") as handle:
+                content = handle.read().rstrip("\n")
+            with open(trace_path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+            self.assertTrue(verify_trace(trace_path)["ok"])
+
+            p2 = SandboxPool([PoolSlot("s0", self._make_toy_lab())], trace_path=trace_path)
+            self.addCleanup(p2.close)
+            self.assertTrue(p2.run_isolated("a2", lambda lab, _l: lab.check())["ok"])
+            p2.close()
+
+            verified = verify_trace(trace_path)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(verified["count"], 2)
+
+    def test_dispatch_idle_slots_generalist_avoids_stranding_role_waiter(self) -> None:
+        """Regression for P6: Pass 1 generalist dispatch prefers an idle slot not needed by
+        remaining uncapped primary-role waiters when multiple idle slots are available."""
+        s_dev = PoolSlot("s-dev", self._make_toy_lab(), role="dev")
+        s_eval = PoolSlot("s-eval", self._make_toy_lab(), role="eval")
+        pool = SandboxPool([s_dev, s_eval], max_slots_per_agent=1)
+        self.addCleanup(pool.close)
+
+        h_dev = pool.acquire("agent-a", role="dev", timeout_s=1.0)
+        h_eval = pool.acquire("agent-b", role="eval", timeout_s=1.0)
+        gen_got: list[str] = []
+        dev_res: list[dict[str, Any]] = []
+
+        t_gen = threading.Thread(
+            target=lambda: gen_got.append(
+                pool.run_isolated("agent-a", lambda _lab, lease: lease.slot_id, role=None, priority=100, timeout_s=2.0)["slot_id"]
+            )
+        )
+        t_dev = threading.Thread(
+            target=lambda: dev_res.append(
+                pool.run_isolated("agent-c", lambda lab, _l: lab.check(), role="dev", priority=1, timeout_s=1.0)
+            )
+        )
+        t_gen.start()
+        t_dev.start()
+        self._wait_for_waiters(pool, 2)
+
+        h_eval.release()
+        h_dev.release()
+        t_gen.join(timeout=3.0)
+        t_dev.join(timeout=3.0)
+        self.assertFalse(t_gen.is_alive())
+        self.assertFalse(t_dev.is_alive())
+        self.assertEqual(gen_got, ["s-eval"])
+        self.assertTrue(dev_res and dev_res[0]["ok"], dev_res)
+        self.assertEqual(dev_res[0]["slot_id"], "s-dev")
+
+    def test_undrained_release_defers_close_drain_and_blocks_heal_until_call_exits(self) -> None:
+        """Regression for P7: an undrained lease with an active fenced call defers close(close_labs=True)
+        and drain_slot(close_lab=True) and rejects heal_slot() until _active_calls reaches 0."""
+        # A. heal_slot refusal + close(close_labs=True) deferral.
+        lab1 = self._make_toy_lab()
+        entered1, allow1 = threading.Event(), threading.Event()
+        self.addCleanup(allow1.set)
+        events1: list[str] = []
+        orig_check1, orig_close1 = lab1.check, lab1.close
+
+        def slow_check1(workload: Any = None) -> dict[str, Any]:
+            events1.append("check_start")
+            entered1.set()
+            allow1.wait(timeout=5.0)
+            res = orig_check1(workload)
+            events1.append("check_end")
+            return res
+
+        def tracked_close1() -> None:
+            events1.append("close_called")
+            orig_close1()
+
+        lab1.check = slow_check1  # type: ignore[method-assign]
+        lab1.close = tracked_close1  # type: ignore[method-assign]
+        pool1 = SandboxPool([PoolSlot("s0", lab1)], close_labs=True, drain_timeout_s=0.05)
+        self.addCleanup(pool1.close)
+
+        lease1 = pool1.acquire("agent-1")
+        events1.clear()
+        t1 = threading.Thread(target=lambda: lease1.lab.check())
+        t1.start()
+        self.assertTrue(entered1.wait(timeout=5.0))
+
+        rec1 = lease1.release()
+        self.assertEqual(rec1["status_after"], "quarantined")
+        with self.assertRaises(PoolError):
+            pool1.heal_slot("s0")
+        pool1.close(close_labs=True)
+        self.assertNotIn("close_called", events1)
+        allow1.set()
+        t1.join(timeout=5.0)
+        self.assertFalse(t1.is_alive())
+        self.assertEqual(events1.count("close_called"), 1)
+        self.assertLess(events1.index("check_end"), events1.index("close_called"))
+
+        # B. drain_slot(close_lab=True) deferral.
+        lab2 = self._make_toy_lab()
+        entered2, allow2 = threading.Event(), threading.Event()
+        self.addCleanup(allow2.set)
+        events2: list[str] = []
+        orig_check2, orig_close2 = lab2.check, lab2.close
+
+        def slow_check2(workload: Any = None) -> dict[str, Any]:
+            events2.append("check_start")
+            entered2.set()
+            allow2.wait(timeout=5.0)
+            res = orig_check2(workload)
+            events2.append("check_end")
+            return res
+
+        def tracked_close2() -> None:
+            events2.append("close_called")
+            orig_close2()
+
+        lab2.check = slow_check2  # type: ignore[method-assign]
+        lab2.close = tracked_close2  # type: ignore[method-assign]
+        pool2 = SandboxPool([PoolSlot("s0", lab2)], drain_timeout_s=0.05)
+        self.addCleanup(pool2.close)
+
+        lease2 = pool2.acquire("agent-2")
+        events2.clear()
+        t2 = threading.Thread(target=lambda: lease2.lab.check())
+        t2.start()
+        self.assertTrue(entered2.wait(timeout=5.0))
+
+        rec2 = lease2.release()
+        self.assertEqual(rec2["status_after"], "quarantined")
+        dr = pool2.drain_slot("s0", close_lab=True)
+        self.assertTrue(dr["ok"] and dr["drained"])
+        self.assertNotIn("close_called", events2)
+        allow2.set()
+        t2.join(timeout=5.0)
+        self.assertFalse(t2.is_alive())
+        self.assertEqual(events2.count("close_called"), 1)
+        self.assertLess(events2.index("check_end"), events2.index("close_called"))
 
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:

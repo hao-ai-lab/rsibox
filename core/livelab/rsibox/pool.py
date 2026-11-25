@@ -5,7 +5,7 @@ strict priority queueing (FIFO tie-break), role routing, fenced leases, failover
 """
 from __future__ import annotations
 
-from collections import deque, namedtuple
+from collections import abc as collections_abc, deque, namedtuple
 from fractions import Fraction
 import contextlib, dataclasses, hashlib, json, math, operator, os, threading, time, types
 from typing import Any, Callable, Iterator, Sequence
@@ -165,7 +165,7 @@ def _chain_record(record: dict[str, Any], last_sequence: int, last_hash: str) ->
     return chained, next_sequence, digest
 def _read_trace_tail(handle: Any) -> tuple[int, str]:
     handle.seek(0)
-    last_line = next((line for line in reversed(handle.readlines()) if line.strip()), "")
+    last_line = next((line for line in reversed(handle.readlines()) if line.strip()), b"")
     if not last_line:
         return 0, _GENESIS_HASH
     try:
@@ -217,34 +217,91 @@ class _BoxLabAdapter:
             raise AttributeError(f"box is not ready; cannot access {attribute_name!r}")
         return getattr(self._box.lab, attribute_name)
 
-class _FencedLabProxy:
-    """Fenced proxy around a leased `Lab` that tracks in-flight calls and rejects post-release access."""
+_BLOCKED_PROXY_ATTRS = frozenset({"_lease", "_target", "__dict__", "__slots__"})
+
+
+def _run_fenced_call(lease: SlotLease, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    with lease._call_cond:
+        if lease._released:
+            raise PoolError(f"lease for slot {lease._slot_id!r} has already been released")
+        lease._active_calls += 1
+    try:
+        return operation(*args, **kwargs)
+    finally:
+        notify_drained = False
+        with lease._call_cond:
+            lease._active_calls -= 1
+            if lease._active_calls == 0:
+                lease._call_cond.notify_all()
+                notify_drained = lease._released
+        if notify_drained:
+            lease._pool._on_undrained_lease_drained(lease)
+
+
+def _should_wrap_fenced_subproxy(value: Any) -> bool:
+    if value is None or isinstance(
+        value,
+        (bool, int, float, complex, Fraction, str, bytes, bytearray, memoryview,
+         tuple, list, dict, set, frozenset, types.MappingProxyType, collections_abc.Mapping),
+    ):
+        return False
+    for name in dir(value):
+        if name.startswith("__") and name.endswith("__"):
+            continue
+        with contextlib.suppress(Exception):
+            if callable(getattr(value, name)):
+                return True
+    return False
+
+
+class _FencedProxyBase:
+    """Shared fenced attribute/call proxy blocking internal proxy attributes and post-release access."""
+    __slots__ = ("_lease", "_target")
+
     def __init__(self, lease: SlotLease, target: Any) -> None:
         object.__setattr__(self, "_lease", lease)
         object.__setattr__(self, "_target", target)
-    def _run_fenced(self, operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        lease = self._lease
-        with lease._call_cond:
-            if lease._released:
-                raise PoolError(f"lease for slot {lease._slot_id!r} has already been released")
-            lease._active_calls += 1
-        try:
-            return operation(*args, **kwargs)
-        finally:
-            with lease._call_cond:
-                lease._active_calls -= 1
-                if lease._active_calls == 0:
-                    lease._call_cond.notify_all()
-    def close(self) -> None:
-        self._run_fenced(lambda: None)
-        raise PoolError("cannot close a pooled lab via SlotLease; call SandboxPool.close()")
-    def __getattr__(self, attribute_name: str) -> Any:
-        value = self._run_fenced(getattr, self._target, attribute_name)
-        if not callable(value):
-            return value
-        return lambda *args, **kwargs: self._run_fenced(value, *args, **kwargs)
+
+    def __getattribute__(self, attribute_name: str) -> Any:
+        if attribute_name == "__class__":
+            return object.__getattribute__(self, "__class__")
+        if attribute_name in _BLOCKED_PROXY_ATTRS:
+            raise PoolError(f"cannot access internal proxy attribute {attribute_name!r}")
+        if type(self) is _FencedLabProxy and attribute_name == "close":
+            return object.__getattribute__(self, "close")
+        lease = object.__getattribute__(self, "_lease")
+        target = object.__getattribute__(self, "_target")
+        value = _run_fenced_call(lease, getattr, target, attribute_name)
+        if callable(value):
+            return lambda *args, **kwargs: _run_fenced_call(lease, value, *args, **kwargs)
+        if _should_wrap_fenced_subproxy(value):
+            return _FencedSubProxy(lease, value)
+        return value
+
     def __setattr__(self, attribute_name: str, value: Any) -> None:
-        self._run_fenced(setattr, self._target, attribute_name, value)
+        lease = object.__getattribute__(self, "_lease")
+        target = object.__getattribute__(self, "_target")
+        _run_fenced_call(lease, setattr, target, attribute_name, value)
+
+    def __delattr__(self, attribute_name: str) -> None:
+        lease = object.__getattribute__(self, "_lease")
+        target = object.__getattribute__(self, "_target")
+        _run_fenced_call(lease, delattr, target, attribute_name)
+
+
+class _FencedSubProxy(_FencedProxyBase):
+    """Fenced proxy for non-scalar sub-objects returned from a leased `Lab` (e.g., `.session`)."""
+    __slots__ = ()
+
+
+class _FencedLabProxy(_FencedProxyBase):
+    """Fenced proxy around a leased `Lab` that tracks in-flight calls and rejects post-release access."""
+    __slots__ = ()
+
+    def close(self) -> None:
+        lease = object.__getattribute__(self, "_lease")
+        _run_fenced_call(lease, lambda: None)
+        raise PoolError("cannot close a pooled lab via SlotLease; call SandboxPool.close()")
 
 @dataclasses.dataclass(frozen=True)
 class _SlotView:
@@ -270,7 +327,8 @@ class PoolSlot:
 
 class _SlotState:
     __slots__ = ("slot", "slot_id", "role", "lab", "view", "quarantined", "quarantine_reason",
-                 "draining", "drain_event", "in_use", "owner_agent_id", "active_since", "dirty", "busy_s", "lab_closed")
+                 "draining", "drain_event", "in_use", "owner_agent_id", "active_since", "dirty",
+                 "busy_s", "lab_closed", "undrained_lease", "close_when_drained")
     def __init__(self, slot: PoolSlot) -> None:
         self.slot, self.slot_id, self.role, self.lab = slot, slot.slot_id, slot.role, slot.lab
         self.view = _SlotView(slot.slot_id, slot.role, types.MappingProxyType(dict(slot.metadata)))
@@ -281,6 +339,8 @@ class _SlotState:
         self.in_use, self.owner_agent_id, self.active_since, self.dirty, self.busy_s, self.lab_closed = (
             False, None, None, True, 0.0, False,
         )
+        self.undrained_lease: SlotLease | None = None
+        self.close_when_drained: bool = False
 
 class _Waiter:
     __slots__ = ("agent_id", "role", "fallback_roles", "priority", "enqueued_mono", "event",
@@ -331,6 +391,9 @@ class SlotLease:
         self._trace_record, self._trace_error = None, None
         self._lab_proxy: Any = _FencedLabProxy(self, slot_state.lab)
 
+    def _has_active_calls(self) -> bool:
+        with self._call_cond:
+            return self._active_calls > 0
     def release(self, error: str | BaseException | None = None) -> dict[str, Any]:
         return self._pool._release_lease(self, error=error)
     def __enter__(self) -> SlotLease: return self
@@ -362,16 +425,21 @@ class SandboxPool:
         if self._max_agent_faults is None and (self._agent_fault_window_s is not None or self._agent_cooldown_s is not None):
             raise ValueError("agent_fault_window_s and agent_cooldown_s require max_agent_faults")
         self._slots: dict[str, _SlotState] = {}
+        seen_ids: set[str] = set()
         seen_targets: set[int] = set()
+        normalized_slots: list[tuple[PoolSlot, Box | None]] = []
         for slot in slots:
-            if not isinstance(slot, PoolSlot):
-                raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
-            if slot.slot_id in self._slots:
+            unwrapped_box, raw_id = self._normalize_pool_slot(slot)
+            if slot.slot_id in seen_ids:
                 raise ValueError(f"duplicate slot_id: {slot.slot_id!r}")
-            raw_target = slot.box.lab if (slot.box is not None and slot.box.lab is not None) else (slot.box or slot.lab)
-            if id(raw_target) in seen_targets:
+            if raw_id in seen_targets:
                 raise ValueError(f"duplicate underlying lab/box for slot_id: {slot.slot_id!r}")
-            seen_targets.add(id(raw_target))
+            seen_ids.add(slot.slot_id)
+            seen_targets.add(raw_id)
+            normalized_slots.append((slot, unwrapped_box))
+        for slot, unwrapped_box in normalized_slots:
+            if slot.box is None and unwrapped_box is not None:
+                slot.box = unwrapped_box
             self._slots[slot.slot_id] = _SlotState(slot)
         self._trace_path, self._clock, self._wall_clock = trace_path, clock, wall_clock
         self._close_labs, self._created_mono = close_labs, clock()
@@ -384,6 +452,7 @@ class SandboxPool:
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         self._agent_active_slots: dict[str, int] = {}
         self._inflight_heal_targets: set[int] = set()
+        self._undrained_slots: dict[int, _SlotState] = {}
         self._agent_faults: dict[str, deque[float]] = {}
         self._agent_quarantined_until: dict[str, float | None] = {}
         self._agent_last_reset_mono: dict[str, float] = {}
@@ -415,9 +484,29 @@ class SandboxPool:
         self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
     def _mark_lab_to_close_locked(self, slot_state: _SlotState) -> Any | None:
         if self._closed and self._close_labs and not slot_state.lab_closed:
+            if slot_state.undrained_lease is not None:
+                if slot_state.undrained_lease._has_active_calls():
+                    slot_state.close_when_drained = True
+                    return None
+                self._undrained_slots.pop(id(slot_state.undrained_lease), None)
+                slot_state.undrained_lease = None
             slot_state.lab_closed = True
             return slot_state.lab
         return None
+
+    def _on_undrained_lease_drained(self, lease: SlotLease) -> None:
+        lab_to_close: Any | None = None
+        with self._lock:
+            slot_state = self._undrained_slots.get(id(lease))
+            if slot_state is None or slot_state.undrained_lease is not lease or lease._has_active_calls():
+                return
+            self._undrained_slots.pop(id(lease), None)
+            slot_state.undrained_lease = None
+            if (slot_state.close_when_drained or (self._closed and self._close_labs)) and not slot_state.lab_closed:
+                slot_state.lab_closed = True
+                slot_state.close_when_drained = False
+                lab_to_close = slot_state.lab
+        _close_quietly(lab_to_close)
 
     def _effective_priority(self, waiter: _Waiter, now_mono: float) -> int | float | Fraction:
         if self._priority_aging_s is None:
@@ -518,15 +607,30 @@ class SandboxPool:
         ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
         assigned_ids: set[int] = set()
         # Pass 1 (Tier 1): primary-role (or generalist) matches take unconditional precedence across all idle slots.
-        for _, _, waiter in ranked:
+        for idx, (_, _, waiter) in enumerate(ranked):
             if not idle_slots:
                 break
             if not self._agent_under_cap_locked(waiter.agent_id):
                 continue
-            matched = next(
-                (slot for slot in idle_slots if not slot.in_use and (waiter.role is None or slot.role == waiter.role)),
-                None,
-            )
+            if waiter.role is None:
+                needed_roles = {
+                    other.role
+                    for _, _, other in ranked[idx + 1:]
+                    if id(other) not in assigned_ids
+                    and other.role is not None
+                    and self._agent_under_cap_locked(other.agent_id)
+                }
+                matched = next(
+                    (slot for slot in idle_slots if not slot.in_use and slot.role not in needed_roles),
+                    None,
+                )
+                if matched is None:
+                    matched = next((slot for slot in idle_slots if not slot.in_use), None)
+            else:
+                matched = next(
+                    (slot for slot in idle_slots if not slot.in_use and slot.role == waiter.role),
+                    None,
+                )
             if matched is None:
                 continue
             assigned_ids.add(id(waiter))
@@ -621,7 +725,15 @@ class SandboxPool:
             return
         if fault_mono < self._agent_last_reset_mono.get(agent_id, -math.inf):
             return
-        self._prune_agent_state_locked(agent_id, fault_mono)
+        now_mono = self._safe_clock(fallback=fault_mono)
+        eval_mono = max(fault_mono, now_mono)
+        self._prune_agent_state_locked(agent_id, eval_mono)
+        if (
+            self._agent_fault_window_s is not None
+            and agent_id not in self._agent_quarantined_until
+            and max(0.0, eval_mono - fault_mono) > self._agent_fault_window_s
+        ):
+            return
         faults = self._agent_faults.setdefault(agent_id, deque())
         faults.append(fault_mono)
         if len(faults) < self._max_agent_faults:
@@ -629,17 +741,20 @@ class SandboxPool:
         if self._agent_cooldown_s is None:
             until: float | None = None
         else:
-            raw_until = fault_mono + self._agent_cooldown_s
+            raw_until = eval_mono + self._agent_cooldown_s
             if not math.isfinite(raw_until):
                 until = None
-            elif raw_until <= fault_mono:
-                next_val = math.nextafter(fault_mono, math.inf)
+            elif raw_until <= eval_mono:
+                next_val = math.nextafter(eval_mono, math.inf)
                 until = next_val if math.isfinite(next_val) else None
             else:
                 until = raw_until
+        if agent_id in self._agent_quarantined_until:
+            existing_until = self._agent_quarantined_until[agent_id]
+            until = None if (existing_until is None or until is None) else max(existing_until, until)
         self._agent_quarantined_until[agent_id] = until
         fault_count = max(len(faults), self._max_agent_faults)
-        retry_after = None if until is None else round(max(0.0, until - fault_mono), 6)
+        retry_after = None if until is None else round(max(0.0, until - eval_mono), 6)
         # Immediately reject any already-queued waiters from this tripped agent before slot handoff.
         remaining_waiters: deque[_Waiter] = deque()
         for waiter in self._waiters:
@@ -669,6 +784,24 @@ class SandboxPool:
             return was_quarantined
 
     @staticmethod
+    def _normalize_pool_slot(slot: Any) -> tuple[Box | None, int]:
+        if not isinstance(slot, PoolSlot):
+            raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
+        if isinstance(slot.lab, _FencedProxyBase):
+            raise TypeError("cannot add a PoolSlot backed by a fenced SlotLease.lab proxy")
+        unwrapped_box: Box | None = slot.box
+        if unwrapped_box is None and isinstance(slot.lab, _BoxLabAdapter):
+            unwrapped_box = slot.lab._box
+        if unwrapped_box is not None and unwrapped_box.state != "ready":
+            raise ValueError(f"Box for slot {slot.slot_id!r} must be ready (state={unwrapped_box.state!r})")
+        raw_target = (
+            unwrapped_box.lab
+            if (unwrapped_box is not None and unwrapped_box.lab is not None)
+            else (unwrapped_box or slot.lab)
+        )
+        return unwrapped_box, id(raw_target)
+
+    @staticmethod
     def _slot_raw_target(slot: PoolSlot) -> Any:
         return slot.box.lab if (slot.box is not None and slot.box.lab is not None) else (slot.box or slot.lab)
 
@@ -677,6 +810,8 @@ class SandboxPool:
 
         Runs cleanup/respawn outside the pool lock so healthy sibling slots continue serving
         uninterrupted, and immediately dispatches the healed slot to any waiting agents.
+        If healing aborts (`healed=False`) without attaching a caller-supplied replacement `lab`,
+        the caller retains ownership of that replacement `lab`.
         """
         if not isinstance(slot_id, str) or not slot_id.strip():
             raise ValueError("slot_id must be a non-empty string")
@@ -686,7 +821,7 @@ class SandboxPool:
         candidate_lab: Any = None
         new_raw_id: int | None = None
         if lab is not None:
-            if isinstance(lab, _FencedLabProxy):
+            if isinstance(lab, _FencedProxyBase):
                 raise TypeError("cannot pass a fenced SlotLease.lab proxy to heal_slot")
             if isinstance(lab, _BoxLabAdapter):
                 lab = lab._box
@@ -709,6 +844,11 @@ class SandboxPool:
                 raise ValueError(f"unknown slot_id: {slot_id!r}")
             if slot_state.in_use:
                 raise PoolError(f"slot {slot_id!r} is currently in use")
+            if slot_state.undrained_lease is not None:
+                if slot_state.undrained_lease._has_active_calls():
+                    raise PoolError(f"slot {slot_id!r} still has an active undrained call")
+                self._undrained_slots.pop(id(slot_state.undrained_lease), None)
+                slot_state.undrained_lease = None
             if slot_state.draining:
                 raise PoolError(f"slot {slot_id!r} is draining")
             if not slot_state.quarantined:
@@ -823,23 +963,9 @@ class SandboxPool:
 
     def add_slot(self, slot: PoolSlot) -> dict[str, Any]:
         """Dynamically attach a new warm `PoolSlot` online and immediately dispatch queued waiters."""
-        if not isinstance(slot, PoolSlot):
-            raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
+        unwrapped_box, raw_id = self._normalize_pool_slot(slot)
         if slot.quarantined:
             raise PoolError(f"slot {slot.slot_id!r} is quarantined; heal or create a fresh PoolSlot before adding")
-        if isinstance(slot.lab, _FencedLabProxy):
-            raise TypeError("cannot add a PoolSlot backed by a fenced SlotLease.lab proxy")
-        unwrapped_box: Box | None = slot.box
-        if unwrapped_box is None and isinstance(slot.lab, _BoxLabAdapter):
-            unwrapped_box = slot.lab._box
-        if unwrapped_box is not None and unwrapped_box.state != "ready":
-            raise ValueError(f"Box for slot {slot.slot_id!r} must be ready (state={unwrapped_box.state!r})")
-        raw_target = (
-            unwrapped_box.lab
-            if (unwrapped_box is not None and unwrapped_box.lab is not None)
-            else (unwrapped_box or slot.lab)
-        )
-        raw_id = id(raw_target)
         with self._lock:
             if self._closed:
                 raise PoolClosedError("SandboxPool is closed")
@@ -861,6 +987,22 @@ class SandboxPool:
                     self._handoff_waiter_locked(slot_state, candidate[1], now_mono)
             slot_count = len(self._slots)
         return {"ok": True, "slot_id": slot.slot_id, "role": slot.role, "slots": slot_count}
+
+    def _finalize_drained_slot_locked(self, slot_id: str, slot_state: _SlotState, *, close_lab: bool) -> tuple[Any | None, int]:
+        del self._slots[slot_id]
+        self._drained_slots += 1
+        slot_state.drain_event = None
+        lab_to_close: Any | None = None
+        if close_lab and not slot_state.lab_closed:
+            if slot_state.undrained_lease is not None:
+                if slot_state.undrained_lease._has_active_calls():
+                    slot_state.close_when_drained = True
+                    return None, len(self._slots)
+                self._undrained_slots.pop(id(slot_state.undrained_lease), None)
+                slot_state.undrained_lease = None
+            slot_state.lab_closed = True
+            lab_to_close = slot_state.lab
+        return lab_to_close, len(self._slots)
 
     def drain_slot(self, slot_id: str, *, timeout_s: float | None = 30.0, close_lab: bool = False) -> dict[str, Any]:
         """Gracefully stop scheduling `slot_id`, wait for any active lease to finish, and remove it."""
@@ -886,13 +1028,9 @@ class SandboxPool:
             slot_state.drain_event = drain_evt
             self._fail_stranded_waiters_locked()
             if not slot_state.in_use:
-                del self._slots[slot_id]
-                self._drained_slots += 1
-                slot_state.drain_event = None
-                if close_lab and not slot_state.lab_closed:
-                    slot_state.lab_closed = True
-                    lab_to_close = slot_state.lab
-                remaining_slots = len(self._slots)
+                lab_to_close, remaining_slots = self._finalize_drained_slot_locked(
+                    slot_id, slot_state, close_lab=close_lab,
+                )
                 immediate = True
             else:
                 immediate = False
@@ -947,13 +1085,9 @@ class SandboxPool:
                 slot_state.draining = False
                 slot_state.drain_event = None
                 raise PoolTimeoutError(f"timed out waiting {timeout_s}s for slot {slot_id!r} to drain")
-            del self._slots[slot_id]
-            self._drained_slots += 1
-            slot_state.drain_event = None
-            if close_lab and not slot_state.lab_closed:
-                slot_state.lab_closed = True
-                lab_to_close = slot_state.lab
-            remaining_slots = len(self._slots)
+            lab_to_close, remaining_slots = self._finalize_drained_slot_locked(
+                slot_id, slot_state, close_lab=close_lab,
+            )
         _close_quietly(lab_to_close)
         return {
             "ok": True,
@@ -967,13 +1101,26 @@ class SandboxPool:
 
     def _finish_slot(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                      *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0,
-                     skip_close: bool = False, faulted_agent_id: str | None = None) -> None:
+                     skip_close: bool = False, faulted_agent_id: str | None = None,
+                     undrained_lease: SlotLease | None = None) -> None:
         with self._lock:
+            slot_state = self._slots.get(slot_id)
+            still_undrained = undrained_lease is not None and undrained_lease._has_active_calls()
+            if slot_state is not None:
+                if still_undrained:
+                    slot_state.undrained_lease = undrained_lease
+                    self._undrained_slots[id(undrained_lease)] = slot_state
+                else:
+                    if slot_state.undrained_lease is not None:
+                        self._undrained_slots.pop(id(slot_state.undrained_lease), None)
+                    slot_state.undrained_lease = None
             if faulted_agent_id is not None:
                 self._record_agent_fault_locked(faulted_agent_id, finish_mono)
             self._total_recovery_s += extra_recovery_s
-            lab_to_close = self._complete_slot_locked(slot_id, finish_mono, healthy, reason,
-                                                      preserve_dirty=preserve_dirty, skip_close=skip_close)
+            lab_to_close = self._complete_slot_locked(
+                slot_id, finish_mono, healthy, reason,
+                preserve_dirty=preserve_dirty, skip_close=skip_close or still_undrained,
+            )
         _close_quietly(lab_to_close)
     def _cancel_waiter_locked(self, waiter: _Waiter) -> Any | None:
         waiter.cancelled = True
@@ -1280,19 +1427,27 @@ class SandboxPool:
                     cleanup.error if cleanup is not None else "lease release interrupted",
                     skip_close=undrained,
                     faulted_agent_id=lease._agent_id if caused_slot_fault else None,
+                    undrained_lease=lease if undrained else None,
                 )
             return dict(finalized)
     def _append_trace(self, record: dict[str, Any]) -> dict[str, Any]:
         with self._trace_lock:
             if self._trace_path:
                 os.makedirs(os.path.dirname(os.path.abspath(self._trace_path)), exist_ok=True)
-                with open(self._trace_path, "a+", encoding="utf-8") as handle:
+                with open(self._trace_path, "a+b") as handle:
                     fcntl and fcntl.flock(handle, fcntl.LOCK_EX)
                     try:
                         last_sequence, last_hash = _read_trace_tail(handle)
                         chained, next_seq, digest = _chain_record(record, last_sequence, last_hash)
                         handle.seek(0, os.SEEK_END)
-                        handle.write(json.dumps(chained, sort_keys=True, default=str) + "\n")
+                        needs_newline = False
+                        end_offset = handle.tell()
+                        if end_offset > 0:
+                            handle.seek(end_offset - 1, os.SEEK_SET)
+                            needs_newline = handle.read(1) != b"\n"
+                            handle.seek(0, os.SEEK_END)
+                        payload = (json.dumps(chained, sort_keys=True, default=str) + "\n").encode("utf-8")
+                        handle.write(b"\n" + payload if needs_newline else payload)
                         handle.flush()
                         os.fsync(handle.fileno())
                     finally:
