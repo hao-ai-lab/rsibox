@@ -1640,6 +1640,226 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertEqual(queued_eval_got, ["eval-queued:eval-0"])
         self.assertEqual(errors, [])
 
+    def test_priority_aging_prevents_low_priority_starvation_while_preserving_burst_priority(self):
+        """Golden case (starvation vs. aging): under continuous high-priority Eval arrivals,
+        static priority starves queued Dev (`priority=0`) behind every arriving Eval (`priority=10`).
+        With `priority_aging_s=0.5`, short bursts still favor Eval (`eff 12.0 > 6.0` at t=3.0),
+        but once Dev's wait exceeds `10 * 0.5 = 5.0 s`, Dev (`eff 12.0`) overtakes a newly arriving
+        Eval (`eff 10.0` at t=6.0) to guarantee bounded tail latency."""
+        lab_bad = self._make_toy_lab()
+        for bad_type in (True, False, "0.5"):
+            with self.assertRaises(TypeError):
+                SandboxPool([PoolSlot("s0", lab_bad)], priority_aging_s=bad_type)  # type: ignore[arg-type]
+        for bad_val in (0, 0.0, -1.0, float("nan"), float("inf"), float("-inf"), 10**400):
+            with self.assertRaises(ValueError):
+                SandboxPool([PoolSlot("s0", lab_bad)], priority_aging_s=bad_val)
+        # Positive integer priority_aging_s is accepted.
+        int_aging_pool = SandboxPool([PoolSlot("s-int", self._make_toy_lab())], priority_aging_s=1)
+        int_aging_pool.close()
+
+        # Deterministic fake-clock comparison: static (None) vs aged (0.5 s per +1 priority).
+        def run_scenario(priority_aging_s: float | None, *, late_arrival_s: float = 6.0) -> list[str]:
+            now = [0.0]
+            pool = SandboxPool(
+                [PoolSlot("slot-0", self._make_toy_lab())],
+                clock=lambda: now[0],
+                priority_aging_s=priority_aging_s,
+            )
+            self.addCleanup(pool.close)
+            order: list[str] = []
+            errors: list[BaseException] = []
+            eval_early_entered = threading.Event()
+            eval_early_release = threading.Event()
+            self.addCleanup(eval_early_release.set)
+
+            holder = pool.acquire("holder")
+
+            def run_agent(
+                agent_id: str,
+                priority: int,
+                gate: tuple[threading.Event, threading.Event] | None = None,
+            ) -> threading.Thread:
+                def worker() -> None:
+                    try:
+                        with pool.lease(agent_id, priority=priority, timeout_s=60.0):
+                            order.append(agent_id)
+                            if gate is not None:
+                                gate[0].set()
+                                gate[1].wait(timeout=5.0)
+                    except BaseException as err:
+                        errors.append(err)
+
+                worker_thread = threading.Thread(target=worker)
+                worker_thread.start()
+                return worker_thread
+
+            # t=0.0: dev-0 (priority=0) queues first.
+            dev_thread = run_agent("dev-0", 0)
+            self._wait_for_waiters(pool, 1)
+
+            # t=2.0: eval-early (priority=10) queues.
+            now[0] = 2.0
+            eval_early_thread = run_agent("eval-early", 10, gate=(eval_early_entered, eval_early_release))
+            self._wait_for_waiters(pool, 2)
+
+            # t=3.0: holder releases -> eval-early wins (aged eff 12.0 > dev eff 6.0; static 10 > 0).
+            now[0] = 3.0
+            holder.release()
+            self.assertTrue(eval_early_entered.wait(timeout=5.0))
+            self.assertEqual(order, ["eval-early"])
+
+            # At late_arrival_s: eval-late (priority=10) arrives while dev-0 has waited late_arrival_s.
+            now[0] = late_arrival_s
+            eval_late_thread = run_agent("eval-late", 10)
+            self._wait_for_waiters(pool, 2)
+            eval_early_release.set()
+
+            for worker_thread in (dev_thread, eval_early_thread, eval_late_thread):
+                worker_thread.join(timeout=5.0)
+                self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+            return order
+
+        self.assertEqual(run_scenario(None), ["eval-early", "eval-late", "dev-0"])
+        self.assertEqual(run_scenario(0.5, late_arrival_s=6.0), ["eval-early", "dev-0", "eval-late"])
+        # Exact effective-priority tie-break: at t=5.0, dev-0 (0 + 5.0/0.5 = 10.0) ties eval-late (10.0) -> FIFO wins.
+        self.assertEqual(run_scenario(0.5, late_arrival_s=5.0), ["eval-early", "dev-0", "eval-late"])
+
+        # Non-monotonic clock guard: high-10 enqueues at t=10.0, clock steps back to t=1.0, then mid-5
+        # enqueues at t=1.0. Without max(0.0, ...), high-10 would drop to 1.0 < 5.0 and lose to mid-5!
+        now_back = [10.0]
+        pool_back = SandboxPool(
+            [PoolSlot("slot-back", self._make_toy_lab())],
+            clock=lambda: now_back[0],
+            priority_aging_s=1.0,
+        )
+        self.addCleanup(pool_back.close)
+        holder_back = pool_back.acquire("holder")
+        back_order: list[str] = []
+        back_errors: list[BaseException] = []
+
+        def spawn_back(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool_back.lease(agent_id, priority=priority, timeout_s=60.0):
+                        back_order.append(agent_id)
+                except BaseException as err:
+                    back_errors.append(err)
+            worker_thread = threading.Thread(target=run)
+            worker_thread.start()
+            return worker_thread
+
+        high_thread = spawn_back("high-10", 10)
+        self._wait_for_waiters(pool_back, 1)
+        now_back[0] = 1.0  # stepped backwards relative to high-10's enqueued_mono=10.0
+        mid_thread = spawn_back("mid-5", 5)
+        self._wait_for_waiters(pool_back, 2)
+        holder_back.release()
+        for worker_thread in (high_thread, mid_thread):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(back_errors, [])
+        self.assertEqual(back_order, ["high-10", "mid-5"])
+
+        # Subnormal/tiny priority_aging_s & large int priority never collapse to float('inf') or lose ordering.
+        now_ext = [0.0]
+        pool_ext = SandboxPool(
+            [PoolSlot("slot-ext", self._make_toy_lab())],
+            clock=lambda: now_ext[0],
+            priority_aging_s=1e-308,
+        )
+        self.addCleanup(pool_ext.close)
+        holder_ext = pool_ext.acquire("holder")
+        ext_order: list[str] = []
+        ext_errors: list[BaseException] = []
+
+        def spawn_ext(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool_ext.lease(agent_id, priority=priority, timeout_s=60.0):
+                        ext_order.append(agent_id)
+                except BaseException as err:
+                    ext_errors.append(err)
+            worker_thread = threading.Thread(target=run)
+            worker_thread.start()
+            return worker_thread
+
+        low_ext_thread = spawn_ext("low-neg100", -100)
+        self._wait_for_waiters(pool_ext, 1)
+        high_ext_thread = spawn_ext("high-pos100", 100)
+        self._wait_for_waiters(pool_ext, 2)
+        now_ext[0] = 2.0  # 2.0 / 1e-308 would overflow IEEE-754 float64 to inf!
+        holder_ext.release()
+        for worker_thread in (low_ext_thread, high_ext_thread):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(ext_errors, [])
+        self.assertEqual(ext_order, ["high-pos100", "low-neg100"])
+
+        # Exact large-int priority ordering when priority_aging_s=None (> 2**53 precision check).
+        pool_big = SandboxPool([PoolSlot("slot-big", self._make_toy_lab())], priority_aging_s=None)
+        self.addCleanup(pool_big.close)
+        holder_big = pool_big.acquire("holder")
+        big_order: list[str] = []
+        big_errors: list[BaseException] = []
+
+        def spawn_big(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool_big.lease(agent_id, priority=priority, timeout_s=60.0):
+                        big_order.append(agent_id)
+                except BaseException as err:
+                    big_errors.append(err)
+            worker_thread = threading.Thread(target=run)
+            worker_thread.start()
+            return worker_thread
+
+        big_a = spawn_big("big-0", (1 << 60))
+        self._wait_for_waiters(pool_big, 1)
+        big_b = spawn_big("big-1", (1 << 60) + 1)
+        self._wait_for_waiters(pool_big, 2)
+        holder_big.release()
+        for worker_thread in (big_a, big_b):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(big_errors, [])
+        self.assertEqual(big_order, ["big-1", "big-0"])
+
+        # Exact large-int priority ordering WITH aging enabled (no float64 rounding inversion near 2**52).
+        now_big_aged = [0.0]
+        pool_big_aged = SandboxPool(
+            [PoolSlot("slot-big-aged", self._make_toy_lab())],
+            clock=lambda: now_big_aged[0],
+            priority_aging_s=1.0,
+        )
+        self.addCleanup(pool_big_aged.close)
+        holder_big_aged = pool_big_aged.acquire("holder")
+        big_aged_order: list[str] = []
+        big_aged_errors: list[BaseException] = []
+
+        def spawn_big_aged(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with pool_big_aged.lease(agent_id, priority=priority, timeout_s=60.0):
+                        big_aged_order.append(agent_id)
+                except BaseException as err:
+                    big_aged_errors.append(err)
+            worker_thread = threading.Thread(target=run)
+            worker_thread.start()
+            return worker_thread
+
+        t_lower = spawn_big_aged("near52-lower", (1 << 52) - 1)
+        self._wait_for_waiters(pool_big_aged, 1)
+        now_big_aged[0] = 0.8  # true eff = (1<<52) - 0.2 < (1<<52)
+        t_higher = spawn_big_aged("near52-higher", (1 << 52))
+        self._wait_for_waiters(pool_big_aged, 2)
+        holder_big_aged.release()
+        for worker_thread in (t_lower, t_higher):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(big_aged_errors, [])
+        self.assertEqual(big_aged_order, ["near52-higher", "near52-lower"])
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
