@@ -91,6 +91,34 @@
      "note": "Verified on V1 GPUModelRunner (`VLLM_USE_V2_MODEL_RUNNER=0`) at TP1 (re-verified on 1x B200 2026-11-19: size-1 recapture 0.321 s, 11 CUDA graph launches, undo 2.62 ms, bit-exact tokens) and on V2 ModelCudaGraphManager (`VLLM_USE_V2_MODEL_RUNNER=1`) on 1x B200 FULL_DECODE_ONLY (29.29 s live boot, 0.299 s selective R1 [1], 0.360 s recapture_extend [2, 4], 2.93 ms undo, 5 consecutive R1 cycles with 0.0 MiB reserved growth, max |delta logprob| == 0.0; plus TP2 V2 NATIVE PR #49750 0.82 s R1 recapture). GB200 is not covered by selective recapture."
     },
     {
+     "name": "Tier-A surgical CUDA graph kernel-node pointer swap (`pointer_swap.py`, PR #240)",
+     "what": "Patches rebuilt `@triton.jit` `CUfunction` pointers directly inside already-instantiated `CUgraphExec` and template `CUgraph` nodes via `cuGraphExecKernelNodeSetParams` (with `keep_graph=True` + auto-`instantiate()`, strict ABI validation, generation-matched `GraphReplayGuard` witness crediting, and fail-closed fallback to Tier-C R1 recapture) with zero dummy model forwards.",
+     "startup_cost_removed": "Dummy forward passes and stream re-capture across all 83+ captured batch-size buckets for ABI-preserving `@triton.jit` edits.",
+     "measured_saving": {
+      "before": "5.550 (Qwen3-0.6B Tier-C R1) / 8.041 (Qwen3-8B Tier-C R1)",
+      "after": "0.102-0.113 (0.6B, 49x-54x vs R1) / 0.135 (8B warm, 60x vs R1; 8.31-11.93 ms node patch)",
+      "unit": "s",
+      "setup": "1x NVIDIA B200, vLLM 0.33.0, TRITON_ATTN FULL_AND_PIECEWISE (83 FULL + 83 PIECEWISE graphs: 2,324 nodes on Qwen3-0.6B, 2,988 nodes on Qwen3-8B), 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "docs/kernels-and-graphs.md:500-567; repos/vllm/livelab/adapter/pointer_swap.py; PR #240",
+     "note": "Measured on 1x B200 (2026-11-24): Qwen3-0.6B (`kernel_unified_attention` 5 specs: 9.28 ms patch, 0.113 s total, 10.82 ms undo = 49.1x vs 5.550 s R1; `reshape_and_cache_kernel_flash` 1 spec: 8.31 ms patch, 0.102 s total, 10.52 ms undo = 54.4x); Qwen3-8B (`reshape_and_cache_kernel_flash` 1 spec: 10.70 ms patch, 0.135 s total, 13.28 ms undo = 59.6x vs 8.041 s R1; `kernel_unified_attention` cold compile: 11.93 ms patch, 1.769 s total, 14.20 ms undo), with post-undo diff == 0.0."
+    },
+    {
+     "name": "NVIDIA Dynamo GMS Standby Shadow & `AsyncShadowReplenisher` (`StandbyShadowDriver`, PR #209/#211/#244/#247)",
+     "what": "Pre-parks Scratch-KV RO standby workers sharing resident GPU weights via Dynamo GMS VMM, promotes ready shadows in sub-second time via `VllmShadowPromoter` with multi-shadow `ready_count_fn` early wake (`PR #244/#247`), and replenishes shadows off the critical path via `AsyncShadowReplenisher` (`PR #211`).",
+     "startup_cost_removed": "Full cold/warm engine restart and weight reload on worker crash (`SIGKILL`), fault poisoning, or restart-tier edits.",
+     "measured_saving": {
+      "before": "36.27-39.98 (vLLM SIGKILL GMS RO respawn)",
+      "after": "0.677-0.752 (N=4..8 SIGKILL, 53.2x-53.6x; 0.312-1.861 s across 0.6B-151.5 GiB TP4)",
+      "unit": "s",
+      "setup": "1x-4x NVIDIA B200, vLLM 0.33.0, Qwen3-0.6B..Qwen3-Next-80B TP4, Scratch-KV StandbyShadowDriver + VllmShadowPromoter, 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "docs/mechanisms.md:21-88; docs/agent-teams-and-contention.md:110-133,356-370; PR #209; PR #211; PR #244; PR #247",
+     "note": "EXP-C (Qwen3-8B, C=1): 0.752 s (N=4, 53.20x) and 0.677 s (N=8, 53.59x) vs 36.27-39.98 s GMS RO respawn. EXP-E1: 3 consecutive SIGKILL crashes recovered in 0.803 / 0.726 / 0.647 s (154.69 edits/min, 0 GMS errors). EXP-G2b (PR #244/#247 multi-shadow guard fix): Restart #2 drops 30.60x (36.533 -> 1.194 s), mean queue wait 8.78x (13.309 -> 1.516 s), p95 wait 13.22x (38.256 -> 2.895 s), with max_abs_logprob_diff == 0.0."
+    },
+    {
      "name": "Zygote (fork server) with module refresh",
      "what": "Imports vLLM and its libraries once, then forks each `vllm serve` from that state; modules edited since are re-imported in the fork.",
      "startup_cost_removed": "Python and library imports (8,631 modules, 12.7 s).",
@@ -501,6 +529,20 @@
      "status": "merged_gpu_verified",
      "source": "PR #163; PR #164; repos/sglang/kb/costs.md",
      "note": "Warm respawn via SglangZygote measured 11.75 s on 2x GB200 TP=2 Qwen3-0.6B, 17.041 s (fork_clean, 3.51x) / 19.693 s (fork_refresh, 3.04x) vs 59.855 s on 1x B200 Qwen3-8B TP=1, and 17.598 s (fork_clean, 4.41x) / 20.109 s (fork_refresh, 3.86x) vs 77.619 s on 2x B200 TP=2 with bit-exact output and 0 MiB exit. With opt-in --fork-subprocs (SGLANG_NUMA_BIND_V2=0 + selective AST dependents refresh + torch.ops spawn fallback + AST ServerArgs probe in fixture/harness.py, 25/25 container pytest), paired B200 spawn+import fell 8.2922 -> 0.8408 s (TP=1, first step 18.4883 -> 10.5882 s clean / 10.5521 s refresh) and 8.8680 -> 0.8518 s (TP=2, 20.0605 -> 11.8862 s clean / 12.5577 s refresh), and FULL 11/11 SglangConformanceLab --fork-subprocs passed with 0 fallbacks across all 5/5 boots (TP=1 case sum 222.417 s vs 283.300 s spawn [1.27x], c8 92.308 s vs 117.933 s [9.62-9.98 s respawns, 1.64x], c3 88.231 s, c9 0.0620 / 0.0111 s; TP=2 case sum 270.789 s vs 309.327 s [1.14x], c8 97.829 s vs 120.666 s [10.91-11.92 s respawns, 1.48x], c3 132.334 s, c9 0.0630 / 0.0157 s, 0 MiB exit). Adding native CUDA IPC weight-cache (services/weights.py + SglangLab --weight-cache-dir, unprefixed UUID normalization, out-of-place c10 fresh control) gave rc=0 standalone start/probe without --uuids, passed TP=2 11/11 conformance on 2x B200 with --fork-subprocs --weight-cache-dir (IpcModelLoader clean forked loads 0.077-0.082 s, 310.42 s case sum, c8 respawns 47.86 s, post-c10 standalone c0 preserved base digest dd7819950a7ed411), and passed 36/36 container pytest."
+    },
+    {
+     "name": "Dynamo GMS Standby Shadow (`SglangShadowPromoter`) & `52` decode CUDA graphs (PR #217/#218/#232/#248)",
+     "what": "Combines `SglangShadowPromoter` + `StandbyShadowDriver` (with `ready_count_fn` multi-shadow guard and `_TargetedFallbackDriver` in PR #248), non-pauseable `52`-decode-CUDA-graph GMS execution (`PR #217`), and targeted GMS-safe engine teardown (`stop_sglang_engine_targeted`, `PR #232`) that preserves co-process `DynamoGmsStore` and parked shadows.",
+     "startup_cost_removed": "Full SGLang respawn, weight reload, and 52-bucket decode CUDA graph capture on crash/poison recovery.",
+     "measured_saving": {
+      "before": "18.417 (52-CG targeted respawn, EXP-F2) / 11.410-11.518 (eager, EXP-C)",
+      "after": "0.534 (52-CG EXP-F2, 34.51x) / 0.484 (K=2 sh2 EXP-G2c, 38.06x) / 0.449-0.490 (eager, 23.5x-25.4x)",
+      "unit": "s",
+      "setup": "1x NVIDIA B200, SGLang, Qwen3-0.6B (eager & 52 decode CUDA graphs) and 0.6B-65.5 GB GMS+CRIU/Shadow, 2026-11-24"
+     },
+     "status": "merged_gpu_verified",
+     "source": "docs/mechanisms.md:48-73; docs/agent-teams-and-contention.md:125-130,298-306,370; PR #217; PR #218; PR #232; PR #248",
+     "note": "EXP-F2 (52 decode CGs, C=1, N=4): SglangShadowPromoter + targeted teardown cuts recovery 34.51x (18.417 -> 0.534 s), boosts burst throughput 4.67x (42.85 -> 200.16 edits/min), and cuts p95 queue wait 11.31x (19.172 -> 1.694 s) with 52 CGs preserved and 0 GMS errors. EXP-G2c (K=2 shadows, PR #248): sh1 promotes in 0.498 s (36.97x), sh2 promotes in 0.484 s (38.06x) via ready_count_fn while replenisher is in_flight, and _TargetedFallbackDriver recovers Fault #3 in 18.41 s with 52 CGs and 0 GMS errors (15/15 verify_trace, max_abs_logprob_diff == 0.0). Matched 0.6B/14B/65.5 GB GMS+CRIU/Shadow: 0.101-0.374 s promote resume, 3.74-4.48 s GMS+CRIU restore."
     }
    ]
   },
@@ -636,18 +678,18 @@
    "folder": "repos/torchtitan",
    "mechanisms": [
     {
-     "name": "Step-gap FSDP2 live swap with deterministic `S0` `DTensor` & RNG reset (`TorchTitanLab`)",
-     "what": "Hosts isolated rank worker subprocesses over `AF_UNIX` JSON channels (`rsibox.ipc.UnixJsonServer`), atomically hot-swaps forward/loss/grad-clip/optimizer helpers in the step gap via `RecaptureCoordinator`, captures per-rank AST witnesses, and restores exact post-init `S0` FSDP2 `DTensor` local shards, `AdamW` state, saved Python/PyTorch/CUDA RNG state, and CUDA cache on `reset('state')` and undo. Real-GPU mode exercises PyTorch `fully_shard` (FSDP2) + `nccl` at `world_size=1` over a synthetic `TitanMLPNet` (upstream `pytorch/torchtitan` is not yet imported; `mode='fsdp2'` with `world_size > 1` fails closed with `ValueError`); 2-rank multi-process orchestration is exercised in CPU toy mode (`ToyTorchTitanLab`).",
+     "name": "Step-gap FSDP2 live swap with deterministic `S0` `DTensor` & RNG reset (`TorchTitanLab`, PR #222/#254/#255)",
+     "what": "Hosts isolated rank worker subprocesses over `AF_UNIX` JSON channels (`rsibox.ipc.UnixJsonServer`), atomically hot-swaps forward/loss/grad-clip/optimizer helpers in the step gap via `RecaptureCoordinator`, captures per-rank AST witnesses, restores exact post-init `S0` FSDP2 `DTensor` local shards, `AdamW` state, saved Python/PyTorch/CUDA RNG state, and CUDA cache on `reset('state')` and undo, and supports pluggable `weight_store`/`recovery_driver` hooks plus parallel multi-rank `PackageOverlay` `fresh_check`. Real-GPU mode exercises PyTorch `fully_shard` (FSDP2) + `nccl` at `world_size=1` (`1x B200`) and `world_size=2` (`2x B200`, `EXP-F7`) over a synthetic `TitanMLPNet` (upstream `pytorch/torchtitan` is not yet imported); 2-rank multi-process orchestration is also exercised in CPU toy mode (`ToyTorchTitanLab`).",
      "startup_cost_removed": "Worker Python/PyTorch imports, `nccl` process group bootstrap, and FSDP2 `fully_shard` model/optimizer initialization.",
      "measured_saving": {
-      "before": "2.689 (+/- 0.044)",
-      "after": "0.083 (0.059 s install + 0.024 s check, 32.5x; 0.048 s bit-exact undo)",
+      "before": "2.689 (1x B200) / 5.515 (2x B200 NCCL, EXP-F7)",
+      "after": "0.083 (1x B200, 32.5x) / 0.255 (2x B200 NCCL EXP-F7, 21.63x)",
       "unit": "s",
-      "setup": "1x NVIDIA B200, PyTorch 2.14.0+cu130, FSDP2 fully_shard + nccl (world_size=1), synthetic 4-layer TitanMLPNet (hidden=256, ffn=512, batch_size=8, 3 steps), deterministic float32, 3x repeats, 2026-11-24"
+      "setup": "1x & 2x NVIDIA B200, PyTorch 2.14.0+cu130, FSDP2 fully_shard + nccl (world_size=1 & world_size=2), synthetic 4-layer TitanMLPNet (3 steps), deterministic float32, 2026-11-24"
      },
      "status": "merged_gpu_verified",
-     "source": "repos/torchtitan/docs/architecture.md; repos/torchtitan/kb/costs.md",
-     "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0142 s install / 0.0045 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 (world_size=1 synthetic TitanMLPNet) via rsibox conformance torchtitan --real -- --mode fsdp2 (c9 install median 0.0541 s / uninstall 0.0458 s, c8 respawns 2.58-2.80 s, c3 bit-exact visible & 3-edit chain vs fresh PackageOverlay subprocess, c10 zero_witness with fresh divergence, max_abs_loss_diff == 0.0, 0 MiB VRAM leaked on exit)."
+     "source": "repos/torchtitan/docs/architecture.md; repos/torchtitan/kb/costs.md; PR #222; PR #254; PR #255",
+     "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0142 s install / 0.0045 s undo), 11/11 real-GPU FSDP2 conformance on 1x B200 world_size=1 (57.13 s, 0.083 s live vs 2.689 s cold = 32.5x, c9 0.0541 / 0.0458 s, c8 respawns 2.58-2.80 s, 0 MiB exit), and 11/11 multi-rank FSDP2 NCCL conformance on 2x B200 world_size=2 via PR #254/#255 (239.00 s c0-c10 / 248.34 s suite wall, EXP-F7 5x median warm live cycle 0.255 s [0.1011 s install, 0.0535 s check, 0.0989 s undo+S0] vs 5.515 s cold 2-rank boot+check = 21.63x, c3 parallel fresh parity 34.419 s, c8 104.952 s, max_abs_loss_diff == 0.0). Also verified in EXP-F6 SandboxPool priority=10/0 (357.3 edits/min, 5.47x lower Eval wait)."
     }
    ]
   }
