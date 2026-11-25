@@ -7,6 +7,7 @@ architecture goes in `repos/<engine>/docs/`, its measurements in `repos/<engine>
 docs/
   README.md                       this index
   quickstart.md                   30-second CPU and real-GPU live hot-reload walkthroughs
+  architecture.html               offline interactive 4-layer architecture map and sequence walkthroughs
   concepts.md                     plain-English overview of rsibox, hot-reload layers, witness, and rollback
   engines.md                      supported ML engines, conformance status, and repository layout
   mechanisms.md                   restart boundaries, Dynamo GMS + Snapshot benchmarks, and CPU tests
@@ -27,6 +28,7 @@ Rules:
 ## Index
 
 - [Quick Start](quickstart.md): copy-pasteable 30-second CPU (`sglang` toy) and real-GPU (`vllm --real`) walkthroughs covering `up`, `source`, `install`, `check`, `uninstall`, and `down`.
+- [Interactive architecture explorer](architecture.html): offline single-file widget mapping the 4-layer runtime + cross-cutting plane, component ownership and boundaries, and 5 interactive sequence walkthroughs.
 - [RSIBox concepts](concepts.md): plain-English overview of `rsibox` vs. `core/livelab/`, hot-reload layers, execution proof (`witness`), journaled rollback, restart boundaries, and the sandbox verification suite.
 - [Supported engines & benchmarks](engines.md): summary table across all supported ML engines, headline speedups, and repository layout.
 - [Restart boundaries, interface & tests](mechanisms.md): full restart-boundary table, NVIDIA Dynamo GMS & Snapshot integration benchmarks, and CPU test commands.

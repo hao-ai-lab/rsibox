@@ -46,6 +46,27 @@
 - **Formally verified protocols & sandbox verification suite:** Core swap, multi-rank coordinator, pool, standby shadow, and autoscaler protocols are specified in TLA+ ([`core/livelab/formal/`](core/livelab/formal/)) and validated against the growing **sandbox verification suite** (`rsibox conformance`, [`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)).
 - **Multi-agent GPU pool (`SandboxPool`):** Concurrent coding agents share warm GPUs via priority scheduling, anti-starvation aging, elastic role borrowing, per-agent fault isolation, and **`112/112`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
 
+Explore the interactive map in [`docs/architecture.html`](docs/architecture.html) or read the layer breakdown in [`docs/concepts.md`](docs/concepts.md):
+
+```text
++---------------------------------------------------------------------------------------------------+
+| Layer 1 · Control Plane               core/livelab/rsibox/                                        |
+|   rsibox CLI & HTTP Box (cli/server) · SandboxPool & PoolAutoScaler · BaseLab / LabUnderTest      |
++---------------------------------------------------------------------------------------------------+
+| Layer 2 · Hot-Reload Kernel (stdlib)  core/livelab/kernel/                                        |
+|   Coordinator & Session (2PC) · swap & jit (R0 / Triton) · witness & Journal · findings/identity  |
++---------------------------------------------------------------------------------------------------+
+| Layer 3 · Warm Recovery & Substrate   core/livelab/rsibox/warm/, forksafe.py                      |
+|   forksafe & IPC · Zygote + CUDA IPC Holder · Dynamo GMS Standby Shadow & CRIU Snapshot           |
++---------------------------------------------------------------------------------------------------+
+| Layer 4 · Thin Engine Adapters        repos/<engine>/livelab/ (10 engines)                        |
+|   vLLM · SGLang · TRT-LLM · Transformers · Megatron-LM · FastVideo · veRL/miles/NeMo-RL/TorchTitan|
++===================================================================================================+
+| Cross-Cutting Plane · core/livelab/{formal,conformance}/ & .agents/plugins/rstack/                |
+|   TLA+ Protocol & Pool Models · Sandbox Verification Suite (c0-c10) · rstack PR & CI Gates        |
++---------------------------------------------------------------------------------------------------+
+```
+
 | Hot-Reload / Recovery Tier | What Changes | Typical Latency |
 | :--- | :--- | ---: |
 | **Live runtime config** | Scheduler & batching flags (`max_num_seqs`, policy) in process | `~4.3 ms` |

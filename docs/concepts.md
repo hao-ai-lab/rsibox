@@ -7,6 +7,18 @@
 - **`rsibox` (CLI & HTTP box):** The user-facing package, CLI (`rsibox up`, `install`, `check`, `uninstall`), and local HTTP daemon that coding agents and developers drive.
 - **`core/livelab/` (internal runtime):** The engine-agnostic standard-library runtime inside this repository. Every engine adapter under `repos/<engine>/livelab/` implements the shared five-verb contract in [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md): `install`, `check`, `reset`, `uninstall`, and `status`.
 
+## 4-Layer Architecture & Design Rationale
+
+| Layer | What It Owns | Code Path | Key Boundary |
+|---|---|---|---|
+| **1. Control Plane** | CLI/HTTP Box, `SandboxPool` scheduling & circuit breaker, `PoolAutoScaler`, `BaseLab` | `core/livelab/rsibox/` | Routes agent calls to warm slots via `LabUnderTest` |
+| **2. Hot-Reload Kernel** | 2PC `Coordinator` & `Session`, `swap`/`jit`, `witness` & `Journal`, `findings`/`identity` | `core/livelab/kernel/` | Pure stdlib; step-gap in-place swap & exact LIFO undo |
+| **3. Warm Recovery & Substrate** | `forksafe`, JSON IPC, Zygote + CUDA IPC holder, Dynamo GMS Shadow & CRIU hooks | `core/livelab/rsibox/warm/`, `core/livelab/forksafe.py` | Process-boundary failover while keeping GPU weights resident |
+| **4. Thin Engine Adapters** | Engine-specific graph/worker hooks for 10 serving, training, video, and RL engines | `repos/<engine>/livelab/` | Implements `LabUnderTest` (plus optional `QuiesceHooks`); zero cross-engine imports |
+| **Cross-Cutting Plane** | TLC-checked TLA+ specs, `c0-c10` verification suite, and `rstack` PR/CI gates | `core/livelab/{formal,conformance}/`, `.agents/plugins/rstack/` | Bounds protocol safety, adapter conformance, and merge hygiene |
+
+Rather than asking production engine teams to rewrite schedulers, model loaders, or CUDA-graph pipelines from scratch, RSIBox wraps all 10 engines behind an external stdlib runtime (`LabUnderTest`) paired with per-rank execution proof (`witness`) and a tiered warm-recovery ladder—letting teams adopt live sub-second iteration and multi-agent GPU sharing with a thin, isolated adapter. Explore each component and step-by-step sequence flow interactively in [`docs/architecture.html`](architecture.html).
+
 ## Hot-Reload Layers (Cheapest First)
 
 RSIBox applies each edit at the lowest layer that can safely update what the hardware actually runs:
