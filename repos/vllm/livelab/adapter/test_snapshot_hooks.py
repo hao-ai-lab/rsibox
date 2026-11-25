@@ -828,6 +828,152 @@ class VllmLabSleepModeAndShadowPromotionTest(unittest.TestCase):
             self.assertIn("exited before reply", reply.get("error", ""))
             self.assertLess(elapsed_s, 2.0, f"_ctl stalled for {elapsed_s:.3f}s instead of fast-failing")
 
+    def test_vllm_shadow_promoter_multi_shadow_ready_count_and_early_wake(self):
+        """Golden case: VllmShadowPromoter.recovery_driver() wires ready_count_fn + replenish_wait_timeout_s.
+
+        Proves:
+        1. K=2 pre-parked shadows with AsyncShadowReplenisher promote Failover #2 immediately
+           (< 1.0 s) while background restock #1 (sh3) is still blocked.
+        2. Failover #3 (ready_count == 0) wakes immediately when sh3 parks even while queued
+           pending restock #2 (sh4) remains blocked.
+        3. Empty queue without shadow_provider fails closed (`standby_not_ready`) without
+           stopping the live primary, whereas `shadow_provider` bypasses `ready_count`.
+        """
+        from rsibox.warm import AsyncShadowReplenisher
+
+        primary = _LiveFakeVllmInstance(pid=40001)
+        sh1 = _LiveFakeVllmInstance(pid=40002)
+        sh2 = _LiveFakeVllmInstance(pid=40003)
+        sh3 = _LiveFakeVllmInstance(pid=40004)
+        sh4 = _LiveFakeVllmInstance(pid=40005)
+        for srv in (primary, sh1, sh2, sh3, sh4):
+            self.addCleanup(srv.close)
+        for srv in (sh1, sh2, sh3, sh4):
+            self.assertTrue(park_shadow_server(srv.handle, sleep_level=1, pause_mode="keep", timeout=5.0)["ok"])
+
+        repl1_entered = threading.Event()
+        repl1_release = threading.Event()
+        repl2_release = threading.Event()
+        restock_seq = [2]
+        promoter_box: list[VllmShadowPromoter] = []
+
+        def gated_restock(_lab_obj, _store):
+            restock_seq[0] += 1
+            idx = restock_seq[0]
+            if idx == 3:
+                repl1_entered.set()
+                repl1_release.wait(timeout=5.0)
+                promoter_box[0].register_shadow(sh3.handle)
+            elif idx == 4:
+                repl2_release.wait(timeout=5.0)
+                promoter_box[0].register_shadow(sh4.handle)
+            return {"ok": True}
+
+        with AsyncShadowReplenisher(gated_restock, queue_when_busy=True) as replenisher:
+            promoter = VllmShadowPromoter(sh1.handle, replenish_fn=replenisher, timeout=5.0)
+            promoter.register_shadow(sh2.handle)
+            promoter_box.append(promoter)
+            self.assertEqual(promoter.ready_count(), 2)
+            driver = promoter.recovery_driver(replenish_wait_timeout_s=5.0)
+            lab = _attach_live_handle_to_lab(primary, weights_backend="dynamo_gms", recovery_driver=driver)
+            try:
+                # Failover #1 promotes sh1 and kicks off background restock #1 (sh3).
+                r1 = lab.reset("respawn")
+                self.assertTrue(r1["ok"], r1)
+                self.assertEqual(r1["promoted_port"], sh1.port)
+                self.assertTrue(repl1_entered.wait(timeout=2.0))
+                self.assertEqual(promoter.ready_count(), 1)
+
+                # Failover #2 MUST promote sh2 immediately (< 1.0 s) while sh3 is blocked!
+                t2 = time.perf_counter()
+                r2 = lab.reset("respawn")
+                r2_elapsed = time.perf_counter() - t2
+                self.assertTrue(r2["ok"], r2)
+                self.assertEqual(r2["promoted_port"], sh2.port)
+                self.assertLess(r2_elapsed, 1.0, f"Failover #2 stalled behind sh3 boot: {r2_elapsed:.3f}s")
+                self.assertEqual(promoter.ready_count(), 0)
+                self.assertTrue(replenisher.status()["pending"])
+
+                # Failover #3 waits for sh3 and wakes immediately while sh4 stays blocked!
+                def release_sh3() -> None:
+                    time.sleep(0.05)
+                    repl1_release.set()
+
+                releaser = threading.Thread(target=release_sh3, daemon=True)
+                releaser.start()
+                t3 = time.perf_counter()
+                r3 = lab.reset("respawn")
+                r3_elapsed = time.perf_counter() - t3
+                releaser.join(timeout=2.0)
+                self.assertTrue(r3["ok"], r3)
+                self.assertEqual(r3["promoted_port"], sh3.port)
+                self.assertLess(r3_elapsed, 1.0, f"Failover #3 blocked on queued sh4: {r3_elapsed:.3f}s")
+                repl2_release.set()
+                self.assertTrue(replenisher.wait(timeout_s=2.0))
+            finally:
+                repl1_release.set()
+                repl2_release.set()
+
+        # Empty promoter (no shadow_provider) fails closed WITHOUT stopping primary.
+        live_primary = _LiveFakeVllmInstance(pid=40006)
+        self.addCleanup(live_primary.close)
+        empty_driver = make_shadow_recovery_driver(timeout=5.0)
+        lab_empty = _attach_live_handle_to_lab(live_primary, recovery_driver=empty_driver)
+        rep_empty = lab_empty.reset("respawn")
+        self.assertFalse(rep_empty["ok"])
+        self.assertIn("standby_not_ready", rep_empty["error"])
+        self.assertEqual(live_primary.stopped_calls, 0)
+        self.assertTrue(live_primary.handle.alive())
+
+        # Dynamic shadow_provider still promotes cleanly even when _shadows starts empty.
+        prov_shadow = _LiveFakeVllmInstance(pid=40007)
+        self.addCleanup(prov_shadow.close)
+        self.assertTrue(park_shadow_server(prov_shadow.handle, sleep_level=1, pause_mode="keep", timeout=5.0)["ok"])
+        prov_driver = make_shadow_recovery_driver(
+            shadow_provider=lambda _l, _s: prov_shadow.handle,
+            timeout=5.0,
+        )
+        lab_empty.recovery_driver = prov_driver
+        rep_prov = lab_empty.reset("respawn")
+        self.assertTrue(rep_prov["ok"], rep_prov)
+        self.assertEqual(rep_prov["promoted_port"], prov_shadow.port)
+
+        # Explicit ready_count_fn override + fallback_driver forwarding through recovery_driver().
+        fb_calls: list[str] = []
+
+        class _StubFallback:
+            def respawn(self, lab_obj, _store, *, reason="reset_respawn"):
+                fb_calls.append(reason)
+                return {"ok": True, "reset": ["fallback"], "driver": "stub_fallback", "reason": reason}
+
+        override_driver = make_shadow_recovery_driver(
+            shadow_provider=lambda _l, _s: prov_shadow.handle,
+            ready_count_fn=lambda: 0,
+            fallback_driver=_StubFallback(),
+            timeout=5.0,
+        )
+        lab_empty.recovery_driver = override_driver
+        rep_fb = lab_empty.reset("respawn")
+        self.assertTrue(rep_fb["ok"], rep_fb)
+        self.assertEqual(rep_fb["fallback_from"], "standby_shadow")
+        self.assertEqual(fb_calls, ["reset_respawn"])
+
+        # Queue with [dead_sh, live_sh]: ready_count() == 1 and promote() skips dead_sh to promote live_sh!
+        dead_sh = _LiveFakeVllmInstance(pid=40008)
+        live_sh = _LiveFakeVllmInstance(pid=40009)
+        for srv in (dead_sh, live_sh):
+            self.addCleanup(srv.close)
+        self.assertTrue(park_shadow_server(live_sh.handle, sleep_level=1, pause_mode="keep", timeout=5.0)["ok"])
+        dead_sh.handle.stop()
+        skip_promoter = VllmShadowPromoter(dead_sh.handle, timeout=5.0)
+        skip_promoter.register_shadow(live_sh.handle)
+        self.assertEqual(skip_promoter.ready_count(), 1)
+        lab_empty.recovery_driver = skip_promoter.recovery_driver()
+        rep_skip = lab_empty.reset("respawn")
+        self.assertTrue(rep_skip["ok"], rep_skip)
+        self.assertEqual(rep_skip["promoted_port"], live_sh.port)
+        self.assertEqual(skip_promoter.ready_count(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
