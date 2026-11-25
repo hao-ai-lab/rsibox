@@ -322,12 +322,12 @@ class IpcTests(unittest.TestCase):
                 ready_line = srv_proc.stdout.readline().strip()
                 self.assertEqual(ready_line, "READY")
 
-                def kill_after_accept():
-                    acc_line = srv_proc.stdout.readline().strip()
+                def kill_after_accept(sp=srv_proc, cph=child_pid_holder):
+                    acc_line = sp.stdout.readline().strip()
                     if acc_line.startswith("ACCEPTED "):
-                        child_pid_holder.append(int(acc_line.split()[1]))
-                    srv_proc.kill()
-                    srv_proc.wait()
+                        cph.append(int(acc_line.split()[1]))
+                    sp.kill()
+                    sp.wait()
 
                 killer = threading.Thread(target=kill_after_accept, daemon=True)
                 killer.start()

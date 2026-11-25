@@ -353,9 +353,9 @@ def _iter_unix_json_lines(
             if nl != -1:
                 line = bytes(buf[:nl])
                 del buf[: nl + 1]
+                yield line
                 if reset_deadline_on_line and timeout_s is not None:
                     deadline = time.monotonic() + timeout_s
-                yield line
                 continue
 
             remaining = None if deadline is None else (deadline - time.monotonic())
@@ -413,9 +413,9 @@ def _iter_unix_json_lines(
                 if nl != -1:
                     line = bytes(buf[:nl])
                     del buf[: nl + 1]
+                    yield line
                     if reset_deadline_on_line and timeout_s is not None:
                         deadline = time.monotonic() + timeout_s
-                    yield line
                     continue
                 if eof:
                     if buf:
