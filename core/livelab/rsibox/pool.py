@@ -853,6 +853,8 @@ class SandboxPool:
                 raise ValueError(f"unknown slot_id: {slot_id!r}")
             if slot_state.draining:
                 raise PoolError(f"slot {slot_id!r} is already draining")
+            if slot_state.in_use and timeout_s == 0.0:
+                raise PoolTimeoutError(f"timed out waiting {timeout_s}s for slot {slot_id!r} to drain")
             start_mono = self._clock()
             slot_state.draining = True
             drain_evt = threading.Event()

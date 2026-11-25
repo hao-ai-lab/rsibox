@@ -46,8 +46,24 @@ class ParkedSglangShadow:
 
 def _check_clean_shadow_lab(shadow_lab: Any) -> str | None:
     """Return an error message if `shadow_lab` is not live, clean, and free of active edits."""
-    if getattr(shadow_lab, "engine", None) is None:
+    engine = getattr(shadow_lab, "engine", None)
+    if engine is None:
         return "standby shadow lab engine is not running"
+    alive_fn = getattr(engine, "alive", None)
+    if callable(alive_fn):
+        try:
+            if not alive_fn():
+                return "standby shadow lab engine worker process died"
+        except Exception:
+            return "standby shadow lab engine liveness check failed"
+    procs = getattr(engine, "procs", None)
+    if isinstance(procs, (list, tuple)) and any(not _proc_is_alive(proc) for proc in procs):
+        return "standby shadow lab engine worker process died"
+    tm = getattr(engine, "tokenizer_manager", None)
+    watchdog = getattr(tm, "_subprocess_watchdog", None) if tm is not None else None
+    wd_procs = getattr(watchdog, "_processes", None) if watchdog is not None else None
+    if isinstance(wd_procs, (list, tuple)) and any(not _proc_is_alive(proc) for proc in wd_procs):
+        return "standby shadow lab engine watchdog process died"
     if getattr(shadow_lab, "dirty", False):
         return "standby shadow lab control channel is dirty"
     session = getattr(shadow_lab, "session", None)
@@ -108,10 +124,13 @@ def _stat_start_ticks(pid: int) -> int | None:
 
 
 def _proc_is_alive(proc: Any) -> bool:
-    if hasattr(proc, "is_alive"):
-        return bool(proc.is_alive())
-    if hasattr(proc, "poll"):
-        return proc.poll() is None
+    try:
+        if hasattr(proc, "is_alive"):
+            return bool(proc.is_alive())
+        if hasattr(proc, "poll"):
+            return proc.poll() is None
+    except Exception:
+        return False
     pid = _safe_pid(proc)
     return pid is not None and _proc.pid_alive(pid)
 
@@ -731,9 +750,19 @@ class SglangShadowPromoter:
         self._shadow_provider = shadow_provider
         self._replenish_fn = replenish_fn
 
+    def _entry_is_clean_standby(self, entry: ParkedSglangShadow) -> bool:
+        return (
+            getattr(entry.hooks, "lab", entry.lab) is entry.lab
+            and bool(entry.receipt.ok)
+            and _check_clean_shadow_lab(entry.lab) is None
+            and _resolve_shadow_ranks(entry.lab) > 0
+        )
+
     def pending_count(self) -> int:
         with self._lock:
-            return len(self._shadows)
+            if self._closed:
+                return 0
+            return sum(1 for entry in self._shadows if self._entry_is_clean_standby(entry))
 
     def is_closed(self) -> bool:
         with self._lock:
@@ -837,20 +866,37 @@ class SglangShadowPromoter:
 
     def _acquire_shadow(self, lab: Any, weight_store: Any) -> tuple[ParkedSglangShadow | None, str | None]:
         """Atomically validate and pop the next compatible queued shadow, or invoke `shadow_provider`."""
+        discarded: list[ParkedSglangShadow] = []
+        selected: ParkedSglangShadow | None = None
+        acquire_err: str | None = None
+        keep_blocked = False
         with self._lock:
             if self._closed:
                 return None, "SglangShadowPromoter is closed"
-            if self._shadows:
+            while self._shadows:
                 candidate = self._shadows[0]
                 err, keep = self._validate_candidate(lab, candidate)
-                if err is not None:
-                    if not keep:
-                        self._shadows.popleft()
-                    return None, err
-                return self._shadows.popleft(), None
+                if err is None:
+                    selected = self._shadows.popleft()
+                    break
+                if keep:
+                    acquire_err = err
+                    keep_blocked = True
+                    break
+                discarded.append(self._shadows.popleft())
+                acquire_err = err
 
+        for stale in discarded:
+            with contextlib.suppress(Exception):
+                if stale.lab is not lab:
+                    stop_sglang_engine_targeted(stale.lab, preserve_process_env=True)
+
+        if selected is not None:
+            return selected, None
+        if keep_blocked:
+            return None, acquire_err
         if self._shadow_provider is None:
-            return None, "no parked standby shadow lab available"
+            return None, acquire_err or "no parked standby shadow lab available"
         with self._provider_lock:
             with self._lock:
                 if self._closed:

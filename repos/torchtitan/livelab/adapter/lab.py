@@ -1,11 +1,11 @@
 """TorchTitanLab & ToyTorchTitanLab: RSIBox live labs for PyTorch Native FSDP2 / TorchTitan."""
 from __future__ import annotations
 
-import argparse, contextlib, json, os, subprocess, sys, tempfile, time
+import argparse, contextlib, json, os, subprocess, sys, tempfile, threading, time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Any
 
-from adapter.worker import FSDP2_SINGLE_RANK_ERR, aggregate_ranks, validate_world_size
+from adapter.worker import aggregate_ranks, validate_world_size
 from kernel import coordinator
 from rsibox import harness, ipc, proc
 from rsibox.lab import BaseLab, RecaptureCoordinator
@@ -108,22 +108,49 @@ class TorchTitanLab(BaseLab):
 
     def _stop_engine(self) -> None:
         self._gen += 1
-        workers, self._workers = self._workers, []
-        for w in workers:
-            p = w["proc"]
-            if p.poll() is None and not self._dirty:
-                with contextlib.suppress(Exception):
-                    ipc.unix_json_call(w["sock"], {"method": "shutdown"}, timeout=2.0)
-                    p.wait(timeout=1.0)
-            if p.poll() is None:
-                for fn in (lambda: proc.stop_session(p.pid, grace=3.0, reap=p.poll), lambda: proc.stop_tree(p.pid, grace_s=2.0, include_pg=True)):
+        workers, self._workers = list(getattr(self, "_workers", ())), []
+        if not workers:
+            return
+        was_dirty = bool(getattr(self, "_dirty", False))
+
+        def _stop_one(w: dict[str, Any]) -> None:
+            p = w.get("proc")
+            try:
+                if p is not None:
                     with contextlib.suppress(Exception):
-                        fn()
-            with contextlib.suppress(Exception):
-                p.wait(timeout=2.0)
-            for path in (w["sock"], w["spec"], w["err"]):
-                with contextlib.suppress(OSError):
-                    os.unlink(path)
+                        if p.poll() is None and not was_dirty and w.get("sock"):
+                            with contextlib.suppress(Exception):
+                                ipc.unix_json_call(w["sock"], {"method": "shutdown"}, timeout=2.0)
+                                p.wait(timeout=1.0)
+                        if p.poll() is None:
+                            for fn in (
+                                lambda: proc.stop_session(p.pid, grace=3.0, reap=p.poll),
+                                lambda: proc.stop_tree(p.pid, grace_s=2.0, include_pg=True),
+                            ):
+                                with contextlib.suppress(Exception):
+                                    fn()
+                        with contextlib.suppress(Exception):
+                            p.wait(timeout=2.0)
+            finally:
+                for key in ("sock", "spec", "err"):
+                    path = w.get(key)
+                    if path:
+                        with contextlib.suppress(OSError):
+                            os.unlink(path)
+
+        if len(workers) == 1:
+            _stop_one(workers[0])
+            return
+        started: list[threading.Thread] = []
+        for w in workers:
+            thread = threading.Thread(target=_stop_one, args=(w,), daemon=True)
+            try:
+                thread.start()
+                started.append(thread)
+            except Exception:
+                _stop_one(w)
+        for thread in started:
+            thread.join()
 
     def _rank_call(self, rank: int, method: str, payload: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
         gen = self._gen

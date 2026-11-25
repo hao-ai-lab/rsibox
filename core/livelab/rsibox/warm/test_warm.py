@@ -1748,6 +1748,216 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
         self.assertEqual(rep_fb["replenish"], "restocked")
         self.assertEqual(sync_restocks, ["sync_restocked"])
 
+    def test_async_replenisher_wait_until_close_race_attempts_reprobe_and_probe_error_fallback(self):
+        """Golden regression (#244): deterministic barriers for wait(until=...) and fallback probe errors.
+
+        Proves:
+        (a) close() wakes wait(until=...) promptly and returns False even when the in-flight worker
+            exits before wait() re-acquires _condition (and validates non-callable until with TypeError);
+        (b) _attempts != snapshot_attempts triggers an immediate re-probe of until() instead of
+            blocking on a queued follow-up attempt;
+        (c) ready_count_fn errors/invalid returns (probe_error) with fallback_driver suppress
+            spurious replenish_fn invocations (both sync and AsyncShadowReplenisher).
+        """
+        from kernel import coordinator as kernel_coordinator
+
+        class _ProbeLab(BaseLab):
+            name = "probe_lab"
+
+            def _start_engine(self):
+                participant = kernel_coordinator.LocalParticipant("participant")
+                return kernel_coordinator.StepGapCoordinator([participant], contextlib.nullcontext), []
+
+            def _stop_engine(self):
+                return None
+
+            def _run_workload(self, workload):
+                return {"ok": True}
+
+        # (a1) Non-callable `until` raises TypeError upfront.
+        r_type = AsyncShadowReplenisher(lambda _l, _s: {"ok": True})
+        try:
+            with self.assertRaises(TypeError):
+                r_type.wait(timeout_s=0.1, until=123)  # type: ignore[arg-type]
+        finally:
+            r_type.close()
+
+        # (a2) Worker-exit race: close() is called and the in-flight worker exits WHILE wait(until=...)
+        # is inside until(), so _in_flight is False when wait() re-acquires _condition.
+        # wait(until=...) MUST return False (not spuriously True from the idle check).
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        until_entered = threading.Event()
+        release_until = threading.Event()
+
+        def race_worker(_lab, _store):
+            worker_entered.set()
+            release_worker.wait(timeout=5.0)
+            return {"ok": True}
+
+        r_race = AsyncShadowReplenisher(race_worker)
+        try:
+            self.assertEqual(r_race("lab", None), "started")
+            self.assertTrue(worker_entered.wait(timeout=2.0))
+
+            wait_results: list[bool] = []
+
+            def race_until() -> bool:
+                until_entered.set()
+                release_until.wait(timeout=5.0)
+                return False
+
+            t_wait = threading.Thread(
+                target=lambda: wait_results.append(r_race.wait(timeout_s=5.0, until=race_until)),
+                daemon=True,
+            )
+            t_wait.start()
+            self.assertTrue(until_entered.wait(timeout=2.0))
+
+            # Close while until() is blocked, let worker exit completely BEFORE until() returns False.
+            release_worker.set()
+            self.assertTrue(r_race.close(timeout_s=2.0))
+            self.assertFalse(r_race.in_flight)
+            release_until.set()
+
+            t_wait.join(timeout=2.0)
+            self.assertFalse(t_wait.is_alive())
+            self.assertEqual(wait_results, [False])
+        finally:
+            release_worker.set()
+            release_until.set()
+            r_race.close(timeout_s=2.0)
+
+        # (a3) close() wakes wait(until=...) sleeping on _condition.wait() promptly and returns False.
+        sleep_worker_entered = threading.Event()
+        release_sleep_worker = threading.Event()
+        r_sleep = AsyncShadowReplenisher(
+            lambda _l, _s: (sleep_worker_entered.set(), release_sleep_worker.wait(timeout=5.0), {"ok": True})[2]
+        )
+        try:
+            self.assertEqual(r_sleep("lab", None), "started")
+            self.assertTrue(sleep_worker_entered.wait(timeout=2.0))
+            sleep_results: list[bool] = []
+            t_sleep_wait = threading.Thread(
+                target=lambda: sleep_results.append(r_sleep.wait(timeout_s=5.0, until=lambda: False)),
+                daemon=True,
+            )
+            t_sleep_wait.start()
+            # Give wait() a brief moment to enter _condition.wait(), then close and unblock worker.
+            time.sleep(0.03)
+            t_close0 = time.perf_counter()
+            release_sleep_worker.set()
+            self.assertTrue(r_sleep.close(timeout_s=2.0))
+            t_sleep_wait.join(timeout=2.0)
+            self.assertLess(time.perf_counter() - t_close0, 1.0)
+            self.assertFalse(t_sleep_wait.is_alive())
+            self.assertEqual(sleep_results, [False])
+        finally:
+            release_sleep_worker.set()
+            r_sleep.close(timeout_s=2.0)
+
+        # (b) _attempts != snapshot_attempts race-avoidance re-probe inside until():
+        # Run 1 sets ready=True and exits while Run 2 (queued) stays blocked.
+        # until() returns False on call #1 (stale read before Run 1 commits); because attempts
+        # advanced while until() was running, wait() MUST re-probe until() and return True
+        # immediately without blocking on Run 2!
+        run_seq = [0]
+        ready_flag = [False]
+        run1_entered = threading.Event()
+        release_run1 = threading.Event()
+        run2_entered = threading.Event()
+        release_run2 = threading.Event()
+        probe1_entered = threading.Event()
+        release_probe1 = threading.Event()
+        probe_calls = [0]
+
+        def reprobe_worker(_lab, _store):
+            run_seq[0] += 1
+            idx = run_seq[0]
+            if idx == 1:
+                run1_entered.set()
+                release_run1.wait(timeout=5.0)
+                ready_flag[0] = True
+            elif idx == 2:
+                run2_entered.set()
+                release_run2.wait(timeout=5.0)
+            return {"ok": True}
+
+        r_reprobe = AsyncShadowReplenisher(reprobe_worker, queue_when_busy=True)
+        try:
+            self.assertEqual(r_reprobe("run-1", None), "started")
+            self.assertTrue(run1_entered.wait(timeout=2.0))
+            self.assertEqual(r_reprobe("run-2", None), "queued")
+
+            def staged_until() -> bool:
+                probe_calls[0] += 1
+                if probe_calls[0] == 1:
+                    probe1_entered.set()
+                    release_probe1.wait(timeout=5.0)
+                    return False
+                return ready_flag[0]
+
+            reprobe_results: list[bool] = []
+            t_rw = threading.Thread(
+                target=lambda: reprobe_results.append(r_reprobe.wait(timeout_s=5.0, until=staged_until)),
+                daemon=True,
+            )
+            t_rw.start()
+            self.assertTrue(probe1_entered.wait(timeout=2.0))
+            release_run1.set()
+            self.assertTrue(run2_entered.wait(timeout=2.0))
+            t_w0 = time.perf_counter()
+            release_probe1.set()
+            t_rw.join(timeout=2.0)
+            self.assertLess(time.perf_counter() - t_w0, 1.0)
+            self.assertFalse(t_rw.is_alive())
+            self.assertEqual(reprobe_results, [True])
+            self.assertEqual(probe_calls[0], 2)
+        finally:
+            release_run1.set()
+            release_probe1.set()
+            release_run2.set()
+            r_reprobe.close(timeout_s=2.0)
+
+        # (c) probe_error with fallback_driver suppresses spurious replenish_fn invocation.
+        for bad_probe in (
+            lambda: -1,
+            lambda: True,
+            lambda: "bad",
+            lambda: (_ for _ in ()).throw(RuntimeError("probe crashed")),
+        ):
+            sync_calls: list[str] = []
+            drv_sync = StandbyShadowDriver(
+                lambda lab, store: {"ok": True},
+                replenish_fn=lambda lab, store: sync_calls.append("called") or "started",
+                ready_count_fn=bad_probe,  # type: ignore[arg-type]
+                fallback_driver=DefaultRespawnDriver(),
+            )
+            with self.assertLogs("rsibox.warm.recovery", level="WARNING"):
+                res_sync = _ProbeLab(weight_store=DiskStore(), recovery_driver=drv_sync).reset("respawn")
+            self.assertTrue(res_sync["ok"], res_sync)
+            self.assertEqual(res_sync["driver"], "default_respawn")
+            self.assertEqual(res_sync["fallback_from"], "standby_shadow")
+            self.assertNotIn("replenish", res_sync)
+            self.assertEqual(sync_calls, [])
+
+            async_calls: list[str] = []
+            with AsyncShadowReplenisher(lambda _l, _s: async_calls.append("called") or {"ok": True}) as async_rep:
+                drv_async = StandbyShadowDriver(
+                    lambda lab, store: {"ok": True},
+                    replenish_fn=async_rep,
+                    ready_count_fn=bad_probe,  # type: ignore[arg-type]
+                    fallback_driver=DefaultRespawnDriver(),
+                )
+                with self.assertLogs("rsibox.warm.recovery", level="WARNING"):
+                    res_async = _ProbeLab(weight_store=DiskStore(), recovery_driver=drv_async).reset("respawn")
+                self.assertTrue(res_async["ok"], res_async)
+                self.assertEqual(res_async["driver"], "default_respawn")
+                self.assertEqual(res_async["fallback_from"], "standby_shadow")
+                self.assertNotIn("replenish", res_async)
+                self.assertEqual(async_rep.attempts, 0)
+                self.assertEqual(async_calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

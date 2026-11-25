@@ -320,6 +320,71 @@ class TorchTitanGoldenTests(unittest.TestCase):
         self.assertEqual(data["env"]["RSIBOX_TORCHTITAN_STEPS"], "3")
         self.assertFalse(data["torch_loaded"])
 
+    def test_stop_engine_tears_down_ranks_in_parallel_and_handles_partial_workers(self):
+        """Golden regression (#254): `_stop_engine()` signals/stops all ranks in parallel
+        (`O(1)` in `world_size`) and cleans up temp files safely on partial init or worker errors."""
+        import tempfile
+        import threading
+        from unittest import mock
+
+        lab_module = sys.modules["adapter.lab"]
+        self.assertFalse(hasattr(lab_module, "FSDP2_SINGLE_RANK_ERR"))
+
+        barrier = threading.Barrier(4, timeout=2.0)
+
+        class _ParallelProc:
+            def __init__(self, pid: int, *, raise_on_poll: bool = False) -> None:
+                self.pid = pid
+                self._alive = True
+                self._raise_on_poll = raise_on_poll
+
+            def poll(self):
+                if self._raise_on_poll:
+                    raise RuntimeError("broken proc")
+                return None if self._alive else 0
+
+            def wait(self, timeout=None):
+                self._alive = False
+                return 0
+
+        def _barrier_shutdown(_sock, payload, timeout=None):
+            if payload.get("method") == "shutdown":
+                barrier.wait()
+            return {"ok": True}
+
+        bare_lab = TorchTitanLab({"mode": "cpu", "world_size": 4}, auto_spawn=False)
+        bare_lab._dirty = False
+        temp_files: list[str] = []
+        for rank in range(4):
+            paths = {}
+            for kind in ("sock", "spec", "err"):
+                fd, p = tempfile.mkstemp(prefix=f"tt-stop-{rank}-{kind}-")
+                os.close(fd)
+                paths[kind] = p
+                temp_files.append(p)
+            bare_lab._workers.append({"rank": rank, "proc": _ParallelProc(1000 + rank), **paths})
+
+        with mock.patch.object(lab_module.ipc, "unix_json_call", side_effect=_barrier_shutdown):
+            bare_lab._stop_engine()
+
+        self.assertEqual(bare_lab._workers, [])
+        for path in temp_files:
+            self.assertFalse(os.path.exists(path), f"temp file not unlinked: {path}")
+
+        # Partial worker entry + raising poll() must not abort sibling cleanup or leak files.
+        fd_ok, ok_sock = tempfile.mkstemp(prefix="tt-part-ok-")
+        os.close(fd_ok)
+        fd_err, err_spec = tempfile.mkstemp(prefix="tt-part-err-")
+        os.close(fd_err)
+        bare_lab._workers = [
+            {"rank": 0, "proc": _ParallelProc(2000, raise_on_poll=True), "sock": ok_sock},
+            {"rank": 1, "spec": err_spec},
+        ]
+        bare_lab._stop_engine()
+        self.assertEqual(bare_lab._workers, [])
+        self.assertFalse(os.path.exists(ok_sock))
+        self.assertFalse(os.path.exists(err_spec))
+
 
 class TorchTitanRealCudaFsdp2Tests(unittest.TestCase):
     """Real PyTorch CUDA + FSDP2 (`fully_shard`) verification (auto-skips on CPU-only hosts)."""

@@ -385,23 +385,25 @@ class AsyncShadowReplenisher:
 
     def wait(self, timeout_s: float | None = None, *, until: Callable[[], bool] | None = None) -> bool:
         """Block until replenishment goes idle, or until `until()` returns True."""
+        if until is not None and not callable(until):
+            raise TypeError(f"until must be callable or None, got {type(until).__name__}")
         deadline = None if timeout_s is None else (time.monotonic() + max(0.0, float(timeout_s)))
         while True:
             with self._condition:
                 if self._active_thread is threading.current_thread():
                     raise RuntimeError("cannot call wait() from inside the active replenishment thread")
-                if not self._in_flight and self._pending_request is None:
-                    return True
                 if until is not None and self._closed:
                     return False
+                if not self._in_flight and self._pending_request is None:
+                    return True
                 snapshot_attempts = self._attempts
             if until is not None and until():
                 return True
             with self._condition:
-                if not self._in_flight and self._pending_request is None:
-                    return True
                 if until is not None and self._closed:
                     return False
+                if not self._in_flight and self._pending_request is None:
+                    return True
                 if until is not None and self._attempts != snapshot_attempts:
                     continue
                 if deadline is None:
