@@ -36,8 +36,8 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 - **CUDA Graph selective recapture:** Recapture only affected CUDA graphs in-place when an edit touches graph-captured kernels, avoiding full cold restarts.
 - **C++/CUDA (`.cu`) & live config reload:** Hot-reload compiled `.cu` kernels (`7.3–19.2 s` vs. `41–49 s`) and tune runtime flags (e.g., `max_num_seqs`) in-process in **`4.3 ms`**.
 - **Multi-GPU & multi-launcher:** Supports TP / DP / PP / VPP / SP workers and Ray actors via local, Docker, gVisor, and Slurm launchers.
-- **Pluggable fast recovery (NVIDIA Dynamo GMS & Snapshot):** Optional zero-dependency [`rsibox.warm`](core/livelab/rsibox/warm/README.md) hooks for persistent GPU weights, **`0.31–1.86 s`** vLLM Shadow failover (with off-critical-path `AsyncShadowReplenisher`), and **`2.73–6.96 s`** `0.6B` / GMS+CRIU + `cuda-checkpoint` restore (vs. `13.35–45.38 s` Plain CRIU on `14B–65.5 GB`).
-- **Multi-agent shared-pool scheduling (`SandboxPool`):** Multiplex `N` concurrent agent workers over `C` warm GPUs with fenced leases, SHA-256 hash-chained `verify_trace` logs, and automatic Shadow failover — delivering **`43.7×–54.4×`** clean multi-agent speedup (`1` B200 at `N = 8` beats `3` B200s restarting at `N = 6` by **`19.2×`**) and sub-second crash recovery ([study](docs/agent-teams-and-contention.md)).
+- **Pluggable fast recovery (NVIDIA Dynamo GMS & Snapshot):** Optional zero-dependency [`rsibox.warm`](core/livelab/rsibox/warm/README.md) hooks for persistent GPU weights, **`0.31–1.86 s`** vLLM and **`0.48–0.53 s`** SGLang (`52` decode CUDA graphs) shadow / multi-shadow failover (with off-critical-path `AsyncShadowReplenisher` and `ready_count_fn`), and **`2.73–6.96 s`** `0.6B` / GMS+CRIU + `cuda-checkpoint` restore (vs. `13.35–45.38 s` Plain CRIU on `14B–65.5 GB`).
+- **Multi-agent shared-pool scheduling (`SandboxPool`):** Multiplex `N` concurrent agent workers over `C` warm GPUs with fenced leases, priority + anti-starvation aging, work-conserving elastic role borrowing (`1.60×–2.60×`), per-agent circuit breaking + `max_slots_per_agent` blast-radius containment (`12.40×` faster healthy team, `60.58×` lower p95 wait), online `heal_slot()` recovery, and SHA-256 `verify_trace` logs (`110/110` verified traces across 5 live B200 engines) — delivering **`43.7×–54.4×`** clean speedup (`1` B200 at `N = 8` beats `3` B200s restarting at `N = 6` by **`19.2×`**) and **`11.30×`** full-stack pipeline speedup under active rogue attack ([study](docs/agent-teams-and-contention.md)).
 
 ## Supported Engines & Results
 
@@ -51,7 +51,7 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 | **`FastVideo`** | Video Gen | SP1–SP4 live swaps, FlashInfer preload, IPC weight holder | `206 s` | **`2.3–6.4 s`** | **up to 92×** |
 | **`veRL`** | RL Post-Training | 21 Ray actors (eager & FSDP CG) + coupled `S0` reset | `298 s` | **`36.4 s`** (`12.6 ms` replay) | **8.2×** |
 | **`miles`** | RL Post-Training | Ray rollout + trainer actors + coupled `S0` reset (`38 ms` median commit) | `82.4 s` | **`0.89 s`** | **up to 93×** |
-| **`TorchTitan`** | Training (FSDP2) | PyTorch `fully_shard` (`world_size=1` `TitanMLPNet`) + 2-rank CPU toy, `S0` + RNG reset | `2.69 s` | **`0.083 s`** (`54 ms` install) | **32.5×** |
+| **`TorchTitan`** | Training (FSDP2) | PyTorch `fully_shard` (`world_size=1` & `world_size=2` NCCL `TitanMLPNet`) + 2-rank CPU toy, `S0` + RNG reset | `2.69 s` / `5.52 s` | **`0.083 s`** / **`0.255 s`** (`2`-rank cycle) | **32.5× / 21.6×** |
 
 On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). Full engine tables, per-tier costs, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
 
