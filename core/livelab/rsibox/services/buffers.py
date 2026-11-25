@@ -84,6 +84,13 @@ def _atomic_write_bytes(target: Path, data: bytes) -> None:
             with contextlib.suppress(OSError): tmp_path.unlink()
 
 
+def _ckpt_int(doc: dict[str, Any], key: str, cpath: Path) -> int:
+    val = doc.get(key)
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise IndexCorruptError(f"invalid {key} in cursor checkpoint {cpath}: {val!r}")
+    return val
+
+
 def _reject_nonfinite(token: str) -> Any:
     raise ValueError(f"non-finite JSON constant {token!r}")
 
@@ -119,6 +126,8 @@ def _scan_delimited_file(data_path: Path, delimiter: bytes) -> tuple[list[tuple[
 
 
 def _write_records_atomic(data_path: Path, records: Iterable[bytes], delimiter: bytes) -> tuple[list[tuple[int, int, bytes]], int]:
+    if isinstance(records, (str, bytes, bytearray, memoryview)):
+        raise TypeError(f"records must be an iterable of bytes-like items, not scalar {type(records).__name__}")
     data_path.parent.mkdir(parents=True, exist_ok=True)
     entries: list[tuple[int, int, bytes]] = []
     tmp_path: Path | None = None
@@ -184,7 +193,12 @@ class IndexedPrefetchService:
         cls, data_path: str | os.PathLike[str], index_path: str | os.PathLike[str],
         delimiter: bytes = b"\n", *, records: Iterable[bytes] | None = None,
     ) -> int:
-        """Build an atomic binary offset index for `data_path`, optionally writing `records` first."""
+        """Build an atomic binary offset index for `data_path`.
+
+        When `records` is None, scans `data_path` splitting by non-empty `delimiter`.
+        When `records` is provided, atomically writes each record followed by `delimiter`
+        (which may be `b""` for packed offset-only records) and indexes exact spans.
+        """
         dpath, ipath = _validate_path(data_path, "data_path"), _validate_path(index_path, "index_path")
         if not isinstance(delimiter, bytes):
             raise TypeError(f"delimiter must be bytes, got {type(delimiter).__name__}")
@@ -297,7 +311,7 @@ class IndexedPrefetchService:
                 "schema": _CHECKPOINT_SCHEMA, "cursor": self._cursor,
                 "count": len(self._entries), "data_size": self._data_size, "index_sha256": self._index_sha256,
             }
-        _atomic_write_bytes(cpath, json.dumps(doc, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+            _atomic_write_bytes(cpath, json.dumps(doc, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8"))
         return dict(doc)
 
     def restore_cursor(self, path: str | os.PathLike[str]) -> int:
@@ -309,15 +323,18 @@ class IndexedPrefetchService:
             raise IndexCorruptError(f"corrupt cursor checkpoint {cpath}: {exc}") from exc
         if not isinstance(doc, dict):
             raise IndexCorruptError(f"cursor checkpoint must be a JSON object: {cpath}")
-        schema, cursor = doc.get("schema"), doc.get("cursor")
-        if isinstance(schema, bool) or schema != _CHECKPOINT_SCHEMA:
+        schema = _ckpt_int(doc, "schema", cpath)
+        cursor = _ckpt_int(doc, "cursor", cpath)
+        count = _ckpt_int(doc, "count", cpath)
+        data_size = _ckpt_int(doc, "data_size", cpath)
+        idx_sha = doc.get("index_sha256")
+        if schema != _CHECKPOINT_SCHEMA:
             raise IndexCorruptError(f"invalid cursor checkpoint schema in {cpath}")
-        if isinstance(cursor, bool) or not isinstance(cursor, int):
-            raise IndexCorruptError(f"invalid cursor value in {cpath}: {cursor!r}")
+        if not isinstance(idx_sha, str):
+            raise IndexCorruptError(f"invalid index_sha256 in cursor checkpoint {cpath}: {idx_sha!r}")
         with self._lock:
             self._require_open_locked()
-            if (doc.get("count") != len(self._entries) or doc.get("data_size") != self._data_size
-                    or doc.get("index_sha256") != self._index_sha256):
+            if count != len(self._entries) or data_size != self._data_size or idx_sha != self._index_sha256:
                 raise IndexCorruptError(f"cursor checkpoint does not match active index: {cpath}")
             if cursor < 0 or cursor > len(self._entries):
                 raise CursorOutOfRangeError(f"restored cursor {cursor} out of range [0, {len(self._entries)}]")

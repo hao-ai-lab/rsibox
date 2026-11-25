@@ -176,10 +176,17 @@ class IndexedPrefetchServiceTests(unittest.TestCase):
 
                 for bad_patch in (
                     {"schema": 99},
+                    {"schema": True},
                     {"cursor": True},
                     {"cursor": "1"},
-                    {"index_sha256": "0" * 64},
+                    {"count": True},
+                    {"count": 2.0},
                     {"count": 99},
+                    {"data_size": True},
+                    {"data_size": float(ckpt_doc["data_size"])},
+                    {"index_sha256": 123},
+                    {"index_sha256": None},
+                    {"index_sha256": "0" * 64},
                 ):
                     patched = {**ckpt_doc, **bad_patch}
                     ckpt_path.write_text(json.dumps(patched), encoding="utf-8")
@@ -199,6 +206,11 @@ class IndexedPrefetchServiceTests(unittest.TestCase):
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always", ResourceWarning)
+                for scalar in (b"abc", "abc", bytearray(b"abc"), memoryview(b"abc")):
+                    with self.assertRaises(TypeError):
+                        IndexedPrefetchService.build_index(
+                            root / "scalar.bin", root / "scalar.idx", records=scalar,  # type: ignore[arg-type]
+                        )
                 with self.assertRaises(TypeError):
                     IndexedPrefetchService(data_path, index_path, start_cursor=True)  # type: ignore[arg-type]
                 with self.assertRaises(CursorOutOfRangeError):
@@ -260,13 +272,20 @@ class IndexedPrefetchServiceTests(unittest.TestCase):
             IndexedPrefetchService.build_index(data_path, index_path, records=records)
 
             with IndexedPrefetchService(data_path, index_path) as svc:
+                ckpt_path = root / "concurrent_ckpt.json"
+
                 def worker(idx: int) -> bytes:
+                    if idx % 16 == 0:
+                        svc.seek(idx % len(records))
+                        svc.checkpoint_cursor(ckpt_path)
                     return svc.get(idx % len(records)).payload
 
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     results = list(pool.map(worker, range(256)))
                 for idx, payload in enumerate(results):
                     self.assertEqual(payload, records[idx % len(records)])
+                restored = svc.restore_cursor(ckpt_path)
+                self.assertTrue(0 <= restored <= len(records))
 
 
 class VersionedReplayBufferServiceTests(unittest.TestCase):
