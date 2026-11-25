@@ -1,10 +1,10 @@
 # Supported Engines & Benchmarks
 
-Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md) contract and is validated against the 11 sandbox verification checks ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)).
+Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md) contract and is validated against the sandbox verification suite ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)).
 
 ## What is in the repo today
 
-| Engine | Verification Suite (11/11) | Headline Live vs. Restart | Docs & Costs |
+| Engine | Verification Suite | Headline Live vs. Restart | Docs & Costs |
 |---|---|---|---|
 | **vLLM** | CPU CI & 1–2× B200 (eager, V1/V2 CUDA graphs) | 228 s → **2.4–23.6 s** (up to 95×); C++/CUDA `.cu` reload 7.3–19.2 s vs. 41–49 s | [architecture](../repos/vllm/docs/architecture.md) · [costs](../repos/vllm/kb/costs.md) · [walkthrough](../repos/vllm/examples/live-edit-qwen3/README.md) |
 | **SGLang** | CPU CI & 1–2× B200 / GB200 (`--fork-subprocs`) | 66.4 s cold / 26.5 s warm → **0.38–1.77 s** live (up to 176×); fork server 10.6–19.5 s | [costs](../repos/sglang/kb/costs.md) |

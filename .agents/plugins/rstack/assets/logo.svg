@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240" fill="none" role="img" aria-label="rstack">
+  <!-- Isometric warm sandbox with floating hot-swap core -->
+  <g transform="translate(14.4, 6.72) scale(0.96)">
+    <!-- Outer isometric box base (slate) -->
+    <!-- Inner back walls (visible inside open box) -->
+    <polygon points="110,68 206,116 110,164 14,116" fill="#1E293B"/>
+    <polygon points="110,68 206,116 206,162 110,114" fill="#334155" opacity="0.55"/>
+    <polygon points="110,68 14,116 14,162 110,114" fill="#475569" opacity="0.55"/>
+
+    <!-- Left front wall -->
+    <polygon points="14,116 110,164 110,218 14,170" fill="#334155"/>
+    <!-- Right front wall -->
+    <polygon points="206,116 110,164 110,218 206,170" fill="#64748B"/>
+
+    <!-- Rim highlights on box top edges -->
+    <polyline points="14,116 110,164 206,116" stroke="#94A3B8" stroke-width="2.5" stroke-linejoin="round" fill="none"/>
+
+    <!-- Floating hot-swap core cube (amber-orange) hovering into the open box -->
+    <!-- Core top face -->
+    <polygon points="110,18 164,45 110,72 56,45" fill="#FB923C"/>
+    <!-- Core left face -->
+    <polygon points="56,45 110,72 110,126 56,99" fill="#EA580C"/>
+    <!-- Core right face -->
+    <polygon points="164,45 110,72 110,126 164,99" fill="#F97316"/>
+
+    <!-- Subtle hot-swap lightning/swap glyph on top of core -->
+    <polygon points="115,31 97,46 109,46 104,59 123,44 111,44" fill="#FFF7ED"/>
+
+    <!-- Left & right swap motion ticks -->
+    <path d="M36,78 L36,54 M29,61 L36,53 L43,61" stroke="#F97316" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M184,54 L184,78 M177,71 L184,79 L191,71" stroke="#64748B" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -24,11 +24,12 @@ from _common import (
 
 def check_body_contract(body_text: str, require_gpu: bool) -> list[str]:
     """Validate PR body headings and mandatory Loop/GPU bullets."""
-    errors = [f"missing heading: {h}" for h in REQUIRED_HEADINGS if h not in body_text]
+    cleaned = re.sub(r"<!--.*?-->", "", body_text.replace("\r", ""), flags=re.S)
+    errors = [f"missing heading: {h}" for h in REQUIRED_HEADINGS if h not in cleaned]
     if require_gpu:
         for key in (*REQUIRED_LOOP_KEYS, *REQUIRED_GPU_KEYS):
-            if not re.search(rf"-\s+\*\*{re.escape(key)}\*\*:\s+\S+", body_text):
-                errors.append(f"missing or empty bullet: - **{key}**:")
+            if not re.search(rf"^- {re.escape(key)}:[ \t]*\S", cleaned, flags=re.M):
+                errors.append(f"missing or empty bullet: - {key}:")
     return errors
 
 

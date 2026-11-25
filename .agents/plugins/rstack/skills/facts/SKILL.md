@@ -1,5 +1,5 @@
 ---
-name: rsibox-facts-sync
+name: facts
 description: Synchronize site/facts JSON files, README tables, and live dashboard checkouts cleanly in one post-batch docs(site) PR after feature merges.
 ---
 

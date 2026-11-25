@@ -1,5 +1,5 @@
 ---
-name: rsibox-precheck
+name: precheck
 description: Run mandatory local CI mirror checks (pre_push.py and pr_gate.py validate-body) before pushing any branch or creating a PR.
 ---
 

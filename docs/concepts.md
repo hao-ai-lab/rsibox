@@ -15,7 +15,8 @@ RSIBox applies each edit at the lowest layer that can safely update what the har
 2. **Triton kernels (`@triton.jit`):** Rebuild modified Triton kernels and any callers that inline them, while keeping the prior binaries cached for instant undo.
 3. **Selective CUDA graph recapture (`~0.5–3.7 s`):** Re-capture only the CUDA graphs touched by an edit instead of restarting the worker process.
 4. **C++/CUDA (`.cu`) side-library reload (`~7–19 s`):** Compile edited native kernels into a versioned side library, rebind PyTorch ops, and recapture affected graphs.
-5. **Warm fork / Dynamo GMS & Snapshot fallback (`~0.3–7 s`):** When an edit crosses a process boundary or crashes a worker, fall back to a pre-warmed fork server or NVIDIA Dynamo GPU Memory Service (GMS) and Snapshot restore so weights stay resident in GPU memory.
+5. **Pre-warmed fork server (`~5–20 s`):** Respawn from a pre-imported zygote server when an edit changes launch flags or startup code, keeping weights in GPU memory when paired with a CUDA IPC weight holder.
+6. **Dynamo GMS & Snapshot fallback (`~0.3–7 s`):** When a worker crashes or is poisoned, promote a parked NVIDIA Dynamo GPU Memory Service (GMS) standby shadow or restore a quiesced CRIU + `cuda-checkpoint` snapshot so weights stay resident in GPU memory.
 
 ## How a Live Edit Flows
 
@@ -37,9 +38,9 @@ Before touching live state, each rank records the exact inverse of every mutatio
 
 Long-lived state (constructors, module-level constants, changed closures, or launch flags) cannot be patched safely in place. RSIBox checks every patch before mutating state, refuses unsupported edits fail-closed, and names the cheapest restart boundary that handles them. See [`docs/mechanisms.md`](mechanisms.md) and [`docs/kernels-and-graphs.md`](kernels-and-graphs.md).
 
-## The 11-Check Verification Suite
+## Sandbox Verification Suite
 
-Every engine adapter must pass 11 deterministic checks ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) before its measurements count:
+Every engine adapter must pass the sandbox verification suite ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)) before its measurements count:
 
 - **Repeatability (`c0`):** Repeated checks after state resets produce identical outputs.
 - **Execution & fresh parity (`c1`–`c3`, `c10`):** Edits execute on every rank, match a fresh process started from the edited files, and report `zero_witness` when code never runs.

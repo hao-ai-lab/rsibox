@@ -22,10 +22,20 @@ def evaluate_rollup(pr_json: dict[str, Any]) -> tuple[str, dict[str, list[str]]]
     Treats conclusion in {SUCCESS, NEUTRAL, SKIPPED} as green even when
     GitHub GraphQL caches a stale status == 'IN_PROGRESS'.
     """
+    latest: dict[tuple[str, str], tuple[tuple[str, str], int, dict[str, Any]]] = {}
+    for idx, item in enumerate(pr_json.get("statusCheckRollup") or []):
+        wf = str(item.get("workflowName") or "")
+        name = str(item.get("name") or item.get("context") or "unknown")
+        key = (wf, name)
+        ts = (str(item.get("startedAt") or ""), str(item.get("completedAt") or ""))
+        prev = latest.get(key)
+        if prev is None or (ts, idx) > (prev[0], prev[1]):
+            latest[key] = (ts, idx, item)
+
     passed: list[str] = []
     pending: list[str] = []
     failed: list[str] = []
-    for item in pr_json.get("statusCheckRollup") or []:
+    for _, _, item in latest.values():
         name = str(item.get("name") or item.get("context") or "unknown")
         conclusion = str(item.get("conclusion") or item.get("state") or "").upper()
         status = str(item.get("status") or "").upper()
