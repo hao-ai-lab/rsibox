@@ -6,8 +6,8 @@
   "engines_target": 14,
   "invariants_done": 12,
   "invariants_total": 12,
-  "experiments_done": 16,
-  "experiments_total": 16,
+  "experiments_done": 18,
+  "experiments_total": 18,
   "traces_verified": "112/112",
   "leases_verified": 3226,
   "targets_done": 0,
@@ -158,9 +158,9 @@
   },
   {
    "id": "I6",
-   "title": "SHA-256 Hash-Chained Pool Traces",
+   "title": "SHA-256 Hash-Chained Pool Traces & Offline CLI Verifier",
    "status": "done",
-   "detail": "Every SandboxPool lease writes an append-only JSONL record chaining prev_sha256 -> record_sha256; verify_trace(..., expected_head=...) passed 112/112 traces across 3,226 real B200 leases."
+   "detail": "Every SandboxPool lease writes an append-only JSONL record chaining prev_sha256 -> record_sha256; verify_trace(..., expected_head=...) passed 112/112 traces across 3,226 real B200 leases; the offline rsibox verify-trace CLI (#266) verified 6/6 B200 traces (411 records, EXP-H1-H4) and 125/125 CPU tests."
   },
   {
    "id": "I7",
@@ -176,9 +176,9 @@
   },
   {
    "id": "I9",
-   "title": "Online Slot Rehabilitation (heal_slot) & Elastic Scaling (add_slot/drain_slot)",
+   "title": "Online Healing (heal_slot), Elastic Scaling & Admission Backpressure",
    "status": "done",
-   "detail": "heal_slot() (#253) rehabilitates quarantined slots online while add_slot()/drain_slot() (#256) scale pools live under load (3->2->3 EXP-H4: 0.176 s drain, 58 us attach, 0 aborted edits)."
+   "detail": "heal_slot() (#253, EXP-H3 2x B200: 101 edits served during 44.55 s heal, 1.87x restored), add_slot()/drain_slot() (#256, EXP-H4 3x B200: 0.176 s drain, 58 us attach, 0 aborted edits), and max_waiters + slot_states() (#260, 126/126 CPU verified; B200 EXP-H5 pending) bound overload and expose atomic slot lifecycles."
   },
   {
    "id": "I10",
@@ -327,6 +327,22 @@
    "result": "Capping max_slots_per_agent=1 (#250) bounds simultaneous 3-thread rogue attack from 3/3 blackout to 1/3 GPU, accelerating healthy team 12.40x (54.32 -> 4.38 s, 273.97 edits/min), cutting p95 wait 60.58x, and cutting GPU recovery 3.31x.",
    "traces": "2/2 (44 leases)",
    "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-H3",
+   "title": "Online Quarantined-Slot Rehabilitation via heal_slot() (2x B200)",
+   "status": "done",
+   "result": "Online heal_slot() (#253) rehabilitates a quarantined B200 in 44.55 s outside the pool lock while the surviving GPU serves 101 live edits (0 lock stalls, 113 phase-3 edits total), restoring steady-state throughput 1.87x (141.80 -> 264.82 edits/min, 96.8% of baseline) with max_abs_logprob_diff == 0.0.",
+   "traces": "1/1 (147 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
+  },
+  {
+   "id": "EXP-H4",
+   "title": "Dynamic Elastic Fleet Scaling 3 -> 2 -> 3 via drain_slot() & add_slot() (3x B200)",
+   "status": "done",
+   "result": "Live 3 -> 2 -> 3 cycle under continuous N=8 traffic (#256): drain_slot() completes in 0.176 s with 0 aborted edits and 0 restarts, add_slot() re-attaches in 58 us (0.000058 s), restoring 1.48x throughput (276.82 -> 409.47 edits/min, 100.1% of baseline) and 1.61x lower mean wait with max_abs_logprob_diff == 0.0.",
+   "traces": "1/1 (160 leases)",
+   "evidence": "docs/agent-teams-and-contention.md"
   }
  ],
  "targets": [
@@ -380,9 +396,9 @@
    "id": "T4",
    "title": "Phase 1 · Codebase Robustness & pstack Tech-Debt Sweep",
    "status": "in_progress",
-   "progress_pct": 75,
+   "progress_pct": 80,
    "owner_track": "Core Reliability",
-   "summary": "Merged PR #264 with 5 P1/P2 audit fixes plus 2 P2 guards across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py with deterministic regression tests; next: run full blast-radius scan.",
+   "summary": "Merged PR #264 with 5 P1/P2 audit fixes plus 2 P2 guards across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py alongside PR #260 (max_waiters + slot_states()) and PR #266 (rsibox verify-trace CLI); next: run full blast-radius scan.",
    "items": [
     "Merged PR #264: fix #244 AsyncShadowReplenisher.wait(until) close() race + barrier regression tests",
     "Merged PR #264: fix #248 SglangShadowPromoter head-dead shadow skipping & bystander survival test",
@@ -434,9 +450,9 @@
   },
   {
    "id": "agent-teams-healing-elastic-and-fsdp2",
-   "title": "Online Healing, Elastic 3->2->3 Scaling & 2-Rank FSDP2 Multi-Node",
+   "title": "Wave 13-17: Online Healing, Live Elastic Scaling & 2x B200 FSDP2 NCCL",
    "path": "assets/agent-teams-healing-elastic-and-fsdp2.svg",
-   "caption": "EXP-H3 online heal_slot() fleet recovery (1.87x throughput), EXP-H4 3->2->3 elastic scaling (0.176 s drain, 58 us re-attach, 112/112 traces, 3,226 leases), and 2x B200 FSDP2 TorchTitan real NCCL telemetry."
+   "caption": "EXP-H3 online heal_slot() on 2x B200 (101 live edits during 44.55 s heal, 1.87x restored), EXP-H4 live 3 -> 2 -> 3 elastic scaling on 3x B200 (0.176 s drain, 58 us attach, 0 aborted edits), and EXP-F7 TorchTitan 2-rank FSDP2 NCCL (21.63x speedup, 0.255 s warm cycle)."
   }
  ]
 }

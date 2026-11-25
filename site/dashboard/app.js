@@ -321,6 +321,10 @@
     const facts = state.facts;
     const k = (facts && facts.kpis) || {};
     const targets = (facts && Array.isArray(facts.targets)) ? facts.targets : [];
+    const allExps = (facts && Array.isArray(facts.experiments)) ? facts.experiments : [];
+    const expRangeTag = allExps.length
+      ? `${allExps[0].id} ~ ${allExps[allExps.length - 1].id}`
+      : 'EXP';
 
     const enginesDone = Number(k.engines_done ?? 0);
     const enginesTarget = Number(k.engines_target ?? 10);
@@ -387,7 +391,7 @@
       {
         href: '#matrix',
         title: 'B200 实验矩阵',
-        tag: 'EXP-A ~ H2',
+        tag: expRangeTag,
         value: `${expDone} of ${expTotal}`,
         sub: `${tracesVerified} traces · ${leasesVerified.toLocaleString()} leases`,
         ratio: expDone / Math.max(1, expTotal),
@@ -1000,7 +1004,11 @@
 
         <div class="card">
           <div class="card-header">
-            <h2 class="card-title" id="tbl-exp-cap">多 Agent 与系统实验验收 (EXP-A ~ EXP-H2)</h2>
+            <h2 class="card-title" id="tbl-exp-cap">多 Agent 与系统实验验收 (${escapeHtml(
+              Array.isArray(facts.experiments) && facts.experiments.length
+                ? `${facts.experiments[0].id} ~ ${facts.experiments[facts.experiments.length - 1].id}`
+                : 'EXP'
+            )})</h2>
             <span class="badge badge-emerald">${experiments.length} 项</span>
           </div>
           ${
