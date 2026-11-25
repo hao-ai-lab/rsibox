@@ -124,10 +124,13 @@ def _stat_start_ticks(pid: int) -> int | None:
 
 
 def _proc_is_alive(proc: Any) -> bool:
-    if hasattr(proc, "is_alive"):
-        return bool(proc.is_alive())
-    if hasattr(proc, "poll"):
-        return proc.poll() is None
+    try:
+        if hasattr(proc, "is_alive"):
+            return bool(proc.is_alive())
+        if hasattr(proc, "poll"):
+            return proc.poll() is None
+    except Exception:
+        return False
     pid = _safe_pid(proc)
     return pid is not None and _proc.pid_alive(pid)
 

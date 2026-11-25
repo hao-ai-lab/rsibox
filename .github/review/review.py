@@ -28,7 +28,7 @@ GPU_FIELDS = ["Ideal full GPU test", "Actual tests run", "Why unrun GPU paths we
 # A number with the sign or comparator written right before it: +5.1 and -5.1, < 0.05 and
 # > 0.05 are different facts. A hyphen after a word character (2026-11-08, 0.13-1.0, x-2)
 # or before a space (a "- 5 GPUs" bullet) is not a sign.
-NUMBER_RE = re.compile(r"(?<![\w#])((?:[<>≤≥]=?[ \t]?|[+\-−±~])?)((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)")
+NUMBER_RE = re.compile(r"(?<![\w#])((?:[<>≤≥]=?[ \t]?|[+\-−±~])?)((?:\d{1,3}(?:,\d{3})+(?!\d)|\d+)(?:\.\d+)?)")
 
 
 def sh(*args, stdin=None):

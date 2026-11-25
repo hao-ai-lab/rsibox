@@ -64,6 +64,7 @@ class Accepts(unittest.TestCase):
         body = BODY + GPU_FIELDS + "\nRun on 2026-11-08: 0.13-1.0 ms, a x-2 shift, -3 dB.\n"
         new = rewrite("Run on 2026-11-08:", "Ran on 2026-11-08:", body)
         self.assertEqual(check(TITLE, body, TITLE, new), [])
+        self.assertEqual(facts("range(0,1000) and 1,2345")["numbers"], Counter({"0": 1, "1000": 1, "1": 1, "2345": 1}))
 
     def test_code_span_unwrapped(self):
         new = rewrite("We hot-swap `sparse_attn_indexer` from", "We hot-swap sparse_attn_indexer from")
@@ -84,6 +85,7 @@ class Accepts(unittest.TestCase):
             body,
         )
         self.assertEqual(check(TITLE, body, TITLE, new), [])
+        self.assertEqual(facts("range(0,1000) and 1,2345")["numbers"], Counter({"0": 1, "1000": 1, "1": 1, "2345": 1}))
 
 
 class Rejects(unittest.TestCase):
