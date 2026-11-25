@@ -62,12 +62,23 @@ class _PipeResource:
 class _InterceptingMemoryService:
     """Thin delegating wrapper around `MemoryService` for deterministic race hooks."""
 
-    def __init__(self, inner: MemoryService, on_acquire: Any = None) -> None:
+    def __init__(
+        self,
+        inner: MemoryService,
+        on_acquire: Any = None,
+        on_get_handle: Any = None,
+        on_release: Any = None,
+    ) -> None:
         self._inner = inner
         self._on_acquire = on_acquire
+        self._on_get_handle = on_get_handle
+        self._on_release = on_release
 
     def get_handle(self, handle_id: str) -> Any:
-        return self._inner.get_handle(handle_id)
+        handle = self._inner.get_handle(handle_id)
+        if self._on_get_handle is not None:
+            self._on_get_handle(handle_id, handle)
+        return handle
 
     def acquire_lease(self, handle_id: str, holder_id: str, writable: bool = False, *, expected_stamp: Any = None) -> Any:
         lease = self._inner.acquire_lease(handle_id, holder_id, writable=writable, expected_stamp=expected_stamp)
@@ -76,6 +87,8 @@ class _InterceptingMemoryService:
         return lease
 
     def release_lease(self, lease_id: str) -> bool:
+        if self._on_release is not None:
+            self._on_release(lease_id)
         return self._inner.release_lease(lease_id)
 
 
@@ -507,6 +520,76 @@ class AuxiliaryRaceAndTeardownTests(unittest.TestCase):
             pipe_race.close()
             mem.teardown()
             time.sleep(0)
+
+    def test_invoke_cur_none_releases_lease_outside_lock(self) -> None:
+        mem = MemoryService()
+        try:
+            mem.register_region(MemoryPoolKind.RO_AUX_WEIGHTS, "verl", "rm", gpus=(0,), size_bytes=1024, handle_id="h-cur-none")
+            svc_ref: list[AuxiliaryModelService] = []
+            lock_acquired_outside: list[bool] = []
+
+            def on_acquire(_hid: str, _lease: Any) -> None:
+                svc_ref[0].unregister_stage("rm-cur-none")
+
+            def on_release(_lid: str) -> None:
+                acquired = threading.Event()
+
+                def probe_lock() -> None:
+                    with svc_ref[0]._lock:
+                        acquired.set()
+
+                probe = threading.Thread(target=probe_lock)
+                probe.start()
+                lock_acquired_outside.append(acquired.wait(timeout=2.0))
+                probe.join(timeout=2.0)
+
+            wrapped_mem = _InterceptingMemoryService(mem, on_acquire=on_acquire, on_release=on_release)
+            with AuxiliaryModelService(memory_service=wrapped_mem) as svc:  # type: ignore[arg-type]
+                svc_ref.append(svc)
+                svc.register_stage(
+                    "rm-cur-none", kind="reward_model", engine="verl", model_id="rm",
+                    handle_id="h-cur-none", infer_fn=lambda p, c: p,
+                )
+                with self.assertRaises(StageNotFoundError):
+                    svc.invoke("rm-cur-none", "w0", "q")
+            self.assertEqual(lock_acquired_outside, [True])
+            self.assertEqual(mem.get_handle("h-cur-none").refcount, 0)
+        finally:
+            mem.teardown()
+
+    def test_bump_version_concurrent_unregister_reregister_fails_closed(self) -> None:
+        mem = MemoryService()
+        try:
+            mem.register_region(MemoryPoolKind.RO_AUX_WEIGHTS, "verl", "rm_v1", gpus=(0,), size_bytes=1024, handle_id="h1")
+            mem.register_region(MemoryPoolKind.RO_AUX_WEIGHTS, "verl", "rm_v2", gpus=(1,), size_bytes=1024, handle_id="h2")
+            swapped = False
+            with AuxiliaryModelService() as svc:
+                def on_get_handle(hid: str, _handle: Any) -> None:
+                    nonlocal swapped
+                    if hid == "h2" and not swapped:
+                        swapped = True
+                        svc.unregister_stage("rm-bump")
+                        svc.register_stage(
+                            "rm-bump", kind="reward_model", engine="verl", model_id="rm-new",
+                            version="fresh-v1", infer_fn=lambda _p, _c: "new-out",
+                        )
+
+                wrapped_mem = _InterceptingMemoryService(mem, on_get_handle=on_get_handle)
+                svc.register_stage(
+                    "rm-bump", kind="reward_model", engine="verl", model_id="rm-old", version="v1",
+                    handle_id="h1", memory_service=wrapped_mem,  # type: ignore[arg-type]
+                    infer_fn=lambda _p, _c: "old-out",
+                )
+                with self.assertRaises(StageNotFoundError):
+                    svc.bump_version("rm-bump", "v2", new_handle_id="h2")
+                self.assertTrue(swapped)
+                cur_spec = svc.get_stage("rm-bump")
+                self.assertEqual(cur_spec.version, "fresh-v1")
+                self.assertIsNone(cur_spec.handle_id)
+                self.assertEqual(cur_spec.model_id, "rm-new")
+                self.assertEqual(svc.invoke("rm-bump", "w0", "q").output, "new-out")
+        finally:
+            mem.teardown()
 
 
 if __name__ == "__main__":

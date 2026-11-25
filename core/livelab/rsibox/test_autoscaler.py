@@ -730,6 +730,16 @@ class PoolAutoScalerTests(unittest.TestCase):
         s_to.stop(timeout_s=1e20)
         self.assertFalse(s_to.status()["running"])
 
+    def test_top_level_package_reexports(self) -> None:
+        """Top-level `rsibox` package re-exports `AutoScalerPolicy` and `PoolAutoScaler`."""
+        import rsibox
+        from rsibox import AutoScalerPolicy as TopPolicy, PoolAutoScaler as TopScaler
+
+        self.assertIs(TopPolicy, AutoScalerPolicy)
+        self.assertIs(TopScaler, PoolAutoScaler)
+        self.assertIn("AutoScalerPolicy", rsibox.__all__)
+        self.assertIn("PoolAutoScaler", rsibox.__all__)
+
 
 if __name__ == "__main__":
     unittest.main()
