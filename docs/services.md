@@ -10,7 +10,7 @@ Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight re
 core/livelab/kernel/          (two-phase txns, code swap, JIT rebuild, witness, journal)
         │
         ▼
-core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache · S4 Aux · S5 Buffers · S6 Recovery [shipped])
+core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux · S5 Buffers · S6 Recovery [shipped])
         │
         ▼
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
@@ -25,7 +25,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 |---|---|---|---|
 | **S1 Memory** | Unified GPU memory & state ownership (`ro_weights`, `kv_pool`, `cow_s0_snapshot`, `ro_aux_weights`, `actor_rollout_shared`) | **Shipped** ([`memory.py`](../core/livelab/rsibox/services/memory.py)) | `MemoryService`, `MemoryHandle`, `SnapshotLease`; `WeightStore` / Dynamo GMS / CUDA IPC + `stamp_diff` |
 | **S2 Zygote** | Pre-imported Python/CUDA fork server & warm worker pool | **Shipped** ([`zygote.py`](../core/livelab/rsibox/services/zygote.py)) | `ZygoteService`, `ZygoteProfile`, `SpawnedChild`, `profile_for_engine`; `forksafe` guards + `AF_UNIX` `SCM_RIGHTS` |
-| **S3 Cache** | Triton, Inductor, C++ side-library & CUDA-graph artifact store | Planned | Content-addressed artifact reuse across respawns with `witness` and rollback pinning |
+| **S3 Cache** | Triton, Inductor, FlashInfer & CUDA-graph artifact store | **Shipped** ([`cache.py`](../core/livelab/rsibox/services/cache.py)) | `CompileCacheService`, `EnvFingerprint`, `CacheEntry`; per-entry `flock` + atomic `os.replace` + SHA-256 verification |
 | **S4 Auxiliary** | Out-of-band reward, reference, and judge model pools | Planned | Dedicated RO placement and RPC endpoints decoupled from actor/trainer loops |
 | **S5 Buffers** | Pre-allocated activation, KV scratch, and step replay buffers | Planned | Quiesce-aware sizing and deterministic zeroing on `reset("state")` |
 | **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | **Shipped** ([`recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py)) | `RecoveryService`, `RecoveryTier`, `ServiceHealth`, `RecoveryReceipt`; `RecoveryDriver` + `QuiesceHooks` + `SandboxPool` |
@@ -62,6 +62,22 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `SpawnedChild` | Frozen child metadata (`pid`, `role`, `engine`, `incarnation`, `child_guard_report`, `affinity_report`) |
 | `ZygoteService` | Thread-safe context-managed coordinator (`arm_guards`, `start`, `spawn_child`, `wait_child`, `reap_finished`, `status`, `teardown`, `close`) |
 
+## S3: Shared Compile & Graph Cache Service (Shipped)
+
+[`core/livelab/rsibox/services/cache.py`](../core/livelab/rsibox/services/cache.py) provides a fail-closed, cross-process and cross-container artifact cache behind `CompileCacheService`:
+
+- **Environment fingerprint binding:** `EnvFingerprint` hashes `gpu_arch`, `cuda_version`, `triton_version`, `torch_version`, `driver_version`, `engine`, and `extra` into a canonical SHA-256 `digest()`. Mismatches raise `FingerprintMismatchError` under `strict=True` or treat the entry as a cache miss (`None`) under `strict=False`.
+- **Per-entry `flock` + atomic replace:** `put()` writes payload and sidecar JSON manifest to temporary files and publishes them via `os.replace` under an exclusive per-entry `fcntl.flock`; `get()` verifies manifest integrity, payload length, and SHA-256 checksum under a shared `flock`, raising `CacheCorruptError` (`strict=True`) or evicting (`strict=False`) on tampering.
+
+### Public API Summary (`rsibox.services.cache`)
+
+| Symbol | Purpose |
+|---|---|
+| `CacheArtifactKind` | Artifact category enum (`triton_kernel`, `torch_inductor`, `flashinfer`, `cuda_graph_plan`, `custom`) |
+| `EnvFingerprint` | Frozen GPU/CUDA/Triton/Torch ABI fingerprint with `to_dict()`, `from_dict()`, and `digest()` |
+| `CacheEntry` | Frozen entry descriptor (`namespace`, `key`, `kind`, `fingerprint_digest`, `payload_path`, `size_bytes`, `sha256`, `created_at`, `metadata`) |
+| `CompileCacheService` | Thread-safe, context-managed disk cache (`put`, `get`, `invalidate`, `list_entries`, `stats`, `teardown`, `close`) |
+
 ## S6: Unified Recovery & Health Service (Shipped)
 
 [`core/livelab/rsibox/services/recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py) unifies process recovery, snapshot quiesce handshakes, and pool/autoscaler health aggregation behind `RecoveryService`:
@@ -80,9 +96,8 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `RecoveryReceipt` | Frozen outcome record (`tier_attempted`, `tier_succeeded`, `ok`, `fallback_used`, `cost_s`, `incarnation`, `driver_receipt`) |
 | `RecoveryService` | Thread-safe coordinator (`register_endpoint`, `attach_pool`, `record_failure`, `recover`, `quiesce_and_checkpoint`, `get_health`, `health_snapshot`, `probe_health`, `teardown`, `close`) |
 
-## Planned Services (`S3`–`S5`)
+## Planned Services (`S4`–`S5`)
 
-- **S3 (Cache):** Shares compiled `.so` side libraries, `@triton.jit` binaries, and selective CUDA-graph recipes across worker restarts without invalidating journaled undo.
 - **S4 (Auxiliary):** Manages non-updated reward/reference/judge pools in RL setups (`veRL`, `miles`, `NeMo-RL`) using `S1` `ro_aux_weights` handles.
 - **S5 (Buffers):** Tracks volatile step buffers (`kv_pool`, replay/rollout buffers) that must drain and reset on `reset("state")` or quiesce during snapshot capture.
 
