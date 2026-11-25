@@ -8,7 +8,6 @@ one call on every rank in rank order, as vLLM's executor does. Each rank has its
 the toy engine (its own module objects, as in its own process). Host, WorkerGroup, Endpoint
 and the kernel are the real code.
 """
-import importlib
 import itertools
 import os
 import queue
@@ -333,7 +332,7 @@ class LoopTest(unittest.TestCase):
             mod_name = f"adh{next(_n)}_{rank_name}"
             toy.load_copy(mod_name)
             engine_mod = sys.modules[mod_name + ".engine"]
-            engine_obj = engines[rank_name] = engine_mod.Engine()
+            engines[rank_name] = engine_mod.Engine()
             quiesce = slow_answer if rank_name == "rank1" else None
             local_part = C.LocalParticipant(rank_name, alias={"toy": mod_name}, quiesce=quiesce)
 

@@ -57,7 +57,7 @@ if os.path.exists(PRS):
             if r is None:   # one of our own agent edits: no upstream pull request, the diff comes with the timing
                 dj = t["diff"]; r = {"pr": cid, "repo": t["repo"], "title": dj["title"], "utitle": dj["title"], "agent": True, "install": "", "add": dj["additions"], "del": dj["deletions"], "nfiles": dj["changedFiles"], "files": [{"path": f["path"], "lines": f["lines"], "cut": 0} for f in dj["files"]], "more": 0}; rows.append(r)
             fr, rs, notes = t["rsibox"], t["restart"], []
-            lab = lambda o: ("installed live, partly proven" if "partly proven" in o else "installed live") if isl(o) else "restarted from a warm copy" if re.search(r"warm restart|restarted warm", o) else "fell back to a restart"
+            lab = lambda o, isl=isl: ("installed live, partly proven" if "partly proven" in o else "installed live") if isl(o) else "restarted from a warm copy" if re.search(r"warm restart|restarted warm", o) else "fell back to a restart"
             if t["variant"]:
                 o = [x for x in ts if x is not t][0]
                 notes.append("This check makes one %s. Without it the check never runs the edited code, and rsibox restarts instead: %.1f s against %.1f s." % (t["variant"].replace(" before the check", " first"), o["rsibox"]["total"], o["restart"]["total"]))

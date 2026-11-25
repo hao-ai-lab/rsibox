@@ -637,11 +637,11 @@ class SglangQuiesceHooksTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory(dir="/tmp", prefix="sglsnap-") as control_dir:
                     control_path = Path(control_dir)
 
-                    def write_restore_complete() -> None:
+                    def write_restore_complete(cpath: Path = control_path) -> None:
                         deadline = time.monotonic() + 5.0
                         while time.monotonic() < deadline:
-                            if (control_path / "ready-for-snapshot").exists():
-                                (control_path / "restore-complete").write_text(
+                            if (cpath / "ready-for-snapshot").exists():
+                                (cpath / "restore-complete").write_text(
                                     "ok\n", encoding="utf-8"
                                 )
                                 return

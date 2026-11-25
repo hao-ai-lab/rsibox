@@ -5,8 +5,6 @@ Run from repo root:
     PYTHONPATH=repos/vllm/livelab:core/livelab python3 -W error::ResourceWarning \
         -m unittest discover -s repos/vllm/livelab/adapter -p 'test_native.py' -t repos/vllm/livelab -v
 """
-import contextlib
-import json
 import os
 import subprocess
 import sys
@@ -15,12 +13,10 @@ import threading
 import time
 import types
 import unittest
-from types import SimpleNamespace as NS
 from unittest import mock
 
 from rsibox import lab as lab_base
 from kernel import coordinator as C
-from kernel import locate as L
 from kernel import toy
 
 from . import native as N

@@ -17,7 +17,6 @@ from unittest import mock
 
 import adapter  # noqa: F401
 from adapter import conformance_lab as CL
-from adapter import gate as G
 from adapter import state as S
 from conformance import cases as CC
 from rsibox import harness as H

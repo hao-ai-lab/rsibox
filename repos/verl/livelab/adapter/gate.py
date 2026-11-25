@@ -185,7 +185,6 @@ class GateMixin:
         from verl.trainer.ppo.v1 import trainer_base
         orig, trainer = trainer_base.compute_advantage_for_multi_trajectories, self
         def recorded(data, batch_keys, **kw):
-            import torch
             from omegaconf import OmegaConf
             inputs, out = {k: data.batch[k].clone() for k in ("token_level_rewards", "response_mask")}, orig(data, batch_keys, **kw)
             step_dir = trainer._gate / "steps" / str(trainer.global_steps)

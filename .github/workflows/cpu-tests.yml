@@ -67,6 +67,8 @@ jobs:
         run: python3 -m unittest discover -s core/livelab/survey -t core/livelab -v
       - name: Run the rsibox runtime kit, CLI, daemon, and launcher tests (IPC, process trees, hooks, overlays, BaseLab 11/11, HTTP box daemon, local/Docker/gVisor/Slurm launchers)
         run: python3 -m unittest discover -s core/livelab/rsibox -t core/livelab -v
+      - name: Run formal TLA+ spec-to-code conformance tests (SandboxPool, Coordinator, Swap)
+        run: python3 -m unittest discover -s core/livelab/formal -t core/livelab -v
       - name: Run rsibox doctor (core health + all engine registrations without eager GPU/torch imports)
         env:
           PYTHONPATH: core/livelab

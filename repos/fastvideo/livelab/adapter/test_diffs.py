@@ -7,7 +7,6 @@ A `.patch` file (`patches/h3-hillclimb/`) is installed as `lab.install({"diff": 
 diff is applied to the lab's live text, so a stack of patches made one on top of the other
 installs in order, and a diff made against other code is refused before any rank changes.
 """
-import os
 import unittest
 
 from adapter import diffs

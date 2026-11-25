@@ -282,8 +282,8 @@ class NemoRlLab(BaseLab):
                     p.wait(timeout=1.0)
             if p.poll() is None:
                 for fn in (
-                    lambda: proc.stop_session(p.pid, grace=3.0, reap=p.poll),
-                    lambda: proc.stop_tree(p.pid, grace_s=2.0, include_pg=True),
+                    lambda p=p: proc.stop_session(p.pid, grace=3.0, reap=p.poll),
+                    lambda p=p: proc.stop_tree(p.pid, grace_s=2.0, include_pg=True),
                 ):
                     with contextlib.suppress(Exception):
                         fn()

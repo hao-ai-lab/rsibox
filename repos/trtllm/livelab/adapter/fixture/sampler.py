@@ -5,7 +5,7 @@ def initial_logit_bias() -> int:
     return 3
 
 def make_bias_fn(offset: int):
-    extra = 1
+    extra = 1  # noqa: F841
     return lambda score: score + offset
 
 def score_logits(prompt_tokens: list[int], step_index: int, startup_bias: int) -> list[int]:

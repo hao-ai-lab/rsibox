@@ -1,5 +1,5 @@
 """Spawned multi-actor synchronous RL cluster for `ToyVerlLab`."""
-import importlib.util, multiprocessing as mp, os, sys, time, types
+import importlib.util, multiprocessing as mp, os, time, types
 from adapter import faults, state as S0
 
 RPC_ERROR = "__verl_rpc_error__"

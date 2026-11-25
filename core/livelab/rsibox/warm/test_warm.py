@@ -26,7 +26,6 @@ from rsibox import BaseLab  # noqa: E402
 from rsibox.warm import (  # noqa: E402
     DEFAULT_MIN_NOFILE,
     ENV_GMS_MIN_NOFILE,
-    GMS_TAGS,
     GMS_VLLM_LOAD_FORMAT,
     GMS_VLLM_WORKER_CLS,
     RECOMMENDED_NOFILE,
@@ -1376,14 +1375,14 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             retry_calls: list[str] = []
 
             class _FakeAsyncReplenisher:
-                def status(self) -> dict:
-                    return dict(state_override)
+                def status(self, _override=state_override) -> dict:
+                    return dict(_override)
 
                 def wait(self, timeout_s: float | None = None) -> bool:
                     return False
 
-                def __call__(self, lab, store=None) -> str:
-                    retry_calls.append("called")
+                def __call__(self, lab, store=None, _calls=retry_calls) -> str:
+                    _calls.append("called")
                     return "started"
 
             lab_f = _GuardedLab(
@@ -1929,7 +1928,7 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             sync_calls: list[str] = []
             drv_sync = StandbyShadowDriver(
                 lambda lab, store: {"ok": True},
-                replenish_fn=lambda lab, store: sync_calls.append("called") or "started",
+                replenish_fn=lambda lab, store, _calls=sync_calls: _calls.append("called") or "started",
                 ready_count_fn=bad_probe,  # type: ignore[arg-type]
                 fallback_driver=DefaultRespawnDriver(),
             )
@@ -1942,7 +1941,7 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             self.assertEqual(sync_calls, [])
 
             async_calls: list[str] = []
-            with AsyncShadowReplenisher(lambda _l, _s: async_calls.append("called") or {"ok": True}) as async_rep:
+            with AsyncShadowReplenisher(lambda _l, _s, _calls=async_calls: _calls.append("called") or {"ok": True}) as async_rep:
                 drv_async = StandbyShadowDriver(
                     lambda lab, store: {"ok": True},
                     replenish_fn=async_rep,

@@ -678,7 +678,8 @@ class NativeManager:
         self._committed: dict[str, dict] = {}
         self._build_jobs: dict[str, str] = {}
         self.build_pool = build_pool if build_pool is not None else _DEFAULT_BUILD_POOL
-        _MANAGERS[id(self)] = weakref.ref(self, lambda _r, mid=id(self): _MANAGERS.pop(mid, None))
+        mid = id(self)
+        _MANAGERS[mid] = weakref.ref(self, lambda _r, mid=mid: _MANAGERS.pop(mid, None))
 
     def prepare(
         self, txn: str, spec: dict, *, graph=None, wants_r1: bool = False,

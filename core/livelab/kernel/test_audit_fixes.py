@@ -19,9 +19,7 @@ from . import receipt as R
 from . import witness as W
 from .test_detectors import temp_modules
 from .test_jit import findings as jit_findings, install as jit_install, lab
-from .test_locate import ENG, OPS, at, edit, fresh
-from .test_participant import step_target
-from .test_witness import wait_for
+from .test_locate import ENG, at, edit, fresh
 
 V1 = {"source": edit(ENG, ("return y", "return y * 100")), "base_hash": L.text_hash(ENG),
       "targets": [["Engine.step", at(ENG, "def step")]]}
