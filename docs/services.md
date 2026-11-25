@@ -10,7 +10,7 @@ Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight re
 core/livelab/kernel/          (two-phase txns, code swap, JIT rebuild, witness, journal)
         │
         ▼
-core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache · S4 Aux · S5 Buffers · S6 Recovery)
+core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache · S4 Aux · S5 Buffers · S6 Recovery [shipped])
         │
         ▼
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
@@ -28,7 +28,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | **S3 Cache** | Triton, Inductor, C++ side-library & CUDA-graph artifact store | Planned | Content-addressed artifact reuse across respawns with `witness` and rollback pinning |
 | **S4 Auxiliary** | Out-of-band reward, reference, and judge model pools | Planned | Dedicated RO placement and RPC endpoints decoupled from actor/trainer loops |
 | **S5 Buffers** | Pre-allocated activation, KV scratch, and step replay buffers | Planned | Quiesce-aware sizing and deterministic zeroing on `reset("state")` |
-| **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | Planned | Unifies `RecoveryDriver`, `StandbyShadowDriver`, and CRIU/`cuda-checkpoint` |
+| **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | **Shipped** ([`recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py)) | `RecoveryService`, `RecoveryTier`, `ServiceHealth`, `RecoveryReceipt`; `RecoveryDriver` + `QuiesceHooks` + `SandboxPool` |
 
 ## S1: Unified GPU Memory & State Service (Shipped)
 
@@ -62,12 +62,29 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `SpawnedChild` | Frozen child metadata (`pid`, `role`, `engine`, `incarnation`, `child_guard_report`, `affinity_report`) |
 | `ZygoteService` | Thread-safe context-managed coordinator (`arm_guards`, `start`, `spawn_child`, `wait_child`, `reap_finished`, `status`, `teardown`, `close`) |
 
-## Planned Services (`S3`–`S6`)
+## S6: Unified Recovery & Health Service (Shipped)
+
+[`core/livelab/rsibox/services/recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py) unifies process recovery, snapshot quiesce handshakes, and pool/autoscaler health aggregation behind `RecoveryService`:
+
+- **Single-flight per-endpoint recovery:** `recover()` fences concurrent recovery on the same `endpoint_id` (`RecoveryInProgressError`) while allowing distinct endpoints to recover in parallel and releasing internal locks across blocking driver I/O.
+- **Deterministic tier escalation & quarantine:** Primary failures (`StandbyShadowDriver` or `DynamoK8sSnapshotDriver`) escalate cleanly to `fallback_driver` without losing `last_error`, increment `incarnation`, and transition repeatedly failing endpoints to `quarantined` (or raise `EscalationFailedError` if all tiers fail).
+- **Pool aggregation & owner-scoped teardown:** `attach_pool()` aggregates `SandboxPool.slot_states()`, `SandboxPool.metrics()`, and `PoolAutoScaler.status()` in `health_snapshot()` / `probe_health()`, and `teardown()` stops owned pools, autoscalers, drivers, and stores outside locks with fail-closed post-close guards.
+
+### Public API Summary (`rsibox.services.recovery_service`)
+
+| Symbol | Purpose |
+|---|---|
+| `RecoveryTier` | Enum of recovery tiers (`cold_respawn`, `standby_shadow`, `snapshot_restore`) |
+| `ServiceHealthStatus` | Lifecycle status enum (`healthy`, `degraded`, `recovering`, `quarantined`, `closed`) |
+| `ServiceHealth` | Frozen endpoint health snapshot (`status`, `incarnation`, `consecutive_failures`, `last_error`, `recovery_count`) |
+| `RecoveryReceipt` | Frozen outcome record (`tier_attempted`, `tier_succeeded`, `ok`, `fallback_used`, `cost_s`, `incarnation`, `driver_receipt`) |
+| `RecoveryService` | Thread-safe coordinator (`register_endpoint`, `attach_pool`, `record_failure`, `recover`, `quiesce_and_checkpoint`, `get_health`, `health_snapshot`, `probe_health`, `teardown`, `close`) |
+
+## Planned Services (`S3`–`S5`)
 
 - **S3 (Cache):** Shares compiled `.so` side libraries, `@triton.jit` binaries, and selective CUDA-graph recipes across worker restarts without invalidating journaled undo.
 - **S4 (Auxiliary):** Manages non-updated reward/reference/judge pools in RL setups (`veRL`, `miles`, `NeMo-RL`) using `S1` `ro_aux_weights` handles.
 - **S5 (Buffers):** Tracks volatile step buffers (`kv_pool`, replay/rollout buffers) that must drain and reset on `reset("state")` or quiesce during snapshot capture.
-- **S6 (Recovery):** Composes [`RecoveryDriver`](../core/livelab/rsibox/warm/recovery.py) (`DefaultRespawnDriver`, `StandbyShadowDriver`, `DynamoK8sSnapshotDriver`) with `S1` handle rebinding after crash or poison events.
 
 ## Public API Summary (`rsibox.services.memory`)
 

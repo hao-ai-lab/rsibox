@@ -7,10 +7,13 @@ Provides engine-agnostic control-plane services composed beneath `core/livelab/k
 - `zygote` (`S2`): Shared Zygote & Pre-Fork Daemon Service (`ZygoteProfile`,
   `SpawnedChild`, `ZygoteState`, `ZygoteService`, `profile_for_engine`, `list_profiles`)
   unifying pre-fork `forksafe` guards and `AF_UNIX` + `SCM_RIGHTS` worker spawning.
+- `recovery_service` (`S6`): Unified Recovery & Health Service (`RecoveryService`,
+  `RecoveryTier`, `ServiceHealthStatus`, `ServiceHealth`, `RecoveryReceipt`) unifying
+  `RecoveryDriver` escalation, `QuiesceHooks` checkpoints, and `SandboxPool` health.
 """
 from __future__ import annotations
 
-from . import memory, zygote
+from . import memory, recovery_service, zygote
 from .memory import (
     DEFAULT_S0_STATE_KEYS,
     READ_ONLY_POOLS,
@@ -23,6 +26,18 @@ from .memory import (
     PoolAccessError,
     SnapshotLease,
     StampMismatchError,
+)
+from .recovery_service import (
+    EndpointNotFoundError,
+    EscalationFailedError,
+    RecoveryClosedError,
+    RecoveryInProgressError,
+    RecoveryReceipt,
+    RecoveryService,
+    RecoveryServiceError,
+    RecoveryTier,
+    ServiceHealth,
+    ServiceHealthStatus,
 )
 from .zygote import (
     ForkPoisonedError,
@@ -39,6 +54,8 @@ from .zygote import (
 
 __all__ = [
     "DEFAULT_S0_STATE_KEYS",
+    "EndpointNotFoundError",
+    "EscalationFailedError",
     "ForkPoisonedError",
     "HandleNotFoundError",
     "LeaseError",
@@ -48,6 +65,14 @@ __all__ = [
     "MemoryServiceError",
     "PoolAccessError",
     "READ_ONLY_POOLS",
+    "RecoveryClosedError",
+    "RecoveryInProgressError",
+    "RecoveryReceipt",
+    "RecoveryService",
+    "RecoveryServiceError",
+    "RecoveryTier",
+    "ServiceHealth",
+    "ServiceHealthStatus",
     "SnapshotLease",
     "SpawnError",
     "SpawnedChild",
@@ -60,5 +85,6 @@ __all__ = [
     "list_profiles",
     "memory",
     "profile_for_engine",
+    "recovery_service",
     "zygote",
 ]
