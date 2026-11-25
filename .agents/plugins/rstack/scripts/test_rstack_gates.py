@@ -14,6 +14,9 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import claim_board  # noqa: E402
+import facts_sync  # noqa: E402
+import gpu_receipt_close  # noqa: E402
+import merge_train  # noqa: E402
 import pr_gate  # noqa: E402
 import pre_push  # noqa: E402
 import preflight  # noqa: E402
@@ -385,6 +388,14 @@ class RstackGatesTest(unittest.TestCase):
         }
         actual_agents = {p.name for p in (plugin_root / "agents").glob("*.md")}
         self.assertEqual(actual_agents, expected_agents)
+        for agent_file in expected_agents:
+            atext = (plugin_root / "agents" / agent_file).read_text(encoding="utf-8")
+            self.assertTrue(atext.startswith("---\n"), f"{agent_file} missing YAML frontmatter")
+            self.assertIn(f"name: {Path(agent_file).stem}", atext)
+            self.assertIn("description:", atext)
+            self.assertIn("subagent: true", atext)
+            self.assertIn("mainAgent: false", atext)
+            self.assertIn("tools:", atext)
 
         expected_skills = {
             "rsibox-mode",
@@ -412,6 +423,110 @@ class RstackGatesTest(unittest.TestCase):
             "04-dag-merge-and-site-sync.md",
         }
         self.assertEqual({p.name for p in workflows_dir.glob("*.md")}, expected_wfs)
+
+    def test_merge_train_dag_patch_id_and_worktree_gc(self) -> None:
+        prs = [
+            {"number": 12, "isDraft": True, "baseRefName": "feat-10", "body": "Depends on #11"},
+            {"number": 11, "isDraft": False, "baseRefName": "main", "body": "Depends on #10"},
+            {"number": 10, "isDraft": False, "baseRefName": "main", "body": "Base PR"},
+        ]
+        ok, rep = merge_train.plan_dag(prs)
+        self.assertTrue(ok)
+        self.assertEqual(rep["order"], [10, 11, 12])
+        self.assertEqual(rep["ready"], [10])
+        self.assertEqual(rep["blocked"], {"11": [10], "12": [11]})
+
+        cyclic = [
+            {"number": 1, "isDraft": False, "baseRefName": "main", "body": "Depends on #2"},
+            {"number": 2, "isDraft": False, "baseRefName": "main", "body": "Depends on #1"},
+        ]
+        ok_cyc, rep_cyc = merge_train.plan_dag(cyclic)
+        self.assertFalse(ok_cyc)
+        self.assertEqual(rep_cyc["cycle"], [1, 2])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp))
+            prs_file = repo / "prs.json"
+            prs_file.write_text(json.dumps(prs), encoding="utf-8")
+            self.assertEqual(
+                merge_train.main(["--repo", str(repo), "plan", "--prs-json", str(prs_file)]),
+                0,
+            )
+            (repo / "f.py").write_text("x = 1\n", encoding="utf-8")
+            _git(repo, "add", "f.py")
+            _git(repo, "commit", "-m", "feat(core): patch")
+            self.assertEqual(
+                merge_train.main(["--repo", str(repo), "patch-id", "--base", "base-ref", "--head", "HEAD"]),
+                0,
+            )
+            self.assertEqual(
+                merge_train.main(["--repo", str(repo), "worktree-gc", "--base", "base-ref"]),
+                0,
+            )
+
+    def test_gpu_receipt_close_validation_and_backlog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp))
+            good = repo / "good.json"
+            good.write_text(
+                json.dumps(
+                    {
+                        "witness_nonzero": True,
+                        "replay_verified": True,
+                        "shapes": ["bs1_seq128", "bs8_seq1024"],
+                        "cold_s": 12.4,
+                        "warm_s": 0.42,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(gpu_receipt_close.main(["validate", "--receipt", str(good)]), 0)
+
+            bad = repo / "bad.json"
+            bad.write_text(
+                json.dumps(
+                    {
+                        "witness_nonzero": False,
+                        "replay_verified": False,
+                        "shapes": ["only_one"],
+                        "cold_s": -1,
+                        "host_ip": ".".join([str(10), str(20), str(30), str(40)]),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(gpu_receipt_close.main(["validate", "--receipt", str(bad)]), 1)
+            errs = gpu_receipt_close.validate_receipt(
+                {
+                    "witness_nonzero": True,
+                    "replay_verified": True,
+                    "shapes": ["a", "b"],
+                    "cold_s": 1.0,
+                    "warm_s": 0.1,
+                },
+                raw_text="path=" + chr(47) + "r" + "aid" + chr(47) + "x",
+            )
+            self.assertTrue(any("path leaked" in e for e in errs))
+            self.assertEqual(
+                gpu_receipt_close.main(
+                    ["--repo", str(repo), "backlog", "--title", "[T1] GPU receipt", "--pr", "295", "--dry-run"]
+                ),
+                0,
+            )
+
+    def test_facts_sync_passes_and_catches_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp))
+            (repo / "scripts").mkdir()
+            (repo / "site" / "facts").mkdir(parents=True)
+            (repo / "scripts" / "verify_facts.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+            (repo / "scripts" / "build_site.py").write_text("import sys; sys.exit(0)\n", encoding="utf-8")
+            matrix = repo / "site" / "facts" / "delivery-matrix.json"
+            matrix.write_text(json.dumps({"engines": ["vllm"]}), encoding="utf-8")
+            self.assertEqual(facts_sync.main(["--repo", str(repo), "--skip-tests"]), 0)
+
+            matrix.write_text("{broken", encoding="utf-8")
+            self.assertEqual(facts_sync.main(["--repo", str(repo), "--skip-tests"]), 1)
 
 
 if __name__ == "__main__":
