@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RSIBox Interactive Architecture Map</title>
+<style>
+  :root {
+    --bg: #f6f8fa; --surface: #ffffff; --surface-2: #f0f3f7; --border: #d0d7de;
+    --text: #1f2328; --muted: #57606a; --accent: #0969da; --accent-soft: rgba(9, 105, 218, 0.12);
+    --l1: #0969da; --l2: #8250df; --l3: #1a7f37; --l4: #bf8700; --l5: #cf222e;
+    --shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0d1117; --surface: #161b22; --surface-2: #1c222b; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent-soft: rgba(88, 166, 255, 0.15);
+      --l1: #58a6ff; --l2: #bc8cff; --l3: #3fb950; --l4: #d29922; --l5: #f85149;
+      --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0d1117; --surface: #161b22; --surface-2: #1c222b; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --accent-soft: rgba(88, 166, 255, 0.15);
+    --l1: #58a6ff; --l2: #bc8cff; --l3: #3fb950; --l4: #d29922; --l5: #f85149;
+    --shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.45; }
+  header {
+    max-width: 1380px; margin: 0 auto 14px; display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
+  }
+  .title-wrap h1 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+  .title-wrap p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+  .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  button {
+    font: inherit; color: var(--text); background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 7px; padding: 6px 11px; cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .layout { max-width: 1380px; margin: 0 auto; display: grid; gap: 14px; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
+  @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px; box-shadow: var(--shadow); }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .panel-head h2 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); }
+  .layer { border: 1px solid var(--border); border-left: 4px solid var(--layer-color); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; background: var(--surface-2); }
+  .layer:last-child { margin-bottom: 0; }
+  .layer-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; gap: 8px; flex-wrap: wrap; }
+  .layer-title { font-weight: 650; font-size: 13px; color: var(--layer-color); }
+  .layer-sub { font-size: 11.5px; color: var(--muted); }
+  .nodes { display: flex; flex-wrap: wrap; gap: 7px; }
+  .node {
+    text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-size: 12.5px; font-weight: 550; position: relative; transition: transform .1s, border-color .15s;
+  }
+  .node:hover { transform: translateY(-1px); border-color: var(--layer-color); }
+  .node.selected { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 1px var(--accent); }
+  .node.walk-active { border-style: dashed; border-color: var(--layer-color); }
+  .node.walk-active::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 50%; background: var(--layer-color); }
+  .right-col { display: flex; flex-direction: column; gap: 14px; }
+  .inspector-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .inspector-title h3 { margin: 0; font-size: 16px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
+  .fields { display: grid; gap: 8px; margin: 0; }
+  .field { padding: 8px 10px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--border); }
+  .field dt { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 3px; }
+  .field dd { margin: 0; font-size: 13px; }
+  code { font-family: var(--mono); font-size: 12px; background: var(--surface); padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); }
+  .flow-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .flow-tab { font-size: 12px; padding: 5px 9px; }
+  .flow-tab.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .step-bar { display: flex; gap: 4px; margin-bottom: 10px; }
+  .step-pip { flex: 1; height: 6px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--border); cursor: pointer; padding: 0; }
+  .step-pip.active { background: var(--accent); border-color: var(--accent); }
+  .step-pip.done { background: var(--accent-soft); border-color: var(--accent); }
+  .step-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .step-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 6px; flex-wrap: wrap; }
+  .step-actors { font-family: var(--mono); font-size: 12px; color: var(--accent); margin-bottom: 6px; padding: 4px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
+  .step-title { font-weight: 650; font-size: 14px; margin-bottom: 4px; }
+  .step-detail { font-size: 13px; margin-bottom: 8px; }
+  .step-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .chip-btn { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; }
+  .step-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+  .kbd { font-family: var(--mono); font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-wrap">
+    <h1>RSIBox Architecture Explorer</h1>
+    <p>4-Layer Runtime + Cross-Cutting Verification Plane &amp; Interactive Sequence Walkthroughs (Offline Single-File)</p>
+  </div>
+  <div class="controls">
+    <span class="hint">Keys: <span class="kbd">&larr;</span> <span class="kbd">&rarr;</span> step walkthrough</span>
+    <button id="theme-toggle" type="button" aria-label="Toggle color theme">Theme: Auto</button>
+  </div>
+</header>
+<main class="layout">
+  <section class="panel" aria-label="Architecture Map">
+    <div class="panel-head"><h2>4 Layers + Cross-Cutting Plane</h2><span class="hint">Click any node to inspect</span></div>
+    <div id="arch-map"></div>
+  </section>
+  <div class="right-col">
+    <section class="panel" aria-label="Component Inspector">
+      <div class="panel-head"><h2>Component Inspector</h2><span class="hint" id="inspector-layer-label"></span></div>
+      <div class="inspector-title"><h3 id="inspector-name"></h3><span class="badge" id="inspector-badge"></span></div>
+      <dl class="fields" id="inspector-fields"></dl>
+    </section>
+    <section class="panel" aria-label="Sequence Walkthroughs">
+      <div class="panel-head"><h2>Sequence Walkthroughs</h2><span class="hint" id="flow-counter"></span></div>
+      <div class="flow-tabs" id="flow-tabs" role="tablist"></div>
+      <div class="step-bar" id="step-bar"></div>
+      <div class="step-card" id="step-card" role="tabpanel"></div>
+      <div class="step-nav">
+        <button id="prev-step" type="button">&larr; Prev</button>
+        <span class="hint" id="flow-summary"></span>
+        <button id="next-step" type="button">Next &rarr;</button>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+  const LAYERS = [
+    { id: "control", name: "Layer 1: Control Plane", sub: "CLI, HTTP box, scheduling & 5-verb lab surface", color: "var(--l1)" },
+    { id: "kernel", name: "Layer 2: Hot-Reload Kernel", sub: "Stdlib-only 2PC, bytecode/Triton swap, proof & undo", color: "var(--l2)" },
+    { id: "warm", name: "Layer 3: Warm Recovery & Process Substrate", sub: "Forksafe guards, IPC, Zygote & Dynamo GMS / CRIU", color: "var(--l3)" },
+    { id: "adapters", name: "Layer 4: Thin Engine Adapters", sub: "Engine-specific hooks behind LabUnderTest", color: "var(--l4)" },
+    { id: "crosscut", name: "Cross-Cutting Plane", sub: "TLA+ protocol/pool specs, conformance suite & PR/CI gates", color: "var(--l5)" }
+  ];
+
+  const NODES = {
+    cli: { layer: "control", name: "rsibox CLI & HTTP Daemon", badge: "User & Agent Entrypoint",
+      owns: "CLI verbs (`up`, `down`, `install`, `check`, `reset`, `uninstall`, `verify-trace`), local/docker/gvisor/slurm launchers, bearer-authenticated HTTP Box server and `box.json` lifecycle.",
+      notOwns: "AST/bytecode patching, CUDA graph capture, or GPU memory ownership.",
+      codePath: "`core/livelab/rsibox/{cli.py, server.py, box.py, launch.py}`",
+      boundary: "Process/HTTP boundary; routes requests to a single `LabUnderTest` instance.",
+      verifiedBy: "`core/livelab/rsibox/test_rsibox.py`, `test_launch.py`, `test_lab_cli.py`" },
+    pool: { layer: "control", name: "SandboxPool & PoolAutoScaler", badge: "Multi-Agent Multiplexer",
+      owns: "Priority + aging scheduling, elastic role borrowing, fenced `SlotLease`, per-agent circuit breaker, hash-chained JSONL trace audit, and self-healing slot replacement.",
+      notOwns: "Two-phase transaction internals inside a worker rank or Triton kernel compilation.",
+      codePath: "`core/livelab/rsibox/{pool.py, autoscaler.py}`",
+      boundary: "Slot-lease boundary across warm Lab/Box workers; drains and heals slots online.",
+      verifiedBy: "`test_pool.py`, `test_autoscaler.py`, `SandboxPool.tla`, `PoolAutoScaler.tla`" },
+    baselab: { layer: "control", name: "BaseLab / LabUnderTest", badge: "5-Verb Engine Contract",
+      owns: "Shared `LabUnderTest` protocol (`install`, `check`, `reset`, `uninstall`, `status`), `BaseLab` live_text stack, `RecaptureCoordinator`, `RoleEndpoint` dispatch, and poison-on-fault latching.",
+      notOwns: "Engine model loaders, CUDA graph dispatchers, or low-level kernel journal entries.",
+      codePath: "`core/livelab/rsibox/lab.py`, `core/livelab/conformance/lab.py`",
+      boundary: "Engine-agnostic boundary separating control plane from engine adapters.",
+      verifiedBy: "`core/livelab/conformance/cases.py` (c0-c10), `test_cases.py`" },
+    coord: { layer: "kernel", name: "Coordinator & Session (2PC)", badge: "Atomic Step-Gap 2PC",
+      owns: "Two-phase commit (`prepare` -> `validate` -> `commit`/`abort`), `StepGapCoordinator` step-boundary sync, incarnation epochs, LIFO `Session` stack, and `recovery_required` latch.",
+      notOwns: "Code-object mutation mechanics or process respawn execution.",
+      codePath: "`core/livelab/kernel/{coordinator.py, session.py}`",
+      boundary: "In-process step gap; latches `recovery_required` on partial/in-doubt undo until respawn.",
+      verifiedBy: "`test_coordinator.py`, `test_session.py`, `Coordinator.tla`, `Transaction.tla`, `SequentialTx.tla`, `test_formal_protocol.py`" },
+    swapjit: { layer: "kernel", name: "swap & jit (Bytecode / Triton)", badge: "R0 In-Place Patcher",
+      owns: "GC-heap holder discovery (`locate.py`), R0 Python `__code__`/`__defaults__` swaps, closure updates, and `@triton.jit` kernel + caller rebuilds with cached binary undo.",
+      notOwns: "Captured CUDA graph replay buffers (requires Tier-A/R1) or startup flag changes.",
+      codePath: "`core/livelab/kernel/{swap.py, jit.py, locate.py}`",
+      boundary: "In-place R0 Python & Triton; refuses constructors, module state, and captured targets.",
+      verifiedBy: "`test_swap.py`, `test_jit.py`, `test_locate.py`, `SwapLifecycle.tla`" },
+    witness: { layer: "kernel", name: "witness & Journal (Proof & Undo)", badge: "Execution Proof & LIFO Undo",
+      owns: "Per-rank two-ledger hit counters (`counts` vs. `capture_counts`) via `__rsibox_hit__`, dynamo-safe `trace_safe` hooks, and ordered inverse `Journal` log for bit-exact rollback.",
+      notOwns: "Distributed 2PC consensus across ranks or process-level CRIU checkpoints.",
+      codePath: "`core/livelab/kernel/{witness.py, journal.py}`",
+      boundary: "In-process undo log; partial undo poisons the participant and triggers `recovery_required`.",
+      verifiedBy: "`test_witness.py`, `test_journal.py`, `SwapLifecycle.tla`" },
+    findings: { layer: "kernel", name: "findings & identity (Fail-Closed)", badge: "Structured Refusal & Digest",
+      owns: "Structured findings schema (`overridable` vs. physical blocks), accept-list decision logic, and deterministic SHA-256 live-state fingerprinting (`rsibox-identity/v1`).",
+      notOwns: "Applying patches or managing worker processes.",
+      codePath: "`core/livelab/kernel/{findings.py, identity.py}`",
+      boundary: "Pre-commit safety gate; refuses unaccepted or non-overridable checks before state mutation.",
+      verifiedBy: "`test_audit_fixes.py`, `test_formal_protocol.py`, conformance cases c4-c7" },
+    forksafe: { layer: "warm", name: "forksafe & IPC", badge: "Pre-CUDA Fork & JSON IPC",
+      owns: "Pre-CUDA import guards (device capability, properties, Triton target) and stdlib transports (`AF_UNIX` JSON sockets, atomic file channels, NFS-safe mailboxes).",
+      notOwns: "GPU memory allocation, CUDA VMM handles, or engine-specific weight loaders.",
+      codePath: "`core/livelab/forksafe.py`, `core/livelab/rsibox/ipc.py`",
+      boundary: "Pre-fork CPU process boundary and cross-process control channel.",
+      verifiedBy: "`core/livelab/test_forksafe.py`, `test_primitives.py`" },
+    zygote: { layer: "warm", name: "Zygote + CUDA IPC Holder", badge: "Warm Respawn Substrate",
+      owns: "Pre-imported fork servers, CUDA IPC weight/KV-plan holders, path-stable JIT cache staging, and in-memory TP/EP weight resharding.",
+      notOwns: "In-place bytecode patching or Dynamo VMM out-of-process socket management.",
+      codePath: "`repos/{vllm,sglang}/livelab/services/{zygote,weights}.py`, `repos/fastvideo/livelab/services/{zygote,holder}.py`, `repos/megatron/livelab/rsibox_megatron/zygote.py`",
+      boundary: "Warm process respawn (5-20 s) preserving GPU-resident weights across fork.",
+      verifiedBy: "`test_zygote.py`, `test_weights.py`, `test_holder.py`" },
+    gms: { layer: "warm", name: "Dynamo GMS Standby Shadow / CRIU Snapshot", badge: "VMM Shadow & CRIU Restore",
+      owns: "`DynamoGmsStore` (`AF_UNIX` GMS sockets, `RLIMIT_NOFILE` & stamp guards), `StandbyShadowDriver` + `AsyncShadowReplenisher`, `QuiesceHooks`, and CRIU + `cuda-checkpoint` contracts.",
+      notOwns: "Engine internal CUDA graph wrappers or Python bytecode swap transactions.",
+      codePath: "`core/livelab/rsibox/warm/{dynamo_gms.py, recovery.py, snapshot_contract.py}`",
+      boundary: "Process crash / `SIGKILL` / sticky CUDA fault boundary (0.1-1.9 s Shadow, 3.4-7.0 s GMS+CRIU / 2.7 s plain CRIU).",
+      verifiedBy: "`core/livelab/rsibox/warm/test_warm.py`, `StandbyShadow.tla`, B200 GMS+CRIU receipts" },
+    vllm: { layer: "adapters", name: "vLLM", badge: "Serving Adapter (V1/V2)",
+      owns: "vLLM worker hooks, Tier-A `cuGraphExecKernelNodeSetParams` pointer swap, `GraphReplayGuard` (`code_epoch`), Tier-C selective recapture, and C++/CUDA `.cu` side-library reload.",
+      notOwns: "Generic 2PC protocol, `Journal` implementation, or `SandboxPool` queueing.",
+      codePath: "`repos/vllm/livelab/{adapter/pointer_swap.py, adapter/graph_guard.py, adapter/recapture.py, services/}`",
+      boundary: "Supports R0 (ms), Tier-A/R1 selective CG (~0.1-3.7 s), `.cu` reload, zygote, GMS Shadow & CRIU.",
+      verifiedBy: "CPU tests + B200 sandbox verification suite; GMS/R0/R1 scaling 1.5 GB - 491.1 GiB TP4" },
+    sglang: { layer: "adapters", name: "SGLang", badge: "Serving Adapter (--fork-subprocs)",
+      owns: "SGLang scheduler/model swap hooks, decode CUDA graph R1 recapture, fork-subproc zygote + weights service, and zero-copy meta GMS shadow loader.",
+      notOwns: "Core transaction kernel or generic GMS socket probing.",
+      codePath: "`repos/sglang/livelab/{adapter/, services/}`",
+      boundary: "Supports R0 (~60 ms), selective R1 (0.85-1.23 s), fork server, GMS Shadow & CRIU.",
+      verifiedBy: "CPU tests + B200/GB200 sandbox verification suite; GMS/R0/R1 scaling 0.6B - 65.5 GB" },
+    trtllm: { layer: "adapters", name: "TRT-LLM", badge: "PyTorch Backend Adapter",
+      owns: "Single-process & TP MPI worker hooks, `TrtllmQuiesceHooks` (KV pool release/re-alloc), and CUDA-graph model-layer R1 swap.",
+      notOwns: "Generic coordinator/session logic or CRIU process checkpoint tooling.",
+      codePath: "`repos/trtllm/livelab/adapter/`",
+      boundary: "Supports R0 (61-91 ms), R1 model-layer swap, KV quiesce/wake & Plain CRIU restore.",
+      verifiedBy: "`ToyTrtllmLab` CPU CI + B200 TP=1 & TP=2 MPI verification" },
+    transformers: { layer: "adapters", name: "Transformers", badge: "HF Model Adapter",
+      owns: "HuggingFace eager/compiled model hooks and H2D offload/resume quiesce hooks for single-node inference/eval loops.",
+      notOwns: "Multi-engine pool scheduling or distributed Ray actor management.",
+      codePath: "`repos/transformers/livelab/adapter/`",
+      boundary: "Supports R0 live swap and H2D memory-release resume.",
+      verifiedBy: "CPU tests + B200 Qwen3-0.6B/8B verification" },
+    megatron: { layer: "adapters", name: "Megatron-LM", badge: "Distributed Training Adapter",
+      owns: "TP/DP/PP/VPP2 rank participant wiring, step-gap synchronization, S0 state reset, and pre-warmed zygote hooks for large MoE/dense training.",
+      notOwns: "2PC kernel protocol or generic `SandboxPool` leases.",
+      codePath: "`repos/megatron/livelab/rsibox_megatron/`",
+      boundary: "Supports R0 live swap + S0 state reset (0.5-17 s) and zygote respawn.",
+      verifiedBy: "CPU tests + GB200 TP/DP/PP/EP4 verification" },
+    fastvideo: { layer: "adapters", name: "FastVideo", badge: "Diffusion / DiT Adapter",
+      owns: "Sequence-parallel (SP1/SP2/SP4) participant hooks, in-process module rebuild, path-stable JIT cache layout, and fork-server + CUDA IPC weight holder.",
+      notOwns: "Stdlib kernel journal or generic IPC transport primitives.",
+      codePath: "`repos/fastvideo/livelab/{adapter/, services/}`",
+      boundary: "Supports R0 swap, in-process rebuild, and zygote + IPC weight holder.",
+      verifiedBy: "CPU tests + GB200 SP1/SP2/SP4 verification" },
+    rltrainers: { layer: "adapters", name: "veRL / miles / NeMo-RL / TorchTitan", badge: "RL & FSDP2 Training Adapters",
+      owns: "Multi-role Ray/NCCL/FSDP2 participants (trainer + rollout + coordinator) with `ray_participants` (`serve` / `RayActorParticipant`) abstain routing (plus `LocalParticipant` over `UnixJsonServer` for TorchTitan), S0 reset, and step-gap sync.",
+      notOwns: "Generic 2PC state machine or stdlib witness/journal implementation.",
+      codePath: "`core/livelab/ray_participants.py`, `repos/{verl,miles,nemo-rl,torchtitan}/livelab/adapter/`",
+      boundary: "Supports R0 multi-role live swaps + S0 resets; FSDP2 / Ray actor fault isolation.",
+      verifiedBy: "CPU CI suites (incl. 3-role `ToyNemoRlLab`) + B200/GB200 GPU runs (NeMo-RL GPU pending staging)" },
+    tla: { layer: "crosscut", name: "TLA+ Protocol & Pool Models", badge: "Bounded Formal Verification",
+      owns: "TLC model-checked specs for `SandboxPool`, `Coordinator`, `SwapLifecycle`, `StandbyShadow`, `PoolAutoScaler`, plus kernel protocol specs (`Transaction`, `Participant`, `SequentialTx`, `Incarnation`) and trace-replay conformance.",
+      notOwns: "Numerical equivalence of GPU kernels or OS/GIL memory-model proofs.",
+      codePath: "`core/livelab/formal/{pool,coordinator,swap,shadow,autoscaler}/*.tla`, `core/livelab/kernel/formal/*.tla`",
+      boundary: "Verifies bounded protocol transitions & safety invariants on every PR via TLC + unittest.",
+      verifiedBy: "`.github/workflows/formal-tla.yml`, `test_tla_conformance.py`, `test_formal_protocol.py`" },
+    conformance: { layer: "crosscut", name: "Conformance Suite (c0-c10)", badge: "Sandbox Verification Contract",
+      owns: "Shared `c0-c10` verification cases driving `LabUnderTest`: repeatability, execution proof (`zero_witness`), fresh-process parity, fail-closed refusal, LIFO undo, and fault-to-poison gating.",
+      notOwns: "Engine-specific adapters or HTTP Box transport internals.",
+      codePath: "`core/livelab/conformance/{cases.py, lab.py, __main__.py}`, `core/livelab/kernel/toy_lab.py`",
+      boundary: "Contract gate every engine adapter must pass before benchmark measurements count.",
+      verifiedBy: "`core/livelab/conformance/test_cases.py` + per-engine conformance targets" },
+    rstack: { layer: "crosscut", name: "rstack PR & CI Gates", badge: "Deterministic Merge Discipline",
+      owns: "Atomic issue claim leases, single-boundary <=600 non-test LOC preflight, zero cross-engine imports, docs/facts lint, leak-check, `ResourceWarning=error`, and Gate 1/Gate 2 adversarial audits.",
+      notOwns: "Runtime sandbox execution or ML engine code.",
+      codePath: "`.agents/plugins/rstack/scripts/{preflight.py, pre_push.py, docs_lint.py, pr_gate.py}`, `.github/scripts/leak-check.sh`",
+      boundary: "Repository & PR governance boundary prior to push and merge.",
+      verifiedBy: "`.agents/plugins/rstack/scripts/test_rstack_gates.py`, `.github/workflows/{pr-rules.yml, cpu-tests.yml}`" }
+  };
+
+  const FLOWS = [
+    { name: "1. R0 Python Swap + Witness", summary: "Sub-100 ms live bytecode swap with execution proof", steps: [
+      { title: "HTTP/CLI install request", actors: "Agent -> rsibox CLI/HTTP -> BaseLab", nodes: ["cli", "baselab"],
+        detail: "Developer or agent runs `rsibox install`; HTTP Box authenticates bearer token and forwards patch files to `BaseLab.install()`." },
+      { title: "Phase 1: Locate, compile & stage", actors: "Coordinator -> swap/jit -> findings", nodes: ["coord", "swapjit", "findings"],
+        detail: "While engine steps continue, each rank's `locate` resolves live function holders, checks for unsupported mutations (constructors/closures/captured graphs), and stages bytecode." },
+      { title: "Phase 2: Step-gap validate & commit", actors: "StepGapCoordinator -> Journal -> Witness", nodes: ["coord", "witness", "swapjit"],
+        detail: "Inside one step gap, all ranks validate simultaneously, record inverse `code` entries in `Journal`, swap `__code__`, and bind `__rsibox_hit__` witness hook." },
+      { title: "Workload check & execution proof", actors: "BaseLab.check -> Engine Adapter -> Witness", nodes: ["baselab", "vllm", "witness"],
+        detail: "Workload runs on live ranks; two-ledger `Witness` increments per-rank `counts` (`self.counts`, distinct from `capture_counts` / `GraphReplayGuard`). Zero live hits reports `zero_witness` fail-closed." },
+      { title: "Formal invariant guard", actors: "Transaction.tla / SequentialTx.tla", nodes: ["tla", "conformance"],
+        detail: "`NoSplitCommit` (`Transaction.tla`) ensures every rank commits or aborts together; `EmptyStackRestoresBase` (`SequentialTx.tla`) guarantees LIFO undo restores exact base code identity." }
+    ]},
+    { name: "2. R1 Selective CG Recapture / Tier-A Pointer Swap", summary: "Updating CUDA-graph-captured kernels without worker restart", steps: [
+      { title: "Fail-closed captured_target check", actors: "findings -> BaseLab -> RecaptureCoordinator", nodes: ["findings", "baselab", "coord"],
+        detail: "R0 detects edited code sits inside a captured CUDA graph and emits `captured_target` — blocking by default (`overridable: true`) unless accepted or routed with `rebuild=['R1']`." },
+      { title: "Tier-A surgical kernel-node patch", actors: "jit -> vLLM pointer_swap -> CUgraphExec", nodes: ["swapjit", "vllm"],
+        detail: "For Triton edits, `pointer_swap.py` recompiles affected specializations, verifies ABI/shared-mem bounds, and patches `cuGraphExecKernelNodeSetParams` + template nodes in place (~0.1 s warm)." },
+      { title: "Tier-C selective recapture fallback", actors: "RecaptureCoordinator -> Engine recapture.py", nodes: ["baselab", "vllm", "sglang"],
+        detail: "If Python/structural graph changes cannot use Tier-A, `recapture.py` clears and recaptures only affected batch descriptors `[1, 2, 4]` inside the step gap (0.5-3.7 s)." },
+      { title: "Epoch stamp & replay witness", actors: "GraphReplayGuard -> Witness", nodes: ["vllm", "witness"],
+        detail: "`GraphReplayGuard` advances `code_epoch` and checks `(code_epoch, pool_epoch, input_sig)` before replay (failing closed with `StaleGraphReplayError` on mismatch), crediting Tier-A replay witnesses." }
+    ]},
+    { name: "3. Dynamo GMS Shadow Failover", summary: "Sub-second crash / SIGKILL recovery with resident GPU weights", steps: [
+      { title: "Weights seeded in Dynamo GMS VMM", actors: "DynamoGmsStore -> GMS Sockets (RO)", nodes: ["gms", "vllm"],
+        detail: "Out-of-process `gpu_memory_service` holds weights in CUDA VMM via `gms_<uuid>_{weights,kv_cache}.sock`; primary and parked Scratch-KV shadows attach read-only." },
+      { title: "Primary crash or poison detected", actors: "BaseLab -> Coordinator -> RecoveryDriver", nodes: ["baselab", "coord", "gms"],
+        detail: "On `SIGKILL`, worker hang, or sticky CUDA error, `BaseLab` marks the lab poisoned and delegates recovery to `StandbyShadowDriver`." },
+      { title: "Promote parked shadow & re-attach", actors: "StandbyShadowDriver -> AsyncShadowReplenisher", nodes: ["gms", "sglang", "vllm"],
+        detail: "Parked shadow allocates KV cache and opens serving endpoint (0.10-0.37 s SGLang / 0.31-1.86 s vLLM promote), while `AsyncShadowReplenisher` restocks the next shadow off the critical path." },
+      { title: "CRIU + cuda-checkpoint fallback", actors: "DynamoK8sSnapshotDriver -> QuiesceHooks", nodes: ["gms", "trtllm"],
+        detail: "If shadow pool is exhausted or clean process restore is requested, `QuiesceHooks.quiesce_for_snapshot()` unmaps KV/weights and CRIU restores the frozen tree (2.7-7.0 s) before re-attaching live-edit channels." }
+    ]},
+    { name: "4. Journal Rollback + Recovery Latch", summary: "Exact inverse undo and fail-closed recovery_required latch", steps: [
+      { title: "Inverse-first mutation logging", actors: "swap/jit -> Journal -> Coordinator", nodes: ["swapjit", "witness", "coord"],
+        detail: "Every `set_code`, `set_attr`, `record_call`, or `record_closures` pushes its exact inverse onto the participant `Journal` before mutating live memory." },
+      { title: "Clean LIFO uninstall", actors: "Session -> Coordinator -> Journal.undo_to", nodes: ["coord", "witness"],
+        detail: "On `rsibox uninstall` or Phase-2 abort, `Journal.undo_to(mark)` replays inverses newest-first, binds `__rsibox_hit__` to no-op `stub`, and restores exact SHA-256 `identity()`." },
+      { title: "Partial / in-doubt undo fault", actors: "Participant.undo -> Coordinator", nodes: ["coord", "findings"],
+        detail: "If any rank throws, times out, or leaves a partial undo during rollback, `Coordinator` cannot guarantee clean state and rejects further edits." },
+      { title: "Latch recovery_required until respawn", actors: "Coordinator -> BaseLab.reset('respawn')", nodes: ["coord", "baselab", "gms", "tla"],
+        detail: "Coordinator latches `_recovery_required = True` (`RollbackFreeze` in `Transaction.tla`; `InDoubtUndoLatchesRecovery` in `Coordinator.tla`). All `install`/`undo` calls refuse until `reset('respawn')` increments incarnation." }
+    ]},
+    { name: "5. SandboxPool Scheduling & Circuit Breaker", summary: "Multi-agent slot multiplexing, fault isolation & self-healing", steps: [
+      { title: "Priority queue & role routing", actors: "Agents -> SandboxPool.acquire()", nodes: ["pool", "cli"],
+        detail: "Concurrent agents request slots by role; `SandboxPool` orders waiters by priority + aging (FIFO tie-break), evicts lowest-priority on `max_waiters`, and allows elastic role borrowing." },
+      { title: "Fenced SlotLease & hash-chained trace", actors: "SandboxPool -> BaseLab", nodes: ["pool", "baselab"],
+        detail: "Winner receives a fenced `SlotLease` bound to a single slot epoch; each completed lease appends a SHA-256 hash-chained summary record to the JSONL audit log." },
+      { title: "Agent fault & circuit breaker", actors: "SandboxPool._record_agent_fault_locked", nodes: ["pool", "tla"],
+        detail: "Repeated slot faults (`_max_agent_faults`) trip the per-agent circuit breaker (`AgentQuarantinedError`), isolating rogue agents, whereas `max_slots_per_agent` queues excess concurrent requests (`PoolTimeoutError` / `PoolOverloadedError` when exhausted)." },
+      { title: "Online heal & elastic autoscaling", actors: "PoolAutoScaler -> heal_slot / drain_slot", nodes: ["pool", "gms", "tla"],
+        detail: "`PoolAutoScaler` prioritizes rehabilitating quarantined slots via `heal_slot()` (exponential backoff + replacement), then scales slots up/down within `[min_slots, max_slots]` without aborting active leases." }
+    ]}
+  ];
+
+  const state = { nodeId: "coord", flowIdx: 0, stepIdx: 0, theme: "auto" };
+  const mapEl = document.getElementById("arch-map");
+  const fieldsEl = document.getElementById("inspector-fields");
+  const nameEl = document.getElementById("inspector-name");
+  const badgeEl = document.getElementById("inspector-badge");
+  const layerEl = document.getElementById("inspector-layer-label");
+  const tabsEl = document.getElementById("flow-tabs");
+  const barEl = document.getElementById("step-bar");
+  const cardEl = document.getElementById("step-card");
+  const counterEl = document.getElementById("flow-counter");
+  const summaryEl = document.getElementById("flow-summary");
+  const prevBtn = document.getElementById("prev-step");
+  const nextBtn = document.getElementById("next-step");
+  const themeBtn = document.getElementById("theme-toggle");
+
+  function esc(raw) {
+    return String(raw).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function fmtCode(raw) {
+    return esc(raw).replace(/`([^`]+)`/g, "<code>$1</code>");
+  }
+
+  function renderMap() {
+    const activeNodes = new Set(FLOWS[state.flowIdx].steps[state.stepIdx].nodes);
+    mapEl.innerHTML = "";
+    for (const layer of LAYERS) {
+      const box = document.createElement("div");
+      box.className = "layer";
+      box.style.setProperty("--layer-color", layer.color);
+      box.innerHTML = `<div class="layer-top"><span class="layer-title">${esc(layer.name)}</span><span class="layer-sub">${esc(layer.sub)}</span></div>`;
+      const row = document.createElement("div");
+      row.className = "nodes";
+      for (const [id, node] of Object.entries(NODES)) {
+        if (node.layer !== layer.id) continue;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "node" + (id === state.nodeId ? " selected" : "") + (activeNodes.has(id) ? " walk-active" : "");
+        btn.dataset.focusKey = `node:${id}`;
+        btn.textContent = node.name;
+        btn.setAttribute("aria-pressed", String(id === state.nodeId));
+        btn.addEventListener("click", () => { state.nodeId = id; renderAll(); });
+        row.appendChild(btn);
+      }
+      box.appendChild(row);
+      mapEl.appendChild(box);
+    }
+  }
+
+  function renderInspector() {
+    const node = NODES[state.nodeId];
+    const layer = LAYERS.find((item) => item.id === node.layer);
+    nameEl.textContent = node.name;
+    badgeEl.textContent = node.badge;
+    layerEl.textContent = layer ? layer.name : "";
+    const rows = [
+      ["Owns", node.owns], ["Does Not Own", node.notOwns], ["Key Code Path", node.codePath],
+      ["Restart Boundary", node.boundary], ["Verified By", node.verifiedBy]
+    ];
+    fieldsEl.innerHTML = rows.map(([label, val]) => `<div class="field"><dt>${esc(label)}</dt><dd>${fmtCode(val)}</dd></div>`).join("");
+  }
+
+  function renderWalkthrough() {
+    const flow = FLOWS[state.flowIdx];
+    const step = flow.steps[state.stepIdx];
+    counterEl.textContent = `Step ${state.stepIdx + 1} / ${flow.steps.length}`;
+    summaryEl.textContent = flow.summary;
+
+    tabsEl.innerHTML = "";
+    FLOWS.forEach((item, idx) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.id = `flow-tab-${idx}`;
+      btn.className = "flow-tab" + (idx === state.flowIdx ? " active" : "");
+      btn.dataset.focusKey = `tab:${idx}`;
+      btn.textContent = item.name;
+      btn.setAttribute("role", "tab");
+      btn.setAttribute("aria-controls", "step-card");
+      btn.setAttribute("aria-selected", String(idx === state.flowIdx));
+      btn.addEventListener("click", () => { state.flowIdx = idx; state.stepIdx = 0; renderAll(); });
+      tabsEl.appendChild(btn);
+    });
+    cardEl.setAttribute("aria-labelledby", `flow-tab-${state.flowIdx}`);
+
+    barEl.innerHTML = "";
+    flow.steps.forEach((_, idx) => {
+      const pip = document.createElement("button");
+      pip.type = "button";
+      pip.className = "step-pip" + (idx === state.stepIdx ? " active" : idx < state.stepIdx ? " done" : "");
+      pip.dataset.focusKey = `pip:${idx}`;
+      pip.setAttribute("aria-label", `Jump to step ${idx + 1}`);
+      pip.addEventListener("click", () => { state.stepIdx = idx; renderAll(); });
+      barEl.appendChild(pip);
+    });
+
+    cardEl.innerHTML = `
+      <div class="step-meta"><span>${esc(flow.name)}</span><span>Dashed nodes = active in this step</span></div>
+      <div class="step-actors">${fmtCode(step.actors)}</div>
+      <div class="step-title">${state.stepIdx + 1}. ${fmtCode(step.title)}</div>
+      <div class="step-detail">${fmtCode(step.detail)}</div>
+      <div class="step-chips"><span class="hint">Inspect active node:</span></div>
+    `;
+    const chipsWrap = cardEl.querySelector(".step-chips");
+    for (const id of step.nodes) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip-btn";
+      chip.dataset.focusKey = `chip:${id}`;
+      chip.textContent = NODES[id].name;
+      chip.addEventListener("click", () => { state.nodeId = id; renderAll(); });
+      chipsWrap.appendChild(chip);
+    }
+
+    prevBtn.disabled = state.stepIdx === 0;
+    nextBtn.disabled = state.stepIdx === flow.steps.length - 1;
+  }
+
+  function renderAll() {
+    const active = document.activeElement;
+    const focusKey = active && active.dataset ? active.dataset.focusKey : null;
+    const focusId = !focusKey && active ? active.id : null;
+    renderMap();
+    renderInspector();
+    renderWalkthrough();
+    if (focusKey) {
+      const target = document.querySelector(`[data-focus-key="${focusKey}"]`);
+      if (target && !target.disabled) {
+        target.focus({ preventScroll: true });
+      } else {
+        const fallback = !nextBtn.disabled ? nextBtn : prevBtn;
+        if (fallback && !fallback.disabled) fallback.focus({ preventScroll: true });
+      }
+    } else if (focusId) {
+      const target = document.getElementById(focusId);
+      if (target && target.disabled) {
+        const fallback = focusId === "prev-step" ? nextBtn : prevBtn;
+        if (fallback && !fallback.disabled) fallback.focus({ preventScroll: true });
+      } else if (target) {
+        target.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function stepBy(delta) {
+    const maxStep = FLOWS[state.flowIdx].steps.length - 1;
+    const nextIdx = Math.max(0, Math.min(maxStep, state.stepIdx + delta));
+    if (nextIdx !== state.stepIdx) { state.stepIdx = nextIdx; renderAll(); }
+  }
+
+  function cycleTheme() {
+    const order = ["auto", "light", "dark"];
+    state.theme = order[(order.indexOf(state.theme) + 1) % order.length];
+    if (state.theme === "auto") {
+      document.documentElement.removeAttribute("data-theme");
+      themeBtn.textContent = "Theme: Auto";
+    } else {
+      document.documentElement.setAttribute("data-theme", state.theme);
+      themeBtn.textContent = `Theme: ${state.theme[0].toUpperCase()}${state.theme.slice(1)}`;
+    }
+  }
+
+  prevBtn.addEventListener("click", () => stepBy(-1));
+  nextBtn.addEventListener("click", () => stepBy(1));
+  themeBtn.addEventListener("click", cycleTheme);
+  document.addEventListener("keydown", (event) => {
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "ArrowLeft") { event.preventDefault(); stepBy(-1); }
+    else if (event.key === "ArrowRight") { event.preventDefault(); stepBy(1); }
+  });
+
+  renderAll();
+})();
+</script>
+</body>
+</html>
