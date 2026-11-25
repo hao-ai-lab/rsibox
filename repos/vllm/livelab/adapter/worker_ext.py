@@ -21,6 +21,7 @@ on this `Endpoint`): the engine-core host (host.py) calls
 rank handles the same call between the same two steps. The rank's endpoint is made at its first
 call. Lab use only: it runs code sent to it.
 """
+import contextlib
 import os
 import sys
 import traceback
@@ -93,6 +94,15 @@ def _v1_fc_should_replay(mode):
     return True
 
 
+def _v1_replay_lookup_key(wrapper, entries, mode, args, kwargs):
+    desc = _v1_call_desc(entries, mode, args, kwargs)
+    if desc is None or not isinstance(entries, dict):
+        return None, None
+    key_fn = getattr(wrapper, "key_fn", None)
+    if callable(key_fn) and (composite := (desc, key_fn(*args, **kwargs))) in entries:
+        return desc, composite
+    return (desc, desc) if desc in entries else (None, None)
+
 def _hook_v1_callable(wrapper, guard):
     from .graph_guard import graph_key
     from .side import stream_capturing
@@ -104,21 +114,23 @@ def _hook_v1_callable(wrapper, guard):
                 raw_mode = getattr(self, "runtime_mode", None)
                 entries, mode = _v1_entries(self), ("PIECEWISE" if raw_mode is None else raw_mode)
                 if _v1_fc_should_replay(raw_mode):
-                    desc = _v1_call_desc(entries, mode, args, kwargs)
-                    if desc is not None and isinstance(entries, dict) and desc in entries:
-                        entry = entries[desc]
+                    desc, lookup_key = _v1_replay_lookup_key(self, entries, mode, args, kwargs)
+                    if lookup_key is not None:
+                        entry = entries[lookup_key]
                         capturing_entry = (
                             (hasattr(entry, "cudagraph") and entry.cudagraph is None)
                             or (hasattr(entry, "capture") and entry.capture is None)
                         )
                         if not capturing_entry:
-                            g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, desc), kwargs.get("input_sig"))
+                            g.check_before_replay(graph_key(getattr(desc, "cg_mode", None) or mode, lookup_key), kwargs.get("input_sig"))
             return orig_call(self, *args, **kwargs)
         guarded_call.__wrapped__, cls.__call__, cls._rsibox_call_hooked = orig_call, guarded_call, True
     wrapper._rsibox_guard = guard
 
 def install_replay_guard(worker, guard):
     """Hook real vLLM V1 (`__call__`) and V2 (`run_fullgraph`) replay paths and stamp startup graphs."""
+    from . import pointer_swap
+    pointer_swap.enable_keep_graph()
     runner, attached = getattr(worker, "model_runner", None), 0
     v1 = [w for m, c in (("vllm.compilation.cuda_graph", "CUDAGraphWrapper"), ("vllm.compilation.breakable_cudagraph", "BreakableCUDAGraphWrapper"))
           if (cls := getattr(sys.modules.get(m), c, None)) is not None for w in list(getattr(cls, "_all_instances", ()))]
@@ -178,3 +190,9 @@ class KernelWorkerExtension:
                 pid=os.getpid(),
             )
         return endpoint.dispatch(method, payload)
+
+
+if "torch" in sys.modules:
+    with contextlib.suppress(Exception):
+        from . import pointer_swap as _pointer_swap_hook
+        _pointer_swap_hook.enable_keep_graph()

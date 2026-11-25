@@ -44,12 +44,14 @@ class GraphReplayGuard:
     """Thread-safe per-rank O(1) staleness guard for CUDA-graph replay."""
 
     __slots__ = ("_code_epoch", "_next_code_epoch", "_pool_epochs", "_stamps",
-                 "_strict_unstamped", "_stale_rejections", "_last_reason", "_lock")
+                 "_replay_witnesses", "_strict_unstamped", "_stale_rejections",
+                 "_last_reason", "_lock")
 
     def __init__(self, *, strict_unstamped: bool = False):
         self._code_epoch, self._next_code_epoch, self._stale_rejections = 0, 1, 0
         self._pool_epochs: dict[str, int] = {}
         self._stamps: dict[Any, tuple[int, int, Any]] = {}
+        self._replay_witnesses: dict[Any, list[tuple[int, int, Any, Any, tuple[str, ...]]]] = {}
         self._strict_unstamped, self._last_reason, self._lock = bool(strict_unstamped), "", threading.RLock()
 
     @property
@@ -112,16 +114,49 @@ class GraphReplayGuard:
                 stamps[k] = (ce, pe.get(_key_mode(k), 0), input_sig); n += 1
             return n
 
+    def register_replay_witness(self, key: Any, witness: Any, witness_keys, *, owner: Any = None) -> None:
+        unique_keys = tuple(dict.fromkeys(witness_keys))
+        with self._lock:
+            entries = [item for item in self._replay_witnesses.get(key, ()) if owner is None or item[2] != owner]
+            if unique_keys: entries.append((self._code_epoch, self._pool_epochs.get(_key_mode(key), 0), owner, witness, unique_keys))
+            if entries: self._replay_witnesses[key] = entries
+            else: self._replay_witnesses.pop(key, None)
+
+    def clear_replay_witnesses(self, keys=None, *, owner: Any = None) -> int:
+        with self._lock:
+            removed = 0
+            for entry_key in (list(self._replay_witnesses) if keys is None else list(keys)):
+                if not (entries := self._replay_witnesses.get(entry_key)): continue
+                kept = [] if owner is None else [item for item in entries if item[2] != owner]
+                removed += len(entries) - len(kept) if owner is not None else 1
+                if kept: self._replay_witnesses[entry_key] = kept
+                else: self._replay_witnesses.pop(entry_key, None)
+            return removed
+
+    def snapshot_replay_witnesses(self, modes) -> dict[Any, list[tuple[int, int, Any, Any, tuple[str, ...]]]]:
+        names = {_mode_name(mode) for mode in modes}
+        with self._lock: return {entry_key: list(entries) for entry_key, entries in self._replay_witnesses.items() if _key_mode(entry_key) in names}
+
+    def restore_replay_witnesses(self, saved: dict[Any, list[tuple[int, int, Any, Any, tuple[str, ...]]]], *, modes=None) -> None:
+        with self._lock:
+            if modes is not None:
+                targets = {_mode_name(mode) for mode in modes}
+                for entry_key in [candidate for candidate in self._replay_witnesses if _key_mode(candidate) in targets]: self._replay_witnesses.pop(entry_key, None)
+            self._replay_witnesses.update({entry_key: list(entries) for entry_key, entries in saved.items()})
+
     def invalidate(self, key: Any = None) -> int:
         with self._lock:
             if key is None:
-                n = len(self._stamps); self._stamps.clear(); return n
+                n = len(self._stamps); self._stamps.clear(); self._replay_witnesses.clear(); return n
+            self._replay_witnesses.pop(key, None)
             return int(self._stamps.pop(key, None) is not None)
 
     def _invalidate_modes_unlocked(self, mode_names) -> int:
         targets = {_mode_name(m) for m in mode_names}
         drop = [k for k in self._stamps if _key_mode(k) in targets]
         for k in drop: self._stamps.pop(k, None)
+        for entry_key in [entry_key for entry_key in self._replay_witnesses if _key_mode(entry_key) in targets]:
+            self._replay_witnesses.pop(entry_key, None)
         return len(drop)
 
     def invalidate_modes(self, mode_names) -> int:
@@ -145,9 +180,17 @@ class GraphReplayGuard:
                                      graph_key=key, expected_epoch=live, actual_epoch=None, actual_sig=input_sig, reason="unstamped")
 
     def check_before_replay(self, key: Any, input_sig: Any = None) -> None:
+        replay_hits: list[tuple[Any, tuple[str, ...]]] = []
         with self._lock:
             if (err := self._mismatch_unlocked(key, input_sig)) is not None:
                 self._stale_rejections += 1; raise err
+            live_pool = self._pool_epochs.get(_key_mode(key), 0)
+            for entry_code, entry_pool, _owner, entry_witness, entry_keys in self._replay_witnesses.get(key, ()):
+                if entry_pool == live_pool and entry_code <= self._code_epoch:
+                    replay_hits.append((entry_witness, entry_keys))
+        for entry_witness, entry_keys in replay_hits:
+            for witness_key in entry_keys:
+                entry_witness.hit(witness_key)
 
     def is_fresh(self, key: Any, input_sig: Any = None) -> bool:
         with self._lock: return self._mismatch_unlocked(key, input_sig) is None
