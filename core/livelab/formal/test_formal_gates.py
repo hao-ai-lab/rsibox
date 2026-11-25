@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from formal import run_formal
-from formal.gates import assumptions_check, check_anchors, check_spec_pins, render_mermaid
+from formal.gates import assumptions_check, check_anchors, check_lean_axioms, check_spec_pins, render_mermaid
 
 
 class FormalGatesTest(unittest.TestCase):
@@ -18,6 +18,7 @@ class FormalGatesTest(unittest.TestCase):
         self.assertEqual(check_spec_pins.main([]), 0)
         self.assertEqual(check_anchors.main([]), 0)
         self.assertEqual(assumptions_check.main([]), 0)
+        self.assertEqual(check_lean_axioms.main([]), 0)
 
     def test_check_spec_pins_catches_tampering_traversal_and_omitted_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +163,79 @@ class FormalGatesTest(unittest.TestCase):
             data = json.loads(out.read_text(encoding="utf-8"))
             self.assertEqual(len(data["states"]), 2)
             self.assertEqual(data["states"][1]["values"]["closed"], True)
+
+    def _write_lean_fixture(self, root: Path, *, inv_body: str, lakefile: str | None = None, verify: str | None = None) -> None:
+        (root / "RsiboxFormal").mkdir(parents=True, exist_ok=True)
+        (root / "lean-toolchain").write_text("leanprover/lean4:v4.16.0\n", encoding="utf-8")
+        (root / "lakefile.toml").write_text(
+            lakefile or 'name = "rsibox_formal"\nversion = "0.1.0"\n[[lean_lib]]\nname = "RsiboxFormal"\n',
+            encoding="utf-8",
+        )
+        (root / "RsiboxFormal.lean").write_text("import RsiboxFormal.Invariants\n", encoding="utf-8")
+        (root / "RsiboxFormal" / "Invariants.lean").write_text(inv_body, encoding="utf-8")
+        (root / "VerifyAxioms.lean").write_text(
+            verify if verify is not None else "import RsiboxFormal\n#print axioms RsiboxFormal.ok\n",
+            encoding="utf-8",
+        )
+
+    def test_check_lean_axioms_ignores_nested_and_line_comments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            body = (
+                "namespace RsiboxFormal\n"
+                "-- sorry admit axiom native_decide partial def @[extern \"c\"]\n"
+                "/- outer /- inner sorry axiom Lean.ofReduceBool -/ still commented sorry -/\n"
+                "theorem ok : True := trivial\n"
+                "end RsiboxFormal\n"
+            )
+            self._write_lean_fixture(root, inv_body=body)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = check_lean_axioms.main(["--root", str(root)])
+            self.assertEqual(rc, 0)
+
+    def test_check_lean_axioms_rejects_cheats_mathlib_and_missing_coverage(self) -> None:
+        cheats = [
+            ("sorry", "theorem ok : True := by sorry\n"),
+            ("admit", "theorem ok : True := by admit\n"),
+            ("axiom", "axiom fake : False\ntheorem ok : True := trivial\n"),
+            ("opaque", "opaque hidden : Nat\ntheorem ok : True := trivial\n"),
+            ("partial def", "partial def loop : Nat := loop\ntheorem ok : True := trivial\n"),
+            ("unsafe", "unsafe def bad : Nat := 0\ntheorem ok : True := trivial\n"),
+            ("native_decide", "theorem ok : True := by native_decide\n"),
+            ("Lean.ofReduceBool", "theorem ok : Lean.ofReduceBool = Lean.ofReduceBool := rfl\n"),
+            ("Lean.trustCompiler", "theorem ok : Lean.trustCompiler = Lean.trustCompiler := rfl\n"),
+            ("implemented_by", "@[implemented_by bad] def f : Nat := 0\ntheorem ok : True := trivial\n"),
+            ("@[extern", "@[extern \"c_fn\"] opaque cfn : Nat\ntheorem ok : True := trivial\n"),
+        ]
+        for label, snippet in cheats:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._write_lean_fixture(root, inv_body=f"namespace RsiboxFormal\n{snippet}end RsiboxFormal\n")
+                errs = check_lean_axioms.check_lean_axioms(root)
+                self.assertTrue(any(label in e for e in errs), (label, errs))
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(check_lean_axioms.main(["--root", str(root)]), 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_lean_fixture(
+                root,
+                inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n",
+                lakefile='name = "bad"\n[[require]]\nname = "mathlib"\n',
+            )
+            errs = check_lean_axioms.check_lean_axioms(root)
+            self.assertTrue(any("mathlib" in e for e in errs), errs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_lean_fixture(
+                root,
+                inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n",
+                verify="import RsiboxFormal\n-- #print axioms RsiboxFormal.ok\n",
+            )
+            errs = check_lean_axioms.check_lean_axioms(root)
+            self.assertTrue(any("missing '#print axioms'" in e for e in errs), errs)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,32 @@ jobs:
       - name: Run TLC model checks, mutants, and witnesses across all 9 specs
         run: |
           python3 core/livelab/formal/run_formal.py --jar .tla-cache/tla2tools.jar --bootstrap --output .tla-cache/runs
+  formal-lean:
+    name: "formal: Lean 4 unbounded proofs"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - name: Run Lean anti-cheat axiom gate
+        run: python3 core/livelab/formal/gates/check_lean_axioms.py --root core/livelab/formal/lean
+      - name: Build Lean 4 proofs (core Init only)
+        uses: leanprover/lean-action@v1
+        with:
+          project-directory: core/livelab/formal/lean
+          build: true
+          test: false
+      - name: Verify #print axioms output
+        run: |
+          cd core/livelab/formal/lean
+          out=$(lake env lean VerifyAxioms.lean 2>&1)
+          echo "$out"
+          if echo "$out" | grep -Eq "sorryAx|Lean\.ofReduceBool|Lean\.trustCompiler|unrecognized"; then
+            echo "ERROR: forbidden axiom or Lean error detected in VerifyAxioms.lean output" >&2
+            exit 1
+          fi
   rule-ruff-bugs:
     name: "rule: Ruff high-signal bug scan"
     runs-on: ubuntu-latest

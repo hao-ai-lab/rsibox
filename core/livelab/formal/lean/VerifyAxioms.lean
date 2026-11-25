@@ -1,0 +1,8 @@
+import RsiboxFormal
+
+#print axioms RsiboxFormal.incarnation_stale_rejected
+#print axioms RsiboxFormal.incarnation_monotone_after_k
+#print axioms RsiboxFormal.two_phase_no_split_commit
+#print axioms RsiboxFormal.rollback_or_recovery_latched
+#print axioms RsiboxFormal.sandbox_pool_capacity_conservation
+#print axioms RsiboxFormal.standby_shadow_single_flight

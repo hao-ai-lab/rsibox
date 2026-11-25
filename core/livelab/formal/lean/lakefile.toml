@@ -1,0 +1,6 @@
+name = "rsibox_formal"
+version = "0.1.0"
+defaultTargets = ["RsiboxFormal"]
+
+[[lean_lib]]
+name = "RsiboxFormal"
