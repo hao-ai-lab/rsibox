@@ -14,9 +14,12 @@
 - `trajectory_audit.py` — cross-checks agent claims against real `transcript.jsonl` commands, skips, and SHAs.
 
 ## Skills & SOP Entry Points
-- `/rsibox-mode`: front-door router with the 12 RSIBox principles and SOP 1–4 dispatch.
-- `/rsibox-docs-polish`: plain-English public doc polish paired with `docs_lint.py` and `facts_sync.py`.
-- SOP 1 (Feature / Fix): `/rsibox-claim` -> `/rsibox-build` -> `/rsibox-precheck`.
-- SOP 2 (GPU Receipt): `/rsibox-gpu-receipt`.
-- SOP 3 (Review Triangle): `/rsibox-audit` -> `/rsibox-triage`.
-- SOP 4 (Merge & Sync): `/rsibox-merge-train` -> `/rsibox-facts-sync`.
+- `/rsibox`: front-door router with the 12 RSIBox principles and SOP 1–4 dispatch.
+- `/polish`: plain-English public doc polish paired with `docs_lint.py` and `facts_sync.py`.
+- `/plain`: restate technical docs, reviews, or metrics in plain human language with zero jargon.
+- `/distill`: mine active session transcripts for durable lessons routed to `rstack` skills or gates.
+- `/report`: inline visual change-report format (1-line file summary + verbatim `Before -> After` excerpts).
+- SOP 1 (Feature / Fix): `/claim` -> `/build` -> `/precheck`.
+- SOP 2 (GPU Receipt): `/receipt`.
+- SOP 3 (Review Triangle): `/audit` -> `/triage`.
+- SOP 4 (Merge & Sync): `/train` -> `/facts`.

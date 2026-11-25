@@ -1,5 +1,5 @@
 ---
-name: rsibox-merge-train
+name: train
 description: Execute bottom-up DAG PR merges onto main using merge_train.py and pr_gate.py, verify rebase patch-ids, release claim leases, and prune worktrees.
 ---
 

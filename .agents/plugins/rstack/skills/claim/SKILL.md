@@ -1,5 +1,5 @@
 ---
-name: rsibox-claim
+name: claim
 description: Acquire an atomic RSIBox issue lease with claim_board.py, create an isolated git worktree off origin/main, and run initial preflight checks.
 ---
 

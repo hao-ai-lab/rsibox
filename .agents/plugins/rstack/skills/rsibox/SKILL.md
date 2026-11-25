@@ -1,5 +1,5 @@
 ---
-name: rsibox-mode
+name: rsibox
 description: Front-door engineering router for RSIBox (rstack). Dispatches tasks across SOP 1-4 playbooks, atomic issue leases, deterministic pre-push/CI gates, GPU witness honesty, and adversarial review triangles.
 ---
 
@@ -24,7 +24,13 @@ Route every non-trivial RSIBox task into the matching SOP playbook and enforce e
 ## SOP Routing Table
 | Task Type | Playbook / Workflow | Skills & Gates |
 |---|---|---|
-| Feature / Bugfix / Engine | [01-claim-and-build.md](workflows/01-claim-and-build.md) | `rsibox-claim` -> `rsibox-build` -> `rsibox-precheck` |
-| GPU Benchmark / Receipt | [02-gpu-receipt-and-witness.md](workflows/02-gpu-receipt-and-witness.md) | `rsibox-gpu-receipt` |
-| PR Review / Triage | [03-adversarial-review-triangle.md](workflows/03-adversarial-review-triangle.md) | `rsibox-audit` -> `rsibox-triage` |
-| Stacked Merge / Site Sync | [04-dag-merge-and-site-sync.md](workflows/04-dag-merge-and-site-sync.md) | `rsibox-merge-train` -> `rsibox-facts-sync` |
+| Feature / Bugfix / Engine | [01-claim-and-build.md](workflows/01-claim-and-build.md) | `claim` -> `build` -> `precheck` |
+| GPU Benchmark / Receipt | [02-gpu-receipt-and-witness.md](workflows/02-gpu-receipt-and-witness.md) | `receipt` |
+| PR Review / Triage | [03-adversarial-review-triangle.md](workflows/03-adversarial-review-triangle.md) | `audit` -> `triage` |
+| Stacked Merge / Site Sync | [04-dag-merge-and-site-sync.md](workflows/04-dag-merge-and-site-sync.md) | `train` -> `facts` |
+
+## Communication & Improvement Skills
+- `/plain`: restate technical docs, reviews, or metrics in plain human language.
+- `/distill`: mine active conversation lessons into `rstack` skill updates or deterministic gates.
+- `/report`: format substantive code/doc changes with 1-line file summaries and verbatim `Before -> After` excerpts inline.
+- `/polish`: keep public docs plain-English and aligned with `docs_lint.py` + `facts_sync.py`.

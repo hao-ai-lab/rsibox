@@ -1,10 +1,10 @@
 # Supported Engines & Benchmarks
 
-Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md) contract and is validated against the 11 sandbox verification checks ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)).
+Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab/INTERFACE.md`](../core/livelab/INTERFACE.md) contract and is validated against the sandbox verification suite ([`core/livelab/conformance/README.md`](../core/livelab/conformance/README.md)).
 
 ## What is in the repo today
 
-| Engine | Verification Suite (11/11) | Headline Live vs. Restart | Docs & Costs |
+| Engine | Verification Suite | Headline Live vs. Restart | Docs & Costs |
 |---|---|---|---|
 | **vLLM** | CPU CI & 1–2× B200 (eager, V1/V2 CUDA graphs) | 228 s → **2.4–23.6 s** (up to 95×); C++/CUDA `.cu` reload 7.3–19.2 s vs. 41–49 s | [architecture](../repos/vllm/docs/architecture.md) · [costs](../repos/vllm/kb/costs.md) · [walkthrough](../repos/vllm/examples/live-edit-qwen3/README.md) |
 | **SGLang** | CPU CI & 1–2× B200 / GB200 (`--fork-subprocs`) | 66.4 s cold / 26.5 s warm → **0.38–1.77 s** live (up to 176×); fork server 10.6–19.5 s | [costs](../repos/sglang/kb/costs.md) |
@@ -16,7 +16,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 | **TRT-LLM** | CPU CI (`ToyTrtllmLab` 11/11) & 1×/2× B200 (`TP=1` & `TP=2` MPI `11/11` conformance + `R1` CUDA-graph model-layer swap + `TrtllmQuiesceHooks`) | `TP=1`: 26.7 s cold / 12.4 s warm → **0.107 s** live (249× / 116×); `TP=2`: **0.275 s** `Qwen3DecoderLayer.forward` `R1` install (`224/224` witness/rank); KV quiesce frees **46.7 GiB** (`15.2 ms` resume) | [architecture](../repos/trtllm/docs/architecture.md) · [costs](../repos/trtllm/kb/costs.md) |
 | **TorchTitan** | CPU CI (2-rank toy) & 1×/2× B200 (FSDP2 `fully_shard` `world_size=1` & `world_size=2` NCCL, synthetic `TitanMLPNet`) | `1×`: 2.69 s cold → **0.083 s** live + S0 reset (32.5×); `2×` NCCL: 5.515 s cold → **0.255 s** full cycle (**21.63×**, `max_abs_loss_diff=0.0`) | [architecture](../repos/torchtitan/docs/architecture.md) · [costs](../repos/torchtitan/kb/costs.md) · [walkthrough](../repos/torchtitan/examples/live-step-swap/README.md) |
 | **NeMo-RL** | CPU CI (3-participant `ToyNemoRlLab`: `coordinator0` + `trainer0` + `rollout0`, 11/11); real GPU (`NemoRlLab --real`) pending hardware/env staging | CPU `c9` 7.6 ms install / 1.5 ms undo (`3.823 s` `c0–c10`); GPU benchmarks pending hardware/env staging | [architecture](../repos/nemo-rl/docs/architecture.md) · [costs](../repos/nemo-rl/kb/costs.md) |
-| **Toy sandbox** | CPU CI (2-rank stdlib reference) | ~1.5 s for all 11 verification cases on a laptop | [verification suite](../core/livelab/conformance/README.md) |
+| **Toy sandbox** | CPU CI (2-rank stdlib reference) | ~1.5 s for the full sandbox verification suite on a laptop | [verification suite](../core/livelab/conformance/README.md) |
 
 ## Repository layout
 

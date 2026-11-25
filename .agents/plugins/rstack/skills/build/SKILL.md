@@ -1,5 +1,5 @@
 ---
-name: rsibox-build
+name: build
 description: Implement a single-boundary RSIBox change under <= 600 non-test LOC with formal TLA+ updates, ResourceWarning cleanliness, and doctor checks.
 ---
 

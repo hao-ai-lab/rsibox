@@ -1,5 +1,5 @@
 ---
-name: rsibox-triage
+name: triage
 description: Triage Gate 1/2 and PR review findings into P0/P1 (fix with regression test) or P2 (file tracking issue), enforcing the 3-round stop rule.
 ---
 

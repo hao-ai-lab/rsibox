@@ -57,16 +57,16 @@ def _valid_pr_body() -> str:
             "- unittest ran cleanly.",
             "",
             "## Loop record",
-            "- **Engine**: core",
-            "- **Upstream PRs**: none",
-            "- **Function groups**: gate",
-            "- **Rule added**: none",
-            "- **Overheads measured**: none",
-            "- **Receipts**: none",
-            "- **Not verified**: GPU runtime",
-            "- **Ideal full GPU test**: 2x B200 integration run",
-            "- **Actual tests run**: local unittest suite",
-            "- **Why unrun GPU paths were skipped**: CPU-only gate tests",
+            "- Engine: core",
+            "- Upstream PRs: none",
+            "- Function groups: gate",
+            "- Rule added: none",
+            "- Overheads measured: none",
+            "- Receipts: none",
+            "- Not verified: GPU runtime",
+            "- Ideal full GPU test: 2x B200 integration run",
+            "- Actual tests run: local unittest suite",
+            "- Why unrun GPU paths were skipped: CPU-only gate tests",
         ]
     )
 
@@ -230,6 +230,48 @@ class RstackGatesTest(unittest.TestCase):
                 ),
                 1,
             )
+            # Bolded Loop/GPU bullets (e.g. - **Engine**: ...) are rejected to match CI pr-rules.yml.
+            bold_body = repo / "bold_body.md"
+            bold_body.write_text(_valid_pr_body().replace("- Engine:", "- **Engine**:"), encoding="utf-8")
+            self.assertEqual(
+                pre_push.main(
+                    [
+                        "--repo",
+                        str(repo),
+                        "--base",
+                        "base-ref",
+                        "--title",
+                        "feat(core): add stub",
+                        "--body-file",
+                        str(bold_body),
+                        "--skip-tests",
+                    ]
+                ),
+                1,
+            )
+            # Loop keys placed under ## What and why with an empty ## Loop record must fail.
+            misplaced_body = "\n".join(
+                [
+                    "## What and why",
+                    "- Engine: core",
+                    "- Upstream PRs: none",
+                    "- Function groups: gate",
+                    "- Rule added: none",
+                    "- Overheads measured: none",
+                    "- Receipts: none",
+                    "- Not verified: GPU runtime",
+                    "",
+                    "## Evidence",
+                    "- unittest ran cleanly.",
+                    "",
+                    "## Loop record",
+                    "- Ideal full GPU test: 2x B200 integration run",
+                    "- Actual tests run: local unittest suite",
+                    "- Why unrun GPU paths were skipped: CPU-only gate tests",
+                ]
+            )
+            misplaced_errs = pre_push.check_body_contract(misplaced_body, require_gpu=True)
+            self.assertTrue(any("- Engine:" in e for e in misplaced_errs))
             # Mocked leak-check failure blocks push.
             leak_sh.write_text("#!/usr/bin/env bash\necho leak >&2\nexit 1\n", encoding="utf-8")
             self.assertEqual(
@@ -300,6 +342,85 @@ class RstackGatesTest(unittest.TestCase):
         }
         state_pend, _ = pr_gate.evaluate_rollup(pending_pr)
         self.assertEqual(state_pend, "pending")
+
+        superseded_pr = {
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [
+                {
+                    "workflowName": "PR Rules",
+                    "name": "rule: Loop record",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "startedAt": "2026-11-24T10:00:00Z",
+                    "completedAt": "2026-11-24T10:00:10Z",
+                },
+                {
+                    "workflowName": "PR Rules",
+                    "name": "rule: Loop record",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-11-24T10:05:00Z",
+                    "completedAt": "2026-11-24T10:05:10Z",
+                },
+            ],
+        }
+        state_sup, counts_sup = pr_gate.evaluate_rollup(superseded_pr)
+        self.assertEqual(state_sup, "green")
+        self.assertEqual(counts_sup["failed"], [])
+        self.assertEqual(len(counts_sup["passed"]), 1)
+
+        # Newly queued re-run with startedAt=None must supersede stale FAILURE and stale SUCCESS.
+        queued_after_fail = {
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "startedAt": "2026-11-24T10:00:00Z",
+                    "completedAt": "2026-11-24T10:01:00Z",
+                },
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "QUEUED",
+                    "conclusion": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                },
+            ],
+        }
+        state_qf, counts_qf = pr_gate.evaluate_rollup(queued_after_fail)
+        self.assertEqual(state_qf, "pending")
+        self.assertEqual(counts_qf["failed"], [])
+        self.assertEqual(counts_qf["pending"], ["cpu"])
+
+        queued_after_success = {
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-11-24T10:00:00Z",
+                    "completedAt": "2026-11-24T10:01:00Z",
+                },
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "QUEUED",
+                    "conclusion": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                },
+            ],
+        }
+        state_qs, counts_qs = pr_gate.evaluate_rollup(queued_after_success)
+        self.assertEqual(state_qs, "pending")
+        self.assertEqual(counts_qs["passed"], [])
+        self.assertEqual(counts_qs["pending"], ["cpu"])
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_repo(Path(tmp))
@@ -376,6 +497,11 @@ class RstackGatesTest(unittest.TestCase):
         }
         self.assertTrue(set(manifest).issubset(allowed_keys))
         self.assertEqual(manifest.get("name"), "rstack")
+        self.assertEqual(manifest.get("displayName"), "rstack")
+        logo_rel = manifest.get("logo")
+        self.assertIsInstance(logo_rel, str)
+        self.assertTrue(logo_rel.endswith(".svg"))
+        self.assertTrue((plugin_root / logo_rel).is_file(), f"missing logo {logo_rel}")
         self.assertLessEqual(len(manifest.get("suggestedPrompts", [])), 3)
 
         rules_text = (plugin_root / "rules" / "AGENTS.md").read_text(encoding="utf-8")
@@ -399,17 +525,22 @@ class RstackGatesTest(unittest.TestCase):
             self.assertIn("tools:", atext)
 
         expected_skills = {
-            "rsibox-mode",
-            "rsibox-claim",
-            "rsibox-build",
-            "rsibox-precheck",
-            "rsibox-gpu-receipt",
-            "rsibox-audit",
-            "rsibox-triage",
-            "rsibox-merge-train",
-            "rsibox-facts-sync",
-            "rsibox-docs-polish",
+            "rsibox",
+            "claim",
+            "build",
+            "precheck",
+            "receipt",
+            "audit",
+            "triage",
+            "train",
+            "facts",
+            "polish",
+            "plain",
+            "distill",
+            "report",
         }
+        actual_skills = {p.parent.name for p in (plugin_root / "skills").glob("*/SKILL.md")}
+        self.assertEqual(actual_skills, expected_skills)
         for skill in expected_skills:
             skill_md = plugin_root / "skills" / skill / "SKILL.md"
             self.assertTrue(skill_md.is_file(), f"missing {skill_md}")
@@ -417,7 +548,7 @@ class RstackGatesTest(unittest.TestCase):
             self.assertIn(f"name: {skill}", text)
             self.assertIn("description:", text)
 
-        workflows_dir = plugin_root / "skills" / "rsibox-mode" / "workflows"
+        workflows_dir = plugin_root / "skills" / "rsibox" / "workflows"
         expected_wfs = {
             "01-claim-and-build.md",
             "02-gpu-receipt-and-witness.md",
@@ -556,6 +687,52 @@ class RstackGatesTest(unittest.TestCase):
             _, violations = docs_lint.lint_docs(repo)
             self.assertEqual([v["kind"] for v in violations], ["duplicate_artifact"])
             self.assertEqual(docs_lint.main(["--repo", str(repo)]), 1)
+
+    def test_docs_lint_edge_cases_fences_images_schemes_and_slugs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp))
+            (repo / "docs").mkdir()
+            (repo / "assets").mkdir()
+            (repo / "assets" / "ok.png").write_bytes(b"png")
+            (repo / "docs" / "foo_(1).md").write_text(
+                "# Foo\n\n## Foo 1\n\n## Foo\n\n## _Emph_ &amp; `code_x`\n\n## Mode 2 (`statuses/<sha>`)\n",
+                encoding="utf-8",
+            )
+            (repo / "README.md").write_text(
+                "\n".join(
+                    [
+                        "```inline``` still lints below.",
+                        "",
+                        "````markdown",
+                        "```md",
+                        "[ignored](missing.md)",
+                        "```",
+                        "````",
+                        "",
+                        "[Parens](docs/foo_(1).md#foo-2)",
+                        "[Emph](/docs/foo_(1).md#emph--code_x)",
+                        "[AngleCode](docs/foo_(1).md#mode-2-statusessha)",
+                        "[Ext](HTTPS://example.com)",
+                        "[![img](assets/ok.png)](docs/foo_(1).md#foo-1)",
+                        '<img src="assets/ok.png" alt="ok">',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _, violations = docs_lint.lint_docs(repo)
+            self.assertEqual(violations, [])
+
+            # Inline fence on a line must NOT swallow subsequent broken links, and nested linked image checks both targets.
+            (repo / "README.md").write_text(
+                "```inline```\n[![alt](assets/ok.png)](docs/missing.md)\n<img src=\"assets/missing.png\">\n",
+                encoding="utf-8",
+            )
+            _, bad_violations = docs_lint.lint_docs(repo)
+            self.assertEqual(
+                [(v["kind"], v["detail"]) for v in bad_violations],
+                [("broken_link", "docs/missing.md"), ("broken_link", "assets/missing.png")],
+            )
 
 
 if __name__ == "__main__":

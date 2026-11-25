@@ -38,7 +38,7 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 - **Selective CUDA graph recapture:** Recapture only the CUDA graphs affected by an edit in place, avoiding full cold restarts.
 - **C++/CUDA (`.cu`) & live config reload:** Hot-reload compiled `.cu` kernels (`7.3–19.2 s` vs. `41–49 s`) and tune runtime flags like `max_num_seqs` in-process in **`4.3 ms`**.
 - **Multi-GPU & multi-launcher:** Supports tensor, data, pipeline, and sequence-parallel workers plus Ray actors via local, Docker, gVisor, and Slurm launchers.
-- **Fast crash recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)):** Optional NVIDIA Dynamo GMS & Snapshot hooks keep weights resident in GPU memory for **`0.31–1.86 s`** standby shadow failover and **`2.73–6.96 s`** checkpoint restore.
+- **Fast crash recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)):** Optional NVIDIA Dynamo GMS & Snapshot hooks keep weights resident in GPU memory for **`0.31–1.86 s`** vLLM standby shadow failover (**`0.10–0.37 s`** SGLang promote resume; **`0.48–0.53 s`** pool failover) and **`2.73–6.96 s`** checkpoint restore.
 - **Multi-agent GPU pool (`SandboxPool`):** Share warm GPUs across concurrent coding agents with priority scheduling, elastic role borrowing, fault isolation, and **`112/112`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
 
 ## Supported Engines & Results

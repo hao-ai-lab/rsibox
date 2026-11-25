@@ -8,7 +8,7 @@ verification (`patches`: named edits; `fresh_check`: the workload in a new proce
 started from the edited files; `inject`: fault injection). The same cases run against the toy sandbox
 on CPU now and against any real engine adapter later.
 
-In plain English, the 11 checks cover four guarantees:
+In plain English, the sandbox verification suite checks four core guarantees (and grows as new failure modes are added):
 1. **Repeatability (`c0`):** Repeated checks after state resets produce identical outputs.
 2. **Real Execution & Fresh Parity (`c1`, `c2`, `c3`, `c10`):** Edits execute on every rank (`witness`), match a fresh process started from the edited files, and fail closed if code never runs.
 3. **Safe Refusal & Rollback (`c4`, `c5`, `c6`, `c7`, `c9`):** Unsupported or mid-fault edits refuse or roll back cleanly, and repeated install/undo cycles restore exact base code identity.

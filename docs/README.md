@@ -25,7 +25,7 @@ Rules:
 
 ## Index
 
-- [RSIBox concepts](concepts.md): plain-English overview of `rsibox` vs. `core/livelab/`, hot-reload layers, execution proof (`witness`), journaled rollback, restart boundaries, and the 11-check verification suite.
+- [RSIBox concepts](concepts.md): plain-English overview of `rsibox` vs. `core/livelab/`, hot-reload layers, execution proof (`witness`), journaled rollback, restart boundaries, and the sandbox verification suite.
 - [Supported engines & benchmarks](engines.md): summary table across all supported ML engines, headline speedups, and repository layout.
 - [Restart boundaries, interface & tests](mechanisms.md): full restart-boundary table, NVIDIA Dynamo GMS & Snapshot integration benchmarks, and CPU test commands.
 - [Lessons from building an RSIBox sandbox](lessons.md): framework lessons and rules for applying them.

@@ -181,4 +181,4 @@ The repo will be public. Experiments and the machines they ran on are not part o
 
 ## In-repo skill stack (`rstack`)
 
-- The repository ships its own Antigravity workspace plugin and deterministic engineering gate CLIs under [`.agents/plugins/rstack/`](.agents/plugins/rstack/README.md) (`claim_board.py`, `preflight.py`, `pre_push.py`, `pr_gate.py`, `trajectory_audit.py`, and `/rsibox-mode`). Run those gates locally before pushing branches or opening PRs.
+- The repository ships its own Antigravity workspace plugin and deterministic engineering gate CLIs under [`.agents/plugins/rstack/`](.agents/plugins/rstack/README.md) (`claim_board.py`, `preflight.py`, `pre_push.py`, `pr_gate.py`, `trajectory_audit.py`, and `/rsibox`). Run those gates locally before pushing branches or opening PRs.
