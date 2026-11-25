@@ -2,44 +2,57 @@
   <img alt="rsibox" src="assets/rsibox-logo.svg" width="360">
 </p>
 
+<h3 align="center">Live Hot-Reload Sandbox &amp; Multi-Agent GPU Pool for ML Engines</h3>
+
+<p align="center"><b>Keeping Weights Warm While AI Agents Optimize Production ML Engines</b></p>
+
 <p align="center">
-  <a href="#use-with-your-coding-agent"><b>Agent Setup</b></a> ·
-  <a href="#features"><b>Features</b></a> ·
+  <a href="#quick-start"><img alt="Quick Start" src="https://img.shields.io/badge/Quick%20Start-Guide-0f766e.svg"></a>
+  <a href="core/livelab/formal/"><img alt="TLA+ Verified" src="https://img.shields.io/badge/Protocol-TLA%2B%20Verified-1d4ed8.svg"></a>
+  <a href="pyproject.toml"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776ab.svg"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache%202.0-green.svg"></a>
+</p>
+
+<p align="center">
+  <a href="#why-rsibox"><b>Why RSIBox</b></a> ·
+  <a href="#how-it-works"><b>How It Works</b></a> ·
   <a href="#supported-engines--results"><b>Engines &amp; Results</b></a> ·
-  <a href="#cli-quick-start"><b>CLI Quick Start</b></a> ·
-  <a href="docs/concepts.md"><b>Concepts</b></a> ·
-  <a href="docs/mechanisms.md"><b>Mechanisms</b></a> ·
-  <a href="docs/engines.md"><b>Engines</b></a> ·
-  <a href="docs/agent-teams-and-contention.md"><b>Multi-Agent Pool</b></a> ·
+  <a href="#quick-start"><b>Quick Start</b></a> ·
+  <a href="#roadmap--documentation-map"><b>Roadmap &amp; Docs</b></a> ·
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` is a live hot-reload sandbox for ML engines. Instead of paying a multi-minute cold restart on every code edit to reload weights and recapture CUDA graphs, `rsibox` swaps Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
+`rsibox` adds safe live hot-reload and multi-agent GPU sharing to existing ML serving, training, and RL engines without rewriting them from scratch. Instead of paying a multi-minute cold restart on every edit to reload weights and recapture CUDA graphs, coding agents swap Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
 
-## Use with Your Coding Agent
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/rsibox-dynamo-4bar-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/rsibox-dynamo-4bar-light.png">
+    <img alt="RSIBox live hot-reload and NVIDIA Dynamo GMS and Snapshot latency comparison on NVIDIA B200" src="assets/rsibox-dynamo-4bar-light.png" width="100%">
+  </picture>
+</p>
 
-*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — zero manual setup:*
+## Why RSIBox
 
-```text
-Install https://github.com/hao-ai-lab/rsibox.git and read core/agents/livelab_overview.md.
-Whenever we edit or benchmark an ML engine, use rsibox to hot-reload and verify changes in-place instead of restarting.
-```
+- **Every small edit forces a multi-minute cold restart:** Changing one scheduling line or kernel in a running ML engine normally tears down the worker, reloads tens of gigabytes of weights, and re-captures CUDA graphs (`66–298 s` per iteration).
+- **Silent no-ops & stale CUDA graphs mislead optimization loops:** Naively monkey-patching Python fails silently when code never executes (`zero_witness`), or when `@triton.jit` binaries and captured `CUDAGraph` nodes continue replaying stale device pointers.
+- **Concurrent agents contend & poison shared GPUs:** Running multiple coding agents against a fixed GPU budget serializes teams behind full restarts and lets one crashing edit stall or poison sibling workers.
+- **Teams shouldn't have to rewrite production engines to get safe live iteration:** Engine teams need a drop-in runtime boundary (`install`, `check`, `reset`, `uninstall`, `status`) that composes with existing engines, launchers, and recovery backends like NVIDIA Dynamo GMS & Snapshot.
 
-**Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
+## How It Works
 
-```bash
-git clone https://github.com/hao-ai-lab/rsibox.git
-mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
-```
+- **Keep GPU weights and states warm while swapping only what changed:** RSIBox applies each edit at the lowest safe tier — runtime flags, Python functions, `@triton.jit` kernels, selective CUDA graphs, or `.cu` side-libraries — with pre-warmed fork server and NVIDIA Dynamo GMS & Snapshot fallback when an edit crosses a process boundary or crashes a worker.
+- **Atomic step-gap commit with execution proof and rollback:** Edits stage while the engine runs, commit atomically across all GPU ranks between steps, record per-rank call counts (`witness`) to prove the new code executed, and reverse bit-for-bit via a per-mutation journal (`~0.05 s` undo).
+- **Formally verified protocols & sandbox verification suite:** Core swap, multi-rank coordinator, pool, standby shadow, and autoscaler protocols are specified in TLA+ ([`core/livelab/formal/`](core/livelab/formal/)) and validated against the growing **sandbox verification suite** (`rsibox conformance`, [`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)).
+- **Multi-agent GPU pool (`SandboxPool`):** Concurrent coding agents share warm GPUs via priority scheduling, anti-starvation aging, elastic role borrowing, per-agent fault isolation, and **`112/112`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
 
-## Features
-
-- **Python & Triton hot-swap (`~80 ms`):** Atomically swap Python functions and Triton kernels across all GPU ranks (`~0.05 s` rollback) with execution proof on every rank.
-- **Selective CUDA graph recapture:** Recapture only the CUDA graphs affected by an edit in place, avoiding full cold restarts.
-- **C++/CUDA (`.cu`) & live config reload:** Hot-reload compiled `.cu` kernels (`7.3–19.2 s` vs. `41–49 s`) and tune runtime flags like `max_num_seqs` in-process in **`4.3 ms`**.
-- **Multi-GPU & multi-launcher:** Supports tensor, data, pipeline, and sequence-parallel workers plus Ray actors via local, Docker, gVisor, and Slurm launchers.
-- **Fast crash recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)):** Optional NVIDIA Dynamo GMS & Snapshot hooks keep weights resident in GPU memory for **`0.31–1.86 s`** vLLM standby shadow failover (**`0.10–0.37 s`** SGLang promote resume; **`0.48–0.53 s`** pool failover) and **`2.73–6.96 s`** checkpoint restore.
-- **Multi-agent GPU pool (`SandboxPool`):** Share warm GPUs across concurrent coding agents with priority scheduling, elastic role borrowing, fault isolation, and **`112/112`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
+| Hot-Reload / Recovery Tier | What Changes | Typical Latency |
+| :--- | :--- | ---: |
+| **Live runtime config** | Scheduler & batching flags (`max_num_seqs`, policy) in process | `~4.3 ms` |
+| **Python & Triton hot-swap** | Python functions & `@triton.jit` kernels across all ranks (`~0.05 s` undo) | `~58–92 ms` |
+| **Selective CUDA graph recapture** | Only CUDA graphs affected by an edited forward path | `0.50–3.69 s` |
+| **C++/CUDA (`.cu`) side-library reload** | Compiled native kernels rebound into `torch.ops._C` + selective recapture | `7.3–19.2 s` |
+| **Dynamo GMS Standby Shadow / Snapshot** | Parked GPU-weight-resident failover (`0.10–0.37 s` SGLang / `0.31–1.86 s` vLLM) or CRIU + `cuda-checkpoint` restore | `0.10–6.96 s` |
 
 ## Supported Engines & Results
 
@@ -58,7 +71,46 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 
 On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). See **[`docs/concepts.md`](docs/concepts.md)** for core concepts, **[`docs/mechanisms.md`](docs/mechanisms.md)** for restart boundaries and Dynamo benchmarks, and **[`docs/engines.md`](docs/engines.md)** for full engine tables and per-tier costs.
 
-## CLI Quick Start
+<details>
+<summary><b>More Results &amp; Safety Guarantees</b> (Dynamo GMS &amp; Snapshot alignment, multi-agent pool study, and safety table)</summary>
+
+<p>
+  <img alt="Matched 3-engine NVIDIA Dynamo Snapshot and RSIBox latency alignment on NVIDIA B200" src="assets/dynamo-3engine-4case-benchmark.svg" width="100%">
+</p>
+
+<p>
+  <img alt="Multi-agent SandboxPool full-stack integration and rogue-agent blast radius containment on NVIDIA B200" src="assets/agent-teams-fullstack-and-blast-radius.svg" width="100%">
+</p>
+
+| Guarantee | What It Enforces |
+| :--- | :--- |
+| **[Atomic step-gap swap](docs/mechanisms.md)** | Stages edits while the engine runs and commits across all ranks together between steps. |
+| **[Execution check](core/livelab/INTERFACE.md)** | Counts calls on every rank so silent no-op edits (`zero_witness`) fail instead of passing. |
+| **[Journaled rollback](docs/mechanisms.md)** | Logs every mutation's inverse; `uninstall` restores exact code objects and verifies base identity. |
+| **[Explicit restart boundaries](docs/kernels-and-graphs.md)** | Refuses unsafe edits before touching state and names the cheapest warm tier (Triton, CUDA graph recapture, `.cu` reload, or pre-warmed fork server + CUDA IPC). |
+| **[Sandbox verification suite](core/livelab/conformance/README.md)** | Verifies repeatability, parity with fresh restart, crash/hang fault handling, and repeated undo stability. |
+
+See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CPU tests, and [`core/agents/`](core/agents/) for ready-to-use agent prompts.
+
+</details>
+
+## Use with Your Coding Agent
+
+*Paste this prompt into Claude Code, Codex, Cursor, or Antigravity — zero manual setup:*
+
+```text
+Install https://github.com/hao-ai-lab/rsibox.git and read core/agents/livelab_overview.md.
+Whenever we edit or benchmark an ML engine, use rsibox to hot-reload and verify changes in-place instead of restarting.
+```
+
+**Or install it as a reusable agent skill** ([`core/agents/livelab_overview.md`](core/agents/livelab_overview.md) already ships with `SKILL.md` frontmatter):
+
+```bash
+git clone https://github.com/hao-ai-lab/rsibox.git
+mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
+```
+
+## Quick Start
 
 Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
 
@@ -87,20 +139,21 @@ rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
   --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
 ```
 
-<details>
-<summary><b>How rsibox keeps live edits safe</b> (atomic step-gap swap, execution proof, rollback, restart boundaries)</summary>
+## Roadmap & Documentation Map
 
-| Guarantee | What It Enforces |
-| :--- | :--- |
-| **[Atomic step-gap swap](docs/mechanisms.md)** | Stages edits while the engine runs and commits across all ranks together between steps. |
-| **[Execution check](core/livelab/INTERFACE.md)** | Counts calls on every rank so silent no-op edits (`zero_witness`) fail instead of passing. |
-| **[Journaled rollback](docs/mechanisms.md)** | Logs every mutation's inverse; `uninstall` restores exact code objects and verifies base identity. |
-| **[Explicit restart boundaries](docs/kernels-and-graphs.md)** | Refuses unsafe edits before touching state and names the cheapest warm tier (Triton, CUDA graph recapture, `.cu` reload, or pre-warmed fork server + CUDA IPC). |
-| **[Sandbox verification suite](core/livelab/conformance/README.md)** | Verifies repeatability, parity with fresh restart, crash/hang fault handling, and repeated undo stability. |
+| Milestone | Status | Scope |
+| :--- | :---: | :--- |
+| **v0** | ✅ Done | Core hot-reload runtime (`install` / `check` / `reset` / `uninstall` / `status`), 10 engine adapters, TLA+ formal suite (`SwapLifecycle`, `Coordinator`, `SandboxPool`, `StandbyShadow`, `PoolAutoScaler`) |
+| **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`112/112` verified traces), in-repo `rstack` gates |
+| **v2** | 🚧 Roadmap | Remaining GPU receipts for `NeMo-RL` & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
 
-See [`docs/mechanisms.md`](docs/mechanisms.md) for all restart boundaries and CPU tests, and [`core/agents/`](core/agents/) for ready-to-use agent prompts.
-
-</details>
+- **[`docs/concepts.md`](docs/concepts.md)** — Plain-English overview of `rsibox`, hot-reload tiers, execution proof (`witness`), and journaled rollback.
+- **[`docs/engines.md`](docs/engines.md)** — Full 10-engine summary, measured speedups, and repository layout.
+- **[`docs/mechanisms.md`](docs/mechanisms.md)** — Restart-boundary table, NVIDIA Dynamo GMS & Snapshot alignment benchmarks, and CPU tests.
+- **[`docs/kernels-and-graphs.md`](docs/kernels-and-graphs.md)** — Deep dive into Python bytecode swaps, Triton `@jit` rebuilds, and CUDA graph replay / `Tier-A` patching.
+- **[`docs/agent-teams-and-contention.md`](docs/agent-teams-and-contention.md)** — Multi-agent `SandboxPool` contention, Standby Shadow failover, rogue isolation, and elastic scaling study.
+- **[`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)** — The sandbox verification suite (`rsibox conformance`) and CPU toy lab guide.
+- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** & **[`.agents/plugins/rstack/README.md`](.agents/plugins/rstack/README.md)** — Contributor guidelines and deterministic `rstack` workflow gates.
 
 ## Contributors
 
