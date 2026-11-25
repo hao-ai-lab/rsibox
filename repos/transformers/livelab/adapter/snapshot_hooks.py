@@ -102,7 +102,12 @@ class TransformersQuiesceHooks:
                     "ok": False, "error": f"{type(error).__name__}: {error}",
                     "resumed": resumed_tags, "resume_s": elapsed, "participants_ok": False,
                 }
-            return {
+            result: dict[str, Any] = {
                 "ok": True, "resumed": resumed_tags, "device": reply.get("device"),
                 "resume_s": round(resume_seconds, 6), "participants_ok": True, "fingerprint": status_reply["fingerprint"],
             }
+            if reply.get("devices") is not None:
+                result["devices"] = reply["devices"]
+            if reply.get("hf_device_map") is not None:
+                result["hf_device_map"] = reply["hf_device_map"]
+            return result

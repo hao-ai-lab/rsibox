@@ -24,13 +24,39 @@ def _env_config() -> dict[str, Any]:
     model_path = os.environ.get("RSIBOX_TRANSFORMERS_MODEL")
     if not model_path:
         raise RuntimeError("set RSIBOX_TRANSFORMERS_MODEL to a model path or repo id")
-    max_tokens_env = os.environ.get("RSIBOX_TRANSFORMERS_MAX_NEW_TOKENS")
-    return {
+    max_tokens_env = (os.environ.get("RSIBOX_TRANSFORMERS_MAX_NEW_TOKENS") or "").strip()
+    device_map_env = (os.environ.get("RSIBOX_TRANSFORMERS_DEVICE_MAP") or "").strip()
+    max_memory_env = (os.environ.get("RSIBOX_TRANSFORMERS_MAX_MEMORY") or "").strip()
+    config: dict[str, Any] = {
         "mode": "real", "model_path": model_path, "device": os.environ.get("RSIBOX_TRANSFORMERS_DEVICE", ""),
         "dtype": os.environ.get("RSIBOX_TRANSFORMERS_DTYPE", "bfloat16"),
         "seed": int(os.environ.get("RSIBOX_TRANSFORMERS_SEED", "0")),
         **({"max_new_tokens": int(max_tokens_env)} if max_tokens_env else {}),
     }
+    if device_map_env:
+        config["device_map"] = json.loads(device_map_env) if device_map_env.startswith("{") else device_map_env
+    if max_memory_env:
+        config["max_memory"] = json.loads(max_memory_env)
+    return config
+
+
+def _extract_gpu_indices(device_map: dict[str, Any]) -> list[int]:
+    indices: list[int] = []
+    for value in device_map.values():
+        idx: int | None = None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            idx = value
+        elif isinstance(value, str):
+            text = value.strip()
+            if text.isascii() and text.isdigit():
+                idx = int(text)
+            elif text.startswith(("cuda:", "gpu:")):
+                suffix = text.split(":", 1)[1].strip()
+                if suffix.isascii() and suffix.isdigit():
+                    idx = int(suffix)
+        if idx is not None and idx not in indices:
+            indices.append(idx)
+    return indices
 
 
 class TransformersLab(BaseLab):
@@ -53,6 +79,8 @@ class TransformersLab(BaseLab):
         self.quiesce_timeout = float(quiesce_timeout if quiesce_timeout is not None else (env_quiesce or 120.0))
         self.sock_path, self._spec_path, self._stderr_path = None, None, None
         self._worker_proc, self._worker_generation, self.model_module = None, 0, None
+        self.hf_device_map: dict[str, str] | None = None
+        self.devices: list[str] = []
         super().__init__(
             receipts=receipts, check_timeout=check_timeout, rpc_timeout=rpc_timeout,
             auto_spawn=auto_spawn, weight_store=weight_store, recovery_driver=recovery_driver,
@@ -64,6 +92,8 @@ class TransformersLab(BaseLab):
         parser = argparse.ArgumentParser(prog="rsibox conformance transformers --real", allow_abbrev=False)
         parser.add_argument("--model", required=True, help="HuggingFace model path or repo id")
         parser.add_argument("--device", default="", help="Target device (e.g. cuda:0, cpu)")
+        parser.add_argument("--device-map", default="", help="Accelerate device_map (e.g. auto, balanced, or JSON dict)")
+        parser.add_argument("--max-memory", default="", help="JSON dict of per-device memory caps for device_map")
         parser.add_argument("--dtype", default="bfloat16", help="Model dtype (bfloat16, float16, float32, auto)")
         parser.add_argument("--max-new-tokens", type=int, default=16, help="Tokens per generation check")
         parser.add_argument("--quiesce-timeout", type=float, default=None, help="Quiesce/resume RPC timeout (s)")
@@ -72,14 +102,22 @@ class TransformersLab(BaseLab):
             "RSIBOX_TRANSFORMERS_MODEL": parsed.model, "RSIBOX_TRANSFORMERS_DTYPE": parsed.dtype,
             "RSIBOX_TRANSFORMERS_MAX_NEW_TOKENS": str(parsed.max_new_tokens),
         }
-        if parsed.device:
-            env["RSIBOX_TRANSFORMERS_DEVICE"] = parsed.device
+        if parsed.device.strip():
+            env["RSIBOX_TRANSFORMERS_DEVICE"] = parsed.device.strip()
+        if parsed.device_map.strip():
+            env["RSIBOX_TRANSFORMERS_DEVICE_MAP"] = parsed.device_map.strip()
+        if parsed.max_memory.strip():
+            env["RSIBOX_TRANSFORMERS_MAX_MEMORY"] = parsed.max_memory.strip()
         if parsed.quiesce_timeout is not None:
             env["RSIBOX_TRANSFORMERS_QUIESCE_TIMEOUT"] = str(parsed.quiesce_timeout)
         return env
 
+    def _worker_alive(self) -> bool:
+        proc_obj = self._worker_proc
+        return proc_obj is not None and proc_obj.poll() is None
+
     def is_running(self) -> bool:
-        return self._worker_proc is not None and self._worker_proc.poll() is None and self.sock_path is not None
+        return self._worker_alive() and self.sock_path is not None
 
     def _engine_version(self) -> str:
         with contextlib.suppress(Exception):
@@ -102,9 +140,43 @@ class TransformersLab(BaseLab):
         )
         return livelab_dir, core_dir
 
+    def _weight_store_probe_kwargs(self, visible_devices: str | None) -> dict[str, Any]:
+        raw_dm = self.config.get("device_map")
+        if isinstance(raw_dm, str):
+            raw_dm = raw_dm.strip()
+            if raw_dm.startswith("{"):
+                with contextlib.suppress(ValueError):
+                    raw_dm = json.loads(raw_dm)
+        if not raw_dm:
+            return {"tp": 1, "visible_devices": visible_devices}
+        visible_list = (
+            [item.strip() for item in visible_devices.split(",") if item.strip()]
+            if visible_devices is not None
+            else None
+        )
+        if isinstance(raw_dm, dict):
+            gpu_indices = _extract_gpu_indices(raw_dm)
+            if not gpu_indices:
+                return {"tp": 1, "visible_devices": visible_devices}
+            if visible_list is None:
+                target_gpus = tuple(str(idx) for idx in gpu_indices)
+                return {"gpus": target_gpus, "tp": len(target_gpus), "visible_devices": None}
+            if all(idx < len(visible_list) for idx in gpu_indices):
+                target_gpus = tuple(visible_list[idx] for idx in gpu_indices)
+                return {"gpus": target_gpus, "tp": len(target_gpus), "visible_devices": visible_devices}
+            return {"tp": max(gpu_indices) + 1, "visible_devices": visible_devices}
+        if visible_list is None:
+            return {"tp": None, "visible_devices": None}
+        return {"tp": len(visible_list) or 1, "visible_devices": visible_devices}
+
+    @property
+    def tp(self) -> int | None:
+        return self._weight_store_probe_kwargs(os.environ.get("CUDA_VISIBLE_DEVICES")).get("tp")
+
     def _start_engine(self) -> tuple[Any, list[str]]:
         if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
-            probe_result = self.weight_store.probe(tp=1, visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+            probe_kwargs = self._weight_store_probe_kwargs(os.environ.get("CUDA_VISIBLE_DEVICES"))
+            probe_result = self.weight_store.probe(**probe_kwargs)
             if not probe_result.ok:
                 raise RuntimeError(f"weight store ({self.weight_store.name}) not ready: {probe_result.error}")
         self._worker_generation += 1
@@ -135,6 +207,8 @@ class TransformersLab(BaseLab):
             stderr_handle = None
             handshake = self._wait_for_worker()
             self.model_module = handshake.get("model_module")
+            self.hf_device_map = handshake.get("hf_device_map")
+            self.devices = list(handshake.get("devices") or ([handshake["device"]] if handshake.get("device") else []))
             tracked = list(dict.fromkeys([*self._init_modules, *([self.model_module] if self.model_module else [])]))
             participant = coordinator.CallParticipant("worker0", lambda method, payload: self.worker_call(method, payload))
             step_coordinator = RecaptureCoordinator(
@@ -157,30 +231,39 @@ class TransformersLab(BaseLab):
         return ""
 
     def _wait_for_worker(self) -> dict[str, Any]:
+        worker = self._worker_proc
+        alive_fn = (lambda proc_obj=worker: proc_obj.poll() is None) if worker is not None else None
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
-            if self._worker_proc is not None and self._worker_proc.poll() is not None:
-                exit_code = self._worker_proc.returncode
+            if worker is not None and worker.poll() is not None:
+                exit_code = worker.returncode
                 raise RuntimeError(f"transformers worker exited during startup (rc={exit_code}): {self._read_stderr_tail()}")
             if self.sock_path and os.path.exists(self.sock_path):
                 with contextlib.suppress(OSError, ValueError):
-                    reply = ipc.unix_json_call(self.sock_path, {"method": "ping"}, timeout=5.0)
+                    reply = ipc.unix_json_call(
+                        self.sock_path, {"method": "ping"}, timeout=5.0, alive_fn=alive_fn,
+                    )
                     if reply.get("ok"):
                         return reply
             time.sleep(0.05)
         raise TimeoutError(f"transformers worker not ready within {self.startup_timeout} s: {self._read_stderr_tail()}")
 
     def _stop_engine(self) -> None:
+        self._worker_generation += 1
         worker, self._worker_proc = self._worker_proc, None
         if worker is not None:
-            if worker.poll() is None and self.sock_path and not self.dirty:
+            leader_alive = worker.poll() is None
+            if leader_alive and self.sock_path and not self.dirty:
                 with contextlib.suppress(Exception):
                     ipc.unix_json_call(self.sock_path, {"method": "shutdown"}, timeout=2.0)
-            if worker.poll() is None:
+                leader_alive = worker.poll() is None
+            if leader_alive or proc.pg_alive(worker.pid):
+                grace = 5.0 if leader_alive else 1.0
                 with contextlib.suppress(Exception):
-                    proc.stop_session(worker.pid, grace=5.0, reap=worker.poll)
-                with contextlib.suppress(Exception):
-                    proc.stop_tree(worker.pid, grace_s=2.0, include_pg=True)
+                    proc.stop_session(worker.pid, grace=grace, reap=worker.poll)
+                if worker.poll() is None:
+                    with contextlib.suppress(Exception):
+                        proc.stop_tree(worker.pid, grace_s=2.0, include_pg=True)
             with contextlib.suppress(Exception):
                 worker.wait(timeout=2.0)
         for cleanup_path in (self.sock_path, self._spec_path, self._stderr_path):
@@ -188,14 +271,22 @@ class TransformersLab(BaseLab):
                 with contextlib.suppress(OSError):
                     os.unlink(cleanup_path)
         self.sock_path, self._spec_path, self._stderr_path = None, None, None
+        self.hf_device_map, self.devices = None, []
 
     def worker_call(self, method: str, payload: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
-        generation, sock_path = self._worker_generation, self.sock_path
+        generation, sock_path, worker = self._worker_generation, self.sock_path, self._worker_proc
         if self.dirty or not sock_path:
             raise ConnectionError("worker channel dirty; respawn required" if self.dirty else "worker is not running")
+        if worker is not None and worker.poll() is not None:
+            if self._worker_generation == generation:
+                self.dirty = True
+            raise ConnectionError(f"worker0 {method}: worker process exited")
+        alive_fn = (lambda proc_obj=worker: proc_obj.poll() is None) if worker is not None else self._worker_alive
         try:
             call_timeout = self.rpc_timeout if timeout is None else float(timeout)
-            return ipc.unix_json_call(sock_path, {"method": method, "payload": payload}, timeout=call_timeout)
+            return ipc.unix_json_call(
+                sock_path, {"method": method, "payload": payload}, timeout=call_timeout, alive_fn=alive_fn,
+            )
         except (TimeoutError, ConnectionError, OSError, ValueError) as error:
             if self._worker_generation == generation:
                 self.dirty = True
