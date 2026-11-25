@@ -3148,6 +3148,333 @@ class SandboxPoolTests(unittest.TestCase):
         t_cap.join(timeout=5.0)
         self.assertEqual(len(winners), 3)
 
+    def test_add_slot_and_drain_slot_scale_online_wake_waiters_and_preserve_inflight_leases(self) -> None:
+        """Golden case: live add_slot() expands pool and wakes queued waiters (respecting caps &
+        primary-before-borrow), while drain_slot() stops new assignments, lets in-flight leases finish
+        uninterrupted, supports re-attach or close_lab=True, and removes quarantined slots cleanly."""
+        lab0 = self._make_toy_lab()
+        lab1 = self._make_toy_lab()
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        trace_path = os.path.join(tmpdir.name, "elastic.jsonl")
+        pool = SandboxPool(
+            [PoolSlot("s0", lab0, role="dev"), PoolSlot("s1", lab1, role="dev")],
+            trace_path=trace_path,
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(pool.close)
+
+        # Validation checks for add_slot and drain_slot.
+        with self.assertRaises(TypeError):
+            pool.add_slot("not-a-slot")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            pool.add_slot(PoolSlot("s0", self._make_toy_lab()))
+        with self.assertRaises(ValueError):
+            pool.add_slot(PoolSlot("s-dup", lab0))
+        with self.assertRaises(ValueError):
+            pool.drain_slot("")
+        with self.assertRaises(ValueError):
+            pool.drain_slot("nonexistent")
+        with self.assertRaises(TypeError):
+            pool.drain_slot("s0", close_lab="yes")  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            pool.drain_slot("s0", timeout_s=float("nan"))
+        with self.assertRaises(TypeError):
+            pool.drain_slot("s0", timeout_s=True)  # type: ignore[arg-type]
+        with pool.acquire("fenced-holder", role="dev", timeout_s=2.0) as fl:
+            with self.assertRaises(TypeError):
+                pool.add_slot(PoolSlot("s-fenced", fl.lab))
+
+        # Live scale-up: hold both dev slots, queue capped prio=100 + borrower prio=50 + primary eval prio=1,
+        # then add_slot("s2", role="eval") -> must immediately wake primary-eval!
+        h0 = pool.acquire("capped-agent", role="dev", timeout_s=2.0)
+        h1 = pool.acquire("other-dev", role="dev", timeout_s=2.0)
+        winners: list[tuple[str, str]] = []
+
+        def _waiter(aid: str, role: str | None, prio: int, fb: tuple[str, ...] = ()) -> None:
+            with pool.lease(aid, role=role, priority=prio, fallback_roles=fb, timeout_s=5.0) as lease:
+                winners.append((aid, lease.slot_id))
+
+        t_cap = threading.Thread(target=_waiter, args=("capped-agent", None, 100))
+        t_bor = threading.Thread(target=_waiter, args=("borrower", "dev", 50, ("eval",)))
+        t_pri = threading.Thread(target=_waiter, args=("primary-eval", "eval", 1, ("dev",)))
+        for t in (t_cap, t_bor, t_pri):
+            t.start()
+        deadline = time.monotonic() + 2.0
+        while len(pool._waiters) < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(len(pool._waiters), 3)
+
+        lab2 = self._make_toy_lab()
+        add_res = pool.add_slot(PoolSlot("s2", lab2, role="eval"))
+        self.assertEqual(add_res, {"ok": True, "slot_id": "s2", "role": "eval", "slots": 3})
+        t_pri.join(timeout=5.0)
+        self.assertEqual(winners[0], ("primary-eval", "s2"))
+        h0.release()
+        h1.release()
+        t_bor.join(timeout=5.0)
+        t_cap.join(timeout=5.0)
+        self.assertEqual(len(winners), 3)
+        self.assertEqual(pool.metrics()["added_slots"], 1)
+
+        # Graceful live drain_slot("s2") while s2 holds an active lease: active edit finishes cleanly,
+        # concurrent drain_slot / heal_slot reject with PoolError, sibling s0 serves uninterrupted!
+        active_s2 = pool.acquire("inflight-eval", role="eval", timeout_s=2.0)
+        self.assertEqual(active_s2.slot_id, "s2")
+        drain_out: list[dict[str, Any]] = []
+        t_drain = threading.Thread(target=lambda: drain_out.append(pool.drain_slot("s2", timeout_s=5.0, close_lab=False)))
+        t_drain.start()
+        deadline = time.monotonic() + 2.0
+        while "s2" not in pool.metrics()["draining_slots"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(pool.metrics()["draining_slots"], ["s2"])
+        with self.assertRaises(PoolError):
+            pool.drain_slot("s2")
+        with self.assertRaises(PoolError):
+            pool.heal_slot("s2")
+        # Sibling s0 serves uninterrupted while s2 is draining.
+        r_sib = pool.run_isolated("sib-dev", lambda lab, _l: lab.check(), role="dev", timeout_s=2.0)
+        self.assertTrue(r_sib["ok"] and r_sib["slot_id"] in ("s0", "s1"), r_sib)
+        # In-flight agent on s2 finishes its work and releases cleanly!
+        chk_s2 = active_s2.lab.check()
+        self.assertTrue(chk_s2["ok"])
+        active_s2.release()
+        t_drain.join(timeout=5.0)
+        self.assertEqual(len(drain_out), 1)
+        self.assertTrue(drain_out[0]["ok"] and drain_out[0]["drained"], drain_out[0])
+        self.assertEqual(drain_out[0]["status"], "removed")
+        self.assertEqual(drain_out[0]["slots"], 2)
+        self.assertEqual(pool.metrics()["drained_slots"], 1)
+        self.assertEqual(pool.metrics()["draining_slots"], [])
+        self.assertNotIn("s2", pool.metrics()["per_slot_utilization"])
+
+        # Re-attaching lab2 (since close_lab=False) works cleanly, and draining with Box + close_lab=True closes Box once.
+        readd = pool.add_slot(PoolSlot("s2", lab2, role="eval"))
+        self.assertEqual(readd["slots"], 3)
+        box_extra = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box_extra.boot()
+        self.addCleanup(box_extra.close)
+        pool.add_slot(PoolSlot("s-box", box_extra, role="eval"))
+        # Duplicate Box rejection
+        with self.assertRaises(ValueError):
+            pool.add_slot(PoolSlot("s-box-dup", box_extra))
+        dr_box = pool.drain_slot("s-box", close_lab=True)
+        self.assertTrue(dr_box["ok"] and dr_box["drained"])
+        self.assertEqual(box_extra.state, "closed")
+
+        # Draining a quarantined idle slot removes it cleanly.
+        orig_r2 = lab2.reset
+        lab2.reset = lambda kind="state": {"ok": False, "error": "dead"} if kind == "respawn" else orig_r2(kind)  # type: ignore[method-assign]
+        def _poison(plab, _l):
+            plab.session.fault("participant_failed", "die", "clean")
+            raise RuntimeError("die")
+        pool.run_isolated("fault-q", _poison, role="eval", timeout_s=2.0)
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["s2"])
+        dr_q = pool.drain_slot("s2", close_lab=True)
+        self.assertTrue(dr_q["ok"] and dr_q["drained"])
+        self.assertEqual(pool.metrics()["quarantined_slots"], [])
+
+        m = pool.metrics()
+        vt = verify_trace(trace_path, expected_head=m["trace_head"])
+        self.assertTrue(vt["ok"] and vt["count"] == m["total_leases"], vt)
+
+    def test_drain_slot_timeout_revert_stranded_waiters_cap_dispatch_and_close_race(self) -> None:
+        """Golden regression: drain_slot fails stranded role waiters, reverts cleanly on timeout,
+        dispatches freed per-agent cap permits onto surviving slots, handles close() mid-drain without
+        double-close, and add_slot rejects labs reserved in _inflight_heal_targets."""
+        l0, l1 = self._make_toy_lab(), self._make_toy_lab()
+        pool = SandboxPool([PoolSlot("s0", l0, role="dev"), PoolSlot("s1", l1, role="eval")], max_slots_per_agent=1)
+        self.addCleanup(pool.close)
+
+        # 1. Draining last healthy eval slot immediately fails stranded eval waiter AND timeout reverts draining=False.
+        hold_ev = pool.acquire("ev-holder", role="eval", timeout_s=2.0)
+        wait_errs: list[BaseException] = []
+        t_w = threading.Thread(target=self._capture_error, args=(lambda: pool.acquire("ev-waiter", role="eval", timeout_s=5.0), wait_errs))
+        t_w.start()
+        deadline = time.monotonic() + 2.0
+        while len(pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        with self.assertRaises(PoolTimeoutError):
+            pool.drain_slot("s1", timeout_s=0.05)
+        t_w.join(timeout=5.0)
+        self.assertEqual(len(wait_errs), 1)
+        self.assertIsInstance(wait_errs[0], PoolTimeoutError)
+        # Drain timed out -> reverted cleanly so s1 serves again after hold_ev releases!
+        self.assertEqual(pool.metrics()["draining_slots"], [])
+        hold_ev.release()
+        r_after = pool.run_isolated("ev-after", lambda lab, _l: lab.check(), role="eval", timeout_s=2.0)
+        self.assertTrue(r_after["ok"] and r_after["slot_id"] == "s1", r_after)
+
+        # 2. Capped agent releasing a draining slot s0 MUST still wake its queued waiter on surviving idle s1!
+        cap_hold = pool.acquire("cap-a", role="dev", timeout_s=2.0)
+        w2_got: list[str] = []
+        t_w2 = threading.Thread(target=lambda: w2_got.append(pool.run_isolated("cap-a", lambda lab, _l: lab.check(), role="eval", timeout_s=5.0)["slot_id"]))
+        t_w2.start()
+        deadline = time.monotonic() + 2.0
+        while len(pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        dr_s0: list[dict[str, Any]] = []
+        t_ds0 = threading.Thread(target=lambda: dr_s0.append(pool.drain_slot("s0", timeout_s=5.0)))
+        t_ds0.start()
+        deadline = time.monotonic() + 2.0
+        while "s0" not in pool.metrics()["draining_slots"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        cap_hold.release()
+        t_ds0.join(timeout=5.0)
+        t_w2.join(timeout=5.0)
+        self.assertTrue(dr_s0[0]["ok"] and dr_s0[0]["drained"])
+        self.assertEqual(w2_got, ["s1"])
+
+        # 3. close(close_labs=True) while drain_slot is waiting wakes drain_slot immediately and closes lab once!
+        lc = self._make_toy_lab()
+        close_count = [0]
+        orig_cc = lc.close
+        lc.close = lambda: (close_count.__setitem__(0, close_count[0] + 1), orig_cc())[1]  # type: ignore[method-assign]
+        cpool = SandboxPool([PoolSlot("sc", lc)], close_labs=True)
+        hold_c = cpool.acquire("hc", timeout_s=2.0)
+        c_dr: list[dict[str, Any]] = []
+        t_cd = threading.Thread(target=lambda: c_dr.append(cpool.drain_slot("sc", timeout_s=5.0, close_lab=True)))
+        t_cd.start()
+        deadline = time.monotonic() + 2.0
+        while "sc" not in cpool.metrics()["draining_slots"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        cpool.close(close_labs=True)
+        t_cd.join(timeout=5.0)
+        self.assertEqual(len(c_dr), 1)
+        self.assertFalse(c_dr[0]["ok"])
+        self.assertEqual(c_dr[0]["status"], "closed")
+        self.assertEqual(close_count[0], 0)
+        hold_c.release()
+        self.assertEqual(close_count[0], 1)
+        with self.assertRaises(PoolClosedError):
+            cpool.add_slot(PoolSlot("s-closed", self._make_toy_lab()))
+        with self.assertRaises(PoolClosedError):
+            cpool.drain_slot("sc")
+
+        # 4. add_slot() rejects a lab currently reserved in _inflight_heal_targets.
+        lh = self._make_toy_lab()
+        orig_rh = lh.reset
+        lh.reset = lambda kind="state": {"ok": False, "error": "down"} if kind == "respawn" else orig_rh(kind)  # type: ignore[method-assign]
+        hpool = SandboxPool([PoolSlot("sh", lh)])
+        self.addCleanup(hpool.close)
+        def _poison(plab, _l):
+            plab.session.fault("participant_failed", "die", "clean")
+            raise RuntimeError("die")
+        hpool.run_isolated("p", _poison, timeout_s=2.0)
+        fresh = self._make_toy_lab()
+        orig_rf = fresh.reset
+        entered, allow = threading.Event(), threading.Event()
+        def _gated(kind="state"):
+            if kind in ("state", "respawn"):
+                entered.set()
+                allow.wait(timeout=5.0)
+            return orig_rf(kind)
+        fresh.reset = _gated  # type: ignore[method-assign]
+        t_h = threading.Thread(target=lambda: hpool.heal_slot("sh", lab=fresh))
+        t_h.start()
+        self.assertTrue(entered.wait(timeout=5.0))
+        with self.assertRaises(ValueError):
+            hpool.add_slot(PoolSlot("s-race", fresh))
+        allow.set()
+        t_h.join(timeout=5.0)
+
+        # 5. Concurrent heal_slot(lab=fresh, close_replaced=True) + drain_slot(close_lab=True) (P1-1):
+        #    heal_slot must see draining, abort without swapping/closing fresh, and drain_slot closes old lab once!
+        l_old = self._make_toy_lab()
+        old_closes = [0]
+        orig_old_close = l_old.close
+        l_old.close = lambda: (old_closes.__setitem__(0, old_closes[0] + 1), orig_old_close())[1]  # type: ignore[method-assign]
+        orig_old_reset = l_old.reset
+        l_old.reset = lambda kind="state": {"ok": False, "error": "down"} if kind == "respawn" else orig_old_reset(kind)  # type: ignore[method-assign]
+        hd_slot = PoolSlot("shd", l_old)
+        hd_pool = SandboxPool([hd_slot], close_labs=False)
+        self.addCleanup(hd_pool.close)
+        hd_pool.run_isolated("p", _poison, timeout_s=2.0)
+        self.assertTrue(hd_slot.quarantined)
+
+        fresh_hd = self._make_toy_lab()
+        fresh_closes = [0]
+        orig_fh_close = fresh_hd.close
+        fresh_hd.close = lambda: (fresh_closes.__setitem__(0, fresh_closes[0] + 1), orig_fh_close())[1]  # type: ignore[method-assign]
+        orig_fh_reset = fresh_hd.reset
+        fh_entered, fh_allow = threading.Event(), threading.Event()
+        def _gated_fh(kind="state"):
+            if kind in ("state", "respawn"):
+                fh_entered.set()
+                fh_allow.wait(timeout=5.0)
+            return orig_fh_reset(kind)
+        fresh_hd.reset = _gated_fh  # type: ignore[method-assign]
+
+        h_out: list[dict[str, Any]] = []
+        d_out: list[dict[str, Any]] = []
+        t_hh = threading.Thread(target=lambda: h_out.append(hd_pool.heal_slot("shd", lab=fresh_hd, close_replaced=True)))
+        t_hh.start()
+        self.assertTrue(fh_entered.wait(timeout=5.0))
+        t_dd = threading.Thread(target=lambda: d_out.append(hd_pool.drain_slot("shd", timeout_s=5.0, close_lab=True)))
+        t_dd.start()
+        deadline = time.monotonic() + 2.0
+        while "shd" not in hd_pool.metrics()["draining_slots"] and time.monotonic() < deadline:
+            time.sleep(0.005)
+        fh_allow.set()
+        t_hh.join(timeout=5.0)
+        t_dd.join(timeout=5.0)
+        self.assertEqual(len(h_out), 1)
+        self.assertFalse(h_out[0]["ok"])
+        self.assertEqual(h_out[0]["status"], "draining")
+        self.assertEqual(len(d_out), 1)
+        self.assertTrue(d_out[0]["ok"] and d_out[0]["drained"])
+        self.assertEqual(old_closes[0], 1)
+        self.assertEqual(fresh_closes[0], 0)
+        self.assertEqual(hd_pool.metrics()["healed_slots"], 0)
+
+        # 6. Zero-slot pool safety (0 slots -> acquire PoolTimeoutError, metrics ok, add_slot 0 -> 1, close ok)
+        #    + add_slot rejecting quarantined PoolSlot, closed Box, and _BoxLabAdapter wrapping closed Box (P2-1/P2-2).
+        self.assertEqual(hd_pool.metrics()["per_slot_utilization"], {})
+        with self.assertRaises(PoolTimeoutError):
+            hd_pool.acquire("nobody", timeout_s=0.05)
+        with self.assertRaises(PoolError):
+            hd_pool.add_slot(hd_slot)  # hd_slot.quarantined is still True!
+        closed_box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        closed_box.boot()
+        closed_adapter_slot = PoolSlot("s-closed-box", closed_box)
+        closed_box.close()
+        with self.assertRaises(ValueError):
+            hd_pool.add_slot(closed_adapter_slot)
+        wrapped_only = PoolSlot("s-wrapped-closed", closed_adapter_slot.lab)
+        self.assertIsNone(wrapped_only.box)
+        with self.assertRaises(ValueError):
+            hd_pool.add_slot(wrapped_only)
+        self.assertIsNone(wrapped_only.box)  # must not mutate slot.box on rejected add_slot!
+        # Scale back 0 -> 1 cleanly using fresh_hd (untouched by aborted heal_slot!).
+        self.assertEqual(hd_pool.add_slot(PoolSlot("s-back", fresh_hd))["slots"], 1)
+        r_back = hd_pool.run_isolated("back-agent", lambda lab, _l: lab.check(), timeout_s=2.0)
+        self.assertTrue(r_back["ok"] and r_back["slot_id"] == "s-back", r_back)
+
+        # 7. BaseException (KeyboardInterrupt) during drain_slot wait reverts draining cleanly!
+        kb_armed = [False]
+        kb_drain_ticks = [0]
+
+        def _kb_clock() -> float:
+            if kb_armed[0]:
+                kb_drain_ticks[0] += 1
+                if kb_drain_ticks[0] >= 2:
+                    raise KeyboardInterrupt("aborted-drain")
+            return time.monotonic()
+
+        l_kb = self._make_toy_lab()
+        kb_pool = SandboxPool([PoolSlot("skb", l_kb)], clock=_kb_clock)
+        self.addCleanup(kb_pool.close)
+        kb_hold = kb_pool.acquire("kb-h", timeout_s=None)
+        kb_armed[0] = True
+        with self.assertRaises(KeyboardInterrupt):
+            kb_pool.drain_slot("skb", timeout_s=10.0)
+        kb_armed[0] = False
+        self.assertFalse(kb_pool._slots["skb"].draining)
+        self.assertIsNone(kb_pool._slots["skb"].drain_event)
+        kb_hold.release()
+        r_kb = kb_pool.run_isolated("kb-after", lambda lab, _l: lab.check(), timeout_s=2.0)
+        self.assertTrue(r_kb["ok"] and r_kb["slot_id"] == "skb", r_kb)
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:

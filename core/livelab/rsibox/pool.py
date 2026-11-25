@@ -251,11 +251,14 @@ class PoolSlot:
 
 class _SlotState:
     __slots__ = ("slot", "slot_id", "role", "lab", "view", "quarantined", "quarantine_reason",
-                 "in_use", "owner_agent_id", "active_since", "dirty", "busy_s", "lab_closed")
+                 "draining", "drain_event", "in_use", "owner_agent_id", "active_since", "dirty", "busy_s", "lab_closed")
     def __init__(self, slot: PoolSlot) -> None:
         self.slot, self.slot_id, self.role, self.lab = slot, slot.slot_id, slot.role, slot.lab
         self.view = _SlotView(slot.slot_id, slot.role, types.MappingProxyType(dict(slot.metadata)))
         self.quarantined, self.quarantine_reason = False, None
+        slot.quarantined, slot.quarantine_reason = False, None
+        self.draining: bool = False
+        self.drain_event: threading.Event | None = None
         self.in_use, self.owner_agent_id, self.active_since, self.dirty, self.busy_s, self.lab_closed = (
             False, None, None, True, 0.0, False,
         )
@@ -352,6 +355,7 @@ class SandboxPool:
         self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._healed_slots, self._total_recovery_s = (
             False, 0, 0, 0, 0, 0.0,
         )
+        self._added_slots, self._drained_slots = 0, 0
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         self._agent_active_slots: dict[str, int] = {}
         self._inflight_heal_targets: set[int] = set()
@@ -373,9 +377,17 @@ class SandboxPool:
     def _has_healthy_slot(self, role: str | None, fallback_roles: tuple[str, ...] = ()) -> bool:
         return any(
             not slot_state.quarantined
+            and not slot_state.draining
             and (role is None or slot_state.role == role or slot_state.role in fallback_roles)
             for slot_state in self._slots.values()
         )
+
+    def _fail_stranded_waiters_locked(self) -> None:
+        for waiter in self._waiters:
+            if not waiter.cancelled and not self._has_healthy_slot(waiter.role, waiter.fallback_roles):
+                waiter.failure = f"no healthy slot available for role={waiter.role!r}"
+                waiter.event.set()
+        self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
     def _mark_lab_to_close_locked(self, slot_state: _SlotState) -> Any | None:
         if self._closed and self._close_labs and not slot_state.lab_closed:
             slot_state.lab_closed = True
@@ -463,10 +475,10 @@ class SandboxPool:
         if self._closed or not self._waiters:
             return
         idle_slots: list[_SlotState] = []
-        if preferred_slot is not None and not preferred_slot.in_use and not preferred_slot.quarantined:
+        if preferred_slot is not None and not preferred_slot.in_use and not preferred_slot.quarantined and not preferred_slot.draining:
             idle_slots.append(preferred_slot)
         for slot_state in self._slots.values():
-            if slot_state is not preferred_slot and not slot_state.in_use and not slot_state.quarantined:
+            if slot_state is not preferred_slot and not slot_state.in_use and not slot_state.quarantined and not slot_state.draining:
                 idle_slots.append(slot_state)
         if not idle_slots:
             return
@@ -529,17 +541,16 @@ class SandboxPool:
         slot_state.quarantine_reason = None if healthy else (reason or "recovery failed")
         slot_state.slot.quarantined, slot_state.slot.quarantine_reason = slot_state.quarantined, slot_state.quarantine_reason
         if not healthy:
-            for waiter in self._waiters:
-                if not waiter.cancelled and not self._has_healthy_slot(waiter.role, waiter.fallback_roles):
-                    waiter.failure = f"no healthy slot available for role={waiter.role!r}"
-                    waiter.event.set()
-            self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
+            self._fail_stranded_waiters_locked()
+        usable = healthy and not slot_state.draining
+        if slot_state.draining and slot_state.drain_event is not None:
+            slot_state.drain_event.set()
         if not self._closed and self._waiters:
             if self._max_slots_per_agent is not None and prev_owner is not None:
                 # Select globally across idle healthy slots so a freed permit goes to the highest-priority
                 # eligible waiter (preventing cross-role priority inversion or lost cross-role wakeups).
-                self._dispatch_idle_slots_locked(finish_mono, preferred_slot=slot_state if healthy else None)
-            elif healthy:
+                self._dispatch_idle_slots_locked(finish_mono, preferred_slot=slot_state if usable else None)
+            elif usable:
                 candidate = self._best_waiter_for_slot_locked(slot_state, finish_mono)
                 if candidate is not None:
                     self._handoff_waiter_locked(slot_state, candidate[1], finish_mono)
@@ -673,6 +684,8 @@ class SandboxPool:
                 raise ValueError(f"unknown slot_id: {slot_id!r}")
             if slot_state.in_use:
                 raise PoolError(f"slot {slot_id!r} is currently in use")
+            if slot_state.draining:
+                raise PoolError(f"slot {slot_id!r} is draining")
             if not slot_state.quarantined:
                 if lab is not None:
                     raise PoolError(f"slot {slot_id!r} is not quarantined; cannot replace healthy slot lab")
@@ -723,6 +736,19 @@ class SandboxPool:
                         "recovery_s": round(outcome.recovery_s, 6),
                         "error": "SandboxPool closed during heal_slot",
                     }
+                elif slot_state.draining:
+                    lab_to_close = self._complete_slot_locked(
+                        slot_id, finish_mono, False, slot_state.quarantine_reason or "slot draining during heal_slot",
+                    )
+                    finalized = True
+                    result = {
+                        "ok": False,
+                        "slot_id": slot_id,
+                        "healed": False,
+                        "status": "draining",
+                        "recovery_s": round(outcome.recovery_s, 6),
+                        "error": f"slot {slot_id!r} started draining during heal_slot",
+                    }
                 elif outcome.healthy:
                     if candidate_lab is not None:
                         prev_lab = slot_state.lab
@@ -770,6 +796,148 @@ class SandboxPool:
             _close_quietly(lab_to_close)
         return result
 
+    def add_slot(self, slot: PoolSlot) -> dict[str, Any]:
+        """Dynamically attach a new warm `PoolSlot` online and immediately dispatch queued waiters."""
+        if not isinstance(slot, PoolSlot):
+            raise TypeError(f"expected PoolSlot, got {type(slot).__name__}")
+        if slot.quarantined:
+            raise PoolError(f"slot {slot.slot_id!r} is quarantined; heal or create a fresh PoolSlot before adding")
+        if isinstance(slot.lab, _FencedLabProxy):
+            raise TypeError("cannot add a PoolSlot backed by a fenced SlotLease.lab proxy")
+        unwrapped_box: Box | None = slot.box
+        if unwrapped_box is None and isinstance(slot.lab, _BoxLabAdapter):
+            unwrapped_box = slot.lab._box
+        if unwrapped_box is not None and unwrapped_box.state != "ready":
+            raise ValueError(f"Box for slot {slot.slot_id!r} must be ready (state={unwrapped_box.state!r})")
+        raw_target = (
+            unwrapped_box.lab
+            if (unwrapped_box is not None and unwrapped_box.lab is not None)
+            else (unwrapped_box or slot.lab)
+        )
+        raw_id = id(raw_target)
+        with self._lock:
+            if self._closed:
+                raise PoolClosedError("SandboxPool is closed")
+            if slot.slot_id in self._slots:
+                raise ValueError(f"duplicate slot_id: {slot.slot_id!r}")
+            if raw_id in self._inflight_heal_targets or any(
+                id(self._slot_raw_target(other.slot)) == raw_id for other in self._slots.values()
+            ):
+                raise ValueError(f"duplicate underlying lab/box for slot_id: {slot.slot_id!r}")
+            now_mono = self._clock() if self._waiters else 0.0
+            if slot.box is None and unwrapped_box is not None:
+                slot.box = unwrapped_box
+            slot_state = _SlotState(slot)
+            self._slots[slot.slot_id] = slot_state
+            self._added_slots += 1
+            if self._waiters:
+                candidate = self._best_waiter_for_slot_locked(slot_state, now_mono)
+                if candidate is not None:
+                    self._handoff_waiter_locked(slot_state, candidate[1], now_mono)
+            slot_count = len(self._slots)
+        return {"ok": True, "slot_id": slot.slot_id, "role": slot.role, "slots": slot_count}
+
+    def drain_slot(self, slot_id: str, *, timeout_s: float | None = 30.0, close_lab: bool = False) -> dict[str, Any]:
+        """Gracefully stop scheduling `slot_id`, wait for any active lease to finish, and remove it."""
+        if not isinstance(slot_id, str) or not slot_id.strip():
+            raise ValueError("slot_id must be a non-empty string")
+        timeout_s = _validate_timeout(timeout_s, "timeout_s")
+        if not isinstance(close_lab, bool):
+            raise TypeError(f"close_lab must be a bool, not {type(close_lab).__name__}")
+        lab_to_close: Any | None = None
+        with self._lock:
+            if self._closed:
+                raise PoolClosedError("SandboxPool is closed")
+            slot_state = self._slots.get(slot_id)
+            if slot_state is None:
+                raise ValueError(f"unknown slot_id: {slot_id!r}")
+            if slot_state.draining:
+                raise PoolError(f"slot {slot_id!r} is already draining")
+            start_mono = self._clock()
+            slot_state.draining = True
+            drain_evt = threading.Event()
+            slot_state.drain_event = drain_evt
+            self._fail_stranded_waiters_locked()
+            if not slot_state.in_use:
+                del self._slots[slot_id]
+                self._drained_slots += 1
+                slot_state.drain_event = None
+                if close_lab and not slot_state.lab_closed:
+                    slot_state.lab_closed = True
+                    lab_to_close = slot_state.lab
+                remaining_slots = len(self._slots)
+                immediate = True
+            else:
+                immediate = False
+        if immediate:
+            _close_quietly(lab_to_close)
+            return {
+                "ok": True,
+                "slot_id": slot_id,
+                "drained": True,
+                "status": "removed",
+                "drain_s": 0.0,
+                "slots": remaining_slots,
+                "error": None,
+            }
+
+        deadline = None if timeout_s is None else start_mono + timeout_s
+        try:
+            while True:
+                remaining_s = None if deadline is None else deadline - self._clock()
+                if remaining_s is not None and remaining_s <= 0.0:
+                    break
+                if drain_evt.wait(timeout=None if remaining_s is None else min(remaining_s, threading.TIMEOUT_MAX)):
+                    break
+        except BaseException:
+            with self._lock:
+                if self._slots.get(slot_id) is slot_state:
+                    slot_state.draining = False
+                    slot_state.drain_event = None
+                    if not self._closed and not slot_state.in_use and not slot_state.quarantined and self._waiters:
+                        now_mono = self._safe_clock(fallback=start_mono)
+                        candidate = self._best_waiter_for_slot_locked(slot_state, now_mono)
+                        if candidate is not None:
+                            self._handoff_waiter_locked(slot_state, candidate[1], now_mono)
+            raise
+
+        with self._lock:
+            end_mono = self._safe_clock(fallback=start_mono)
+            drain_s = round(max(0.0, end_mono - start_mono), 6)
+            if self._closed:
+                slot_state.draining = False
+                slot_state.drain_event = None
+                return {
+                    "ok": False,
+                    "slot_id": slot_id,
+                    "drained": False,
+                    "status": "closed",
+                    "drain_s": drain_s,
+                    "slots": len(self._slots),
+                    "error": "SandboxPool closed during drain_slot",
+                }
+            if slot_state.in_use:
+                slot_state.draining = False
+                slot_state.drain_event = None
+                raise PoolTimeoutError(f"timed out waiting {timeout_s}s for slot {slot_id!r} to drain")
+            del self._slots[slot_id]
+            self._drained_slots += 1
+            slot_state.drain_event = None
+            if close_lab and not slot_state.lab_closed:
+                slot_state.lab_closed = True
+                lab_to_close = slot_state.lab
+            remaining_slots = len(self._slots)
+        _close_quietly(lab_to_close)
+        return {
+            "ok": True,
+            "slot_id": slot_id,
+            "drained": True,
+            "status": "removed",
+            "drain_s": drain_s,
+            "slots": remaining_slots,
+            "error": None,
+        }
+
     def _finish_slot(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                      *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0,
                      skip_close: bool = False, faulted_agent_id: str | None = None) -> None:
@@ -812,7 +980,7 @@ class SandboxPool:
                 )
                 for target_role, is_borrow in candidate_roles:
                     for slot_state in self._slots.values():
-                        if slot_state.in_use or slot_state.quarantined or (target_role is not None and slot_state.role != target_role):
+                        if slot_state.in_use or slot_state.quarantined or slot_state.draining or (target_role is not None and slot_state.role != target_role):
                             continue
                         # Eligible (uncapped) primary waiters block borrowers unconditionally and block equal/lower primary arrivals.
                         if is_borrow:
@@ -1128,6 +1296,9 @@ class SandboxPool:
                 "mean_hold_s": round(sum(self._hold_times) / total_leases, 6) if total_leases else 0.0,
                 "total_recovery_s": round(self._total_recovery_s, 6), "recoveries": self._recoveries,
                 "healed_slots": self._healed_slots,
+                "added_slots": self._added_slots,
+                "drained_slots": self._drained_slots,
+                "draining_slots": [slot_id for slot_id, state in self._slots.items() if state.draining],
                 "quarantined_slots": [slot_id for slot_id, state in self._slots.items() if state.quarantined],
                 "quarantined_agents": sorted(self._agent_quarantined_until),
                 "circuit_breaker_rejections": self._circuit_breaker_rejections,
@@ -1144,6 +1315,9 @@ class SandboxPool:
             if close_labs is True or (close_labs is False and not self._closed):
                 self._close_labs = close_labs
             self._closed = True
+            for state in self._slots.values():
+                if state.drain_event is not None:
+                    state.drain_event.set()
             while self._waiters:
                 waiter = self._waiters.popleft()
                 if not waiter.cancelled:
