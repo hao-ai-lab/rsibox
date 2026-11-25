@@ -82,4 +82,4 @@ jobs:
           ruff check \
             --select F,B008,B023,S602 \
             --exclude core/livelab/survey/fixture \
-            core/livelab repos scripts site .github/review
+            core/livelab repos scripts site .github/review .agents/plugins/rstack/scripts
