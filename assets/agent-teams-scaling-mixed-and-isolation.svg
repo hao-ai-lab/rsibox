@@ -64,8 +64,8 @@
 <text x="878" y="400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#0F172A">breaker_off (no quarantine)</text>
 <rect x="1072" y="390" width="12" height="12" rx="2" fill="#059669"/>
 <text x="1090" y="400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#0F172A">breaker_on (max_agent_faults=1, latched)</text>
-<text x="42" y="468" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">C. 50/50 Mixed Hot-Swap + Restart-Tier Workload &amp; Multi-Shadow Guard Fix (EXP-G2 &amp; EXP-G2b, PR #244)</text>
-<text x="42" y="486" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">1x B200 (N=4, 3 R0 hot-swaps + 3 restart-tier edits, K=2 Scratch-KV shadows + AsyncShadowReplenisher): PR #244 cuts Restart #2 by 30.60x and p95 queue wait by 13.22x (25.92x vs no-shadow)</text>
+<text x="42" y="468" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">C. 50/50 Mixed Hot-Swap + Restart-Tier Workload &amp; Multi-Shadow Guard Fix (EXP-G2 &amp; EXP-G2b, PR #244 + #247)</text>
+<text x="42" y="486" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">1x B200 (N=4, 3 R0 hot-swaps + 3 restart-tier edits, K=2 Scratch-KV shadows + AsyncShadowReplenisher): PR #244 + #247 cuts Restart #2 by 30.60x and p95 queue wait by 13.22x (25.92x vs no-shadow)</text>
 <rect x="42" y="502" width="436" height="218" rx="8" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1"/>
 <text x="56" y="524" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Total 6-Edit Wall (s)</text>
 <text x="178.0" y="704" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">0s</text>
@@ -105,7 +105,7 @@
 <text x="723.4" y="612" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="700" fill="#0F172A">38.26 s (1.96x↓)</text>
 <text x="630" y="658" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" font-weight="600" fill="#0F172A">EXP-G2b post-#244</text>
 <rect x="638" y="642" width="5.9" height="24" rx="4" fill="#059669"/>
-<text x="650.9" y="658" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="700" fill="#0F172A">2.89 s (25.92x↓)</text>
+<text x="650.9" y="658" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="700" fill="#0F172A">2.895 s (25.92x↓)</text>
 <rect x="962" y="502" width="436" height="218" rx="8" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1"/>
 <text x="976" y="524" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#0F172A">Restart #2 Latency (s)</text>
 <text x="1098.0" y="704" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">0s</text>
@@ -128,6 +128,6 @@
 <rect x="1098" y="642" width="4.9" height="24" rx="4" fill="#059669"/>
 <text x="1109.9" y="658" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="700" fill="#0F172A">1.19 s (30.60x↓ vs G2)</text>
 <rect x="42" y="732" width="1356" height="30" rx="6" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1"/>
-<text x="720" y="751" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" font-weight="600" fill="#065F46">EXP-G2b (PR #244 + VllmShadowPromoter ready_count_fn): Restart #1 = 1.15 s, Restart #2 = 1.19 s (30.60x faster), mean queue wait 13.31 s -&gt; 1.52 s (8.78x lower), 0 GMS errors, exact VRAM return.</text>
-<text x="28" y="804" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#64748B">Source: docs/agent-teams-and-contention.md (EXP-G1, EXP-G2, EXP-G3) &amp; PR #244 live EXP-G2b receipt. Ratios computed from raw unrounded timings; all traces SHA-256 verified.</text>
+<text x="720" y="751" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" font-weight="600" fill="#065F46">EXP-G2b (PR #244 + #247 + VllmShadowPromoter ready_count_fn): Restart #1 = 1.15 s, Restart #2 = 1.19 s (30.60x faster), mean queue wait 13.31 s -&gt; 1.52 s (8.78x lower), 0 GMS errors, exact VRAM return.</text>
+<text x="28" y="804" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#64748B">Source: docs/agent-teams-and-contention.md (EXP-G1, EXP-G2, EXP-G3) &amp; PR #247 live EXP-G2b receipt. Ratios computed from raw unrounded timings; all traces SHA-256 verified.</text>
 </svg>
