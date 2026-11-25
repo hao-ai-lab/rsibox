@@ -249,6 +249,29 @@ class RstackGatesTest(unittest.TestCase):
                 ),
                 1,
             )
+            # Loop keys placed under ## What and why with an empty ## Loop record must fail.
+            misplaced_body = "\n".join(
+                [
+                    "## What and why",
+                    "- Engine: core",
+                    "- Upstream PRs: none",
+                    "- Function groups: gate",
+                    "- Rule added: none",
+                    "- Overheads measured: none",
+                    "- Receipts: none",
+                    "- Not verified: GPU runtime",
+                    "",
+                    "## Evidence",
+                    "- unittest ran cleanly.",
+                    "",
+                    "## Loop record",
+                    "- Ideal full GPU test: 2x B200 integration run",
+                    "- Actual tests run: local unittest suite",
+                    "- Why unrun GPU paths were skipped: CPU-only gate tests",
+                ]
+            )
+            misplaced_errs = pre_push.check_body_contract(misplaced_body, require_gpu=True)
+            self.assertTrue(any("- Engine:" in e for e in misplaced_errs))
             # Mocked leak-check failure blocks push.
             leak_sh.write_text("#!/usr/bin/env bash\necho leak >&2\nexit 1\n", encoding="utf-8")
             self.assertEqual(
@@ -345,6 +368,59 @@ class RstackGatesTest(unittest.TestCase):
         self.assertEqual(state_sup, "green")
         self.assertEqual(counts_sup["failed"], [])
         self.assertEqual(len(counts_sup["passed"]), 1)
+
+        # Newly queued re-run with startedAt=None must supersede stale FAILURE and stale SUCCESS.
+        queued_after_fail = {
+            "mergeStateStatus": "BLOCKED",
+            "statusCheckRollup": [
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                    "startedAt": "2026-11-24T10:00:00Z",
+                    "completedAt": "2026-11-24T10:01:00Z",
+                },
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "QUEUED",
+                    "conclusion": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                },
+            ],
+        }
+        state_qf, counts_qf = pr_gate.evaluate_rollup(queued_after_fail)
+        self.assertEqual(state_qf, "pending")
+        self.assertEqual(counts_qf["failed"], [])
+        self.assertEqual(counts_qf["pending"], ["cpu"])
+
+        queued_after_success = {
+            "mergeStateStatus": "CLEAN",
+            "statusCheckRollup": [
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "startedAt": "2026-11-24T10:00:00Z",
+                    "completedAt": "2026-11-24T10:01:00Z",
+                },
+                {
+                    "workflowName": "CPU Tests",
+                    "name": "cpu",
+                    "status": "QUEUED",
+                    "conclusion": None,
+                    "startedAt": None,
+                    "completedAt": None,
+                },
+            ],
+        }
+        state_qs, counts_qs = pr_gate.evaluate_rollup(queued_after_success)
+        self.assertEqual(state_qs, "pending")
+        self.assertEqual(counts_qs["passed"], [])
+        self.assertEqual(counts_qs["pending"], ["cpu"])
 
         with tempfile.TemporaryDirectory() as tmp:
             repo = _init_repo(Path(tmp))
@@ -619,7 +695,7 @@ class RstackGatesTest(unittest.TestCase):
             (repo / "assets").mkdir()
             (repo / "assets" / "ok.png").write_bytes(b"png")
             (repo / "docs" / "foo_(1).md").write_text(
-                "# Foo\n\n## Foo 1\n\n## Foo\n\n## _Emph_ &amp; `code_x`\n",
+                "# Foo\n\n## Foo 1\n\n## Foo\n\n## _Emph_ &amp; `code_x`\n\n## Mode 2 (`statuses/<sha>`)\n",
                 encoding="utf-8",
             )
             (repo / "README.md").write_text(
@@ -635,6 +711,7 @@ class RstackGatesTest(unittest.TestCase):
                         "",
                         "[Parens](docs/foo_(1).md#foo-2)",
                         "[Emph](/docs/foo_(1).md#emph--code_x)",
+                        "[AngleCode](docs/foo_(1).md#mode-2-statusessha)",
                         "[Ext](HTTPS://example.com)",
                         "[![img](assets/ok.png)](docs/foo_(1).md#foo-1)",
                         '<img src="assets/ok.png" alt="ok">',

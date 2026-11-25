@@ -70,7 +70,7 @@ No PR may be presented to the owner until all four pre-flight gates pass:
 
 - [ ] **Dependency DAG Verification:** Verify parent/child branch relationships across active stacks so no PR is presented with an unmerged or conflicting base.
 - [ ] **Rebase onto Latest `origin/main`:** Rebase the branch cleanly onto `origin/main` and confirm zero merge conflicts.
-- [ ] **11/11 CI & Conformance Green:** Verify that all GitHub Actions checks (PR rules, leak check, CPU unit tests, and the 11 conformance cases `c0`–`c10`) pass on the pushed head SHA.
+- [ ] **CI & Conformance Green:** Verify that all GitHub Actions checks (PR rules, leak check, CPU unit tests, and the sandbox verification suite (`c0`–`c10`)) pass on the pushed head SHA.
 - [ ] **Zero Unresolved Review Threads:** Confirm that every review comment from prior rounds has been fixed, rejected with counter-evidence, or deferred with a linked tracking issue and resolved.
 
 ### Step 2: Review Priority & Bundling Strategy

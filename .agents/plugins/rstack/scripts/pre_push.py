@@ -27,7 +27,12 @@ def check_body_contract(body_text: str, require_gpu: bool) -> list[str]:
     cleaned = re.sub(r"<!--.*?-->", "", body_text.replace("\r", ""), flags=re.S)
     errors = [f"missing heading: {h}" for h in REQUIRED_HEADINGS if h not in cleaned]
     if require_gpu:
-        for key in (*REQUIRED_LOOP_KEYS, *REQUIRED_GPU_KEYS):
+        loop_match = re.search(r"^## Loop record\s*$(.*?)(?=^## |\Z)", cleaned, flags=re.M | re.S)
+        loop_section = loop_match.group(1) if loop_match else ""
+        for key in REQUIRED_LOOP_KEYS:
+            if not re.search(rf"^- {re.escape(key)}:[ \t]*\S", loop_section, flags=re.M):
+                errors.append(f"missing or empty bullet: - {key}:")
+        for key in REQUIRED_GPU_KEYS:
             if not re.search(rf"^- {re.escape(key)}:[ \t]*\S", cleaned, flags=re.M):
                 errors.append(f"missing or empty bullet: - {key}:")
     return errors

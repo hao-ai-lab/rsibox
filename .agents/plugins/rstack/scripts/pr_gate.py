@@ -22,20 +22,33 @@ def evaluate_rollup(pr_json: dict[str, Any]) -> tuple[str, dict[str, list[str]]]
     Treats conclusion in {SUCCESS, NEUTRAL, SKIPPED} as green even when
     GitHub GraphQL caches a stale status == 'IN_PROGRESS'.
     """
-    latest: dict[tuple[str, str], tuple[tuple[str, str], int, dict[str, Any]]] = {}
+    latest: dict[tuple[str, str], tuple[tuple[int, tuple[str, str], int], dict[str, Any]]] = {}
     for idx, item in enumerate(pr_json.get("statusCheckRollup") or []):
         wf = str(item.get("workflowName") or "")
         name = str(item.get("name") or item.get("context") or "unknown")
         key = (wf, name)
+        status = str(item.get("status") or "").upper()
+        conclusion = str(item.get("conclusion") or item.get("state") or "").upper()
+        is_queued_active = (
+            1
+            if (
+                not item.get("startedAt")
+                and not item.get("completedAt")
+                and not conclusion
+                and status in {"QUEUED", "PENDING", "WAITING", "REQUESTED"}
+            )
+            else 0
+        )
         ts = (str(item.get("startedAt") or ""), str(item.get("completedAt") or ""))
+        rank = (is_queued_active, ts, idx)
         prev = latest.get(key)
-        if prev is None or (ts, idx) > (prev[0], prev[1]):
-            latest[key] = (ts, idx, item)
+        if prev is None or rank > prev[0]:
+            latest[key] = (rank, item)
 
     passed: list[str] = []
     pending: list[str] = []
     failed: list[str] = []
-    for _, _, item in latest.values():
+    for _, item in latest.values():
         name = str(item.get("name") or item.get("context") or "unknown")
         conclusion = str(item.get("conclusion") or item.get("state") or "").upper()
         status = str(item.get("status") or "").upper()
@@ -43,7 +56,7 @@ def evaluate_rollup(pr_json: dict[str, Any]) -> tuple[str, dict[str, list[str]]]
             passed.append(name)
         elif conclusion in FAIL_CONCLUSIONS:
             failed.append(f"{name}:{conclusion}")
-        elif not conclusion and status in {"", "QUEUED", "IN_PROGRESS", "PENDING"}:
+        elif not conclusion and status in {"", "QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"}:
             pending.append(name)
         else:
             pending.append(f"{name}:{conclusion or status}")

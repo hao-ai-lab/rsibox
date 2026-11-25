@@ -47,26 +47,21 @@ def _iter_non_fenced_lines(text: str) -> list[tuple[int, str]]:
     return rows
 
 
-def _strip_emphasis_outside_code(text: str) -> str:
-    """Strip Markdown code backticks and emphasis delimiters outside code spans."""
-    parts = re.split(r"(`[^`]*`)", text)
-    out: list[str] = []
-    for part in parts:
-        if part.startswith("`") and part.endswith("`") and len(part) >= 2:
-            out.append(part[1:-1])
-        else:
-            cleaned = part.replace("*", "")
-            cleaned = re.sub(r"(?<!\w)_+|_+(?!\w)", "", cleaned)
-            out.append(cleaned)
-    return "".join(out)
-
-
 def _slugify_heading(raw_heading: str) -> str:
     """Convert a Markdown heading into its GitHub-style anchor slug."""
-    cleaned = html.unescape(raw_heading)
-    cleaned = re.sub(r"!?\[([^\]]*)\]\([^)]+\)", r"\1", cleaned)
-    cleaned = re.sub(r"<[^>]+>", "", cleaned)
-    cleaned = _strip_emphasis_outside_code(cleaned).replace("`", "").strip().lower()
+    unlinked = re.sub(r"!?\[([^\]]*)\]\([^)]+\)", r"\1", raw_heading)
+    parts = re.split(r"(`[^`]*`)", unlinked)
+    processed: list[str] = []
+    for part in parts:
+        if part.startswith("`") and part.endswith("`") and len(part) >= 2:
+            processed.append(html.unescape(part[1:-1]))
+        else:
+            chunk = html.unescape(part)
+            chunk = re.sub(r"<[^>]+>", "", chunk)
+            chunk = chunk.replace("*", "")
+            chunk = re.sub(r"(?<!\w)_+|_+(?!\w)", "", chunk)
+            processed.append(chunk)
+    cleaned = "".join(processed).replace("`", "").strip().lower()
     cleaned = re.sub(r"[^\w\s-]", "", cleaned)
     return re.sub(r"\s", "-", cleaned)
 
