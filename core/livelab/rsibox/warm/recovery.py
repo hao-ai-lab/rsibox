@@ -383,13 +383,27 @@ class AsyncShadowReplenisher:
         self._active_thread = None
         self._condition.notify_all()
 
-    def wait(self, timeout_s: float | None = None) -> bool:
-        """Block until all in-flight and pending replenishments complete."""
+    def wait(self, timeout_s: float | None = None, *, until: Callable[[], bool] | None = None) -> bool:
+        """Block until replenishment goes idle, or until `until()` returns True."""
         deadline = None if timeout_s is None else (time.monotonic() + max(0.0, float(timeout_s)))
-        with self._condition:
-            if self._active_thread is threading.current_thread():
-                raise RuntimeError("cannot call wait() from inside the active replenishment thread")
-            while self._in_flight or self._pending_request is not None:
+        while True:
+            with self._condition:
+                if self._active_thread is threading.current_thread():
+                    raise RuntimeError("cannot call wait() from inside the active replenishment thread")
+                if not self._in_flight and self._pending_request is None:
+                    return True
+                if until is not None and self._closed:
+                    return False
+                snapshot_attempts = self._attempts
+            if until is not None and until():
+                return True
+            with self._condition:
+                if not self._in_flight and self._pending_request is None:
+                    return True
+                if until is not None and self._closed:
+                    return False
+                if until is not None and self._attempts != snapshot_attempts:
+                    continue
                 if deadline is None:
                     self._condition.wait()
                 else:
@@ -397,7 +411,6 @@ class AsyncShadowReplenisher:
                     if remaining <= 0.0:
                         return False
                     self._condition.wait(timeout=remaining)
-            return True
 
     def close(self, timeout_s: float | None = 5.0) -> bool:
         """Signal cancellation, drop pending work, and join any active worker."""
@@ -445,46 +458,108 @@ class StandbyShadowDriver:
         *,
         replenish_wait_timeout_s: float = 0.0,
         fallback_driver: RecoveryDriver | None = None,
+        ready_count_fn: Callable[[], int] | None = None,
     ):
         if isinstance(replenish_wait_timeout_s, bool) or replenish_wait_timeout_s < 0:
             raise ValueError(
                 f"replenish_wait_timeout_s must be a non-negative float, got {replenish_wait_timeout_s!r}"
             )
+        if ready_count_fn is not None and not callable(ready_count_fn):
+            raise TypeError(
+                f"ready_count_fn must be callable or None, got {type(ready_count_fn).__name__}"
+            )
         self._promote_fn = promote_fn
         self._replenish_fn = replenish_fn
         self._replenish_wait_timeout_s = float(replenish_wait_timeout_s)
         self._fallback_driver = fallback_driver
+        self._ready_count_fn = ready_count_fn
+
+    def _probe_ready_standby(self) -> tuple[bool | None, str | None]:
+        """Probe ready shadow count if `ready_count_fn` is configured.
+
+        Returns `(has_ready, probe_error)` where `has_ready` is `None` when unconfigured,
+        `True` when `count > 0`, and `False` when empty (`probe_error=None`) or invalid/raising.
+        """
+        if self._ready_count_fn is None:
+            return None, None
+        try:
+            count = self._ready_count_fn()
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            _LOGGER.warning("StandbyShadowDriver ready_count_fn() raised %s", msg)
+            return False, msg
+        if isinstance(count, bool) or not isinstance(count, int):
+            msg = f"returned non-int {count!r}"
+            _LOGGER.warning("StandbyShadowDriver ready_count_fn() %s", msg)
+            return False, msg
+        if count < 0:
+            msg = f"returned negative count {count}"
+            _LOGGER.warning("StandbyShadowDriver ready_count_fn() %s", msg)
+            return False, msg
+        return count > 0, None
 
     def _standby_guard(
         self, async_replenisher: Any, lab: Any, store: WeightStore | None, *, reason: str, started_at: float
     ) -> dict[str, Any] | None:
         """Verify standby readiness before stopping the primary; wait or fall back if not ready."""
         replenisher_state = async_replenisher.status()
-        if (replenisher_state.get("in_flight") or replenisher_state.get("pending")) and self._replenish_wait_timeout_s > 0.0:
-            async_replenisher.wait(timeout_s=self._replenish_wait_timeout_s)
-            replenisher_state = async_replenisher.status()
-
         is_closed = bool(replenisher_state.get("closed"))
+        has_ready, probe_error = (None, None) if is_closed else self._probe_ready_standby()
+        # Multi-shadow pools (K >= 2): if a verified shadow is already parked and the replenisher
+        # is open, promote immediately without stalling behind an in-flight background restock.
+        if has_ready is True and not is_closed:
+            return None
+
+        if (
+            not is_closed
+            and probe_error is None
+            and (replenisher_state.get("in_flight") or replenisher_state.get("pending"))
+            and self._replenish_wait_timeout_s > 0.0
+        ):
+            if self._ready_count_fn is not None and isinstance(async_replenisher, AsyncShadowReplenisher):
+                async_replenisher.wait(
+                    timeout_s=self._replenish_wait_timeout_s,
+                    until=lambda: self._probe_ready_standby()[0] is True,
+                )
+            else:
+                async_replenisher.wait(timeout_s=self._replenish_wait_timeout_s)
+            replenisher_state = async_replenisher.status()
+            is_closed = bool(replenisher_state.get("closed"))
+            has_ready, probe_error = (None, None) if is_closed else self._probe_ready_standby()
+            if has_ready is True and not is_closed:
+                return None
+
         still_busy = bool(replenisher_state.get("in_flight") or replenisher_state.get("pending"))
         last_failed = replenisher_state.get("attempts", 0) > 0 and (
             replenisher_state.get("last_ok") is False or replenisher_state.get("last_error") is not None
         )
-        if not is_closed and not still_busy and not last_failed:
+        if not is_closed and not still_busy and not last_failed and has_ready is not False:
             return None
 
         if self._fallback_driver is not None:
             fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
             fallback_result["fallback_from"] = self.name
-            if last_failed and not still_busy and not is_closed and fallback_result.get("ok") and self._replenish_fn is not None:
+            if (
+                (last_failed or (has_ready is False and probe_error is None))
+                and not still_busy
+                and not is_closed
+                and fallback_result.get("ok")
+                and self._replenish_fn is not None
+            ):
                 fallback_result["replenish"] = self._replenish_fn(lab, store)
             return fallback_result
 
         if is_closed:
             error_text, replenish_status = "standby_not_ready: replenisher is closed", "closed"
+        elif probe_error is not None:
+            error_text, replenish_status = f"standby_not_ready: ready_count_fn invalid ({probe_error})", None
         elif still_busy:
             error_text, replenish_status = "standby_not_ready: replenishment still in flight", "in_flight"
-        else:
+        elif last_failed:
             error_text = f"standby_not_ready: last replenishment failed ({replenisher_state.get('last_error')})"
+            replenish_status = self._replenish_fn(lab, store) if self._replenish_fn is not None else None
+        else:
+            error_text = "standby_not_ready: no standby shadow ready"
             replenish_status = self._replenish_fn(lab, store) if self._replenish_fn is not None else None
         return {
             "ok": False, "reset": [], "driver": self.name, "recovery_mode": self.name, "reason": reason,
@@ -507,6 +582,25 @@ class StandbyShadowDriver:
             )
             if guard_result is not None:
                 return guard_result
+        else:
+            has_ready, probe_error = self._probe_ready_standby()
+            if has_ready is False:
+                if self._fallback_driver is not None:
+                    fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
+                    fallback_result["fallback_from"] = self.name
+                    if probe_error is None and fallback_result.get("ok") and self._replenish_fn is not None:
+                        fallback_result["replenish"] = self._replenish_fn(lab, store)
+                    return fallback_result
+                error_text = (
+                    f"standby_not_ready: ready_count_fn invalid ({probe_error})"
+                    if probe_error is not None
+                    else "standby_not_ready: no standby shadow ready"
+                )
+                return {
+                    "ok": False, "reset": [], "driver": self.name, "recovery_mode": self.name, "reason": reason,
+                    "error": error_text,
+                    "cost_s": round(time.perf_counter() - started_at, 6),
+                }
 
         with contextlib.suppress(Exception):
             lab._stop_engine()
