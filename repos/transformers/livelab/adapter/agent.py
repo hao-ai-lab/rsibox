@@ -51,6 +51,157 @@ def _seed_torch(seed: int) -> Any:
     return torch
 
 
+def _is_ascii_digits(text: str) -> bool:
+    return bool(text) and text.isascii() and text.isdigit()
+
+
+def _normalize_device_map(raw: Any) -> str | dict[str, int | str] | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"invalid JSON device_map: {error}") from error
+            return _normalize_device_map(parsed)
+        return text
+    if isinstance(raw, dict):
+        if not raw:
+            raise ValueError("device_map dict must not be empty")
+        cleaned: dict[str, int | str] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError(f"device_map keys must be non-empty strings, got {key!r}")
+            if isinstance(value, bool) or not isinstance(value, (int, str)) or (isinstance(value, str) and not value.strip()):
+                raise ValueError(f"device_map[{key!r}] must be a non-negative int GPU index or non-empty device string, got {value!r}")
+            if isinstance(value, int) and value < 0:
+                raise ValueError(f"device_map[{key!r}] GPU index must be >= 0, got {value!r}")
+            cleaned[key] = value.strip() if isinstance(value, str) else int(value)
+        return cleaned
+    raise ValueError(f"device_map must be a string, dict, or None; got {type(raw).__name__}")
+
+
+def _normalize_max_memory(raw: Any) -> dict[int | str, int | str] | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid JSON max_memory: {error}") from error
+        return _normalize_max_memory(parsed)
+    if isinstance(raw, dict):
+        if not raw:
+            raise ValueError("max_memory dict must not be empty")
+        cleaned: dict[int | str, int | str] = {}
+        for key, value in raw.items():
+            if isinstance(key, bool) or not isinstance(key, (int, str)):
+                raise ValueError(f"max_memory key must be an int or string, got {key!r}")
+            if isinstance(key, int):
+                if key < 0:
+                    raise ValueError(f"max_memory GPU key must be >= 0, got {key!r}")
+                norm_key: int | str = int(key)
+            else:
+                stripped_key = key.strip()
+                if not stripped_key or not stripped_key.isascii():
+                    raise ValueError(f"max_memory string key must be non-empty ASCII, got {key!r}")
+                if stripped_key.startswith("-") and _is_ascii_digits(stripped_key[1:]):
+                    raise ValueError(f"max_memory GPU key must be >= 0, got {key!r}")
+                norm_key = int(stripped_key) if _is_ascii_digits(stripped_key) else stripped_key
+            if isinstance(value, bool) or not isinstance(value, (int, str)):
+                raise ValueError(f"max_memory[{key!r}] must be a positive int or non-empty string, got {value!r}")
+            if isinstance(value, int) and value <= 0:
+                raise ValueError(f"max_memory[{key!r}] must be > 0, got {value!r}")
+            if isinstance(value, str) and not value.strip():
+                raise ValueError(f"max_memory[{key!r}] must not be empty")
+            cleaned[norm_key] = value.strip() if isinstance(value, str) else int(value)
+        return cleaned
+    raise ValueError(f"max_memory must be a JSON string, dict, or None; got {type(raw).__name__}")
+
+
+def _format_device_entry(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"cuda:{value}"
+    text = str(value).strip()
+    if _is_ascii_digits(text):
+        return f"cuda:{int(text)}"
+    return text
+
+
+def _stringify_device_map(device_map: Any) -> dict[str, str] | None:
+    if not isinstance(device_map, dict) or not device_map:
+        return None
+    return {str(k): _format_device_entry(v) for k, v in device_map.items()}
+
+
+def _resolve_input_device(model: Any, fallback_device: str, torch_module: Any) -> Any:
+    get_emb = getattr(model, "get_input_embeddings", None)
+    if callable(get_emb):
+        try:
+            emb = get_emb()
+            if emb is not None:
+                for tensor in (*emb.parameters(), *emb.buffers()):
+                    if tensor.device.type != "meta":
+                        return tensor.device
+        except Exception:
+            pass
+    hf_map = getattr(model, "hf_device_map", None)
+    if isinstance(hf_map, dict):
+        for value in hf_map.values():
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                return torch_module.device(f"cuda:{value}")
+            if isinstance(value, str):
+                text = value.strip()
+                if text and text not in ("disk", "meta"):
+                    return torch_module.device(f"cuda:{int(text)}" if _is_ascii_digits(text) else text)
+    for tensor in (*model.parameters(), *model.buffers()):
+        if tensor.device.type != "meta":
+            return tensor.device
+    return torch_module.device(fallback_device)
+
+
+def _model_devices(model: Any, fallback_device: str, torch_module: Any) -> list[Any]:
+    seen: list[Any] = []
+    for tensor in (*model.parameters(), *model.buffers()):
+        if tensor.device.type != "meta" and tensor.device not in seen:
+            seen.append(tensor.device)
+    if not seen:
+        seen.append(torch_module.device(fallback_device))
+    return seen
+
+
+def _sync_cuda_devices(devices: list[Any], torch_module: Any) -> None:
+    if not (torch_module.cuda.is_available() and torch_module.cuda.is_initialized()):
+        return
+    cuda_devs: list[Any] = []
+    for dev in devices:
+        if dev.type == "cuda" and dev not in cuda_devs:
+            cuda_devs.append(dev)
+    if cuda_devs:
+        for dev in cuda_devs:
+            torch_module.cuda.synchronize(dev)
+    else:
+        torch_module.cuda.synchronize()
+
+
+def _is_sharded_model(model: Any, runtime: dict[str, Any]) -> bool:
+    if runtime.get("hf_device_map") or getattr(model, "hf_device_map", None):
+        return True
+    devices = {
+        tensor.device
+        for tensor in (*model.parameters(), *model.buffers())
+        if tensor.device.type != "meta"
+    }
+    return len(devices) > 1
+
+
 def _move_and_sync(model: Any, target_device: Any, torch_module: Any) -> None:
     is_cuda = target_device.type == "cuda"
     model.to(target_device, non_blocking=is_cuda)
@@ -58,13 +209,76 @@ def _move_and_sync(model: Any, target_device: Any, torch_module: Any) -> None:
         torch_module.cuda.synchronize(target_device)
 
 
+def _pin_cpu_tensors(unique_tensors: list[Any]) -> None:
+    counts: dict[int, int] = {}
+    for tensor in unique_tensors:
+        storage_ptr = tensor.untyped_storage().data_ptr()
+        counts[storage_ptr] = counts.get(storage_ptr, 0) + 1
+    for tensor in unique_tensors:
+        storage = tensor.untyped_storage()
+        if (
+            counts[storage.data_ptr()] == 1
+            and tensor.device.type == "cpu"
+            and not tensor.is_pinned()
+            and tensor.is_contiguous()
+            and tensor.storage_offset() == 0
+            and tensor.nbytes == storage.nbytes()
+        ):
+            tensor.data = tensor.pin_memory()
+
+
+def _move_tensors_preserving_storage(
+    unique_tensors: list[Any],
+    target_for_tensor: dict[int, Any],
+    torch_module: Any,
+) -> list[Any]:
+    """Move each tensor's data to its target device while preserving shared storages and views."""
+    moved_storages: dict[tuple[int, str, str], Any] = {}
+    moved_devices: list[Any] = []
+    for tensor in unique_tensors:
+        target_dev = target_for_tensor.get(id(tensor))
+        if target_dev is None or tensor.device.type == "meta":
+            continue
+        if target_dev not in moved_devices:
+            moved_devices.append(target_dev)
+        if tensor.device == target_dev:
+            continue
+        src_storage = tensor.untyped_storage()
+        cache_key = (src_storage.data_ptr(), str(tensor.device), str(target_dev))
+        dst_storage = moved_storages.get(cache_key)
+        if dst_storage is None:
+            non_blocking = target_dev.type == "cuda"
+            byte_view = torch_module.empty(0, dtype=torch_module.uint8, device=tensor.device).set_(src_storage)
+            dst_storage = byte_view.to(target_dev, non_blocking=non_blocking).untyped_storage()
+            moved_storages[cache_key] = dst_storage
+        rebound = torch_module.empty(0, dtype=tensor.dtype, device=target_dev).set_(
+            dst_storage, tensor.storage_offset(), tensor.size(), tensor.stride()
+        )
+        tensor.data = rebound
+    return moved_devices
+
+
+def _restore_sharded_tensors(
+    model: Any, saved_devices: dict[int, Any], torch_module: Any
+) -> list[Any]:
+    unique_tensors = list(dict.fromkeys([*model.parameters(), *model.buffers()]))
+    restored_devices = _move_tensors_preserving_storage(unique_tensors, saved_devices, torch_module)
+    _sync_cuda_devices(restored_devices, torch_module)
+    return restored_devices
+
+
 def load_backend(config: dict[str, Any]) -> dict[str, Any]:
     mode, seed = str(config.get("mode", "real")), int(config.get("seed", 0))
+    device_map = _normalize_device_map(config.get("device_map"))
+    max_memory = _normalize_max_memory(config.get("max_memory"))
     if mode == "toy":
         from adapter.fixture.toy_hf.modeling import ToyCausalLM
-        model = ToyCausalLM(vocab_size=int(config.get("vocab_size", 64)), seed=seed)
+        model = ToyCausalLM(vocab_size=int(config.get("vocab_size", 64)), seed=seed, device_map=device_map)
+        hf_map = dict(model.hf_device_map) if model.hf_device_map else None
+        devices = sorted(set(hf_map.values())) if hf_map else [model.device]
         return {
-            "mode": "toy", "model": model, "tokenizer": None, "device": "cpu",
+            "mode": "toy", "model": model, "tokenizer": None, "device": model.device,
+            "devices": devices, "hf_device_map": hf_map,
             "seed": seed, "model_module": type(model).__module__, "quiesced": False,
         }
     import torch
@@ -85,13 +299,28 @@ def load_backend(config: dict[str, Any]) -> dict[str, Any]:
     load_kwargs: dict[str, Any] = {"trust_remote_code": trust_remote}
     if config.get("attn_implementation"):
         load_kwargs["attn_implementation"] = config["attn_implementation"]
+    if device_map is not None:
+        load_kwargs["device_map"] = device_map
+    if max_memory is not None:
+        load_kwargs["max_memory"] = max_memory
     try:
         model = transformers.AutoModelForCausalLM.from_pretrained(model_path, dtype=resolved_dtype, **load_kwargs)
     except TypeError:
         model = transformers.AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=resolved_dtype, **load_kwargs)
+    if device_map is None:
+        model = model.to(device).eval()
+        hf_map = None
+        input_device = device
+        devices = [device]
+    else:
+        model = model.eval()
+        hf_map = _stringify_device_map(getattr(model, "hf_device_map", None))
+        input_device = str(_resolve_input_device(model, device, torch))
+        devices = sorted({str(d) for d in _model_devices(model, input_device, torch)})
     return {
-        "mode": "real", "model": model.to(device).eval(), "tokenizer": tokenizer,
-        "device": device, "seed": seed, "model_module": type(model).__module__, "quiesced": False,
+        "mode": "real", "model": model, "tokenizer": tokenizer,
+        "device": input_device, "devices": devices, "hf_device_map": hf_map,
+        "seed": seed, "model_module": type(model).__module__, "quiesced": False,
     }
 
 
@@ -117,10 +346,11 @@ def generate_tokens(runtime: dict[str, Any], workload: dict[str, Any]) -> dict[s
         )
         return {"tokens": tokens, "digest": hashlib.sha256(json.dumps(tokens).encode("utf-8")).hexdigest()[:16]}
     torch_module = _seed_torch(int(workload.get("seed", runtime.get("seed", 0))))
-    tokenizer, device = runtime["tokenizer"], runtime["device"]
+    tokenizer = runtime["tokenizer"]
+    input_device = _resolve_input_device(model, runtime["device"], torch_module)
     temperature = float(workload.get("temperature", 0.0))
     do_sample = bool(workload.get("do_sample", temperature > 0.0))
-    encoded = tokenizer(list(workload["prompts"]), return_tensors="pt", padding=True).to(device)
+    encoded = tokenizer(list(workload["prompts"]), return_tensors="pt", padding=True).to(input_device)
     gen_kwargs = {
         "max_new_tokens": int(workload.get("max_new_tokens", 16)), "do_sample": do_sample,
         "use_cache": True, "pad_token_id": tokenizer.pad_token_id, **({"temperature": temperature} if do_sample else {}),
@@ -135,33 +365,45 @@ def generate_tokens(runtime: dict[str, Any], workload: dict[str, Any]) -> dict[s
 
 
 def _quiesce_runtime(runtime: dict[str, Any], offload_to_cpu: bool, pin_memory: bool) -> dict[str, Any]:
+    if runtime.get("quiesced"):
+        return findings.not_ok("quiesce refused: worker is already quiesced; resume required")
     model, released = runtime["model"], ["kv_cache"]
     if runtime["mode"] == "toy":
         (model.offload_to_cpu if offload_to_cpu else model.clear_cache)()
         runtime["quiesced"] = True
-        return {"ok": True, "released": released + (["weights"] if offload_to_cpu else []), "device": "cpu"}
+        devices = ["cpu"] if offload_to_cpu else list(runtime.get("devices") or [model.device])
+        return {
+            "ok": True, "released": released + (["weights"] if offload_to_cpu else []),
+            "device": "cpu" if offload_to_cpu else model.device,
+            "devices": devices, "hf_device_map": runtime.get("hf_device_map"),
+        }
     import torch
+    sharded = _is_sharded_model(model, runtime)
+    initial_devices = _model_devices(model, runtime["device"], torch)
     target_device = torch.device(runtime["device"])
-    use_cuda, offloaded = (target_device.type == "cuda" or torch.cuda.is_initialized()), False
+    use_cuda = any(d.type == "cuda" for d in initial_devices) or target_device.type == "cuda" or torch.cuda.is_initialized()
+    offloaded = False
+    saved_devices: dict[int, Any] | None = None
     try:
         if offload_to_cpu:
-            model.to("cpu")
-            offloaded = True
-            if pin_memory and use_cuda and torch.cuda.is_available():
+            if sharded:
                 unique_tensors = list(dict.fromkeys([*model.parameters(), *model.buffers()]))
-                counts: dict[int, int] = {}
-                for tensor in unique_tensors:
-                    storage_ptr = tensor.untyped_storage().data_ptr()
-                    counts[storage_ptr] = counts.get(storage_ptr, 0) + 1
-                for tensor in unique_tensors:
-                    storage = tensor.untyped_storage()
-                    if (counts[storage.data_ptr()] == 1 and tensor.device.type == "cpu" and not tensor.is_pinned()
-                            and tensor.is_contiguous() and tensor.storage_offset() == 0 and tensor.nbytes == storage.nbytes()):
-                        tensor.data = tensor.pin_memory()
+                saved_devices = {id(t): t.device for t in unique_tensors if t.device.type != "meta"}
+                offloaded = True
+                cpu_targets = {tid: torch.device("cpu") for tid in saved_devices}
+                _move_tensors_preserving_storage(unique_tensors, cpu_targets, torch)
+                if pin_memory and use_cuda and torch.cuda.is_available():
+                    _pin_cpu_tensors(unique_tensors)
+                runtime["saved_devices"] = saved_devices
+            else:
+                model.to("cpu")
+                offloaded = True
+                if pin_memory and use_cuda and torch.cuda.is_available():
+                    _pin_cpu_tensors(list(dict.fromkeys([*model.parameters(), *model.buffers()])))
             released.append("weights")
         gc.collect()
         if use_cuda and torch.cuda.is_available():
-            torch.cuda.synchronize(target_device if target_device.type == "cuda" else None)
+            _sync_cuda_devices(initial_devices, torch)
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
             released.append("cuda_cache")
@@ -169,13 +411,22 @@ def _quiesce_runtime(runtime: dict[str, Any], offload_to_cpu: bool, pin_memory: 
         message = f"quiesce failed: {type(error).__name__}: {error}"
         if offloaded:
             try:
-                _move_and_sync(model, target_device, torch)
+                if sharded and saved_devices is not None:
+                    _restore_sharded_tensors(model, saved_devices, torch)
+                    runtime.pop("saved_devices", None)
+                else:
+                    _move_and_sync(model, target_device, torch)
             except Exception as rollback_error:
                 message = f"{message} (rollback failed: {rollback_error})"
         runtime["quiesced"] = False
         return findings.not_ok(message)
     runtime["quiesced"] = True
-    return {"ok": True, "released": released, "device": "cpu" if offload_to_cpu else runtime["device"]}
+    devices = ["cpu"] if offload_to_cpu else sorted({str(d) for d in initial_devices})
+    return {
+        "ok": True, "released": released,
+        "device": "cpu" if offload_to_cpu else runtime["device"],
+        "devices": devices, "hf_device_map": runtime.get("hf_device_map"),
+    }
 
 
 def _resume_runtime(runtime: dict[str, Any], released: list[str]) -> dict[str, Any]:
@@ -185,8 +436,34 @@ def _resume_runtime(runtime: dict[str, Any], released: list[str]) -> dict[str, A
             model.restore_to_device(target_name)
             resumed.append("weights")
         runtime["quiesced"] = False
-        return {"ok": True, "resumed": resumed, "device": target_name}
+        hf_map = dict(model.hf_device_map) if getattr(model, "hf_device_map", None) else None
+        devices = sorted(set(hf_map.values())) if hf_map else [model.device]
+        return {
+            "ok": True, "resumed": resumed, "device": model.device,
+            "devices": devices, "hf_device_map": hf_map,
+        }
     import torch
+    saved_devices: dict[int, Any] | None = runtime.get("saved_devices")
+    if saved_devices is not None or _is_sharded_model(model, runtime):
+        restore_weights = "weights" in released or not released
+        if saved_devices is not None and restore_weights:
+            restored_devices = _restore_sharded_tensors(model, saved_devices, torch)
+            runtime.pop("saved_devices", None)
+            resumed.append("weights")
+        elif saved_devices is None and "weights" in released:
+            return findings.not_ok("resume refused: sharded model has no saved device placement for weights")
+        else:
+            restored_devices = _model_devices(model, target_name, torch)
+            _sync_cuda_devices(restored_devices, torch)
+        if any(d.type == "cuda" for d in restored_devices) and "cuda_cache" in released:
+            resumed.append("cuda_cache")
+        devices = sorted({str(d) for d in restored_devices})
+        runtime["devices"] = devices
+        runtime["quiesced"] = False
+        return {
+            "ok": True, "resumed": resumed, "device": target_name,
+            "devices": devices, "hf_device_map": runtime.get("hf_device_map"),
+        }
     target_device = torch.device(target_name)
     if "weights" in released or any(tensor.device != target_device for tensor in (*model.parameters(), *model.buffers())):
         _move_and_sync(model, target_device, torch)
@@ -196,7 +473,10 @@ def _resume_runtime(runtime: dict[str, Any], released: list[str]) -> dict[str, A
     if target_device.type == "cuda" and "cuda_cache" in released:
         resumed.append("cuda_cache")
     runtime["quiesced"] = False
-    return {"ok": True, "resumed": resumed, "device": target_name}
+    return {
+        "ok": True, "resumed": resumed, "device": target_name,
+        "devices": [target_name], "hf_device_map": runtime.get("hf_device_map"),
+    }
 
 
 def _dispatch_request(
@@ -208,7 +488,9 @@ def _dispatch_request(
     if method == "ping":
         return {
             "ok": True, "pid": os.getpid(), "mode": runtime["mode"],
-            "device": runtime["device"], "model_module": runtime["model_module"],
+            "device": runtime["device"], "devices": list(runtime.get("devices") or [runtime["device"]]),
+            "hf_device_map": runtime.get("hf_device_map"),
+            "model_module": runtime["model_module"],
         }, False
     if runtime.get("quiesced") and method in QUIESCE_BLOCKED:
         return findings.not_ok(f"{method} refused: worker is quiesced; resume required"), False

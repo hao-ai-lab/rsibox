@@ -21,12 +21,17 @@ class ToyTransformersLab(TransformersLab):
 
     name, package = "transformers-toy", "adapter"
 
-    def __init__(self, receipts: str | None = None, **kwargs: Any) -> None:
+    def __init__(
+        self, receipts: str | None = None, *, device_map: str | dict[str, Any] | None = None, **kwargs: Any
+    ) -> None:
         defaults = (("rpc_timeout", 5.0), ("check_timeout", 1.5), ("startup_timeout", 15.0), ("quiesce_timeout", 10.0))
         for key, value in defaults:
             kwargs.setdefault(key, value)
+        config: dict[str, Any] = {"mode": "toy", "vocab_size": 64, "seed": 0}
+        if device_map is not None:
+            config["device_map"] = device_map
         super().__init__(
-            {"mode": "toy", "vocab_size": 64, "seed": 0},
+            config,
             (LOGITS_MODULE, GENERATION_MODULE, MODELING_MODULE), receipts=receipts, **kwargs,
         )
 
