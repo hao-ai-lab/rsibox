@@ -247,8 +247,13 @@ def _attach_live_handle_to_lab(
     lab.port = instance.port
     lab.tp = 1
     lab.base_text = dict(FAKE_SOURCES)
+    lab.shared = bool(share_as_class_shared)
+    lab._owns_server = not lab.shared
+    lab._closed = False
+    lab.server_key = ("test-shared", instance.port) if share_as_class_shared else None
     if share_as_class_shared:
-        conformance_lab.VllmLab._shared = instance.handle
+        with conformance_lab.VllmLab._shared_lock:
+            conformance_lab.VllmLab._shared_servers[lab.server_key] = instance.handle
     lab.bridge = conformance_lab.HostBridge(lab._ctl)
     lab.session = conformance_lab.SS.Session(lab.bridge, conformance_lab.MODULES)
     return lab
@@ -570,7 +575,8 @@ class VllmQuiesceHooksTest(unittest.TestCase):
 
 class VllmLabSleepModeAndShadowPromotionTest(unittest.TestCase):
     def tearDown(self):
-        conformance_lab.VllmLab._shared = None
+        with conformance_lab.VllmLab._shared_lock:
+            conformance_lab.VllmLab._shared_servers.clear()
 
     def test_launch_environment_and_start_server_opt_in_sleep_mode(self):
         default_env = conformance_lab.VllmLab.launch_environment(["--model", "test-model"])
@@ -708,12 +714,14 @@ class VllmLabSleepModeAndShadowPromotionTest(unittest.TestCase):
         self.assertEqual(recovered["promoted_pid"], shadow.pid)
         self.assertTrue(recovered["host_ping_ok"])
 
-        # Primary was stopped; lab and VllmLab._shared switched to shadow; replenish_fn fired.
+        # Primary was stopped; lab and VllmLab._shared_servers moved to shadow key; replenish_fn fired.
         self.assertFalse(primary.handle.alive())
         self.assertEqual(primary.stopped_calls, 1)
         self.assertIs(lab.server, shadow.handle)
-        self.assertIs(conformance_lab.VllmLab._shared, shadow.handle)
         self.assertEqual(lab.port, shadow.port)
+        self.assertEqual(lab.server_key, ("test-shared", shadow.port))
+        self.assertNotIn(("test-shared", primary.port), conformance_lab.VllmLab._shared_servers)
+        self.assertIs(conformance_lab.VllmLab._shared_servers[lab.server_key], shadow.handle)
         self.assertEqual(len(replenished_calls), 1)
         self.assertEqual(replenished_calls[0][0], shadow.port)
         self.assertEqual(lab.status()["state"], "base")
