@@ -132,8 +132,17 @@ class _WorkerHandle:
         call_timeout = self.rpc_timeout if timeout is None else float(timeout)
         request = {"method": method, "payload": payload}
         try:
-            caller = ipc.file_channel_call if self.transport == "file" else ipc.unix_json_call
-            return caller(self.endpoint, request, timeout=call_timeout)
+            if self.transport == "file":
+                reply = ipc.file_channel_call(
+                    self.endpoint,
+                    request,
+                    timeout=call_timeout,
+                    alive_fn=lambda: self.process.poll() is None,
+                )
+                if not reply.get("ok") and reply.get("lost"):
+                    return {**reply, "transport_error": True}
+                return reply
+            return ipc.unix_json_call(self.endpoint, request, timeout=call_timeout)
         except Exception as error:
             return findings.not_ok(
                 f"{self.name} {method}: {type(error).__name__}: {error}",
