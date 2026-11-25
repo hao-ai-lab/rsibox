@@ -231,3 +231,38 @@ class UndoCallTest(unittest.TestCase):
         self.assertEqual(u_retry["undone"], 1)
         self.assertEqual([e.name for e in j.entries], ["base"])
         self.assertEqual(j.marks, [("t1", m1)])
+
+
+class ClosureUndoTest(unittest.TestCase):
+    """S3: live closures created by swapped code are restored even when the outer new code drops."""
+
+    def test_undo_restores_closure_when_outer_code_drops_and_cancels_refcount(self):
+        """Input: swap `outer` -> `inner` without retaining `staged`, call `c1 = mod.outer()` so
+        `c1` holds `inner_new` (+1) while `Entry('code')` drops `outer_new` (-1), then `undo_to`.
+        Expected: `_restore_closures` still scans `gc.get_referrers` and restores `c1.__code__`
+        so `c1()` returns 1 instead of staying on 2."""
+        from . import swap as S
+        from . import witness as W
+        from .test_detectors import temp_modules
+
+        (mod,) = temp_modules(
+            self,
+            {"kt_closure_undo_s3": "def outer():\n    def inner():\n        return 1\n    return inner\n"},
+        )
+        j, w = J.Journal(), W.Witness()
+        mark = j.mark("t1")
+        res = S.apply(
+            S.stage("kt_closure_undo_s3", "def outer():\n    def inner():\n        return 2\n    return inner\n")[
+                "staged"
+            ],
+            j,
+            w,
+        )
+        self.assertTrue(res["ok"], res)
+        c1 = mod.outer()
+        self.assertEqual(c1(), 2)
+        u = j.undo_to(mark)
+        self.assertTrue(u["ok"], u)
+        self.assertGreaterEqual(u.get("closures_restored", 0), 1)
+        self.assertEqual(c1(), 1)
+        self.assertEqual(mod.outer()(), 1)
