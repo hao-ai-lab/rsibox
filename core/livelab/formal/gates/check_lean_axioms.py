@@ -7,10 +7,10 @@ import json
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 FORMAL_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_ROOT = FORMAL_DIR / "lean"
-
 ALLOWED_AXIOMS = frozenset({"propext", "Quot.sound"})
 
 FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -34,13 +34,17 @@ IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_'»]")
 CHAR_LITERAL_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^\\'\n])'")
 RAW_STR_RE = re.compile(r'r(#*)"')
 IMPORT_RE = re.compile(r"\bimport\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
-NAMESPACE_RE = re.compile(r"(?<![A-Za-z0-9_'])namespace\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
 THEOREM_KW_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem(?![A-Za-z0-9_'])")
-THEOREM_NAME_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_']*)")
+SCOPE_RE = re.compile(
+    r"(?<![A-Za-z0-9_'])(?:"
+    r"namespace\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
+    r"|end(?:[ \t]+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*))?"
+    r"|theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
+    r")(?![A-Za-z0-9_'])"
+)
 VERIFY_IMPORT_LINE_RE = re.compile(r"^import\s+RsiboxFormal$")
 VERIFY_PRINT_LINE_RE = re.compile(r"^#print\s+axioms\s+RsiboxFormal\.[A-Za-z_][A-Za-z0-9_']*$")
 MATHLIB_RE = re.compile(r"\bmathlib\b", re.IGNORECASE)
-TOML_REQUIRE_RE = re.compile(r"\[\[\s*require\s*\]\]|^\s*require\b", re.IGNORECASE | re.MULTILINE)
 DIAGNOSTIC_RE = re.compile(r"(?im)(?:^|[\s:])(?:error|warning):")
 NO_AXIOMS_RE = re.compile(r"^'RsiboxFormal\.([A-Za-z_][A-Za-z0-9_']*)'\s+does not depend on any axioms$")
 DEPS_AXIOMS_RE = re.compile(r"^'RsiboxFormal\.([A-Za-z_][A-Za-z0-9_']*)'\s+depends on axioms:\s*\[([^\]]*)\]$")
@@ -52,10 +56,8 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
     stack: list[tuple[str, int]] = [("code", 0)]
     i, n, comment_depth = 0, len(text), 0
     lex_errors: list[str] = []
-
     while i < n:
-        ch = text[i]
-        two = text[i : i + 2]
+        ch, two = text[i], text[i : i + 2]
         mode, depth = stack[-1]
         if comment_depth > 0:
             if two == "/-":
@@ -114,14 +116,9 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
                 break
             out.append(text[i : end_q + 1])
             i = end_q + 1
-        elif ch == "'" and (i == 0 or not IDENT_CHAR_RE.match(text[i - 1])):
-            m = CHAR_LITERAL_RE.match(text, i)
-            if m:
-                out.append(m.group(0))
-                i = m.end()
-            else:
-                out.append(ch)
-                i += 1
+        elif ch == "'" and (i == 0 or not IDENT_CHAR_RE.match(text[i - 1])) and (m_ch := CHAR_LITERAL_RE.match(text, i)):
+            out.append(m_ch.group(0))
+            i = m_ch.end()
         elif ch == "{" and len(stack) > 1:
             stack[-1] = ("code", depth + 1)
             out.append(ch)
@@ -136,7 +133,6 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
         else:
             out.append(ch)
             i += 1
-
     if comment_depth > 0:
         lex_errors.append("unterminated block comment")
     if len(stack) > 1:
@@ -146,8 +142,7 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
 
 def strip_lean_comments(text: str) -> str:
     """Strip Lean comments and non-interpolated string bodies."""
-    cleaned, _ = _lex_lean(text)
-    return cleaned
+    return _lex_lean(text)[0]
 
 
 def _iter_lean_files(root: Path) -> list[Path]:
@@ -158,6 +153,12 @@ def _is_allowed_import(module: str) -> bool:
     return module in ("Init", "RsiboxFormal") or module.startswith(("Init.", "RsiboxFormal."))
 
 
+def _has_bad_srcdir(obj: object) -> bool:
+    if isinstance(obj, dict):
+        return ("srcDir" in obj and obj["srcDir"] != ".") or any(_has_bad_srcdir(v) for v in obj.values())
+    return isinstance(obj, list) and any(_has_bad_srcdir(v) for v in obj)
+
+
 def _collect_theorems(root: Path) -> tuple[list[str], dict[Path, str], list[str]]:
     lean_files = _iter_lean_files(root)
     if not lean_files:
@@ -165,26 +166,53 @@ def _collect_theorems(root: Path) -> tuple[list[str], dict[Path, str], list[str]
     stripped: dict[Path, str] = {}
     theorems: list[str] = []
     errors: list[str] = []
+    imports_map: dict[str, list[str]] = {}
     for path in lean_files:
         cleaned, lex_errs = _lex_lean(path.read_text(encoding="utf-8"))
-        for err in lex_errs:
-            errors.append(f"{path}: {err}")
+        errors.extend(f"{path}: {e}" for e in lex_errs)
         stripped[path] = cleaned
-        if path.relative_to(root).as_posix() != "VerifyAxioms.lean":
-            for ns in NAMESPACE_RE.findall(cleaned):
-                if ns != "RsiboxFormal":
+        rel = path.relative_to(root)
+        if rel.as_posix() == "VerifyAxioms.lean":
+            continue
+        imports_map[".".join(rel.with_suffix("").parts)] = IMPORT_RE.findall(cleaned)
+        ns_stack: list[str] = []
+        thm_parsed = 0
+        for m in SCOPE_RE.finditer(cleaned):
+            ns, end_ns, thm = m.group(1), m.group(2), m.group(3)
+            if ns is not None:
+                if ns_stack or ns != "RsiboxFormal":
                     errors.append(f"{path}: forbidden namespace '{ns}'")
-            found = THEOREM_NAME_RE.findall(cleaned)
-            kw_count = len(THEOREM_KW_RE.findall(cleaned))
-            if len(found) != kw_count:
-                errors.append(f"{path}: unparsed theorem declaration ({len(found)}/{kw_count})")
-            for name in found:
-                if name.startswith("«"):
-                    errors.append(f"{path}: guillemet theorem name '{name}' is forbidden")
-                elif name in theorems:
-                    errors.append(f"{path}: duplicate theorem name '{name}'")
+                ns_stack.append(ns)
+            elif thm is not None:
+                thm_parsed += 1
+                if ns_stack != ["RsiboxFormal"]:
+                    errors.append(f"{path}: theorem '{thm}' outside RsiboxFormal namespace")
+                if thm.startswith("«") or "." in thm:
+                    errors.append(f"{path}: invalid theorem name '{thm}'")
+                elif thm in theorems:
+                    errors.append(f"{path}: duplicate theorem name '{thm}'")
                 else:
-                    theorems.append(name)
+                    theorems.append(thm)
+            else:
+                if not ns_stack or (end_ns is not None and end_ns != ns_stack[-1]):
+                    errors.append(f"{path}: mismatched 'end' scope")
+                if ns_stack:
+                    ns_stack.pop()
+        if ns_stack:
+            errors.append(f"{path}: unclosed namespace {ns_stack}")
+        kw_count = len(THEOREM_KW_RE.findall(cleaned))
+        if thm_parsed != kw_count:
+            errors.append(f"{path}: unparsed theorem declaration ({thm_parsed}/{kw_count})")
+    reachable: set[str] = set()
+    queue = ["RsiboxFormal"] if "RsiboxFormal" in imports_map else []
+    while queue:
+        cur = queue.pop()
+        if cur not in reachable:
+            reachable.add(cur)
+            queue.extend(m for m in imports_map.get(cur, ()) if m in imports_map and m not in reachable)
+    for mod in sorted(imports_map):
+        if mod not in reachable:
+            errors.append(f"{root}: module '{mod}' is not imported from RsiboxFormal")
     return theorems, stripped, errors
 
 
@@ -192,15 +220,14 @@ def check_lean_axioms(root: Path) -> list[str]:
     """Return anti-cheat, import-allowlist, and VerifyAxioms coverage violations under `root`."""
     if not root.is_dir():
         return [f"missing Lean project root: {root}"]
-
     errors: list[str] = []
     toolchain = root / "lean-toolchain"
-    if not toolchain.is_file() or not toolchain.read_text(encoding="utf-8").strip():
-        errors.append(f"missing or empty lean-toolchain in {root}")
+    tc_text = toolchain.read_text(encoding="utf-8").strip() if toolchain.is_file() else ""
+    if not tc_text or not tc_text.startswith("leanprover/lean4:"):
+        errors.append(f"missing or invalid lean-toolchain in {root}")
     lakefile = root / "lakefile.toml"
     if not lakefile.is_file():
         errors.append(f"missing lakefile.toml in {root}")
-
     for cfg_name in ("lean-toolchain", "lakefile.toml", "lakefile.lean", "lake-manifest.json"):
         cfg_path = root / cfg_name
         if not cfg_path.is_file():
@@ -208,8 +235,19 @@ def check_lean_axioms(root: Path) -> list[str]:
         cfg_text = cfg_path.read_text(encoding="utf-8")
         if MATHLIB_RE.search(cfg_text):
             errors.append(f"{cfg_path}: forbidden mathlib dependency")
-        if cfg_name == "lakefile.toml" and TOML_REQUIRE_RE.search(cfg_text):
-            errors.append(f"{cfg_path}: forbidden external require dependency")
+        if cfg_name == "lakefile.toml":
+            try:
+                cfg = tomllib.loads(cfg_text)
+            except tomllib.TOMLDecodeError as exc:
+                errors.append(f"{cfg_path}: invalid TOML ({exc})")
+            else:
+                if "require" in cfg:
+                    errors.append(f"{cfg_path}: forbidden external require dependency")
+                if _has_bad_srcdir(cfg):
+                    errors.append(f"{cfg_path}: forbidden srcDir override")
+                targets = cfg.get("defaultTargets")
+                if not isinstance(targets, list) or "RsiboxFormal" not in targets:
+                    errors.append(f"{cfg_path}: defaultTargets must include RsiboxFormal")
         elif cfg_name == "lakefile.lean" and re.search(r"\brequire\b", cfg_text, re.IGNORECASE):
             errors.append(f"{cfg_path}: forbidden external require dependency")
         elif cfg_name == "lake-manifest.json":
@@ -220,12 +258,10 @@ def check_lean_axioms(root: Path) -> list[str]:
             else:
                 if not isinstance(manifest, dict) or manifest.get("packages"):
                     errors.append(f"{cfg_path}: forbidden manifest structure or external packages")
-
     theorems, stripped, scan_errs = _collect_theorems(root)
     errors.extend(scan_errs)
     if not stripped:
         return errors
-
     for path, cleaned in stripped.items():
         for label, pattern in FORBIDDEN_PATTERNS:
             if pattern.search(cleaned):
@@ -233,10 +269,8 @@ def check_lean_axioms(root: Path) -> list[str]:
         for mod in IMPORT_RE.findall(cleaned):
             if not _is_allowed_import(mod):
                 errors.append(f"{path}: forbidden non-Init import '{mod}'")
-
     if not theorems:
         errors.append(f"{root}: no theorem declarations found in library .lean files")
-
     verify_path = root / "VerifyAxioms.lean"
     if not verify_path.is_file():
         errors.append(f"missing VerifyAxioms.lean in {root}")
@@ -257,7 +291,6 @@ def check_lean_axioms(root: Path) -> list[str]:
             pat = rf"(?m)^\s*#print\s+axioms\s+RsiboxFormal\.{re.escape(thm)}(?![A-Za-z0-9_'])"
             if not re.search(pat, verify_cleaned):
                 errors.append(f"{verify_path}: missing '#print axioms RsiboxFormal.{thm}'")
-
     return errors
 
 
@@ -266,20 +299,15 @@ def verify_axioms_output(output_text: str, root: Path) -> list[str]:
     errors = check_lean_axioms(root)
     theorems, _, _ = _collect_theorems(root)
     seen: set[str] = set()
-
     for lineno, raw in enumerate(output_text.splitlines(), 1):
         line = raw.strip()
         if not line:
             continue
         if DIAGNOSTIC_RE.search(line):
             errors.append(f"line {lineno}: Lean diagnostic '{line}'")
-            continue
-        m_none = NO_AXIOMS_RE.match(line)
-        if m_none:
+        elif (m_none := NO_AXIOMS_RE.match(line)):
             seen.add(m_none.group(1))
-            continue
-        m_deps = DEPS_AXIOMS_RE.match(line)
-        if m_deps:
+        elif (m_deps := DEPS_AXIOMS_RE.match(line)):
             thm = m_deps.group(1)
             seen.add(thm)
             axioms = [a.strip() for a in m_deps.group(2).split(",") if a.strip()]
@@ -290,7 +318,6 @@ def verify_axioms_output(output_text: str, root: Path) -> list[str]:
                     errors.append(f"line {lineno}: disallowed axiom '{ax}' for 'RsiboxFormal.{thm}'")
         else:
             errors.append(f"line {lineno}: unexpected VerifyAxioms output '{line}'")
-
     if not seen:
         errors.append("no '#print axioms RsiboxFormal.<thm>' output lines found")
     for thm in theorems:
@@ -302,21 +329,14 @@ def verify_axioms_output(output_text: str, root: Path) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
-    parser.add_argument(
-        "--verify-axioms-output",
-        type=Path,
-        default=None,
-        help="Path to captured `lake env lean VerifyAxioms.lean` output, or `-` for stdin",
-    )
+    parser.add_argument("--verify-axioms-output", type=Path, default=None)
     args = parser.parse_args(argv)
     if args.verify_axioms_output is not None:
         raw = sys.stdin.read() if str(args.verify_axioms_output) == "-" else args.verify_axioms_output.read_text(encoding="utf-8")
         errors = verify_axioms_output(raw, args.root)
     else:
         errors = check_lean_axioms(args.root)
-    print("\n".join(f"ERROR: {e}" for e in errors), file=sys.stderr) if errors else print(
-        f"OK: Lean axiom gate passed in {args.root}"
-    )
+    print("\n".join(f"ERROR: {e}" for e in errors), file=sys.stderr) if errors else print(f"OK: Lean axiom gate passed in {args.root}")
     return 1 if errors else 0
 
 

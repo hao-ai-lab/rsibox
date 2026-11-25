@@ -168,7 +168,7 @@ class FormalGatesTest(unittest.TestCase):
         (root / "RsiboxFormal").mkdir(parents=True, exist_ok=True)
         (root / "lean-toolchain").write_text("leanprover/lean4:v4.16.0\n", encoding="utf-8")
         (root / "lakefile.toml").write_text(
-            lakefile or 'name = "rsibox_formal"\nversion = "0.1.0"\n[[lean_lib]]\nname = "RsiboxFormal"\n',
+            lakefile or 'name = "rsibox_formal"\nversion = "0.1.0"\ndefaultTargets = ["RsiboxFormal"]\n[[lean_lib]]\nname = "RsiboxFormal"\n',
             encoding="utf-8",
         )
         (root / "RsiboxFormal.lean").write_text("import RsiboxFormal.Invariants\n", encoding="utf-8")
@@ -226,8 +226,10 @@ class FormalGatesTest(unittest.TestCase):
             ("non-Init import", "import Init import Lean\ntheorem ok : True := trivial\n"),
             ("non-Init import", "import/-c-/Lean\ntheorem ok : True := trivial\n"),
             ("macro/syntax/elab", 'macro "#print" "axioms" ident : command => `(pure ())\ntheorem ok : True := trivial\n'),
-            ("guillemet theorem name", "theorem «hidden4» : True := trivial\n"),
+            ("invalid theorem name", "theorem «hidden4» : True := trivial\n"),
+            ("invalid theorem name", "theorem A.cheat : True := trivial\n"),
             ("forbidden namespace", "namespace Evil\ntheorem ok : True := trivial\nend Evil\n"),
+            ("forbidden namespace", "namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n"),
             ("duplicate theorem name", "theorem ok : True := trivial\ntheorem ok : True := trivial\n"),
         ]
         for label, snippet in cheats:
@@ -239,26 +241,39 @@ class FormalGatesTest(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(check_lean_axioms.main(["--root", str(root)]), 1)
 
-        # Non-Mathlib [[require]], non-dict manifest, and `open ... in theorem` / `@[simp] theorem`.
+        # Pre-namespace / post-end theorems, unimported module, `[["require"]]`, `srcDir`, invalid toolchain.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_lean_fixture(
                 root,
                 inv_body=(
+                    "theorem pre_ns : True := trivial\n"
                     "namespace RsiboxFormal\n"
                     "open Classical in theorem hidden3 : True := trivial\n"
                     "@[simp] theorem hidden : True := trivial\n"
                     "end RsiboxFormal\n"
+                    "theorem post_end : True := trivial\n"
                 ),
-                lakefile='name = "bad"\n[[require]]\nname = "batteries"\n',
+                lakefile='name = "bad"\ndefaultTargets = ["RsiboxFormal"]\nsrcDir = ".lake/cheat"\n[["require"]]\nname = "batteries"\n',
                 verify="import RsiboxFormal\n#print axioms RsiboxFormal.ok\n",
+            )
+            (root / "lean-toolchain").write_text("custom/lean4:v1.0.0\n", encoding="utf-8")
+            (root / "RsiboxFormal" / "Orphan.lean").write_text(
+                "namespace RsiboxFormal\ntheorem orphan : True := trivial\nend RsiboxFormal\n", encoding="utf-8"
             )
             (root / "lake-manifest.json").write_text('["not-a-dict"]\n', encoding="utf-8")
             errs = check_lean_axioms.check_lean_axioms(root)
-            self.assertTrue(any("external require" in e for e in errs), errs)
-            self.assertTrue(any("forbidden manifest structure" in e for e in errs), errs)
-            self.assertTrue(any("RsiboxFormal.hidden3" in e for e in errs), errs)
-            self.assertTrue(any("RsiboxFormal.hidden" in e for e in errs), errs)
+            for needle in (
+                "invalid lean-toolchain",
+                "external require",
+                "forbidden srcDir override",
+                "forbidden manifest structure",
+                "outside RsiboxFormal namespace",
+                "not imported from RsiboxFormal",
+                "RsiboxFormal.hidden3",
+                "RsiboxFormal.hidden",
+            ):
+                self.assertTrue(any(needle in e for e in errs), (needle, errs))
 
         # VerifyAxioms.lean strict line allowlist and prime boundary (`ok` vs `ok'`).
         with tempfile.TemporaryDirectory() as tmp:
