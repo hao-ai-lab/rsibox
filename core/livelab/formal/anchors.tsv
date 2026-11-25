@@ -12,3 +12,7 @@ core/livelab/kernel/formal/Participant.tla	Commit	core/livelab/kernel/coordinato
 core/livelab/kernel/formal/SequentialTx.tla	InstallCommit	core/livelab/kernel/session.py	Session.install	LIFO install stack
 core/livelab/kernel/formal/SequentialTx.tla	UninstallClean	core/livelab/kernel/session.py	Session.uninstall	LIFO uninstall stack
 core/livelab/kernel/formal/Incarnation.tla	Respawn	core/livelab/kernel/coordinator.py	Coordinator.recovered	incarnation bump & supersede
+core/livelab/formal/snapshot/SnapshotLifecycle.tla	QuiesceOk	core/livelab/rsibox/warm/snapshot_contract.py	run_snapshot_lifecycle	fail-closed quiesce before ready sentinel
+core/livelab/formal/snapshot/SnapshotLifecycle.tla	ResumeOk	core/livelab/rsibox/warm/snapshot_contract.py	DynamoK8sSnapshotDriver	restore-complete before restore-ready
+core/livelab/formal/forksafe/ForksafeLockOrder.tla	ArmGuards	core/livelab/forksafe.py	install_all_guards	arm CUDA guards and pin Triton before preload
+core/livelab/formal/forksafe/ForksafeLockOrder.tla	ForkChild	core/livelab/rsibox/services/zygote.py	ZygoteService	clean-driver fork and child unpatch

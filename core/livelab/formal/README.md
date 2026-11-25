@@ -3,7 +3,7 @@
 Two complementary layers verify RSIBox protocol state machines and algebraic invariants:
 
 1. **Stage A — Bounded TLA+ / TLC State Machines**
-   - Specs live under `core/livelab/formal/{pool,coordinator,swap,shadow,autoscaler}/` and `core/livelab/kernel/formal/`.
+   - Specs live under `core/livelab/formal/{pool,coordinator,swap,shadow,autoscaler,snapshot,forksafe}/` and `core/livelab/kernel/formal/`.
    - Anti-cheat gates:
      - `gates/check_spec_pins.py`: verifies `SPEC_PINS.sha256` matches every `.tla` file on disk.
      - `gates/check_anchors.py`: verifies every spec-to-Python anchor in `anchors.tsv`.

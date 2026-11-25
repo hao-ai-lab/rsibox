@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run bounded TLC checks across all 9 RSIBox TLA+ specs, mutants, and witnesses."""
+"""Run bounded TLC checks across all 11 RSIBox TLA+ specs, mutants, and witnesses."""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +26,14 @@ FORMAL_MODELS = [
     ("swap", ROOT / "swap" / "SwapLifecycle.tla", ROOT / "swap" / "SwapLifecycle.cfg", "NeverRolledBack"),
     ("shadow", ROOT / "shadow" / "StandbyShadow.tla", ROOT / "shadow" / "StandbyShadow.cfg", "NeverClosed"),
     ("autoscaler", ROOT / "autoscaler" / "PoolAutoScaler.tla", ROOT / "autoscaler" / "PoolAutoScaler.cfg", "NeverScaleDown"),
+    ("snapshot", ROOT / "snapshot" / "SnapshotLifecycle.tla", ROOT / "snapshot" / "SnapshotLifecycle.cfg", "NeverReady"),
+    ("forksafe", ROOT / "forksafe" / "ForksafeLockOrder.tla", ROOT / "forksafe" / "ForksafeLockOrder.cfg", "NeverChildReady"),
+]
+SUBSYSTEM_MUTANTS = [
+    ("snapshot", "WriteReadyBeforeQuiesce", "ReadySentinelRequiresQuiesce"),
+    ("snapshot", "WriteResumeBeforeRestore", "ResumeReadyRequiresRestore"),
+    ("forksafe", "PreloadBeforeGuards", "PreloadAfterGuards"),
+    ("forksafe", "ForkWhileCudaInit", "ForkRequiresCleanDriver"),
 ]
 KERNEL_MODELS: dict[str, tuple[Path, dict[str, str], list[str]]] = {
     "Transaction": (KERNEL_FORMAL / "Transaction.tla", {"Participants": '{"p1", "p2"}', "Bug": '"None"'},
@@ -42,9 +50,13 @@ KERNEL_MODELS: dict[str, tuple[Path, dict[str, str], list[str]]] = {
 
 def cases() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    formal_by_name = {name: (tla, cfg) for name, tla, cfg, _ in FORMAL_MODELS}
     for name, tla, cfg, witness_inv in FORMAL_MODELS:
         out.append({"name": name, "tla": tla, "cfg": cfg, "expected": None})
         out.append({"name": f"witness-{tla.stem}-{witness_inv}", "tla": tla, "cfg": cfg, "expected": witness_inv})
+    for model_name, bug, inv in SUBSYSTEM_MUTANTS:
+        tla, cfg = formal_by_name[model_name]
+        out.append({"name": f"mutant-{bug}", "tla": tla, "cfg": cfg, "constants": {"Bug": json.dumps(bug)}, "expected": inv})
 
     def add_k(name: str, mod: str, overrides: dict[str, str] | None = None, expected: str | None = None) -> None:
         tla, consts, invs = KERNEL_MODELS[mod]
@@ -102,6 +114,10 @@ def _write_cfg(case: dict[str, Any], cfg_dest: Path) -> None:
     expected = case["expected"]
     if "cfg" in case:
         text = Path(case["cfg"]).read_text(encoding="utf-8")
+        for k, v in case.get("constants", {}).items():
+            text, n = re.subn(rf"(?m)^(\s*{re.escape(k)}\s*=\s*).*$", lambda m, val=v: m.group(1) + val, text)
+            if n == 0:
+                raise RuntimeError(f"constant {k} not found in {case['cfg']}")
         if expected and not re.search(rf"(?m)^INVARIANT\s+{re.escape(expected)}\s*$", text):
             text = text.rstrip() + f"\nINVARIANT {expected}\n"
         cfg_dest.write_text(text, encoding="utf-8")
