@@ -223,7 +223,7 @@ class RecaptureCoordinator(C.StepGapCoordinator):
                         self._latch_recovery(
                             f"{part.name}: post-rebuild rollback undo was partial",
                             participant=part.name,
-                            poison_check="undo_incomplete",
+                            poison_check=None if part.name in missed else "undo_incomplete",
                             incarnation=txn_inc,
                         )
                 out["outcome"] = "rolled_back"
