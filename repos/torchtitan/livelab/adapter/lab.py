@@ -217,9 +217,21 @@ class TorchTitanLab(BaseLab):
     def _fanout_rank_call(self, method: str, payload: Any, *, timeout: float | None = None) -> dict[int, dict[str, Any]]:
         if len(self._workers) <= 1:
             return {w["rank"]: self._rank_call(w["rank"], method, payload, timeout=timeout) for w in self._workers}
-        with ThreadPoolExecutor(max_workers=len(self._workers)) as pool:
-            futs = {pool.submit(self._rank_call, w["rank"], method, payload, timeout=timeout): w["rank"] for w in self._workers}
-            return {rank: fut.result() for fut, rank in futs.items()}
+        pool = ThreadPoolExecutor(max_workers=len(self._workers))
+        futs = {pool.submit(self._rank_call, w["rank"], method, payload, timeout=timeout): w["rank"] for w in self._workers}
+        pending, results = set(futs), {}
+        try:
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_EXCEPTION)
+                for fut in done:
+                    if (exc := fut.exception()) is not None:
+                        raise exc
+                    results[futs[fut]] = fut.result()
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        pool.shutdown(wait=True)
+        return results
 
     def _fault_mount(self, message: str) -> None:
         self._dirty = True

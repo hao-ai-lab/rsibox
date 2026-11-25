@@ -478,12 +478,10 @@ class StepGapTrainer:
             if not torch.is_tensor(sp) or tuple(sp.shape) != tuple(_local(lp).shape):
                 return None, f"checkpoint parameter[{idx}] shape mismatch"
         optim_raw = data.get("optim_state")
+        if optim_raw is None:
+            return None, "missing checkpoint optim_state"
         try:
-            optim_clean = (
-                _validate_optim_state(optim_raw, live_params, len(self.optimizer.param_groups))
-                if optim_raw is not None
-                else None
-            )
+            optim_clean = _validate_optim_state(optim_raw, live_params, len(self.optimizer.param_groups))
             rng_torch = _validate_rng_tensor(
                 data.get("rng_torch"), name="rng_torch", expected_len=int(self._rng_torch.numel())
             )

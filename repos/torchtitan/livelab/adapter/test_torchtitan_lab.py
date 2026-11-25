@@ -5,7 +5,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import unittest
+from typing import Any
 
 import adapter  # noqa: F401 - puts core/livelab on sys.path
 from adapter.lab import DEFAULT_MODULES, TorchTitanLab, ToyTorchTitanLab
@@ -689,6 +692,11 @@ class TorchTitanRealCudaFsdp2Tests(unittest.TestCase):
             bad_opt_res = tlab.mount_checkpoint_as_s0(bad_torch_dir)
             self.assertFalse(bad_opt_res["ok"])
             self.assertIn("optim_state", bad_opt_res["error"])
+            missing_opt = dict(pt_data, optim_state=None)
+            torch.save(missing_opt, os.path.join(bad_torch_dir, "rank0.pt"))
+            missing_opt_res = tlab.mount_checkpoint_as_s0(bad_torch_dir)
+            self.assertFalse(missing_opt_res["ok"])
+            self.assertIn("optim_state", missing_opt_res["error"])
             self.assertEqual(tlab.check({"steps": 2})["output"], t_base)
 
             t_vis = tlab.patches()["visible"]
@@ -706,6 +714,27 @@ class TorchTitanRealCudaFsdp2Tests(unittest.TestCase):
             # Mounting step=0 checkpoint over populated AdamW state clears optimizer.state bit-exact!
             self.assertTrue(tlab.mount_checkpoint_as_s0(tckpt0_dir)["ok"])
             self.assertEqual(tlab.check({"steps": 2})["output"], t_step0)
+
+    def test_fanout_rank_call_fast_fails_without_waiting_on_hung_sibling(self):
+        """FIRST_EXCEPTION fanout fails promptly when rank 0 raises even if rank 1 blocks."""
+        lab = ToyTorchTitanLab(rpc_timeout=20.0)
+        self.addCleanup(lab.close)
+        unblock = threading.Event()
+        self.addCleanup(unblock.set)
+
+        def _fake_rank_call(rank: int, _method: str, _payload: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+            if rank == 0:
+                raise ConnectionError("rank0 crashed immediately")
+            unblock.wait(timeout=timeout or 20.0)
+            return {"ok": True}
+
+        lab._rank_call = _fake_rank_call  # type: ignore[method-assign]
+        t0 = time.monotonic()
+        with self.assertRaises(ConnectionError):
+            lab._fanout_rank_call("validate_checkpoint", "unused-ckpt-dir", timeout=20.0)
+        elapsed = time.monotonic() - t0
+        unblock.set()
+        self.assertLess(elapsed, 2.0, f"_fanout_rank_call stalled {elapsed:.3f}s waiting for rank1")
 
     def test_real_fsdp2_cuda_checkpoint_to_live_sandbox_s0(self):
         """Input: real CUDA FSDP2 (`fully_shard`, `DTensor`) mid-run step-4 checkpoint mount.

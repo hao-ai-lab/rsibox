@@ -414,6 +414,11 @@ class AsyncShadowReplenisher:
                         return False
                     self._condition.wait(timeout=remaining)
 
+    def wake(self) -> None:
+        """Wake any callers blocked in `wait(..., until=...)` so external predicates re-evaluate immediately."""
+        with self._condition:
+            self._condition.notify_all()
+
     def close(self, timeout_s: float | None = 5.0) -> bool:
         """Signal cancellation, drop pending work, and join any active worker."""
         with self._condition:
