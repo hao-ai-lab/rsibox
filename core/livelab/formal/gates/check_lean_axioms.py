@@ -28,17 +28,19 @@ FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("implemented_by", re.compile(r"\bimplemented_by\b")),
     ("extern", re.compile(r"(?:@|attribute\s*)\[[^\]]*\bextern\b")),
     ("macro/syntax/elab", re.compile(r"\b(?:macro|macro_rules|syntax|elab|elab_rules)\b")),
+    ("dbg_trace", re.compile(r"\b(?:dbg_trace|Macro\.trace)\b")),
 )
 
 IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_'»]")
 CHAR_LITERAL_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^\\'\n])'")
 RAW_STR_RE = re.compile(r'r(#*)"')
+INTERP_PREFIX_RE = re.compile(r"(?<![A-Za-z0-9_'])(?:s|f|m|println)!\s*$")
 IMPORT_RE = re.compile(r"\bimport\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
 THEOREM_KW_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem(?![A-Za-z0-9_'])")
 SCOPE_RE = re.compile(
     r"(?<![A-Za-z0-9_'])(?:"
     r"namespace\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
-    r"|end(?:[ \t]+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*))?"
+    r"|end(?:[ \t]+([^\s:(\[{]+))?"
     r"|theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
     r")(?=$|\s|[:(\[{])"
 )
@@ -100,13 +102,10 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
                 break
             out.append('""' + "\n" * text[m_raw.end() : end_raw].count("\n"))
             i = end_raw + len(closing)
-        elif two == '!"' and i >= 1 and text[i - 1] in ("s", "f", "m") and (i == 1 or not IDENT_CHAR_RE.match(text[i - 2])):
-            out.append('!"')
-            stack.append(("interp", 0))
-            i += 2
         elif ch == '"':
+            kind = "interp" if INTERP_PREFIX_RE.search("".join(out[-64:])) else "string"
             out.append('"')
-            stack.append(("string", 0))
+            stack.append((kind, 0))
             i += 1
         elif ch == "«":
             end_q = text.find("»", i + 1)

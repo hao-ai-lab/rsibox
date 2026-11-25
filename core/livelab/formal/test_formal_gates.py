@@ -221,6 +221,10 @@ class FormalGatesTest(unittest.TestCase):
             ("extern", "attribute [extern \"c_fn\"] f\ntheorem ok : True := trivial\n"),
             ("sorry", "def q : Char := '\"'\ntheorem ok : True := by sorry\n"),
             ("sorry", 'def x := s!"{ /- " -/ 0 } /- "\ntheorem evil : True := by sorry\ndef y := "-/"\n'),
+            ("axiom", 'def x := s! "{ /- " -/ 1 }"\naxiom fake : False\ntheorem ok : True := trivial\n'),
+            ("axiom", 'def x := f! "{ /- " -/ 1 }"\naxiom fake : False\ntheorem ok : True := trivial\n'),
+            ("axiom", 'def x := println!"{ /- " -/ 1 }"\naxiom fake : False\ntheorem ok : True := trivial\n'),
+            ("axiom", 'def x := println! "{ /- " -/ 1 }"\naxiom fake : False\ntheorem ok : True := trivial\n'),
             ("sorry", 'def p := panic!"{ "\ntheorem evil : True := by sorry\n'),
             ("sorry", 'def raw := r##" " "##\ntheorem evil : True := by sorry\n'),
             ("non-Init import", "import Init import Lean\ntheorem ok : True := trivial\n"),
@@ -298,6 +302,16 @@ class FormalGatesTest(unittest.TestCase):
             )
             errs = check_lean_axioms.check_lean_axioms(root)
             self.assertTrue(any("outside RsiboxFormal namespace" in e for e in errs), errs)
+
+        # `end RsiboxFormal!` must not backtrack to bare `end`.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_lean_fixture(
+                root,
+                inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal!\n",
+            )
+            errs = check_lean_axioms.check_lean_axioms(root)
+            self.assertTrue(any("mismatched 'end' scope" in e for e in errs), errs)
 
     def test_verify_axioms_output_strict_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
