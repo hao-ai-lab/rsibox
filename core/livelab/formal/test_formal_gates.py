@@ -228,6 +228,8 @@ class FormalGatesTest(unittest.TestCase):
             ("macro/syntax/elab", 'macro "#print" "axioms" ident : command => `(pure ())\ntheorem ok : True := trivial\n'),
             ("invalid theorem name", "theorem «hidden4» : True := trivial\n"),
             ("invalid theorem name", "theorem A.cheat : True := trivial\n"),
+            ("unparsed theorem declaration", "theorem ok! : True := trivial\n"),
+            ("unparsed theorem declaration", "theorem okα : True := trivial\n"),
             ("forbidden namespace", "namespace Evil\ntheorem ok : True := trivial\nend Evil\n"),
             ("forbidden namespace", "namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n"),
             ("duplicate theorem name", "theorem ok : True := trivial\ntheorem ok : True := trivial\n"),
@@ -286,6 +288,16 @@ class FormalGatesTest(unittest.TestCase):
             errs = check_lean_axioms.check_lean_axioms(root)
             self.assertTrue(any("disallowed line" in e for e in errs), errs)
             self.assertTrue(any("missing '#print axioms RsiboxFormal.ok'" in e for e in errs), errs)
+
+        # `namespace RsiboxFormal!` must not match `namespace RsiboxFormal`.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_lean_fixture(
+                root,
+                inv_body="namespace RsiboxFormal!\ntheorem ok : True := trivial\nend RsiboxFormal!\n",
+            )
+            errs = check_lean_axioms.check_lean_axioms(root)
+            self.assertTrue(any("outside RsiboxFormal namespace" in e for e in errs), errs)
 
     def test_verify_axioms_output_strict_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

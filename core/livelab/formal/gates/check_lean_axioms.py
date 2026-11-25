@@ -40,7 +40,7 @@ SCOPE_RE = re.compile(
     r"namespace\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
     r"|end(?:[ \t]+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*))?"
     r"|theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)"
-    r")(?![A-Za-z0-9_'])"
+    r")(?=$|\s|[:(\[{])"
 )
 VERIFY_IMPORT_LINE_RE = re.compile(r"^import\s+RsiboxFormal$")
 VERIFY_PRINT_LINE_RE = re.compile(r"^#print\s+axioms\s+RsiboxFormal\.[A-Za-z_][A-Za-z0-9_']*$")
