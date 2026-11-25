@@ -11,6 +11,7 @@ docs/
   concepts.md                     plain-English overview of rsibox, hot-reload layers, witness, and rollback
   engines.md                      supported ML engines, conformance status, and repository layout
   mechanisms.md                   restart boundaries, Dynamo GMS + Snapshot benchmarks, and CPU tests
+  services.md                     shared control-plane services (S1 Memory shipped, S2-S6 planned)
   lessons.md                      framework lessons from building an RSIBox sandbox
   kernels-and-graphs.md           bytecode swap, Triton @jit rebuild, CUDA graphs, execution checks, and warm-cache restart taxes
   agent-teams-and-contention.md   multi-agent GPU contention, SandboxPool scaling, and team topology trade-offs
@@ -32,6 +33,7 @@ Rules:
 - [RSIBox concepts](concepts.md): plain-English overview of `rsibox` vs. `core/livelab/`, hot-reload layers, execution proof (`witness`), journaled rollback, restart boundaries, and the sandbox verification suite.
 - [Supported engines & benchmarks](engines.md): summary table across all supported ML engines, headline speedups, and repository layout.
 - [Restart boundaries, interface & tests](mechanisms.md): full restart-boundary table, NVIDIA Dynamo GMS & Snapshot integration benchmarks, and CPU test commands.
+- [Shared control-plane services (`rsibox.services`)](services.md): unified S1 GPU memory & state service (`MemoryService`, `MemoryHandle`, `SnapshotLease`) and S2–S6 roadmap composed beneath `core/livelab/kernel/`.
 - [Lessons from building an RSIBox sandbox](lessons.md): framework lessons and rules for applying them.
 - [Bytecode swap, kernel rebuild, and CUDA graph replay](kernels-and-graphs.md): why Python bytecode swaps stop at `@triton.jit` and `CUDAGraph` boundaries, how `core/livelab/kernel/jit.py` rebuilds kernels in place with zero-recompile undo, how the two-ledger execution check (`live` vs. `capture`) prevents false positives, what selective graph recapture does today in the vLLM sandbox, the target design (not implemented) for lazy recapture and for updating all ~50 shape buckets at once (`cuGraphExecKernelNodeSetParams`, `cuGraphExecUpdate`), and how warm-cache restart taxes break down across vLLM, Megatron-LM, and FastVideo.
 - [Multi-agent GPU contention and agent-team topologies](agent-teams-and-contention.md): empirical NVIDIA B200 study (`112/112` SHA-256 hash-chained `SandboxPool` traces, `3,226` leases across 5 live engines including `TorchTitan` FSDP2) evaluating shared-pool live hot-reload vs. restarts (`43.7×–54.4×` clean, `399.2` edits/min at `N = 24`), Dynamo GMS Standby Shadow crash failover & sub-millisecond `SIGKILL` fast-fail, circuit-breaker + `max_slots_per_agent=1` rogue-agent isolation, online slot healing (`heal_slot()`), zero-restart `3 → 2 → 3` elastic scaling (`drain_slot()` / `add_slot()`), priority/aging/elastic role-borrowing scheduling, and 6-layer full-stack resilience (`EXP-A`–`EXP-H4`).
