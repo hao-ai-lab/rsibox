@@ -906,6 +906,74 @@ class SglangShadowPromoterTests(unittest.TestCase):
             for lab_obj in (primary, sh1, sh2, sh3, sh4):
                 lab_obj.close()
 
+    def test_dead_head_shadow_filtered_and_skipped_and_bystander_survives_targeted_fallback(self) -> None:
+        """Golden regression (#248): dead/unclean head shadows do not inflate `pending_count()`
+        or block promotion of healthy shadows queued behind them, and a real spawned co-process
+        bystander `ToySglangLab` stays alive and operational across `_TargetedFallbackDriver` respawn."""
+        # (a) [dead_shadow, healthy_shadow] queue -> pending_count() == 1 and failover promotes healthy_shadow.
+        primary = ToySglangLab(tp_size=1)
+        dead_shadow = ToySglangLab(tp_size=1)
+        healthy_shadow = ToySglangLab(tp_size=1)
+        _attach_fake_memory_saver(dead_shadow, [])
+        _attach_fake_memory_saver(healthy_shadow, [])
+        healthy_engine = healthy_shadow.engine
+        try:
+            with _patch_pause_io_types(primary.io_module):
+                promoter = SglangShadowPromoter()
+                self.assertTrue(promoter.park_shadow(dead_shadow)["ok"])
+                self.assertTrue(promoter.park_shadow(healthy_shadow)["ok"])
+                self.assertEqual(promoter.pending_count(), 2)
+
+                # Kill dead_shadow's worker process while keeping healthy_shadow alive.
+                for proc in dead_shadow.engine.procs:
+                    proc.kill()
+                    proc.join(timeout=5.0)
+                self.assertFalse(dead_shadow.engine.alive())
+                self.assertTrue(healthy_shadow.engine.alive())
+                self.assertEqual(promoter.pending_count(), 1)
+
+                primary.recovery_driver = promoter.recovery_driver()
+                primary.session.fault("participant_failed", "primary poisoned", "clean")
+                primary.dirty = True
+                res = primary.reset("respawn")
+                self.assertTrue(res["ok"], res)
+                self.assertEqual(res["driver"], "standby_shadow")
+                self.assertIs(primary.engine, healthy_engine)
+                self.assertIsNone(dead_shadow.engine)
+                self.assertEqual(promoter.pending_count(), 0)
+                self.assertFalse(primary.session.poisoned())
+                self.assertTrue(primary.check()["ok"])
+        finally:
+            primary.close()
+            dead_shadow.close()
+            healthy_shadow.close()
+
+        # (b) Real spawned co-process bystander ToySglangLab stays alive & operational across _TargetedFallbackDriver.
+        from rsibox.warm import DefaultRespawnDriver
+
+        fb_primary = ToySglangLab(tp_size=1)
+        bystander = ToySglangLab(tp_size=1)
+        try:
+            bystander_base = bystander.check()
+            self.assertTrue(bystander_base["ok"], bystander_base)
+            fb_primary.recovery_driver = make_shadow_recovery_driver(fallback_driver=DefaultRespawnDriver())
+            fb_primary.session.fault("participant_failed", "primary poisoned with empty shadow pool", "clean")
+            fb_primary.dirty = True
+
+            fb_res = fb_primary.reset("respawn")
+            self.assertTrue(fb_res["ok"], fb_res)
+            self.assertEqual(fb_res["driver"], "default_respawn")
+            self.assertEqual(fb_res["fallback_from"], "standby_shadow")
+            self.assertTrue(fb_primary.check()["ok"])
+
+            self.assertTrue(bystander.engine.alive(), "co-process bystander ToySglangLab must stay alive")
+            bystander_after = bystander.check()
+            self.assertTrue(bystander_after["ok"], bystander_after)
+            self.assertEqual(bystander_after["output"], bystander_base["output"])
+        finally:
+            fb_primary.close()
+            bystander.close()
+
 
 if __name__ == "__main__":
     unittest.main()

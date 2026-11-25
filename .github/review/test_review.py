@@ -7,10 +7,11 @@ whether the checker must accept or reject it.
 Run: python3 .github/review/test_review.py -v
 """
 import sys, unittest
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from review import check  # noqa: E402
+from review import check, facts  # noqa: E402
 
 TITLE = "feat(vllm): replay PR 62240 in the live lab"
 BODY = """## What and why
@@ -67,6 +68,22 @@ class Accepts(unittest.TestCase):
     def test_code_span_unwrapped(self):
         new = rewrite("We hot-swap `sparse_attn_indexer` from", "We hot-swap sparse_attn_indexer from")
         self.assertEqual(check(TITLE, BODY, TITLE, new), [])
+
+    def test_prose_commas_after_numbers_and_thousand_separators(self):
+        """Trailing prose commas (0, 8, >=1, 512,) must not attach to numbers, while valid
+        thousand-grouped numbers (1,000, 1,159.11) stay whole across prose and code spans."""
+        sample = "Ranks 0, 8, >=1, 512, `0,`, `1,000`, and 1,159.11 ms."
+        self.assertEqual(
+            facts(sample)["numbers"],
+            Counter({"0": 2, "8": 1, ">=1": 1, "512": 1, "1,000": 1, "1,159.11": 1}),
+        )
+        body = BODY + "\nConfigured ranks >=1, 0, 8, 512, and took 1,159.11 ms across 1,000 steps.\n"
+        new = rewrite(
+            "Configured ranks >=1, 0, 8, 512, and took 1,159.11 ms across 1,000 steps.",
+            "Configured ranks >=1 and 0, 8 and 512 (took 1,159.11 ms over 1,000 steps).",
+            body,
+        )
+        self.assertEqual(check(TITLE, body, TITLE, new), [])
 
 
 class Rejects(unittest.TestCase):

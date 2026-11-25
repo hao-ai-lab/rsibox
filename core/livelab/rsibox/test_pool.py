@@ -3475,6 +3475,41 @@ class SandboxPoolTests(unittest.TestCase):
         r_kb = kb_pool.run_isolated("kb-after", lambda lab, _l: lab.check(), timeout_s=2.0)
         self.assertTrue(r_kb["ok"] and r_kb["slot_id"] == "skb", r_kb)
 
+        # 8. Non-blocking drain_slot(..., timeout_s=0.0) on a busy slot MUST NOT kill queued role waiters (#256).
+        z0, z1 = self._make_toy_lab(), self._make_toy_lab()
+        zpool = SandboxPool([PoolSlot("zdev", z0, role="dev"), PoolSlot("zeval", z1, role="eval")])
+        self.addCleanup(zpool.close)
+        z_hold = zpool.acquire("z-holder", role="eval", timeout_s=2.0)
+        waiter_results: list[str] = []
+        waiter_errors: list[BaseException] = []
+        t_zw = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: waiter_results.append(
+                    zpool.run_isolated("z-waiter", lambda lab, _l: lab.check(), role="eval", timeout_s=5.0)["slot_id"]
+                ),
+                waiter_errors,
+            ),
+            daemon=True,
+        )
+        t_zw.start()
+        deadline = time.monotonic() + 2.0
+        while len(zpool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(len(zpool._waiters), 1)
+        with self.assertRaises(PoolTimeoutError):
+            zpool.drain_slot("zeval", timeout_s=0.0)
+        self.assertEqual(zpool.metrics()["draining_slots"], [])
+        self.assertEqual(len(zpool._waiters), 1)
+        self.assertIsNone(zpool._waiters[0].failure)
+        z_hold.release()
+        t_zw.join(timeout=5.0)
+        self.assertFalse(t_zw.is_alive())
+        self.assertEqual(waiter_errors, [])
+        self.assertEqual(waiter_results, ["zeval"])
+        # Non-blocking drain_slot(..., timeout_s=0.0) on an idle slot still drains immediately.
+        dr_idle = zpool.drain_slot("zeval", timeout_s=0.0)
+        self.assertTrue(dr_idle["ok"] and dr_idle["drained"])
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
