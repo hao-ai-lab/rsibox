@@ -6,6 +6,7 @@
     rsibox wait | status | info | events | receipts | source MODULE
     rsibox install (--file MODULE=PATH ... | --patch FILE | --diff FILE) [--accept CHECK ...]
     rsibox check [--workload JSON] | reset [--kind state|respawn] | uninstall [--id TXN]
+    rsibox verify-trace PATH [PATH ...] [--expected-count N --expected-hash SHA] [--json]
 
 Client commands read `RSIBOX` (a box file) or `RSIBOX_URL` + `RSIBOX_TOKEN`; `--box FILE`
 overrides them. Exit code: 0 when the reply is ok, 2 for a refused or aborted install, else 1.
@@ -13,6 +14,7 @@ overrides them. Exit code: 0 when the reply is ok, 2 for a refused or aborted in
 import argparse
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -141,6 +143,71 @@ def _call(a):
     return 0 if reply.get("ok") else 1
 
 
+def _verify_trace(a, ap):
+    has_count = a.expected_count is not None
+    has_hash = a.expected_hash is not None
+    if has_count != has_hash:
+        ap.error("--expected-count and --expected-hash must be given together")
+    expected_head = None
+    if has_count:
+        if len(a.paths) != 1:
+            ap.error("--expected-count/--expected-hash require a single trace path")
+        if a.expected_count < 0:
+            ap.error("--expected-count must be >= 0")
+        expected_hash = a.expected_hash.strip()
+        if not expected_hash:
+            ap.error("--expected-hash must be non-empty")
+        if expected_hash != "genesis":
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
+                ap.error("--expected-hash must be 'genesis' or a 64-character hex SHA-256 digest")
+            expected_hash = expected_hash.lower()
+        if a.expected_count == 0 and expected_hash != "genesis":
+            ap.error("--expected-count 0 requires --expected-hash genesis")
+        if a.expected_count > 0 and expected_hash == "genesis":
+            ap.error("--expected-hash genesis requires --expected-count 0")
+        expected_head = (a.expected_count, expected_hash)
+
+    from .pool import verify_trace
+
+    results = []
+    for path in a.paths:
+        res = verify_trace(path, expected_head=expected_head)
+        head = list(res["head"]) if "head" in res else None
+        results.append({
+            "path": path,
+            "ok": bool(res["ok"]),
+            "count": int(res.get("count", 0)),
+            "head": head,
+            "line": res.get("line"),
+            "error": res.get("error"),
+        })
+    passed = sum(1 for item in results if item["ok"])
+    failed = len(results) - passed
+    total_records = sum(item["count"] for item in results)
+    summary = {
+        "ok": failed == 0,
+        "checked": len(results),
+        "passed": passed,
+        "failed": failed,
+        "total_records": total_records,
+        "results": results,
+    }
+    if a.json:
+        print(json.dumps(summary, indent=1))
+    else:
+        for item in results:
+            if item["ok"]:
+                head = item["head"] or [0, "genesis"]
+                digest = head[1] if head[1] == "genesis" else f"{head[1][:12]}..."
+                print(f"OK   {item['path']} ({item['count']} records, head={head[0]}:{digest})")
+            else:
+                loc = f"line {item['line']}: " if item["line"] is not None else ""
+                print(f"FAIL {item['path']} ({item['count']} verified; {loc}{item['error']})")
+        if len(results) > 1:
+            print(f"Summary: {passed}/{len(results)} traces OK ({total_records} total records)")
+    return 0 if summary["ok"] else 1
+
+
 _LAB_COMMANDS = frozenset(("list", "conformance", "survey", "ctl", "doctor"))
 
 
@@ -216,6 +283,12 @@ def main(argv=None):
     client_cmd("reset", "reset volatile state").add_argument("--kind", default="state")
     client_cmd("uninstall", "undo the newest edit, or down to --id").add_argument("--id")
 
+    vt = sub.add_parser("verify-trace", help="verify SHA-256 hash-chained SandboxPool JSONL trace file(s)")
+    vt.add_argument("paths", nargs="+", metavar="PATH", help="trace JSONL file path(s)")
+    vt.add_argument("--expected-count", type=int, default=None, help="expected record count (requires --expected-hash)")
+    vt.add_argument("--expected-hash", default=None, help="expected tail SHA-256 hash (requires --expected-count)")
+    vt.add_argument("--json", action="store_true", help="emit machine-readable JSON summary")
+
     a = ap.parse_args(argv)
     if a.command == "serve":
         return _serve(a)
@@ -225,6 +298,8 @@ def main(argv=None):
         reply = L.down(a.state)
         print(json.dumps(reply, indent=1, default=str))
         return 0 if reply["ok"] else 1
+    if a.command == "verify-trace":
+        return _verify_trace(a, vt)
     return _call(a)
 
 
