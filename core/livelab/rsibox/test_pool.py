@@ -2783,6 +2783,371 @@ class SandboxPoolTests(unittest.TestCase):
         k_hold2.release()
         self.assertEqual(cancel_pool.metrics()["agent_active_slots"], {})
 
+    def test_heal_slot_rehabilitates_quarantined_slot_replaces_lab_and_wakes_waiters(self) -> None:
+        """Golden case: online heal_slot() rehabilitates quarantined slots in-place or via replacement lab,
+        keeps healthy sibling slots serving uninterrupted, wakes queued waiters immediately, and fails closed
+        on bad inputs, duplicate labs, failed recovery, or pool close races."""
+        # 1. Transient respawn failure quarantines s1 while s0 keeps serving; in-place heal_slot("s1")
+        #    recovers s1 online and immediately wakes a queued waiter!
+        lab0 = self._make_toy_lab()
+        lab1 = self._make_toy_lab()
+        orig_reset1 = lab1.reset
+        fail_respawn = [True]
+        heal_entered = threading.Event()
+        heal_allow = threading.Event()
+
+        def flaky_reset1(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn" and fail_respawn[0]:
+                return {"ok": False, "error": "transient-port-bind-error"}
+            if kind == "respawn":
+                heal_entered.set()
+                heal_allow.wait(timeout=5.0)
+            return orig_reset1(kind)
+
+        lab1.reset = flaky_reset1  # type: ignore[method-assign]
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        trace_path = os.path.join(tmpdir.name, "heal_slot.jsonl")
+        pool = SandboxPool(
+            [PoolSlot("s0", lab0, role="dev"), PoolSlot("s1", lab1, role="eval")],
+            trace_path=trace_path,
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(pool.close)
+
+        # Validation & healthy-slot idempotency
+        with self.assertRaises(ValueError):
+            pool.heal_slot("")
+        with self.assertRaises(ValueError):
+            pool.heal_slot("nonexistent")
+        with self.assertRaises(TypeError):
+            pool.heal_slot("s0", close_replaced="yes")  # type: ignore[arg-type]
+        noop = pool.heal_slot("s0")
+        self.assertEqual(noop, {"ok": True, "slot_id": "s0", "healed": False, "status": "healthy", "recovery_s": 0.0, "error": None})
+        with self.assertRaises(PoolError):
+            pool.heal_slot("s0", lab=self._make_toy_lab())
+
+        # Poison s1 so its first respawn fails and quarantines s1.
+        def _poison(plab, _l):
+            plab.session.fault("participant_failed", "transient-oom", "clean")
+            raise RuntimeError("transient-oom")
+
+        r_bad = pool.run_isolated("agent-a", _poison, role="eval", timeout_s=2.0)
+        self.assertFalse(r_bad["ok"])
+        self.assertEqual(r_bad["status_after"], "quarantined")
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["s1"])
+        self.assertEqual(pool.metrics()["healed_slots"], 0)
+        # While s1 is still failing respawn, heal_slot("s1") fails closed and keeps s1 quarantined.
+        failed_heal = pool.heal_slot("s1")
+        self.assertFalse(failed_heal["ok"])
+        self.assertFalse(failed_heal["healed"])
+        self.assertEqual(failed_heal["status"], "quarantined")
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["s1"])
+        self.assertEqual(pool.metrics()["healed_slots"], 0)
+
+        # Now transient condition clears; heal_slot("s1") runs outside pool lock while s0 keeps serving!
+        fail_respawn[0] = False
+        heal_res: list[dict[str, Any]] = []
+
+        def _do_heal() -> None:
+            heal_res.append(pool.heal_slot("s1"))
+
+        t_heal = threading.Thread(target=_do_heal)
+        t_heal.start()
+        self.assertTrue(heal_entered.wait(timeout=5.0))
+        # Concurrent heal_slot("s1") while healing is in-flight must reject with PoolError (in_use).
+        with self.assertRaises(PoolError):
+            pool.heal_slot("s1")
+        # Healthy sibling slot s0 continues serving uninterrupted while s1 is healing!
+        r_s0 = pool.run_isolated("healthy-dev", lambda lab, _l: lab.check(), role="dev", timeout_s=2.0)
+        self.assertTrue(r_s0["ok"] and r_s0["slot_id"] == "s0", r_s0)
+
+        # Queue a waiter holding s0 busy so we can also prove heal_slot immediately dispatches s1 to a waiter!
+        s0_hold = pool.acquire("dev-holder", role="dev", timeout_s=2.0)
+        waiter_got: list[str] = []
+
+        def _wait_any() -> None:
+            with pool.lease("waiter-any", role=None, timeout_s=5.0) as lease:
+                waiter_got.append(lease.slot_id)
+
+        t_wait = threading.Thread(target=_wait_any)
+        t_wait.start()
+        deadline = time.monotonic() + 2.0
+        while len(pool._waiters) < 1 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(waiter_got, [])
+        # Let s1 finish healing -> s1 MUST immediately wake waiter-any even while s0 is still held!
+        heal_allow.set()
+        t_heal.join(timeout=5.0)
+        t_wait.join(timeout=5.0)
+        s0_hold.release()
+        self.assertEqual(len(heal_res), 1)
+        self.assertTrue(heal_res[0]["ok"] and heal_res[0]["healed"], heal_res[0])
+        self.assertEqual(waiter_got, ["s1"])
+        self.assertEqual(pool.metrics()["quarantined_slots"], [])
+        self.assertEqual(pool.metrics()["healed_slots"], 1)
+
+        # 2. Replacement-lab heal_slot(slot_id, lab=fresh_lab, close_replaced=True) + duplicate-lab rejection.
+        fail_respawn[0] = True
+        r_bad2 = pool.run_isolated("agent-b", _poison, role="eval", timeout_s=2.0)
+        self.assertEqual(r_bad2["status_after"], "quarantined")
+        self.assertEqual(pool.metrics()["quarantined_slots"], ["s1"])
+        # Reject replacing s1 with lab0 (already owned by s0)!
+        with self.assertRaises(ValueError):
+            pool.heal_slot("s1", lab=lab0)
+        old_closed = [False]
+        orig_close1 = lab1.close
+
+        def _track_close1():
+            old_closed[0] = True
+            return orig_close1()
+
+        lab1.close = _track_close1  # type: ignore[method-assign]
+        fresh_lab = self._make_toy_lab()
+        rep = pool.heal_slot("s1", lab=fresh_lab, close_replaced=True)
+        self.assertTrue(rep["ok"] and rep["healed"], rep)
+        self.assertTrue(old_closed[0])
+        self.assertEqual(pool.metrics()["quarantined_slots"], [])
+        self.assertEqual(pool.metrics()["healed_slots"], 2)
+        r_eval = pool.run_isolated("eval-after-replace", lambda lab, _l: lab.check(), role="eval", timeout_s=2.0)
+        self.assertTrue(r_eval["ok"] and r_eval["slot_id"] == "s1", r_eval)
+
+        # 3. Pool closed during in-flight heal_slot fails closed and closes slot cleanly once.
+        lab_c = self._make_toy_lab()
+        orig_rc = lab_c.reset
+        c_fail = [True]
+        c_entered = threading.Event()
+        c_allow = threading.Event()
+
+        def _slow_rc(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn" and c_fail[0]:
+                return {"ok": False, "error": "die"}
+            if kind == "respawn":
+                c_entered.set()
+                c_allow.wait(timeout=5.0)
+            return orig_rc(kind)
+
+        lab_c.reset = _slow_rc  # type: ignore[method-assign]
+        close_count = [0]
+        orig_cc = lab_c.close
+
+        def _count_cc():
+            close_count[0] += 1
+            return orig_cc()
+
+        lab_c.close = _count_cc  # type: ignore[method-assign]
+        cpool = SandboxPool([PoolSlot("sc", lab_c)], close_labs=True)
+        cpool.run_isolated("x", _poison, timeout_s=2.0)
+        self.assertEqual(cpool.metrics()["quarantined_slots"], ["sc"])
+        c_fail[0] = False
+        c_res: list[dict[str, Any]] = []
+        t_ch = threading.Thread(target=lambda: c_res.append(cpool.heal_slot("sc")))
+        t_ch.start()
+        self.assertTrue(c_entered.wait(timeout=5.0))
+        cpool.close(close_labs=True)
+        self.assertEqual(close_count[0], 0)
+        c_allow.set()
+        t_ch.join(timeout=5.0)
+        self.assertEqual(len(c_res), 1)
+        self.assertFalse(c_res[0]["ok"])
+        self.assertEqual(c_res[0]["status"], "closed")
+        self.assertEqual(close_count[0], 1)
+        with self.assertRaises(PoolClosedError):
+            cpool.heal_slot("sc")
+
+        # 4. SHA-256 trace verification on primary pool.
+        m = pool.metrics()
+        vt = verify_trace(trace_path, expected_head=m["trace_head"])
+        self.assertTrue(vt["ok"] and vt["count"] == m["total_leases"], vt)
+
+    def test_heal_slot_box_concurrent_race_base_exception_and_cap_dispatch(self) -> None:
+        """Golden regression: Box/adapter/proxy validation, concurrent two-slot replacement-lab race,
+        BaseException cleanup, utilization accounting, and cap-aware primary-before-borrow wakeup."""
+        def _poison(plab, _l):
+            plab.session.fault("participant_failed", "boom", "clean")
+            raise RuntimeError("boom")
+
+        # 1. Box replacement, non-ready Box rejection, same-Box/adapter/fenced-proxy rejection (P1-2).
+        box0 = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box1 = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box0.boot()
+        box1.boot()
+        self.addCleanup(box0.close)
+        self.addCleanup(box1.close)
+        orig_b1_reset = box1.lab.reset
+        box1.lab.reset = lambda kind="state": {"ok": False, "error": "dead-box"} if kind == "respawn" else orig_b1_reset(kind)  # type: ignore[method-assign]
+        bpool = SandboxPool([PoolSlot("b0", box0), PoolSlot("b1", box1)], close_labs=False)
+        self.addCleanup(bpool.close)
+
+        # Active leased healthy slot rejects heal_slot() with PoolError; fenced proxy raises TypeError.
+        with bpool.acquire("holder", timeout_s=2.0) as held_lease:
+            self.assertEqual(held_lease.slot_id, "b0")
+            with self.assertRaises(PoolError):
+                bpool.heal_slot("b0")
+            # Quarantine b1 while b0 is held.
+            r_q = bpool.run_isolated("fault-agent", _poison, timeout_s=2.0)
+            self.assertEqual(r_q["slot_id"], "b1")
+            self.assertEqual(r_q["status_after"], "quarantined")
+            with self.assertRaises(TypeError):
+                bpool.heal_slot("b1", lab=held_lease.lab)
+
+        # Reject same Box, Box.lab, and _BoxLabAdapter (never self-close active Box!).
+        for dup in (box1, box1.lab, bpool._slots["b1"].lab, box0, box0.lab):
+            with self.assertRaises(ValueError):
+                bpool.heal_slot("b1", lab=dup, close_replaced=True)
+        self.assertEqual(box1.state, "ready")
+        # Reject non-ready (unbooted & closed) Boxes.
+        unbooted_box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        with self.assertRaises(ValueError):
+            bpool.heal_slot("b1", lab=unbooted_box)
+        closed_box = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        closed_box.boot()
+        closed_box.close()
+        with self.assertRaises(ValueError):
+            bpool.heal_slot("b1", lab=closed_box)
+        # Valid ready replacement Box succeeds, closes replaced box1, and serves work.
+        box2 = Box(lambda receipts=None: toy_lab.ToyLab(ranks=2, receipts=receipts), spec="toy")
+        box2.boot()
+        self.addCleanup(box2.close)
+        h_box = bpool.heal_slot("b1", lab=box2, close_replaced=True)
+        self.assertTrue(h_box["ok"] and h_box["healed"], h_box)
+        self.assertEqual(box1.state, "closed")
+        self.assertEqual(box2.state, "ready")
+        self.assertIs(bpool._slots["b1"].slot.box, box2)
+        with bpool.acquire("hold-b0", timeout_s=2.0):
+            r_b1 = bpool.run_isolated("check-b1", lambda lab, _l: lab.check(), timeout_s=2.0)
+            self.assertTrue(r_b1["ok"] and r_b1["slot_id"] == "b1", r_b1)
+
+        # 2. Concurrent heal_slot("s0", lab=fresh) vs heal_slot("s1", lab=fresh) prevents aliasing (P1-1).
+        rl0, rl1 = self._make_toy_lab(), self._make_toy_lab()
+        for rl in (rl0, rl1):
+            orig_r = rl.reset
+            rl.reset = lambda kind="state", _o=orig_r: {"ok": False, "error": "fail"} if kind == "respawn" else _o(kind)  # type: ignore[method-assign]
+        rpool = SandboxPool([PoolSlot("s0", rl0), PoolSlot("s1", rl1)])
+        self.addCleanup(rpool.close)
+        rpool.run_isolated("a0", _poison, timeout_s=2.0)
+        rpool.run_isolated("a1", _poison, timeout_s=2.0)
+        self.assertEqual(sorted(rpool.metrics()["quarantined_slots"]), ["s0", "s1"])
+
+        fresh = self._make_toy_lab()
+        orig_fresh_reset = fresh.reset
+        fresh_entered = threading.Event()
+        fresh_allow = threading.Event()
+
+        def _gated_fresh_reset(kind: str = "state") -> dict[str, Any]:
+            if kind in ("state", "respawn"):
+                fresh_entered.set()
+                fresh_allow.wait(timeout=5.0)
+            return orig_fresh_reset(kind)
+
+        fresh.reset = _gated_fresh_reset  # type: ignore[method-assign]
+        race_res: list[dict[str, Any]] = []
+        t_h0 = threading.Thread(target=lambda: race_res.append(rpool.heal_slot("s0", lab=fresh)))
+        t_h0.start()
+        self.assertTrue(fresh_entered.wait(timeout=5.0))
+        with self.assertRaises(ValueError):
+            rpool.heal_slot("s1", lab=fresh)
+        fresh_allow.set()
+        t_h0.join(timeout=5.0)
+        self.assertEqual(len(race_res), 1)
+        self.assertTrue(race_res[0]["ok"] and race_res[0]["healed"])
+        self.assertIs(rpool._slots["s0"].lab, fresh)
+        self.assertIsNot(rpool._slots["s1"].lab, fresh)
+        self.assertEqual(rpool.metrics()["quarantined_slots"], ["s1"])
+
+        # 3. Failed heals do not inflate per_slot_utilization, and BaseException cleans up cleanly (P2-1).
+        now = [0.0]
+        qlab = self._make_toy_lab()
+        orig_q_reset = qlab.reset
+        q_mode = ["fail"]
+
+        def _q_reset(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn":
+                now[0] += 10.0
+                if q_mode[0] == "fail":
+                    return {"ok": False, "error": "still-dead"}
+                if q_mode[0] == "interrupt":
+                    raise KeyboardInterrupt("aborted-heal")
+            return orig_q_reset(kind)
+
+        qlab.reset = _q_reset  # type: ignore[method-assign]
+        qpool = SandboxPool([PoolSlot("q0", qlab)], clock=lambda: now[0])
+        self.addCleanup(qpool.close)
+        qpool.run_isolated("a0", _poison, timeout_s=2.0)
+        util_before = qpool.metrics()["per_slot_utilization"]["q0"]
+        failed_probe = qpool.heal_slot("q0")
+        self.assertFalse(failed_probe["ok"])
+        # Pool elapsed grew by 10s during failed heal; busy_s must NOT increase (utilization must not rise).
+        self.assertLessEqual(qpool.metrics()["per_slot_utilization"]["q0"], util_before)
+
+        kb_lab = self._make_toy_lab()
+        orig_kb_reset = kb_lab.reset
+        kb_interrupt = [True]
+
+        def _kb_reset(kind: str = "state") -> dict[str, Any]:
+            if kind in ("state", "respawn") and kb_interrupt[0]:
+                kb_interrupt[0] = False
+                raise KeyboardInterrupt("kb-during-heal")
+            return orig_kb_reset(kind)
+
+        kb_lab.reset = _kb_reset  # type: ignore[method-assign]
+        with self.assertRaises(KeyboardInterrupt):
+            qpool.heal_slot("q0", lab=kb_lab)
+        self.assertFalse(qpool._slots["q0"].in_use)
+        self.assertTrue(qpool._slots["q0"].quarantined)
+        self.assertEqual(qpool._inflight_heal_targets, set())
+        self.assertIs(qpool._slots["q0"].lab, qlab)
+        # Retrying with kb_lab now succeeds cleanly!
+        kb_ok = qpool.heal_slot("q0", lab=kb_lab)
+        self.assertTrue(kb_ok["ok"] and kb_ok["healed"])
+
+        # 4. Cap-aware + primary-before-borrow waiter dispatch on heal_slot() (P2-2).
+        ldev, leval = self._make_toy_lab(), self._make_toy_lab()
+        orig_ev_reset = leval.reset
+        ev_fail = [True]
+        leval.reset = lambda kind="state": {"ok": False, "error": "ev-down"} if (kind == "respawn" and ev_fail[0]) else orig_ev_reset(kind)  # type: ignore[method-assign]
+        dpool = SandboxPool(
+            [PoolSlot("s-dev", ldev, role="dev"), PoolSlot("s-eval", leval, role="eval")],
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(dpool.close)
+        dpool.run_isolated("fault-ev", _poison, role="eval", timeout_s=2.0)
+        self.assertEqual(dpool.metrics()["quarantined_slots"], ["s-eval"])
+        # Hold s-dev under capped_agent so capped_agent is at its max_slots_per_agent=1 cap.
+        dev_hold = dpool.acquire("capped-agent", role="dev", timeout_s=2.0)
+        winners: list[tuple[str, str]] = []
+        done_order: list[str] = []
+
+        def _waiter_task(aid: str, role: str, prio: int, fb: tuple[str, ...] = ()) -> None:
+            with dpool.lease(aid, role=role, priority=prio, fallback_roles=fb, timeout_s=5.0) as l:
+                winners.append((aid, l.slot_id))
+                done_order.append(aid)
+
+        # Queue 3 waiters while s-dev is held and s-eval is quarantined (waiters only fail if no healthy
+        # slot matches when entering; here s-dev is healthy for dev/fallback, and let's start healing s-eval
+        # or queue role=None / fallback=("dev", "eval") so they enter cleanly!):
+        # Specifically: capped-agent (prio=100, role=None), borrower (prio=50, role="dev", fb=("eval",)),
+        # primary-eval (prio=1, role="eval", fb=("dev",)).
+        t_cap = threading.Thread(target=_waiter_task, args=("capped-agent", None, 100))  # type: ignore[arg-type]
+        t_bor = threading.Thread(target=_waiter_task, args=("borrower", "dev", 50, ("eval",)))
+        t_pri = threading.Thread(target=_waiter_task, args=("primary-eval", "eval", 1, ("dev",)))
+        for t in (t_cap, t_bor, t_pri):
+            t.start()
+        deadline = time.monotonic() + 2.0
+        while len(dpool._waiters) < 3 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(len(dpool._waiters), 3)
+        ev_fail[0] = False
+        h_ev = dpool.heal_slot("s-eval")
+        self.assertTrue(h_ev["ok"] and h_ev["healed"], h_ev)
+        t_pri.join(timeout=5.0)
+        # First winner on healed s-eval MUST be primary-eval (skips capped prio=100 & beats Tier-2 borrower prio=50)!
+        self.assertEqual(winners[0], ("primary-eval", "s-eval"))
+        dev_hold.release()
+        t_bor.join(timeout=5.0)
+        t_cap.join(timeout=5.0)
+        self.assertEqual(len(winners), 3)
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:

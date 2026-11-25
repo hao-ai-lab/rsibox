@@ -349,9 +349,12 @@ class SandboxPool:
         self._trace_path, self._clock, self._wall_clock = trace_path, clock, wall_clock
         self._close_labs, self._created_mono = close_labs, clock()
         self._lock, self._trace_lock, self._waiters = threading.Lock(), threading.Lock(), deque()
-        self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0, 0.0
+        self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._healed_slots, self._total_recovery_s = (
+            False, 0, 0, 0, 0, 0.0,
+        )
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         self._agent_active_slots: dict[str, int] = {}
+        self._inflight_heal_targets: set[int] = set()
         self._agent_faults: dict[str, deque[float]] = {}
         self._agent_quarantined_until: dict[str, float | None] = {}
         self._agent_last_reset_mono: dict[str, float] = {}
@@ -628,6 +631,144 @@ class SandboxPool:
                     self._agent_last_reset_mono.get(agent_id, -math.inf), now_mono
                 )
             return was_quarantined
+
+    @staticmethod
+    def _slot_raw_target(slot: PoolSlot) -> Any:
+        return slot.box.lab if (slot.box is not None and slot.box.lab is not None) else (slot.box or slot.lab)
+
+    def heal_slot(self, slot_id: str, *, lab: Any = None, close_replaced: bool = False) -> dict[str, Any]:
+        """Rehabilitate a quarantined slot online (in-place recovery or replacement `lab`/`Box`).
+
+        Runs cleanup/respawn outside the pool lock so healthy sibling slots continue serving
+        uninterrupted, and immediately dispatches the healed slot to any waiting agents.
+        """
+        if not isinstance(slot_id, str) or not slot_id.strip():
+            raise ValueError("slot_id must be a non-empty string")
+        if not isinstance(close_replaced, bool):
+            raise TypeError(f"close_replaced must be a bool, not {type(close_replaced).__name__}")
+        new_box: Box | None = None
+        candidate_lab: Any = None
+        new_raw_id: int | None = None
+        if lab is not None:
+            if isinstance(lab, _FencedLabProxy):
+                raise TypeError("cannot pass a fenced SlotLease.lab proxy to heal_slot")
+            if isinstance(lab, _BoxLabAdapter):
+                lab = lab._box
+            if isinstance(lab, Box):
+                if lab.state != "ready":
+                    raise ValueError(f"Box for slot {slot_id!r} must be ready (state={lab.state!r})")
+                new_box = lab
+                candidate_lab = _BoxLabAdapter(lab)
+                new_raw_id = id(lab.lab if lab.lab is not None else lab)
+            else:
+                candidate_lab = lab
+                new_raw_id = id(lab)
+
+        reserved_target_id: int | None = None
+        with self._lock:
+            if self._closed:
+                raise PoolClosedError("SandboxPool is closed")
+            slot_state = self._slots.get(slot_id)
+            if slot_state is None:
+                raise ValueError(f"unknown slot_id: {slot_id!r}")
+            if slot_state.in_use:
+                raise PoolError(f"slot {slot_id!r} is currently in use")
+            if not slot_state.quarantined:
+                if lab is not None:
+                    raise PoolError(f"slot {slot_id!r} is not quarantined; cannot replace healthy slot lab")
+                return {
+                    "ok": True,
+                    "slot_id": slot_id,
+                    "healed": False,
+                    "status": "healthy",
+                    "recovery_s": 0.0,
+                    "error": None,
+                }
+            if new_raw_id is not None:
+                if new_raw_id in self._inflight_heal_targets:
+                    raise ValueError(f"duplicate underlying lab/box for slot_id: {slot_id!r}")
+                for other_state in self._slots.values():
+                    if id(self._slot_raw_target(other_state.slot)) == new_raw_id:
+                        raise ValueError(f"duplicate underlying lab/box for slot_id: {slot_id!r}")
+            claim_mono = self._clock()
+            if new_raw_id is not None:
+                self._inflight_heal_targets.add(new_raw_id)
+                reserved_target_id = new_raw_id
+            slot_state.in_use = True
+            slot_state.active_since = None
+            slot_state.owner_agent_id = None
+            target_lab = candidate_lab if candidate_lab is not None else slot_state.lab
+
+        finalized = False
+        old_lab_to_close: Any | None = None
+        lab_to_close: Any | None = None
+        try:
+            outcome = self._clean_and_recover_slot(target_lab, force_reset_state=True)
+            finish_mono = self._safe_clock(fallback=claim_mono)
+            with self._lock:
+                if reserved_target_id is not None:
+                    self._inflight_heal_targets.discard(reserved_target_id)
+                    reserved_target_id = None
+                self._total_recovery_s += outcome.recovery_s
+                if self._closed:
+                    lab_to_close = self._complete_slot_locked(
+                        slot_id, finish_mono, False, "SandboxPool closed during heal_slot",
+                    )
+                    finalized = True
+                    result = {
+                        "ok": False,
+                        "slot_id": slot_id,
+                        "healed": False,
+                        "status": "closed",
+                        "recovery_s": round(outcome.recovery_s, 6),
+                        "error": "SandboxPool closed during heal_slot",
+                    }
+                elif outcome.healthy:
+                    if candidate_lab is not None:
+                        prev_lab = slot_state.lab
+                        prev_raw_id = id(self._slot_raw_target(slot_state.slot))
+                        slot_state.lab = candidate_lab
+                        slot_state.slot.lab = candidate_lab
+                        slot_state.slot.box = new_box
+                        if close_replaced and prev_lab is not candidate_lab and prev_raw_id != new_raw_id:
+                            old_lab_to_close = prev_lab
+                    self._healed_slots += 1
+                    self._recoveries += int(outcome.recovered)
+                    lab_to_close = self._complete_slot_locked(
+                        slot_id, finish_mono, True, None, preserve_dirty=False,
+                    )
+                    finalized = True
+                    result = {
+                        "ok": True,
+                        "slot_id": slot_id,
+                        "healed": True,
+                        "status": "base",
+                        "recovery_s": round(outcome.recovery_s, 6),
+                        "error": None,
+                    }
+                else:
+                    reason = outcome.error or "slot heal failed"
+                    lab_to_close = self._complete_slot_locked(slot_id, finish_mono, False, reason)
+                    finalized = True
+                    result = {
+                        "ok": False,
+                        "slot_id": slot_id,
+                        "healed": False,
+                        "status": "quarantined",
+                        "recovery_s": round(outcome.recovery_s, 6),
+                        "error": reason,
+                    }
+        finally:
+            if reserved_target_id is not None:
+                with self._lock:
+                    self._inflight_heal_targets.discard(reserved_target_id)
+            if not finalized:
+                self._finish_slot(
+                    slot_id, self._safe_clock(fallback=claim_mono), False, "heal_slot interrupted",
+                )
+            _close_quietly(old_lab_to_close)
+            _close_quietly(lab_to_close)
+        return result
 
     def _finish_slot(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                      *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0,
@@ -986,6 +1127,7 @@ class SandboxPool:
                 "p95_queue_wait_s": round(_percentile(self._queue_waits, 0.95), 6),
                 "mean_hold_s": round(sum(self._hold_times) / total_leases, 6) if total_leases else 0.0,
                 "total_recovery_s": round(self._total_recovery_s, 6), "recoveries": self._recoveries,
+                "healed_slots": self._healed_slots,
                 "quarantined_slots": [slot_id for slot_id, state in self._slots.items() if state.quarantined],
                 "quarantined_agents": sorted(self._agent_quarantined_until),
                 "circuit_breaker_rejections": self._circuit_breaker_rejections,
