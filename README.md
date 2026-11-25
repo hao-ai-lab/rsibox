@@ -52,6 +52,7 @@ mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_ov
 | **`veRL`** | RL Post-Training | 21 Ray actors (eager & FSDP CG) + coupled `S0` reset | `298 s` | **`36.4 s`** (`12.6 ms` replay) | **8.2×** |
 | **`miles`** | RL Post-Training | Ray rollout + trainer actors + coupled `S0` reset (`38 ms` median commit) | `82.4 s` | **`0.89 s`** | **up to 93×** |
 | **`TorchTitan`** | Training (FSDP2) | PyTorch `fully_shard` (`world_size=1` & `world_size=2` NCCL `TitanMLPNet`) + 2-rank CPU toy, `S0` + RNG reset | `2.69 s` / `5.52 s` | **`0.083 s`** / **`0.255 s`** (`2`-rank cycle) | **32.5× / 21.6×** |
+| **`NeMo-RL`** | RL Post-Training | AutoModel FSDP2 + SGLang GRPO (`ray_participants.py`); 3-participant CPU `11/11` verified; GPU pending | `pending` | `8.5 ms` CPU install (`1.6 ms` undo) | **CPU 11/11 (GPU pending)** |
 
 On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). Full engine tables, per-tier costs, and walkthroughs live in **[`docs/engines.md`](docs/engines.md)**.
 

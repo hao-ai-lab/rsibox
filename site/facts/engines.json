@@ -1,6 +1,6 @@
 {
  "shared_kernel": {
-  "what": "All nine engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
+  "what": "All ten engine labs share one pure-stdlib runtime (core/livelab): transaction kernel (locate, swap, journal, witness, findings, jit, reinit, coordinator, session), shared helpers (rsibox BaseLab/cli/diffs/ipc/proc/harness, forksafe, ray_participants), and the 11-case conformance suite.",
   "conformance": "11 cases c0-c10 (core/livelab/conformance/README.md:11-23)",
   "gpu_fix_receipt": "PR #136 (B200, TP=2)",
   "source": "core/livelab/kernel/README.md; core/livelab/rsibox/; PR #136"
@@ -690,6 +690,31 @@
      "status": "merged_gpu_verified",
      "source": "repos/torchtitan/docs/architecture.md; repos/torchtitan/kb/costs.md; PR #222; PR #254; PR #255",
      "note": "Passed 11/11 CPU conformance on 2-rank ToyTorchTitanLab (c9 0.0142 s install / 0.0045 s undo), 11/11 real-GPU FSDP2 conformance on 1x B200 world_size=1 (57.13 s, 0.083 s live vs 2.689 s cold = 32.5x, c9 0.0541 / 0.0458 s, c8 respawns 2.58-2.80 s, 0 MiB exit), and 11/11 multi-rank FSDP2 NCCL conformance on 2x B200 world_size=2 via PR #254/#255 (239.00 s c0-c10 / 248.34 s suite wall, EXP-F7 5x median warm live cycle 0.255 s [0.1011 s install, 0.0535 s check, 0.0989 s undo+S0] vs 5.515 s cold 2-rank boot+check = 21.63x, c3 parallel fresh parity 34.419 s, c8 104.952 s, max_abs_loss_diff == 0.0). Also verified in EXP-F6 SandboxPool priority=10/0 (357.3 edits/min, 5.47x lower Eval wait)."
+    }
+   ]
+  },
+  {
+   "engine": "NeMo-RL",
+   "upstream": "NVIDIA-NeMo/RL",
+   "folder": "repos/nemo-rl",
+   "mechanisms": [
+    {
+     "name": "3-participant GRPO step-gap live swap & coupled `S0` reset (`ToyNemoRlLab` CPU)",
+     "what": "Spawns 3 isolated worker subprocesses (coordinator0 + AutoModel trainer0 + SGLang rollout0) over AF_UNIX JSON channels using ray_participants.serve, atomically hot-swaps GRPO loss/AdamW/rollout/shared reward helpers in the step gap with per-role abstain + AST witnesses, and restores coupled S0 trainer weights, AdamW moments, rollout weights, refit_version=0, KV cache, RNG, and step_counter on reset('state') and undo.",
+     "startup_cost_removed": "Worker process launch and coupled GRPO policy/rollout initialization.",
+     "measured_saving": null,
+     "status": "merged_cpu_only",
+     "source": "repos/nemo-rl/docs/architecture.md; repos/nemo-rl/kb/costs.md",
+     "note": "Passed 11/11 CPU conformance on 3-participant ToyNemoRlLab (3.823 s c0-c10 sum, c9 0.0076 s install / 0.0015 s undo, c8 respawns 0.105-0.223 s) and 11/11 unit/golden tests with -W error::ResourceWarning."
+    },
+    {
+     "name": "Colocated AutoModel FSDP2 + SGLang GRPO Ray actor swap (`NemoRlLab --real`)",
+     "what": "Reuses core/livelab/ray_participants.py via NemoRlRayParticipant and serve_nemo_rl_actor over handle.__ray_call__.remote(...) for colocated NeMo-RL AutoModel FSDP2 policy workers and SGLang generation workers, with lazy DTensor/AdamW/CUDA RNG S0 snapshot/restore and refit_policy_generation + flush_cache hooks (fail-closed require_nemo_rl_deps guard).",
+     "startup_cost_removed": "Ray placement group, AutoModel FSDP2 initialization, SGLang server boot/CUDA graph capture, and initial policy weight refit.",
+     "measured_saving": null,
+     "status": "planned",
+     "source": "repos/nemo-rl/docs/architecture.md; repos/nemo-rl/kb/costs.md",
+     "note": "Adapter and Ray participant scaffolding implemented and tested on CPU via FakeActor/runtime_factory; real 1x/2x NVIDIA B200 GPU conformance and benchmarks are pending hardware/env staging."
     }
    ]
   }

@@ -15,6 +15,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 | **Transformers** | CPU CI & 1× B200 (`Qwen3-0.6B` / `Qwen3-8B`) | 7.75 s cold → **0.61 s** live (12.8×); H2D hook resume **0.31 s** (15.4 GiB freed) | [architecture](../repos/transformers/docs/architecture.md) · [costs](../repos/transformers/kb/costs.md) |
 | **TRT-LLM** | CPU CI (`ToyTrtllmLab` 11/11) & 1×/2× B200 (`TP=1` & `TP=2` MPI `11/11` conformance + `R1` CUDA-graph model-layer swap + `TrtllmQuiesceHooks`) | `TP=1`: 26.7 s cold / 12.4 s warm → **0.107 s** live (249× / 116×); `TP=2`: **0.275 s** `Qwen3DecoderLayer.forward` `R1` install (`224/224` witness/rank); KV quiesce frees **46.7 GiB** (`15.2 ms` resume) | [architecture](../repos/trtllm/docs/architecture.md) · [costs](../repos/trtllm/kb/costs.md) |
 | **TorchTitan** | CPU CI (2-rank toy) & 1×/2× B200 (FSDP2 `fully_shard` `world_size=1` & `world_size=2` NCCL, synthetic `TitanMLPNet`) | `1×`: 2.69 s cold → **0.083 s** live + S0 reset (32.5×); `2×` NCCL: 5.515 s cold → **0.255 s** full cycle (**21.63×**, `max_abs_loss_diff=0.0`) | [architecture](../repos/torchtitan/docs/architecture.md) · [costs](../repos/torchtitan/kb/costs.md) · [walkthrough](../repos/torchtitan/examples/live-step-swap/README.md) |
+| **NeMo-RL** | CPU CI (3-participant `ToyNemoRlLab`: `coordinator0` + `trainer0` + `rollout0`, 11/11); real GPU (`NemoRlLab --real`) pending hardware/env staging | CPU `c9` 7.6 ms install / 1.5 ms undo (`3.823 s` `c0–c10`); GPU benchmarks pending hardware/env staging | [architecture](../repos/nemo-rl/docs/architecture.md) · [costs](../repos/nemo-rl/kb/costs.md) |
 | **Toy sandbox** | CPU CI (2-rank stdlib reference) | ~1.5 s for all 11 verification cases on a laptop | [verification suite](../core/livelab/conformance/README.md) |
 
 ## Repository layout
@@ -22,7 +23,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 ```
 core/livelab/        shared stdlib runtime (kernel/, rsibox/, conformance/, survey/, forksafe.py, INTERFACE.md)
 core/agents/         prompts for coding agents (livelab_overview, developer, orchestrator, toolsmith)
-repos/<engine>/      vllm, fastvideo, megatron, verl, sglang, miles, transformers, trtllm, torchtitan (docs/, kb/, livelab/, examples/)
+repos/<engine>/      vllm, fastvideo, megatron, verl, sglang, miles, transformers, trtllm, torchtitan, nemo-rl (docs/, kb/, livelab/, examples/)
 docs/                design notes on engines, restart mechanisms, kernels/CUDA graphs, and CI
 .github/             CPU workflows, automated review service, leak check, and Modal GPU CI runner
 scripts/             fact and consistency checks (verify_facts.py)

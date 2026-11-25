@@ -284,6 +284,26 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}/core/livelab
         run: python3 -m rsibox conformance torchtitan
+  func-nemo-rl-adapter:
+    # NeMo-RL adapter golden tests and conformance c0-c10 on 3-participant CPU toy workers (no nemo_rl/ray/torch/GPU)
+    name: "func: NeMo-RL adapter (CPU)"
+    runs-on: ${{ (vars.RSIBOX_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.RSIBOX_CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        if: runner.environment == 'github-hosted'
+        with:
+          python-version: "3.12"
+      - name: Run NeMo-RL adapter golden tests and 3-participant conformance c0-c10 (CPU toy; ResourceWarning as error)
+        run: python3 -W error::ResourceWarning -m unittest discover -s repos/nemo-rl/livelab/adapter -t repos/nemo-rl/livelab -v
+      - name: Run conformance c0-c10 against ToyNemoRlLab via unified CLI
+        env:
+          PYTHONPATH: ${{ github.workspace }}/core/livelab
+        run: python3 -m rsibox conformance nemo-rl
   func-modal-ci-runner:
     # Modal GPU CI runner and loop golden cases (CPU; real git mirror/archive, stand-in modal CLI, no GitHub calls)
     name: "func: GPU CI runner self-test (CPU)"

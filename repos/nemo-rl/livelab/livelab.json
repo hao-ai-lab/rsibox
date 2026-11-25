@@ -1,0 +1,4 @@
+{
+  "toy": "adapter.lab:ToyNemoRlLab",
+  "real": "adapter.lab:NemoRlLab"
+}
