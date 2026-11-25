@@ -7,6 +7,9 @@
 - `preflight.py --base origin/main --max-loc 600` — checks baseline ancestry, non-test LOC cap, single-engine scope, and cross-engine imports.
 - `pre_push.py --strict` — runs PR title check, AI attribution scan, `.github/scripts/leak-check.sh`, Ruff (`F,B008,B023,S602`), PR body contract, and `-W error::ResourceWarning` tests.
 - `pr_gate.py validate-body|wait-ci` — verifies `.github/pull_request_template.md` and waits for `mergeStateStatus == CLEAN`.
+- `merge_train.py plan|patch-id|worktree-gc` — computes bottom-up DAG merge order (`Depends on #N`), verifies rebase `patch-id` equivalence, and safely cleans merged/detached secondary worktrees.
+- `gpu_receipt_close.py validate|backlog` — enforces multi-shape non-zero witness receipts with cold/warm separation and creates `status:needs-gpu` backlog issues.
+- `facts_sync.py` — validates `verify_facts.py --strict`, `build_site.py --check`, `scripts/test_*.py`, and `site/facts/delivery-matrix.json`.
 - `trajectory_audit.py` — cross-checks agent claims against real `transcript.jsonl` commands, skips, and SHAs.
 
 ## Skills & SOP Entry Points
