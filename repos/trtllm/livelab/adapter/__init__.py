@@ -8,6 +8,19 @@ LIVELAB = os.path.abspath(
 if LIVELAB not in sys.path:
     sys.path.insert(0, LIVELAB)
 
+from .shadow import (  # noqa: E402
+    DEFAULT_SHADOW_RELEASE_TAGS,
+    ParkedTrtllmShadow,
+    TrtllmShadowPromoter,
+    park_shadow_lab,
+)
 from .snapshot_hooks import TrtllmQuiesceHooks  # noqa: E402
 
-__all__ = ["LIVELAB", "TrtllmQuiesceHooks"]
+__all__ = [
+    "DEFAULT_SHADOW_RELEASE_TAGS",
+    "LIVELAB",
+    "ParkedTrtllmShadow",
+    "TrtllmQuiesceHooks",
+    "TrtllmShadowPromoter",
+    "park_shadow_lab",
+]
