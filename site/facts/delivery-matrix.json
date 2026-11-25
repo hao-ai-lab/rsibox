@@ -8,8 +8,8 @@
   "invariants_total": 12,
   "experiments_done": 16,
   "experiments_total": 16,
-  "traces_verified": "110/110",
-  "leases_verified": 2919,
+  "traces_verified": "112/112",
+  "leases_verified": 3226,
   "targets_done": 0,
   "targets_total": 5
  },
@@ -112,6 +112,17 @@
    "speedup": "32.5x (1x B200: 2.689 -> 0.083 s); 21.63x (2x B200 EXP-F7: 5.515 -> 0.255 s)",
    "summary": "PyTorch Native FSDP2 (fully_shard) training lab across 1x B200 (32.5x) and 2x B200 NCCL ranks (#222/#254/#255, EXP-F7: 21.63x, 0.101 s install / 0.054 s check / 0.099 s undo, max_abs_loss_diff == 0.0, 239.00 s c0-c10) + EXP-F6 SandboxPool priority.",
    "evidence": "repos/torchtitan/kb/costs.md"
+  },
+  {
+   "id": "nemo-rl",
+   "name": "NeMo-RL",
+   "category": "RL Post-Training",
+   "status": "in_progress",
+   "conformance": "11/11 CPU (3-participant ToyNemoRlLab); real GPU pending hardware/env staging",
+   "tiers": "RayActorParticipant Colocated AutoModel FSDP2 + SGLang GRPO + Coupled S0 Trainer/Rollout Reset",
+   "speedup": "CPU 11/11 verified (c9 8.5 ms install / 1.6 ms undo); GPU pending hardware/env staging",
+   "summary": "Onboarded NVIDIA-NeMo/RL live-lab adapter reusing ray_participants.py: 3-participant CPU toy (coordinator0 + trainer0 + rollout0) passes 11/11 conformance and 9/9 golden tests; real 1x/2x B200 GPU run pending hardware/env staging.",
+   "evidence": "repos/nemo-rl/kb/costs.md"
   }
  ],
  "invariants": [
@@ -149,7 +160,7 @@
    "id": "I6",
    "title": "SHA-256 Hash-Chained Pool Traces",
    "status": "done",
-   "detail": "Every SandboxPool lease writes an append-only JSONL record chaining prev_sha256 -> record_sha256; verify_trace(..., expected_head=...) passed 110/110 traces across 2,919 real B200 leases."
+   "detail": "Every SandboxPool lease writes an append-only JSONL record chaining prev_sha256 -> record_sha256; verify_trace(..., expected_head=...) passed 112/112 traces across 3,226 real B200 leases."
   },
   {
    "id": "I7",
@@ -185,7 +196,7 @@
    "id": "I12",
    "title": "Facts Consistency & Leak-Free CI",
    "status": "done",
-   "detail": "verify_facts.py --strict enforces 0 schema/math/join errors and 0 split-brain drifts across 7 fact files and 9 repo engines alongside site/build.py --check, leak-check.sh, and -W error::ResourceWarning CPU test suites (including 24/24 warm checks)."
+   "detail": "verify_facts.py --strict enforces 0 schema/math/join errors and 0 split-brain drifts across 7 fact files and 10 repo engines alongside site/build.py --check, leak-check.sh, and -W error::ResourceWarning CPU test suites (including 24/24 warm checks)."
   }
  ],
  "experiments": [
@@ -323,17 +334,17 @@
    "id": "T1",
    "title": "Phase 2 & 3 · New Engines: NeMo-RL, *-Omni, Dynamo & Isaac Lab",
    "status": "in_progress",
-   "progress_pct": 20,
+   "progress_pct": 30,
    "owner_track": "Engine Onboarding",
-   "summary": "Expand from 9 to 14 live-lab engines: NVIDIA NeMo-RL (Engine #10, AutoModel FSDP2 + SGLang GRPO), vLLM-Omni & SGLang-Omni (#11-#12, multi-stage multimodal), NVIDIA Dynamo (#13, Python Planner live swap + Rust Frontend/cdylib micro-restart + GMS), Isaac Lab (#14, 4,096-env GPU PhysX + RL live swap), and TorchTitan real upstream Llama3 PR replay.",
+   "summary": "Expand from 9 to 14 live-lab engines: NVIDIA NeMo-RL (Engine #10, AutoModel FSDP2 + SGLang GRPO, CPU 11/11 verified, real GPU pending hardware/env staging), vLLM-Omni & SGLang-Omni (#11-#12, multi-stage multimodal), NVIDIA Dynamo (#13, Python Planner live swap + Rust Frontend/cdylib micro-restart + GMS), Isaac Lab (#14, 4,096-env GPU PhysX + RL live swap), and TorchTitan real upstream Llama3 PR replay.",
    "items": [
-    "NVIDIA NeMo-RL (Engine #10): AutoModel FSDP2 + SGLang GRPO reusing ray_participants.py (CPU 11/11 in progress -> B200 Qwen3/Inkling2 live GRPO)",
+    "NVIDIA NeMo-RL (Engine #10): AutoModel FSDP2 + SGLang GRPO reusing ray_participants.py (CPU 11/11 verified -> B200 Qwen3/Inkling2 live GRPO pending hardware/env staging)",
     "vLLM-Omni & SGLang-Omni (Engines #11-#12): multi-stage Thinker/Talker/DiT/Vocoder live swap, Tier-A/R1, targeted teardown & stage-buffer S0 reset",
     "NVIDIA Dynamo (Engine #13): Python Planner/Router live swap (~50 ms) + Rust Frontend/cdylib micro-restart (2-6 s) atop GMS-resident GPU workers",
     "Isaac Lab (Engine #14): resident 4,096-env GPU PhysX/USD simulation + RL reward/observation/policy sub-second swap + seeded S0 reset",
     "TorchTitan: add real upstream pytorch/torchtitan Llama3 config & PR replay on 2x B200 FSDP2 NCCL"
    ],
-   "evidence": "repos/torchtitan/docs/architecture.md"
+   "evidence": "repos/nemo-rl/docs/architecture.md"
   },
   {
    "id": "T2",
@@ -369,14 +380,14 @@
    "id": "T4",
    "title": "Phase 1 · Codebase Robustness & pstack Tech-Debt Sweep",
    "status": "in_progress",
-   "progress_pct": 60,
+   "progress_pct": 75,
    "owner_track": "Core Reliability",
-   "summary": "PR #264 opened with all 5 P1/P2 audit fixes across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py with deterministic regression tests; next: merge #264 and run blast-radius scan.",
+   "summary": "Merged PR #264 with 5 P1/P2 audit fixes plus 2 P2 guards across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py with deterministic regression tests; next: run full blast-radius scan.",
    "items": [
-    "Merged-ready PR #264: fix #244 AsyncShadowReplenisher.wait(until) close() race + barrier regression tests",
-    "Merged-ready PR #264: fix #248 SglangShadowPromoter head-dead shadow skipping & bystander survival test",
-    "Merged-ready PR #264: fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
-    "Merge PR #264 and run full pstack blast-radius & deduplication scan across core/livelab/ and adapters"
+    "Merged PR #264: fix #244 AsyncShadowReplenisher.wait(until) close() race + barrier regression tests",
+    "Merged PR #264: fix #248 SglangShadowPromoter head-dead shadow skipping & bystander survival test",
+    "Merged PR #264: fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
+    "Run full pstack blast-radius & deduplication scan across core/livelab/ and adapters"
    ],
    "evidence": "core/livelab/rsibox/pool.py"
   },
@@ -420,6 +431,12 @@
    "title": "Wave 10-12: Full-Stack Resilience, Blast-Radius Cap & 5-Engine Portability",
    "path": "assets/agent-teams-fullstack-and-blast-radius.svg",
    "caption": "EXP-H1 6-layer full-stack campaign under Eval-slot attack (11.30x pipeline), EXP-H2 max_slots_per_agent=1 blast-radius containment (12.40x healthy speedup), and EXP-F6 5-engine SandboxPool portability (110/110 traces, 2,919 leases)."
+  },
+  {
+   "id": "agent-teams-healing-elastic-and-fsdp2",
+   "title": "Online Healing, Elastic 3->2->3 Scaling & 2-Rank FSDP2 Multi-Node",
+   "path": "assets/agent-teams-healing-elastic-and-fsdp2.svg",
+   "caption": "EXP-H3 online heal_slot() fleet recovery (1.87x throughput), EXP-H4 3->2->3 elastic scaling (0.176 s drain, 58 us re-attach, 112/112 traces, 3,226 leases), and 2x B200 FSDP2 TorchTitan real NCCL telemetry."
   }
  ]
 }
