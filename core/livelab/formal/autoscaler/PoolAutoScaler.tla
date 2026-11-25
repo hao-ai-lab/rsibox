@@ -233,4 +233,7 @@ RemovedClearsTracking ==
 ClosedYieldsNoop ==
     (pool_closed /\ last_action # ActNone) => (last_action = ActNoop)
 
+NeverScaleDown ==
+    last_action # ActScaleDown
+
 ====

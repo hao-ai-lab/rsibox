@@ -19,6 +19,7 @@
 - `/plain`: restate technical docs, reviews, or metrics in plain human language with zero jargon.
 - `/distill`: mine active session transcripts for durable lessons routed to `rstack` skills or gates.
 - `/report`: inline visual change-report format (1-line file summary + verbatim `Before -> After` excerpts).
+- `/formal`: run TLC verification, mutants/witnesses, spec pin/anchor/assumption gates, and Mermaid trace rendering.
 - SOP 1 (Feature / Fix): `/claim` -> `/build` -> `/precheck`.
 - SOP 2 (GPU Receipt): `/receipt`.
 - SOP 3 (Review Triangle): `/audit` -> `/triage`.

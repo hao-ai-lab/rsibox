@@ -155,6 +155,13 @@ class RecaptureCoordinator(C.StepGapCoordinator):
         self.rebuild_participant = rebuild_participant
         self.rank_fields = tuple(rank_fields)
 
+    def _txn_ctx(self, txn):
+        with self._lock:
+            rec = self.txns[txn]
+            txn_inc = rec.get("incarnation", self.incarnation)
+            parts = list(rec.get("participants") or self.participants)
+            return rec, txn_inc, (self.incarnation == txn_inc), parts, rec.setdefault("missed", set())
+
     def _phase2(self, txn, tl):
         out = super()._phase2(txn, tl)
         if out["outcome"] != "committed":
@@ -191,36 +198,46 @@ class RecaptureCoordinator(C.StepGapCoordinator):
                     )
                 ]
                 out["extra"] += [{**f, "participant": self.rebuild_participant} for f in extra]
+                tl.pop("committed", None)
+                rec, txn_inc, same_inc, parts, missed = self._txn_ctx(txn)
+                if not same_inc:
+                    out["outcome"] = "aborted"
+                    tl["gap_end"] = self.clock()
+                    return out
                 rb = out["rollback"] = {"status": "undone", "participants": {}}
-                res_map = self.txns[txn]["res"]
+                res_map = rec["res"]
                 undo_deadline = (
                     time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
                 )
-                missed: set = set()
-                for part in reversed(self.participants):
+                for part in reversed(parts):
                     rb["participants"][part.name] = res_map[part.name]["undo"] = self._bounded(
-                        part, "undo", txn, undo_deadline, missed
+                        part, "undo", txn, undo_deadline, missed, incarnation=txn_inc
                     )
                 if not all(u["ok"] for u in rb["participants"].values()):
                     rb["status"] = "partial"
+                    failed_parts = [p for p in reversed(parts) if not rb["participants"][p.name]["ok"]]
                     with self._lock:
-                        self.txns[txn]["pending_rollback"] = [
-                            part
-                            for part in reversed(self.participants)
-                            if not rb["participants"][part.name]["ok"]
-                        ]
+                        if self.incarnation == txn_inc:
+                            rec["pending_rollback"] = failed_parts
+                    for part in failed_parts:
+                        self._latch_recovery(
+                            f"{part.name}: post-rebuild rollback undo was partial",
+                            participant=part.name,
+                            poison_check=None if part.name in missed else "undo_incomplete",
+                            incarnation=txn_inc,
+                        )
                 out["outcome"] = "rolled_back"
-                tl.pop("committed", None)
                 tl["gap_end"] = self.clock()
                 return out
             self.txns[txn]["rebuilt"] = [route_name]
 
         if self.post_commit_reset:
-            deadline = time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
-            missed = set()
-            for part in self.participants:
-                self._bounded(part, "reset", self.post_commit_reset, deadline, missed)
-            tl["gap_end"] = self.clock()
+            _rec, txn_inc, same_inc, parts, missed = self._txn_ctx(txn)
+            if same_inc:
+                deadline = time.time() + self.phase2_deadline_s if self.phase2_deadline_s else None
+                for part in parts:
+                    self._bounded(part, "reset", self.post_commit_reset, deadline, missed, incarnation=txn_inc)
+                tl["gap_end"] = self.clock()
         return out
 
 

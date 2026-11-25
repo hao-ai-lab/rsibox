@@ -7,7 +7,7 @@ EXTENDS Naturals, Sequences, FiniteSets
  * and exact base-state restoration when the stack drains cleanly.
  *)
 
-CONSTANTS TxnIds
+CONSTANTS TxnIds, Bug
 
 VARIABLES
     stack,             \* Sequence of committed txn IDs (oldest first)
@@ -31,7 +31,8 @@ Init ==
 InstallCommit(t) ==
     /\ ~recovery_required
     /\ t \in TxnIds
-    /\ t \notin seen
+    /\ Len(stack) < Cardinality(TxnIds)
+    /\ (Bug = "AllowDuplicateTxn" \/ t \notin seen)
     /\ stack' = Append(stack, t)
     /\ seen' = seen \cup {t}
     /\ at_base' = FALSE
@@ -76,6 +77,10 @@ EmptyStackRestoresBase ==
 
 NoDuplicateInStack ==
     \A i, j \in 1..Len(stack) : (i # j) => (stack[i] # stack[j])
+
+\* Reachability witness invariants (expected to fail on non-mutant model)
+NeverTwoStacked == Len(stack) < 2
+NeverRecovery == ~recovery_required
 
 Spec == Init /\ [][Next]_vars
 =============================================================================

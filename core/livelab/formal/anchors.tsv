@@ -1,0 +1,14 @@
+spec_file	spec_symbol	code_file	code_symbol	notes
+core/livelab/formal/pool/SandboxPool.tla	Acquire	core/livelab/rsibox/pool.py	SandboxPool.acquire	lease slot
+core/livelab/formal/pool/SandboxPool.tla	HealStartWithReplacement	core/livelab/rsibox/pool.py	SandboxPool.heal_slot	caller-owned heal
+core/livelab/formal/coordinator/Coordinator.tla	UndoStart	core/livelab/kernel/coordinator.py	Coordinator.undo	in-gap undo
+core/livelab/formal/coordinator/Coordinator.tla	UndoFailPartial	core/livelab/rsibox/lab.py	RecaptureCoordinator._phase2	post-rebuild rollback latch
+core/livelab/formal/swap/SwapLifecycle.tla	Stage	core/livelab/kernel/swap.py	stage	AST staging
+core/livelab/formal/swap/SwapLifecycle.tla	ApplyOk	core/livelab/kernel/swap.py	apply	live code swap
+core/livelab/formal/shadow/StandbyShadow.tla	FastPromote	core/livelab/rsibox/warm/recovery.py	StandbyShadowDriver	shadow promotion
+core/livelab/formal/autoscaler/PoolAutoScaler.tla	ScaleUp	core/livelab/rsibox/autoscaler.py	PoolAutoScaler	pool reconciliation
+core/livelab/kernel/formal/Transaction.tla	RollbackParticipantFail	core/livelab/kernel/coordinator.py	Coordinator._latch_recovery	fail-closed recovery latch
+core/livelab/kernel/formal/Participant.tla	Commit	core/livelab/kernel/coordinator.py	LocalParticipant	participant journal lifecycle
+core/livelab/kernel/formal/SequentialTx.tla	InstallCommit	core/livelab/kernel/session.py	Session.install	LIFO install stack
+core/livelab/kernel/formal/SequentialTx.tla	UninstallClean	core/livelab/kernel/session.py	Session.uninstall	LIFO uninstall stack
+core/livelab/kernel/formal/Incarnation.tla	Respawn	core/livelab/kernel/coordinator.py	Coordinator.recovered	incarnation bump & supersede

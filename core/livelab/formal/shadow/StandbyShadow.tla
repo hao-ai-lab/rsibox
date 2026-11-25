@@ -156,4 +156,7 @@ ZeroOrphanOnClose ==
 ZeroOrphanLeak ==
     orphans = 0
 
+NeverClosed ==
+    ~closed
+
 ====

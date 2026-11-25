@@ -7,7 +7,7 @@ EXTENDS Naturals, FiniteSets
  * recovery_required freeze until clean Respawn.
  *)
 
-CONSTANTS Participants
+CONSTANTS Participants, Bug
 
 VARIABLES
     coord_state,       \* "idle" | "preparing" | "validating" | "committing" | "committed" | "aborted" | "rolling_back" | "rolled_back" | "recovery_required"
@@ -36,8 +36,7 @@ Init ==
 
 StartPrepare ==
     /\ coord_state \in TerminalStates
-    /\ ~recovery_required
-    /\ ~poisoned
+    /\ (Bug = "SkipRollbackFreeze" \/ (~recovery_required /\ ~poisoned))
     /\ coord_state' = "preparing"
     /\ p_state' = [p \in Participants |-> "idle"]
     /\ UNCHANGED <<recovery_required, poisoned>>
@@ -81,7 +80,9 @@ ParticipantCommit(p) ==
 
 FinalizeCommit ==
     /\ coord_state = "committing"
-    /\ \A p \in Participants : p_state[p] = "committed"
+    /\ IF Bug = "AllowSplitCommit"
+       THEN \E p \in Participants : p_state[p] = "committed"
+       ELSE \A p \in Participants : p_state[p] = "committed"
     /\ coord_state' = "committed"
     /\ UNCHANGED <<p_state, recovery_required, poisoned>>
 
@@ -139,6 +140,11 @@ NoSplitCommit ==
 
 RollbackFreeze ==
     recovery_required => (coord_state = "recovery_required" /\ poisoned)
+
+\* Reachability witness invariants (expected to fail on non-mutant model)
+NeverCommitted == coord_state # "committed"
+NeverRolledBack == coord_state # "rolled_back"
+NeverRecoveryRequired == ~recovery_required
 
 Spec == Init /\ [][Next]_vars
 =============================================================================

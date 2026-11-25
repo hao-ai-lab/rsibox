@@ -170,4 +170,7 @@ NeverHealWhileCallActive ==
 DeferredCloseCompletes ==
     (deferred_close /\ ~active_call /\ slot \notin { Leased, DrainingLeased, Healing, DrainingHealing }) => lab_closed
 
+NeverRemoved ==
+    slot # Removed
+
 ====

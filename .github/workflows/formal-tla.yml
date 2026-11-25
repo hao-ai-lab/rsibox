@@ -26,43 +26,14 @@ jobs:
         with:
           path: .tla-cache
           key: tla2tools-v1.7.4-v2
-      - name: Fetch and verify tla2tools.jar v1.7.4
+      - name: Run formal anti-cheat gates
         run: |
-          python3 - <<'PY'
-          import hashlib, pathlib, urllib.request
-
-          jar = pathlib.Path(".tla-cache/tla2tools.jar")
-          jar.parent.mkdir(parents=True, exist_ok=True)
-          expected = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
-          url = "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
-
-          def sha256(p: pathlib.Path) -> str:
-              return hashlib.sha256(p.read_bytes()).hexdigest()
-
-          if not jar.is_file() or sha256(jar) != expected:
-              req = urllib.request.Request(url, headers={"User-Agent": "rsibox-ci/1"})
-              with urllib.request.urlopen(req, timeout=60) as resp:
-                  jar.write_bytes(resp.read())
-          actual = sha256(jar)
-          assert actual == expected, f"tla2tools.jar sha256 mismatch: got {actual} (size={jar.stat().st_size})"
-          print(f"Verified {jar} ({jar.stat().st_size} bytes, sha256={actual})")
-          PY
-      - name: Run TLC model checks across Pool, Coordinator, Swap, Shadow, and AutoScaler specs
+          python3 core/livelab/formal/gates/check_spec_pins.py
+          python3 core/livelab/formal/gates/check_anchors.py
+          python3 core/livelab/formal/gates/assumptions_check.py
+      - name: Run TLC model checks, mutants, and witnesses across all 9 specs
         run: |
-          set -euo pipefail
-          JAR="$PWD/.tla-cache/tla2tools.jar"
-          for pair in \
-            "core/livelab/formal/pool/SandboxPool.tla core/livelab/formal/pool/SandboxPool.cfg" \
-            "core/livelab/formal/coordinator/Coordinator.tla core/livelab/formal/coordinator/Coordinator.cfg" \
-            "core/livelab/formal/swap/SwapLifecycle.tla core/livelab/formal/swap/SwapLifecycle.cfg" \
-            "core/livelab/formal/shadow/StandbyShadow.tla core/livelab/formal/shadow/StandbyShadow.cfg" \
-            "core/livelab/formal/autoscaler/PoolAutoScaler.tla core/livelab/formal/autoscaler/PoolAutoScaler.cfg"
-          do
-            spec="${pair%% *}"
-            cfg="${pair##* }"
-            echo "=== TLC: $spec ==="
-            java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup -config "$cfg" "$spec"
-          done
+          python3 core/livelab/formal/run_formal.py --jar .tla-cache/tla2tools.jar --bootstrap --output .tla-cache/runs
   rule-ruff-bugs:
     name: "rule: Ruff high-signal bug scan"
     runs-on: ubuntu-latest
