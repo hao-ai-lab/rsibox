@@ -182,10 +182,11 @@ class ZygoteService:
         self._stop_event, self._teardown_done, self._start_lock = threading.Event(), threading.Event(), threading.Lock(); _LIVE_SERVICES.add(self)
 
     def _on_fork_child(self) -> None:
-        self._lock = threading.RLock(); self._active_pids.clear(); self._pending_handlers.clear()
+        self._lock, self._start_lock = threading.RLock(), threading.Lock(); self._active_pids.clear(); self._pending_handlers.clear()
         if (fin := getattr(self._temp_dir, "_finalizer", None)) is not None:
             with contextlib.suppress(Exception): fin.detach()
-        self._temp_dir = self._listener = None; self._started = False
+        self._temp_dir = self._listener = self._socket_path = self._wakeup_r = self._wakeup_w = self._server_thread = None
+        self._started = self._owns_listener = False
 
     @property
     def profile(self) -> ZygoteProfile: return _copy_profile(self._profile)
@@ -202,7 +203,7 @@ class ZygoteService:
     def _rollback_guards(self, cuda_mod: Any, armed: set[str], clear_nvml: bool, saved_env: dict[str, str | None], gc_frozen: bool) -> None:
         if "cuda_python" in armed:
             with contextlib.suppress(Exception): forksafe.unguard_cuda_python()
-        if "torch_cuda" in armed and cuda_mod is not None:
+        if "torch_cuda" in armed:
             with contextlib.suppress(Exception): forksafe.unpatch(cuda_mod, clear_env=False)
         if clear_nvml: os.environ.pop("PYTORCH_NVML_BASED_CUDA_CHECK", None)
         if gc_frozen and hasattr(gc, "unfreeze"):
@@ -223,8 +224,9 @@ class ZygoteService:
             saved_env = {k: os.environ.get(k) for k in (*self._profile.env_defaults, "PYTORCH_NVML_BASED_CUDA_CHECK", "CUTE_DSL_ARCH")}
             was_cuinit = bool(getattr(forksafe, "_CUINIT", None))
             cuda_mod = self._cuda_module_fn() if self._cuda_module_fn is not None else None
-            was_torch = cuda_mod is not None and any(
-                getattr(getattr(cuda_mod, n, None), "_rsibox_forksafe", False) or getattr(getattr(cuda_mod, n, None), "_rsibox_props", False)
+            probe_cuda = cuda_mod if cuda_mod is not None else getattr(sys.modules.get("torch"), "cuda", None)
+            was_torch = probe_cuda is not None and any(
+                getattr(getattr(probe_cuda, n, None), "_rsibox_forksafe", False) or getattr(getattr(probe_cuda, n, None), "_rsibox_props", False)
                 for n in ("get_device_capability", "current_device", "get_device_properties")
             )
             import_fn = importer or self._default_importer
@@ -256,7 +258,7 @@ class ZygoteService:
                 gc_report = forksafe.freeze_gc_before_fork() if self._profile.freeze_gc else {}; gc_frozen = self._profile.freeze_gc
             except BaseException:
                 if not was_cuinit and getattr(forksafe, "_CUINIT", None): armed.add("cuda_python")
-                if not was_torch and cuda_mod is not None: armed.add("torch_cuda")
+                if not was_torch and (cuda_mod is not None or use_forksafe_torch): armed.add("torch_cuda")
                 self._rollback_guards(cuda_mod, armed, False, saved_env, gc_frozen)
                 raise
             self._cuda_mod, self._armed_by_self, self._guard_report = cuda_mod, armed, dict(guard_report)
@@ -488,12 +490,12 @@ class ZygoteService:
         with self._lock:
             already = self._torn_down
             if not already:
-                self._closed = self._torn_down = True; self._stop_event.set()
+                self._closed = self._torn_down = True; self._started = False; self._stop_event.set()
                 wake_w, wake_r, self._wakeup_w, self._wakeup_r = self._wakeup_w, self._wakeup_r, None, None
                 thread, self._server_thread = self._server_thread, None
                 listener, owns_listener, self._listener = self._listener, self._owns_listener, None
-                sock_path, temp_dir, self._temp_dir = self._socket_path, self._temp_dir, None
-                cuda_mod, armed, guards_armed = self._cuda_mod, set(self._armed_by_self), self._guards_armed
+                sock_path, self._socket_path, temp_dir, self._temp_dir = self._socket_path, None, self._temp_dir, None
+                cuda_mod, armed, guards_armed, self._guards_armed = self._cuda_mod, set(self._armed_by_self), self._guards_armed, False
                 clear_env = bool(self._guard_report.get("nvml_env_set", False))
                 gc_frozen, self._gc_frozen = self._gc_frozen, False; self._pending_handlers.clear(); self._cancelled_reqs.clear()
         if already:

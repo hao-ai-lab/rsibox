@@ -218,6 +218,30 @@ class ZygoteGuardAndPoisonTests(unittest.TestCase):
             finally:
                 forksafe.unpatch(fake_pre, clear_env=True)
 
+        # Stub torch in sys.modules with cuda_module_fn=None + use_forksafe_torch=True.
+        torch_stub = types.SimpleNamespace(cuda=_make_fake_cuda())
+        prof_torch = ZygoteProfile("vllm", preload_modules=("torch",), freeze_gc=False)
+        with mock.patch.dict(sys.modules, {"torch": torch_stub}), mock.patch.dict(os.environ, {}, clear=False):
+            svc_t = ZygoteService(prof_torch)
+            try:
+                svc_t.arm_guards(capability=(10, 0), probe=_FAKE_PROBE, preload=True)
+                self.assertTrue(getattr(torch_stub.cuda.get_device_capability, "_rsibox_forksafe", False))
+            finally:
+                svc_t.close()
+            self.assertFalse(getattr(torch_stub.cuda.get_device_capability, "_rsibox_forksafe", False))
+
+            # Pre-existing forksafe.install(torch.cuda) survives svc.close() when cuda_module_fn=None.
+            forksafe.install(torch_stub.cuda, capability=lambda: ((10, 0), 1))
+            try:
+                svc_t2 = ZygoteService(prof_torch)
+                try:
+                    svc_t2.arm_guards(capability=(10, 0), probe=_FAKE_PROBE, preload=True)
+                finally:
+                    svc_t2.close()
+                self.assertTrue(getattr(torch_stub.cuda.get_device_capability, "_rsibox_forksafe", False))
+            finally:
+                forksafe.unpatch(torch_stub.cuda, clear_env=True)
+
 
 class ZygoteForkAndScmRightsTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -413,6 +437,24 @@ class ZygoteForkAndScmRightsTests(unittest.TestCase):
                             self.assertFalse(st.started and st.closed)
                         finally:
                             svc_race.close()
+
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        svc_seq = ZygoteService(prof_plain)
+                        try:
+                            sp = svc_seq.start(capability=(9, 0), probe=_FAKE_PROBE, preload=False)
+                            self.assertTrue(sp.exists())
+                            # Child calling svc_seq.close() must not unlink parent's socket or kill parent's loop.
+                            c_close = svc_seq.spawn_child("child-close", handler=lambda _p, _fds: (svc_seq.close(), 0)[1], wait=True)
+                            self.assertEqual(c_close.exit_code, 0)
+                            self.assertTrue(sp.exists())
+                            self.assertEqual(svc_seq.spawn_child("after-child-close", wait=True).exit_code, 0)
+                        finally:
+                            svc_seq.teardown(grace_s=0.1)
+                        st_seq = svc_seq.status()
+                        self.assertFalse(st_seq.started)
+                        self.assertFalse(st_seq.guards_armed)
+                        self.assertIsNone(st_seq.socket_path)
+                        self.assertTrue(st_seq.closed)
 
                     svc = ZygoteService(prof_plain)
                     try:
