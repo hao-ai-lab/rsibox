@@ -10,6 +10,7 @@ from __future__ import annotations
 import collections
 import contextlib
 import json
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -373,9 +374,10 @@ class VllmShadowPromoter:
     def __init__(
         self, shadow_server: Any = None, *,
         shadow_provider: Callable[[Any, Any], Any] | None = None,
-        replenish_fn: Callable[[Any, Any], None] | None = None,
+        replenish_fn: Callable[[Any, Any], Any] | None = None,
         timeout: float = 30.0, modules: Sequence[str] | None = None,
     ) -> None:
+        self._lock = threading.Lock()
         self._shadows: collections.deque[Any] = collections.deque()
         if shadow_server is not None:
             self._shadows.append(shadow_server)
@@ -383,8 +385,19 @@ class VllmShadowPromoter:
         self._timeout = float(timeout)
         self._modules = tuple(modules) if modules is not None else DEFAULT_WORKER_MODULES
 
+    def ready_count(self) -> int:
+        with self._lock:
+            return sum(
+                1 for srv in self._shadows
+                if srv is not None and (not hasattr(srv, "alive") or srv.alive())
+            )
+
     def register_shadow(self, shadow_server: Any) -> None:
-        self._shadows.append(shadow_server)
+        if shadow_server is None:
+            raise ValueError("shadow_server cannot be None")
+        with self._lock:
+            if shadow_server not in self._shadows:
+                self._shadows.append(shadow_server)
 
     def park_shadow(
         self, shadow_server: Any, *, sleep_level: int = 1, pause_mode: str = "keep"
@@ -393,7 +406,9 @@ class VllmShadowPromoter:
             shadow_server, sleep_level=sleep_level, pause_mode=pause_mode, timeout=self._timeout
         )
         if result.get("ok"):
-            self._shadows.append(shadow_server)
+            with self._lock:
+                if shadow_server not in self._shadows:
+                    self._shadows.append(shadow_server)
         return result
 
     def _shadow_control_call(
@@ -407,12 +422,28 @@ class VllmShadowPromoter:
         return lambda _command, _timeout: {"ok": False, "error": "shadow server has no kernel_dir or ctl"}
 
     def promote(self, lab: Any, weight_store: Any = None) -> dict[str, Any]:
-        """Wake and verify the next parked shadow, then swap it into `lab`."""
-        shadow_server = self._shadows.popleft() if self._shadows else (
-            self._shadow_provider(lab, weight_store) if self._shadow_provider is not None else None
-        )
+        """Wake and verify the next alive parked shadow, then swap it into `lab`."""
+        shadow_server = None
+        saw_dead = False
+        with self._lock:
+            while self._shadows:
+                candidate = self._shadows.popleft()
+                if candidate is None:
+                    continue
+                if hasattr(candidate, "alive") and not candidate.alive():
+                    saw_dead = True
+                    continue
+                shadow_server = candidate
+                break
+        if shadow_server is None and self._shadow_provider is not None:
+            shadow_server = self._shadow_provider(lab, weight_store)
         if shadow_server is None:
-            return {"ok": False, "error": "no parked standby shadow server available"}
+            error_msg = (
+                "standby shadow server is not alive"
+                if saw_dead
+                else "no parked standby shadow server available"
+            )
+            return {"ok": False, "error": error_msg}
         if hasattr(shadow_server, "alive") and not shadow_server.alive():
             return {"ok": False, "error": "standby shadow server is not alive"}
         try:
@@ -447,8 +478,23 @@ class VllmShadowPromoter:
         return {**outcome, "reset": ["shadow promoted", "session"],
                 "promoted_port": shadow_server.port, "promoted_pid": getattr(shadow_server, "pid", None)}
 
-    def recovery_driver(self) -> StandbyShadowDriver:
-        driver = StandbyShadowDriver(self.promote, replenish_fn=self._replenish_fn)
+    def recovery_driver(
+        self, *,
+        replenish_wait_timeout_s: float = 0.0,
+        fallback_driver: Any = None,
+        ready_count_fn: Callable[[], int] | None = None,
+    ) -> StandbyShadowDriver:
+        effective_ready_count_fn = (
+            ready_count_fn if ready_count_fn is not None
+            else (self.ready_count if self._shadow_provider is None else None)
+        )
+        driver = StandbyShadowDriver(
+            self.promote,
+            replenish_fn=self._replenish_fn,
+            replenish_wait_timeout_s=replenish_wait_timeout_s,
+            fallback_driver=fallback_driver,
+            ready_count_fn=effective_ready_count_fn,
+        )
         driver.promoter = self  # type: ignore[attr-defined]
         return driver
 
@@ -456,11 +502,18 @@ class VllmShadowPromoter:
 def make_shadow_recovery_driver(
     shadow_server: Any = None, *,
     shadow_provider: Callable[[Any, Any], Any] | None = None,
-    replenish_fn: Callable[[Any, Any], None] | None = None,
+    replenish_fn: Callable[[Any, Any], Any] | None = None,
     timeout: float = 30.0, modules: Sequence[str] | None = None,
+    replenish_wait_timeout_s: float = 0.0,
+    fallback_driver: Any = None,
+    ready_count_fn: Callable[[], int] | None = None,
 ) -> StandbyShadowDriver:
     """Create a `StandbyShadowDriver` configured with `VllmShadowPromoter`."""
     return VllmShadowPromoter(
         shadow_server=shadow_server, shadow_provider=shadow_provider,
         replenish_fn=replenish_fn, timeout=timeout, modules=modules,
-    ).recovery_driver()
+    ).recovery_driver(
+        replenish_wait_timeout_s=replenish_wait_timeout_s,
+        fallback_driver=fallback_driver,
+        ready_count_fn=ready_count_fn,
+    )
