@@ -62,7 +62,7 @@ from .ipc import (
 )
 from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
 from .pool import (
-    AgentQuarantinedError, PoolClosedError, PoolError, PoolSlot, PoolTimeoutError,
+    AgentQuarantinedError, PoolClosedError, PoolError, PoolOverloadedError, PoolSlot, PoolTimeoutError,
     SandboxPool, SlotLease, verify_trace,
 )
 from .proc import (
@@ -124,6 +124,7 @@ __all__ = [
     "PackageOverlay",
     "PoolClosedError",
     "PoolError",
+    "PoolOverloadedError",
     "PoolSlot",
     "PoolTimeoutError",
     "RecaptureCoordinator",

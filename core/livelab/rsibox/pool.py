@@ -16,8 +16,8 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
 from .box import Box
 
 __all__ = [
-    "AgentQuarantinedError", "PoolClosedError", "PoolError", "PoolSlot",
-    "PoolTimeoutError", "SandboxPool", "SlotLease", "verify_trace",
+    "AgentQuarantinedError", "PoolClosedError", "PoolError", "PoolOverloadedError",
+    "PoolSlot", "PoolTimeoutError", "SandboxPool", "SlotLease", "verify_trace",
 ]
 _GENESIS_HASH = "genesis"
 _CleanupOutcome = namedtuple("_CleanupOutcome", "healthy cleanup_s recovery_s recovered status_after error")
@@ -26,6 +26,17 @@ _RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recove
 class PoolError(RuntimeError): """Base error raised by `SandboxPool`."""
 class PoolTimeoutError(TimeoutError, PoolError): """Raised when waiting for a healthy matching slot times out."""
 class PoolClosedError(PoolError): """Raised when attempting to acquire a slot from a closed `SandboxPool`."""
+class PoolOverloadedError(PoolError):
+    """Raised when `SandboxPool` rejects or evicts a waiter because `max_waiters` is reached."""
+
+    def __init__(self, *, queue_depth: int, max_waiters: int, evicted: bool = False) -> None:
+        verb = "evicted by higher-priority arrival" if evicted else "rejected"
+        super().__init__(
+            f"SandboxPool queue overloaded ({verb}: queue_depth={queue_depth}, max_waiters={max_waiters})"
+        )
+        self.queue_depth = queue_depth
+        self.max_waiters = max_waiters
+        self.evicted = evicted
 class AgentQuarantinedError(PoolError):
     """Raised when an agent's per-agent fault circuit breaker is open."""
 
@@ -95,6 +106,14 @@ def _validate_positive_int(value: int | None, name: str) -> int | None:
         raise TypeError(f"{name} must be a positive int or None, not {type(value).__name__}")
     if value < 1:
         raise ValueError(f"{name} must be >= 1, got {value!r}")
+    return value
+def _validate_non_negative_int(value: int | None, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be a non-negative int or None, not {type(value).__name__}")
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value!r}")
     return value
 def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
@@ -265,14 +284,17 @@ class _SlotState:
 
 class _Waiter:
     __slots__ = ("agent_id", "role", "fallback_roles", "priority", "enqueued_mono", "event",
-                 "assigned_state", "assigned_dirty", "cancelled", "failure", "quarantined_error", "closed")
+                 "assigned_state", "assigned_dirty", "cancelled", "failure",
+                 "quarantined_error", "overloaded_error", "closed")
     def __init__(self, role: str | None, priority: int = 0, enqueued_mono: float = 0.0,
                  fallback_roles: tuple[str, ...] = (), agent_id: str | None = None) -> None:
         self.agent_id, self.role, self.fallback_roles, self.priority, self.enqueued_mono = (
             agent_id, role, fallback_roles, priority, enqueued_mono,
         )
         self.event, self.assigned_state, self.assigned_dirty = threading.Event(), None, True
-        self.cancelled, self.failure, self.quarantined_error, self.closed = False, None, None, False
+        self.cancelled, self.failure, self.quarantined_error, self.overloaded_error, self.closed = (
+            False, None, None, None, False,
+        )
 
 class SlotLease:
     """Exclusive lease over one `PoolSlot`; supports `with` and idempotent `release()`."""
@@ -326,7 +348,8 @@ class SandboxPool:
                  max_agent_faults: int | None = None,
                  agent_fault_window_s: float | None = None,
                  agent_cooldown_s: float | None = None,
-                 max_slots_per_agent: int | None = None) -> None:
+                 max_slots_per_agent: int | None = None,
+                 max_waiters: int | None = None) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
         self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
@@ -335,6 +358,7 @@ class SandboxPool:
         self._agent_fault_window_s = _validate_positive_finite(agent_fault_window_s, "agent_fault_window_s")
         self._agent_cooldown_s = _validate_positive_finite(agent_cooldown_s, "agent_cooldown_s")
         self._max_slots_per_agent = _validate_positive_int(max_slots_per_agent, "max_slots_per_agent")
+        self._max_waiters = _validate_non_negative_int(max_waiters, "max_waiters")
         if self._max_agent_faults is None and (self._agent_fault_window_s is not None or self._agent_cooldown_s is not None):
             raise ValueError("agent_fault_window_s and agent_cooldown_s require max_agent_faults")
         self._slots: dict[str, _SlotState] = {}
@@ -356,6 +380,7 @@ class SandboxPool:
             False, 0, 0, 0, 0, 0.0,
         )
         self._added_slots, self._drained_slots = 0, 0
+        self._overload_rejections, self._overload_evictions = 0, 0
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
         self._agent_active_slots: dict[str, int] = {}
         self._inflight_heal_targets: set[int] = set()
@@ -1010,6 +1035,32 @@ class SandboxPool:
                 now_mono = now_mono if now_mono is not None else self._clock()
                 if deadline is not None and now_mono >= deadline:
                     raise PoolTimeoutError(f"timed out waiting for slot (role={role!r})")
+            if self._max_waiters is not None:
+                active_waiters = [(idx, w) for idx, w in enumerate(self._waiters) if not w.cancelled]
+                active_depth = len(active_waiters)
+                if self._max_waiters == 0:
+                    self._overload_rejections += 1
+                    raise PoolOverloadedError(queue_depth=active_depth, max_waiters=0, evicted=False)
+                if active_depth >= self._max_waiters:
+                    eval_mono = 0.0 if now_mono is None else now_mono
+                    victim_idx, victim = min(
+                        active_waiters,
+                        key=lambda pair: (self._effective_priority(pair[1], eval_mono), -pair[0]),
+                    )
+                    victim_eff = self._effective_priority(victim, eval_mono)
+                    if priority > victim_eff:
+                        del self._waiters[victim_idx]
+                        victim.overloaded_error = PoolOverloadedError(
+                            queue_depth=active_depth, max_waiters=self._max_waiters, evicted=True,
+                        )
+                        victim.event.set()
+                        self._overload_rejections += 1
+                        self._overload_evictions += 1
+                    else:
+                        self._overload_rejections += 1
+                        raise PoolOverloadedError(
+                            queue_depth=active_depth, max_waiters=self._max_waiters, evicted=False,
+                        )
             waiter = _Waiter(role, priority)
             waiter.agent_id = agent_id
             if now_mono is not None:
@@ -1034,12 +1085,15 @@ class SandboxPool:
                 return waiter.assigned_state, waiter.assigned_dirty
             closed_error = self._closed or waiter.closed
             quarantined_error = waiter.quarantined_error
+            overloaded_error = waiter.overloaded_error
             lab_to_close = self._cancel_waiter_locked(waiter)
         _close_quietly(lab_to_close)
         if closed_error:
             raise PoolClosedError("SandboxPool closed while waiting for slot")
         if quarantined_error is not None:
             raise quarantined_error
+        if overloaded_error is not None:
+            raise overloaded_error
         raise PoolTimeoutError(waiter.failure or f"timed out waiting for slot (role={role!r})")
 
     def _cleanup_in_place(self, lab: Any, *, force_reset_state: bool) -> str | None:
@@ -1276,6 +1330,44 @@ class SandboxPool:
         return {"ok": caught_error is None, "result": action_result if caught_error is None else None,
                 "slot_id": slot_lease._slot_id, **{key: trace_record[key] for key in _RUN_RESULT_KEYS}}
 
+    def slot_states(self) -> list[dict[str, Any]]:
+        """Return an atomic read-only health and activity snapshot for every slot in the pool."""
+        with self._lock:
+            now_mono = self._clock()
+            elapsed_s = max(0.0, now_mono - self._created_mono)
+            snapshots: list[dict[str, Any]] = []
+            for slot_id, slot_state in self._slots.items():
+                if slot_state.draining:
+                    state = "draining"
+                elif slot_state.quarantined and slot_state.in_use:
+                    state = "healing"
+                elif slot_state.quarantined:
+                    state = "quarantined"
+                elif slot_state.in_use:
+                    state = "leased"
+                else:
+                    state = "idle"
+                active_hold_s = (
+                    max(0.0, now_mono - slot_state.active_since)
+                    if slot_state.active_since is not None
+                    else 0.0
+                )
+                busy = slot_state.busy_s + active_hold_s
+                util = round(0.0 if (elapsed_s <= 0.0 or busy <= 0.0) else min(1.0, busy / elapsed_s), 6)
+                snapshots.append({
+                    "slot_id": slot_id,
+                    "role": slot_state.role,
+                    "state": state,
+                    "in_use": slot_state.in_use,
+                    "quarantined": slot_state.quarantined,
+                    "draining": slot_state.draining,
+                    "owner_agent_id": slot_state.owner_agent_id,
+                    "active_hold_s": round(active_hold_s, 6),
+                    "quarantine_reason": slot_state.quarantine_reason,
+                    "utilization": util,
+                })
+            return snapshots
+
     def metrics(self) -> dict[str, Any]:
         """Compute exact aggregate queue, hold, recovery, quarantine, and slot utilization stats."""
         with self._trace_lock:
@@ -1307,6 +1399,10 @@ class SandboxPool:
                 "agent_fault_counts": {aid: len(ts) for aid, ts in sorted(self._agent_faults.items()) if ts},
                 "max_slots_per_agent": self._max_slots_per_agent,
                 "agent_active_slots": {aid: cnt for aid, cnt in sorted(self._agent_active_slots.items()) if cnt},
+                "queue_depth": sum(1 for w in self._waiters if not w.cancelled),
+                "max_waiters": self._max_waiters,
+                "overload_rejections": self._overload_rejections,
+                "overload_evictions": self._overload_evictions,
                 "per_slot_utilization": per_slot_utilization, "trace_head": trace_head,
             }
 
