@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import ctypes
 import gc, hashlib, importlib, json, linecache, math, os, queue, random, signal, subprocess, sys, tempfile, time
 from typing import Any
@@ -14,6 +15,151 @@ from rsibox.lab import ENDPOINT_METHODS
 PARTICIPANT_METHODS = frozenset(ENDPOINT_METHODS)
 WORLD_SIZE_ERR = "world_size must be an integer >= 1"
 FSDP2_SINGLE_RANK_ERR = WORLD_SIZE_ERR
+CHECKPOINT_FORMAT = "rsibox-torchtitan-ckpt-v1"
+
+
+def _validate_rng_py(raw_rng: Any) -> tuple[int, tuple[int, ...], float | None]:
+    """Validate and normalize a Python `random.getstate()` tuple without mutating global RNG."""
+    if not isinstance(raw_rng, (list, tuple)) or len(raw_rng) != 3:
+        raise ValueError("invalid checkpoint rng_py state")
+    ver, state_seq, gauss_next = raw_rng
+    if isinstance(ver, bool) or not isinstance(ver, int) or ver != 3:
+        raise ValueError("invalid checkpoint rng_py version")
+    if not isinstance(state_seq, (list, tuple)) or len(state_seq) != 625:
+        raise ValueError("invalid checkpoint rng_py state vector")
+    if any(isinstance(x, bool) or not isinstance(x, int) for x in state_seq):
+        raise ValueError("invalid checkpoint rng_py state vector element")
+    if gauss_next is not None and (
+        isinstance(gauss_next, bool) or not isinstance(gauss_next, (int, float)) or not math.isfinite(float(gauss_next))
+    ):
+        raise ValueError("invalid checkpoint rng_py gauss_next")
+    normalized = (ver, tuple(state_seq), None if gauss_next is None else float(gauss_next))
+    random.Random().setstate(normalized)
+    return normalized
+
+
+def _validate_rng_tensor(tensor: Any, *, name: str, expected_len: int | None = None) -> Any:
+    import torch
+
+    if not torch.is_tensor(tensor):
+        raise ValueError(f"invalid checkpoint {name}")
+    if tensor.dtype != torch.uint8 or tensor.ndim != 1:
+        raise ValueError(f"checkpoint {name} must be a 1-D uint8 ByteTensor")
+    if expected_len is not None and int(tensor.numel()) != int(expected_len):
+        raise ValueError(f"checkpoint {name} length mismatch ({int(tensor.numel())} != {expected_len})")
+    return tensor.detach().cpu().clone()
+
+
+def _validate_optim_state(optim_state: Any, live_params: list[Any], expected_groups: int) -> dict[str, Any]:
+    import torch
+
+    if not isinstance(optim_state, dict):
+        raise ValueError("invalid checkpoint optim_state")
+    state = optim_state.get("state")
+    groups = optim_state.get("param_groups")
+    if not isinstance(state, dict) or not isinstance(groups, list) or len(groups) != expected_groups:
+        raise ValueError("invalid checkpoint optim_state structure")
+    for grp in groups:
+        if not isinstance(grp, dict):
+            raise ValueError("invalid checkpoint optim_state param_group")
+    for key, entry in state.items():
+        if isinstance(key, bool) or not isinstance(key, int) or key < 0 or key >= len(live_params):
+            raise ValueError(f"invalid checkpoint optim_state parameter index {key!r}")
+        if not isinstance(entry, dict):
+            raise ValueError(f"invalid checkpoint optim_state entry for parameter {key}")
+        expected_shape = tuple(_local(live_params[key]).shape)
+        for field, val in entry.items():
+            if field == "step":
+                if torch.is_tensor(val):
+                    if val.ndim != 0 or val.dtype == torch.bool:
+                        raise ValueError(f"invalid checkpoint optim_state[{key}].step tensor")
+                elif isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+                    raise ValueError(f"invalid checkpoint optim_state[{key}].step value")
+            elif torch.is_tensor(val):
+                if tuple(val.shape) != expected_shape:
+                    raise ValueError(
+                        f"checkpoint optim_state[{key}].{field} shape mismatch "
+                        f"({tuple(val.shape)} != {expected_shape})"
+                    )
+            elif field in ("exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                raise ValueError(f"invalid checkpoint optim_state[{key}].{field} (expected tensor)")
+    return _clone_optim_state(optim_state)
+
+
+def _validate_matrix(mat: Any, rows: int, cols: int, name: str) -> list[list[float]]:
+    if not isinstance(mat, list) or len(mat) != rows:
+        raise ValueError(f"checkpoint {name} matrix shape mismatch")
+    out: list[list[float]] = []
+    for row in mat:
+        if not isinstance(row, list) or len(row) != cols:
+            raise ValueError(f"checkpoint {name} matrix shape mismatch")
+        parsed_row: list[float] = []
+        for val in row:
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not math.isfinite(float(val)):
+                raise ValueError(f"invalid checkpoint {name} value")
+            parsed_row.append(float(val))
+        out.append(parsed_row)
+    return out
+
+
+def _clone_optim_state(state_dict: dict[str, Any]) -> dict[str, Any]:
+    import torch
+
+    def _clone_obj(obj: Any) -> Any:
+        if torch.is_tensor(obj):
+            return _local(obj).detach().cpu().clone()
+        if isinstance(obj, dict):
+            return {k: _clone_obj(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_clone_obj(v) for v in obj]
+        if isinstance(obj, tuple):
+            return tuple(_clone_obj(v) for v in obj)
+        return copy.deepcopy(obj)
+
+    return _clone_obj(state_dict)
+
+
+def _restore_optim_state(optimizer: Any, model: Any, saved_state: dict[str, Any], device: str) -> None:
+    import torch
+
+    has_dtensor = any(hasattr(p, "to_local") for p in model.parameters())
+    if not has_dtensor:
+        optimizer.load_state_dict(copy.deepcopy(saved_state))
+        for st in optimizer.state.values():
+            if isinstance(st, dict):
+                for key, val in list(st.items()):
+                    if torch.is_tensor(val) and key != "step":
+                        st[key] = val.to(device)
+        return
+    # FSDP2 DTensor path: restore per-parameter local state tensors in place when present.
+    params = list(model.parameters())
+    saved_by_idx = saved_state.get("state") or {}
+    optimizer.state.clear()
+    for idx, param in enumerate(params):
+        saved_entry = saved_by_idx.get(idx)
+        if not isinstance(saved_entry, dict) or not saved_entry:
+            continue
+        restored_entry: dict[str, Any] = {}
+        for key, val in saved_entry.items():
+            if torch.is_tensor(val):
+                if key == "step":
+                    restored_entry[key] = val.detach().clone()
+                elif hasattr(param, "to_local"):
+                    local_target = torch.empty_like(_local(param)).copy_(val.to(device))
+                    from torch.distributed.tensor import DTensor
+                    restored_entry[key] = DTensor.from_local(
+                        local_target, device_mesh=param.device_mesh, placements=param.placements, run_check=False
+                    )
+                else:
+                    restored_entry[key] = val.to(device).clone()
+            else:
+                restored_entry[key] = copy.deepcopy(val)
+        optimizer.state[param] = restored_entry
+    saved_groups = saved_state.get("param_groups") or ()
+    for dst_group, src_group in zip(optimizer.param_groups, saved_groups):
+        for key, val in src_group.items():
+            if key != "params":
+                dst_group[key] = copy.deepcopy(val)
 
 
 def validate_world_size(value: Any) -> int:
@@ -97,11 +243,20 @@ class StepGapTrainer:
             int(config.get("rank", 0)),
             validate_world_size(config.get("world_size", 1)),
         )
-        self.seed, self.step, self.pg_initialized = int(config.get("seed", 0)), 0, False
+        self.seed, self.step, self._s0_step, self.pg_initialized = int(config.get("seed", 0)), 0, 0, False
+        self._s0_optim_state: dict[str, Any] | None = None
+        self._checkpoint_dir: str | None = None
+        self._at_s0 = False
         self.use_torch, self.use_fsdp2 = self.mode in ("fsdp2", "cuda", "torch_cpu"), self.mode == "fsdp2"
         self.cfg = model_ops.TitanStepConfig(int(config.get("hidden", 16)), int(config.get("ffn", 32)), int(config.get("layers", 2)), float(config.get("lr", 0.01)))
         try:
             self._init_backend(config)
+            self._at_s0 = True
+            ckpt_dir = config.get("checkpoint_dir")
+            if isinstance(ckpt_dir, str) and ckpt_dir.strip():
+                mount_res = self.mount_checkpoint_as_s0(ckpt_dir.strip())
+                if not mount_res.get("ok"):
+                    raise RuntimeError(str(mount_res.get("error") or "failed to mount checkpoint_dir"))
         except BaseException:
             self.close()
             raise
@@ -153,27 +308,263 @@ class StepGapTrainer:
         self._rng_py, self._rng_torch, self._rng_cuda = random.getstate(), torch.get_rng_state(), (torch.cuda.get_rng_state(self.device) if self.device.startswith("cuda") else None)
 
     def reset_state(self) -> list[str]:
-        """Restore exact post-init `S0` weights, optimizer buffers, step counter, and RNG."""
-        self.step = 0
+        """Restore exact `S0` (post-init or mounted checkpoint) weights, optimizer buffers, step, and RNG."""
+        self._at_s0 = False
+        self.step = self._s0_step
         random.setstate(self._rng_py)
         if not self.use_torch:
             self.w1, self.w2 = [list(r) for r in self._s0_w1], [list(r) for r in self._s0_w2]
+            self._at_s0 = True
             return ["weights_s0", "optimizer_state", "rng", "step_counter"]
         import torch
         with torch.no_grad():
             for param, saved in zip(self.model.parameters(), self._s0_params):
-                _local(param).copy_(saved)
+                _local(param).copy_(saved.to(self.device))
                 param.grad = None
-        self.optimizer.state.clear()
-        for group in self.optimizer.param_groups:
-            group["lr"] = self.cfg.lr
+        if self._s0_optim_state is not None:
+            _restore_optim_state(self.optimizer, self.model, self._s0_optim_state, self.device)
+        else:
+            self.optimizer.state.clear()
+            for group in self.optimizer.param_groups:
+                group["lr"] = self.cfg.lr
         torch.set_rng_state(self._rng_torch)
         if self._rng_cuda is not None:
             torch.cuda.set_rng_state(self._rng_cuda, self.device)
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
         gc.collect()
+        self._at_s0 = True
         return ["weights_s0", "optimizer_state", "rng", *(["cuda_cache"] if self._rng_cuda is not None else []), "step_counter"]
+
+    def save_checkpoint(self, checkpoint_dir: str) -> dict[str, Any]:
+        """Atomically persist this rank's live weights, optimizer state, step, and RNG to `checkpoint_dir`."""
+        if not isinstance(checkpoint_dir, str) or not checkpoint_dir.strip():
+            return findings.not_ok("checkpoint_dir must be a non-empty path string")
+        target_dir = os.path.abspath(checkpoint_dir.strip())
+        if os.path.exists(target_dir) and not os.path.isdir(target_dir):
+            return findings.not_ok(f"checkpoint_dir is not a directory: {target_dir}")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as exc:
+            return findings.not_ok(f"failed to create checkpoint_dir {target_dir}: {exc}")
+        cfg_meta = {"hidden": self.cfg.hidden, "ffn": self.cfg.ffn, "layers": self.cfg.layers, "lr": self.cfg.lr}
+        py_st = random.getstate()
+        if not self.use_torch:
+            payload = {
+                "format": CHECKPOINT_FORMAT,
+                "mode": self.mode,
+                "rank": self.rank,
+                "world_size": self.world_size,
+                "step": self.step,
+                "cfg": cfg_meta,
+                "w1": [list(r) for r in self.w1],
+                "w2": [list(r) for r in self.w2],
+                "rng_py": [py_st[0], list(py_st[1]), py_st[2]],
+            }
+            out_path = os.path.join(target_dir, f"rank{self.rank}.json")
+            try:
+                ipc.atomic_write_json(out_path, payload)
+            except OSError as exc:
+                return findings.not_ok(f"failed to write checkpoint {out_path}: {exc}")
+            return {"ok": True, "rank": self.rank, "step": self.step, "cfg": cfg_meta, "path": out_path}
+        import torch
+        payload = {
+            "format": CHECKPOINT_FORMAT,
+            "mode": self.mode,
+            "rank": self.rank,
+            "world_size": self.world_size,
+            "step": self.step,
+            "cfg": cfg_meta,
+            "params": [_local(p).detach().cpu().clone() for p in self.model.parameters()],
+            "optim_state": _clone_optim_state(self.optimizer.state_dict()),
+            "rng_py": py_st,
+            "rng_torch": torch.get_rng_state().clone(),
+            "rng_cuda": torch.cuda.get_rng_state(self.device).cpu().clone() if self.device.startswith("cuda") else None,
+        }
+        out_path = os.path.join(target_dir, f"rank{self.rank}.pt")
+        tmp_path = f"{out_path}.{os.getpid()}.tmp"
+        try:
+            torch.save(payload, tmp_path)
+            os.replace(tmp_path, out_path)
+        except OSError as exc:
+            return findings.not_ok(f"failed to write checkpoint {out_path}: {exc}")
+        finally:
+            if os.path.exists(tmp_path):
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+        return {"ok": True, "rank": self.rank, "step": self.step, "cfg": cfg_meta, "path": out_path}
+
+    def _load_and_validate_checkpoint(self, checkpoint_dir: str) -> tuple[dict[str, Any] | None, str | None]:
+        """Load and strictly validate a per-rank checkpoint without mutating any worker state."""
+        if not isinstance(checkpoint_dir, str) or not checkpoint_dir.strip():
+            return None, "checkpoint_dir must be a non-empty path string"
+        target_dir = os.path.abspath(checkpoint_dir.strip())
+        if not os.path.isdir(target_dir):
+            return None, f"checkpoint_dir is not a directory: {target_dir}"
+        if not self.use_torch:
+            in_path = os.path.join(target_dir, f"rank{self.rank}.json")
+            if not os.path.isfile(in_path):
+                return None, f"missing checkpoint file: {in_path}"
+            try:
+                with open(in_path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError) as exc:
+                return None, f"failed to read checkpoint {in_path}: {exc}"
+        else:
+            import torch
+            in_path = os.path.join(target_dir, f"rank{self.rank}.pt")
+            if not os.path.isfile(in_path):
+                return None, f"missing checkpoint file: {in_path}"
+            try:
+                data = torch.load(in_path, map_location="cpu", weights_only=False)
+            except Exception as exc:
+                return None, f"failed to load checkpoint {in_path}: {type(exc).__name__}: {exc}"
+
+        if not isinstance(data, dict) or data.get("format") != CHECKPOINT_FORMAT:
+            return None, f"unsupported checkpoint format in {in_path}"
+        if data.get("mode") != self.mode:
+            return None, f"checkpoint mode mismatch ({data.get('mode')!r} != {self.mode!r})"
+        if data.get("world_size") != self.world_size or data.get("rank") != self.rank:
+            return None, (
+                f"checkpoint topology mismatch (rank={data.get('rank')}, world_size={data.get('world_size')} "
+                f"vs expected rank={self.rank}, world_size={self.world_size})"
+            )
+        step_val = data.get("step")
+        if isinstance(step_val, bool) or not isinstance(step_val, int) or step_val < 0:
+            return None, f"invalid checkpoint step {step_val!r}"
+        cfg_meta = data.get("cfg")
+        if not isinstance(cfg_meta, dict):
+            return None, f"invalid checkpoint cfg metadata: {cfg_meta!r}"
+        if (
+            cfg_meta.get("hidden") != self.cfg.hidden
+            or cfg_meta.get("ffn") != self.cfg.ffn
+            or cfg_meta.get("layers") != self.cfg.layers
+        ):
+            return None, f"checkpoint model dimensions mismatch: {cfg_meta!r}"
+        cfg_lr = cfg_meta.get("lr")
+        if (
+            isinstance(cfg_lr, bool)
+            or not isinstance(cfg_lr, (int, float))
+            or not math.isfinite(float(cfg_lr))
+            or not math.isclose(float(cfg_lr), float(self.cfg.lr), rel_tol=1e-9, abs_tol=1e-12)
+        ):
+            return None, f"checkpoint lr mismatch ({cfg_lr!r} != {self.cfg.lr!r})"
+
+        try:
+            restored_rng_py = _validate_rng_py(data.get("rng_py"))
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not self.use_torch:
+            try:
+                w1 = _validate_matrix(data.get("w1"), len(self._s0_w1), self.cfg.hidden, "w1")
+                w2 = _validate_matrix(data.get("w2"), len(self._s0_w2), self.cfg.ffn, "w2")
+            except ValueError as exc:
+                return None, str(exc)
+            return {
+                "target_dir": target_dir,
+                "step": step_val,
+                "w1": w1,
+                "w2": w2,
+                "rng_py": restored_rng_py,
+            }, None
+
+        import torch
+        params_loaded = data.get("params")
+        live_params = list(self.model.parameters())
+        if not isinstance(params_loaded, list) or len(params_loaded) != len(live_params):
+            return None, "checkpoint parameter count mismatch"
+        for idx, (lp, sp) in enumerate(zip(live_params, params_loaded)):
+            if not torch.is_tensor(sp) or tuple(sp.shape) != tuple(_local(lp).shape):
+                return None, f"checkpoint parameter[{idx}] shape mismatch"
+        optim_raw = data.get("optim_state")
+        try:
+            optim_clean = (
+                _validate_optim_state(optim_raw, live_params, len(self.optimizer.param_groups))
+                if optim_raw is not None
+                else None
+            )
+            rng_torch = _validate_rng_tensor(
+                data.get("rng_torch"), name="rng_torch", expected_len=int(self._rng_torch.numel())
+            )
+            if self.device.startswith("cuda"):
+                if self._rng_cuda is None:
+                    return None, "worker missing baseline CUDA RNG state"
+                rng_cuda = _validate_rng_tensor(
+                    data.get("rng_cuda"), name="rng_cuda", expected_len=int(self._rng_cuda.numel())
+                )
+            else:
+                rng_cuda = None
+        except ValueError as exc:
+            return None, str(exc)
+        return {
+            "target_dir": target_dir,
+            "step": step_val,
+            "params": [sp.detach().cpu().clone() for sp in params_loaded],
+            "optim_state": optim_clean,
+            "rng_py": restored_rng_py,
+            "rng_torch": rng_torch,
+            "rng_cuda": rng_cuda,
+        }, None
+
+    def validate_checkpoint(self, checkpoint_dir: str) -> dict[str, Any]:
+        """Dry-run validate a checkpoint directory for this rank without mutating any state."""
+        parsed, err = self._load_and_validate_checkpoint(checkpoint_dir)
+        if err is not None or parsed is None:
+            return findings.not_ok(err or "checkpoint validation failed")
+        return {"ok": True, "rank": self.rank, "s0_step": parsed["step"], "checkpoint_dir": parsed["target_dir"]}
+
+    def mount_checkpoint_as_s0(self, checkpoint_dir: str) -> dict[str, Any]:
+        """Transactionally validate and mount a per-rank checkpoint as this worker's live `S0` anchor."""
+        parsed, err = self._load_and_validate_checkpoint(checkpoint_dir)
+        if err is not None or parsed is None:
+            return findings.not_ok(err or "checkpoint validation failed")
+
+        prev_step = self.step
+        prev_s0_step = self._s0_step
+        prev_rng_py = self._rng_py
+        prev_ckpt_dir = self._checkpoint_dir
+        prev_at_s0 = self._at_s0
+        if not self.use_torch:
+            prev_w1, prev_w2 = self._s0_w1, self._s0_w2
+            try:
+                self._s0_w1 = parsed["w1"]
+                self._s0_w2 = parsed["w2"]
+                self._s0_step = parsed["step"]
+                self._rng_py = parsed["rng_py"]
+                self._checkpoint_dir = parsed["target_dir"]
+                self.reset_state()
+            except BaseException as exc:
+                self._s0_w1, self._s0_w2 = prev_w1, prev_w2
+                self._s0_step, self._rng_py, self._checkpoint_dir = prev_s0_step, prev_rng_py, prev_ckpt_dir
+                self.step, self._at_s0 = prev_step, prev_at_s0
+                with contextlib.suppress(Exception):
+                    self.reset_state()
+                return findings.not_ok(f"failed to activate checkpoint S0: {type(exc).__name__}: {exc}")
+            return {"ok": True, "rank": self.rank, "s0_step": self._s0_step, "checkpoint_dir": parsed["target_dir"]}
+
+        prev_params = self._s0_params
+        prev_optim = self._s0_optim_state
+        prev_rng_torch = self._rng_torch
+        prev_rng_cuda = self._rng_cuda
+        try:
+            self._s0_params = [sp.to(self.device).clone() for sp in parsed["params"]]
+            self._s0_optim_state = parsed["optim_state"]
+            self._s0_step = parsed["step"]
+            self._rng_py = parsed["rng_py"]
+            self._rng_torch = parsed["rng_torch"]
+            self._rng_cuda = parsed["rng_cuda"]
+            self._checkpoint_dir = parsed["target_dir"]
+            self.reset_state()
+        except BaseException as exc:
+            self._s0_params, self._s0_optim_state = prev_params, prev_optim
+            self._s0_step, self._rng_py, self._checkpoint_dir = prev_s0_step, prev_rng_py, prev_ckpt_dir
+            self._rng_torch, self._rng_cuda = prev_rng_torch, prev_rng_cuda
+            self.step, self._at_s0 = prev_step, prev_at_s0
+            with contextlib.suppress(Exception):
+                self.reset_state()
+            return findings.not_ok(f"failed to activate checkpoint S0: {type(exc).__name__}: {exc}")
+        return {"ok": True, "rank": self.rank, "s0_step": self._s0_step, "checkpoint_dir": parsed["target_dir"]}
 
     def _cpu_step(self, step_idx: int) -> tuple[float, float]:
         pred = model_ops.mlp_forward(self.x_batch, self.w1, self.w2)
@@ -207,8 +598,9 @@ class StepGapTrainer:
 
     def run_steps(self, n_steps: int, *, reset_to_s0: bool = True) -> dict[str, Any]:
         """Run `n_steps` training iterations (`forward -> loss -> backward -> optimizer.step`)."""
-        if reset_to_s0 and self.step != 0:
+        if reset_to_s0 and (self.step != self._s0_step or not self._at_s0):
             self.reset_state()
+        self._at_s0 = False
         losses, grad_norms = [], []
         for _ in range(max(1, int(n_steps))):
             loss, gnorm = self._torch_step(self.step) if self.use_torch else self._cpu_step(self.step)
@@ -232,7 +624,16 @@ def _dispatch(trainer: StepGapTrainer, participant: Any, planned: dict[str, set[
     if method == "shutdown":
         return {"ok": True}, True
     if method == "ping":
-        return {"ok": True, "pid": os.getpid(), "rank": trainer.rank, "mode": trainer.mode, "device": trainer.device}, False
+        return {"ok": True, "pid": os.getpid(), "rank": trainer.rank, "mode": trainer.mode, "device": trainer.device, "s0_step": trainer._s0_step}, False
+    if method == "save_checkpoint":
+        ckpt_dir = (payload or {}).get("checkpoint_dir") if isinstance(payload, dict) else payload
+        return trainer.save_checkpoint(ckpt_dir), False
+    if method == "validate_checkpoint":
+        ckpt_dir = (payload or {}).get("checkpoint_dir") if isinstance(payload, dict) else payload
+        return trainer.validate_checkpoint(ckpt_dir), False
+    if method == "mount_checkpoint":
+        ckpt_dir = (payload or {}).get("checkpoint_dir") if isinstance(payload, dict) else payload
+        return trainer.mount_checkpoint_as_s0(ckpt_dir), False
     if method == "step":
         if faults.pop("crash", False):
             os._exit(139)

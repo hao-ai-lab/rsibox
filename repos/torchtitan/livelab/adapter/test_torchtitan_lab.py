@@ -460,6 +460,297 @@ class TorchTitanRealCudaFsdp2Tests(unittest.TestCase):
         finally:
             lab.close()
 
+    def test_checkpoint_to_live_sandbox_s0_mounting_cpu_and_pytorch_adamw(self):
+        """Golden case (Checkpoint-to-Live-Sandbox S0): save mid-run step-4 multi-rank state,
+        mount it as S0, prove bit-exact live==fresh parity and rollback at step 4 (both 2-rank
+        CPU and PyTorch AdamW with populated momentum/variance buffers), and verify fail-closed errors."""
+        import tempfile
+
+        # 1. CLI --checkpoint-dir passthrough (normalized to absolute path).
+        env_ckpt = TorchTitanLab.launch_environment(["--", "--mode", "cpu", "--checkpoint-dir", "rel-demo-ckpt"])
+        self.assertEqual(env_ckpt["RSIBOX_TORCHTITAN_CHECKPOINT_DIR"], os.path.abspath("rel-demo-ckpt"))
+
+        # 2. 2-rank CPU ToyTorchTitanLab mid-run checkpoint S0 workflow + step=0 + fail-closed invariants.
+        with tempfile.TemporaryDirectory(prefix="rsitt-ckpt-cpu-") as root_dir:
+            ckpt0_dir = os.path.join(root_dir, "step0")
+            ckpt_dir = os.path.join(root_dir, "step4")
+            src_lab = ToyTorchTitanLab()
+            self.addCleanup(src_lab.close)
+            # Save clean step=0 checkpoint before advancing!
+            saved0 = src_lab.save_checkpoint(ckpt0_dir)
+            self.assertTrue(saved0["ok"] and saved0["step"] == 0, saved0)
+
+            step0_out = src_lab.check({"steps": 2})["output"]
+            # Continue 2 more steps (total step 4) and persist mid-run checkpoint!
+            adv = src_lab.check({"steps": 2, "continue_state": True})
+            self.assertTrue(adv["ok"], adv)
+            self.assertEqual(adv["output"]["per_rank"]["rank0"]["step"], 4)
+            saved = src_lab.save_checkpoint(ckpt_dir)
+            self.assertTrue(saved["ok"], saved)
+            self.assertEqual(saved["step"], 4)
+            self.assertEqual(saved["ranks"], 2)
+
+            # Active live edit must refuse BOTH save_checkpoint and mount_checkpoint_as_s0 fail-closed!
+            visible = src_lab.patches()["visible"]
+            self.assertTrue(src_lab.install(visible)["ok"])
+            refused_save = src_lab.save_checkpoint(os.path.join(root_dir, "edited_save"))
+            self.assertFalse(refused_save["ok"])
+            self.assertIn("uninstall", refused_save["error"])
+            refused_active = src_lab.mount_checkpoint_as_s0(ckpt_dir)
+            self.assertFalse(refused_active["ok"])
+            self.assertIn("uninstall", refused_active["error"])
+            self.assertTrue(src_lab.uninstall()["ok"])
+
+            # Non-directory regular file path must return ok=False cleanly (no FileExistsError).
+            reg_file = os.path.join(root_dir, "not_a_dir.txt")
+            with open(reg_file, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            self.assertFalse(src_lab.save_checkpoint(reg_file)["ok"])
+            self.assertFalse(src_lab.mount_checkpoint_as_s0(reg_file)["ok"])
+
+            # Atomic staging: simulated rank1 failure while overwriting ckpt0_dir leaves step=0 intact!
+            orig_rank_call = src_lab._rank_call
+
+            def _flaky_rank_call(rank, method, payload=None, *, timeout=None):
+                if method == "save_checkpoint" and rank == 1:
+                    return {"ok": False, "error": "simulated rank1 disk full"}
+                return orig_rank_call(rank, method, payload, timeout=timeout)
+
+            src_lab._rank_call = _flaky_rank_call  # type: ignore[method-assign]
+            try:
+                torn = src_lab.save_checkpoint(ckpt0_dir)
+            finally:
+                src_lab._rank_call = orig_rank_call  # type: ignore[method-assign]
+            self.assertFalse(torn["ok"])
+            self.assertIn("disk full", torn["error"])
+            with open(os.path.join(ckpt0_dir, "manifest.json"), encoding="utf-8") as mf:
+                self.assertEqual(json.load(mf)["step"], 0)
+            with open(os.path.join(ckpt0_dir, "rank0.json"), encoding="utf-8") as rf0:
+                self.assertEqual(json.load(rf0)["step"], 0)
+
+            # Mount step-4 checkpoint as S0 on a brand-new 2-rank lab!
+            lab_m = ToyTorchTitanLab()
+            self.addCleanup(lab_m.close)
+            mounted = lab_m.mount_checkpoint_as_s0(ckpt_dir)
+            self.assertTrue(mounted["ok"], mounted)
+            self.assertEqual(mounted["s0_step"], 4)
+
+            c_base = lab_m.check({"steps": 2})
+            self.assertTrue(c_base["ok"], c_base)
+            self.assertEqual(c_base["output"]["per_rank"]["rank0"]["step"], 6)
+            self.assertEqual(c_base["output"]["per_rank"]["rank1"]["step"], 6)
+            self.assertNotEqual(c_base["output"]["losses"], step0_out["losses"])
+
+            # Repeatable S0 rollback back to step 4!
+            self.assertTrue(lab_m.reset("state")["ok"])
+            self.assertEqual(lab_m.check({"steps": 2})["output"], c_base["output"])
+
+            # Mounting step=0 checkpoint over step=4 S0 restores exact initial step-0 baseline!
+            mounted0 = lab_m.mount_checkpoint_as_s0(ckpt0_dir)
+            self.assertTrue(mounted0["ok"] and mounted0["s0_step"] == 0, mounted0)
+            self.assertEqual(lab_m.check({"steps": 2})["output"], step0_out)
+            # Re-mount step=4 for parity & corruption invariance checks below.
+            self.assertTrue(lab_m.mount_checkpoint_as_s0(ckpt_dir)["ok"])
+
+            # Live hot-swap + fresh_check parity directly from step-4 S0!
+            self.assertTrue(lab_m.install(visible)["ok"])
+            c_ed = lab_m.check({"steps": 2})
+            self.assertTrue(c_ed["ok"] and c_ed["proven"], c_ed)
+            self.assertNotEqual(c_ed["output"]["losses"], c_base["output"]["losses"])
+            fresh_ed = lab_m.fresh_check(visible, {"steps": 2})
+            self.assertTrue(fresh_ed["ok"], fresh_ed)
+            self.assertEqual(fresh_ed["output"], c_ed["output"])
+
+            # Uninstall restores exact step-4 S0 baseline (max_abs_loss_diff == 0.0)!
+            self.assertTrue(lab_m.uninstall()["ok"])
+            c_back = lab_m.check({"steps": 2})
+            self.assertEqual(c_back["output"], c_base["output"])
+
+            # Booting directly with config["checkpoint_dir"] starts at step-4 S0!
+            lab_boot = TorchTitanLab(
+                {
+                    "mode": "cpu", "world_size": 2, "hidden": 8, "ffn": 16,
+                    "layers": 1, "steps": 2, "seed": 0, "checkpoint_dir": ckpt_dir,
+                },
+                rpc_timeout=5.0, check_timeout=2.0, startup_timeout=15.0,
+            )
+            self.addCleanup(lab_boot.close)
+            self.assertEqual(lab_boot.check({"steps": 2})["output"], c_base["output"])
+
+            # Corrupt checkpoint failed-mount invariance: prior step-4 S0 stays bit-exact & unpoisoned!
+            bad_rng_dir = os.path.join(root_dir, "bad_rng")
+            os.makedirs(bad_rng_dir)
+            for fname in ("manifest.json", "rank0.json", "rank1.json"):
+                with open(os.path.join(ckpt_dir, fname), encoding="utf-8") as sf:
+                    payload = json.load(sf)
+                if fname == "rank1.json":
+                    payload["rng_py"] = ["bad"]
+                with open(os.path.join(bad_rng_dir, fname), "w", encoding="utf-8") as df:
+                    json.dump(payload, df)
+            bad_res = lab_m.mount_checkpoint_as_s0(bad_rng_dir)
+            self.assertFalse(bad_res["ok"])
+            self.assertIn("rng_py", bad_res["error"])
+            self.assertEqual(lab_m.status()["state"], "base")
+            self.assertEqual(lab_m.check({"steps": 2})["output"], c_base["output"])
+
+            # Missing manifest and corrupt manifest fail closed without corrupting prior S0.
+            no_man_dir = os.path.join(root_dir, "no_man")
+            os.makedirs(no_man_dir)
+            for fname in ("rank0.json", "rank1.json"):
+                with open(os.path.join(ckpt_dir, fname), encoding="utf-8") as sf:
+                    with open(os.path.join(no_man_dir, fname), "w", encoding="utf-8") as df:
+                        df.write(sf.read())
+            self.assertFalse(lab_m.mount_checkpoint_as_s0(no_man_dir)["ok"])
+            with open(os.path.join(no_man_dir, "manifest.json"), "w", encoding="utf-8") as mf:
+                mf.write("{corrupt-json")
+            self.assertFalse(lab_m.mount_checkpoint_as_s0(no_man_dir)["ok"])
+            self.assertEqual(lab_m.check({"steps": 2})["output"], c_base["output"])
+
+            # Fail-closed checks: missing directory, lr mismatch, & world_size mismatch!
+            self.assertFalse(lab_m.mount_checkpoint_as_s0(os.path.join(ckpt_dir, "missing"))["ok"])
+            lab_lr = TorchTitanLab(
+                {"mode": "cpu", "world_size": 2, "hidden": 8, "ffn": 16, "layers": 1, "lr": 0.05, "steps": 2, "seed": 0},
+                rpc_timeout=5.0, check_timeout=2.0, startup_timeout=15.0,
+            )
+            self.addCleanup(lab_lr.close)
+            lr_res = lab_lr.mount_checkpoint_as_s0(ckpt_dir)
+            self.assertFalse(lr_res["ok"])
+            self.assertIn("lr", lr_res["error"])
+            lab_w1 = TorchTitanLab(
+                {"mode": "cpu", "world_size": 1, "hidden": 8, "ffn": 16, "layers": 1, "steps": 2, "seed": 0},
+                rpc_timeout=5.0, check_timeout=2.0, startup_timeout=15.0,
+            )
+            self.addCleanup(lab_w1.close)
+            self.assertFalse(lab_w1.mount_checkpoint_as_s0(ckpt_dir)["ok"])
+
+            # Phase-2 split s0_step immediately faults/poisons session!
+            lab_split = ToyTorchTitanLab()
+            self.addCleanup(lab_split.close)
+            orig_fanout = lab_split._fanout_rank_call
+
+            def _split_fanout(method, payload, *, timeout=None):
+                res = orig_fanout(method, payload, timeout=timeout)
+                if method == "mount_checkpoint":
+                    res[1]["s0_step"] = 99
+                return res
+
+            lab_split._fanout_rank_call = _split_fanout  # type: ignore[method-assign]
+            split_res = lab_split.mount_checkpoint_as_s0(ckpt_dir)
+            self.assertFalse(split_res["ok"])
+            self.assertTrue(lab_split._dirty)
+            self.assertTrue(bool(lab_split.session.poisoned()))
+
+        # 3. Real PyTorch AdamW (torch_cpu) mid-run checkpoint S0 preserves momentum/variance bit-exact
+        #    and rejects bad ByteTensor rng_torch / bad optim_state without corrupting live S0!
+        try:
+            import torch
+        except Exception:
+            return
+        with tempfile.TemporaryDirectory(prefix="rsitt-ckpt-torch-") as troot:
+            tckpt0_dir = os.path.join(troot, "step0")
+            tckpt_dir = os.path.join(troot, "step3")
+            tlab = TorchTitanLab(
+                {"mode": "torch_cpu", "world_size": 1, "hidden": 16, "ffn": 32, "layers": 2, "steps": 2, "seed": 0},
+                rpc_timeout=10.0, check_timeout=15.0, startup_timeout=30.0,
+            )
+            self.addCleanup(tlab.close)
+            self.assertTrue(tlab.save_checkpoint(tckpt0_dir)["ok"])
+            t_step0 = tlab.check({"steps": 2})["output"]
+            t_adv = tlab.check({"steps": 1, "continue_state": True})
+            self.assertTrue(t_adv["ok"], t_adv)
+            self.assertEqual(t_adv["output"]["per_rank"]["rank0"]["step"], 3)
+            t_saved = tlab.save_checkpoint(tckpt_dir)
+            self.assertTrue(t_saved["ok"] and t_saved["step"] == 3, t_saved)
+
+            t_mounted = tlab.mount_checkpoint_as_s0(tckpt_dir)
+            self.assertTrue(t_mounted["ok"] and t_mounted["s0_step"] == 3, t_mounted)
+            t_base = tlab.check({"steps": 2})["output"]
+            self.assertEqual(t_base["per_rank"]["rank0"]["step"], 5)
+            self.assertNotEqual(t_base["losses"], t_step0["losses"])
+
+            # Corrupt rng_torch (int64 instead of uint8 ByteTensor) & bad optim_state fail closed
+            # while preserving the active step-3 S0 bit-exact!
+            bad_torch_dir = os.path.join(troot, "bad_rng_torch")
+            os.makedirs(bad_torch_dir)
+            with open(os.path.join(tckpt_dir, "manifest.json"), encoding="utf-8") as sf:
+                with open(os.path.join(bad_torch_dir, "manifest.json"), "w", encoding="utf-8") as df:
+                    df.write(sf.read())
+            pt_data = torch.load(os.path.join(tckpt_dir, "rank0.pt"), map_location="cpu", weights_only=False)
+            bad_rng = dict(pt_data, rng_torch=torch.zeros(10, dtype=torch.int64))
+            torch.save(bad_rng, os.path.join(bad_torch_dir, "rank0.pt"))
+            bad_rng_res = tlab.mount_checkpoint_as_s0(bad_torch_dir)
+            self.assertFalse(bad_rng_res["ok"])
+            self.assertIn("ByteTensor", bad_rng_res["error"])
+            self.assertEqual(tlab.status()["state"], "base")
+            self.assertEqual(tlab.check({"steps": 2})["output"], t_base)
+
+            bad_opt = dict(pt_data, optim_state={"state": {0: {"step": "bad"}}, "param_groups": [{}]})
+            torch.save(bad_opt, os.path.join(bad_torch_dir, "rank0.pt"))
+            bad_opt_res = tlab.mount_checkpoint_as_s0(bad_torch_dir)
+            self.assertFalse(bad_opt_res["ok"])
+            self.assertIn("optim_state", bad_opt_res["error"])
+            self.assertEqual(tlab.check({"steps": 2})["output"], t_base)
+
+            t_vis = tlab.patches()["visible"]
+            self.assertTrue(tlab.install(t_vis)["ok"])
+            t_ed = tlab.check({"steps": 2})
+            self.assertTrue(t_ed["ok"] and t_ed["proven"], t_ed)
+            t_fresh = tlab.fresh_check(t_vis, {"steps": 2})
+            self.assertTrue(t_fresh["ok"], t_fresh)
+            self.assertEqual(t_fresh["output"], t_ed["output"])
+            self.assertTrue(tlab.uninstall()["ok"])
+            t_back = tlab.check({"steps": 2})["output"]
+            max_diff = max(abs(a - b) for a, b in zip(t_base["losses"], t_back["losses"]))
+            self.assertEqual(max_diff, 0.0)
+
+            # Mounting step=0 checkpoint over populated AdamW state clears optimizer.state bit-exact!
+            self.assertTrue(tlab.mount_checkpoint_as_s0(tckpt0_dir)["ok"])
+            self.assertEqual(tlab.check({"steps": 2})["output"], t_step0)
+
+    def test_real_fsdp2_cuda_checkpoint_to_live_sandbox_s0(self):
+        """Input: real CUDA FSDP2 (`fully_shard`, `DTensor`) mid-run step-4 checkpoint mount.
+        Expected: mounting mid-run FSDP2 checkpoint restores sharded `DTensor` weights, `AdamW`
+        buffers, and CUDA RNG bit-exact; missing `rng_cuda=None` fails closed."""
+        if not _cuda_fsdp2_available():
+            self.skipTest("requires CUDA GPU and PyTorch FSDP2")
+        import tempfile
+        import torch
+
+        with tempfile.TemporaryDirectory(prefix="rsitt-ckpt-fsdp2-") as root:
+            ckpt4 = os.path.join(root, "step4")
+            lab = TorchTitanLab(
+                {"mode": "fsdp2", "world_size": 1, "hidden": 16, "ffn": 32, "layers": 2, "steps": 2, "seed": 0},
+                check_timeout=30.0,
+                startup_timeout=60.0,
+            )
+            self.addCleanup(lab.close)
+            self.assertTrue(lab.check({"steps": 2, "continue_state": True})["ok"])
+            self.assertTrue(lab.check({"steps": 2, "continue_state": True})["ok"])
+            self.assertTrue(lab.save_checkpoint(ckpt4)["ok"])
+            expected = lab.check({"steps": 2, "continue_state": True})["output"]
+
+            lab2 = TorchTitanLab(
+                {"mode": "fsdp2", "world_size": 1, "hidden": 16, "ffn": 32, "layers": 2, "steps": 2, "seed": 0},
+                check_timeout=30.0,
+                startup_timeout=60.0,
+            )
+            self.addCleanup(lab2.close)
+            self.assertTrue(lab2.mount_checkpoint_as_s0(ckpt4)["ok"])
+            self.assertEqual(lab2.check({"steps": 2})["output"], expected)
+            self.assertEqual(lab2.check({"steps": 2})["output"], expected)
+
+            # Missing rng_cuda on CUDA must fail closed without altering mounted step-4 S0.
+            bad_cuda = os.path.join(root, "no_cuda_rng")
+            os.makedirs(bad_cuda)
+            with open(os.path.join(ckpt4, "manifest.json"), encoding="utf-8") as sf:
+                with open(os.path.join(bad_cuda, "manifest.json"), "w", encoding="utf-8") as df:
+                    df.write(sf.read())
+            d0 = torch.load(os.path.join(ckpt4, "rank0.pt"), map_location="cpu", weights_only=False)
+            d0["rng_cuda"] = None
+            torch.save(d0, os.path.join(bad_cuda, "rank0.pt"))
+            self.assertFalse(lab2.mount_checkpoint_as_s0(bad_cuda)["ok"])
+            self.assertEqual(lab2.check({"steps": 2})["output"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()
