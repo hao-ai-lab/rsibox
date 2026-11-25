@@ -1,0 +1,16 @@
+{
+  "name": "rstack",
+  "displayName": "RSIBox Engineering Stack (rstack)",
+  "version": "0.1.0",
+  "description": "In-repo RSIBox SOP skill stack, adversarial review triangle, atomic claim board, and deterministic pre-push/CI gates.",
+  "author": {
+    "name": "hao-ai-lab",
+    "url": "https://github.com/hao-ai-lab/rsibox"
+  },
+  "repository": "https://github.com/hao-ai-lab/rsibox",
+  "suggestedPrompts": [
+    "Claim a status:ready issue with /rsibox-mode and implement it in an isolated worktree.",
+    "Run pre_push.py --strict and /rsibox-audit on my current branch before opening a PR.",
+    "Run /rsibox-merge-train on open PRs and sync site/facts after merging."
+  ]
+}

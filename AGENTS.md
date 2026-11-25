@@ -178,3 +178,7 @@ The repo will be public. Experiments and the machines they ran on are not part o
   source.
 - Each engine keeps a standing replay of real upstream PRs (`core/agents/orchestrator.md`). A fix found
   by the replay is done when the replay shows it, not when CPU tests pass.
+
+## In-repo skill stack (`rstack`)
+
+- The repository ships its own Antigravity workspace plugin and deterministic engineering gate CLIs under [`.agents/plugins/rstack/`](.agents/plugins/rstack/README.md) (`claim_board.py`, `preflight.py`, `pre_push.py`, `pr_gate.py`, `trajectory_audit.py`, and `/rsibox-mode`). Run those gates locally before pushing branches or opening PRs.
