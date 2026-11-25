@@ -11,9 +11,12 @@ Unifies the three transport shapes used across rsibox engines:
   revalidation.
 """
 import contextlib
+import errno
 import json
+import math
 import os
 import queue
+import selectors
 import socket
 import sys
 import tempfile
@@ -206,16 +209,265 @@ class UnixJsonServer:
         self.close()
 
 
-def unix_json_call(sock_path: str, req: dict, timeout: float | None = 60.0) -> dict:
-    """Send one JSON request line to `sock_path` and return the decoded JSON reply object."""
-    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    conn.settimeout(timeout)
-    label = req.get("verb") or req.get("op") or req.get("cmd") or "request"
+_MAX_WAIT_SLICE_S = 3600.0
+
+
+def _validate_liveness_args(alive_fn, poll_s: float) -> float:
+    if alive_fn is not None and not callable(alive_fn):
+        raise TypeError(f"alive_fn must be callable or None, got {type(alive_fn).__name__}")
+    if isinstance(poll_s, bool) or not isinstance(poll_s, (int, float)):
+        raise ValueError(f"poll_s must be a finite number >= 0, got {poll_s!r}")
     try:
-        conn.connect(sock_path)
-        conn.sendall((json.dumps(req, default=str) + "\n").encode("utf-8"))
-        with conn.makefile("rb") as stream:
-            line = stream.readline()
+        poll_f = float(poll_s)
+    except OverflowError as exc:
+        raise ValueError(f"poll_s must be finite, got {poll_s!r}") from exc
+    if not math.isfinite(poll_f) or poll_f < 0.0:
+        raise ValueError(f"poll_s must be a finite number >= 0, got {poll_s!r}")
+    return poll_f
+
+
+def _validate_unix_timeout(timeout: float | None, label: str) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise TypeError(f"timeout must be a number or None, got {type(timeout).__name__}")
+    try:
+        timeout_f = float(timeout)
+    except OverflowError as exc:
+        raise ValueError(f"timeout must be finite or inf, got {timeout!r}") from exc
+    if math.isnan(timeout_f):
+        raise TimeoutError(f"no answer to {label} in {timeout} s")
+    if timeout_f < 0.0:
+        raise ValueError(f"timeout must be >= 0, got {timeout!r}")
+    if math.isinf(timeout_f):
+        return None
+    return timeout_f
+
+
+def _wait_socket_event(
+    sel: selectors.BaseSelector,
+    *,
+    label: str,
+    timeout_orig: float | None,
+    deadline: float | None,
+    poll_s: float,
+    alive_fn,
+    phase: str,
+) -> bool:
+    """Wait until registered socket event is ready, polling `alive_fn` and enforcing `deadline`.
+
+    Returns True when the socket became ready; raises TimeoutError or ConnectionError otherwise.
+    """
+    while True:
+        remaining = None if deadline is None else (deadline - time.monotonic())
+        if remaining is not None and not (remaining > 0.0):
+            if sel.select(0.0):
+                return True
+            raise TimeoutError(f"no answer to {label} in {timeout_orig} s")
+        if alive_fn is not None:
+            wait_s = poll_s if remaining is None else min(poll_s, remaining)
+        else:
+            wait_s = _MAX_WAIT_SLICE_S if remaining is None else remaining
+        wait_s = min(wait_s, _MAX_WAIT_SLICE_S)
+        if sel.select(wait_s):
+            return True
+        if alive_fn is not None and not alive_fn():
+            if sel.select(0.0):
+                return True
+            raise ConnectionError(f"peer process exited before {phase} {label}")
+
+
+def _connect_and_send_unix(
+    conn: socket.socket,
+    sock_path: str,
+    payload: bytes,
+    *,
+    label: str,
+    timeout_orig: float | None,
+    deadline: float | None,
+    poll_s: float,
+    alive_fn,
+) -> None:
+    """Non-blocking AF_UNIX connect + chunked send polling `alive_fn` via DefaultSelector."""
+    conn.setblocking(False)
+    with selectors.DefaultSelector() as sel:
+        sel.register(conn, selectors.EVENT_WRITE)
+        try:
+            conn.connect(sock_path)
+        except BlockingIOError:
+            _wait_socket_event(
+                sel, label=label, timeout_orig=timeout_orig, deadline=deadline,
+                poll_s=poll_s, alive_fn=alive_fn, phase="sending",
+            )
+            so_err = conn.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if so_err:
+                raise OSError(so_err, os.strerror(so_err))
+        except OSError as exc:
+            if exc.errno in (errno.EINPROGRESS, errno.EAGAIN, errno.EWOULDBLOCK):
+                _wait_socket_event(
+                    sel, label=label, timeout_orig=timeout_orig, deadline=deadline,
+                    poll_s=poll_s, alive_fn=alive_fn, phase="sending",
+                )
+                so_err = conn.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                if so_err:
+                    raise OSError(so_err, os.strerror(so_err))
+            else:
+                raise
+
+        view = memoryview(payload)
+        sent = 0
+        total = len(payload)
+        while sent < total:
+            try:
+                n = conn.send(view[sent:])
+                if n == 0:
+                    raise ConnectionError(f"server closed the connection during {label}")
+                sent += n
+                continue
+            except BlockingIOError:
+                pass
+            _wait_socket_event(
+                sel, label=label, timeout_orig=timeout_orig, deadline=deadline,
+                poll_s=poll_s, alive_fn=alive_fn, phase="sending",
+            )
+
+
+def _iter_unix_json_lines(
+    conn: socket.socket,
+    *,
+    label: str,
+    timeout_orig: float | None,
+    timeout_s: float | None,
+    deadline: float | None,
+    poll_s: float,
+    alive_fn,
+    reset_deadline_on_line: bool = False,
+):
+    """Yield complete newline-delimited byte lines from `conn` using DefaultSelector."""
+    conn.setblocking(False)
+    buf = bytearray()
+    with selectors.DefaultSelector() as sel:
+        sel.register(conn, selectors.EVENT_READ)
+        while True:
+            nl = buf.find(b"\n")
+            if nl != -1:
+                line = bytes(buf[:nl])
+                del buf[: nl + 1]
+                yield line
+                if reset_deadline_on_line and timeout_s is not None:
+                    deadline = time.monotonic() + timeout_s
+                continue
+
+            remaining = None if deadline is None else (deadline - time.monotonic())
+            if remaining is not None and not (remaining > 0.0):
+                if sel.select(0.0):
+                    try:
+                        chunk = conn.recv(65536)
+                    except BlockingIOError:
+                        chunk = None
+                    if chunk:
+                        buf.extend(chunk)
+                        continue
+                    if chunk == b"":
+                        if buf:
+                            line = bytes(buf)
+                            buf.clear()
+                            yield line
+                        return
+                raise TimeoutError(f"no answer to {label} in {timeout_orig} s")
+
+            if alive_fn is not None:
+                wait_s = poll_s if remaining is None else min(poll_s, remaining)
+            else:
+                wait_s = _MAX_WAIT_SLICE_S if remaining is None else remaining
+            wait_s = min(wait_s, _MAX_WAIT_SLICE_S)
+
+            if sel.select(wait_s):
+                try:
+                    chunk = conn.recv(65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    if buf:
+                        line = bytes(buf)
+                        buf.clear()
+                        yield line
+                    return
+                buf.extend(chunk)
+                continue
+
+            if alive_fn is not None and not alive_fn():
+                eof = False
+                while sel.select(0.0):
+                    try:
+                        chunk = conn.recv(65536)
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        eof = True
+                        break
+                    buf.extend(chunk)
+                    if b"\n" in buf:
+                        break
+                nl = buf.find(b"\n")
+                if nl != -1:
+                    line = bytes(buf[:nl])
+                    del buf[: nl + 1]
+                    yield line
+                    if reset_deadline_on_line and timeout_s is not None:
+                        deadline = time.monotonic() + timeout_s
+                    continue
+                if eof:
+                    if buf:
+                        line = bytes(buf)
+                        buf.clear()
+                        yield line
+                    return
+                raise ConnectionError(f"peer process exited before answering {label}")
+
+
+def unix_json_call(
+    sock_path: str,
+    req: dict,
+    timeout: float | None = 60.0,
+    *,
+    poll_s: float = 0.05,
+    alive_fn=None,
+) -> dict:
+    """Send one JSON request line to `sock_path` and return the decoded JSON reply object.
+
+    Optional `alive_fn` (`() -> bool`) is checked before connecting and every `poll_s` across
+    connect, send, and receive so a SIGKILLed peer fails fast with `ConnectionError` even when
+    a forked grandchild still holds the inherited socket FD open.
+    """
+    poll_f = _validate_liveness_args(alive_fn, poll_s)
+    label = req.get("verb") or req.get("op") or req.get("cmd") or req.get("method") or "request"
+    timeout_s = _validate_unix_timeout(timeout, label)
+    if alive_fn is not None and not alive_fn():
+        raise ConnectionError(f"peer process exited before sending {label}")
+    payload = (json.dumps(req, default=str) + "\n").encode("utf-8")
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    use_selector = alive_fn is not None or timeout_s == 0.0 or (timeout_s is not None and timeout_s > _MAX_WAIT_SLICE_S)
+    try:
+        if not use_selector:
+            conn.settimeout(timeout_s)
+            conn.connect(sock_path)
+            conn.sendall(payload)
+            with conn.makefile("rb") as stream:
+                line = stream.readline()
+        else:
+            deadline = None if timeout_s is None else (time.monotonic() + timeout_s)
+            _connect_and_send_unix(
+                conn, sock_path, payload, label=label, timeout_orig=timeout,
+                deadline=deadline, poll_s=poll_f, alive_fn=alive_fn,
+            )
+            line = next(
+                _iter_unix_json_lines(
+                    conn, label=label, timeout_orig=timeout, timeout_s=timeout_s,
+                    deadline=deadline, poll_s=poll_f, alive_fn=alive_fn,
+                ),
+                b"",
+            )
     except socket.timeout as exc:
         raise TimeoutError(f"no answer to {label} in {timeout} s") from exc
     finally:
@@ -232,18 +484,55 @@ def unix_json_stream(
     *,
     timeout: float | None = None,
     stop_events: tuple[str, ...] = ("exited", "refused", "error", "stopped", "pong"),
+    poll_s: float = 0.05,
+    alive_fn=None,
 ):
-    """Send one JSON request line and yield streamed JSON event objects until a terminal event."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-        conn.settimeout(timeout)
-        conn.connect(sock_path)
-        conn.sendall((json.dumps(req, default=str) + "\n").encode("utf-8"))
-        with conn.makefile("rb") as stream:
-            for line in stream:
-                event = json.loads(line)
-                yield event
-                if isinstance(event, dict) and event.get("event") in stop_events:
-                    break
+    """Send one JSON request line and yield streamed JSON event objects until a terminal event.
+
+    `timeout`, when set, acts as a per-event inactivity timeout across both `alive_fn=None`
+    and `alive_fn!=None` paths. Argument validation and pre-connect liveness checks run eagerly.
+    """
+    poll_f = _validate_liveness_args(alive_fn, poll_s)
+    label = req.get("verb") or req.get("op") or req.get("cmd") or req.get("method") or "request"
+    timeout_s = _validate_unix_timeout(timeout, label)
+    if alive_fn is not None and not alive_fn():
+        raise ConnectionError(f"peer process exited before sending {label}")
+    payload = (json.dumps(req, default=str) + "\n").encode("utf-8")
+    use_selector = alive_fn is not None or timeout_s == 0.0 or (timeout_s is not None and timeout_s > _MAX_WAIT_SLICE_S)
+
+    def _stream():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            if not use_selector:
+                conn.settimeout(timeout_s)
+                try:
+                    conn.connect(sock_path)
+                    conn.sendall(payload)
+                    with conn.makefile("rb") as stream:
+                        for line in stream:
+                            event = json.loads(line)
+                            yield event
+                            if isinstance(event, dict) and event.get("event") in stop_events:
+                                break
+                except socket.timeout as exc:
+                    raise TimeoutError(f"no answer to {label} in {timeout} s") from exc
+            else:
+                deadline = None if timeout_s is None else (time.monotonic() + timeout_s)
+                _connect_and_send_unix(
+                    conn, sock_path, payload, label=label, timeout_orig=timeout,
+                    deadline=deadline, poll_s=poll_f, alive_fn=alive_fn,
+                )
+                read_deadline = None if timeout_s is None else (time.monotonic() + timeout_s)
+                for line in _iter_unix_json_lines(
+                    conn, label=label, timeout_orig=timeout, timeout_s=timeout_s,
+                    deadline=read_deadline, poll_s=poll_f, alive_fn=alive_fn,
+                    reset_deadline_on_line=True,
+                ):
+                    event = json.loads(line)
+                    yield event
+                    if isinstance(event, dict) and event.get("event") in stop_events:
+                        break
+
+    return _stream()
 
 
 # -- File control channel & NFS-safe directory mailbox -----------------------------------
