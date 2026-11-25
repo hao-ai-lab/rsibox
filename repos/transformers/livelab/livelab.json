@@ -1,4 +1,10 @@
 {
   "toy": "adapter.toy_lab:ToyTransformersLab",
-  "real": "adapter.lab:TransformersLab"
+  "real": "adapter.lab:TransformersLab",
+  "roles": ["inference"],
+  "capabilities": {
+    "mode": "inference",
+    "cuda_graph": false,
+    "distributed": "single"
+  }
 }

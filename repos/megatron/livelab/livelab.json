@@ -1,0 +1,10 @@
+{
+  "toy": null,
+  "real": "rsibox_megatron.conformance_lab:MegatronLab",
+  "roles": ["trainer"],
+  "capabilities": {
+    "mode": "training",
+    "cuda_graph": false,
+    "distributed": "torchrun"
+  }
+}

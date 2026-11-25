@@ -1,0 +1,10 @@
+{
+  "toy": "adapter.toy_lab:ToySglangLab",
+  "real": "adapter.conformance_lab:SglangConformanceLab",
+  "roles": ["inference"],
+  "capabilities": {
+    "mode": "inference",
+    "cuda_graph": true,
+    "distributed": "tp"
+  }
+}
