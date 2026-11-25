@@ -10,7 +10,7 @@ Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight re
 core/livelab/kernel/          (two-phase txns, code swap, JIT rebuild, witness, journal)
         │
         ▼
-core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux · S5 Buffers · S6 Recovery [shipped])
+core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux [shipped] · S5 Buffers · S6 Recovery [shipped])
         │
         ▼
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
@@ -26,7 +26,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | **S1 Memory** | Unified GPU memory & state ownership (`ro_weights`, `kv_pool`, `cow_s0_snapshot`, `ro_aux_weights`, `actor_rollout_shared`) | **Shipped** ([`memory.py`](../core/livelab/rsibox/services/memory.py)) | `MemoryService`, `MemoryHandle`, `SnapshotLease`; `WeightStore` / Dynamo GMS / CUDA IPC + `stamp_diff` |
 | **S2 Zygote** | Pre-imported Python/CUDA fork server & warm worker pool | **Shipped** ([`zygote.py`](../core/livelab/rsibox/services/zygote.py)) | `ZygoteService`, `ZygoteProfile`, `SpawnedChild`, `profile_for_engine`; `forksafe` guards + `AF_UNIX` `SCM_RIGHTS` |
 | **S3 Cache** | Triton, Inductor, FlashInfer & CUDA-graph artifact store | **Shipped** ([`cache.py`](../core/livelab/rsibox/services/cache.py)) | `CompileCacheService`, `EnvFingerprint`, `CacheEntry`; per-entry `flock` + atomic `os.replace` + SHA-256 verification |
-| **S4 Auxiliary** | Out-of-band reward, reference, and judge model pools | Planned | Dedicated RO placement and RPC endpoints decoupled from actor/trainer loops |
+| **S4 Auxiliary** | Shared frozen VAE, text encoder, reward, reference, and judge stage pool | **Shipped** ([`auxiliary.py`](../core/livelab/rsibox/services/auxiliary.py)) | `AuxiliaryModelService`, `AuxStageKind`, `AuxStageSpec`, `AuxInvocationReceipt`; S1 `ro_aux_weights` RO leases + LRU cache |
 | **S5 Buffers** | Pre-allocated activation, KV scratch, and step replay buffers | Planned | Quiesce-aware sizing and deterministic zeroing on `reset("state")` |
 | **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | **Shipped** ([`recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py)) | `RecoveryService`, `RecoveryTier`, `ServiceHealth`, `RecoveryReceipt`; `RecoveryDriver` + `QuiesceHooks` + `SandboxPool` |
 
@@ -78,6 +78,22 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `CacheEntry` | Frozen entry descriptor (`namespace`, `key`, `kind`, `fingerprint_digest`, `payload_path`, `size_bytes`, `sha256`, `created_at`, `metadata`) |
 | `CompileCacheService` | Thread-safe, context-managed disk cache (`put`, `get`, `invalidate`, `list_entries`, `stats`, `teardown`, `close`) |
 
+## S4: Shared Auxiliary & Frozen Stage Pool (Shipped)
+
+[`core/livelab/rsibox/services/auxiliary.py`](../core/livelab/rsibox/services/auxiliary.py) manages non-updated auxiliary models (`vae`, `text_encoder`, `reward_model`, `reference_model`, `judge`, `custom`) shared across concurrent inference and RL workers behind `AuxiliaryModelService`:
+
+- **Read-only S1 weight fencing:** `register_stage()` rejects writable handles and non-RO pools fail-closed (`read_only=True` in `ro_aux_weights` or `ro_weights`), while `invoke()` acquires a per-call RO `SnapshotLease` with `expected_stamp` validation and releases it in `finally:` even when `infer_fn` raises.
+- **Lock-free inference & bounded LRU caching:** Internal locks are released across blocking `infer_fn(payload, context)` calls, results are cached per `(stage_id, version, input_digest)` in a bounded `OrderedDict` LRU cache, and `bump_version()` / `unregister_stage()` atomically invalidate cached entries and run stage `close_fn()` hooks outside locks.
+
+### Public API Summary (`rsibox.services.auxiliary`)
+
+| Symbol | Purpose |
+|---|---|
+| `AuxStageKind` | Enum of frozen stage categories (`vae`, `text_encoder`, `reward_model`, `reference_model`, `judge`, `custom`) |
+| `AuxStageSpec` | Frozen stage descriptor (`stage_id`, `kind`, `engine`, `model_id`, `version`, `handle_id`, `gpus`, `max_cache_entries`) |
+| `AuxInvocationReceipt` | Frozen invocation receipt (`stage_id`, `version`, `caller_id`, `input_digest`, `cache_hit`, `cost_s`, `lease_id`, `output`) |
+| `AuxiliaryModelService` | Thread-safe context-managed stage pool (`register_stage`, `invoke`, `bump_version`, `unregister_stage`, `list_stages`, `get_stage`, `stats`, `teardown`, `close`) |
+
 ## S6: Unified Recovery & Health Service (Shipped)
 
 [`core/livelab/rsibox/services/recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py) unifies process recovery, snapshot quiesce handshakes, and pool/autoscaler health aggregation behind `RecoveryService`:
@@ -96,9 +112,8 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `RecoveryReceipt` | Frozen outcome record (`tier_attempted`, `tier_succeeded`, `ok`, `fallback_used`, `cost_s`, `incarnation`, `driver_receipt`) |
 | `RecoveryService` | Thread-safe coordinator (`register_endpoint`, `attach_pool`, `record_failure`, `recover`, `quiesce_and_checkpoint`, `get_health`, `health_snapshot`, `probe_health`, `teardown`, `close`) |
 
-## Planned Services (`S4`–`S5`)
+## Planned Services (`S5`)
 
-- **S4 (Auxiliary):** Manages non-updated reward/reference/judge pools in RL setups (`veRL`, `miles`, `NeMo-RL`) using `S1` `ro_aux_weights` handles.
 - **S5 (Buffers):** Tracks volatile step buffers (`kv_pool`, replay/rollout buffers) that must drain and reset on `reset("state")` or quiesce during snapshot capture.
 
 ## Public API Summary (`rsibox.services.memory`)

@@ -9,13 +9,27 @@ Provides engine-agnostic control-plane services composed beneath `core/livelab/k
   unifying pre-fork `forksafe` guards and `AF_UNIX` + `SCM_RIGHTS` worker spawning.
 - `cache` (`S3`): Shared Compile & Graph Cache Service (`CacheArtifactKind`, `EnvFingerprint`,
   `CacheEntry`, `CompileCacheService`) providing fail-closed cross-process artifact reuse.
+- `auxiliary` (`S4`): Shared Auxiliary & Frozen Stage Pool (`AuxiliaryModelService`,
+  `AuxStageKind`, `AuxStageSpec`, `AuxInvocationReceipt`) managing frozen VAE, text
+  encoder, reward, reference, and judge stages with S1 RO weight leases and LRU caching.
 - `recovery_service` (`S6`): Unified Recovery & Health Service (`RecoveryService`,
   `RecoveryTier`, `ServiceHealthStatus`, `ServiceHealth`, `RecoveryReceipt`) unifying
   `RecoveryDriver` escalation, `QuiesceHooks` checkpoints, and `SandboxPool` health.
 """
 from __future__ import annotations
 
-from . import cache, memory, recovery_service, zygote
+from . import auxiliary, cache, memory, recovery_service, zygote
+from .auxiliary import (
+    AuxClosedError,
+    AuxiliaryModelService,
+    AuxInvocationError,
+    AuxInvocationReceipt,
+    AuxServiceError,
+    AuxStageKind,
+    AuxStageSpec,
+    StageExistsError,
+    StageNotFoundError,
+)
 from .cache import (
     CacheArtifactKind,
     CacheClosedError,
@@ -65,6 +79,13 @@ from .zygote import (
 )
 
 __all__ = [
+    "AuxClosedError",
+    "AuxInvocationError",
+    "AuxInvocationReceipt",
+    "AuxServiceError",
+    "AuxStageKind",
+    "AuxStageSpec",
+    "AuxiliaryModelService",
     "CacheArtifactKind",
     "CacheClosedError",
     "CacheCorruptError",
@@ -96,12 +117,15 @@ __all__ = [
     "SnapshotLease",
     "SpawnError",
     "SpawnedChild",
+    "StageExistsError",
+    "StageNotFoundError",
     "StampMismatchError",
     "ZygoteClosedError",
     "ZygoteError",
     "ZygoteProfile",
     "ZygoteService",
     "ZygoteState",
+    "auxiliary",
     "cache",
     "list_profiles",
     "memory",
