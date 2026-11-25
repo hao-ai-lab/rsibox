@@ -1,13 +1,19 @@
 """Spec-to-code conformance tests validating live state transitions against the TLA+ models."""
 from __future__ import annotations
 
+import gc
+import json
+import os
 import pathlib
 import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
+import forksafe
 from kernel import coordinator as C
 from kernel import journal as J
 from kernel import receipt as R
@@ -17,7 +23,16 @@ from kernel import witness as W
 from rsibox.autoscaler import AutoScalerPolicy, PoolAutoScaler
 from rsibox.lab import BaseLab
 from rsibox.pool import PoolError, PoolSlot, PoolTimeoutError, SandboxPool
-from rsibox.warm import AsyncShadowReplenisher, DefaultRespawnDriver, DiskStore, StandbyShadowDriver
+from rsibox.services import ForkPoisonedError, ZygoteProfile, ZygoteService
+from rsibox.warm import (
+    AsyncShadowReplenisher,
+    DefaultRespawnDriver,
+    DiskStore,
+    DynamoK8sSnapshotDriver,
+    QuiesceReceipt,
+    StandbyShadowDriver,
+    run_snapshot_lifecycle,
+)
 
 
 class _TrackingLab:
@@ -352,3 +367,181 @@ class TlaConformanceTests(unittest.TestCase):
 
         pool.close(close_labs=True)
         self.assertEqual(scaler.reconcile_once()["action"], "noop")  # ClosedYieldsNoop
+
+    def test_snapshot_lifecycle_tla_fail_closed_sentinels(self) -> None:
+        class _Hooks:
+            mutability = "readonly_weights"
+
+            def __init__(self, *, quiesce_ok: bool, resume_ok: bool) -> None:
+                self._quiesce_ok = quiesce_ok
+                self._resume_ok = resume_ok
+                self.events: list[str] = []
+
+            def warmup_for_snapshot(self) -> None:
+                self.events.append("warmup")
+
+            def quiesce_for_snapshot(self) -> QuiesceReceipt:
+                self.events.append("quiesce")
+                if not self._quiesce_ok:
+                    return QuiesceReceipt(ok=False, error="quiesce failed")
+                return QuiesceReceipt(ok=True, released=("kv_cache",), token="tok-tla")
+
+            def resume_after_restore(self, _receipt: QuiesceReceipt) -> dict[str, object]:
+                self.events.append("resume")
+                if not self._resume_ok:
+                    return {"ok": False, "error": "wake_up / host ping failed"}
+                return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as td:
+            ctrl = pathlib.Path(td)
+            ready = ctrl / "ready-for-snapshot"
+            restore_complete = ctrl / "restore-complete"
+            restore_ready = ctrl / "vllm-restore-ready"
+            driver = DynamoK8sSnapshotDriver(
+                engine_name="vllm", control_dir=str(ctrl), wait_timeout_s=1.0, poll_s=0.01,
+            )
+
+            # 1. Failing quiesce_for_snapshot() -> stale sentinels cleared, ready-for-snapshot never written.
+            ready.write_text("stale", encoding="utf-8")
+            restore_complete.write_text("stale", encoding="utf-8")
+            restore_ready.write_text("stale", encoding="utf-8")
+            q_fail = _Hooks(quiesce_ok=False, resume_ok=True)
+            res_q = driver.checkpoint_and_wait(q_fail)
+            self.assertFalse(res_q.ok)
+            self.assertEqual(q_fail.events, ["warmup", "quiesce"])
+            self.assertFalse(ready.exists())  # ReadySentinelRequiresQuiesce
+            self.assertFalse(restore_complete.exists())
+            self.assertFalse(restore_ready.exists())  # FailedNoResumeReady
+
+            # 2. Timeout waiting for restore-complete -> ready-for-snapshot unlinked, no restore-ready.
+            tmo_hooks = _Hooks(quiesce_ok=True, resume_ok=True)
+            res_tmo = run_snapshot_lifecycle(
+                tmo_hooks, engine_name="vllm", control_dir=str(ctrl), wait_timeout_s=0.04, poll_s=0.01,
+            )
+            self.assertFalse(res_tmo.ok)
+            self.assertEqual(tmo_hooks.events, ["warmup", "quiesce"])
+            self.assertFalse(ready.exists())
+            self.assertFalse(restore_ready.exists())  # ResumeReadyRequiresRestore
+
+            def _spawn_agent(expected_hooks: _Hooks) -> threading.Thread:
+                def _agent() -> None:
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline:
+                        if ready.exists() and "quiesce" in expected_hooks.events:
+                            restore_complete.write_text("ok\n", encoding="utf-8")
+                            return
+                        time.sleep(0.01)
+
+                t = threading.Thread(target=_agent, daemon=True)
+                t.start()
+                return t
+
+            # 3. Failing wake_up / host ping in resume_after_restore() -> no <engine>-restore-ready written.
+            r_fail = _Hooks(quiesce_ok=True, resume_ok=False)
+            t1 = _spawn_agent(r_fail)
+            res_r = driver.checkpoint_and_wait(r_fail)
+            t1.join(timeout=2.0)
+            self.assertFalse(res_r.ok)
+            self.assertTrue(restore_complete.exists())
+            self.assertFalse(restore_ready.exists())  # FailedNoResumeReady
+
+            # 4. Clean pass writes ready-for-snapshot after quiesce and <engine>-restore-ready after restore.
+            ok_hooks = _Hooks(quiesce_ok=True, resume_ok=True)
+            t2 = _spawn_agent(ok_hooks)
+            res_ok = driver.checkpoint_and_wait(ok_hooks)
+            t2.join(timeout=2.0)
+            self.assertTrue(res_ok.ok, res_ok.to_dict())
+            self.assertEqual(ok_hooks.events, ["warmup", "quiesce", "resume"])
+            self.assertTrue(ready.exists())
+            self.assertTrue(restore_complete.exists())
+            self.assertTrue(restore_ready.exists())
+
+    def test_forksafe_lock_order_tla_guard_preload_and_poison_refusal(self) -> None:
+        if hasattr(gc, "unfreeze"):
+            self.addCleanup(gc.unfreeze)
+
+        def _make_fake_cuda() -> types.SimpleNamespace:
+            def _uninit(*_a: object, **_kw: object) -> None:
+                raise AssertionError("unpatched fake CUDA queried while uninitialized")
+
+            return types.SimpleNamespace(
+                is_initialized=lambda: False,
+                get_device_capability=_uninit,
+                current_device=_uninit,
+                get_device_properties=_uninit,
+            )
+
+        def _fake_probe() -> list[dict[str, object]]:
+            return [{"name": "FakeGPU", "major": 10, "minor": 0, "total_memory": 1024, "multi_processor_count": 8}]
+
+        prof = ZygoteProfile("vllm", preload_modules=("json",), freeze_gc=True)
+
+        # 1. Poisoned parent refuses arm_guards() and start() fail-closed (ForkRequiresCleanDriver).
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch.object(forksafe, "fork_poisoned", return_value=True), \
+             mock.patch.object(forksafe, "poison_reasons", return_value=["cuInit called"]):
+            svc_poisoned = ZygoteService(prof, cuda_module_fn=_make_fake_cuda)
+            self.addCleanup(svc_poisoned.close)
+            with self.assertRaises(ForkPoisonedError):
+                svc_poisoned.arm_guards(capability=(10, 0), probe=_fake_probe)
+            with self.assertRaises(ForkPoisonedError):
+                svc_poisoned.start(capability=(10, 0), probe=_fake_probe)
+
+        # 2. Guards armed & Triton pinned before preload, Triton unpinned after preload, poison blocks fork,
+        #    and clean fork runs unpatch_child() before child payload (PreloadAfterGuards / ReadyChildUnpatched).
+        fake_cuda = _make_fake_cuda()
+        events: list[str] = []
+
+        def _fake_pin_triton(**_kw: object):
+            events.append("pin_triton")
+
+            def _restore() -> None:
+                events.append("restore_triton")
+
+            return _restore
+
+        def _importer(name: str) -> object:
+            self.assertTrue(getattr(fake_cuda.get_device_capability, "_rsibox_forksafe", False))
+            events.append(f"import:{name}")
+            return __import__(name)
+
+        def _child_handler(payload: dict, fds: list[int]) -> int:
+            out = {
+                "still_patched": getattr(fake_cuda.get_device_capability, "_rsibox_forksafe", False),
+                "torch_cuda": sorted(payload["child_guard_report"].get("torch_cuda", [])),
+            }
+            os.write(fds[0], json.dumps(out).encode("utf-8"))
+            return 0
+
+        with mock.patch.dict(os.environ, {}, clear=False), \
+             mock.patch.object(forksafe, "pin_triton_target", side_effect=_fake_pin_triton):
+            svc = ZygoteService(prof, cuda_module_fn=lambda: fake_cuda, importer=_importer)
+            self.addCleanup(svc.close)
+            svc.start(capability=(10, 0), probe=_fake_probe)
+            self.assertEqual(events, ["pin_triton", "import:json", "restore_triton"])
+
+            # Subsequent CUDA initialization refuses spawn_child() fail-closed.
+            with mock.patch.object(forksafe, "fork_poisoned", return_value=True), \
+                 mock.patch.object(forksafe, "poison_reasons", return_value=["CUDA driver initialized"]):
+                with self.assertRaises(ForkPoisonedError):
+                    svc.spawn_child("worker")
+
+            r_fd, w_fd = os.pipe()
+            try:
+                child = svc.spawn_child("worker", pass_fds=(w_fd,), handler=_child_handler, wait=True)
+            finally:
+                os.close(w_fd)
+            try:
+                chunks: list[bytes] = []
+                while chunk := os.read(r_fd, 4096):
+                    chunks.append(chunk)
+                child_info = json.loads(b"".join(chunks).decode("utf-8"))
+            finally:
+                os.close(r_fd)
+
+            self.assertEqual(child.exit_code, 0)
+            self.assertFalse(child_info["still_patched"])
+            self.assertEqual(
+                child_info["torch_cuda"],
+                ["current_device", "get_device_capability", "get_device_properties"],
+            )

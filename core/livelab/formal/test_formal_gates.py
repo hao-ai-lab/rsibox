@@ -142,6 +142,7 @@ class FormalGatesTest(unittest.TestCase):
         names = {c["name"] for c in all_cases}
         for base in (
             "pool", "coordinator", "swap", "shadow", "autoscaler",
+            "snapshot", "forksafe",
             "transaction", "participant", "sequential-tx", "incarnation",
         ):
             self.assertIn(base, names)
