@@ -42,9 +42,9 @@
    "category": "Inference",
    "status": "done",
    "conformance": "11/11 CPU & 1x/2x B200 (TP=1 & TP=2 MPI)",
-   "tiers": "R0 Python + TP>=2 MPIPoolExecutor Hook (#241) + R1 Lazy CUDA Graph Recapture + TrtllmQuiesceHooks (#215)",
+   "tiers": "R0 Python + TP>=2 MPIPoolExecutor Hook (#241) + R1 Lazy CUDA Graph Recapture + TrtllmQuiesceHooks (#215) + TrtllmShadowPromoter (#272 CPU)",
    "speedup": "up to 249x cold / 116x warm (26.7 s / 12.4 s -> 0.107 s TP=1)",
-   "summary": "Unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend across TP=1 and TP=2 MPI (#215/#241): 0.107 s edit+check, 0.275 s Qwen3DecoderLayer.forward R1 install (224/224 witness/rank), 0.173 ms alive_fn SIGKILL fast-fail, and TrtllmQuiesceHooks freeing 23.6 GiB (TP=1) / 46.7 GiB (TP=2) in 7.4-15.2 ms resume.",
+   "summary": "Unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend across TP=1 and TP=2 MPI (#215/#241): 0.107 s edit+check, 0.275 s Qwen3DecoderLayer.forward R1 install (224/224 witness/rank), 0.173 ms alive_fn SIGKILL fast-fail, TrtllmQuiesceHooks freeing 23.6 GiB (TP=1) / 46.7 GiB (TP=2) in 7.4-15.2 ms resume, and TrtllmShadowPromoter (#272 CPU 23/23 verified; B200 GPU timing pending).",
    "evidence": "repos/trtllm/kb/costs.md"
   },
   {
@@ -53,9 +53,9 @@
    "category": "Inference",
    "status": "done",
    "conformance": "11/11 CPU & 1x B200 (Qwen3-0.6B / Qwen3-8B)",
-   "tiers": "R0 Persistent Subprocess Multi-Module Swap + TransformersQuiesceHooks (#213)",
+   "tiers": "R0 Persistent Subprocess Multi-Module Swap + TransformersQuiesceHooks (#213) + device_map Multi-GPU & alive_fn Fast-Fail (#269 CPU)",
    "speedup": "9.05x (0.6B) / 12.81x (8B: 7.75 s -> 0.605 s)",
-   "summary": "Unmodified HuggingFace Transformers 5.20.2 persistent AF_UNIX worker (#213): atomic swaps across generation/model modules (0.521-0.605 s edit+check) and pinned-CPU TransformersQuiesceHooks freeing 15,778 MiB (15.4 GiB) on Qwen3-8B with 0.310 s H2D DMA resume.",
+   "summary": "Unmodified HuggingFace Transformers 5.20.2 persistent AF_UNIX worker (#213): atomic swaps across generation/model modules (0.521-0.605 s edit+check), pinned-CPU TransformersQuiesceHooks freeing 15,778 MiB (15.4 GiB) on Qwen3-8B with 0.310 s H2D DMA resume, plus #269 sharded device_map offload and alive_fn SIGKILL fast-fail (CPU verified; 2x B200 pending).",
    "evidence": "repos/transformers/kb/costs.md"
   },
   {
@@ -108,9 +108,9 @@
    "category": "Training (FSDP2)",
    "status": "done",
    "conformance": "11/11 CPU (2-rank toy) & 1x/2x B200 (FSDP2 world_size=1 & world_size=2 NCCL)",
-   "tiers": "Step-Gap FSDP2 Live Swap + DTensor/AdamW/RNG S0 Reset + Parallel PackageOverlay Fresh Check (#222/#254/#255)",
+   "tiers": "Step-Gap FSDP2 Live Swap + DTensor/AdamW/RNG S0 Reset + Parallel PackageOverlay Fresh Check (#222/#254/#255) + Checkpoint-to-S0 (#273)",
    "speedup": "32.5x (1x B200: 2.689 -> 0.083 s); 21.63x (2x B200 EXP-F7: 5.515 -> 0.255 s)",
-   "summary": "PyTorch Native FSDP2 (fully_shard) training lab across 1x B200 (32.5x) and 2x B200 NCCL ranks (#222/#254/#255, EXP-F7: 21.63x, 0.101 s install / 0.054 s check / 0.099 s undo, max_abs_loss_diff == 0.0, 239.00 s c0-c10) + EXP-F6 SandboxPool priority.",
+   "summary": "PyTorch Native FSDP2 (fully_shard) training lab across 1x B200 (32.5x) and 2x B200 NCCL ranks (#222/#254/#255, EXP-F7: 21.63x, 0.101 s install / 0.054 s check / 0.099 s undo, max_abs_loss_diff == 0.0, 239.00 s c0-c10), EXP-F6 SandboxPool priority, and Checkpoint-to-Live-Sandbox S0 mounting (#273: CPU + 1x B200 FSDP2 verified; 2-rank NCCL pending).",
    "evidence": "repos/torchtitan/kb/costs.md"
   },
   {
@@ -178,7 +178,7 @@
    "id": "I9",
    "title": "Online Healing (heal_slot), Elastic Scaling & Admission Backpressure",
    "status": "done",
-   "detail": "heal_slot() (#253, EXP-H3 2x B200: 101 edits served during 44.55 s heal, 1.87x restored), add_slot()/drain_slot() (#256, EXP-H4 3x B200: 0.176 s drain, 58 us attach, 0 aborted edits), and max_waiters + slot_states() (#260, 126/126 CPU verified; B200 EXP-H5 pending) bound overload and expose atomic slot lifecycles."
+   "detail": "heal_slot() (#253, EXP-H3 2x B200: 101 edits served during 44.55 s heal, 1.87x restored), add_slot()/drain_slot() (#256, EXP-H4 3x B200: 0.176 s drain, 58 us attach, 0 aborted edits), max_waiters + slot_states() (#260, EXP-H5 pending), and self-healing PoolAutoScaler (#268 CPU verified; B200 EXP-H6 pending) bound overload and automate slot recovery/scaling."
   },
   {
    "id": "I10",
@@ -190,13 +190,13 @@
    "id": "I11",
    "title": "Sub-Millisecond Unassisted SIGKILL Fast-Fail",
    "status": "done",
-   "detail": "alive_fn peer-liveness checks + transport_error=True (#229/#230/#235) eliminate dead-channel timeout stalls, cutting cleanup latency to 0.502 ms on vLLM (358,566x vs 180 s timeout) and 0.173 ms on TRT-LLM (346,821x vs 60 s timeout)."
+   "detail": "alive_fn peer-liveness checks across IPC/AF_UNIX DefaultSelector (#229/#230/#235/#270, wired into Transformers #269) eliminate dead-channel timeout stalls with inherited FDs, cutting cleanup latency to 0.502 ms on vLLM (358,566x vs 180 s timeout) and 0.173 ms on TRT-LLM (346,821x vs 60 s timeout)."
   },
   {
    "id": "I12",
-   "title": "Facts Consistency & Leak-Free CI",
+   "title": "Facts Consistency, Formal State Machines & Leak-Free CI",
    "status": "done",
-   "detail": "verify_facts.py --strict enforces 0 schema/math/join errors and 0 split-brain drifts across 7 fact files and 10 repo engines alongside site/build.py --check, leak-check.sh, and -W error::ResourceWarning CPU test suites (including 24/24 warm checks)."
+   "detail": "verify_facts.py --strict enforces 0 schema/math/join errors across 7 fact files and 10 repo engines, paired with formal-tla.yml (#277: 3 TLC specs + conformance + Ruff F,B008,B023,S602 bug scan), site/build.py --check, leak-check.sh, and CPU conformance suites."
   }
  ],
  "experiments": [
@@ -366,14 +366,14 @@
    "id": "T2",
    "title": "Phase 3 · High-Order Mechanisms: Tier-A TP>=2, Inductor & Checkpoint-S0",
    "status": "in_progress",
-   "progress_pct": 25,
+   "progress_pct": 45,
    "owner_track": "Kernel & Graph Tiers",
-   "summary": "Generalize Tier-A surgical pointer swap across vLLM TP>=2, SGLang 52-CG, and TRT-LLM; add Checkpoint-to-Live-Sandbox S0 mounting, torch.compile/Inductor selective recompile, SGLang dp_size>1 & PD disagg, and Transformers multi-GPU.",
+   "summary": "Landed CPU implementations for TorchTitan Checkpoint-to-S0 (#273, 1x B200 FSDP2 verified; 2-rank NCCL pending), Transformers device_map multi-GPU + alive_fn (#269 CPU), and TrtllmShadowPromoter (#272 CPU); remaining: shared Tier-A TP>=2, Inductor/Tier-B, SGLang PD/DP, and multi-GPU B200 receipts.",
    "items": [
     "Shared Tier-A cuGraphExecKernelNodeSetParams primitive across vLLM TP >= 2, SGLang 52-CG, and TRT-LLM + Component Restart & KV Memory Holder",
-    "Checkpoint-to-Live-Sandbox: mount mid-run training/RL failure checkpoints as S0 for 1 s root-cause iteration & bit-exact rollback",
+    "Checkpoint-to-Live-Sandbox S0 (#273 landed CPU + 1x B200 FSDP2; 2x B200 NCCL round-trip pending) + TrtllmShadowPromoter (#272 CPU; B200 timing pending)",
     "Selective torch.compile / Inductor guard invalidation and Tier-B cuGraphExecUpdate across Megatron jit_fuser, FastVideo VAE, and TorchTitan",
-    "SGLang dp_size > 1 / PD disaggregation and Transformers multi-GPU (device_map='auto') worker orchestration"
+    "Transformers device_map multi-GPU + alive_fn (#269 landed CPU; 2x B200 offload pending) and SGLang dp_size > 1 / PD disaggregation"
    ],
    "evidence": "docs/kernels-and-graphs.md"
   },
@@ -381,31 +381,31 @@
    "id": "T3",
    "title": "Phase 4 · Real LLM Agent Campaigns & SandboxPool AutoScaler",
    "status": "in_progress",
-   "progress_pct": 20,
+   "progress_pct": 35,
    "owner_track": "Autonomous Agent Loops",
-   "summary": "Scale beyond Megatron 82-iteration (+5.1% tokens/s/GPU) to autonomous LLM coding agent hill-climbs on vLLM Tier-A, SGLang, and RL, plus self-healing SandboxPool AutoScaling via add_slot()/drain_slot()/heal_slot().",
+   "summary": "Landed self-healing PoolAutoScaler (#268 CPU verified; EXP-H6 B200 pending) and AF_UNIX DefaultSelector alive_fn (#270); remaining: EXP-H5/H6 live B200 receipts and autonomous LLM coding agent hill-climbs on vLLM Tier-A, SGLang, and RL.",
    "items": [
     "Run live autonomous LLM agent hill-climb on vLLM Tier-A Triton kernel optimizations and *-Omni pipelines",
     "Run live multi-agent LLM campaigns on SGLang, NeMo-RL, and veRL/miles GRPO",
-    "SandboxPool AutoScaler: auto-expand via add_slot(), reclaim idle VRAM via drain_slot(), and self-heal faults via heal_slot()",
+    "SandboxPool PoolAutoScaler (#268 landed CPU) & AF_UNIX alive_fn (#270 landed); run B200 EXP-H5/EXP-H6 live fleet verification",
     "Measure stochastic LLM edit mixes, refusal-repair loops, and end-to-end throughput vs cold/warm restarts"
    ],
    "evidence": "repos/megatron/examples/codex-hillclimb/README.md"
   },
   {
    "id": "T4",
-   "title": "Phase 1 · Codebase Robustness & pstack Tech-Debt Sweep",
+   "title": "Phase 1 · Codebase Robustness & Formal TLA+ Hardening",
    "status": "in_progress",
-   "progress_pct": 80,
+   "progress_pct": 95,
    "owner_track": "Core Reliability",
-   "summary": "Merged PR #264 with 5 P1/P2 audit fixes plus 2 P2 guards across AsyncShadowReplenisher, SandboxPool.drain_slot(), SglangShadowPromoter, TorchTitan parallel teardown, and .github/review/review.py alongside PR #260 (max_waiters + slot_states()) and PR #266 (rsibox verify-trace CLI); next: run full blast-radius scan.",
+   "summary": "Landed PRs #274-#276 hardening SandboxPool, Coordinator, and Swap from /interrogate + TLA+ audit alongside #277 CI gate (3 TLC specs, trace conformance, Ruff F,B008,B023,S602); next: extend formal specs to warm.py and autoscaler.py plus ResourceWarning CI enforcement.",
    "items": [
-    "Merged PR #264: fix #244 AsyncShadowReplenisher.wait(until) close() race + barrier regression tests",
-    "Merged PR #264: fix #248 SglangShadowPromoter head-dead shadow skipping & bystander survival test",
-    "Merged PR #264: fix #256 SandboxPool.drain_slot(timeout_s=0) ordering & #254 parallel _stop_engine",
-    "Run full pstack blast-radius & deduplication scan across core/livelab/ and adapters"
+    "Merged PRs #274-#276: fixed core SandboxPool, Coordinator, and Swap concurrency/fencing/rollback bugs found via /interrogate + /statechart",
+    "Merged PR #277: added SandboxPool/Coordinator/SwapLifecycle TLA+ TLC specs, trace conformance, and Ruff bug scan CI",
+    "Merged PRs #268-#270 compatibility fixes: PoolAutoScaler undrained/Box/close hardening and Transformers alive_fn PG reaping",
+    "Next: add StandbyShadow & PoolAutoScaler TLA+ specs and enable -W error::ResourceWarning in rsibox CI"
    ],
-   "evidence": "core/livelab/rsibox/pool.py"
+   "evidence": "core/livelab/formal/test_tla_conformance.py"
   },
   {
    "id": "T5",
