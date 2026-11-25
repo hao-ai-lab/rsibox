@@ -14,6 +14,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import claim_board  # noqa: E402
+import docs_lint  # noqa: E402
 import facts_sync  # noqa: E402
 import gpu_receipt_close  # noqa: E402
 import merge_train  # noqa: E402
@@ -407,6 +408,7 @@ class RstackGatesTest(unittest.TestCase):
             "rsibox-triage",
             "rsibox-merge-train",
             "rsibox-facts-sync",
+            "rsibox-docs-polish",
         }
         for skill in expected_skills:
             skill_md = plugin_root / "skills" / skill / "SKILL.md"
@@ -527,6 +529,33 @@ class RstackGatesTest(unittest.TestCase):
 
             matrix.write_text("{broken", encoding="utf-8")
             self.assertEqual(facts_sync.main(["--repo", str(repo), "--skip-tests"]), 1)
+
+    def test_docs_lint_passes_clean_and_flags_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _init_repo(Path(tmp))
+            (repo / "docs").mkdir()
+            (repo / "docs" / "guide.md").write_text("# User Guide\n\n## Quick Start\n\nReady.\n", encoding="utf-8")
+            (repo / "README.md").write_text(
+                "# Repo\n\nSee [Guide](docs/guide.md#quick-start).\n\n```md\n[ignored](missing.md#nope)\n```\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(docs_lint.main(["--repo", str(repo)]), 0)
+
+            (repo / "README.md").write_text("See [Missing](docs/missing.md).\n", encoding="utf-8")
+            _, violations = docs_lint.lint_docs(repo)
+            self.assertEqual([v["kind"] for v in violations], ["broken_link"])
+            self.assertEqual(docs_lint.main(["--repo", str(repo)]), 1)
+
+            (repo / "README.md").write_text("See [BadAnchor](docs/guide.md#missing-section).\n", encoding="utf-8")
+            _, violations = docs_lint.lint_docs(repo)
+            self.assertEqual([v["kind"] for v in violations], ["broken_anchor"])
+            self.assertEqual(docs_lint.main(["--repo", str(repo)]), 1)
+
+            (repo / "CONTRIBUTING.md").write_text("Welcome to **rsibox (rsibox)**!\n", encoding="utf-8")
+            (repo / "README.md").write_text("See [Guide](docs/guide.md#quick-start).\n", encoding="utf-8")
+            _, violations = docs_lint.lint_docs(repo)
+            self.assertEqual([v["kind"] for v in violations], ["duplicate_artifact"])
+            self.assertEqual(docs_lint.main(["--repo", str(repo)]), 1)
 
 
 if __name__ == "__main__":

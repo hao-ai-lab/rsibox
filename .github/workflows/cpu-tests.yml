@@ -77,6 +77,8 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
       - name: Run rstack deterministic engineering gate script tests
         run: python3 -W error::ResourceWarning -m unittest discover -s .agents/plugins/rstack/scripts -p 'test_*.py' -v
+      - name: Run public documentation lint gate (broken links, anchors, duplicate artifacts)
+        run: python3 .agents/plugins/rstack/scripts/docs_lint.py
       - name: Run the CI timing comment's golden cases (API records in, the comment's numbers out; no network)
         run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
       - name: Run the engine onboarding template skeleton golden tests
