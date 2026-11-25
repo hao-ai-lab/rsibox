@@ -1,0 +1,147 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="860" viewBox="0 0 1440 860" role="img" aria-label="RSIBox Multi-Agent GPU Contention, Crash Failover, and Elastic Role Borrowing on NVIDIA B200">
+<title>RSIBox Multi-Agent GPU Contention, Crash Recovery, and Work-Conserving Elastic Triad on NVIDIA B200</title>
+<rect x="0" y="0" width="1440" height="860" rx="12" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+<text x="28" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#0F172A">RSIBox Multi-Agent GPU Contention, Crash Failover &amp; Elastic Role Borrowing on NVIDIA B200</text>
+<text x="28" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12.2" fill="#475569">Measured on 1x-3x NVIDIA B200 (183,359 MiB HBM3e; vLLM 0.33.0 Qwen3-8B, SGLang &amp; TRT-LLM Qwen3-0.6B; 91/91 SHA-256 SandboxPool traces, 2,414 leases)</text>
+<rect x="24" y="78" width="686" height="360" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="730" y="78" width="686" height="360" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="24" y="454" width="686" height="360" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<rect x="730" y="454" width="686" height="360" rx="10" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1"/>
+<text x="42" y="106" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">A. Multi-Agent Throughput: Restart-per-Edit vs. SandboxPool (EXP-A)</text>
+<text x="42" y="124" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">vLLM 0.33.0 Qwen3-8B (CUDA graphs ON): 43.7x-54.4x clean speedup (N=2..8); 1 GPU beats 3 restarting by 19.2x</text>
+<text x="229.0" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">0</text>
+<line x1="301.5" y1="140" x2="301.5" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="301.5" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">50</text>
+<line x1="374.0" y1="140" x2="374.0" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="374.0" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">100</text>
+<line x1="446.5" y1="140" x2="446.5" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="446.5" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">150</text>
+<line x1="519.0" y1="140" x2="519.0" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="519.0" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">200</text>
+<line x1="229" y1="140" x2="229" y2="392" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="374.0" y="425" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#475569">Edits / min (higher is better)</text>
+<text x="219" y="162" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">Live Restart (C=1, N=4)</text>
+<rect x="229" y="150" width="1.9" height="16" rx="1" fill="#94A3B8"/>
+<text x="237.9" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">1.30 (wait 68.97 s)</text>
+<text x="219" y="192" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">Live Restart (C=3, N=6)</text>
+<rect x="229" y="180" width="5.2" height="16" rx="3" fill="#94A3B8"/>
+<text x="241.2" y="192" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">3.56 (3 GPUs restarting)</text>
+<text x="219" y="222" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=1, N=4)</text>
+<rect x="229" y="210" width="101.3" height="16" rx="3" fill="#4F46E5"/>
+<text x="337.3" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">69.9 (53.3x vs FIFO)</text>
+<text x="219" y="252" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=1, N=8)</text>
+<rect x="229" y="240" width="99.1" height="16" rx="3" fill="#4F46E5"/>
+<text x="335.1" y="252" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">68.3 (19.2x vs 3-GPU)</text>
+<text x="219" y="282" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=2, N=2)</text>
+<rect x="229" y="270" width="181.6" height="16" rx="3" fill="#0D9488"/>
+<text x="417.6" y="282" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">125.2 (47.7x vs FIFO)</text>
+<text x="219" y="312" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=2, N=8)</text>
+<rect x="229" y="300" width="203.0" height="16" rx="3" fill="#0D9488"/>
+<text x="439.0" y="312" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">140.0 (53.4x vs FIFO)</text>
+<text x="219" y="342" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=3, N=2)</text>
+<rect x="229" y="330" width="166.2" height="16" rx="3" fill="#059669"/>
+<text x="402.2" y="342" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">114.6 (43.7x vs FIFO)</text>
+<text x="219" y="372" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SandboxPool (C=3, N=4)</text>
+<rect x="229" y="360" width="276.1" height="16" rx="3" fill="#059669"/>
+<text x="512.1" y="372" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10" font-weight="600" fill="#0F172A">190.4 (54.4x; peak)</text>
+<text x="748" y="106" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">B. Crash Recovery &amp; Unassisted SIGKILL Cleanup (Log Scale)</text>
+<text x="748" y="124" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">Dynamo GMS Standby Shadow (34.51x-53.20x; 53.59x at N=8) &amp; alive_fn fast-fail (0.173-0.502 ms)</text>
+<text x="950.0" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">0.1ms</text>
+<line x1="994.5" y1="140" x2="994.5" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="994.5" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">1ms</text>
+<line x1="1039.1" y1="140" x2="1039.1" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1039.1" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">10ms</text>
+<line x1="1083.6" y1="140" x2="1083.6" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1083.6" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">0.1s</text>
+<line x1="1128.1" y1="140" x2="1128.1" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1128.1" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">1s</text>
+<line x1="1172.7" y1="140" x2="1172.7" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1172.7" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">10s</text>
+<line x1="1217.2" y1="140" x2="1217.2" y2="392" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1217.2" y="409" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" fill="#64748B">100s</text>
+<line x1="950" y1="140" x2="950" y2="392" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="1092.5" y="425" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#475569">Latency in seconds — log scale (lower is better)</text>
+<text x="940" y="162" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">vLLM 8B Timeout Bound</text>
+<rect x="950" y="150" width="278.6" height="16" rx="3" fill="#94A3B8"/>
+<text x="1235.6" y="162" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">180.0 s (check_timeout)</text>
+<text x="940" y="192" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">vLLM 8B GMS RO Respawn</text>
+<rect x="950" y="180" width="249.5" height="16" rx="3" fill="#94A3B8"/>
+<text x="1206.5" y="192" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">39.98 s (EXP-C N=4)</text>
+<text x="940" y="222" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SGLang 52-CG Respawn</text>
+<rect x="950" y="210" width="234.5" height="16" rx="3" fill="#94A3B8"/>
+<text x="1191.5" y="222" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">18.42 s (EXP-F2)</text>
+<text x="940" y="252" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">vLLM 8B Shadow (N=4)</text>
+<rect x="950" y="240" width="172.6" height="16" rx="3" fill="#059669"/>
+<text x="1129.6" y="252" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">0.752 s (53.20x faster)</text>
+<text x="940" y="282" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">vLLM 8B 3-Crash Shadow</text>
+<rect x="950" y="270" width="171.9" height="16" rx="3" fill="#059669"/>
+<text x="1128.9" y="282" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">0.65-0.80 s (mean 0.73 s)</text>
+<text x="940" y="312" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">SGLang 52-CG Shadow</text>
+<rect x="950" y="300" width="166.0" height="16" rx="3" fill="#0D9488"/>
+<text x="1123.0" y="312" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">0.534 s (34.51x; 0 GMS err)</text>
+<text x="940" y="342" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">vLLM SIGKILL Cleanup</text>
+<rect x="950" y="330" width="31.2" height="16" rx="3" fill="#4F46E5"/>
+<text x="988.2" y="342" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">0.502 ms (358,566x)</text>
+<text x="940" y="372" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" fill="#0F172A">TRT-LLM SIGKILL RPC</text>
+<rect x="950" y="360" width="10.6" height="16" rx="3" fill="#7C3AED"/>
+<text x="967.6" y="372" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.8" font-weight="600" fill="#0F172A">0.173 ms (346,821x vs 60 s)</text>
+<text x="42" y="482" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">C. 3x B200 Elastic Triad Pipeline (EXP-F4 Part 1, PR #237)</text>
+<text x="42" y="500" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">12-idea (28-lease) Dev -&gt; Fixer -&gt; Eval pipeline, matched worker counts (CUDA graphs ON, logprob diff 0.0)</text>
+<text x="88" y="744.0" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">0</text>
+<line x1="96" y1="668.7" x2="678" y2="668.7" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="88" y="672.7" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">25</text>
+<line x1="96" y1="597.3" x2="678" y2="597.3" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="88" y="601.3" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">50</text>
+<line x1="96" y1="526.0" x2="678" y2="526.0" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="88" y="530.0" text-anchor="end" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">75</text>
+<line x1="96" y1="740" x2="678" y2="740" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="50" y="633.0" text-anchor="middle" transform="rotate(-90 50 633.0)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#475569">Ideas Verified / min</text>
+<rect x="133.0" y="625.3" width="54.0" height="114.7" rx="4" fill="#94A3B8"/>
+<text x="160.0" y="619.3" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="600" fill="#475569">40.2</text>
+<rect x="199.0" y="551.0" width="54.0" height="189.0" rx="4" fill="#059669"/>
+<text x="226.0" y="545.0" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="700" fill="#059669">66.2 (1.65x)</text>
+<text x="193.0" y="758" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">N = 4 (1D / 1F / 2E)</text>
+<text x="193.0" y="774" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">eval_q 1.31s -&gt; 0.00s</text>
+<rect x="327.0" y="630.5" width="54.0" height="109.5" rx="4" fill="#94A3B8"/>
+<text x="354.0" y="624.5" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="600" fill="#475569">38.4</text>
+<rect x="393.0" y="564.7" width="54.0" height="175.3" rx="4" fill="#059669"/>
+<text x="420.0" y="558.7" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="700" fill="#059669">61.4 (1.60x)</text>
+<text x="387.0" y="758" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">N = 6 (2D / 1F / 3E)</text>
+<text x="387.0" y="774" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">eval_q 2.38s -&gt; 0.42s</text>
+<rect x="521.0" y="632.0" width="54.0" height="108.0" rx="4" fill="#94A3B8"/>
+<text x="548.0" y="626.0" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="600" fill="#475569">37.8</text>
+<rect x="587.0" y="567.7" width="54.0" height="172.3" rx="4" fill="#059669"/>
+<text x="614.0" y="561.7" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" font-weight="700" fill="#059669">60.4 (1.60x)</text>
+<text x="581.0" y="758" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">N = 8 (4D / 1F / 3E)</text>
+<text x="581.0" y="774" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">eval_q 2.40s -&gt; 0.43s</text>
+<rect x="179" y="788" width="12" height="12" rx="2" fill="#94A3B8"/>
+<text x="196" y="798" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#0F172A">static_triad (fallback_roles=None)</text>
+<rect x="419" y="788" width="12" height="12" rx="2" fill="#059669"/>
+<text x="436" y="798" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#0F172A">elastic_triad (Tier-1 primary precedence)</text>
+<text x="748" y="482" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0F172A">D. 3x B200 Explore-Then-Validate Phase Shift (EXP-F4 Part 2)</text>
+<text x="748" y="500" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.8" fill="#475569">C=3, N=6 (12 Dev bursts -&gt; 12 Eval verifications): elastic borrowing beats hand-tuned 2E+1D by 1.61x</text>
+<text x="945.0" y="744" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">0</text>
+<line x1="1048.3" y1="522" x2="1048.3" y2="726" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1048.3" y="744" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">30</text>
+<line x1="1151.7" y1="522" x2="1151.7" y2="726" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1151.7" y="744" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">60</text>
+<line x1="1255.0" y1="522" x2="1255.0" y2="726" stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="1255.0" y="744" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.5" fill="#64748B">90</text>
+<line x1="945" y1="522" x2="945" y2="726" stroke="#CBD5E1" stroke-width="1.2"/>
+<text x="1100.0" y="762" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#475569">Ideas Verified / min (higher is better)</text>
+<text x="935" y="553" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">phase_static_triad (1D/1F/1E)</text>
+<rect x="945" y="538" width="109.0" height="22" rx="4" fill="#94A3B8"/>
+<text x="1062.0" y="553" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.2" font-weight="700" fill="#0F172A">31.6 (22.75 s; 1.00x)</text>
+<text x="952" y="576" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">P1 Dev 4.65 s | P2 Eval 18.11 s | 0/24 borrowed</text>
+<text x="935" y="615" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">phase_proportional (2E+1D)</text>
+<rect x="945" y="600" width="175.7" height="22" rx="4" fill="#D97706"/>
+<text x="1128.7" y="615" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.2" font-weight="700" fill="#0F172A">51.0 (14.12 s; 1.61x)</text>
+<text x="952" y="638" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">P1 Dev 4.74 s | P2 Eval 9.37 s | 0/24 borrowed</text>
+<text x="935" y="677" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#0F172A">phase_elastic_triad (PR #237)</text>
+<rect x="945" y="662" width="283.7" height="22" rx="4" fill="#059669"/>
+<text x="1236.7" y="677" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="10.2" font-weight="700" fill="#0F172A">82.4 (8.74 s; 2.60x)</text>
+<text x="952" y="700" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="9.5" fill="#475569">P1 Dev 2.56 s | P2 Eval 6.18 s | 12/24 borrowed (1.61x vs 2E+1D)</text>
+<rect x="748" y="774" width="650" height="28" rx="6" fill="#ECFDF5" stroke="#A7F3D0" stroke-width="1"/>
+<text x="1073" y="792" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.2" font-weight="600" fill="#065F46">Work-conserving fallback_roles adapts automatically to phase shifts without manual GPU repartitioning.</text>
+<text x="28" y="844" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="10.5" fill="#64748B">Source: docs/agent-teams-and-contention.md (EXP-A, EXP-C, EXP-E1, EXP-F1, EXP-F2, EXP-F4, EXP-F5). Ratios computed from raw unrounded timings; SandboxPool traces SHA-256 verified.</text>
+</svg>
