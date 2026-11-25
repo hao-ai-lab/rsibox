@@ -185,7 +185,8 @@ class FormalGatesTest(unittest.TestCase):
                 "import Init.Data.Nat.Basic\n"
                 "namespace RsiboxFormal\n"
                 "def q : Char := '\"'\n"
-                "def esc : String := \"\\\"--\"\n"
+                "def esc : String := \"\\\"-- theorem fake\"\n"
+                "def interp : String := s!\"x = { 1 + 1 } /- ignored\"\n"
                 "def s' : Nat := 1\n"
                 "-- sorry admit axiom native_decide partial @[extern \"c\"]\n"
                 "/- outer /- inner sorry axiom Lean.ofReduceBool -/ still commented sorry -/\n"
@@ -216,7 +217,10 @@ class FormalGatesTest(unittest.TestCase):
             ("implemented_by", "@[implemented_by bad] def f : Nat := 0\ntheorem ok : True := trivial\n"),
             ("@[extern", "@[extern \"c_fn\"] opaque cfn : Nat\ntheorem ok : True := trivial\n"),
             ("sorry", "def q : Char := '\"'\ntheorem ok : True := by sorry\n"),
-            ("non-Init import", "import Lean\ntheorem ok : True := trivial\n"),
+            ("sorry", 'def x := s!"{ /- " -/ 0 } /- "\ntheorem evil : True := by sorry\ndef y := "-/"\n'),
+            ("non-Init import", "import Init import Lean\ntheorem ok : True := trivial\n"),
+            ("macro/syntax/elab", 'macro "#print" "axioms" ident : command => `(pure ())\ntheorem ok : True := trivial\n'),
+            ("guillemet theorem name", "theorem «hidden4» : True := trivial\n"),
         ]
         for label, snippet in cheats:
             with tempfile.TemporaryDirectory() as tmp:
@@ -227,30 +231,38 @@ class FormalGatesTest(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(check_lean_axioms.main(["--root", str(root)]), 1)
 
-        # Non-Mathlib [[require]] in lakefile.toml and missing coverage for @[simp] theorem.
+        # Non-Mathlib [[require]], non-dict manifest, and `open ... in theorem` / `@[simp] theorem`.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_lean_fixture(
                 root,
-                inv_body="namespace RsiboxFormal\n@[simp] theorem hidden : True := trivial\nend RsiboxFormal\n",
+                inv_body=(
+                    "namespace RsiboxFormal\n"
+                    "open Classical in theorem hidden3 : True := trivial\n"
+                    "@[simp] theorem hidden : True := trivial\n"
+                    "end RsiboxFormal\n"
+                ),
                 lakefile='name = "bad"\n[[require]]\nname = "batteries"\n',
                 verify="import RsiboxFormal\n#print axioms RsiboxFormal.ok\n",
             )
+            (root / "lake-manifest.json").write_text('["not-a-dict"]\n', encoding="utf-8")
             errs = check_lean_axioms.check_lean_axioms(root)
             self.assertTrue(any("external require" in e for e in errs), errs)
+            self.assertTrue(any("forbidden manifest structure" in e for e in errs), errs)
+            self.assertTrue(any("RsiboxFormal.hidden3" in e for e in errs), errs)
             self.assertTrue(any("RsiboxFormal.hidden" in e for e in errs), errs)
 
-        # VerifyAxioms.lean must not shadow via namespace/theorem/def or omit RsiboxFormal prefix.
+        # VerifyAxioms.lean strict line allowlist and prime boundary (`ok` vs `ok'`).
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_lean_fixture(
                 root,
                 inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n",
-                verify="import RsiboxFormal\nnamespace Fake\ntheorem ok : True := trivial\n#print axioms ok\n",
+                verify="import RsiboxFormal\nnamespace Fake\ntheorem ok : True := trivial\n#print axioms RsiboxFormal.ok'\n",
             )
             errs = check_lean_axioms.check_lean_axioms(root)
-            self.assertTrue(any("must not declare theorem, def, or namespace" in e for e in errs), errs)
-            self.assertTrue(any("RsiboxFormal.ok" in e for e in errs), errs)
+            self.assertTrue(any("disallowed line" in e for e in errs), errs)
+            self.assertTrue(any("missing '#print axioms RsiboxFormal.ok'" in e for e in errs), errs)
 
     def test_verify_axioms_output_strict_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

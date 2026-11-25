@@ -27,17 +27,16 @@ FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Lean.trustCompiler", re.compile(r"\bLean\.trustCompiler\b")),
     ("implemented_by", re.compile(r"\bimplemented_by\b")),
     ("@[extern", re.compile(r"@\[[^\]]*\bextern\b")),
+    ("macro/syntax/elab", re.compile(r"\b(?:macro|macro_rules|syntax|elab|elab_rules)\b")),
 )
 
 IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_'»]")
 CHAR_LITERAL_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^\\'\n])'")
-IMPORT_RE = re.compile(r"(?m)^\s*import\s+([A-Za-z_][A-Za-z0-9_'.]*)")
-THEOREM_RE = re.compile(
-    r"(?m)^\s*(?:@\[[^\]]*\]\s*|(?:private|protected|noncomputable)\s+)*theorem\s+([A-Za-z_][A-Za-z0-9_']*)\b"
-)
-VERIFY_DECL_RE = re.compile(
-    r"(?m)^\s*(?:@\[[^\]]*\]\s*|(?:private|protected|noncomputable)\s+)*(?:theorem|def|namespace)\b"
-)
+IMPORT_RE = re.compile(r"\bimport\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
+THEOREM_KW_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem(?![A-Za-z0-9_'])")
+THEOREM_NAME_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_']*)")
+VERIFY_IMPORT_LINE_RE = re.compile(r"^import\s+RsiboxFormal$")
+VERIFY_PRINT_LINE_RE = re.compile(r"^#print\s+axioms\s+RsiboxFormal\.[A-Za-z_][A-Za-z0-9_']*$")
 MATHLIB_RE = re.compile(r"\bmathlib\b", re.IGNORECASE)
 TOML_REQUIRE_RE = re.compile(r"\[\[\s*require\s*\]\]|^\s*require\b", re.IGNORECASE | re.MULTILINE)
 DIAGNOSTIC_RE = re.compile(r"(?im)(?:^|[\s:])(?:error|warning):")
@@ -45,36 +44,64 @@ NO_AXIOMS_RE = re.compile(r"^'RsiboxFormal\.([A-Za-z_][A-Za-z0-9_']*)'\s+does no
 DEPS_AXIOMS_RE = re.compile(r"^'RsiboxFormal\.([A-Za-z_][A-Za-z0-9_']*)'\s+depends on axioms:\s*\[([^\]]*)\]$")
 
 
-def strip_lean_comments(text: str) -> str:
-    """Strip `--` and nested `/- ... -/` comments while lexing char and string literals."""
+def _lex_lean(text: str) -> tuple[str, list[str]]:
+    """Strip comments and literal string bodies while tracking `s!"..."` interpolation braces."""
     out: list[str] = []
-    i, n, depth, in_string = 0, len(text), 0, False
+    stack: list[tuple[str, int]] = [("code", 0)]
+    i, n, comment_depth = 0, len(text), 0
+    lex_errors: list[str] = []
+
     while i < n:
         ch = text[i]
         two = text[i : i + 2]
-        if depth > 0:
+        mode, depth = stack[-1]
+        if comment_depth > 0:
             if two == "/-":
-                depth, i = depth + 1, i + 2
+                comment_depth, i = comment_depth + 1, i + 2
             elif two == "-/":
-                depth, i = depth - 1, i + 2
+                comment_depth, i = comment_depth - 1, i + 2
             else:
                 if ch == "\n":
                     out.append("\n")
                 i += 1
-        elif in_string:
+        elif mode in ("string", "interp"):
             if ch == "\\":
-                out.append(text[i : i + 2])
+                if i + 1 < n and text[i + 1] == "\n":
+                    out.append("\n")
                 i += 2 if i + 1 < n else 1
+            elif ch == '"':
+                out.append('"')
+                stack.pop()
+                i += 1
+            elif mode == "interp" and ch == "{":
+                out.append(" { ")
+                stack.append(("code", 1))
+                i += 1
             else:
-                out.append(ch)
-                if ch == '"':
-                    in_string = False
+                if ch == "\n":
+                    out.append("\n")
                 i += 1
         elif two == "--":
             nl = text.find("\n", i)
             i = n if nl == -1 else nl
         elif two == "/-":
-            depth, i = depth + 1, i + 2
+            comment_depth, i = 1, i + 2
+        elif two == '!"':
+            out.append('!"')
+            stack.append(("interp", 0))
+            i += 2
+        elif ch == '"':
+            out.append('"')
+            stack.append(("string", 0))
+            i += 1
+        elif ch == "«":
+            end_q = text.find("»", i + 1)
+            if end_q == -1:
+                lex_errors.append("unterminated guillemet identifier")
+                out.append(text[i:])
+                break
+            out.append(text[i : end_q + 1])
+            i = end_q + 1
         elif ch == "'" and (i == 0 or not IDENT_CHAR_RE.match(text[i - 1])):
             m = CHAR_LITERAL_RE.match(text, i)
             if m:
@@ -83,12 +110,32 @@ def strip_lean_comments(text: str) -> str:
             else:
                 out.append(ch)
                 i += 1
-        else:
-            if ch == '"':
-                in_string = True
+        elif ch == "{" and len(stack) > 1:
+            stack[-1] = ("code", depth + 1)
             out.append(ch)
             i += 1
-    return "".join(out)
+        elif ch == "}" and len(stack) > 1:
+            out.append(ch)
+            if depth <= 1:
+                stack.pop()
+            else:
+                stack[-1] = ("code", depth - 1)
+            i += 1
+        else:
+            out.append(ch)
+            i += 1
+
+    if comment_depth > 0:
+        lex_errors.append("unterminated block comment")
+    if len(stack) > 1:
+        lex_errors.append("unterminated string or interpolation literal")
+    return "".join(out), lex_errors
+
+
+def strip_lean_comments(text: str) -> str:
+    """Strip Lean comments and non-interpolated string bodies."""
+    cleaned, _ = _lex_lean(text)
+    return cleaned
 
 
 def _iter_lean_files(root: Path) -> list[Path]:
@@ -105,12 +152,23 @@ def _collect_theorems(root: Path) -> tuple[list[str], dict[Path, str], list[str]
         return [], {}, [f"no .lean files found under {root}"]
     stripped: dict[Path, str] = {}
     theorems: list[str] = []
+    errors: list[str] = []
     for path in lean_files:
-        cleaned = strip_lean_comments(path.read_text(encoding="utf-8"))
+        cleaned, lex_errs = _lex_lean(path.read_text(encoding="utf-8"))
+        for err in lex_errs:
+            errors.append(f"{path}: {err}")
         stripped[path] = cleaned
         if path.relative_to(root).as_posix() != "VerifyAxioms.lean":
-            theorems.extend(THEOREM_RE.findall(cleaned))
-    return list(dict.fromkeys(theorems)), stripped, []
+            found = THEOREM_NAME_RE.findall(cleaned)
+            kw_count = len(THEOREM_KW_RE.findall(cleaned))
+            if len(found) != kw_count:
+                errors.append(f"{path}: unparsed theorem declaration ({len(found)}/{kw_count})")
+            for name in found:
+                if name.startswith("«"):
+                    errors.append(f"{path}: guillemet theorem name '{name}' is forbidden")
+                else:
+                    theorems.append(name)
+    return list(dict.fromkeys(theorems)), stripped, errors
 
 
 def check_lean_axioms(root: Path) -> list[str]:
@@ -143,8 +201,8 @@ def check_lean_axioms(root: Path) -> list[str]:
             except json.JSONDecodeError as exc:
                 errors.append(f"{cfg_path}: invalid JSON ({exc})")
             else:
-                if manifest.get("packages"):
-                    errors.append(f"{cfg_path}: forbidden external packages in manifest")
+                if not isinstance(manifest, dict) or manifest.get("packages"):
+                    errors.append(f"{cfg_path}: forbidden manifest structure or external packages")
 
     theorems, stripped, scan_errs = _collect_theorems(root)
     errors.extend(scan_errs)
@@ -167,12 +225,19 @@ def check_lean_axioms(root: Path) -> list[str]:
         errors.append(f"missing VerifyAxioms.lean in {root}")
     else:
         verify_cleaned = stripped[verify_path]
-        if not re.search(r"(?m)^\s*import\s+RsiboxFormal\b", verify_cleaned):
+        has_import = False
+        for lineno, raw in enumerate(verify_cleaned.splitlines(), 1):
+            line = raw.strip()
+            if not line:
+                continue
+            if VERIFY_IMPORT_LINE_RE.match(line):
+                has_import = True
+            elif not VERIFY_PRINT_LINE_RE.match(line):
+                errors.append(f"{verify_path}:{lineno}: disallowed line '{line}'")
+        if not has_import:
             errors.append(f"{verify_path}: must import RsiboxFormal")
-        if VERIFY_DECL_RE.search(verify_cleaned):
-            errors.append(f"{verify_path}: must not declare theorem, def, or namespace")
         for thm in theorems:
-            pat = rf"(?m)^\s*#print\s+axioms\s+RsiboxFormal\.{re.escape(thm)}\b"
+            pat = rf"(?m)^\s*#print\s+axioms\s+RsiboxFormal\.{re.escape(thm)}(?![A-Za-z0-9_'])"
             if not re.search(pat, verify_cleaned):
                 errors.append(f"{verify_path}: missing '#print axioms RsiboxFormal.{thm}'")
 
