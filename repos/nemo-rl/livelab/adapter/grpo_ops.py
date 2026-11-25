@@ -15,7 +15,7 @@ def init_policy_scale() -> float:
 
 def make_kl_schedule(base_kl: float, warmup_steps: int = 2):
     """Return a step-indexed KL penalty closure (used by c6 closure-change refusal)."""
-    floor_kl, decay = base_kl * 0.1, 0.5
+    floor_kl, decay = base_kl * 0.1, 0.5  # noqa: F841
 
     def kl_at(step: int) -> float:
         return base_kl * (step + 1) / max(warmup_steps, 1) if step < warmup_steps else max(floor_kl, base_kl)

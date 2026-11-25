@@ -135,7 +135,7 @@ class VerlConformanceLab:
             env["PYTHONPATH"] = pythonpath + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         t0 = time.time()
         with open(gate.parent / f"{gate.name}-launch.log", "a", encoding="utf-8") as log:
-            _JOBS[str(gate)] = subprocess.Popen(
+            _JOBS[str(gate)] = subprocess.Popen(  # noqa: S602
                 self.launch, shell=True, env=env, start_new_session=True,
                 stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             )

@@ -85,12 +85,12 @@ for d in sys.argv[1:]:
         keys.setdefault((x["engine"], x["repo"], x["source"], x["pr"], x["variant"]), collections.OrderedDict()).setdefault(x["arm"], []).append(x)
     for pr, v in list(eff.items()):
         if not v or "method" in v[0]: continue
-        g = lambda k: [float(x["seconds"]) for x in v if x["phase"].startswith("effect / " + k)][0]
+        g = lambda k, v=v: [float(x["seconds"]) for x in v if x["phase"].startswith("effect / " + k)][0]
         b, e = g("warm check at base"), g("warm check with the edit")
         m = re.search(r"\((.*)\)", [x["phase"] for x in v if x["phase"].startswith("effect / warm check at base")][0]).group(1)
         eff[pr] = [{"method": m, "base_step_s": b, "edit_step_s": e, "ratio": round(e / b, 4), "percent": round(g("change in percent"), 2), "output": v[0]["outcome"]}]
     for (eng, repo, src, pr, var), arms in keys.items():
-        def arm(name):
+        def arm(name, arms=arms, pr=pr, var=var):
             v = arms.get(name)
             if not v: return None
             tot = [float(x["seconds"]) for x in v if x["phase"].startswith("total")][0]

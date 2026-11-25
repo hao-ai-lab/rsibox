@@ -24,7 +24,7 @@ from . import journal as J
 from . import locate as L
 from . import swap as S
 from . import witness as W
-from .test_locate import ENG, OPS, at, edit, fresh, module_from
+from .test_locate import ENG, OPS, at, fresh, module_from
 
 
 def install(mod, source, targets, journal, witness, key_module):

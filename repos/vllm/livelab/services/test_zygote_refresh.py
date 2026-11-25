@@ -114,7 +114,7 @@ def test_fork_without_refresh_keeps_torch_duplicate_errors():
     """The guard must not outlive its purpose: a fork that refreshed nothing (and the engine
     core and workers forked from it) must still fail on a duplicate op definition, as torch
     does, instead of silently skipping it."""
-    torch = __import__("pytest").importorskip("torch")
+    __import__("pytest").importorskip("torch")
     from torch.library import Library
     lib = Library("zrtest2", "FRAGMENT")
     lib.define("twice(Tensor x) -> Tensor")
@@ -158,7 +158,7 @@ def test_refreshed_layer_registers_its_name_again(tmp_path, monkeypatch):
                 pass
         """,
     })
-    import zr2.layers, zr2.other
+    import zr2.layers, zr2.other  # noqa: E401,F401
     monkeypatch.setattr(zr, "NAME_REGISTRIES", {"zr2.custom_op": ("op_registry",)},
                         raising=False)
     graph = zr.import_graph(("zr2",))

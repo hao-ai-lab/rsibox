@@ -25,7 +25,7 @@ def main(argv=None):
         os.execv(sys.executable, [sys.executable, str(script), *rest])
     if rest or args.tp < 1:
         parser.error(f"unexpected arguments {rest}" if rest else "--tp must be positive")
-    import adapter  # resolves the shared conformance harness
+    import adapter  # noqa: F401  # resolves the shared conformance harness
     from conformance.__main__ import main as run_cases
 
     os.environ.update(RSIBOX_VLLM_MODEL=args.model, RSIBOX_VLLM_WORK=args.work,

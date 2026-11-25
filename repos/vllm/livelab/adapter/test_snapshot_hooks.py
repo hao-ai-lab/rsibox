@@ -27,7 +27,6 @@ from rsibox.warm import (
     DefaultRespawnDriver,
     DynamoK8sSnapshotDriver,
     QuiesceHooks,
-    QuiesceReceipt,
     StoreProbe,
 )
 

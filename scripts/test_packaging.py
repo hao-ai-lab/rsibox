@@ -128,9 +128,9 @@ class PackagingMetadataTests(unittest.TestCase):
         self.assertEqual(proj["dependencies"], [])
 
         scripts = proj["scripts"]
-        self.assertEqual(scripts, {"rsibox": "rsibox.cli:main", "rsibox": "rsibox.cli:main"})
+        self.assertEqual(scripts, {"rsibox": "rsibox.cli:main"})
 
-        for cli_path in (LIVELAB_DIR / "rsibox" / "cli.py", LIVELAB_DIR / "rsibox" / "cli.py"):
+        for cli_path in (LIVELAB_DIR / "rsibox" / "cli.py",):
             cli_ast = ast.parse(cli_path.read_text(encoding="utf-8"), filename=str(cli_path))
             top_defs = {node.name for node in cli_ast.body if isinstance(node, ast.FunctionDef)}
             self.assertIn("main", top_defs, cli_path)

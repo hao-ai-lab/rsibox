@@ -9,7 +9,7 @@ GRAD_CLIP_NORM = 1.0
 
 def make_lr_schedule(base_lr: float, warmup_steps: int = 2):
     """Return a step-indexed LR closure (used by c6 closure-change refusal check)."""
-    floor_lr, decay = base_lr * 0.1, 0.5
+    floor_lr, decay = base_lr * 0.1, 0.5  # noqa: F841
 
     def lr_at(step: int) -> float:
         return base_lr * (step + 1) / max(warmup_steps, 1) if step < warmup_steps else max(floor_lr, base_lr)

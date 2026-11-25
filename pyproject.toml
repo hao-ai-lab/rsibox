@@ -80,3 +80,6 @@ py-modules = [
   "survey.rules",
   "survey.scan",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"core/livelab/kernel/toy/ops.py" = ["F841"]

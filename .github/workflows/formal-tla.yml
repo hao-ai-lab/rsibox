@@ -1,0 +1,83 @@
+name: Formal TLA+ & static bug scan
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  formal-tla:
+    name: "formal: TLA+ state machines"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4
+        id: cache-tlc
+        with:
+          path: .tla-cache
+          key: tla2tools-v1.7.4-v2
+      - name: Fetch and verify tla2tools.jar v1.7.4
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, urllib.request
+
+          jar = pathlib.Path(".tla-cache/tla2tools.jar")
+          jar.parent.mkdir(parents=True, exist_ok=True)
+          expected = "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88"
+          url = "https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar"
+
+          def sha256(p: pathlib.Path) -> str:
+              return hashlib.sha256(p.read_bytes()).hexdigest()
+
+          if not jar.is_file() or sha256(jar) != expected:
+              req = urllib.request.Request(url, headers={"User-Agent": "rsibox-ci/1"})
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  jar.write_bytes(resp.read())
+          actual = sha256(jar)
+          assert actual == expected, f"tla2tools.jar sha256 mismatch: got {actual} (size={jar.stat().st_size})"
+          print(f"Verified {jar} ({jar.stat().st_size} bytes, sha256={actual})")
+          PY
+      - name: Run TLC model checks across Pool, Coordinator, and Swap specs
+        run: |
+          set -euo pipefail
+          JAR="$PWD/.tla-cache/tla2tools.jar"
+          for pair in \
+            "core/livelab/formal/pool/SandboxPool.tla core/livelab/formal/pool/SandboxPool.cfg" \
+            "core/livelab/formal/coordinator/Coordinator.tla core/livelab/formal/coordinator/Coordinator.cfg" \
+            "core/livelab/formal/swap/SwapLifecycle.tla core/livelab/formal/swap/SwapLifecycle.cfg"
+          do
+            spec="${pair%% *}"
+            cfg="${pair##* }"
+            echo "=== TLC: $spec ==="
+            java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -cleanup -config "$cfg" "$spec"
+          done
+  rule-ruff-bugs:
+    name: "rule: Ruff high-signal bug scan"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python3 -m pip install --quiet --disable-pip-version-check ruff
+      - name: Check pyflakes (F), default-call (B008), loop closure (B023), and shell=True (S602)
+        run: |
+          ruff check \
+            --select F,B008,B023,S602 \
+            --exclude core/livelab/survey/fixture \
+            core/livelab repos scripts site .github/review
