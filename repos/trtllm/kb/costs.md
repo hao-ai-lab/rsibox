@@ -54,3 +54,35 @@ Measured timings on `1x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `PyTorch 2.8.0a0+
 | `rsibox conformance trtllm` (`c0–c10`) | **11/11 pass** | ~4.9 s total; `c9_soak` 20-cycle median `0.0100 s` install / `0.0048 s` undo |
 | `rsibox doctor` | **9/9 labs ok (7/7 engines)** | `0` GPU import violations (`torch`/`tensorrt_llm` stay lazy) |
 | `adapter/test_adapter.py` | **14/14 pass** | ~5.5 s (lazy imports, live swap, linecache undo, fresh parity, faults, file channel, snapshot hooks + pointer-shift & block-reuse guards) |
+
+## Multi-GPU `TP=2` MPI + CUDA Graph `R1` Recapture (`2x NVIDIA B200`, `Qwen3-0.6B`)
+
+Verified live on `2x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `Qwen3-0.6B`, `TP=2` `MPIPoolExecutor` hooked via pure-stdlib `adapter/mpi_hook.py`, `use_cuda_graph=True`, `2026-11-24`):
+
+### Real-GPU `TP=2` `11/11` Conformance (`rsibox conformance trtllm --real -- --tp 2 --check-timeout 30 --rpc-timeout 30`)
+
+| Case | Result | Wall (s) | Evidence |
+|---|---|---:|---|
+| `c0_repeatable` | **pass** | `0.940` | 3 checks (`reset=[kv_cache_events, rng]`) gave bit-exact token IDs across both ranks |
+| `c1_noop` | **pass** | `1.048` | `TorchSampler._process_requests:446` (`[17, 17]` witness calls), output bit-exact |
+| `c2_visible` | **pass** | `1.000` | `TorchSampler._process_requests:446` (`[17, 17]` witness calls), output changed |
+| `c3_fresh_equivalence` | **pass** | `76.114` | Both `visible` and `chain of 3` matched fresh `TP=2` `PackageOverlay` MPI subprocesses bit-exact |
+| `c4_uninstall` | **pass** | `1.111` | Undo in `0.0108 s`; exact code identity restored across both ranks |
+| `c5_failed_install` | **pass** | `1.504` | `fail_apply` & `fail_commit` rolled back cleanly across both ranks; control committed 3 targets |
+| `c6_refusal` | **pass** | `1.338` | `syntax`, `closure`, `module_state`, `empty` all refused |
+| `c7_chain` | **pass** | `1.493` | 3 stacked edits across `sampler.py` & `py_executor.py`, undone 1-by-1 to base |
+| `c8_crash_and_hang` | **pass** | `121.444` | `crash` (`22.35 s`), `hang` (`22.29 s`), `lost` (`22.53 s`), `tamper` (`22.66 s`) poisoned & respawned to base |
+| `c9_soak` | **pass** | `4.672` | 20 cycles across 2 ranks: install median **`0.0676 s`**, uninstall median **`0.0134 s`** |
+| `c10_not_proven` | **pass** | `26.368` | Startup-only `PyTorchModelEngine._load_model`: `proven=False` (`[zero_witness, zero_witness]`), live == base, fresh != base |
+| **Total** | **11/11 pass** | **237.0 s** | `rc=0`, both GPUs cleanly returned to baseline (`0%` util) |
+
+### Model-Layer Forward Hot-Swap Inside CUDA Graphs (`R1`) & `TP=2` KV Quiesce
+
+| Operation (`2x NVIDIA B200`, `Qwen3-0.6B`, `TP=2`, `use_cuda_graph=True`) | Measured | Notes |
+|---|---:|---|
+| `TP=2` MPI cold boot | **36.93 s** | `workers=[rank0, rank1]`, deterministic `base1 == base2` |
+| `Qwen3DecoderLayer.forward` live `install` (auto-`R1` recapture) | **0.2751 s** | Auto-triggered `_release_cuda_graphs()` on both ranks (`rank0`: `0.2441 s` / 4 graphs, `rank1`: `0.2439 s` / 4 graphs) |
+| `Qwen3DecoderLayer.forward` live `check` (lazy CUDA graph recapture) | **0.3743 s** | `proven=True`, `output_changed=True`, **`224 / 224` witness calls on BOTH `rank0` and `rank1`** |
+| `Qwen3DecoderLayer.forward` live `uninstall` (auto-`R1` invalidate) | **0.1491 s** | Both ranks invalidated & restored cleanly |
+| `TrtllmQuiesceHooks` `quiesce_for_snapshot()` (`TP=2`) | **-46.67 GiB** (`-23.33 GiB`/GPU) | `rank0`: `47,256 -> 23,362 MiB`, `rank1`: `45,920 -> 22,026 MiB` |
+| `TrtllmQuiesceHooks` `resume_after_restore()` (`TP=2`) | **0.0152 s** (`15.2 ms`) | `rank0`: `6.3 ms`, `rank1`: `7.1 ms`, `participants_ok=True`; post-restore `Qwen3DecoderLayer.forward` edit & bit-exact rollback passed |
