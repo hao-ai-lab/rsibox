@@ -84,3 +84,29 @@ py-modules = [
 
 [tool.ruff.lint.per-file-ignores]
 "core/livelab/kernel/toy/ops.py" = ["F841"]
+
+[tool.pyright]
+pythonVersion = "3.11"
+extraPaths = ["core/livelab"]
+typeCheckingMode = "basic"
+include = [
+  "core/livelab/kernel/__init__.py",
+  "core/livelab/kernel/findings.py",
+  "core/livelab/kernel/identity.py",
+  "core/livelab/kernel/jit.py",
+  "core/livelab/kernel/receipt.py",
+  "core/livelab/kernel/toy/engine.py",
+  "core/livelab/kernel/toy_lab.py",
+  "core/livelab/rsibox/__init__.py",
+  "core/livelab/rsibox/__main__.py",
+  "core/livelab/rsibox/client.py",
+  "core/livelab/rsibox/diffs.py",
+  "core/livelab/rsibox/doctor.py",
+  "core/livelab/rsibox/gvisor.py",
+  "core/livelab/rsibox/hooks.py",
+  "core/livelab/rsibox/proc.py",
+  "core/livelab/rsibox/warm/__init__.py",
+  "core/livelab/rsibox/warm/snapshot_contract.py",
+  "core/livelab/rsibox/warm/types.py",
+  "core/livelab/rsibox/warm/weight_store.py",
+]
