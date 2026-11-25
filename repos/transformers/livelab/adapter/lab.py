@@ -231,14 +231,18 @@ class TransformersLab(BaseLab):
         return ""
 
     def _wait_for_worker(self) -> dict[str, Any]:
+        worker = self._worker_proc
+        alive_fn = (lambda proc_obj=worker: proc_obj.poll() is None) if worker is not None else None
         deadline = time.monotonic() + self.startup_timeout
         while time.monotonic() < deadline:
-            if self._worker_proc is not None and self._worker_proc.poll() is not None:
-                exit_code = self._worker_proc.returncode
+            if worker is not None and worker.poll() is not None:
+                exit_code = worker.returncode
                 raise RuntimeError(f"transformers worker exited during startup (rc={exit_code}): {self._read_stderr_tail()}")
             if self.sock_path and os.path.exists(self.sock_path):
                 with contextlib.suppress(OSError, ValueError):
-                    reply = ipc.unix_json_call(self.sock_path, {"method": "ping"}, timeout=5.0)
+                    reply = ipc.unix_json_call(
+                        self.sock_path, {"method": "ping"}, timeout=5.0, alive_fn=alive_fn,
+                    )
                     if reply.get("ok"):
                         return reply
             time.sleep(0.05)
@@ -248,14 +252,18 @@ class TransformersLab(BaseLab):
         self._worker_generation += 1
         worker, self._worker_proc = self._worker_proc, None
         if worker is not None:
-            if worker.poll() is None and self.sock_path and not self.dirty:
+            leader_alive = worker.poll() is None
+            if leader_alive and self.sock_path and not self.dirty:
                 with contextlib.suppress(Exception):
                     ipc.unix_json_call(self.sock_path, {"method": "shutdown"}, timeout=2.0)
-            if worker.poll() is None:
+                leader_alive = worker.poll() is None
+            if leader_alive or proc.pg_alive(worker.pid):
+                grace = 5.0 if leader_alive else 1.0
                 with contextlib.suppress(Exception):
-                    proc.stop_session(worker.pid, grace=5.0, reap=worker.poll)
-                with contextlib.suppress(Exception):
-                    proc.stop_tree(worker.pid, grace_s=2.0, include_pg=True)
+                    proc.stop_session(worker.pid, grace=grace, reap=worker.poll)
+                if worker.poll() is None:
+                    with contextlib.suppress(Exception):
+                        proc.stop_tree(worker.pid, grace_s=2.0, include_pg=True)
             with contextlib.suppress(Exception):
                 worker.wait(timeout=2.0)
         for cleanup_path in (self.sock_path, self._spec_path, self._stderr_path):
@@ -266,16 +274,19 @@ class TransformersLab(BaseLab):
         self.hf_device_map, self.devices = None, []
 
     def worker_call(self, method: str, payload: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
-        generation, sock_path = self._worker_generation, self.sock_path
+        generation, sock_path, worker = self._worker_generation, self.sock_path, self._worker_proc
         if self.dirty or not sock_path:
             raise ConnectionError("worker channel dirty; respawn required" if self.dirty else "worker is not running")
-        if not self._worker_alive():
+        if worker is not None and worker.poll() is not None:
             if self._worker_generation == generation:
                 self.dirty = True
             raise ConnectionError(f"worker0 {method}: worker process exited")
+        alive_fn = (lambda proc_obj=worker: proc_obj.poll() is None) if worker is not None else self._worker_alive
         try:
             call_timeout = self.rpc_timeout if timeout is None else float(timeout)
-            return ipc.unix_json_call(sock_path, {"method": method, "payload": payload}, timeout=call_timeout)
+            return ipc.unix_json_call(
+                sock_path, {"method": method, "payload": payload}, timeout=call_timeout, alive_fn=alive_fn,
+            )
         except (TimeoutError, ConnectionError, OSError, ValueError) as error:
             if self._worker_generation == generation:
                 self.dirty = True

@@ -41,7 +41,7 @@ from conformance.cases import REFUSALS  # noqa: E402
 from kernel import coordinator as kernel_coordinator  # noqa: E402
 from kernel import findings as kernel_findings  # noqa: E402
 from kernel import locate as kernel_locate  # noqa: E402
-from rsibox import harness as rsibox_harness  # noqa: E402
+from rsibox import harness as rsibox_harness, ipc as rsibox_ipc, proc as rsibox_proc  # noqa: E402
 from rsibox.warm import (  # noqa: E402
     DefaultRespawnDriver,
     DiskStore,
@@ -289,6 +289,67 @@ class ToyTransformersLiveLabTests(unittest.TestCase):
         # Clean respawn restores full parity.
         self.assertTrue(lab.reset("respawn")["ok"])
         self.assertEqual(lab.check()["output"], base_output)
+
+        # 3. Inherited socket FD held by a grandchild in the worker session still fast-fails
+        #    and `_stop_engine()` reaps the orphaned process group after external SIGKILL.
+        fd_sock = rsibox_ipc.short_sock_path("rsitf-fd")
+        self.addCleanup(lambda p=fd_sock: os.path.exists(p) and os.unlink(p))
+        srv_code = (
+            "import os, socket, subprocess, sys, time\n"
+            "srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "srv.bind(sys.argv[1]); srv.listen(4)\n"
+            "print('READY', flush=True)\n"
+            "conn, _ = srv.accept()\n"
+            "conn.recv(4096)\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], pass_fds=(conn.fileno(),))\n"
+            "print(f'CHILD {child.pid}', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        fd_proc = subprocess.Popen(
+            [sys.executable, "-c", srv_code, fd_sock],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        )
+        grandchild_pid: list[int] = []
+
+        def _cleanup_fd(p=fd_proc, gp=grandchild_pid) -> None:
+            if p.stdout is not None:
+                with contextlib.suppress(OSError):
+                    p.stdout.close()
+            for pid in gp:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+            if rsibox_proc.pg_alive(p.pid):
+                with contextlib.suppress(Exception):
+                    rsibox_proc.stop_session(p.pid, grace=0.5, reap=p.poll)
+
+        self.addCleanup(_cleanup_fd)
+        assert fd_proc.stdout is not None
+        self.assertEqual(fd_proc.stdout.readline().strip(), "READY")
+        fd_lab = ToyTransformersLab(auto_spawn=False, rpc_timeout=30.0)
+        self.addCleanup(fd_lab.close)
+        fd_lab.sock_path = fd_sock
+        fd_lab._worker_proc = fd_proc
+
+        def _kill_leader_after_fork(p=fd_proc, gp=grandchild_pid) -> None:
+            assert p.stdout is not None
+            line = p.stdout.readline().strip()
+            if line.startswith("CHILD "):
+                gp.append(int(line.split()[1]))
+            os.kill(p.pid, signal.SIGKILL)
+
+        fd_killer = threading.Thread(target=_kill_leader_after_fork, daemon=True)
+        fd_killer.start()
+        t_fd = time.monotonic()
+        with self.assertRaises(ConnectionError):
+            fd_lab.worker_call("generate", {}, timeout=30.0)
+        elapsed_fd = time.monotonic() - t_fd
+        fd_killer.join(timeout=2.0)
+        self.assertLess(elapsed_fd, 2.0, f"inherited-FD SIGKILL stalled {elapsed_fd:.3f}s")
+        self.assertTrue(fd_lab.dirty)
+        self.assertEqual(len(grandchild_pid), 1)
+        fd_lab.close()
+        self.assertFalse(rsibox_proc.pid_alive(grandchild_pid[0]))
+        self.assertFalse(rsibox_proc.pg_alive(fd_proc.pid))
 
     def test_multigpu_device_map_quiesce_resume_live_swap_and_tp_probe(self) -> None:
         """Golden case: device_map sharding preserves shard map across quiesce/resume and live swaps."""
