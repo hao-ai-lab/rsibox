@@ -22,7 +22,15 @@ import threading
 import time
 from typing import Any, Callable
 
-from .pool import PoolClosedError, PoolError, PoolSlot, PoolTimeoutError, SandboxPool
+from .pool import (
+    Box,
+    PoolClosedError,
+    PoolError,
+    PoolSlot,
+    PoolTimeoutError,
+    SandboxPool,
+    _BoxLabAdapter,
+)
 
 __all__ = ["AutoScalerPolicy", "PoolAutoScaler"]
 
@@ -57,6 +65,14 @@ def _check_finite_float(value: Any, name: str, *, minimum: float = 0.0, strictly
     return numeric
 
 
+def _unwrap_raw_target(target: Any) -> Any:
+    if isinstance(target, _BoxLabAdapter):
+        target = target._box
+    if isinstance(target, Box):
+        return target.lab if target.lab is not None else target
+    return target
+
+
 def _pool_owns_target(pool: Any, target: Any) -> bool:
     if pool is None or target is None:
         return False
@@ -64,10 +80,21 @@ def _pool_owns_target(pool: Any, target: Any) -> bool:
     slots = getattr(pool, "_slots", None)
     if lock is None or not isinstance(slots, dict):
         return False
+    raw_target = _unwrap_raw_target(target)
+    raw_id = id(raw_target)
     with lock:
+        inflight = getattr(pool, "_inflight_heal_targets", None)
+        if inflight and raw_id in inflight:
+            return True
         for st in slots.values():
             st_slot = getattr(st, "slot", None)
-            if st_slot is not None and (st_slot.box is target or st_slot.lab is target):
+            if st_slot is None:
+                continue
+            if st_slot.box is target or st_slot.lab is target:
+                return True
+            if _unwrap_raw_target(st_slot.box or st_slot.lab) is raw_target:
+                return True
+            if id(SandboxPool._slot_raw_target(st_slot)) == raw_id:
                 return True
     return False
 
@@ -185,6 +212,9 @@ class PoolAutoScaler:
         self._heal_failures: dict[str, int] = {}
         self._heal_backoff: dict[str, tuple[float, float]] = {}
         self._exhausted_slots: set[str] = set()
+        self._replace_pending: set[str] = set()
+        self._replace_heal_errors: dict[str, str] = {}
+        self._replace_failures: dict[str, int] = {}
         self._last_action: dict[str, Any] | None = None
         self._last_error: str | None = None
         self._events: deque[dict[str, Any]] = deque(maxlen=self._policy.max_history)
@@ -394,36 +424,51 @@ class PoolAutoScaler:
             sid = str(row["slot_id"])
             with self._lock:
                 exhausted = sid in self._exhausted_slots
+                replace_pending = sid in self._replace_pending
                 backoff_entry = self._heal_backoff.get(sid)
                 if backoff_entry is not None and now_mono < backoff_entry[0]:
                     backoff_entry = (now_mono, backoff_entry[1])
                     self._heal_backoff[sid] = backoff_entry
-            if exhausted:
+            if exhausted and not replace_pending:
                 continue
             if backoff_entry is not None and max(0.0, now_mono - backoff_entry[0]) < backoff_entry[1]:
                 continue
+            if replace_pending:
+                with self._lock:
+                    prev_err = self._replace_heal_errors.get(sid, "heal exhausted")
+                return self._replace_exhausted_slot(sid, now_mono, prev_err)
 
-            with self._lock:
-                self._heals_attempted += 1
             t0 = self._safe_clock(fallback=now_mono)
             try:
                 reply = self._pool.heal_slot(sid)
             except PoolClosedError as err:
                 return self._record_event({"action": "noop", "reason": f"pool_closed: {err}"})
             except (PoolError, ValueError):
-                # Slot raced into use/draining or was removed externally; skip cleanly and inspect next candidate.
+                # Slot has an active undrained call, raced into use/draining, or disappeared; back off cleanly.
+                finish_mono = self._safe_clock(fallback=t0)
+                with self._lock:
+                    self._heal_backoff[sid] = (finish_mono, policy.heal_backoff_s)
                 continue
             except Exception as err:
                 reply = {"ok": False, "healed": False, "status": "error", "error": f"{type(err).__name__}: {err}"}
 
             finish_mono = self._safe_clock(fallback=t0)
             cost_s = round(max(0.0, finish_mono - t0), 6)
+            if reply.get("status") == "closed":
+                return self._record_event({
+                    "action": "noop",
+                    "reason": f"pool_closed: {reply.get('error') or 'closed during heal_slot'}",
+                })
             if reply.get("ok") and reply.get("healed"):
                 with self._lock:
+                    self._heals_attempted += 1
                     self._heals_succeeded += 1
                     self._heal_failures.pop(sid, None)
                     self._heal_backoff.pop(sid, None)
                     self._exhausted_slots.discard(sid)
+                    self._replace_pending.discard(sid)
+                    self._replace_heal_errors.pop(sid, None)
+                    self._replace_failures.pop(sid, None)
                     self._idle_since.pop(sid, None)
                 return self._record_event({
                     "action": "heal",
@@ -438,24 +483,32 @@ class PoolAutoScaler:
                     self._heal_failures.pop(sid, None)
                     self._heal_backoff.pop(sid, None)
                     self._exhausted_slots.discard(sid)
+                    self._replace_pending.discard(sid)
+                    self._replace_heal_errors.pop(sid, None)
+                    self._replace_failures.pop(sid, None)
                 continue
 
             err_msg = str(reply.get("error") or f"heal failed (status={reply.get('status')!r})")
             self._record_error(err_msg)
+            should_replace = bool(policy.replace_on_heal_exhausted and self._slot_factory is not None)
             with self._lock:
+                self._heals_attempted += 1
                 self._heals_failed += 1
                 attempts = self._heal_failures.get(sid, 0) + 1
                 self._heal_failures[sid] = attempts
                 if attempts >= policy.max_heal_attempts:
                     self._exhausted_slots.add(sid)
                     self._heal_backoff.pop(sid, None)
+                    if should_replace:
+                        self._replace_pending.add(sid)
+                        self._replace_heal_errors[sid] = err_msg
                     exhausted_now = True
                 else:
                     delay = min(policy.max_heal_backoff_s, policy.heal_backoff_s * (2 ** min(attempts - 1, 30)))
                     self._heal_backoff[sid] = (finish_mono, delay)
                     exhausted_now = False
 
-            if exhausted_now and policy.replace_on_heal_exhausted and self._slot_factory is not None:
+            if exhausted_now and should_replace:
                 return self._replace_exhausted_slot(sid, finish_mono, err_msg)
 
             return self._record_event({
@@ -470,36 +523,51 @@ class PoolAutoScaler:
     def _replace_exhausted_slot(
         self, dead_slot_id: str, now_mono: float, heal_error: str
     ) -> dict[str, Any]:
+        policy = self._policy
         t0 = self._safe_clock(fallback=now_mono)
+        drain_err: str | None = None
         try:
             dr = self._pool.drain_slot(
                 dead_slot_id,
-                timeout_s=self._policy.drain_timeout_s,
-                close_lab=self._policy.close_on_drain,
+                timeout_s=policy.drain_timeout_s,
+                close_lab=policy.close_on_drain,
             )
-            if not dr.get("ok") or not dr.get("drained"):
-                msg = str(dr.get("error") or "drain_slot returned not drained")
-                self._record_error(msg)
+            if dr.get("status") == "closed":
                 return self._record_event({
-                    "action": "replace_failed",
-                    "slot_id": dead_slot_id,
-                    "error": msg,
+                    "action": "noop",
+                    "reason": f"pool_closed: {dr.get('error') or 'closed during drain_slot'}",
                 })
+            if not dr.get("ok") or not dr.get("drained"):
+                drain_err = str(dr.get("error") or "drain_slot returned not drained")
         except PoolClosedError as err:
             return self._record_event({"action": "noop", "reason": f"pool_closed: {err}"})
         except Exception as err:
-            msg = f"{type(err).__name__}: {err}"
-            self._record_error(msg)
+            drain_err = f"{type(err).__name__}: {err}"
+
+        if drain_err is not None:
+            finish_mono = self._safe_clock(fallback=t0)
+            self._record_error(drain_err)
+            with self._lock:
+                r_attempts = self._replace_failures.get(dead_slot_id, 0) + 1
+                self._replace_failures[dead_slot_id] = r_attempts
+                delay = min(policy.max_heal_backoff_s, policy.heal_backoff_s * (2 ** min(r_attempts - 1, 30)))
+                self._heal_backoff[dead_slot_id] = (finish_mono, delay)
+                self._exhausted_slots.add(dead_slot_id)
+                self._replace_pending.add(dead_slot_id)
+                self._replace_heal_errors[dead_slot_id] = heal_error
             return self._record_event({
                 "action": "replace_failed",
                 "slot_id": dead_slot_id,
-                "error": msg,
+                "error": drain_err,
             })
 
         with self._lock:
             self._heal_failures.pop(dead_slot_id, None)
             self._heal_backoff.pop(dead_slot_id, None)
             self._exhausted_slots.discard(dead_slot_id)
+            self._replace_pending.discard(dead_slot_id)
+            self._replace_heal_errors.pop(dead_slot_id, None)
+            self._replace_failures.pop(dead_slot_id, None)
             self._idle_since.pop(dead_slot_id, None)
             self._auto_slots.discard(dead_slot_id)
 
@@ -548,6 +616,13 @@ class PoolAutoScaler:
                     elif now_mono < self._heal_backoff[sid][0]:
                         self._heal_backoff[sid] = (now_mono, self._heal_backoff[sid][1])
                 self._exhausted_slots.intersection_update(quarantined_ids)
+                self._replace_pending.intersection_update(quarantined_ids)
+                for sid in list(self._replace_heal_errors):
+                    if sid not in quarantined_ids:
+                        self._replace_heal_errors.pop(sid, None)
+                for sid in list(self._replace_failures):
+                    if sid not in quarantined_ids:
+                        self._replace_failures.pop(sid, None)
                 self._auto_slots.intersection_update(managed_ids)
                 for sid in list(self._idle_since):
                     if sid not in managed_ids:
@@ -643,6 +718,11 @@ class PoolAutoScaler:
                                 "error": msg,
                             })
 
+                        if dr.get("status") == "closed":
+                            return self._record_event({
+                                "action": "noop",
+                                "reason": f"pool_closed: {dr.get('error') or 'closed during drain_slot'}",
+                            })
                         finish_mono = self._safe_clock(fallback=t0)
                         if dr.get("ok") and dr.get("drained"):
                             with self._lock:
@@ -679,7 +759,7 @@ class PoolAutoScaler:
                     break
             except Exception as err:
                 self._record_error(f"{type(err).__name__}: {err}")
-            self._stop_event.wait(self._policy.poll_interval_s)
+            self._stop_event.wait(min(self._policy.poll_interval_s, threading.TIMEOUT_MAX))
 
     def start(self) -> PoolAutoScaler:
         """Start the background reconciliation daemon thread (idempotent)."""
@@ -701,7 +781,8 @@ class PoolAutoScaler:
         with self._lock:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=timeout_s)
+            join_timeout = None if timeout_s is None else min(timeout_s, threading.TIMEOUT_MAX)
+            thread.join(timeout=join_timeout)
         with self._lock:
             if self._thread is thread and (thread is None or not thread.is_alive()):
                 self._thread = None

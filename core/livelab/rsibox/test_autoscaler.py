@@ -8,7 +8,7 @@ from typing import Any
 
 from kernel import toy_lab
 from rsibox.autoscaler import AutoScalerPolicy, PoolAutoScaler
-from rsibox.pool import PoolSlot, SandboxPool
+from rsibox.pool import Box, PoolSlot, PoolTimeoutError, SandboxPool, _BoxLabAdapter
 
 
 class PoolAutoScalerTests(unittest.TestCase):
@@ -564,6 +564,171 @@ class PoolAutoScalerTests(unittest.TestCase):
         self.assertEqual(ev_ex["action"], "heal_exhausted")
         self.assertEqual(s_ex.status()["exhausted_slots"], ["x0"])
         self.assertEqual(s_ex.reconcile_once()["action"], "noop")
+
+    def test_undrained_backoff_box_unwrap_closed_status_replace_retry_and_timeout_clamp(self):
+        """Regression tests for P1/P2 pool hardening compatibility and close/replace edge cases."""
+        # 1. Undrained fenced call -> PoolError backs off cleanly without inflating heals_attempted.
+        p_ud = SandboxPool([PoolSlot("s0", self._make_toy_lab())], drain_timeout_s=0.05)
+        self.addCleanup(p_ud.close)
+        lease = p_ud.acquire("agent-a")
+        entered = threading.Event()
+        release_call = threading.Event()
+        self.addCleanup(release_call.set)
+        orig_check = p_ud._slots["s0"].slot.lab.check
+
+        def _blocked_check(*a: Any, **kw: Any) -> Any:
+            entered.set()
+            release_call.wait(timeout=5.0)
+            return orig_check(*a, **kw)
+
+        p_ud._slots["s0"].slot.lab.check = _blocked_check  # type: ignore[method-assign]
+        t_call = threading.Thread(target=lambda: lease.lab.check())
+        t_call.start()
+        self.assertTrue(entered.wait(timeout=3.0))
+        lease.release()
+        now_ud = [0.0]
+        heal_calls = [0]
+        orig_heal = p_ud.heal_slot
+
+        def _counting_heal(slot_id: str, **kw: Any) -> dict[str, Any]:
+            heal_calls[0] += 1
+            return orig_heal(slot_id, **kw)
+
+        p_ud.heal_slot = _counting_heal  # type: ignore[method-assign]
+        s_ud = PoolAutoScaler(
+            p_ud,
+            policy=AutoScalerPolicy(min_slots=1, max_slots=1, heal_backoff_s=5.0),
+            clock=lambda: now_ud[0],
+        )
+        self.assertEqual(s_ud.reconcile_once()["action"], "noop")
+        self.assertEqual(heal_calls[0], 1)
+        # During 5s backoff, reconcile_once does NOT hammer heal_slot() or inflate heals_attempted!
+        now_ud[0] = 2.0
+        self.assertEqual(s_ud.reconcile_once()["action"], "noop")
+        self.assertEqual(heal_calls[0], 1)
+        self.assertEqual(s_ud.status()["heals_attempted"], 0)
+        release_call.set()
+        t_call.join(timeout=3.0)
+        p_ud._slots["s0"].slot.lab.check = orig_check  # type: ignore[method-assign]
+        now_ud[0] = 6.0
+        self.assertEqual(s_ud.reconcile_once()["action"], "heal")
+        st_ud = s_ud.status()
+        self.assertEqual(st_ud["heals_attempted"], st_ud["heals_succeeded"] + st_ud["heals_failed"])
+
+        # 2. _pool_owns_target unwraps Box / _BoxLabAdapter so duplicate Box is NOT closed!
+        box_lab = self._make_toy_lab()
+        box_closed = [0]
+        orig_box_lab_close = box_lab.close
+        box_lab.close = lambda: (box_closed.__setitem__(0, box_closed[0] + 1), orig_box_lab_close())[1]  # type: ignore[method-assign]
+        live_box = Box(lambda receipts=None: box_lab, spec="toy")
+        live_box.boot()
+        self.addCleanup(live_box.close)
+        p_box = SandboxPool([PoolSlot("b0", live_box)])
+        self.addCleanup(p_box.close)
+        s_box = PoolAutoScaler(
+            p_box,
+            lambda sid, role: PoolSlot(sid, _BoxLabAdapter(live_box), role=role),
+            policy=AutoScalerPolicy(min_slots=2, max_slots=2),
+        )
+        ev_box = s_box.reconcile_once()
+        self.assertEqual(ev_box["action"], "scale_up_failed")
+        self.assertEqual(box_closed[0], 0, "_BoxLabAdapter wrapping live Box closed the live Box!")
+        self.assertTrue(live_box.state == "ready")
+
+        # 3. Concurrent close returning status=="closed" maps cleanly to noop with errors==0.
+        class _ClosedStatusPool:
+            def __init__(self) -> None:
+                self._closed = False
+                self.mode = "heal"
+
+            def slot_states(self) -> list[dict[str, Any]]:
+                if self.mode == "heal":
+                    return [{"slot_id": "c0", "role": None, "in_use": False, "quarantined": True, "draining": False}]
+                return [{"slot_id": "c0", "role": None, "in_use": False, "quarantined": False, "draining": False}]
+
+            def metrics(self) -> dict[str, Any]:
+                return {"queue_depth": 0}
+
+            def heal_slot(self, _sid: str) -> dict[str, Any]:
+                return {"ok": False, "healed": False, "status": "closed", "error": "SandboxPool closed during heal_slot"}
+
+            def drain_slot(self, _sid: str, **_kw: Any) -> dict[str, Any]:
+                return {"ok": False, "drained": False, "status": "closed", "error": "SandboxPool closed during drain_slot"}
+
+        cp = _ClosedStatusPool()
+        s_cls = PoolAutoScaler(
+            cp,  # type: ignore[arg-type]
+            policy=AutoScalerPolicy(min_slots=0, max_slots=1, scale_down_idle_s=0.0, scale_down_cooldown_s=0.0),
+        )
+        ev_hc = s_cls.reconcile_once()
+        self.assertEqual(ev_hc["action"], "noop")
+        self.assertIn("pool_closed", ev_hc["reason"])
+        cp.mode = "drain"
+        ev_dc = s_cls.reconcile_once()
+        self.assertEqual(ev_dc["action"], "noop")
+        self.assertIn("pool_closed", ev_dc["reason"])
+        self.assertEqual(s_cls.status()["errors"], 0)
+        self.assertEqual(s_cls.status()["heals_attempted"], 0)
+        self.assertEqual(s_cls.status()["heals_failed"], 0)
+
+        # 4. Failed drain inside _replace_exhausted_slot backs off and retries replacement without re-healing.
+        dead_r = self._make_toy_lab()
+        orig_rr = dead_r.reset
+        heal_hits = [0]
+
+        def _dead_reset(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn":
+                heal_hits[0] += 1
+                return {"ok": False, "error": "still dead"}
+            return orig_rr(kind)
+
+        dead_r.reset = _dead_reset  # type: ignore[method-assign]
+        p_rep = SandboxPool([PoolSlot("r0", dead_r)])
+        self.addCleanup(p_rep.close)
+        p_rep.run_isolated("rogue", lambda pl, _l: (pl.session.fault("participant_failed", "b", "c"), 1 / 0), timeout_s=2.0)
+        heal_hits_before = heal_hits[0]
+        orig_drain = p_rep.drain_slot
+        fail_drain = [True]
+
+        def _flaky_drain(slot_id: str, **kw: Any) -> dict[str, Any]:
+            if fail_drain[0]:
+                raise PoolTimeoutError("transient drain timeout")
+            return orig_drain(slot_id, **kw)
+
+        p_rep.drain_slot = _flaky_drain  # type: ignore[method-assign]
+        now_rp = [0.0]
+        s_rep = PoolAutoScaler(
+            p_rep,
+            lambda sid, role: PoolSlot(sid, self._make_toy_lab(), role=role),
+            policy=AutoScalerPolicy(
+                min_slots=1, max_slots=1, max_heal_attempts=1,
+                heal_backoff_s=4.0, replace_on_heal_exhausted=True,
+            ),
+            clock=lambda: now_rp[0],
+        )
+        ev_rf = s_rep.reconcile_once()
+        self.assertEqual(ev_rf["action"], "replace_failed")
+        self.assertEqual(heal_hits[0] - heal_hits_before, 1)
+        # During backoff: noop; once drain recovers and backoff expires: replaces without re-calling heal_slot!
+        now_rp[0] = 2.0
+        self.assertEqual(s_rep.reconcile_once()["action"], "noop")
+        fail_drain[0] = False
+        now_rp[0] = 5.0
+        ev_rok = s_rep.reconcile_once()
+        self.assertEqual(ev_rok["action"], "replace")
+        self.assertEqual(heal_hits[0] - heal_hits_before, 1)
+        self.assertEqual(s_rep.status()["exhausted_slots"], [])
+
+        # 5. Huge finite floats > threading.TIMEOUT_MAX do not OverflowError in start()/stop().
+        p_to = SandboxPool([PoolSlot("t0", self._make_toy_lab())])
+        self.addCleanup(p_to.close)
+        s_to = PoolAutoScaler(
+            p_to,
+            policy=AutoScalerPolicy(poll_interval_s=1e20),
+        )
+        s_to.start()
+        s_to.stop(timeout_s=1e20)
+        self.assertFalse(s_to.status()["running"])
 
 
 if __name__ == "__main__":
