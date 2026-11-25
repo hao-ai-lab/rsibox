@@ -10,7 +10,7 @@ Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight re
 core/livelab/kernel/          (two-phase txns, code swap, JIT rebuild, witness, journal)
         │
         ▼
-core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux [shipped] · S5 Buffers · S6 Recovery [shipped])
+core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux [shipped] · S5 Buffers [shipped] · S6 Recovery [shipped])
         │
         ▼
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
@@ -27,7 +27,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | **S2 Zygote** | Pre-imported Python/CUDA fork server & warm worker pool | **Shipped** ([`zygote.py`](../core/livelab/rsibox/services/zygote.py)) | `ZygoteService`, `ZygoteProfile`, `SpawnedChild`, `profile_for_engine`; `forksafe` guards + `AF_UNIX` `SCM_RIGHTS` |
 | **S3 Cache** | Triton, Inductor, FlashInfer & CUDA-graph artifact store | **Shipped** ([`cache.py`](../core/livelab/rsibox/services/cache.py)) | `CompileCacheService`, `EnvFingerprint`, `CacheEntry`; per-entry `flock` + atomic `os.replace` + SHA-256 verification |
 | **S4 Auxiliary** | Shared frozen VAE, text encoder, reward, reference, and judge stage pool | **Shipped** ([`auxiliary.py`](../core/livelab/rsibox/services/auxiliary.py)) | `AuxiliaryModelService`, `AuxStageKind`, `AuxStageSpec`, `AuxInvocationReceipt`; S1 `ro_aux_weights` RO leases + LRU cache |
-| **S5 Buffers** | Pre-allocated activation, KV scratch, and step replay buffers | Planned | Quiesce-aware sizing and deterministic zeroing on `reset("state")` |
+| **S5 Buffers** | Indexed mmap prefetch & `code_version`-fenced RL replay buffers | **Shipped** ([`buffers.py`](../core/livelab/rsibox/services/buffers.py)) | `IndexedPrefetchService`, `VersionedReplayBufferService`, `PrefetchItem`, `VersionedEntry`, `BufferResetReceipt` |
 | **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | **Shipped** ([`recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py)) | `RecoveryService`, `RecoveryTier`, `ServiceHealth`, `RecoveryReceipt`; `RecoveryDriver` + `QuiesceHooks` + `SandboxPool` |
 
 ## S1: Unified GPU Memory & State Service (Shipped)
@@ -94,6 +94,23 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `AuxInvocationReceipt` | Frozen invocation receipt (`stage_id`, `version`, `caller_id`, `input_digest`, `cache_hit`, `cost_s`, `lease_id`, `output`) |
 | `AuxiliaryModelService` | Thread-safe context-managed stage pool (`register_stage`, `invoke`, `bump_version`, `unregister_stage`, `list_stages`, `get_stage`, `stats`, `teardown`, `close`) |
 
+## S5: Indexed Prefetch & Versioned RL Replay Buffers (Shipped)
+
+[`core/livelab/rsibox/services/buffers.py`](../core/livelab/rsibox/services/buffers.py) provides two thread-safe, context-managed buffer services with zero leaked file descriptors or `mmap` handles:
+
+- **Indexed dataset prefetch (`IndexedPrefetchService`):** Builds atomic headered binary offset + SHA-256-prefix indexes (`RSIIDX01`), maps non-empty datasets read-only via `mmap.ACCESS_READ` (supporting empty 0-record files cleanly), verifies slice lengths/checksums fail-closed (`IndexCorruptError`), and checkpoints/restores sequential cursors atomically.
+- **Versioned RL replay (`VersionedReplayBufferService`):** Bounded `deque` rollout buffer tagging every entry with `code_version`, filtering `sample()` to the active version unless `allow_stale=True`, enforcing `reject_stale_push` / `drain_on_version_mismatch`, and returning `BufferResetReceipt` on `advance_code_version()` and `reset_state()`.
+
+### Public API Summary (`rsibox.services.buffers`)
+
+| Symbol | Purpose |
+|---|---|
+| `PrefetchItem` | Frozen dataset record (`index`, `offset`, `length`, `payload`) |
+| `VersionedEntry` | Frozen rollout entry (`seq`, `code_version`, `payload`, `metadata`) |
+| `BufferResetReceipt` | Frozen reset/promotion receipt (`drained`, `retained`, `active_code_version`, `epoch`) |
+| `IndexedPrefetchService` | Thread-safe mmap reader (`build_index`, `open`, `get`, `seek`, `next_batch`, `checkpoint_cursor`, `restore_cursor`, `close`) |
+| `VersionedReplayBufferService` | Thread-safe versioned replay buffer (`push`, `sample`, `advance_code_version`, `reset_state`, `stats`, `close`) |
+
 ## S6: Unified Recovery & Health Service (Shipped)
 
 [`core/livelab/rsibox/services/recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py) unifies process recovery, snapshot quiesce handshakes, and pool/autoscaler health aggregation behind `RecoveryService`:
@@ -112,10 +129,6 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `RecoveryReceipt` | Frozen outcome record (`tier_attempted`, `tier_succeeded`, `ok`, `fallback_used`, `cost_s`, `incarnation`, `driver_receipt`) |
 | `RecoveryService` | Thread-safe coordinator (`register_endpoint`, `attach_pool`, `record_failure`, `recover`, `quiesce_and_checkpoint`, `get_health`, `health_snapshot`, `probe_health`, `teardown`, `close`) |
 
-## Planned Services (`S5`)
-
-- **S5 (Buffers):** Tracks volatile step buffers (`kv_pool`, replay/rollout buffers) that must drain and reset on `reset("state")` or quiesce during snapshot capture.
-
 ## Public API Summary (`rsibox.services.memory`)
 
 | Symbol | Purpose |
@@ -131,6 +144,6 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 |---|---|---|
 | **LLM / Diffusion Inference** | `vLLM`, `SGLang`, `TensorRT-LLM`, `FastVideo`, `Transformers` | `S1` (`ro_weights`, `kv_pool`) + `S2` zygote / `S6` shadow recovery + `S3` kernel/graph cache |
 | **Pretraining / Fine-tuning** | `Megatron-LM`, `TorchTitan` | `S1` (`cow_s0_snapshot` `S0` reset) + `S3` compile cache + `S5` step/optimizer buffers |
-| **Reinforcement Learning** | `veRL`, `miles`, `NeMo-RL` | `S1` (`ro_aux_weights`, `actor_rollout_shared`, `cow_s0_snapshot`) + `S4` aux pools + `S6` recovery |
+| **Reinforcement Learning** | `veRL`, `miles`, `NeMo-RL` | `S1` (`ro_aux_weights`, `actor_rollout_shared`, `cow_s0_snapshot`) + `S4` aux pools + `S5` versioned replay + `S6` recovery |
 
 See [`docs/mechanisms.md`](mechanisms.md) for the restart-boundary latency ladder and [`docs/engines.md`](engines.md) for per-engine verification summaries.
