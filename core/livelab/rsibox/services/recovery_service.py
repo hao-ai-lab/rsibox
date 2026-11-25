@@ -259,6 +259,11 @@ class RecoveryService:
             store, old_lab, old_owns_lab, lab_factory = entry.store, entry.lab, entry.owns_lab, entry.lab_factory
 
         committed, started, target_lab, created_lab, extra_labs = False, time.perf_counter(), old_lab, None, []
+
+        def _track_candidate(cand: Any) -> None:
+            if cand is not None and cand is not old_lab and cand is not created_lab:
+                extra_labs.append(cand)
+
         try:
             lab_err: str | None = None
             if target_lab is None and lab_factory is not None:
@@ -266,6 +271,7 @@ class RecoveryService:
                 except Exception as exc: lab_err = f"lab_factory failed: {_format_error(exc)}"
             ok1, raw1, err1 = ((False, {"ok": False, "error": lab_err}, lab_err) if lab_err is not None
                                else _invoke_driver(driver, target_lab, store, clean_reason, driver_kwargs))
+            _track_candidate(raw1.get("lab"))
             fallback_used = bool(raw1.get("fallback_from"))
             if fallback_used and raw1.get("promote_error") and not ok1:
                 err1 = f"promote: {raw1['promote_error']}; fallback: {err1}"
@@ -287,16 +293,11 @@ class RecoveryService:
                 fb_tier = _infer_tier(fallback_driver, default=RecoveryTier.COLD_RESPAWN)
                 fb_ok, fb_raw, fb_err = ((False, {"ok": False, "error": fb_lab_err}, fb_lab_err) if fb_lab_err is not None
                                          else _invoke_driver(fallback_driver, target_lab, store, clean_reason, driver_kwargs))
+                _track_candidate(fb_raw.get("lab"))
                 if fb_ok:
-                    r1_lab = raw1.get("lab")
-                    if r1_lab is not None and r1_lab is not old_lab and r1_lab is not target_lab:
-                        extra_labs.append(r1_lab)
                     fallback_used, final_ok, tier_succeeded = True, True, fb_tier
                     final_raw, final_err = {**fb_raw, "primary_error": err1}, err1
                 else:
-                    for cand in (raw1.get("lab"), fb_raw.get("lab")):
-                        if cand is not None and cand is not old_lab and cand is not created_lab:
-                            extra_labs.append(cand)
                     combined = f"primary ({primary_tier.value}) failed: {err1}; fallback ({fb_tier.value}) failed: {fb_err}"
                     with self._lock:
                         entry.recovering, committed = False, True
@@ -317,6 +318,7 @@ class RecoveryService:
                     if new_lab is not None:
                         entry.lab = new_lab
                         entry.owns_lab = old_owns_lab or (new_lab is created_lab) or (returned_lab is not None and returned_lab is not old_lab)
+                    extra_labs = [x for x in extra_labs if x is not new_lab]
                     if created_lab is not None and created_lab is not new_lab: labs_to_close.append(created_lab)
                     if old_owns_lab and old_lab is not None and old_lab is not new_lab: labs_to_close.append(old_lab)
                     if fallback_used: entry.last_error = final_err
@@ -326,7 +328,6 @@ class RecoveryService:
                                           else (ServiceHealthStatus.DEGRADED if entry.consecutive_failures > 0 else ServiceHealthStatus.HEALTHY))
                 else:
                     if created_lab is not None: labs_to_close.append(created_lab)
-                    if final_raw.get("lab") is not None and final_raw.get("lab") is not old_lab: labs_to_close.append(final_raw.get("lab"))
                     entry.status = prev_status
                     self._apply_fault_locked(entry, final_err)
                 incarnation = entry.incarnation
@@ -422,9 +423,13 @@ class RecoveryService:
         """Aggregate `health_snapshot()` plus optional live `WeightStore` probes outside locks."""
         _require_bool(probe_stores, "probe_stores")
         snapshot = self.health_snapshot()
-        with self._lock: store_rows = [(e.endpoint_id, e.store) for e in self._endpoints.values() if e.store is not None]
+        with self._lock:
+            if self._closed:
+                snapshot["closed"], snapshot["ok"], snapshot["stores"] = True, False, {}
+                return snapshot
+            store_rows = [(e.endpoint_id, e.store) for e in self._endpoints.values() if e.store is not None]
         stores_out, stores_ok = {}, True
-        if probe_stores and not snapshot["closed"]:
+        if probe_stores:
             for eid, store in store_rows:
                 assert store is not None
                 try: probe = store.probe(); probe_dict, stores_ok = probe.to_dict(), stores_ok and bool(probe.ok)

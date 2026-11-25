@@ -600,6 +600,47 @@ class RecoveryServiceHardeningTests(unittest.TestCase):
             t.join(timeout=2.0)
             self.assertIsInstance(race_exc[0], RecoveryClosedError)
             self.assertTrue(raced[0].closed)
+
+            # Concurrent teardown when driver returns a replacement "lab" closes returned_lab too.
+            rep_entered = threading.Event()
+            rep_release = threading.Event()
+            returned_labs: list[_PipeLab] = []
+            initial_labs: list[_PipeLab] = []
+
+            class _SlowReplacingDriver:
+                name = "default_respawn"
+
+                def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                    rep_entered.set()
+                    rep_release.wait(timeout=5.0)
+                    new_lab = _PipeLab()
+                    returned_labs.append(new_lab)
+                    return {"ok": True, "driver": self.name, "lab": new_lab}
+
+            svc3 = RecoveryService()
+            svc3.register_endpoint(
+                "ep-race-rep-pipe",
+                engine="vllm",
+                lab_factory=lambda: initial_labs.append(p := _PipeLab()) or p,
+                driver=_SlowReplacingDriver(),
+            )
+            rep_exc: list[BaseException] = []
+
+            def run_rep_raced() -> None:
+                try:
+                    svc3.recover("ep-race-rep-pipe")
+                except BaseException as exc:
+                    rep_exc.append(exc)
+
+            t3 = threading.Thread(target=run_rep_raced)
+            t3.start()
+            self.assertTrue(rep_entered.wait(timeout=2.0))
+            svc3.teardown()
+            rep_release.set()
+            t3.join(timeout=2.0)
+            self.assertIsInstance(rep_exc[0], RecoveryClosedError)
+            self.assertTrue(initial_labs[0].closed)
+            self.assertTrue(returned_labs[0].closed)
             gc.collect()
         finally:
             foreign_lab.close()
