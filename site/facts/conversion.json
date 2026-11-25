@@ -479,6 +479,29 @@
    "notes": [
     "Completes the NVIDIA Dynamo serving triad (vLLM + SGLang + TensorRT-LLM) with zero core/ edits."
    ]
+  },
+  {
+   "engine": "TorchTitan",
+   "folder": "repos/torchtitan",
+   "recorded_facts": [
+    {
+     "fact": "Onboarded PyTorch Native FSDP2 training adapter (real CUDA torch.distributed.fsdp.fully_shard at world_size=1 over synthetic TitanMLPNet + 2-rank CPU toy mode; upstream pytorch/torchtitan not yet imported) in 597 non-test adapter LOC reusing core/livelab unchanged.",
+     "source": "repos/torchtitan/README.md; repos/torchtitan/docs/architecture.md"
+    },
+    {
+     "fact": "Passed 11/11 CPU 2-rank conformance (ToyTorchTitanLab: c9 0.0142 s install / 0.0045 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 via rsibox conformance torchtitan --real -- --mode fsdp2 (0.083 s live install+check vs 2.689 s cold boot = 32.5x, c9 0.0541 s install / 0.0458 s undo, c8 respawns 2.58-2.80 s, max_abs_loss_diff == 0.0, 0 MiB exit).",
+     "source": "repos/torchtitan/kb/costs.md"
+    }
+   ],
+   "upstream_patches": {
+    "ledger": null,
+    "count": 0,
+    "note": "Runs against unmodified PyTorch FSDP2 (`torch.distributed.fsdp.fully_shard`, `world_size=1` synthetic `TitanMLPNet`) with zero upstream patches.",
+    "source": "repos/torchtitan/docs/architecture.md"
+   },
+   "notes": [
+    "597 non-test adapter LOC; 11/11 2-rank CPU conformance and 11/11 1x NVIDIA B200 FSDP2 (world_size=1 synthetic TitanMLPNet) real-GPU conformance verified."
+   ]
   }
  ]
 }
