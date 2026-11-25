@@ -26,6 +26,7 @@ from kernel import coordinator as C, session as SS
 from rsibox import proc as _proc
 from rsibox.lab import RecaptureCoordinator
 from rsibox.warm import QuiesceReceipt, StandbyShadowDriver
+from rsibox.warm.recovery import _resolve_async_replenisher
 
 from .snapshot_hooks import SglangQuiesceHooks
 
@@ -464,6 +465,39 @@ def _rebuild_coordinator(lab: Any) -> RecaptureCoordinator:
     )
 
 
+class _TargetedFallbackDriver:
+    """Wrap a fallback `RecoveryDriver` so `lab._stop_engine()` uses targeted SGLang teardown.
+
+    Prevents `DefaultRespawnDriver.respawn()` from invoking upstream `sglang.Engine.shutdown()`
+    (`kill_process_tree(os.getpid())`), which could kill co-process parked shadows or a co-process
+    GMS daemon, while preserving the fallback driver's `store.probe()` ordering and spawn logic.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.name = getattr(inner, "name", "targeted_fallback")
+
+    def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+        had_own = "_stop_engine" in getattr(lab, "__dict__", {})
+        orig_stop = lab.__dict__.get("_stop_engine") if had_own else None
+
+        def _targeted_stop() -> None:
+            if getattr(lab, "engine", None) is not None or getattr(lab, "rank_conns", None):
+                stop_sglang_engine_targeted(lab, preserve_process_env=True)
+            else:
+                lab.dirty = True
+
+        lab._stop_engine = _targeted_stop
+        try:
+            return self._inner.respawn(lab, store, reason=reason)
+        finally:
+            if had_own:
+                lab._stop_engine = orig_stop
+            else:
+                with contextlib.suppress(AttributeError):
+                    delattr(lab, "_stop_engine")
+
+
 class _SglangShadowDriver(StandbyShadowDriver):
     """`StandbyShadowDriver` using targeted SGLang primary stop to protect co-process shadows."""
 
@@ -472,9 +506,136 @@ class _SglangShadowDriver(StandbyShadowDriver):
         promoter: SglangShadowPromoter,
         *,
         replenish_fn: Callable[[Any, Any], Any] | None = None,
+        replenish_wait_timeout_s: float = 0.0,
+        fallback_driver: Any = None,
+        ready_count_fn: Callable[[], int] | None = None,
     ) -> None:
-        super().__init__(promoter.promote, replenish_fn=replenish_fn)
+        wrapped_fallback = _TargetedFallbackDriver(fallback_driver) if fallback_driver is not None else None
+        super().__init__(
+            promoter.promote,
+            replenish_fn=replenish_fn,
+            replenish_wait_timeout_s=replenish_wait_timeout_s,
+            fallback_driver=wrapped_fallback,
+            ready_count_fn=ready_count_fn,
+        )
         self.promoter = promoter
+
+    def _closed_response(self, lab: Any, store: Any, *, reason: str, started_at: float) -> dict[str, Any]:
+        if self._fallback_driver is not None:
+            fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
+            fallback_result["fallback_from"] = self.name
+            return fallback_result
+        return {
+            "ok": False,
+            "reset": [],
+            "driver": self.name,
+            "recovery_mode": self.name,
+            "reason": reason,
+            "error": "SglangShadowPromoter is closed",
+            "replenish": "closed",
+            "cost_s": round(time.perf_counter() - started_at, 6),
+        }
+
+    def _safe_replenish(self, lab: Any, store: Any) -> tuple[Any, str | None]:
+        if self._replenish_fn is None or self.promoter.is_closed():
+            return None, None
+        try:
+            return self._replenish_fn(lab, store), None
+        except Exception as exc:
+            return None, f"{type(exc).__name__}: {exc}"
+
+    def _guard_async_replenisher(
+        self, async_replenisher: Any, lab: Any, store: Any, *, reason: str, started_at: float
+    ) -> dict[str, Any] | None:
+        """Promoter-close-aware standby guard around `AsyncShadowReplenisher`."""
+        from rsibox.warm import AsyncShadowReplenisher
+
+        if self.promoter.is_closed():
+            return self._closed_response(lab, store, reason=reason, started_at=started_at)
+        replenisher_state = async_replenisher.status()
+        is_closed = bool(replenisher_state.get("closed"))
+        has_ready, probe_error = (None, None) if is_closed else self._probe_ready_standby()
+        if has_ready is True and not is_closed and not self.promoter.is_closed():
+            return None
+
+        if (
+            not is_closed
+            and not self.promoter.is_closed()
+            and probe_error is None
+            and (replenisher_state.get("in_flight") or replenisher_state.get("pending"))
+            and self._replenish_wait_timeout_s > 0.0
+        ):
+            if isinstance(async_replenisher, AsyncShadowReplenisher):
+                async_replenisher.wait(
+                    timeout_s=self._replenish_wait_timeout_s,
+                    until=lambda: self.promoter.is_closed() or (
+                        self._ready_count_fn is not None and self._probe_ready_standby()[0] is True
+                    ),
+                )
+            else:
+                async_replenisher.wait(timeout_s=self._replenish_wait_timeout_s)
+            if self.promoter.is_closed():
+                return self._closed_response(lab, store, reason=reason, started_at=started_at)
+            replenisher_state = async_replenisher.status()
+            is_closed = bool(replenisher_state.get("closed"))
+            has_ready, probe_error = (None, None) if is_closed else self._probe_ready_standby()
+            if has_ready is True and not is_closed:
+                return None
+
+        if self.promoter.is_closed():
+            return self._closed_response(lab, store, reason=reason, started_at=started_at)
+        still_busy = bool(replenisher_state.get("in_flight") or replenisher_state.get("pending"))
+        last_failed = replenisher_state.get("attempts", 0) > 0 and (
+            replenisher_state.get("last_ok") is False or replenisher_state.get("last_error") is not None
+        )
+        if not is_closed and not still_busy and not last_failed and has_ready is not False:
+            return None
+
+        if self._fallback_driver is not None:
+            fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
+            fallback_result["fallback_from"] = self.name
+            if (
+                (last_failed or (has_ready is False and probe_error is None))
+                and not still_busy
+                and not is_closed
+                and not self.promoter.is_closed()
+                and fallback_result.get("ok")
+                and self._replenish_fn is not None
+            ):
+                rep_val, rep_err = self._safe_replenish(lab, store)
+                if rep_err is not None:
+                    fallback_result["replenish_error"] = rep_err
+                elif rep_val is not None:
+                    fallback_result["replenish"] = rep_val
+            return fallback_result
+
+        replenish_error: str | None = None
+        if is_closed:
+            error_text, replenish_status = "standby_not_ready: replenisher is closed", "closed"
+        elif probe_error is not None:
+            error_text, replenish_status = f"standby_not_ready: ready_count_fn invalid ({probe_error})", None
+        elif still_busy:
+            error_text, replenish_status = "standby_not_ready: replenishment still in flight", "in_flight"
+        elif last_failed:
+            error_text = f"standby_not_ready: last replenishment failed ({replenisher_state.get('last_error')})"
+            replenish_status, replenish_error = self._safe_replenish(lab, store)
+        else:
+            error_text = "standby_not_ready: no parked standby shadow lab available"
+            replenish_status, replenish_error = self._safe_replenish(lab, store)
+        result: dict[str, Any] = {
+            "ok": False,
+            "reset": [],
+            "driver": self.name,
+            "recovery_mode": self.name,
+            "reason": reason,
+            "error": error_text,
+            "replenish": replenish_status,
+            "replenisher_status": replenisher_state,
+            "cost_s": round(time.perf_counter() - started_at, 6),
+        }
+        if replenish_error is not None:
+            result["replenish_error"] = replenish_error
+        return result
 
     def respawn(
         self,
@@ -484,6 +645,49 @@ class _SglangShadowDriver(StandbyShadowDriver):
         reason: str = "reset_respawn",
     ) -> dict[str, Any]:
         t0 = time.perf_counter()
+        if self.promoter.is_closed():
+            return self._closed_response(lab, store, reason=reason, started_at=t0)
+
+        async_replenisher = _resolve_async_replenisher(self._replenish_fn)
+        if async_replenisher is not None:
+            guard_result = self._guard_async_replenisher(
+                async_replenisher, lab, store, reason=reason, started_at=t0
+            )
+            if guard_result is not None:
+                return guard_result
+        else:
+            has_ready, probe_error = self._probe_ready_standby()
+            if has_ready is False:
+                if self._fallback_driver is not None:
+                    fallback_result = self._fallback_driver.respawn(lab, store, reason=reason)
+                    fallback_result["fallback_from"] = self.name
+                    if (
+                        probe_error is None
+                        and not self.promoter.is_closed()
+                        and fallback_result.get("ok")
+                        and self._replenish_fn is not None
+                    ):
+                        rep_val, rep_err = self._safe_replenish(lab, store)
+                        if rep_err is not None:
+                            fallback_result["replenish_error"] = rep_err
+                        else:
+                            fallback_result["replenish"] = rep_val
+                    return fallback_result
+                error_text = (
+                    f"standby_not_ready: ready_count_fn invalid ({probe_error})"
+                    if probe_error is not None
+                    else "standby_not_ready: no parked standby shadow lab available"
+                )
+                return {
+                    "ok": False,
+                    "reset": [],
+                    "driver": self.name,
+                    "recovery_mode": self.name,
+                    "reason": reason,
+                    "error": error_text,
+                    "cost_s": round(time.perf_counter() - t0, 6),
+                }
+
         # Validate candidate availability & stop primary cleanly using targeted shutdown
         # inside promoter.promote so we never kill co-process parked shadow workers.
         promoted = self._promote_fn(lab, store) or {}
@@ -491,14 +695,11 @@ class _SglangShadowDriver(StandbyShadowDriver):
         session = getattr(lab, "session", None)
         poisoned = bool(session.poisoned()) if session is not None else False
         ok = bool(promoted.get("ok", False)) and not poisoned
-        replenish_error: str | None = None
-        if ok and self._replenish_fn is not None:
-            try:
-                self._replenish_fn(lab, store)
-            except Exception as exc:
-                replenish_error = f"{type(exc).__name__}: {exc}"
-        reserved = {"ok", "reset", "driver", "reason", "cost_s"}
+        replenish_outcome, replenish_error = (self._safe_replenish(lab, store) if ok else (None, None))
+        reserved = {"ok", "reset", "driver", "reason", "cost_s", "replenish"}
         extra = {k: v for k, v in promoted.items() if k not in reserved}
+        if ok and async_replenisher is not None and replenish_error is None and replenish_outcome is not None:
+            extra["replenish"] = replenish_outcome
         if replenish_error is not None:
             extra["replenish_error"] = replenish_error
         return {
@@ -533,6 +734,10 @@ class SglangShadowPromoter:
     def pending_count(self) -> int:
         with self._lock:
             return len(self._shadows)
+
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
     def register_shadow(
         self,
@@ -770,8 +975,25 @@ class SglangShadowPromoter:
                 pass
         return closed
 
-    def recovery_driver(self) -> StandbyShadowDriver:
-        return _SglangShadowDriver(self, replenish_fn=self._replenish_fn)
+    def recovery_driver(
+        self,
+        *,
+        replenish_wait_timeout_s: float = 0.0,
+        fallback_driver: Any = None,
+        ready_count_fn: Callable[[], int] | None = None,
+    ) -> StandbyShadowDriver:
+        effective_ready_count_fn = (
+            ready_count_fn
+            if ready_count_fn is not None
+            else (self.pending_count if self._shadow_provider is None else None)
+        )
+        return _SglangShadowDriver(
+            self,
+            replenish_fn=self._replenish_fn,
+            replenish_wait_timeout_s=replenish_wait_timeout_s,
+            fallback_driver=fallback_driver,
+            ready_count_fn=effective_ready_count_fn,
+        )
 
 
 def make_shadow_recovery_driver(
@@ -779,10 +1001,17 @@ def make_shadow_recovery_driver(
     *,
     shadow_provider: Callable[[Any, Any], Any] | None = None,
     replenish_fn: Callable[[Any, Any], Any] | None = None,
+    replenish_wait_timeout_s: float = 0.0,
+    fallback_driver: Any = None,
+    ready_count_fn: Callable[[], int] | None = None,
 ) -> StandbyShadowDriver:
     """Create a `StandbyShadowDriver` configured with `SglangShadowPromoter`."""
     return SglangShadowPromoter(
         shadow=shadow,
         shadow_provider=shadow_provider,
         replenish_fn=replenish_fn,
-    ).recovery_driver()
+    ).recovery_driver(
+        replenish_wait_timeout_s=replenish_wait_timeout_s,
+        fallback_driver=fallback_driver,
+        ready_count_fn=ready_count_fn,
+    )

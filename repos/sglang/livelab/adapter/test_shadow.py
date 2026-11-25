@@ -715,6 +715,197 @@ class SglangShadowPromoterTests(unittest.TestCase):
                     proc.kill()
                 proc.wait(timeout=5.0)
 
+    def test_sglang_shadow_driver_standby_guard_multi_shadow_early_wake_and_fallback(self) -> None:
+        """Golden case: `_SglangShadowDriver` enforces `StandbyShadowDriver` guard + `ready_count_fn`.
+
+        Proves:
+        1. K=2 parked shadows with `AsyncShadowReplenisher` promote Failover #2 immediately
+           (< 1.0 s) while background restock #1 (sh3) is blocked, and Failover #3 wakes
+           immediately when sh3 parks while queued pending restock #2 (sh4) stays blocked.
+        2. Empty queue with open `AsyncShadowReplenisher` (or `fallback_driver`) fails closed /
+           delegates without killing primary, and closed promoter never triggers replenishment.
+        """
+        import time
+        from rsibox.warm import AsyncShadowReplenisher, DefaultRespawnDriver
+
+        primary = ToySglangLab(tp_size=1)
+        sh1 = ToySglangLab(tp_size=1)
+        sh2 = ToySglangLab(tp_size=1)
+        sh3 = ToySglangLab(tp_size=1)
+        sh4 = ToySglangLab(tp_size=1)
+        log: list[tuple[str, object]] = []
+        for lab_obj in (sh1, sh2, sh3, sh4):
+            _attach_fake_memory_saver(lab_obj, log)
+
+        repl1_entered = threading.Event()
+        repl1_release = threading.Event()
+        repl2_release = threading.Event()
+        restock_seq = [2]
+        promoter_box: list[SglangShadowPromoter] = []
+        try:
+            with _patch_pause_io_types(primary.io_module):
+                def gated_restock(_lab_obj, _store):
+                    restock_seq[0] += 1
+                    idx = restock_seq[0]
+                    if idx == 3:
+                        repl1_entered.set()
+                        repl1_release.wait(timeout=5.0)
+                        assert promoter_box[0].park_shadow(sh3)["ok"]
+                    elif idx == 4:
+                        repl2_release.wait(timeout=5.0)
+                        assert promoter_box[0].park_shadow(sh4)["ok"]
+                    return {"ok": True}
+
+                with AsyncShadowReplenisher(gated_restock, queue_when_busy=True) as replenisher:
+                    promoter = SglangShadowPromoter(replenish_fn=replenisher)
+                    promoter_box.append(promoter)
+                    self.assertTrue(promoter.park_shadow(sh1)["ok"])
+                    self.assertTrue(promoter.park_shadow(sh2)["ok"])
+                    self.assertEqual(promoter.pending_count(), 2)
+                    primary.recovery_driver = promoter.recovery_driver(replenish_wait_timeout_s=5.0)
+
+                    # Failover #1 promotes sh1 and starts background restock #1 (sh3).
+                    r1 = primary.reset("respawn")
+                    self.assertTrue(r1["ok"], r1)
+                    self.assertEqual(r1["replenish"], "started")
+                    self.assertTrue(repl1_entered.wait(timeout=2.0))
+                    self.assertEqual(promoter.pending_count(), 1)
+
+                    # Failover #2 promotes sh2 immediately (< 1.0 s) while sh3 is blocked!
+                    t2 = time.perf_counter()
+                    r2 = primary.reset("respawn")
+                    r2_elapsed = time.perf_counter() - t2
+                    self.assertTrue(r2["ok"], r2)
+                    self.assertLess(r2_elapsed, 1.0, f"Failover #2 stalled behind sh3: {r2_elapsed:.3f}s")
+                    self.assertEqual(promoter.pending_count(), 0)
+                    self.assertTrue(replenisher.status()["pending"])
+
+                    # Failover #3 waits for sh3 and wakes immediately while sh4 stays blocked!
+                    def release_sh3() -> None:
+                        time.sleep(0.05)
+                        repl1_release.set()
+
+                    releaser = threading.Thread(target=release_sh3, daemon=True)
+                    releaser.start()
+                    t3 = time.perf_counter()
+                    r3 = primary.reset("respawn")
+                    r3_elapsed = time.perf_counter() - t3
+                    releaser.join(timeout=2.0)
+                    self.assertTrue(r3["ok"], r3)
+                    self.assertLess(r3_elapsed, 1.0, f"Failover #3 blocked on sh4: {r3_elapsed:.3f}s")
+                    self.assertTrue(primary.check()["ok"])
+                    repl2_release.set()
+                    self.assertTrue(replenisher.wait(timeout_s=2.0))
+
+                # Closed promoter fails closed without triggering replenish.
+                repl_called: list[str] = []
+                with AsyncShadowReplenisher(lambda _l, _s: (repl_called.append("called") or {"ok": True})) as r_closed:
+                    p_closed = SglangShadowPromoter(replenish_fn=r_closed)
+                    p_closed.close_parked()
+                    primary.recovery_driver = p_closed.recovery_driver(replenish_wait_timeout_s=1.0)
+                    res_cl = primary.reset("respawn")
+                    self.assertFalse(res_cl["ok"])
+                    self.assertIn("closed", res_cl["error"])
+                    self.assertEqual(repl_called, [])
+
+                # Closed promoter + fallback_driver delegates via targeted stop WITHOUT calling lab._stop_engine() or replenish.
+                blanket_stop_called: list[str] = []
+                orig_stop_engine = primary._stop_engine
+                primary._stop_engine = lambda: (blanket_stop_called.append("blanket"), orig_stop_engine())
+                try:
+                    with AsyncShadowReplenisher(lambda _l, _s: (repl_called.append("called") or {"ok": True})) as r_closed2:
+                        p_closed2 = SglangShadowPromoter(replenish_fn=r_closed2)
+                        p_closed2.close_parked()
+                        primary.recovery_driver = p_closed2.recovery_driver(fallback_driver=DefaultRespawnDriver())
+                        res_cl_fb = primary.reset("respawn")
+                        self.assertTrue(res_cl_fb["ok"], res_cl_fb)
+                        self.assertEqual(res_cl_fb["fallback_from"], "standby_shadow")
+                        self.assertEqual(repl_called, [])
+                        self.assertEqual(blanket_stop_called, [], "fallback must bypass SglangLab._stop_engine()")
+                finally:
+                    primary._stop_engine = orig_stop_engine
+
+                # Racing close_parked() during _guard_async_replenisher wait never triggers spurious restock.
+                race_started = threading.Event()
+                race_release = threading.Event()
+                race_calls: list[int] = []
+                race_promoter_box: list[SglangShadowPromoter] = []
+
+                def racing_worker(_l, _s):
+                    race_calls.append(len(race_calls) + 1)
+                    if len(race_calls) == 1:
+                        race_started.set()
+                        race_release.wait(timeout=5.0)
+                    return {"ok": True}
+
+                try:
+                    with AsyncShadowReplenisher(racing_worker) as race_repl:
+                        race_prom = SglangShadowPromoter(replenish_fn=race_repl)
+                        race_promoter_box.append(race_prom)
+                        race_repl(primary, None)
+                        self.assertTrue(race_started.wait(timeout=2.0))
+                        primary.recovery_driver = race_prom.recovery_driver(replenish_wait_timeout_s=5.0)
+
+                        def close_then_release() -> None:
+                            time.sleep(0.05)
+                            race_prom.close_parked()
+                            race_release.set()
+
+                        closer = threading.Thread(target=close_then_release, daemon=True)
+                        closer.start()
+                        res_race_cl = primary.reset("respawn")
+                        closer.join(timeout=2.0)
+                        self.assertFalse(res_race_cl["ok"])
+                        self.assertIn("closed", res_race_cl["error"])
+                        self.assertEqual(res_race_cl.get("replenish"), "closed")
+                        self.assertTrue(race_repl.wait(timeout_s=2.0))
+                        self.assertEqual(race_calls, [1], "closed promoter must not trigger a second restock")
+                finally:
+                    race_release.set()
+
+                # Empty queue with fallback_driver delegates cleanly via targeted stop and handles sync restock + error.
+                sync_restocks: list[str] = []
+                primary.recovery_driver = make_shadow_recovery_driver(
+                    replenish_fn=lambda _l, _s: (sync_restocks.append("ok") or "sync_ok"),
+                    fallback_driver=DefaultRespawnDriver(),
+                )
+                res_fb = primary.reset("respawn")
+                self.assertTrue(res_fb["ok"], res_fb)
+                self.assertEqual(res_fb["fallback_from"], "standby_shadow")
+                self.assertEqual(res_fb["replenish"], "sync_ok")
+                self.assertEqual(sync_restocks, ["ok"])
+
+                primary.recovery_driver = make_shadow_recovery_driver(
+                    replenish_fn=lambda _l, _s: (_ for _ in ()).throw(RuntimeError("sync restock boom")),
+                    fallback_driver=DefaultRespawnDriver(),
+                )
+                res_fb_err = primary.reset("respawn")
+                self.assertTrue(res_fb_err["ok"], res_fb_err)
+                self.assertNotIn("replenish", res_fb_err)
+                self.assertIn("sync restock boom", res_fb_err["replenish_error"])
+
+                # Explicit ready_count_fn=lambda: 0 blocks shadow_provider; invalid probe fails closed with warning.
+                provider_called: list[int] = []
+                primary.recovery_driver = make_shadow_recovery_driver(
+                    shadow_provider=lambda _l, _s: provider_called.append(1),
+                    ready_count_fn=lambda: 0,
+                )
+                res_zero = primary.reset("respawn")
+                self.assertFalse(res_zero["ok"])
+                self.assertIn("standby_not_ready", res_zero["error"])
+                self.assertEqual(provider_called, [])
+
+                with self.assertLogs("rsibox.warm.recovery", level="WARNING"):
+                    primary.recovery_driver = make_shadow_recovery_driver(ready_count_fn=lambda: -1)
+                    res_inv = primary.reset("respawn")
+                self.assertFalse(res_inv["ok"])
+                self.assertIn("ready_count_fn invalid", res_inv["error"])
+        finally:
+            repl1_release.set()
+            repl2_release.set()
+            for lab_obj in (primary, sh1, sh2, sh3, sh4):
+                lab_obj.close()
+
 
 if __name__ == "__main__":
     unittest.main()
