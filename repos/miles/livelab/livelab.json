@@ -1,4 +1,10 @@
 {
   "toy": "adapter.toy_lab:ToyMilesLab",
-  "real": "adapter.conformance_lab:MilesConformanceLab"
+  "real": "adapter.conformance_lab:MilesConformanceLab",
+  "roles": ["trainer", "rollout"],
+  "capabilities": {
+    "mode": "rl",
+    "cuda_graph": false,
+    "distributed": "ray"
+  }
 }

@@ -1,4 +1,10 @@
 {
   "toy": "adapter.toy_lab:ToyVerlLab",
-  "real": "adapter.conformance_lab:VerlConformanceLab"
+  "real": "adapter.conformance_lab:VerlConformanceLab",
+  "roles": ["actor", "rollout", "reference"],
+  "capabilities": {
+    "mode": "rl",
+    "cuda_graph": false,
+    "distributed": "ray"
+  }
 }

@@ -36,7 +36,7 @@ _CORE_KERNEL_MODULES = (
 _LAB_METHODS = ("install", "check", "reset", "uninstall", "status", "patches", "fresh_check", "inject", "close")
 # Generic GPU/accelerator runtime packages that must stay lazy at lab-module import time.
 _GPU_RUNTIME_LIBS = ("torch", "cuda", "cupy", "triton", "pynvml", "nvidia", "tensorrt", "jax", "tensorflow")
-_MANIFEST_KEYS = frozenset(("toy", "real"))
+_MANIFEST_KEYS = frozenset(("toy", "real", "roles", "capabilities"))
 _PROBE_SCRIPT = (
     "import importlib, json, sys\n"
     "spec, req_csv, gpu_csv = sys.argv[1], sys.argv[2], sys.argv[3]\n"
@@ -113,8 +113,22 @@ def _is_valid_lab_spec(value: object) -> bool:
     return all(part.isidentifier() for part in mod_name.split(".")) and cls_name.isidentifier()
 
 
+def _is_valid_roles(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(item, str) and bool(item) and item == item.strip() for item in value)
+    )
+
+
+def _is_valid_capability_value(value: object) -> bool:
+    if isinstance(value, (bool, str)):
+        return True
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
 def _load_livelab_manifest(manifest_path: str) -> tuple[dict | None, list[str]]:
-    """Read and validate `<livelab_dir>/livelab.json` (`{\"toy\": spec|null, \"real\": spec|null}`)."""
+    """Read and validate `<livelab_dir>/livelab.json` (`toy`, `real`, optional `roles`, `capabilities`)."""
     try:
         with open(manifest_path, encoding="utf-8") as handle:
             raw = json.load(handle)
@@ -126,7 +140,7 @@ def _load_livelab_manifest(manifest_path: str) -> tuple[dict | None, list[str]]:
     unknown = sorted(set(raw) - _MANIFEST_KEYS)
     if unknown:
         errors.append(f"invalid livelab.json: unknown key(s) {unknown} (allowed: {sorted(_MANIFEST_KEYS)})")
-    parsed: dict[str, str | None] = {"toy": None, "real": None}
+    parsed: dict[str, object] = {"toy": None, "real": None}
     for key in ("toy", "real"):
         val = raw.get(key)
         if val is None:
@@ -135,6 +149,34 @@ def _load_livelab_manifest(manifest_path: str) -> tuple[dict | None, list[str]]:
             parsed[key] = val
         else:
             errors.append(f"invalid livelab.json: {key!r} must be null or 'module:Class', got {val!r}")
+    if "roles" in raw:
+        roles_val = raw["roles"]
+        if _is_valid_roles(roles_val):
+            parsed["roles"] = list(roles_val)
+        else:
+            errors.append(
+                f"invalid livelab.json: 'roles' must be a non-empty list of non-empty stripped strings, got {roles_val!r}"
+            )
+    if "capabilities" in raw:
+        caps_val = raw["capabilities"]
+        if not isinstance(caps_val, dict):
+            errors.append(
+                f"invalid livelab.json: 'capabilities' must be a JSON object, got {type(caps_val).__name__}"
+            )
+        else:
+            bad = [
+                (k, v)
+                for k, v in caps_val.items()
+                if not isinstance(k, str) or not k or not _is_valid_capability_value(v)
+            ]
+            if bad:
+                k, v = bad[0]
+                errors.append(
+                    f"invalid livelab.json: 'capabilities' entries must map string keys to bool, str, or list[str]; "
+                    f"bad entry {k!r}: {v!r}"
+                )
+            else:
+                parsed["capabilities"] = dict(caps_val)
     return (None, errors) if errors else (parsed, [])
 
 
@@ -143,12 +185,16 @@ def _discover_livelab_dir(name: str, livelab_dir: str) -> dict:
     manifest_path = os.path.join(livelab_dir, "livelab.json")
     if os.path.isfile(manifest_path):
         manifest, errors = _load_livelab_manifest(manifest_path)
-        entry = {
+        entry: dict[str, object] = {
             "name": name,
             "livelab_dir": livelab_dir,
             "toy_spec": manifest["toy"] if manifest else None,
             "real_spec": manifest["real"] if manifest else None,
         }
+        if manifest and "roles" in manifest:
+            entry["roles"] = manifest["roles"]
+        if manifest and "capabilities" in manifest:
+            entry["capabilities"] = manifest["capabilities"]
         if errors:
             entry["manifest_errors"] = errors
         return entry

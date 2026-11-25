@@ -1,4 +1,10 @@
 {
   "toy": "adapter.toy_lab:ToyFastVideoLab",
-  "real": "adapter.h3:H3Lab"
+  "real": "adapter.h3:H3Lab",
+  "roles": ["inference"],
+  "capabilities": {
+    "mode": "diffusion",
+    "cuda_graph": false,
+    "distributed": "sp"
+  }
 }

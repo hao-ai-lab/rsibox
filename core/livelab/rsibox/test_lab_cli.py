@@ -870,6 +870,137 @@ class CliTests(unittest.TestCase):
         self.assertIn("--nproc-per-node 4", env["RSIBOX_MG_CMD"])
         self.assertTrue(env["RSIBOX_MG_CMD"].endswith("--foo"))
 
+    def test_livelab_json_roles_and_capabilities_validation(self):
+        """Input: synthetic repo with valid and invalid `roles` / `capabilities` in `livelab.json`.
+        Expected: valid manifests expose `roles` and `capabilities` via `discover_labs`/`list --json`
+        and pass `doctor`; invalid `roles` or `capabilities` report schema errors and fail `doctor`."""
+        tmp = tempfile.mkdtemp(prefix="rsibox-manifest-caps-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "core", "livelab"))
+        valid_body = (
+            "class GoodLab:\n"
+            "    def install(self, p): pass\n"
+            "    def check(self, w=None): pass\n"
+            "    def reset(self): pass\n"
+            "    def uninstall(self, tid=None): pass\n"
+            "    def status(self): pass\n"
+            "    def patches(self): pass\n"
+            "    def fresh_check(self, p, w=None): pass\n"
+            "    def inject(self, f, **k): pass\n"
+            "    def close(self): pass\n"
+        )
+
+        def make_pkg(eng_name, manifest_obj):
+            ldir = Path(tmp, "repos", eng_name, "livelab")
+            pkg = ldir / "adapter"
+            pkg.mkdir(parents=True)
+            (pkg / "__init__.py").write_text("")
+            (pkg / "toy_lab.py").write_text(valid_body)
+            (ldir / "livelab.json").write_text(json.dumps(manifest_obj))
+
+        make_pkg("minimal_ok", {"toy": "adapter.toy_lab:GoodLab", "real": None})
+        make_pkg("rich_ok", {
+            "toy": "adapter.toy_lab:GoodLab",
+            "real": None,
+            "roles": ["actor", "rollout"],
+            "capabilities": {"mode": "rl", "cuda_graph": False, "distributed": "ray", "tags": ["step_gap", "s0"]},
+        })
+
+        invalid_roles = [
+            ("bad_roles_empty", []),
+            ("bad_roles_null", None),
+            ("bad_roles_str", "trainer"),
+            ("bad_roles_blank", [""]),
+            ("bad_roles_ws", ["  "]),
+            ("bad_roles_unstripped", [" trainer"]),
+            ("bad_roles_int", [123]),
+        ]
+        for eng_name, roles_val in invalid_roles:
+            make_pkg(eng_name, {"toy": "adapter.toy_lab:GoodLab", "real": None, "roles": roles_val})
+
+        invalid_caps = [
+            ("bad_caps_null", None),
+            ("bad_caps_list", ["tp"]),
+            ("bad_caps_str", "inference"),
+            ("bad_caps_int_val", {"cuda_graph": 1}),
+            ("bad_caps_none_val", {"mode": None}),
+            ("bad_caps_bad_list_val", {"tags": ["ok", 2]}),
+            ("bad_caps_empty_key", {"": True}),
+        ]
+        for eng_name, caps_val in invalid_caps:
+            make_pkg(eng_name, {"toy": "adapter.toy_lab:GoodLab", "real": None, "capabilities": caps_val})
+
+        discovered = {item["name"]: item for item in cli.discover_labs(tmp)}
+        self.assertNotIn("roles", discovered["minimal_ok"])
+        self.assertNotIn("capabilities", discovered["minimal_ok"])
+        self.assertEqual(discovered["rich_ok"]["roles"], ["actor", "rollout"])
+        self.assertEqual(
+            discovered["rich_ok"]["capabilities"],
+            {"mode": "rl", "cuda_graph": False, "distributed": "ray", "tags": ["step_gap", "s0"]},
+        )
+
+        list_buf = io.StringIO()
+        with contextlib.redirect_stdout(list_buf):
+            rc_list = cli.main(["list", "--repo-root", tmp, "--json"])
+        self.assertEqual(rc_list, 0)
+        listed = {item["name"]: item for item in json.loads(list_buf.getvalue())["labs"]}
+        self.assertEqual(listed["rich_ok"]["roles"], ["actor", "rollout"])
+        self.assertEqual(listed["rich_ok"]["capabilities"]["mode"], "rl")
+
+        doc_buf = io.StringIO()
+        with contextlib.redirect_stdout(doc_buf):
+            rc_doc = cli.main(["doctor", "--repo-root", tmp, "--json"])
+        self.assertEqual(rc_doc, 1)
+        by_name = {item["name"]: item for item in json.loads(doc_buf.getvalue())["labs"]}
+        self.assertTrue(by_name["minimal_ok"]["ok"])
+        self.assertTrue(by_name["rich_ok"]["ok"])
+
+        for eng_name, _ in invalid_roles:
+            self.assertFalse(by_name[eng_name]["ok"], eng_name)
+            self.assertTrue(
+                any("invalid livelab.json: 'roles'" in err for err in by_name[eng_name]["errors"]),
+                by_name[eng_name],
+            )
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["conformance", eng_name, "--repo-root", tmp]), 2)
+            self.assertIn("invalid livelab.json: 'roles'", err.getvalue())
+
+        for eng_name, _ in invalid_caps:
+            self.assertFalse(by_name[eng_name]["ok"], eng_name)
+            self.assertTrue(
+                any("invalid livelab.json: 'capabilities'" in err for err in by_name[eng_name]["errors"]),
+                by_name[eng_name],
+            )
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main(["conformance", eng_name, "--repo-root", tmp]), 2)
+            self.assertIn("invalid livelab.json: 'capabilities'", err.getvalue())
+
+    def test_repo_manifests_exist_and_parse_cleanly(self):
+        """Input: all 10 `repos/<engine>/livelab/livelab.json` manifests in the repository.
+        Expected: every manifest file exists, parses via `_discover_livelab_dir` with zero
+        `manifest_errors`, and exposes non-empty `roles` and `capabilities`."""
+        repo_root = os.path.dirname(os.path.dirname(LIVELAB))
+        expected_engines = (
+            "fastvideo", "megatron", "miles", "nemo-rl", "sglang",
+            "torchtitan", "transformers", "trtllm", "verl", "vllm",
+        )
+        discovered = {item["name"]: item for item in cli.discover_labs(repo_root)}
+        for engine in expected_engines:
+            with self.subTest(engine=engine):
+                livelab_dir = os.path.join(repo_root, "repos", engine, "livelab")
+                manifest_path = os.path.join(livelab_dir, "livelab.json")
+                self.assertTrue(os.path.isfile(manifest_path), f"missing {manifest_path}")
+                entry = cli._discover_livelab_dir(engine, livelab_dir)
+                self.assertNotIn("manifest_errors", entry)
+                self.assertTrue(entry["toy_spec"] or entry["real_spec"])
+                self.assertIsInstance(entry.get("roles"), list)
+                self.assertTrue(entry["roles"])
+                self.assertIsInstance(entry.get("capabilities"), dict)
+                self.assertTrue(entry["capabilities"])
+                self.assertEqual(discovered[engine], entry)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,10 @@
 {
   "toy": "adapter.lab:ToyTorchTitanLab",
-  "real": "adapter.lab:TorchTitanLab"
+  "real": "adapter.lab:TorchTitanLab",
+  "roles": ["trainer"],
+  "capabilities": {
+    "mode": "training",
+    "cuda_graph": false,
+    "distributed": "fsdp2"
+  }
 }
