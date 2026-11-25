@@ -3510,6 +3510,519 @@ class SandboxPoolTests(unittest.TestCase):
         dr_idle = zpool.drain_slot("zeval", timeout_s=0.0)
         self.assertTrue(dr_idle["ok"] and dr_idle["drained"])
 
+    def test_max_waiters_backpressure_and_priority_load_shedding(self):
+        """Golden case: `max_waiters` rejects excess low-priority arrivals immediately in-lock with
+        `PoolOverloadedError`, supports `max_waiters=0` fail-fast try-acquire, and allows strictly
+        higher-priority arrivals (e.g., Eval) to evict the newest lowest-priority queued waiter
+        while respecting `priority_aging_s`."""
+        from rsibox import PoolOverloadedError
+
+        bad_lab = self._make_toy_lab()
+        for bad_type in (True, False, 1.5, "2"):
+            with self.assertRaises(TypeError):
+                SandboxPool([PoolSlot("s0", bad_lab)], max_waiters=bad_type)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("s0", bad_lab)], max_waiters=-1)
+
+        # 1. max_waiters=0 -> immediate fail-fast when busy, immediate acquire when idle; timeout_s=0 still PoolTimeoutError.
+        p0 = SandboxPool([PoolSlot("s0", self._make_toy_lab())], max_waiters=0)
+        self.addCleanup(p0.close)
+        h0 = p0.acquire("holder-0")
+        with self.assertRaises(PoolOverloadedError) as ctx0:
+            p0.acquire("fast-fail", timeout_s=5.0)
+        self.assertEqual(ctx0.exception.queue_depth, 0)
+        self.assertEqual(ctx0.exception.max_waiters, 0)
+        self.assertFalse(ctx0.exception.evicted)
+        res0 = p0.run_isolated("fast-fail-iso", lambda lab, _l: lab.check(), timeout_s=5.0)
+        self.assertFalse(res0["ok"])
+        self.assertIn("PoolOverloadedError", str(res0["error"]))
+        with self.assertRaises(PoolTimeoutError):
+            p0.acquire("zero-timeout", timeout_s=0.0)
+        m0 = p0.metrics()
+        self.assertEqual(m0["max_waiters"], 0)
+        self.assertEqual(m0["queue_depth"], 0)
+        self.assertEqual(m0["overload_rejections"], 2)
+        self.assertEqual(m0["overload_evictions"], 0)
+        h0.release()
+        with p0.lease("after-release", timeout_s=1.0) as ok_lease:
+            self.assertEqual(ok_lease.slot_id, "s0")
+
+        # 2. max_waiters=2 with priority load shedding:
+        #    Queue fills with dev-1 (p=0, older) and dev-2 (p=0, newer).
+        #    - dev-3 (p=0) is rejected immediately (evicted=False).
+        #    - eval-1 (p=10) evicts dev-2 (newest lowest-priority -> evicted=True) while keeping dev-1!
+        #    - eval-2 (p=10) evicts dev-1 (only remaining p=0 -> evicted=True).
+        #    - eval-3 (p=10) sees only p=10 waiters -> rejected immediately (evicted=False).
+        p2 = SandboxPool([PoolSlot("s0", self._make_toy_lab())], max_waiters=2)
+        self.addCleanup(p2.close)
+        h2 = p2.acquire("holder")
+        acquired_order: list[str] = []
+        evicted_errs: dict[str, PoolOverloadedError] = {}
+        unexpected: list[BaseException] = []
+
+        def spawn_waiter(agent_id: str, priority: int) -> threading.Thread:
+            def run() -> None:
+                try:
+                    with p2.lease(agent_id, priority=priority, timeout_s=5.0):
+                        acquired_order.append(agent_id)
+                except PoolOverloadedError as err:
+                    evicted_errs[agent_id] = err
+                except BaseException as err:
+                    unexpected.append(err)
+            t = threading.Thread(target=run)
+            t.start()
+            return t
+
+        t_d1 = spawn_waiter("dev-1", 0)
+        self._wait_for_waiters(p2, 1)
+        t_d2 = spawn_waiter("dev-2", 0)
+        self._wait_for_waiters(p2, 2)
+        self.assertEqual(p2.metrics()["queue_depth"], 2)
+
+        with self.assertRaises(PoolOverloadedError) as ctx_d3:
+            p2.acquire("dev-3", priority=0, timeout_s=5.0)
+        self.assertFalse(ctx_d3.exception.evicted)
+        self.assertEqual(ctx_d3.exception.queue_depth, 2)
+
+        t_e1 = spawn_waiter("eval-1", 10)
+        t_d2.join(timeout=5.0)
+        self.assertFalse(t_d2.is_alive())
+        self.assertIn("dev-2", evicted_errs)
+        self.assertTrue(evicted_errs["dev-2"].evicted)
+        self.assertEqual(p2.metrics()["queue_depth"], 2)
+
+        t_e2 = spawn_waiter("eval-2", 10)
+        t_d1.join(timeout=5.0)
+        self.assertFalse(t_d1.is_alive())
+        self.assertIn("dev-1", evicted_errs)
+        self.assertTrue(evicted_errs["dev-1"].evicted)
+
+        with self.assertRaises(PoolOverloadedError) as ctx_e3:
+            p2.acquire("eval-3", priority=10, timeout_s=5.0)
+        self.assertFalse(ctx_e3.exception.evicted)
+
+        h2.release()
+        for t in (t_e1, t_e2):
+            t.join(timeout=5.0)
+            self.assertFalse(t.is_alive())
+        self.assertEqual(unexpected, [])
+        self.assertEqual(acquired_order, ["eval-1", "eval-2"])
+        m2 = p2.metrics()
+        self.assertEqual(m2["queue_depth"], 0)
+        self.assertEqual(m2["overload_rejections"], 4)
+        self.assertEqual(m2["overload_evictions"], 2)
+
+        # 3. Aging consistency: a Dev waiter aged past Eval's base priority cannot be evicted by a fresh Eval.
+        now = [0.0]
+        p_age = SandboxPool(
+            [PoolSlot("sa", self._make_toy_lab())],
+            clock=lambda: now[0],
+            priority_aging_s=1.0,
+            max_waiters=1,
+        )
+        self.addCleanup(p_age.close)
+        h_age = p_age.acquire("holder-age")
+        aged_got: list[str] = []
+        aged_errs: list[BaseException] = []
+
+        def run_aged_dev() -> None:
+            try:
+                with p_age.lease("aged-dev", priority=0, timeout_s=60.0):
+                    aged_got.append("aged-dev")
+            except BaseException as err:
+                aged_errs.append(err)
+
+        t_aged = threading.Thread(target=run_aged_dev)
+        t_aged.start()
+        self._wait_for_waiters(p_age, 1)
+        now[0] = 12.0  # aged-dev effective priority = 0 + 12.0 / 1.0 = 12.0 > fresh eval priority 10
+        with self.assertRaises(PoolOverloadedError) as ctx_fresh_eval:
+            p_age.acquire("fresh-eval", priority=10, timeout_s=60.0)
+        self.assertFalse(ctx_fresh_eval.exception.evicted)
+        h_age.release()
+        t_aged.join(timeout=5.0)
+        self.assertFalse(t_aged.is_alive())
+        self.assertEqual(aged_errs, [])
+        self.assertEqual(aged_got, ["aged-dev"])
+
+    def test_slot_states_atomic_lifecycle_snapshot(self):
+        """Golden case: `slot_states()` atomically reports `idle`, `leased`, `quarantined`,
+        `healing`, and `draining` lifecycle states, active owner/hold duration, and post-close state."""
+        now = [100.0]
+        lab0 = self._make_toy_lab()
+        lab1 = self._make_toy_lab()
+        orig_reset1 = lab1.reset
+        fail_respawn = [True]
+        heal_entered, heal_allow = threading.Event(), threading.Event()
+        self.addCleanup(heal_allow.set)
+
+        def _custom_reset1(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn":
+                if fail_respawn[0]:
+                    return {"ok": False, "error": "transient-down"}
+                heal_entered.set()
+                heal_allow.wait(timeout=5.0)
+            return orig_reset1(kind)
+
+        lab1.reset = _custom_reset1  # type: ignore[method-assign]
+        pool = SandboxPool(
+            [PoolSlot("s0", lab0, role="dev"), PoolSlot("s1", lab1, role="eval")],
+            clock=lambda: now[0],
+        )
+        self.addCleanup(pool.close)
+
+        # Idle snapshot
+        snap = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap["s0"]["state"], "idle")
+        self.assertEqual(snap["s1"]["state"], "idle")
+        self.assertIsNone(snap["s0"]["owner_agent_id"])
+        self.assertEqual(snap["s0"]["active_hold_s"], 0.0)
+
+        # Leased snapshot with deterministic hold duration
+        lease0 = pool.acquire("agent-dev", role="dev")
+        now[0] = 104.5
+        snap_leased = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap_leased["s0"]["state"], "leased")
+        self.assertTrue(snap_leased["s0"]["in_use"])
+        self.assertEqual(snap_leased["s0"]["owner_agent_id"], "agent-dev")
+        self.assertEqual(snap_leased["s0"]["active_hold_s"], 4.5)
+
+        # Quarantine s1 via transient respawn failure -> quarantined state with reason
+        def _poison(lab, _l):
+            lab.session.fault("participant_failed", "boom", "clean")
+            raise RuntimeError("boom")
+
+        pool.run_isolated("rogue", _poison, role="eval", timeout_s=2.0)
+        snap_q = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap_q["s1"]["state"], "quarantined")
+        self.assertTrue(snap_q["s1"]["quarantined"])
+        self.assertFalse(snap_q["s1"]["in_use"])
+        self.assertIn("transient-down", str(snap_q["s1"]["quarantine_reason"]))
+
+        # Online heal_slot() -> state transitions to "healing" with active_hold_s == 0.0
+        fail_respawn[0] = False
+        heal_res: list[dict[str, Any]] = []
+        t_heal = threading.Thread(target=lambda: heal_res.append(pool.heal_slot("s1")))
+        t_heal.start()
+        self.assertTrue(heal_entered.wait(timeout=5.0))
+        snap_h = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap_h["s1"]["state"], "healing")
+        self.assertTrue(snap_h["s1"]["in_use"] and snap_h["s1"]["quarantined"])
+        self.assertEqual(snap_h["s1"]["active_hold_s"], 0.0)
+        heal_allow.set()
+        t_heal.join(timeout=5.0)
+        self.assertTrue(heal_res and heal_res[0]["healed"])
+        snap_after_heal = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap_after_heal["s1"]["state"], "idle")
+
+        # Live drain_slot("s0") while leased -> state transitions to "draining", then removed on release
+        drain_res: list[dict[str, Any]] = []
+        t_drain = threading.Thread(target=lambda: drain_res.append(pool.drain_slot("s0", timeout_s=5.0)))
+        t_drain.start()
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            cur = {row["slot_id"]: row for row in pool.slot_states()}
+            if cur.get("s0", {}).get("state") == "draining":
+                break
+            time.sleep(0.005)
+        snap_d = {row["slot_id"]: row for row in pool.slot_states()}
+        self.assertEqual(snap_d["s0"]["state"], "draining")
+        self.assertTrue(snap_d["s0"]["draining"] and snap_d["s0"]["in_use"])
+        lease0.release()
+        t_drain.join(timeout=5.0)
+        self.assertTrue(drain_res and drain_res[0]["drained"])
+        self.assertEqual([row["slot_id"] for row in pool.slot_states()], ["s1"])
+
+        # slot_states() remains callable after pool.close() for post-mortem diagnostics
+        pool.close()
+        post_close = pool.slot_states()
+        self.assertEqual(len(post_close), 1)
+        self.assertEqual(post_close[0]["slot_id"], "s1")
+
+    def test_max_waiters_and_slot_states_interactions_and_edge_cases(self):
+        """Golden case covering P2 edge-case interactions: constructor bounds, queue-slot
+        reclamation (timeout/KeyboardInterrupt/circuit-breaker/drain_slot), max_slots_per_agent
+        + role/fallback_roles + max_waiters, Fraction/backward-clock/inf-aging eviction, close
+        race, multi-threaded burst bound, and slot_states() revert/overlap/parity/0-slot."""
+        from rsibox import AgentQuarantinedError, PoolOverloadedError, pool as pool_module
+
+        # 1. Extra validation + default max_waiters is None
+        vlab = self._make_toy_lab()
+        for bad_t in (float("nan"), float("inf")):
+            with self.assertRaises(TypeError):
+                SandboxPool([PoolSlot("s0", vlab)], max_waiters=bad_t)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("s0", vlab)], max_waiters=-(10**400))
+        p_def = SandboxPool([PoolSlot("s0", vlab)])
+        self.addCleanup(p_def.close)
+        self.assertIsNone(p_def.metrics()["max_waiters"])
+
+        # 2. Queue-slot reclamation across timeout, KeyboardInterrupt, circuit-breaker, and drain_slot
+        p_rec = SandboxPool(
+            [PoolSlot("d0", self._make_toy_lab(), role="dev"), PoolSlot("e0", self._make_toy_lab(), role="eval")],
+            max_waiters=1,
+            max_agent_faults=1,
+            max_slots_per_agent=1,
+        )
+        self.addCleanup(p_rec.close)
+        h_dev = p_rec.acquire("rogue-a", role="dev")
+        # 2a. Unservable role raises PoolTimeoutError without incrementing overload_rejections
+        with self.assertRaises(PoolTimeoutError):
+            p_rec.acquire("ghost", role="nonexistent", timeout_s=0.1)
+        self.assertEqual(p_rec.metrics()["overload_rejections"], 0)
+        # 2b. Capped rogue-a fills max_waiters=1; uncapped other agent still claims idle e0 immediately!
+        r_errs: list[BaseException] = []
+        t_cap = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: p_rec.acquire("rogue-a", role="eval", timeout_s=5.0), r_errs
+            )
+        )
+        t_cap.start()
+        self._wait_for_waiters(p_rec, 1)
+        with p_rec.lease("uncapped-eval", role="eval", fallback_roles=("dev",), timeout_s=1.0) as ev_l:
+            self.assertEqual(ev_l.slot_id, "e0")
+            # While both slots busy and queue_depth==1, equal-priority arrival is rejected
+            with self.assertRaises(PoolOverloadedError):
+                p_rec.acquire("excess", role="eval", priority=0, timeout_s=1.0)
+        # Releasing h_dev with poison trips circuit breaker -> wakes queued rogue-a with AgentQuarantinedError
+        # AND reclaims queue slot (queue_depth -> 0)!
+        h_dev.lab.session.fault("participant_failed", "trip", "clean")
+        h_dev.release(error="trip")
+        t_cap.join(timeout=5.0)
+        self.assertEqual(len(r_errs), 1)
+        self.assertIsInstance(r_errs[0], AgentQuarantinedError)
+        self.assertEqual(p_rec.metrics()["queue_depth"], 0)
+        # Already-quarantined agent fails with AgentQuarantinedError BEFORE overload check
+        before_rej = p_rec.metrics()["overload_rejections"]
+        h_d2 = p_rec.acquire("ok-dev", role="dev")
+        t_q = threading.Thread(target=lambda: p_rec.run_isolated("w-dev", lambda _l, _s: None, role="dev", timeout_s=5.0))
+        t_q.start()
+        self._wait_for_waiters(p_rec, 1)
+        with self.assertRaises(AgentQuarantinedError):
+            p_rec.acquire("rogue-a", role="dev", priority=999, timeout_s=1.0)
+        self.assertEqual(p_rec.metrics()["overload_rejections"], before_rej)
+        self.assertEqual(p_rec.metrics()["queue_depth"], 1)
+        # drain_slot("d0") fails stranded waiter and reclaims queue slot!
+        dr_res: list[dict[str, Any]] = []
+        t_dr = threading.Thread(target=lambda: dr_res.append(p_rec.drain_slot("d0", timeout_s=5.0)))
+        t_dr.start()
+        t_q.join(timeout=5.0)
+        self.assertEqual(p_rec.metrics()["queue_depth"], 0)
+        h_d2.release()
+        t_dr.join(timeout=5.0)
+        self.assertTrue(dr_res and dr_res[0]["drained"])
+        # Capped caller with max_waiters=0 and an idle slot raises PoolOverloadedError
+        p_cap0 = SandboxPool(
+            [PoolSlot("s0", self._make_toy_lab()), PoolSlot("s1", self._make_toy_lab())],
+            max_slots_per_agent=1,
+            max_waiters=0,
+        )
+        self.addCleanup(p_cap0.close)
+        hc0 = p_cap0.acquire("same-agent")
+        with self.assertRaises(PoolOverloadedError):
+            p_cap0.acquire("same-agent", timeout_s=5.0)
+        hc0.release()
+
+        # 2c. Timeout + KeyboardInterrupt reclaim queue slot
+        p_tki = SandboxPool([PoolSlot("s0", self._make_toy_lab())], max_waiters=1)
+        self.addCleanup(p_tki.close)
+        ht = p_tki.acquire("h")
+        with self.assertRaises(PoolTimeoutError):
+            p_tki.acquire("short-to", timeout_s=0.02)
+        self.assertEqual(p_tki.metrics()["queue_depth"], 0)
+        real_waiter_cls = pool_module._Waiter
+        ki_entered = threading.Event()
+        ki_allow = threading.Event()
+        self.addCleanup(ki_allow.set)
+        def _ki_waiter(role, priority=0):
+            w = real_waiter_cls(role, priority)
+            def _raise_ki(timeout=None):
+                ki_entered.set()
+                ki_allow.wait(timeout=5.0)
+                raise KeyboardInterrupt("cancel")
+            w.event.wait = _raise_ki
+            return w
+        ki_errs: list[BaseException] = []
+        with mock.patch.object(pool_module, "_Waiter", side_effect=_ki_waiter):
+            t_ki = threading.Thread(target=lambda: self._capture_error(lambda: p_tki.acquire("ki-a", timeout_s=5.0), ki_errs))
+            t_ki.start()
+            self.assertTrue(ki_entered.wait(timeout=5.0))
+            self.assertEqual(p_tki.metrics()["queue_depth"], 1)
+            ki_allow.set()
+            t_ki.join(timeout=5.0)
+        self.assertEqual(len(ki_errs), 1)
+        self.assertIsInstance(ki_errs[0], KeyboardInterrupt)
+        self.assertEqual(p_tki.metrics()["queue_depth"], 0)
+        ht.release()
+
+        # 3. Huge-int Fraction precision, backward clock, inf elapsed aging, and eviction-vs-close race
+        now_f = [10.0]
+        p_frac = SandboxPool(
+            [PoolSlot("sf", self._make_toy_lab())],
+            clock=lambda: now_f[0],
+            priority_aging_s=1.0,
+            max_waiters=1,
+        )
+        self.addCleanup(p_frac.close)
+        hf = p_frac.acquire("hf")
+        big_base = 1 << 60
+        f_errs: dict[str, BaseException] = {}
+        t_big1 = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: p_frac.acquire("big1", priority=big_base, timeout_s=60.0),
+                f_errs.setdefault("big1", []),  # type: ignore[arg-type]
+            )
+        )
+        t_big1.start()
+        self._wait_for_waiters(p_frac, 1)
+        now_f[0] = 5.0  # backward clock jump -> elapsed clamped to 0.0 -> eff == big_base
+        with self.assertRaises(PoolOverloadedError):
+            p_frac.acquire("big-tie", priority=big_base, timeout_s=60.0)
+        # Strictly higher by 1 above 2^53 (Fraction exactness!) evicts big1 cleanly
+        t_big2 = threading.Thread(
+            target=lambda: p_frac.run_isolated("big2", lambda _l, _s: None, priority=big_base + 1, timeout_s=60.0)
+        )
+        t_big2.start()
+        t_big1.join(timeout=5.0)
+        self.assertIsInstance(f_errs["big1"][0], PoolOverloadedError)  # type: ignore[index]
+        # Infinite elapsed wait resists even 10**400 eviction
+        now_f[0] = float("inf")
+        with self.assertRaises(PoolOverloadedError):
+            p_frac.acquire("mega", priority=10**400, timeout_s=None)
+        now_f[0] = 20.0
+        hf.release()
+        t_big2.join(timeout=5.0)
+        self.assertFalse(t_big2.is_alive())
+
+        # Evicted victim vs pool.close() race -> PoolClosedError takes precedence cleanly
+        p_cr = SandboxPool([PoolSlot("sc", self._make_toy_lab())], max_waiters=1)
+        hc = p_cr.acquire("hc")
+        evict_hit = threading.Event()
+        resume_victim = threading.Event()
+        self.addCleanup(resume_victim.set)
+        def _paused_waiter(role, priority=0):
+            w = real_waiter_cls(role, priority)
+            if priority == 0:
+                orig_wait = w.event.wait
+                def _wait_then_pause(timeout=None):
+                    ret = orig_wait(timeout=timeout)
+                    evict_hit.set()
+                    resume_victim.wait(timeout=5.0)
+                    return ret
+                w.event.wait = _wait_then_pause
+            return w
+        cr_errs: list[BaseException] = []
+        with mock.patch.object(pool_module, "_Waiter", side_effect=_paused_waiter):
+            t_v = threading.Thread(target=lambda: self._capture_error(lambda: p_cr.acquire("v0", priority=0, timeout_s=5.0), cr_errs))
+            t_v.start()
+            self._wait_for_waiters(p_cr, 1)
+            t_hi = threading.Thread(target=lambda: self._capture_error(lambda: p_cr.acquire("hi", priority=10, timeout_s=5.0), []))
+            t_hi.start()
+            self.assertTrue(evict_hit.wait(timeout=5.0))
+            p_cr.close()
+            resume_victim.set()
+            t_v.join(timeout=5.0)
+            t_hi.join(timeout=5.0)
+        self.assertEqual(len(cr_errs), 1)
+        self.assertIsInstance(cr_errs[0], PoolClosedError)
+        hc.release()
+
+        # 4. Multi-threaded burst storm (N=12 >> max_waiters=2) preserves queue_depth <= 2
+        p_burst = SandboxPool([PoolSlot("sb", self._make_toy_lab())], max_waiters=2)
+        self.addCleanup(p_burst.close)
+        max_seen_depth = [0]
+        burst_results: list[dict[str, Any]] = []
+        b_lock = threading.Lock()
+        hb = p_burst.acquire("hb")
+        def _burst_worker(idx: int) -> None:
+            res = p_burst.run_isolated(f"b-{idx}", lambda _l, _s: None, priority=idx % 3, timeout_s=5.0)
+            with b_lock:
+                burst_results.append(res)
+                max_seen_depth[0] = max(max_seen_depth[0], p_burst.metrics()["queue_depth"])
+        b_threads = [threading.Thread(target=_burst_worker, args=(i,)) for i in range(12)]
+        for t in b_threads:
+            t.start()
+        time.sleep(0.05)
+        max_seen_depth[0] = max(max_seen_depth[0], p_burst.metrics()["queue_depth"])
+        hb.release()
+        for t in b_threads:
+            t.join(timeout=5.0)
+        self.assertLessEqual(max_seen_depth[0], 2)
+        self.assertGreater(p_burst.metrics()["overload_rejections"], 0)
+        self.assertEqual(p_burst.metrics()["queue_depth"], 0)
+
+        # 5. slot_states(): drain timeout revert, overlapping heal+drain, util parity, post-close active lease, 0-slot []
+        now_s = [50.0]
+        ls0 = self._make_toy_lab()
+        ls1 = self._make_toy_lab()
+        orig_r1 = ls1.reset
+        fail_r1 = [True]
+        h_in, h_go = threading.Event(), threading.Event()
+        self.addCleanup(h_go.set)
+        def _r1(kind: str = "state") -> dict[str, Any]:
+            if kind == "respawn":
+                if fail_r1[0]:
+                    return {"ok": False, "error": "down"}
+                h_in.set()
+                h_go.wait(timeout=5.0)
+            return orig_r1(kind)
+        ls1.reset = _r1  # type: ignore[method-assign]
+        p_st = SandboxPool([PoolSlot("s0", ls0), PoolSlot("s1", ls1)], clock=lambda: now_s[0])
+        self.addCleanup(p_st.close)
+        hl0 = p_st.acquire("a0")
+        now_s[0] = 54.0
+        # Utilization parity against metrics()["per_slot_utilization"]
+        st_map = {r["slot_id"]: r for r in p_st.slot_states()}
+        self.assertEqual(st_map["s0"]["utilization"], p_st.metrics()["per_slot_utilization"]["s0"])
+        # drain_slot timeout reverts "draining" -> "leased" (check on real clock so wait expires cleanly)
+        p_rev = SandboxPool([PoolSlot("sr", self._make_toy_lab())])
+        self.addCleanup(p_rev.close)
+        h_rev = p_rev.acquire("a-rev")
+        with self.assertRaises(PoolTimeoutError):
+            p_rev.drain_slot("sr", timeout_s=0.02)
+        self.assertEqual(p_rev.slot_states()[0]["state"], "leased")
+        h_rev.release()
+        self.assertEqual(p_rev.slot_states()[0]["state"], "idle")
+        # Also verify frozen-clock timeout_s=0.0 reverts cleanly on p_st
+        with self.assertRaises(PoolTimeoutError):
+            p_st.drain_slot("s0", timeout_s=0.0)
+        self.assertEqual({r["slot_id"]: r for r in p_st.slot_states()}["s0"]["state"], "leased")
+        # Overlapping heal_slot + drain_slot reports state == "draining" with quarantined=True & in_use=True
+        def _psn(lab, _l):
+            lab.session.fault("participant_failed", "die", "clean")
+            raise RuntimeError("die")
+        p_st.run_isolated("rogue", _psn, timeout_s=2.0)
+        fail_r1[0] = False
+        t_h1 = threading.Thread(target=lambda: p_st.heal_slot("s1"))
+        t_h1.start()
+        self.assertTrue(h_in.wait(timeout=5.0))
+        t_d1 = threading.Thread(target=lambda: p_st.drain_slot("s1", timeout_s=5.0))
+        t_d1.start()
+        dl = time.monotonic() + 2.0
+        while time.monotonic() < dl:
+            cur = {r["slot_id"]: r for r in p_st.slot_states()}
+            if cur.get("s1", {}).get("state") == "draining":
+                break
+            time.sleep(0.005)
+        ov = {r["slot_id"]: r for r in p_st.slot_states()}["s1"]
+        self.assertEqual(ov["state"], "draining")
+        self.assertTrue(ov["quarantined"] and ov["in_use"] and ov["draining"])
+        h_go.set()
+        t_h1.join(timeout=5.0)
+        t_d1.join(timeout=5.0)
+        # Post-close snapshot while hl0 is still active preserves state == "leased" and owner_agent_id
+        p_st.close()
+        pc_active = {r["slot_id"]: r for r in p_st.slot_states()}["s0"]
+        self.assertEqual(pc_active["state"], "leased")
+        self.assertEqual(pc_active["owner_agent_id"], "a0")
+        hl0.release()
+        self.assertEqual({r["slot_id"]: r for r in p_st.slot_states()}["s0"]["state"], "idle")
+        # 0-slot drained pool returns slot_states() == []
+        p_zero = SandboxPool([PoolSlot("z0", self._make_toy_lab())])
+        self.addCleanup(p_zero.close)
+        self.assertTrue(p_zero.drain_slot("z0")["drained"])
+        self.assertEqual(p_zero.slot_states(), [])
+
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
         try:
