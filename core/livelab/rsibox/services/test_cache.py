@@ -4,6 +4,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import gc
 import hashlib
+import json
 import os
 from pathlib import Path
 import sys
@@ -49,11 +50,22 @@ class EnvFingerprintTests(unittest.TestCase):
 
         as_dict = fp_a.to_dict()
         fp_roundtrip = EnvFingerprint.from_dict(as_dict)
+        self.assertEqual(fp_roundtrip, fp_a)
         self.assertEqual(fp_roundtrip.digest(), fp_a.digest())
 
         as_dict_map = dict(as_dict)
         as_dict_map["extra"] = {"z_opt": "1", "a_opt": "2"}
-        self.assertEqual(EnvFingerprint.from_dict(as_dict_map).digest(), fp_a.digest())
+        fp_from_map = EnvFingerprint.from_dict(as_dict_map)
+        self.assertEqual(fp_from_map, fp_a)
+        self.assertEqual(fp_from_map.digest(), fp_a.digest())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with CompileCacheService(tmp, fsync=False) as svc:
+                svc.put("vllm", "fp_eq", b"ok", fingerprint=fp_a)
+                got = svc.get("vllm", "fp_eq", expected_fingerprint=fp_a)
+                self.assertIsNotNone(got)
+                assert got is not None
+                self.assertEqual(got[0].fingerprint, fp_a)
 
     def test_rejects_invalid_types_and_empty_required_fields(self) -> None:
         for bad_dict in ("not-a-dict", ["gpu_arch"], None, 123):
@@ -83,6 +95,13 @@ class EnvFingerprintTests(unittest.TestCase):
             EnvFingerprint.from_dict({"gpu_arch": "sm_90", "cuda_version": "12.8", "extra": "bad"})
         with self.assertRaises(ValueError):
             EnvFingerprint.from_dict({"gpu_arch": "sm_90", "cuda_version": "12.8", "extra": [["only_key"]]})
+
+        for bad_bool_kw in (
+            {"gpu_arch": True}, {"cuda_version": False}, {"engine": True},
+            {"triton_version": True}, {"extra": True}, {"extra": [(True, "1")]}, {"extra": [("k", False)]},
+        ):
+            with self.assertRaises(TypeError):
+                _fp(**bad_bool_kw)
 
 
 class CompileCacheServiceTests(unittest.TestCase):
@@ -215,6 +234,23 @@ class CompileCacheServiceTests(unittest.TestCase):
                 self.assertIsNone(svc.get("inductor", "fx_orphan", expected_fingerprint=fp, strict=False))
                 self.assertFalse(e4.payload_path.exists())
 
+                # 5. Bool schema, non-finite created_at (NaN/Infinity), and non-hex sha256
+                for idx, mutator in enumerate((
+                    lambda raw_doc: raw_doc.replace('"schema":1', '"schema":true'),
+                    lambda raw_doc: raw_doc.replace(f'"created_at":{json.loads(raw_doc)["created_at"]}', '"created_at":NaN'),
+                    lambda raw_doc: raw_doc.replace(f'"created_at":{json.loads(raw_doc)["created_at"]}', '"created_at":Infinity'),
+                    lambda raw_doc: raw_doc.replace(f'"sha256":"{json.loads(raw_doc)["sha256"]}"', f'"sha256":"{"Z" * 64}"'),
+                    lambda raw_doc: raw_doc.replace(f'"sha256":"{json.loads(raw_doc)["sha256"]}"', f'"sha256":"{"A" * 64}"'),
+                )):
+                    e5 = svc.put("inductor", f"fx_hdr_{idx}", b"hdr-bytes", fingerprint=fp)
+                    mp = e5.payload_path.with_suffix(".json")
+                    mp.write_text(mutator(mp.read_text(encoding="utf-8")), encoding="utf-8")
+                    with self.assertRaises(CacheCorruptError):
+                        svc.get("inductor", f"fx_hdr_{idx}", expected_fingerprint=fp, strict=True)
+                    self.assertIsNone(svc.get("inductor", f"fx_hdr_{idx}", expected_fingerprint=fp, strict=False))
+                    self.assertFalse(e5.payload_path.exists())
+                    self.assertFalse(mp.exists())
+
     def test_rejects_traversal_bad_keys_and_bad_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             fp = _fp()
@@ -293,6 +329,48 @@ class CompileCacheServiceTests(unittest.TestCase):
                         fut.result()
 
                 self.assertEqual(len(container_b.list_entries("flashinfer")), 4)
+
+    def test_slug_collision_resistance_overwrite_race_and_eviction_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = _fp()
+            with CompileCacheService(tmp, fsync=False) as svc:
+                # Distinct tokens that sanitize to similar slugs must never collide
+                tokens = ("a_b", "a-b", "a:b", "Foo", "foo")
+                for tok in tokens:
+                    svc.put(tok, tok, f"payload-{tok}".encode("utf-8"), fingerprint=fp)
+                self.assertEqual(len(svc.list_entries()), len(tokens))
+                for tok in tokens:
+                    got = svc.get(tok, tok, expected_fingerprint=fp, strict=True)
+                    self.assertIsNotNone(got)
+                    assert got is not None
+                    self.assertEqual(got[1], f"payload-{tok}".encode("utf-8"))
+
+                # Concurrent overwrite=False race: exactly 1 writer wins, all others get CompileCacheError
+                def race_put(i: int) -> bool:
+                    try:
+                        svc.put("race_ns", "once", f"winner-{i}".encode("utf-8"), fingerprint=fp, overwrite=False)
+                        return True
+                    except CompileCacheError:
+                        return False
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    outcomes = list(pool.map(race_put, range(16)))
+                self.assertEqual(outcomes.count(True), 1)
+                self.assertEqual(outcomes.count(False), 15)
+
+                # Concurrent strict=False corruption eviction race
+                corrupt_entry = svc.put("race_ns", "corrupt_me", b"good-bytes", fingerprint=fp)
+                corrupt_entry.payload_path.write_bytes(b"X" * len(b"good-bytes"))
+
+                def race_evict(_: int) -> bytes | None:
+                    res = svc.get("race_ns", "corrupt_me", expected_fingerprint=fp, strict=False)
+                    return None if res is None else res[1]
+
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    evict_results = list(pool.map(race_evict, range(16)))
+                self.assertTrue(all(r is None for r in evict_results))
+                self.assertFalse(corrupt_entry.payload_path.exists())
+                self.assertFalse(corrupt_entry.payload_path.with_suffix(".json").exists())
 
     def test_multiprocess_fork_atomic_put_get_race(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

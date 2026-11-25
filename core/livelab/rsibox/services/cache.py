@@ -7,7 +7,7 @@ payload SHA-256, and synchronized with per-entry `fcntl.flock` + `os.replace`.
 """
 from __future__ import annotations
 
-import contextlib, fcntl, hashlib, json, os, tempfile, threading, time
+import contextlib, fcntl, hashlib, json, math, os, tempfile, threading, time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -58,7 +58,7 @@ def _normalize_extra(extra: object) -> tuple[tuple[str, str], ...]:
         if not isinstance(item, (tuple, list)) or len(item) != 2:
             raise ValueError(f"extra[{idx}] must be a (key, value) pair, got {item!r}")
         out.append((_check_str(item[0], f"extra[{idx}][0]"), _check_str(item[1], f"extra[{idx}][1]", allow_empty=True)))
-    return tuple(out)
+    return tuple(sorted(out))
 
 
 @dataclass(frozen=True)
@@ -168,12 +168,20 @@ def _unlink_pair(manifest_path: Path, payload_path: Path) -> bool:
     return removed
 
 
+_HEX64_CHARS = frozenset("0123456789abcdef")
+
+
+def _reject_nonfinite(token: str) -> Any:
+    raise ValueError(f"non-finite JSON constant {token!r}")
+
+
 def _parse_manifest(manifest_path: Path, payload_path: Path, expected_ns: str | None, expected_key: str | None) -> CacheEntry:
     try:
-        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite)
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise CacheCorruptError(f"corrupt manifest {manifest_path}: {exc}") from exc
-    if not isinstance(doc, dict) or doc.get("schema") != _SCHEMA_VERSION:
+    schema = doc.get("schema") if isinstance(doc, dict) else None
+    if not isinstance(doc, dict) or isinstance(schema, bool) or schema != _SCHEMA_VERSION:
         raise CacheCorruptError(f"invalid manifest header in {manifest_path}")
     try:
         ns, key = _validate_segment(doc.get("namespace"), "namespace"), _validate_segment(doc.get("key"), "key")
@@ -183,9 +191,10 @@ def _parse_manifest(manifest_path: Path, payload_path: Path, expected_ns: str | 
         fp_digest, sha256 = _check_str(doc.get("fingerprint_digest"), "fingerprint_digest"), _check_str(doc.get("sha256"), "sha256")
         size_bytes, created_at, metadata = doc.get("size_bytes"), doc.get("created_at"), doc.get("metadata")
         if (
-            fp_digest != fp.digest() or len(sha256) != 64
+            fp_digest != fp.digest() or len(sha256) != 64 or not _HEX64_CHARS.issuperset(sha256)
             or isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0
-            or isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or not isinstance(metadata, dict)
+            or isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+            or not math.isfinite(created_at) or not isinstance(metadata, dict)
         ):
             raise CacheCorruptError(f"invalid manifest fields in {manifest_path}")
     except CacheCorruptError:
@@ -348,13 +357,16 @@ class CompileCacheService:
             _, payload_path, manifest_path, lock_path = self._entry_paths(ns, clean_key)
             if not manifest_path.exists() and not payload_path.exists(): return 0
             with _flock_file(lock_path, exclusive=True):
+                self._require_open()
                 removed = 1 if _unlink_pair(manifest_path, payload_path) else 0
             self._inc("invalidations", removed); return removed
 
         removed_count = 0
         with _flock_file(ns_dir / "_namespace.lock", exclusive=True):
+            self._require_open()
             for stem in sorted({p.stem for p in ns_dir.iterdir() if p.suffix in (".json", ".bin")}):
                 with _flock_file(ns_dir / f"{stem}.lock", exclusive=True):
+                    self._require_open()
                     if _unlink_pair(ns_dir / f"{stem}.json", ns_dir / f"{stem}.bin"): removed_count += 1
         self._inc("invalidations", removed_count)
         return removed_count
@@ -370,6 +382,7 @@ class CompileCacheService:
                 stem = manifest_path.stem
                 payload_path = ns_dir / f"{stem}.bin"
                 with _flock_file(ns_dir / f"{stem}.lock", exclusive=False):
+                    self._require_open()
                     if manifest_path.exists() and payload_path.exists():
                         with contextlib.suppress(CacheCorruptError):
                             entries.append(_parse_manifest(manifest_path, payload_path, namespace, None))
