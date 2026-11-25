@@ -187,6 +187,8 @@ class FormalGatesTest(unittest.TestCase):
                 "def q : Char := '\"'\n"
                 "def esc : String := \"\\\"-- theorem fake\"\n"
                 "def interp : String := s!\"x = { 1 + 1 } /- ignored\"\n"
+                "def p : String := panic!\"{\"\n"
+                'def r1 : String := r#"\\"#\n'
                 "def s' : Nat := 1\n"
                 "-- sorry admit axiom native_decide partial @[extern \"c\"]\n"
                 "/- outer /- inner sorry axiom Lean.ofReduceBool -/ still commented sorry -/\n"
@@ -211,16 +213,22 @@ class FormalGatesTest(unittest.TestCase):
             ("partial", "partial instance : Inhabited Nat := ⟨0⟩\ntheorem ok : True := trivial\n"),
             ("unsafe", "unsafe def bad : Nat := 0\ntheorem ok : True := trivial\n"),
             ("native_decide", "theorem ok : True := by native_decide\n"),
-            ("Lean.ofReduceBool", "theorem ok : Lean.ofReduceBool = Lean.ofReduceBool := rfl\n"),
-            ("Lean.ofReduceNat", "theorem ok : Lean.ofReduceNat = Lean.ofReduceNat := rfl\n"),
-            ("Lean.trustCompiler", "theorem ok : Lean.trustCompiler = Lean.trustCompiler := rfl\n"),
+            ("Lean.ofReduceBool", "theorem ok : ofReduceBool = ofReduceBool := rfl\n"),
+            ("Lean.ofReduceNat", "theorem ok : ofReduceNat = ofReduceNat := rfl\n"),
+            ("Lean.trustCompiler", "theorem ok : trustCompiler = trustCompiler := rfl\n"),
             ("implemented_by", "@[implemented_by bad] def f : Nat := 0\ntheorem ok : True := trivial\n"),
-            ("@[extern", "@[extern \"c_fn\"] opaque cfn : Nat\ntheorem ok : True := trivial\n"),
+            ("extern", "@[extern \"c_fn\"] opaque cfn : Nat\ntheorem ok : True := trivial\n"),
+            ("extern", "attribute [extern \"c_fn\"] f\ntheorem ok : True := trivial\n"),
             ("sorry", "def q : Char := '\"'\ntheorem ok : True := by sorry\n"),
             ("sorry", 'def x := s!"{ /- " -/ 0 } /- "\ntheorem evil : True := by sorry\ndef y := "-/"\n'),
+            ("sorry", 'def p := panic!"{ "\ntheorem evil : True := by sorry\n'),
+            ("sorry", 'def raw := r##" " "##\ntheorem evil : True := by sorry\n'),
             ("non-Init import", "import Init import Lean\ntheorem ok : True := trivial\n"),
+            ("non-Init import", "import/-c-/Lean\ntheorem ok : True := trivial\n"),
             ("macro/syntax/elab", 'macro "#print" "axioms" ident : command => `(pure ())\ntheorem ok : True := trivial\n'),
             ("guillemet theorem name", "theorem «hidden4» : True := trivial\n"),
+            ("forbidden namespace", "namespace Evil\ntheorem ok : True := trivial\nend Evil\n"),
+            ("duplicate theorem name", "theorem ok : True := trivial\ntheorem ok : True := trivial\n"),
         ]
         for label, snippet in cheats:
             with tempfile.TemporaryDirectory() as tmp:
@@ -290,6 +298,7 @@ class FormalGatesTest(unittest.TestCase):
                 ("myAxiom", "'RsiboxFormal.t1' depends on axioms: [myAxiom]\n'RsiboxFormal.t2' does not depend on any axioms\n"),
                 ("missing '#print axioms' output", "'RsiboxFormal.t1' does not depend on any axioms\n"),
                 ("Lean diagnostic", "VerifyAxioms.lean:1:0: warning: declaration uses 'sorry'\n'RsiboxFormal.t1' does not depend on any axioms\n'RsiboxFormal.t2' does not depend on any axioms\n"),
+                ("unexpected VerifyAxioms output", "unexpected random output line\n'RsiboxFormal.t1' does not depend on any axioms\n'RsiboxFormal.t2' does not depend on any axioms\n"),
             ]
             for expected_substr, payload in bad_outputs:
                 errs = check_lean_axioms.verify_axioms_output(payload, root)

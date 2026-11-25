@@ -22,17 +22,19 @@ FORBIDDEN_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("partial", re.compile(r"\bpartial\b")),
     ("unsafe", re.compile(r"\bunsafe\b")),
     ("native_decide", re.compile(r"\bnative_decide\b")),
-    ("Lean.ofReduceBool", re.compile(r"\bLean\.ofReduceBool\b")),
-    ("Lean.ofReduceNat", re.compile(r"\bLean\.ofReduceNat\b")),
-    ("Lean.trustCompiler", re.compile(r"\bLean\.trustCompiler\b")),
+    ("Lean.ofReduceBool", re.compile(r"\bofReduceBool\b")),
+    ("Lean.ofReduceNat", re.compile(r"\bofReduceNat\b")),
+    ("Lean.trustCompiler", re.compile(r"\btrustCompiler\b")),
     ("implemented_by", re.compile(r"\bimplemented_by\b")),
-    ("@[extern", re.compile(r"@\[[^\]]*\bextern\b")),
+    ("extern", re.compile(r"(?:@|attribute\s*)\[[^\]]*\bextern\b")),
     ("macro/syntax/elab", re.compile(r"\b(?:macro|macro_rules|syntax|elab|elab_rules)\b")),
 )
 
 IDENT_CHAR_RE = re.compile(r"[A-Za-z0-9_'»]")
 CHAR_LITERAL_RE = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^\\'\n])'")
+RAW_STR_RE = re.compile(r'r(#*)"')
 IMPORT_RE = re.compile(r"\bimport\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
+NAMESPACE_RE = re.compile(r"(?<![A-Za-z0-9_'])namespace\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_'.]*)")
 THEOREM_KW_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem(?![A-Za-z0-9_'])")
 THEOREM_NAME_RE = re.compile(r"(?<![A-Za-z0-9_'])theorem\s+(«[^»]+»|[A-Za-z_][A-Za-z0-9_']*)")
 VERIFY_IMPORT_LINE_RE = re.compile(r"^import\s+RsiboxFormal$")
@@ -59,6 +61,8 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
             if two == "/-":
                 comment_depth, i = comment_depth + 1, i + 2
             elif two == "-/":
+                if comment_depth == 1:
+                    out.append(" ")
                 comment_depth, i = comment_depth - 1, i + 2
             else:
                 if ch == "\n":
@@ -86,7 +90,15 @@ def _lex_lean(text: str) -> tuple[str, list[str]]:
             i = n if nl == -1 else nl
         elif two == "/-":
             comment_depth, i = 1, i + 2
-        elif two == '!"':
+        elif ch == "r" and (i == 0 or not IDENT_CHAR_RE.match(text[i - 1])) and (m_raw := RAW_STR_RE.match(text, i)):
+            closing = '"' + m_raw.group(1)
+            end_raw = text.find(closing, m_raw.end())
+            if end_raw == -1:
+                lex_errors.append("unterminated raw string literal")
+                break
+            out.append('""' + "\n" * text[m_raw.end() : end_raw].count("\n"))
+            i = end_raw + len(closing)
+        elif two == '!"' and i >= 1 and text[i - 1] in ("s", "f", "m") and (i == 1 or not IDENT_CHAR_RE.match(text[i - 2])):
             out.append('!"')
             stack.append(("interp", 0))
             i += 2
@@ -159,6 +171,9 @@ def _collect_theorems(root: Path) -> tuple[list[str], dict[Path, str], list[str]
             errors.append(f"{path}: {err}")
         stripped[path] = cleaned
         if path.relative_to(root).as_posix() != "VerifyAxioms.lean":
+            for ns in NAMESPACE_RE.findall(cleaned):
+                if ns != "RsiboxFormal":
+                    errors.append(f"{path}: forbidden namespace '{ns}'")
             found = THEOREM_NAME_RE.findall(cleaned)
             kw_count = len(THEOREM_KW_RE.findall(cleaned))
             if len(found) != kw_count:
@@ -166,9 +181,11 @@ def _collect_theorems(root: Path) -> tuple[list[str], dict[Path, str], list[str]
             for name in found:
                 if name.startswith("«"):
                     errors.append(f"{path}: guillemet theorem name '{name}' is forbidden")
+                elif name in theorems:
+                    errors.append(f"{path}: duplicate theorem name '{name}'")
                 else:
                     theorems.append(name)
-    return list(dict.fromkeys(theorems)), stripped, errors
+    return theorems, stripped, errors
 
 
 def check_lean_axioms(root: Path) -> list[str]:
@@ -271,6 +288,8 @@ def verify_axioms_output(output_text: str, root: Path) -> list[str]:
             for ax in axioms:
                 if ax not in ALLOWED_AXIOMS:
                     errors.append(f"line {lineno}: disallowed axiom '{ax}' for 'RsiboxFormal.{thm}'")
+        else:
+            errors.append(f"line {lineno}: unexpected VerifyAxioms output '{line}'")
 
     if not seen:
         errors.append("no '#print axioms RsiboxFormal.<thm>' output lines found")
