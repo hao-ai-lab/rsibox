@@ -816,8 +816,8 @@ class SandboxPoolTests(unittest.TestCase):
         real_waiter_cls = pool_module._Waiter
 
         # Case A: interrupt while still waiting (no slot assigned yet) -> waiter removed, zero leaks.
-        def interrupting_waiter_unassigned(role):
-            waiter = real_waiter_cls(role)
+        def interrupting_waiter_unassigned(role, priority=0):
+            waiter = real_waiter_cls(role, priority)
             waiter.event.wait = lambda timeout=None: (_ for _ in ()).throw(
                 KeyboardInterrupt("interrupt before handoff")
             )
@@ -832,8 +832,8 @@ class SandboxPoolTests(unittest.TestCase):
         # Case B: interrupt right AFTER holder hands off slot -> assigned slot returned cleanly!
         interrupted_errors: list[BaseException] = []
 
-        def interrupting_waiter_after_handoff(role):
-            waiter = real_waiter_cls(role)
+        def interrupting_waiter_after_handoff(role, priority=0):
+            waiter = real_waiter_cls(role, priority)
             real_wait = waiter.event.wait
 
             def wait_then_interrupt(timeout=None):
@@ -1395,6 +1395,250 @@ class SandboxPoolTests(unittest.TestCase):
             ready_box.close()
             with self.assertRaises(ValueError):
                 PoolSlot("closed-0", ready_box)
+
+    def test_priority_scheduling_and_fifo_tie_break_with_trace(self):
+        """Golden case: higher-priority waiters (e.g., Eval) wake ahead of lower-priority waiters
+        queued earlier, equal-priority waiters preserve strict FIFO order, negative priorities work,
+        invalid priorities fail closed across acquire/lease/run_isolated, and priority is recorded
+        in the hash-chained trace (while remaining backward-compatible with legacy traces)."""
+        slot_lab = toy_lab.ToyLab(ranks=2)
+        self.addCleanup(slot_lab.close)
+        with tempfile.TemporaryDirectory(prefix="rsibox-priority-") as temp_dir:
+            trace_path = os.path.join(temp_dir, "priority_trace.jsonl")
+            # Seed a legacy JSONL trace without the "priority" key to lock down backward compatibility.
+            from rsibox import pool as pool_module
+
+            legacy_entry, _, _ = pool_module._chain_record(
+                {
+                    "agent_id": "legacy-agent", "role": None, "slot_role": None,
+                    "idea_id": "legacy-0", "slot_id": "slot-0",
+                    "acquired_at": 1.0, "released_at": 2.0, "queue_wait_s": 0.0,
+                    "hold_s": 1.0, "cleanup_s": 0.0, "recovery_s": 0.0,
+                    "recovered": False, "error": None, "status_after": "base",
+                },
+                0,
+                pool_module._GENESIS_HASH,
+            )
+            with open(trace_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(legacy_entry, sort_keys=True) + "\n")
+            self.assertTrue(verify_trace(trace_path)["ok"])
+
+            pool = SandboxPool([PoolSlot("slot-0", slot_lab)], trace_path=trace_path)
+            self.addCleanup(pool.close)
+
+            # Invalid priorities fail closed with TypeError across acquire, lease, and run_isolated.
+            for bad_priority in (True, False, 1.5, "10", None):
+                with self.assertRaises(TypeError):
+                    pool.acquire("bad-agent", priority=bad_priority)  # type: ignore[arg-type]
+                with self.assertRaises(TypeError):
+                    with pool.lease("bad-agent", priority=bad_priority):  # type: ignore[arg-type]
+                        pass
+                with self.assertRaises(TypeError):
+                    pool.run_isolated("bad-agent", lambda _lab, _lease: None, priority=bad_priority)  # type: ignore[arg-type]
+
+            holder = pool.acquire("holder", priority=0)
+            self.assertEqual(holder.priority, 0)
+            with self.assertRaises(AttributeError):
+                holder.priority = 99  # type: ignore[misc]
+
+            wake_order: list[tuple[str, int]] = []
+            order_lock = threading.Lock()
+            errors: list[BaseException] = []
+
+            def enqueue_waiter(agent_id: str, priority: int) -> threading.Thread:
+                def action(_lab, lease) -> None:
+                    with order_lock:
+                        wake_order.append((agent_id, lease.priority))
+
+                def runner() -> None:
+                    try:
+                        outcome = pool.run_isolated(
+                            agent_id,
+                            action,
+                            priority=priority,
+                            timeout_s=5.0,
+                        )
+                        if not outcome["ok"]:
+                            raise AssertionError(outcome)
+                    except BaseException as err:
+                        errors.append(err)
+
+                worker_thread = threading.Thread(target=runner)
+                worker_thread.start()
+                return worker_thread
+
+            # Queue: bg-low (-5), dev-1 (0), dev-2 (0), eval-1 (10), fix-1 (5), eval-2 (10)
+            waiter_threads = []
+            for expected_len, (agent_name, prio) in enumerate(
+                [("bg-low", -5), ("dev-1", 0), ("dev-2", 0), ("eval-1", 10), ("fix-1", 5), ("eval-2", 10)],
+                start=1,
+            ):
+                waiter_threads.append(enqueue_waiter(agent_name, prio))
+                self._wait_for_waiters(pool, expected_len)
+
+            # A high-priority waiter that times out is skipped cleanly without blocking lower priorities.
+            with self.assertRaises(PoolTimeoutError):
+                pool.acquire("timed-out-eval", priority=50, timeout_s=0.01)
+
+            holder.release()
+            for worker_thread in waiter_threads:
+                worker_thread.join(timeout=5.0)
+                self.assertFalse(worker_thread.is_alive())
+            self.assertEqual(errors, [])
+
+            # Expected wake order: eval-1 (10), eval-2 (10), fix-1 (5), dev-1 (0), dev-2 (0), bg-low (-5)
+            self.assertEqual(
+                wake_order,
+                [("eval-1", 10), ("eval-2", 10), ("fix-1", 5), ("dev-1", 0), ("dev-2", 0), ("bg-low", -5)],
+            )
+
+            verified = verify_trace(trace_path)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(verified["count"], 8)
+            self.assertNotIn("priority", verified["records"][0])
+            self.assertEqual(
+                [(entry["agent_id"], entry["priority"]) for entry in verified["records"][1:]],
+                [
+                    ("holder", 0),
+                    ("eval-1", 10),
+                    ("eval-2", 10),
+                    ("fix-1", 5),
+                    ("dev-1", 0),
+                    ("dev-2", 0),
+                    ("bg-low", -5),
+                ],
+            )
+
+            # Post-handoff cancellation of the highest-priority waiter must hand off to the next-highest
+            # priority waiter (not FIFO).
+            real_waiter_cls = pool_module._Waiter
+            holder_two = pool.acquire("holder-2", priority=0)
+            handoff_order: list[str] = []
+            cancel_errors: list[BaseException] = []
+
+            def make_interrupting_waiter(role, priority=0):
+                waiter = real_waiter_cls(role, priority)
+                if priority == 20:
+                    real_wait = waiter.event.wait
+
+                    def wait_then_interrupt(timeout=None):
+                        real_wait(timeout=timeout)
+                        raise KeyboardInterrupt("cancel high-priority after handoff")
+
+                    waiter.event.wait = wait_then_interrupt
+                return waiter
+
+            with mock.patch.object(pool_module, "_Waiter", side_effect=make_interrupting_waiter):
+                low_thread = threading.Thread(
+                    target=lambda: pool.run_isolated("low-0", lambda _l, _s: handoff_order.append("low-0"), priority=0, timeout_s=5.0)
+                )
+                low_thread.start()
+                self._wait_for_waiters(pool, 1)
+                mid_thread = threading.Thread(
+                    target=lambda: pool.run_isolated("mid-5", lambda _l, _s: handoff_order.append("mid-5"), priority=5, timeout_s=5.0)
+                )
+                mid_thread.start()
+                self._wait_for_waiters(pool, 2)
+                cancelled_high = threading.Thread(
+                    target=lambda: self._capture_error(
+                        lambda: pool.acquire("cancel-20", priority=20, timeout_s=5.0),
+                        cancel_errors,
+                    )
+                )
+                cancelled_high.start()
+                self._wait_for_waiters(pool, 3)
+
+                holder_two.release()
+                for worker_thread in (cancelled_high, mid_thread, low_thread):
+                    worker_thread.join(timeout=5.0)
+                    self.assertFalse(worker_thread.is_alive())
+
+            self.assertEqual(len(cancel_errors), 1)
+            self.assertIsInstance(cancel_errors[0], KeyboardInterrupt)
+            self.assertEqual(handoff_order, ["mid-5", "low-0"])
+
+    def test_priority_respects_role_isolation(self):
+        """Golden case: a high-priority eval waiter does not starve a dev slot or block fast-path
+        acquisition of an idle dev slot, while still preempting a lower-priority generalist waiter
+        on an eval slot."""
+        dev_lab = toy_lab.ToyLab(ranks=2)
+        eval_lab = toy_lab.ToyLab(ranks=2)
+        self.addCleanup(dev_lab.close)
+        self.addCleanup(eval_lab.close)
+        pool = SandboxPool([
+            PoolSlot("dev-0", dev_lab, role="dev"),
+            PoolSlot("eval-0", eval_lab, role="eval"),
+        ])
+        self.addCleanup(pool.close)
+
+        dev_holder = pool.acquire("holder-dev", role="dev")
+        eval_holder = pool.acquire("holder-eval", role="eval")
+
+        dev_acquired: list[str] = []
+        eval_order: list[str] = []
+        errors: list[BaseException] = []
+        dev_entered = threading.Event()
+        dev_release_gate = threading.Event()
+        self.addCleanup(dev_release_gate.set)
+
+        def wait_role(
+            agent_id: str,
+            role: str | None,
+            priority: int,
+            bucket: list[str],
+            *,
+            hold_gate: tuple[threading.Event, threading.Event] | None = None,
+        ) -> threading.Thread:
+            def runner() -> None:
+                try:
+                    with pool.lease(agent_id, role=role, priority=priority, timeout_s=5.0) as lease:
+                        bucket.append(f"{agent_id}:{lease.slot_id}")
+                        if hold_gate is not None:
+                            hold_gate[0].set()
+                            hold_gate[1].wait(timeout=5.0)
+                except BaseException as err:
+                    errors.append(err)
+
+            worker_thread = threading.Thread(target=runner)
+            worker_thread.start()
+            return worker_thread
+
+        generalist_thread = wait_role("gen-low", None, 0, eval_order)
+        self._wait_for_waiters(pool, 1)
+        eval_thread = wait_role("eval-high", "eval", 10, eval_order)
+        self._wait_for_waiters(pool, 2)
+        dev_thread = wait_role("dev-mid", "dev", 5, dev_acquired, hold_gate=(dev_entered, dev_release_gate))
+        self._wait_for_waiters(pool, 3)
+
+        # Releasing dev-0 wakes dev-mid (priority 5 > gen-low priority 0), ignoring eval-high (wrong role).
+        dev_holder.release()
+        self.assertTrue(dev_entered.wait(timeout=5.0))
+        self.assertEqual(dev_acquired, ["dev-mid:dev-0"])
+
+        # While dev-mid holds dev-0, releasing eval-0 must wake eval-high (priority 10) before gen-low (priority 0).
+        eval_holder.release()
+        eval_thread.join(timeout=5.0)
+        self.assertFalse(eval_thread.is_alive())
+        dev_release_gate.set()
+        for worker_thread in (dev_thread, generalist_thread):
+            worker_thread.join(timeout=5.0)
+            self.assertFalse(worker_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(eval_order, ["eval-high:eval-0", "gen-low:eval-0"])
+
+        # Fast-path cross-role check: with eval-0 busy and a high-priority eval waiter queued,
+        # a low-priority generalist caller claims idle dev-0 immediately even with timeout_s=0.
+        eval_holder_two = pool.acquire("holder-eval-2", role="eval")
+        queued_eval_got: list[str] = []
+        queued_eval_thread = wait_role("eval-queued", "eval", 10, queued_eval_got)
+        self._wait_for_waiters(pool, 1)
+        with pool.lease("gen-fast", role=None, priority=0, timeout_s=0.0) as fast_lease:
+            self.assertEqual(fast_lease.slot_id, "dev-0")
+        eval_holder_two.release()
+        queued_eval_thread.join(timeout=5.0)
+        self.assertFalse(queued_eval_thread.is_alive())
+        self.assertEqual(queued_eval_got, ["eval-queued:eval-0"])
+        self.assertEqual(errors, [])
 
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
