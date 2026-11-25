@@ -237,6 +237,289 @@ class IpcTests(unittest.TestCase):
         )
         self.assertEqual(mb_race_ans, {"ok": True, "verb": "final"})
 
+    def test_unix_json_call_and_stream_alive_fn_fast_fails_with_inherited_fd_on_sigkill(self):
+        """Pain point: when a worker serving an AF_UNIX socket has a forked/spawned child holding
+        an inherited copy of the connection FD, SIGKILLing the worker does NOT deliver EOF to the
+        client socket — causing unix_json_call / unix_json_stream to hang for the full timeout.
+        With `alive_fn`, SIGKILL fails fast in milliseconds while still preserving replies written
+        immediately before peer exit."""
+        sock_path = ipc.short_sock_path("test-unix-kill")
+        self.addCleanup(lambda: os.unlink(sock_path) if os.path.exists(sock_path) else None)
+
+        # 1. Eager validation & pre-dead peer fail closed at call time (without connecting or iterating).
+        with self.assertRaises(TypeError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, alive_fn="bad")  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, timeout=True)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, timeout=-0.5)
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, poll_s=-0.1)
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, poll_s=float("nan"))
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, poll_s=float("inf"))
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, poll_s=10**400)
+        with self.assertRaises(ValueError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, timeout=10**400)
+        with self.assertRaises(TimeoutError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, timeout=float("nan"))
+        with self.assertRaises(ConnectionError):
+            ipc.unix_json_call(sock_path, {"method": "ping"}, timeout=30.0, alive_fn=lambda: False)
+        # unix_json_stream validates eagerly BEFORE iteration!
+        with self.assertRaises(TypeError):
+            ipc.unix_json_stream(sock_path, {"method": "watch"}, alive_fn=123)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            ipc.unix_json_stream(sock_path, {"method": "watch"}, poll_s=-1.0)
+        with self.assertRaises(ConnectionError):
+            ipc.unix_json_stream(sock_path, {"method": "watch"}, timeout=30.0, alive_fn=lambda: False)
+
+        # 2. Real server process spawns a child inheriting the accepted socket FD, then gets SIGKILLed!
+        #    The child stays alive holding the FD open, so the kernel does NOT send EOF.
+        server_code = (
+            "import json, os, socket, subprocess, sys, time\n"
+            "sock_path, mode = sys.argv[1], sys.argv[2]\n"
+            "srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "srv.bind(sock_path)\n"
+            "srv.listen(4)\n"
+            "print('READY', flush=True)\n"
+            "conn, _ = srv.accept()\n"
+            "conn.recv(4096)\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], pass_fds=(conn.fileno(),))\n"
+            "print(f'ACCEPTED {child.pid}', flush=True)\n"
+            "if mode == 'stream':\n"
+            "    conn.sendall(b'{\"event\": \"started\"}\\n')\n"
+            "time.sleep(30)\n"
+        )
+
+        for mode in ("call", "stream"):
+            with self.subTest(mode=mode):
+                if os.path.exists(sock_path):
+                    os.unlink(sock_path)
+                srv_proc = subprocess.Popen(
+                    [sys.executable, "-c", server_code, sock_path, mode],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                child_pid_holder: list[int] = []
+
+                def cleanup_procs(sp=srv_proc, cph=child_pid_holder):
+                    if sp.poll() is None:
+                        sp.kill()
+                        sp.wait()
+                    for cpid in cph:
+                        try:
+                            os.kill(cpid, 9)
+                        except ProcessLookupError:
+                            pass
+                    if sp.stdout:
+                        sp.stdout.close()
+                    if sp.stderr:
+                        sp.stderr.close()
+
+                self.addCleanup(cleanup_procs)
+                assert srv_proc.stdout is not None
+                ready_line = srv_proc.stdout.readline().strip()
+                self.assertEqual(ready_line, "READY")
+
+                def kill_after_accept():
+                    acc_line = srv_proc.stdout.readline().strip()
+                    if acc_line.startswith("ACCEPTED "):
+                        child_pid_holder.append(int(acc_line.split()[1]))
+                    srv_proc.kill()
+                    srv_proc.wait()
+
+                killer = threading.Thread(target=kill_after_accept, daemon=True)
+                killer.start()
+                t0 = time.perf_counter()
+                if mode == "call":
+                    with self.assertRaises(ConnectionError):
+                        ipc.unix_json_call(
+                            sock_path, {"method": "generate"}, timeout=30.0, poll_s=0.01,
+                            alive_fn=lambda sp=srv_proc: sp.poll() is None,
+                        )
+                else:
+                    seen: list[dict] = []
+                    with self.assertRaises(ConnectionError):
+                        for ev in ipc.unix_json_stream(
+                            sock_path, {"method": "watch"}, timeout=30.0, poll_s=0.01,
+                            alive_fn=lambda sp=srv_proc: sp.poll() is None,
+                        ):
+                            seen.append(ev)
+                    self.assertEqual(seen, [{"event": "started"}])
+                elapsed = time.perf_counter() - t0
+                killer.join(timeout=3.0)
+                self.assertLess(elapsed, 2.0, f"{mode} stalled {elapsed:.3f}s despite SIGKILL (inherited FD)")
+
+        # 3. Final-reply race guard: reply written right before alive_fn turns False still succeeds!
+        race_sock = ipc.short_sock_path("test-unix-race")
+        with ipc.UnixJsonServer(race_sock) as srv:
+            def delayed_reply():
+                req, reply = srv.next(timeout=3.0)
+                time.sleep(0.03)
+                reply({"ok": True, "got": req["method"]})
+
+            checks = [0]
+            replier = threading.Thread(target=delayed_reply, daemon=True)
+            replier.start()
+
+            def alive_turns_false_after_reply() -> bool:
+                checks[0] += 1
+                if checks[0] == 1:
+                    return True
+                replier.join(timeout=3.0)
+                return False
+
+            ans = ipc.unix_json_call(
+                race_sock, {"method": "final"}, timeout=5.0, poll_s=0.01,
+                alive_fn=alive_turns_false_after_reply,
+            )
+            self.assertEqual(ans, {"ok": True, "got": "final"})
+            replier.join(timeout=3.0)
+
+        # 4. P0-1 & P1-1..P1-5 regressions:
+        #    (a) FD >= 1024 works without FD_SETSIZE ValueError (DefaultSelector),
+        #    (b) >64 KiB chunked reply + poll_s=0.0 + timeout=inf,
+        #    (c) timeout=0.0 raises TimeoutError (never ConnectionError) for both alive_fn=None and set,
+        #    (d) clean EOF without trailing newline + stream clean EOF racing alive_fn()->False,
+        #    (e) large sendall (> SO_SNDBUF) fails fast on dead peer instead of blocking until timeout,
+        #    (f) unix_json_stream per-event inactivity timeout & clean early close (0 ResourceWarnings).
+        big_payload = "A" * 131072
+        hi_sock = ipc.short_sock_path("test-unix-hi")
+        with ipc.UnixJsonServer(hi_sock, handler=lambda r: {"ok": True, "size": len(r.get("blob", "")), "echo": big_payload}):
+            # Push socket FD past 1024 if RLIMIT_NOFILE allows it.
+            duped: list[int] = []
+            try:
+                while len(duped) < 1040:
+                    fd = os.dup(0)
+                    duped.append(fd)
+                    if fd >= 1030:
+                        break
+                ans_hi = ipc.unix_json_call(
+                    hi_sock, {"method": "big", "blob": big_payload},
+                    timeout=float("inf"), poll_s=0.01, alive_fn=lambda: True,
+                )
+                self.assertEqual(ans_hi["size"], len(big_payload))
+                self.assertEqual(len(ans_hi["echo"]), len(big_payload))
+            finally:
+                for fd in duped:
+                    os.close(fd)
+
+        # timeout=0.0 against silent peer raises TimeoutError for both alive_fn=None and alive_fn!=None.
+        t0_sock = ipc.short_sock_path("test-unix-t0")
+        with ipc.UnixJsonServer(t0_sock):
+            for af in (None, lambda: True):
+                with self.assertRaises(TimeoutError):
+                    ipc.unix_json_call(t0_sock, {"method": "slow"}, timeout=0.0, poll_s=0.0, alive_fn=af)
+
+        # Clean EOF without trailing newline + stream clean EOF racing alive_fn()->False.
+        eof_sock = ipc.short_sock_path("test-unix-eof")
+        self.addCleanup(lambda: os.unlink(eof_sock) if os.path.exists(eof_sock) else None)
+        eof_srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        eof_srv.bind(eof_sock)
+        eof_srv.listen(4)
+        self.addCleanup(eof_srv.close)
+
+        c1_done, c2_done = threading.Event(), threading.Event()
+
+        def serve_eof_cases():
+            # Case 1: no-newline JSON then clean EOF.
+            c1, _ = eof_srv.accept()
+            with c1:
+                c1.recv(4096)
+                time.sleep(0.02)
+                c1.sendall(b'{"ok": true, "eof": 1}')
+            c1_done.set()
+            # Case 2: stream burst in one send then clean EOF (no stop_event).
+            c2, _ = eof_srv.accept()
+            with c2:
+                c2.recv(4096)
+                time.sleep(0.02)
+                c2.sendall(b'{"event": "a"}\n{"event": "b"}\n')
+            c2_done.set()
+            # Case 3: slow multi-tick stream (3 ticks 0.12s apart, total 0.36s > 0.25s timeout -> succeeds with inactivity timeout!).
+            c3, _ = eof_srv.accept()
+            with c3:
+                c3.recv(4096)
+                for i in range(3):
+                    time.sleep(0.12)
+                    c3.sendall(f'{{"event": "tick", "i": {i}}}\n'.encode("utf-8"))
+                c3.sendall(b'{"event": "stopped"}\n')
+            # Case 4: early close stream (never finishes, client closes after 1 event).
+            c4, _ = eof_srv.accept()
+            with c4:
+                c4.recv(4096)
+                c4.sendall(b'{"event": "first"}\n')
+                time.sleep(0.2)
+
+        eof_th = threading.Thread(target=serve_eof_cases, daemon=True)
+        eof_th.start()
+        c1_calls = [0]
+
+        def alive_after_c1() -> bool:
+            c1_calls[0] += 1
+            if c1_calls[0] == 1:
+                return True
+            c1_done.wait(timeout=3.0)
+            return False
+
+        ans_eof = ipc.unix_json_call(
+            eof_sock, {"method": "eof"}, timeout=5.0, poll_s=0.005,
+            alive_fn=alive_after_c1,
+        )
+        self.assertEqual(ans_eof, {"ok": True, "eof": 1})
+        c2_calls = [0]
+
+        def alive_after_c2() -> bool:
+            c2_calls[0] += 1
+            if c2_calls[0] == 1:
+                return True
+            c2_done.wait(timeout=3.0)
+            return False
+
+        evs_eof = list(ipc.unix_json_stream(
+            eof_sock, {"method": "burst"}, timeout=5.0, poll_s=0.005,
+            alive_fn=alive_after_c2,
+        ))
+        self.assertEqual(evs_eof, [{"event": "a"}, {"event": "b"}])
+        evs_inact = list(ipc.unix_json_stream(
+            eof_sock, {"method": "ticks"}, timeout=0.25, poll_s=0.01, alive_fn=lambda: True,
+        ))
+        self.assertEqual(len(evs_inact), 4)
+        self.assertEqual(evs_inact[-1]["event"], "stopped")
+        gen_early = ipc.unix_json_stream(eof_sock, {"method": "early"}, timeout=5.0, poll_s=0.01, alive_fn=lambda: True)
+        self.assertEqual(next(gen_early), {"event": "first"})
+        gen_early.close()
+        eof_th.join(timeout=3.0)
+
+        # Large sendall (> SO_SNDBUF) against a peer that never reads and dies -> fast-fails with ConnectionError!
+        snd_sock = ipc.short_sock_path("test-unix-snd")
+        self.addCleanup(lambda: os.unlink(snd_sock) if os.path.exists(snd_sock) else None)
+        snd_srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        snd_srv.bind(snd_sock)
+        snd_srv.listen(2)
+        self.addCleanup(snd_srv.close)
+        accepted_conns: list[socket.socket] = []
+
+        def accept_no_read():
+            c, _ = snd_srv.accept()
+            accepted_conns.append(c)
+
+        acc_th = threading.Thread(target=accept_no_read, daemon=True)
+        acc_th.start()
+        snd_alive = [True]
+        threading.Timer(0.05, lambda: snd_alive.__setitem__(0, False)).start()
+        t_snd = time.perf_counter()
+        with self.assertRaises(ConnectionError):
+            ipc.unix_json_call(
+                snd_sock, {"method": "huge", "blob": "x" * (4 * 1024 * 1024)},
+                timeout=10.0, poll_s=0.01, alive_fn=lambda: snd_alive[0],
+            )
+        self.assertLess(time.perf_counter() - t_snd, 2.0)
+        acc_th.join(timeout=2.0)
+        for c in accepted_conns:
+            c.close()
+
 
 class ProcTests(unittest.TestCase):
     def test_stat_parsing_handles_comm_with_spaces_and_parens(self):
