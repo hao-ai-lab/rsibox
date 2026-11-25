@@ -461,7 +461,9 @@ class VllmShadowPromoter:
         old_server = getattr(lab, "server", None)
         lab.server, lab.port = shadow_server, shadow_server.port
         lab_class = type(lab)
-        if (getattr(lab_class, "_shared", None) is old_server and old_server is not None) or getattr(
+        if hasattr(lab_class, "_replace_shared_server"):
+            lab_class._replace_shared_server(lab, old_server, shadow_server)
+        elif (getattr(lab_class, "_shared", None) is old_server and old_server is not None) or getattr(
             lab, "_was_shared", False
         ):
             lab_class._shared = shadow_server

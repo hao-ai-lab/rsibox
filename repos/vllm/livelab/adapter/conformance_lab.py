@@ -28,9 +28,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 from rsibox import harness
 from kernel import coordinator as C
@@ -189,7 +191,14 @@ class VllmLab:
     """`LabUnderTest` driving a live vLLM server through `adapter.host`."""
     name = "vllm"
     supports_gms_uuid_shim = True
-    _shared = None
+    _shared_servers: dict[tuple[Any, ...], _ServerHandle] = {}
+    _shared_lock = threading.Lock()
+    shared = True
+    server_key: tuple[Any, ...] | None = None
+    _owns_server = False
+    _closed = False
+    _shared_stopped = False
+    _was_shared = False
 
     @staticmethod
     def launch_environment(argv):
@@ -268,10 +277,13 @@ class VllmLab:
         return env
 
     def __init__(self, receipts=None, check_timeout=None, backend=None, base_texts=None,
-                 weight_store=None, recovery_driver=None, enable_sleep_mode=None):
+                 weight_store=None, recovery_driver=None, enable_sleep_mode=None,
+                 shared: bool = True):
         self.receipts = receipts
         self.check_timeout = float(check_timeout or os.environ.get("RSIBOX_VLLM_CHECK_TIMEOUT", "30"))
         self.weight_store, self.recovery_driver, self._was_shared = weight_store, recovery_driver, False
+        self.shared = bool(shared)
+        self._owns_server, self._closed, self._shared_stopped, self.server_key = False, False, False, None
         self.enable_sleep_mode = (
             os.environ.get("RSIBOX_VLLM_ENABLE_SLEEP_MODE", "0").strip().lower() in ("1", "true", "yes")
             if enable_sleep_mode is None else bool(enable_sleep_mode)
@@ -320,17 +332,113 @@ class VllmLab:
                            self.gms_scratch_kv or os.environ.get("DYN_GMS_SCRATCH_KV_ENABLED"),
                            self.enable_sleep_mode,
                            os.environ.get("VLLM_SERVER_DEV_MODE"))
-        shared = VllmLab._shared
-        if (shared is not None and shared.key == self.server_key and shared.alive()
-                and self._server_at_base(shared)):
-            self.server = shared
+        if self.shared:
+            self.server = self._acquire_shared_server()
         else:
-            if shared is not None:
-                shared.stop()
-                VllmLab._shared = None
-            self.server = VllmLab._shared = self._start_server(self.port, "live", use_farm=False)
-        self.bridge = HostBridge(self._ctl)
-        self.session = SS.Session(self.bridge, MODULES)
+            self.server = self._start_server(self.port, "live", use_farm=False)
+            self._owns_server = True
+        try:
+            self.bridge = HostBridge(self._ctl)
+            self.session = SS.Session(self.bridge, MODULES)
+        except BaseException:
+            if self._owns_server and self.server is not None:
+                self.server.stop()
+            raise
+
+    def _acquire_shared_server(self):
+        assert self.server_key is not None
+        with VllmLab._shared_lock:
+            cand = VllmLab._shared_servers.get(self.server_key)
+        if cand is not None:
+            healthy = bool(cand.alive() and self._server_at_base(cand))
+            popped = False
+            with VllmLab._shared_lock:
+                if VllmLab._shared_servers.get(self.server_key) is cand:
+                    if healthy and cand.alive():
+                        return cand
+                    VllmLab._shared_servers.pop(self.server_key, None)
+                    popped = True
+            if popped:
+                cand.stop()
+        srv = self._start_server(self.port, "live", use_farm=False)
+        duplicate, stale_existing = None, None
+        with VllmLab._shared_lock:
+            existing = VllmLab._shared_servers.get(self.server_key)
+            if existing is not None and existing.alive():
+                duplicate, chosen = srv, existing
+            else:
+                if existing is not None:
+                    VllmLab._shared_servers.pop(self.server_key, None)
+                    stale_existing = existing
+                VllmLab._shared_servers[self.server_key] = srv
+                chosen = srv
+        if stale_existing is not None:
+            stale_existing.stop()
+        if duplicate is not None:
+            duplicate.stop()
+        return chosen
+
+    def _detach_shared_server(self, srv) -> bool:
+        key = getattr(self, "server_key", None)
+        if key is None or srv is None:
+            return False
+        with VllmLab._shared_lock:
+            if VllmLab._shared_servers.get(key) is srv:
+                VllmLab._shared_servers.pop(key, None)
+                return True
+        return False
+
+    def _register_shared_server(self, srv) -> None:
+        key = getattr(self, "server_key", None)
+        if not getattr(self, "shared", True) or key is None or srv is None:
+            return
+        with VllmLab._shared_lock:
+            VllmLab._shared_servers[key] = srv
+
+    @classmethod
+    def _replace_shared_server(cls, lab, old_server, new_server) -> None:
+        old_key = getattr(lab, "server_key", None)
+        if old_key is None:
+            return
+        new_port = getattr(new_server, "port", getattr(lab, "port", None))
+        if isinstance(old_key, tuple) and new_port is not None:
+            old_port = getattr(old_server, "port", None)
+            if len(old_key) >= 3 and (len(old_key) == 16 or old_key[2] == old_port):
+                new_key = old_key[:2] + (new_port,) + old_key[3:]
+            elif old_port is not None and old_port in old_key:
+                idx = old_key.index(old_port)
+                new_key = old_key[:idx] + (new_port,) + old_key[idx + 1:]
+            else:
+                new_key = old_key
+        else:
+            new_key = old_key
+        lab.server_key = new_key
+        if not getattr(lab, "shared", True):
+            return
+        with cls._shared_lock:
+            current = cls._shared_servers.get(old_key)
+            was_shared = getattr(lab, "_was_shared", False)
+            if (current is old_server and old_server is not None) or was_shared:
+                if current is old_server:
+                    cls._shared_servers.pop(old_key, None)
+                cls._shared_servers[new_key] = new_server
+                if hasattr(lab, "_was_shared"):
+                    lab._was_shared = False
+
+    @classmethod
+    def stop_shared(cls, key=None) -> int:
+        """Stop and remove shared server(s) from `_shared_servers` (one `key` or all)."""
+        with cls._shared_lock:
+            if key is None:
+                servers = list(cls._shared_servers.values())
+                cls._shared_servers.clear()
+            else:
+                srv = cls._shared_servers.pop(key, None)
+                servers = [srv] if srv is not None else []
+        for srv in servers:
+            with contextlib.suppress(Exception):
+                srv.stop()
+        return len(servers)
 
     def _server_at_base(self, srv):
         try:
@@ -543,8 +651,7 @@ class VllmLab:
         if self._backend is not None:
             return
         if self.server is not None:
-            if VllmLab._shared is self.server:
-                VllmLab._shared = None
+            if self._detach_shared_server(self.server):
                 self._was_shared = True
             self.server.stop()
 
@@ -552,7 +659,8 @@ class VllmLab:
         if self._backend is not None:
             self._backend.respawn()
         else:
-            self.server = VllmLab._shared = self._start_server(self.port, "live", use_farm=False)
+            self.server = self._start_server(self.port, "live", use_farm=False)
+            self._register_shared_server(self.server)
             self._was_shared = False
         self.bridge = HostBridge(self._ctl)
         self.session.recovered(self.bridge)
@@ -589,9 +697,12 @@ class VllmLab:
                 self._backend.respawn()
                 start_info = {}
             else:
-                self.server.stop()
-                VllmLab._shared = None
-                self.server = VllmLab._shared = self._start_server(self.port, "live", use_farm=False)
+                if self.server is not None:
+                    self._detach_shared_server(self.server)
+                    self.server.stop()
+                self.server = self._start_server(self.port, "live", use_farm=False)
+                self._register_shared_server(self.server)
+                self._was_shared = False
                 start_info = {"start_s": self.server.start_s}
             self.bridge = HostBridge(self._ctl)
             return {"ok": self.session.recovered(self.bridge)["ok"], "reset": ["worker group", "session"],
@@ -624,9 +735,32 @@ class VllmLab:
     def status(self):
         return self.session.status()
 
-    def close(self):
+    def close(self, stop_shared: bool = False):
+        with VllmLab._shared_lock:
+            already_closed = getattr(self, "_closed", False)
+            owns = getattr(self, "_owns_server", False)
+            if already_closed and (not stop_shared or owns or getattr(self, "_shared_stopped", False)):
+                return
+            self._closed = True
+            stop_srv = None
+            if self._backend is None:
+                srv = getattr(self, "server", None)
+                key = getattr(self, "server_key", None)
+                if owns:
+                    stop_srv = srv
+                    if key is not None and VllmLab._shared_servers.get(key) is srv:
+                        VllmLab._shared_servers.pop(key, None)
+                elif stop_shared:
+                    self._shared_stopped = True
+                    if key is not None and VllmLab._shared_servers.get(key) is srv:
+                        VllmLab._shared_servers.pop(key, None)
+                        stop_srv = srv
         if self._backend is not None:
-            self._backend.close()
+            if not already_closed:
+                self._backend.close()
+            return
+        if stop_srv is not None:
+            stop_srv.stop()
 
     def patches(self):
         samp, sutils = self.base_text[SAMPLER], self.base_text[SCHED_UTILS]
@@ -689,8 +823,10 @@ class VllmLab:
             return self._backend.fresh_check({**(patch or {}), "files": resolved_files}, workload)
         paused_live, saved_stack = False, [dict(x) for x in self._stack_files]
         if self.share_gpu and self.server is not None and self.server.alive():
+            if self._detach_shared_server(self.server):
+                self._was_shared = True
             self.server.stop()
-            VllmLab._shared, paused_live = None, True
+            paused_live = True
         fresh_srv = None
         try:
             self._write_farm(resolved_files)
@@ -703,7 +839,9 @@ class VllmLab:
                 fresh_srv.stop()
             self._write_farm({})
             if paused_live:
-                self.server = VllmLab._shared = self._start_server(self.port, "live", use_farm=False)
+                self.server = self._start_server(self.port, "live", use_farm=False)
+                self._register_shared_server(self.server)
+                self._was_shared = False
                 self.bridge = HostBridge(self._ctl)
                 self.session = SS.Session(self.bridge, MODULES)
                 self._stack_files.clear()
@@ -767,6 +905,4 @@ class VllmLab:
 
 @atexit.register
 def _cleanup_shared():
-    if VllmLab._shared is not None:
-        VllmLab._shared.stop()
-        VllmLab._shared = None
+    VllmLab.stop_shared()

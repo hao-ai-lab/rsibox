@@ -345,12 +345,13 @@ class ConformanceOnFakeVllmTest(unittest.TestCase):
                 backend.respawn()
             return srv
         lab.server, lab.port, lab.share_gpu = srv, srv.port, True
+        lab.shared, lab.server_key, lab._owns_server = True, ("fake-key", 8111), False
         with (mock.patch.object(lab, "_backend", None),
               mock.patch.object(lab, "_ctl", backend.ctl),
               mock.patch.object(lab, "_start_server", start_server),
               mock.patch.object(lab, "_write_farm"),
               mock.patch.object(lab, "_run_http", return_value=backend.fresh_check(edit)["output"]),
-              mock.patch.object(CL.VllmLab, "_shared", srv)):
+              mock.patch.dict(CL.VllmLab._shared_servers, {lab.server_key: srv}, clear=True)):
             self.assertTrue(lab.fresh_check(edit)["ok"])
             self.assertEqual(lab.status()["txns"], [original])
             self.assertTrue(lab.uninstall(original)["ok"])
@@ -490,6 +491,341 @@ class FarmAndHelpersTest(unittest.TestCase):
         self.assertEqual((lab.check()["output"], lab.status()["state"]), (out1, "edited"))
         self.assertTrue(lab.uninstall()["ok"])
         self.assertEqual((lab.check()["output"], lab.status()["state"]), (base_out, "base"))
+
+
+class VllmLabMultiInstanceAndCloseTest(unittest.TestCase):
+    """Verify key-indexed `_shared_servers`, `shared=False` ownership, and `close()` teardown."""
+
+    def setUp(self):
+        with CL.VllmLab._shared_lock:
+            self._saved_servers = dict(CL.VllmLab._shared_servers)
+            CL.VllmLab._shared_servers.clear()
+
+    def tearDown(self):
+        CL._cleanup_shared()
+        with CL.VllmLab._shared_lock:
+            CL.VllmLab._shared_servers.update(self._saved_servers)
+
+    @staticmethod
+    def _make_fake_site(root):
+        site = os.path.join(root, "site")
+        for mod_name, src_text in FAKE_SOURCES.items():
+            path = os.path.join(site, mod_name.replace(".", os.sep) + ".py")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(src_text)
+        return site
+
+    @staticmethod
+    def _make_stub_start(started_handles):
+        def _start(lab_self, port, tag, use_farm):
+            state = {"alive": True, "stops": 0}
+
+            def _stop():
+                state["stops"] += 1
+                state["alive"] = False
+
+            handle = NS(
+                port=port,
+                key=lab_self.server_key,
+                state=state,
+                alive=lambda: state["alive"],
+                stop=_stop,
+                start_s=0.01,
+            )
+            started_handles.append(handle)
+            return handle
+
+        return _start
+
+    def test_distinct_server_keys_coexist_without_stopping_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True)):
+                with mock.patch.dict(os.environ, {
+                    "RSIBOX_VLLM_MODEL": "m",
+                    "RSIBOX_VLLM_PORT": "18600",
+                    "RSIBOX_VLLM_WORK": os.path.join(tmp, "w0"),
+                    "CUDA_VISIBLE_DEVICES": "2",
+                }):
+                    lab0 = CL.VllmLab(shared=True)
+                with mock.patch.dict(os.environ, {
+                    "RSIBOX_VLLM_MODEL": "m",
+                    "RSIBOX_VLLM_PORT": "18601",
+                    "RSIBOX_VLLM_WORK": os.path.join(tmp, "w1"),
+                    "CUDA_VISIBLE_DEVICES": "3",
+                }):
+                    lab1 = CL.VllmLab(shared=True)
+
+            self.assertEqual(len(started), 2)
+            self.assertNotEqual(lab0.server_key, lab1.server_key)
+            self.assertTrue(lab0.server.alive())
+            self.assertTrue(lab1.server.alive())
+            self.assertEqual(lab0.server.state["stops"], 0)
+            self.assertEqual(lab1.server.state["stops"], 0)
+            self.assertEqual(set(CL.VllmLab._shared_servers.keys()), {lab0.server_key, lab1.server_key})
+
+            # Explicit shared teardown for lab1 leaves distinct sibling lab0 untouched.
+            lab1.close(stop_shared=True)
+            self.assertTrue(lab0.server.alive())
+            self.assertFalse(lab1.server.alive())
+            self.assertEqual(lab0.server.state["stops"], 0)
+            self.assertEqual(lab1.server.state["stops"], 1)
+
+            self.assertEqual(CL.VllmLab.stop_shared(lab0.server_key), 1)
+            self.assertFalse(lab0.server.alive())
+            self.assertEqual(lab0.server.state["stops"], 1)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+    def test_unshared_close_stops_server_immediately_when_backend_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.dict(os.environ, {
+                      "RSIBOX_VLLM_MODEL": "m",
+                      "RSIBOX_VLLM_PORT": "18610",
+                      "RSIBOX_VLLM_WORK": os.path.join(tmp, "w"),
+                  })):
+                lab_a = CL.VllmLab(shared=False)
+                lab_b = CL.VllmLab(shared=False)
+
+            self.assertIsNone(lab_a._backend)
+            self.assertTrue(lab_a._owns_server)
+            self.assertTrue(lab_b._owns_server)
+            self.assertIsNot(lab_a.server, lab_b.server)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+            lab_a.close()
+            self.assertFalse(lab_a.server.alive())
+            self.assertEqual(lab_a.server.state["stops"], 1)
+            self.assertTrue(lab_b.server.alive())
+            self.assertEqual(lab_b.server.state["stops"], 0)
+
+            # Idempotent second close must not stop again.
+            lab_a.close()
+            lab_a.close(stop_shared=True)
+            self.assertEqual(lab_a.server.state["stops"], 1)
+
+            lab_b.close()
+            self.assertFalse(lab_b.server.alive())
+            self.assertEqual(lab_b.server.state["stops"], 1)
+
+    def test_shared_close_preserves_warm_server_for_sequential_reuse_and_stop_shared_stops(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            env = {
+                "RSIBOX_VLLM_MODEL": "m",
+                "RSIBOX_VLLM_PORT": "18620",
+                "RSIBOX_VLLM_WORK": os.path.join(tmp, "shared_w"),
+                "CUDA_VISIBLE_DEVICES": "2",
+            }
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True),
+                  mock.patch.dict(os.environ, env)):
+                lab1 = CL.VllmLab(shared=True)
+                lab1.close()
+                # Sequential conformance c0..c10 expects warm reuse after close().
+                self.assertTrue(lab1.server.alive())
+                self.assertEqual(lab1.server.state["stops"], 0)
+                self.assertIn(lab1.server_key, CL.VllmLab._shared_servers)
+
+                lab2 = CL.VllmLab(shared=True)
+                self.assertEqual(len(started), 1)
+                self.assertIs(lab1.server, lab2.server)
+                lab2.close()
+                self.assertTrue(lab2.server.alive())
+                self.assertEqual(lab2.server.state["stops"], 0)
+
+            # Explicit stop_shared=True (or atexit _cleanup_shared) stops and removes it once.
+            lab2.close(stop_shared=True)
+            lab2.close(stop_shared=True)
+            self.assertFalse(lab2.server.alive())
+            self.assertEqual(lab2.server.state["stops"], 1)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+            # Two shared=True owners sharing one server: both calling close(stop_shared=True) stops once.
+            started.clear()
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True),
+                  mock.patch.dict(os.environ, env)):
+                owner_a = CL.VllmLab(shared=True)
+                owner_b = CL.VllmLab(shared=True)
+            self.assertIs(owner_a.server, owner_b.server)
+            owner_a.close(stop_shared=True)
+            owner_b.close(stop_shared=True)
+            self.assertEqual(owner_a.server.state["stops"], 1)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+            # Calling close(stop_shared=True) after VllmLab.stop_shared() does not stop again.
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True),
+                  mock.patch.dict(os.environ, env)):
+                owner_c = CL.VllmLab(shared=True)
+            self.assertEqual(CL.VllmLab.stop_shared(), 1)
+            owner_c.close(stop_shared=True)
+            self.assertEqual(owner_c.server.state["stops"], 1)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+    def test_unshared_init_cleans_up_server_if_session_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.SS, "Session", side_effect=RuntimeError("session boom")),
+                  mock.patch.dict(os.environ, {
+                      "RSIBOX_VLLM_MODEL": "m",
+                      "RSIBOX_VLLM_PORT": "18625",
+                      "RSIBOX_VLLM_WORK": os.path.join(tmp, "fail_init"),
+                  })):
+                with self.assertRaisesRegex(RuntimeError, "session boom"):
+                    CL.VllmLab(shared=False)
+
+            self.assertEqual(len(started), 1)
+            self.assertFalse(started[0].alive())
+            self.assertEqual(started[0].state["stops"], 1)
+            self.assertEqual(CL.VllmLab._shared_servers, {})
+
+    def test_acquire_shared_server_reaps_raced_dead_candidate_without_touching_siblings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True)):
+                with mock.patch.dict(os.environ, {
+                    "RSIBOX_VLLM_MODEL": "m",
+                    "RSIBOX_VLLM_PORT": "18626",
+                    "RSIBOX_VLLM_WORK": os.path.join(tmp, "sibling"),
+                    "CUDA_VISIBLE_DEVICES": "2",
+                }):
+                    sibling = CL.VllmLab(shared=True)
+
+            # Register a candidate that passes initial alive() + _server_at_base()
+            # and then exits right before re-acquiring _shared_lock.
+            raced_state = {"alive_calls": 0, "stops": 0}
+
+            def raced_alive():
+                raced_state["alive_calls"] += 1
+                return raced_state["alive_calls"] == 1
+
+            def raced_stop():
+                raced_state["stops"] += 1
+
+            raced_srv = NS(port=18627, alive=raced_alive, stop=raced_stop, start_s=0.01)
+            target_env = {
+                "RSIBOX_VLLM_MODEL": "m",
+                "RSIBOX_VLLM_PORT": "18627",
+                "RSIBOX_VLLM_WORK": os.path.join(tmp, "target"),
+                "CUDA_VISIBLE_DEVICES": "3",
+            }
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=True),
+                  mock.patch.dict(os.environ, target_env)):
+                # Pre-populate target key using the exact server_key that VllmLab computes.
+                probe_lab = CL.VllmLab(shared=False)
+                probe_lab.close()
+                CL.VllmLab._shared_servers[probe_lab.server_key] = raced_srv
+
+                recovered = CL.VllmLab(shared=True)
+
+            self.assertEqual(raced_state["stops"], 1)
+            self.assertIsNot(recovered.server, raced_srv)
+            self.assertIs(CL.VllmLab._shared_servers[recovered.server_key], recovered.server)
+            self.assertTrue(sibling.server.alive())
+            self.assertEqual(sibling.server.state["stops"], 0)
+
+            # Intentional replacement when same-key server is alive but not at base
+            # must also leave distinct siblings untouched.
+            old_recovered_srv = recovered.server
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_server_at_base", return_value=False),
+                  mock.patch.dict(os.environ, target_env)):
+                replaced = CL.VllmLab(shared=True)
+
+            self.assertFalse(old_recovered_srv.alive())
+            self.assertEqual(old_recovered_srv.state["stops"], 1)
+            self.assertIs(CL.VllmLab._shared_servers[replaced.server_key], replaced.server)
+            self.assertTrue(sibling.server.alive())
+            self.assertEqual(sibling.server.state["stops"], 0)
+
+    def test_shadow_promotion_syncs_server_key_port_and_shared_registry(self):
+        from . import snapshot_hooks as SH
+
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.dict(os.environ, {
+                      "RSIBOX_VLLM_MODEL": "m",
+                      "RSIBOX_VLLM_PORT": "18640",
+                      "RSIBOX_VLLM_WORK": os.path.join(tmp, "promo"),
+                      "CUDA_VISIBLE_DEVICES": "2",
+                  })):
+                lab = CL.VllmLab(shared=True)
+
+            old_key = lab.server_key
+            self.assertEqual(old_key[2], 18640)
+            self.assertEqual(old_key[6], "2")
+            shadow = NS(port=18645, pid=99999, kernel_dir=os.path.join(tmp, "sk"), alive=lambda: True)
+            promoter = SH.VllmShadowPromoter(shadow_server=shadow, timeout=5.0)
+            with (mock.patch.object(SH, "_wake_resume_and_verify", return_value={"ok": True}),
+                  mock.patch.object(lab.session, "recovered", return_value={"ok": True}),
+                  mock.patch.object(lab.session, "poisoned", return_value=[])):
+                res = promoter.promote(lab)
+
+            self.assertTrue(res["ok"], res)
+            self.assertEqual(lab.port, 18645)
+            self.assertEqual(lab.server_key, old_key[:2] + (18645,) + old_key[3:])
+            self.assertEqual(lab.server_key[6], "2")
+            self.assertNotIn(old_key, CL.VllmLab._shared_servers)
+            self.assertIs(CL.VllmLab._shared_servers[lab.server_key], shadow)
+
+    def test_sandbox_pool_drain_and_close_stop_unshared_vllm_labs(self):
+        from rsibox.pool import PoolSlot, SandboxPool
+
+        with tempfile.TemporaryDirectory() as tmp:
+            site = self._make_fake_site(tmp)
+            started = []
+            with (mock.patch.object(CL, "_site_packages", return_value=site),
+                  mock.patch.object(CL.VllmLab, "_start_server", self._make_stub_start(started)),
+                  mock.patch.object(CL.VllmLab, "_ctl", return_value={"ok": True}),
+                  mock.patch.object(CL.VllmLab, "status", return_value={"state": "base"})):
+                with mock.patch.dict(os.environ, {
+                    "RSIBOX_VLLM_MODEL": "m",
+                    "RSIBOX_VLLM_PORT": "18630",
+                    "RSIBOX_VLLM_WORK": os.path.join(tmp, "p0"),
+                    "CUDA_VISIBLE_DEVICES": "2",
+                }):
+                    lab0 = CL.VllmLab(shared=False)
+                with mock.patch.dict(os.environ, {
+                    "RSIBOX_VLLM_MODEL": "m",
+                    "RSIBOX_VLLM_PORT": "18631",
+                    "RSIBOX_VLLM_WORK": os.path.join(tmp, "p1"),
+                    "CUDA_VISIBLE_DEVICES": "3",
+                }):
+                    lab1 = CL.VllmLab(shared=False)
+                pool = SandboxPool([PoolSlot("s0", lab0), PoolSlot("s1", lab1)], close_labs=True)
+                drained = pool.drain_slot("s1", close_lab=True)
+                self.assertTrue(drained["ok"])
+                self.assertTrue(lab0.server.alive())
+                self.assertFalse(lab1.server.alive())
+                self.assertEqual(lab1.server.state["stops"], 1)
+                pool.close()
+                self.assertFalse(lab0.server.alive())
+                self.assertEqual(lab0.server.state["stops"], 1)
 
 
 if __name__ == "__main__":
