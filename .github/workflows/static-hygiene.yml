@@ -1,0 +1,30 @@
+name: Static hygiene & architecture guards
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  PYTHONNOUSERSITE: "1"
+jobs:
+  static-hygiene:
+    name: "static: Pyright & architecture guards"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pyright
+        run: python3 -m pip install --quiet --disable-pip-version-check "pyright==1.1.414"
+      - name: Run pyright on verified type-clean modules
+        run: pyright
+      - name: Run AST architecture guard tests
+        run: python3 -W error::ResourceWarning -m unittest scripts.test_architecture_guards -v
