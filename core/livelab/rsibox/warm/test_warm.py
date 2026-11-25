@@ -1507,6 +1507,247 @@ class SnapshotContractAndRecoveryTests(unittest.TestCase):
             self.assertEqual(self_wait_replenisher.failed, 1)
             self.assertIn("cannot call wait()", self_wait_replenisher.last_error)
 
+    def test_standby_shadow_driver_multi_shadow_ready_count_skips_unnecessary_wait(self):
+        """Golden case: K>=2 pre-parked shadows with `ready_count_fn` promote immediately during in-flight restock.
+
+        Proves:
+        1. Invalid non-callable `ready_count_fn` raises TypeError.
+        2. With K=2 parked shadows and an in-flight background replenisher blocked on a gate,
+           Failover #1 and Failover #2 BOTH promote immediately without stalling on `replenish_wait_timeout_s`.
+        3. Failover #3 (ready_count == 0) STILL waits for the in-flight restock and promotes Shadow #3 cleanly.
+        4. When `ready_count_fn()` stays 0 (with or without an async replenisher, or on bad return / exception),
+           `StandbyShadowDriver` fails closed without stopping the live primary (or delegates to `fallback_driver`).
+        """
+        from kernel import coordinator as kernel_coordinator
+
+        with self.assertRaises(TypeError):
+            StandbyShadowDriver(lambda lab, store: {"ok": True}, ready_count_fn=2)  # type: ignore[arg-type]
+
+        stop_calls: list[str] = []
+        promoted_ids: list[str] = []
+
+        class _MultiShadowLab(BaseLab):
+            name = "multi_shadow_lab"
+
+            def _start_engine(self):
+                participant = kernel_coordinator.LocalParticipant("participant")
+                return kernel_coordinator.StepGapCoordinator([participant], contextlib.nullcontext), []
+
+            def _stop_engine(self):
+                stop_calls.append("stop")
+
+            def _run_workload(self, workload):
+                return {"ok": True}
+
+        ready_shadows = ["sh1", "sh2"]
+        ready_lock = threading.Lock()
+        repl1_entered = threading.Event()
+        repl1_release = threading.Event()
+        repl2_release = threading.Event()
+        restock_seq = [2]
+
+        def promote_from_queue(lab, store):
+            with ready_lock:
+                if not ready_shadows:
+                    return {"ok": False, "error": "no shadow"}
+                sid = ready_shadows.pop(0)
+            promoted_ids.append(sid)
+            lab._spawn()
+            return {"ok": True, "reset": ["shadow promoted"], "shadow_id": sid}
+
+        def ready_count() -> int:
+            with ready_lock:
+                return len(ready_shadows)
+
+        def gated_restock(lab, store):
+            with ready_lock:
+                restock_seq[0] += 1
+                idx = restock_seq[0]
+            if idx == 3:
+                repl1_entered.set()
+                repl1_release.wait(timeout=5.0)
+            elif idx == 4:
+                # Stays gated while Failover #3 promotes sh3, proving wait(until=...) wakes
+                # on attempt #1 completion instead of blocking on queued pending attempt #2!
+                repl2_release.wait(timeout=5.0)
+            with ready_lock:
+                ready_shadows.append(f"sh{idx}")
+            return {"ok": True}
+
+        with AsyncShadowReplenisher(gated_restock, queue_when_busy=True) as replenisher:
+            driver = StandbyShadowDriver(
+                promote_fn=promote_from_queue,
+                replenish_fn=replenisher,
+                replenish_wait_timeout_s=5.0,
+                ready_count_fn=ready_count,
+            )
+            lab = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=driver)
+            try:
+                # Failover #1 promotes sh1 and kicks off background restock #1 (sh3).
+                r1 = lab.reset("respawn")
+                self.assertTrue(r1["ok"], r1)
+                self.assertEqual(r1["shadow_id"], "sh1")
+                self.assertTrue(repl1_entered.wait(timeout=2.0))
+
+                # Failover #2 MUST NOT wait on blocked restock #1 because sh2 is already ready,
+                # and it queues pending restock #2 (sh4, gated independently on repl2_release).
+                t0 = time.perf_counter()
+                r2 = lab.reset("respawn")
+                r2_elapsed = time.perf_counter() - t0
+                self.assertTrue(r2["ok"], r2)
+                self.assertEqual(r2["shadow_id"], "sh2")
+                self.assertLess(r2_elapsed, 1.0, f"Failover #2 stalled behind in-flight restock: {r2_elapsed:.3f}s")
+                self.assertEqual(ready_count(), 0)
+                self.assertTrue(replenisher.status()["pending"])
+
+                # Failover #3 sees ready_count == 0, wakes IMMEDIATELY when sh3 completes even though
+                # pending restock #2 (sh4) remains blocked on repl2_release!
+                def release_sh3_only() -> None:
+                    time.sleep(0.05)
+                    repl1_release.set()
+
+                releaser = threading.Thread(target=release_sh3_only, daemon=True)
+                releaser.start()
+                t3 = time.perf_counter()
+                r3 = lab.reset("respawn")
+                r3_elapsed = time.perf_counter() - t3
+                releaser.join(timeout=2.0)
+                self.assertTrue(r3["ok"], r3)
+                self.assertEqual(r3["shadow_id"], "sh3")
+                self.assertLess(r3_elapsed, 1.0, f"Failover #3 blocked on queued restock #2: {r3_elapsed:.3f}s")
+                self.assertEqual(promoted_ids, ["sh1", "sh2", "sh3"])
+                repl2_release.set()
+                self.assertTrue(replenisher.wait(timeout_s=2.0))
+            finally:
+                repl1_release.set()
+                repl2_release.set()
+
+        # Fail-closed checks with AsyncShadowReplenisher:
+        # (a) idle replenisher with ready_count == 0 refuses WITHOUT stopping primary & nudges restock
+        # (b) fallback_driver with idle open replenisher and ready_count == 0 delegates & triggers replenish
+        # (c) last_failed=True is bypassed when ready_count > 0
+        # (d) is_closed=True still fails closed even when ready_count > 0 (without calling ready_count_fn)
+        # (e) wait timeout with ready_count == 0 returns standby_not_ready without stopping primary
+        nudge_calls: list[str] = []
+        with AsyncShadowReplenisher(lambda lab, store: (nudge_calls.append("nudged") or {"ok": True})) as idle_repl:
+            stop_calls.clear()
+            drv_idle_empty = StandbyShadowDriver(
+                promote_from_queue, replenish_fn=idle_repl, ready_count_fn=lambda: 0
+            )
+            lab_ie = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=drv_idle_empty)
+            rep_ie = lab_ie.reset("respawn")
+            self.assertFalse(rep_ie["ok"])
+            self.assertIn("no standby shadow ready", rep_ie["error"])
+            self.assertEqual(rep_ie["replenish"], "started")
+            self.assertEqual(stop_calls, [])
+            self.assertTrue(idle_repl.wait(timeout_s=2.0))
+            self.assertEqual(len(nudge_calls), 1)
+
+            drv_idle_fb = StandbyShadowDriver(
+                promote_from_queue,
+                replenish_fn=idle_repl,
+                ready_count_fn=lambda: 0,
+                fallback_driver=DefaultRespawnDriver(),
+            )
+            lab_ifb = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=drv_idle_fb)
+            rep_ifb = lab_ifb.reset("respawn")
+            self.assertTrue(rep_ifb["ok"], rep_ifb)
+            self.assertEqual(rep_ifb["fallback_from"], "standby_shadow")
+            self.assertEqual(rep_ifb["replenish"], "started")
+            self.assertTrue(idle_repl.wait(timeout_s=2.0))
+            self.assertEqual(len(nudge_calls), 2)
+
+        # (c) last_failed=True bypassed when ready_count > 0; (d) is_closed=True skips probe & fails closed
+        with AsyncShadowReplenisher(lambda lab, store: {"ok": False, "error": "transient"}) as fail_repl:
+            fail_repl("lab", None)
+            self.assertTrue(fail_repl.wait(timeout_s=2.0))
+            with ready_lock:
+                ready_shadows[:] = ["sh_backup"]
+            drv_bypass_fail = StandbyShadowDriver(
+                promote_from_queue, replenish_fn=fail_repl, ready_count_fn=ready_count
+            )
+            lab_bf = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=drv_bypass_fail)
+            rep_bf = lab_bf.reset("respawn")
+            self.assertTrue(rep_bf["ok"], rep_bf)
+            self.assertEqual(rep_bf["shadow_id"], "sh_backup")
+            self.assertTrue(fail_repl.wait(timeout_s=2.0))
+
+        probe_calls_when_closed: list[int] = []
+        closed_repl = AsyncShadowReplenisher(lambda lab, store: {"ok": True})
+        closed_repl.close()
+        stop_calls.clear()
+        drv_closed = StandbyShadowDriver(
+            promote_from_queue,
+            replenish_fn=closed_repl,
+            ready_count_fn=lambda: (probe_calls_when_closed.append(1) or 2),
+        )
+        lab_cl = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=drv_closed)
+        rep_cl = lab_cl.reset("respawn")
+        self.assertFalse(rep_cl["ok"])
+        self.assertIn("replenisher is closed", rep_cl["error"])
+        self.assertEqual(stop_calls, [])
+        self.assertEqual(probe_calls_when_closed, [])
+
+        # (e) Timeout with ready_count == 0 and stuck in-flight restock fails closed cleanly
+        stuck_ev = threading.Event()
+        stuck_started = threading.Event()
+        try:
+            with AsyncShadowReplenisher(lambda lab, store: (stuck_started.set(), stuck_ev.wait(timeout=5.0), {"ok": True})[2]) as stuck_repl:
+                stuck_repl("lab", None)
+                self.assertTrue(stuck_started.wait(timeout=2.0))
+                stop_calls.clear()
+                drv_to = StandbyShadowDriver(
+                    promote_from_queue,
+                    replenish_fn=stuck_repl,
+                    replenish_wait_timeout_s=0.05,
+                    ready_count_fn=lambda: 0,
+                )
+                lab_to = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=drv_to)
+                rep_to = lab_to.reset("respawn")
+                self.assertFalse(rep_to["ok"])
+                self.assertIn("in flight", rep_to["error"])
+                self.assertEqual(stop_calls, [])
+                stuck_ev.set()
+        finally:
+            stuck_ev.set()
+
+        # Fail-closed checks when ready_count_fn returns 0, -1, bool, non-int, or raises (NO async replenisher):
+        stop_calls.clear()
+        empty_zero = StandbyShadowDriver(promote_from_queue, ready_count_fn=lambda: 0)
+        rep_zero = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=empty_zero).reset("respawn")
+        self.assertFalse(rep_zero["ok"])
+        self.assertIn("no standby shadow ready", rep_zero["error"])
+        self.assertEqual(stop_calls, [])
+
+        for bad_probe in (
+            lambda: -1,
+            lambda: True,
+            lambda: "1",
+            lambda: (_ for _ in ()).throw(RuntimeError("probe boom")),
+        ):
+            with self.assertLogs("rsibox.warm.recovery", level="WARNING") as logs:
+                bad_drv = StandbyShadowDriver(promote_from_queue, ready_count_fn=bad_probe)  # type: ignore[arg-type]
+                rep = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=bad_drv).reset("respawn")
+            self.assertFalse(rep["ok"])
+            self.assertIn("ready_count_fn invalid", rep["error"])
+            self.assertTrue(logs.output)
+            self.assertEqual(stop_calls, [], "must not stop live primary when ready_count_fn is invalid")
+
+        # Fallback delegation when ready_count == 0 with synchronous replenish_fn triggers sync restock:
+        sync_restocks: list[str] = []
+        fallback_driver = StandbyShadowDriver(
+            promote_from_queue,
+            replenish_fn=lambda lab, store: (sync_restocks.append("sync_restocked") or "restocked"),
+            ready_count_fn=lambda: 0,
+            fallback_driver=DefaultRespawnDriver(),
+        )
+        lab_fb = _MultiShadowLab(weight_store=DiskStore(), recovery_driver=fallback_driver)
+        rep_fb = lab_fb.reset("respawn")
+        self.assertTrue(rep_fb["ok"], rep_fb)
+        self.assertEqual(rep_fb["fallback_from"], "standby_shadow")
+        self.assertEqual(rep_fb["replenish"], "restocked")
+        self.assertEqual(sync_restocks, ["sync_restocked"])
+
 
 if __name__ == "__main__":
     unittest.main()
