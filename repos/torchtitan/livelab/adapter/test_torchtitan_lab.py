@@ -151,15 +151,130 @@ class TorchTitanGoldenTests(unittest.TestCase):
         self.assertEqual(self.lab.status()["state"], "base")
         self.assertEqual(self.lab.check()["output"], out0)
 
-    def test_fsdp2_world_size_gt_1_fails_closed(self):
-        """Input: `TorchTitanLab` and `run_fresh` configured with `mode='fsdp2', world_size=2`.
-        Expected: both refuse immediately with `ValueError` instead of deadlocking `init_process_group`."""
-        from adapter.worker import run_fresh
+    def test_world_size_validation_pluggable_hooks_and_parallel_fresh_parity(self):
+        """Input: invalid `world_size`/`timeout`, pluggable `weight_store`/`recovery_driver`,
+        transient-thread spawn, parallel `PackageOverlay` propagation, and asymmetric sibling hang.
+        Expected: strict fail-closed validation, `weight_store.probe(tp=2)` + `recovery_driver` work,
+        workers survive spawning-thread exit, and rank-0 crash kills hanging rank-1 fast."""
+        import threading
+        import time
+        from adapter.worker import _run_fresh_parallel, aggregate_ranks, run_fresh
 
-        with self.assertRaisesRegex(ValueError, "fsdp2 mode currently supports world_size=1"):
-            TorchTitanLab({"mode": "fsdp2", "world_size": 2}, auto_spawn=False)
-        with self.assertRaisesRegex(ValueError, "fsdp2 mode currently supports world_size=1"):
-            run_fresh({"config": {"mode": "fsdp2", "world_size": 2}, "workload": {"steps": 1}})
+        for bad_ws in (0, -1, True, 1.5, "2"):
+            with self.assertRaises(ValueError):
+                TorchTitanLab({"mode": "fsdp2", "world_size": bad_ws}, auto_spawn=False)
+            with self.assertRaises(ValueError):
+                run_fresh({"config": {"mode": "fsdp2", "world_size": bad_ws}, "workload": {"steps": 1}})
+        for bad_to in (0, 0.0, -5.0, float("nan"), float("inf"), True):
+            with self.assertRaises(ValueError):
+                run_fresh({"config": {"mode": "cpu", "world_size": 2}, "workload": {"steps": 1}, "timeout": bad_to})
+
+        # Pluggable weight_store fail-closed probe with tp == ranks == 2, and recovery_driver delegation.
+        probe_calls: list[int] = []
+
+        from rsibox.warm.recovery import DefaultRespawnDriver
+        from rsibox.warm.types import StoreProbe
+
+        class _RejectStore:
+            name = "test-store"
+
+            def probe(self, *, tp=None, visible_devices=None):
+                probe_calls.append(tp)
+                return StoreProbe(ok=False, backend=self.name, error="store offline")
+
+        with self.assertRaisesRegex(RuntimeError, "store offline"):
+            TorchTitanLab({"mode": "cpu", "world_size": 2}, weight_store=_RejectStore(), auto_spawn=True)
+        self.assertEqual(probe_calls, [2])
+
+        respawn_calls: list[int] = []
+
+        class _TrackStore:
+            name = "track-store"
+
+            def probe(self, *, tp=None, visible_devices=None):
+                respawn_calls.append(tp)
+                return StoreProbe(ok=True, backend=self.name)
+
+        class _TrackDriver(DefaultRespawnDriver):
+            def respawn(self, lab, *args, **kwargs):
+                respawn_calls.append(-lab.ranks)
+                return super().respawn(lab, *args, **kwargs)
+
+        custom_lab = ToyTorchTitanLab(weight_store=_TrackStore(), recovery_driver=_TrackDriver())
+        self.addCleanup(custom_lab.close)
+        self.assertEqual(custom_lab.ranks, 2)
+        rst = custom_lab.reset("respawn")
+        self.assertTrue(rst["ok"], rst)
+        # Initial boot probes tp=2; respawn invokes _TrackDriver (-2) + DefaultRespawnDriver weight_store probe (2) + _start_engine probe (2).
+        self.assertIn(-2, respawn_calls)
+        self.assertGreaterEqual(respawn_calls.count(2), 2)
+
+        # Negative rank must fail closed instead of indexing self._workers[-1].
+        self.assertFalse(custom_lab.inject("crash", rank=-1)["ok"])
+
+        # Spawning live workers on a transient thread must NOT trigger PR_SET_PDEATHSIG SIGTERM on thread exit.
+        spawned: list[ToyTorchTitanLab] = []
+        t_spawn = threading.Thread(target=lambda: spawned.append(ToyTorchTitanLab()))
+        t_spawn.start()
+        t_spawn.join(timeout=15.0)
+        self.assertEqual(len(spawned), 1)
+        self.addCleanup(spawned[0].close)
+        time.sleep(0.15)
+        self.assertTrue(spawned[0].check()["ok"])
+
+        # Real 2-rank parallel subprocess fresh_check with PackageOverlay patch propagation!
+        patch = self.lab.patches()["visible"]
+        self.assertTrue(self.lab.install(patch)["ok"])
+        live_edited = self.lab.check()["output"]
+        self.assertTrue(self.lab.uninstall()["ok"])
+        overrides = self.lab.files(patch, against="disk")
+        livelab_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        core_dir = os.path.abspath(os.path.join(livelab_dir, "..", "..", "..", "core", "livelab"))
+        old_pp = os.environ.get("PYTHONPATH")
+        try:
+            with harness.PackageOverlay("adapter", overrides) as overlay:
+                os.environ["PYTHONPATH"] = os.pathsep.join([overlay.root, livelab_dir, core_dir] + ([old_pp] if old_pp else []))
+                per_rank = _run_fresh_parallel(
+                    {"mode": "cpu", "world_size": 2, "hidden": 8, "ffn": 16, "layers": 1, "steps": 2, "seed": 0},
+                    {"steps": 2},
+                    world_size=2,
+                    timeout_s=30.0,
+                )
+            self.assertEqual(aggregate_ranks(per_rank), live_edited)
+
+            # Asymmetric sibling hang: one rank fails immediately while sibling sleeps 20 s -> must fail fast (< 8 s)!
+            m_mod = DEFAULT_MODULES[0]
+            # Rank 0 and rank 1 have distinct deterministic y_batch[0][0] (seed 500 vs 501): check exact sign split.
+            import random as _r_chk
+            r0_y = _r_chk.Random(500).uniform(-0.5, 0.5)
+            r1_y = _r_chk.Random(501).uniform(-0.5, 0.5)
+            mid_y = (r0_y + r1_y) / 2.0
+            asym_src = harness.edit_once(
+                self.lab._base_source(m_mod),
+                "diffs = [(p_val - t_val) for p_row, t_row in zip(pred, target) for p_val, t_val in zip(p_row, t_row)]",
+                "import time as _time\n"
+                f"    if target[0][0] < {mid_y!r}:\n"
+                "        raise RuntimeError('rank-crash-fast')\n"
+                "    _time.sleep(20.0)\n"
+                "    diffs = [(p_val - t_val) for p_row, t_row in zip(pred, target) for p_val, t_val in zip(p_row, t_row)]",
+            )
+            asym_overrides = self.lab.files({"files": {m_mod: asym_src}}, against="disk")
+            t0 = time.monotonic()
+            with harness.PackageOverlay("adapter", asym_overrides) as asym_ov:
+                os.environ["PYTHONPATH"] = os.pathsep.join([asym_ov.root, livelab_dir, core_dir] + ([old_pp] if old_pp else []))
+                with self.assertRaisesRegex(RuntimeError, "rank-crash-fast"):
+                    _run_fresh_parallel(
+                        {"mode": "cpu", "world_size": 2, "hidden": 8, "ffn": 16, "layers": 1, "steps": 1, "seed": 0},
+                        {"steps": 1},
+                        world_size=2,
+                        timeout_s=30.0,
+                    )
+            self.assertLess(time.monotonic() - t0, 8.0)
+        finally:
+            if old_pp is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old_pp
 
     def test_rng_state_restored_bit_exact_for_stochastic_hotswapped_op(self):
         """Input: hot-swap `compute_loss` to add `random.random() * 1e-3` noise.
@@ -230,6 +345,48 @@ class TorchTitanRealCudaFsdp2Tests(unittest.TestCase):
             c1 = lab.check()
             self.assertTrue(c1["ok"] and c1["proven"] is True, c1)
             self.assertNotEqual(c1["output"]["losses"], c0["output"]["losses"])
+            u = lab.uninstall()
+            self.assertTrue(u["ok"], u)
+            c2 = lab.check()
+            max_diff = max(abs(a - b) for a, b in zip(c0["output"]["losses"], c2["output"]["losses"]))
+            self.assertEqual(max_diff, 0.0)
+        finally:
+            lab.close()
+
+    def test_real_fsdp2_cuda_two_rank_nccl_hotswap_fresh_parity_and_rollback(self):
+        """Input: real 2-rank `TorchTitanLab(mode='fsdp2', world_size=2)` over NCCL on 2 CUDA GPUs.
+        Expected: both ranks shard via `fully_shard` on distinct GPUs (`cuda:0`, `cuda:1`), live
+        hot-swap proves execution on both ranks, matches parallel 2-rank `fresh_check()`, and
+        uninstall restores bit-exact losses (`max_abs_loss_diff == 0.0`)."""
+        if not _cuda_fsdp2_available():
+            self.skipTest("requires CUDA GPU and PyTorch FSDP2")
+        import torch
+
+        if torch.cuda.device_count() < 2:
+            self.skipTest("requires >= 2 visible CUDA GPUs for world_size=2 FSDP2 NCCL test")
+        lab = TorchTitanLab(
+            {"mode": "fsdp2", "world_size": 2, "hidden": 64, "ffn": 128, "layers": 2, "steps": 2, "seed": 0},
+            check_timeout=45.0,
+            startup_timeout=90.0,
+        )
+        try:
+            c0 = lab.check()
+            self.assertTrue(c0["ok"], c0)
+            self.assertEqual(c0["output"]["per_rank"]["rank0"]["device"], "cuda:0")
+            self.assertEqual(c0["output"]["per_rank"]["rank1"]["device"], "cuda:1")
+            self.assertTrue(c0["output"]["per_rank"]["rank0"]["fsdp2"])
+            self.assertTrue(c0["output"]["per_rank"]["rank1"]["fsdp2"])
+            patch = lab.patches()["visible"]
+            res = lab.install(patch)
+            self.assertTrue(res["ok"], res)
+            c1 = lab.check()
+            self.assertTrue(c1["ok"] and c1["proven"] is True, c1)
+            self.assertNotEqual(c1["output"]["losses"], c0["output"]["losses"])
+            self.assertIn("rank0", c1["witness"])
+            self.assertIn("rank1", c1["witness"])
+            fresh = lab.fresh_check(patch)
+            self.assertTrue(fresh["ok"], fresh)
+            self.assertEqual(c1["output"], fresh["output"])
             u = lab.uninstall()
             self.assertTrue(u["ok"], u)
             c2 = lab.check()

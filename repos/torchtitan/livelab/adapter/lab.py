@@ -5,7 +5,7 @@ import argparse, contextlib, json, os, subprocess, sys, tempfile, time
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from typing import Any
 
-from adapter.worker import FSDP2_SINGLE_RANK_ERR, aggregate_ranks
+from adapter.worker import FSDP2_SINGLE_RANK_ERR, aggregate_ranks, validate_world_size
 from kernel import coordinator
 from rsibox import harness, ipc, proc
 from rsibox.lab import BaseLab, RecaptureCoordinator
@@ -19,17 +19,20 @@ def _env_config() -> dict[str, Any]:
 
 
 class TorchTitanLab(BaseLab):
-    """RSIBox live lab over multi-rank CPU toy or single-rank PyTorch FSDP2 training workers."""
+    """RSIBox live lab over multi-rank CPU toy or single/multi-rank PyTorch FSDP2 training workers."""
 
     name, package, threaded_check = "torchtitan", "adapter", True
 
-    def __init__(self, config: dict[str, Any] | None = None, modules: tuple[str, ...] | list[str] | None = None, *, receipts: str | None = None, rpc_timeout: float = 30.0, check_timeout: float | None = None, startup_timeout: float = 90.0, auto_spawn: bool = True) -> None:
+    def __init__(self, config: dict[str, Any] | None = None, modules: tuple[str, ...] | list[str] | None = None, *, receipts: str | None = None, rpc_timeout: float = 30.0, check_timeout: float | None = None, startup_timeout: float = 90.0, weight_store: Any = None, recovery_driver: Any = None, auto_spawn: bool = True) -> None:
         self.config = {"mode": "fsdp2", "world_size": 1, **(json.loads(json.dumps(config)) if config is not None else _env_config())}
-        if str(self.config["mode"]) == "fsdp2" and int(self.config["world_size"]) > 1:
-            raise ValueError(FSDP2_SINGLE_RANK_ERR)
+        self.config["world_size"] = validate_world_size(self.config["world_size"])
         self._init_modules, self.startup_timeout, self._workers, self._gen = list(modules if modules is not None else DEFAULT_MODULES), float(startup_timeout), [], 0
         ct = float(check_timeout if check_timeout is not None else os.environ.get("RSIBOX_TORCHTITAN_CHECK_TIMEOUT", "30.0"))
-        super().__init__(receipts=receipts, check_timeout=ct, rpc_timeout=rpc_timeout, auto_spawn=auto_spawn)
+        super().__init__(receipts=receipts, check_timeout=ct, rpc_timeout=rpc_timeout, weight_store=weight_store, recovery_driver=recovery_driver, auto_spawn=auto_spawn)
+
+    @property
+    def ranks(self) -> int:
+        return int(self.config.get("world_size", 1))
 
     @classmethod
     def launch_environment(cls, args: list[str]) -> dict[str, str]:
@@ -47,11 +50,17 @@ class TorchTitanLab(BaseLab):
         return ll, os.path.abspath(os.environ.get("RSIBOX_LIVELAB") or os.path.join(ll, "..", "..", "..", "core", "livelab"))
 
     def _start_engine(self) -> tuple[Any, list[str]]:
+        world_size = int(self.config.get("world_size", 1))
+        if self.weight_store is not None and getattr(self.weight_store, "name", "none") != "none":
+            probe_result = self.weight_store.probe(tp=world_size, visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"))
+            if not probe_result.ok:
+                raise RuntimeError(f"weight store ({self.weight_store.name}) not ready: {probe_result.error}")
         self._gen += 1
-        world_size, port, (ll, core) = int(self.config.get("world_size", 1)), proc.free_port(), self._livelab_paths()
+        port, (ll, core) = proc.free_port(), self._livelab_paths()
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG", ":4096:8")}
         existing = [p for p in (env.get("PYTHONPATH") or "").split(os.pathsep) if p]
         env["PYTHONPATH"] = os.pathsep.join([p for p in (ll, core) if p not in existing] + existing)
+        pending_paths: list[str] = []
         try:
             for rank in range(world_size):
                 sock = ipc.short_sock_path(f"rsitt{rank}")
@@ -59,14 +68,20 @@ class TorchTitanLab(BaseLab):
                 with tempfile.NamedTemporaryFile(mode="w", prefix=f"rsitt-r{rank}-", suffix=".json", delete=False, encoding="utf-8") as sf:
                     json.dump({"sock_path": sock, "config": wcfg}, sf)
                     spec_path = sf.name
+                pending_paths.append(spec_path)
                 with tempfile.NamedTemporaryFile(mode="w", prefix=f"rsitt-r{rank}-", suffix=".log", delete=False, encoding="utf-8") as ef:
-                    p = subprocess.Popen([sys.executable, "-m", "adapter.worker", spec_path], env=env, stdout=subprocess.DEVNULL, stderr=ef, start_new_session=True)
                     err_path = ef.name
+                    pending_paths.append(err_path)
+                    p = subprocess.Popen([sys.executable, "-m", "adapter.worker", spec_path], env=env, stdout=subprocess.DEVNULL, stderr=ef, start_new_session=True)
                 self._workers.append({"rank": rank, "proc": p, "sock": sock, "spec": spec_path, "err": err_path})
+                pending_paths.clear()
             self._wait_for_workers()
             parts = [coordinator.CallParticipant(f"rank{w['rank']}", lambda m, pay, r=w["rank"]: self._rank_call(r, m, pay)) for w in self._workers]
             return RecaptureCoordinator(parts, gap=lambda fn: fn(), writer=self.writer, interface_version="1-draft", engine={"name": self.name, "version": str(self.config.get("mode", "fsdp2")), "commit": None}, phase2_deadline_s=self.rpc_timeout, post_commit_reset="state"), list(self._init_modules)
         except BaseException:
+            for path in pending_paths:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
             self._stop_engine()
             raise
 
@@ -112,7 +127,7 @@ class TorchTitanLab(BaseLab):
 
     def _rank_call(self, rank: int, method: str, payload: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
         gen = self._gen
-        if self._dirty or rank >= len(self._workers):
+        if self._dirty or rank < 0 or rank >= len(self._workers):
             raise ConnectionError("worker channel dirty; respawn required")
         try:
             return ipc.unix_json_call(self._workers[rank]["sock"], {"method": method, "payload": payload}, timeout=self.rpc_timeout if timeout is None else timeout)
@@ -171,9 +186,16 @@ class TorchTitanLab(BaseLab):
             overrides = self.files(patch, against="disk")
         except ValueError as exc:
             return {"ok": False, "output": None, "error": str(exc)}
-        spec, env = {"fresh": True, "config": {**self.config, "master_port": proc.free_port()}, "workload": {**self.default_workload(), **(workload or {})}}, {**os.environ, "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG", ":4096:8")}
+        outer_timeout = self.check_timeout + 120.0
+        inner_timeout = max(5.0, outer_timeout - 15.0)
+        spec, env = {
+            "fresh": True,
+            "config": {**self.config, "master_port": proc.free_port()},
+            "workload": {**self.default_workload(), **(workload or {})},
+            "timeout": inner_timeout,
+        }, {**os.environ, "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG", ":4096:8")}
         with harness.PackageOverlay(self.package, overrides) as overlay:
-            return harness.run_fresh_subprocess("adapter.worker", spec, overlay.root, extra_pythonpath=(ll, core), timeout=self.check_timeout + 120.0, env=env)
+            return harness.run_fresh_subprocess("adapter.worker", spec, overlay.root, extra_pythonpath=(ll, core), timeout=outer_timeout, env=env)
 
     def inject(self, fault: str, **kwargs: Any) -> dict[str, Any]:
         rank = int(kwargs.pop("rank", 0))
