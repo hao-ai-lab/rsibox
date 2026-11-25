@@ -1,12 +1,15 @@
 # Workload F(x)
 
-## Target Workload (Real GPU FSDP2, `world_size=1`)
+## Target Workload (Real GPU FSDP2, `world_size=1` and `world_size=2` NCCL)
 
 Deterministic multi-step PyTorch FSDP2 (`torch.distributed.fsdp.fully_shard`) training loop running
 `forward -> loss -> backward -> clip_grad_norm_ -> AdamW.step()` over a self-contained synthetic
-4-layer SwiGLU-style `TitanMLPNet` (`hidden=256`, `ffn=512`, `layers=4`, `batch_size=8`, `steps=3`,
-`seed=0`, `float32`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, TF32 disabled) with an `nccl` process group
-(upstream `pytorch/torchtitan` model/config integration is not yet wired):
+4-layer SwiGLU-style `TitanMLPNet` (`layers=4`, `steps=3`, `seed=0`, `float32`,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, TF32 disabled) with an `nccl` process group (upstream
+`pytorch/torchtitan` model/config integration is not yet wired):
+
+- **1× NVIDIA B200 (`world_size=1`):** `hidden=256`, `ffn=512`, `layers=4`, `batch_size=8`, `steps=3`.
+- **2× NVIDIA B200 (`EXP-F7`, `world_size=2` NCCL):** `hidden=512`, `ffn=1024`, `layers=4`, `batch_size=16`, `steps=3` (sharded across 2 NCCL ranks with parallel 2-rank `PackageOverlay` `fresh_check`).
 
 ```json
 {
@@ -41,5 +44,6 @@ processes with zero external dependencies.
    `max_abs_grad_norm_diff == 0.0`.
 5. **Fail-closed safety (`c5`, `c6`, `c8`, golden tests):** Partial-apply/commit faults roll back
    atomically across ranks; syntax, closure, module-state, empty, `__init__` constructor edits,
-   and unsupported `mode="fsdp2"` with `world_size > 1` are refused before mutating state; worker
-   crash/hang/lost/tamper faults poison the session until `reset("respawn")`.
+   invalid `world_size` (`<= 0`, non-int, or `> torch.cuda.device_count()`), and invalid `timeout`
+   (`<= 0`, non-finite, or `bool`) are refused before mutating state; worker crash/hang/lost/tamper
+   faults poison the session until `reset("respawn")`.
