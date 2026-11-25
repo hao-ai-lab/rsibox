@@ -11,6 +11,8 @@ import http.server
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -780,6 +782,51 @@ class VllmLabSleepModeAndShadowPromotionTest(unittest.TestCase):
             self.assertIn("uncommitted", reply["error"])
             stop_mock.assert_not_called()
             spawn_mock.assert_not_called()
+
+    def test_vllm_ctl_fast_fails_when_server_exits_mid_request(self):
+        """Regression for the 180 s SIGKILL race: if the vLLM server is alive when `_ctl()`
+        starts but gets SIGKILLed before writing a reply, `_ctl()` must return `lost=True`
+        within milliseconds instead of stalling for the full `check_timeout`."""
+        with tempfile.TemporaryDirectory(prefix="rsibox-vllm-ctl-kill-") as kdir:
+            sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            self.addCleanup(lambda: (sleeper.kill(), sleeper.wait()) if sleeper.poll() is None else None)
+
+            class _FakeProcHandle:
+                kernel_dir = kdir
+                port = 19999
+
+                def alive(self) -> bool:
+                    return sleeper.poll() is None
+
+            lab = conformance_lab.VllmLab.__new__(conformance_lab.VllmLab)
+            lab._backend = None
+            lab.check_timeout = 60.0
+            lab.server = _FakeProcHandle()
+
+            ctl_path = os.path.join(kdir, "ctl.json")
+            stop_killer = threading.Event()
+
+            def kill_mid_call() -> None:
+                while not stop_killer.is_set() and not os.path.exists(ctl_path):
+                    time.sleep(0.002)
+                if not stop_killer.is_set():
+                    sleeper.kill()
+                    sleeper.wait()
+
+            killer = threading.Thread(target=kill_mid_call, daemon=True)
+            killer.start()
+            t0 = time.perf_counter()
+            try:
+                reply = lab._ctl({"op": "status"})
+                elapsed_s = time.perf_counter() - t0
+            finally:
+                stop_killer.set()
+                killer.join(timeout=3.0)
+
+            self.assertFalse(reply["ok"])
+            self.assertTrue(reply.get("lost"))
+            self.assertIn("exited before reply", reply.get("error", ""))
+            self.assertLess(elapsed_s, 2.0, f"_ctl stalled for {elapsed_s:.3f}s instead of fast-failing")
 
 
 if __name__ == "__main__":
