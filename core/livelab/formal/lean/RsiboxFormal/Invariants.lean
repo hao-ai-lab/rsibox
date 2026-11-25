@@ -78,14 +78,18 @@ def runPhase2 (applyOk undoOk : Bool) : Phase2State :=
   else
     { outcome := .recoveryLatched, recoveryLatched := true }
 
-/-- 4. Failed apply + incomplete undo always latches recovery (fail-closed totality). -/
+/-- 4. Phase-2 transition is total and fail-closed: clean apply commits without latching,
+    failed apply + clean undo rolls back cleanly, and failed apply + incomplete undo latches recovery. -/
 theorem rollback_or_recovery_latched (applyOk undoOk : Bool) :
+    (applyOk = true →
+      (runPhase2 applyOk undoOk).outcome = .committed ∧
+      (runPhase2 applyOk undoOk).recoveryLatched = false) ∧
+    (applyOk = false ∧ undoOk = true →
+      (runPhase2 applyOk undoOk).outcome = .cleanRollback ∧
+      (runPhase2 applyOk undoOk).recoveryLatched = false) ∧
     (applyOk = false ∧ undoOk = false →
       (runPhase2 applyOk undoOk).recoveryLatched = true ∧
-      (runPhase2 applyOk undoOk).outcome = .recoveryLatched) ∧
-    ((runPhase2 applyOk undoOk).outcome = .committed ∨
-     (runPhase2 applyOk undoOk).outcome = .cleanRollback ∨
-     (runPhase2 applyOk undoOk).outcome = .recoveryLatched) := by
+      (runPhase2 applyOk undoOk).outcome = .recoveryLatched) := by
   cases applyOk <;> cases undoOk <;> simp [runPhase2]
 
 /-- Sandbox pool slot count accounting across all lifecycle buckets. -/

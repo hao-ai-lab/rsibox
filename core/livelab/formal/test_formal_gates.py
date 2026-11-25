@@ -182,10 +182,15 @@ class FormalGatesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             body = (
+                "import Init.Data.Nat.Basic\n"
                 "namespace RsiboxFormal\n"
-                "-- sorry admit axiom native_decide partial def @[extern \"c\"]\n"
+                "def q : Char := '\"'\n"
+                "def esc : String := \"\\\"--\"\n"
+                "def s' : Nat := 1\n"
+                "-- sorry admit axiom native_decide partial @[extern \"c\"]\n"
                 "/- outer /- inner sorry axiom Lean.ofReduceBool -/ still commented sorry -/\n"
-                "theorem ok : True := trivial\n"
+                "def q2 : Char := '\"' -- sorry in comment after char quote\n"
+                "@[simp] theorem ok : True := trivial\n"
                 "end RsiboxFormal\n"
             )
             self._write_lean_fixture(root, inv_body=body)
@@ -197,16 +202,21 @@ class FormalGatesTest(unittest.TestCase):
     def test_check_lean_axioms_rejects_cheats_mathlib_and_missing_coverage(self) -> None:
         cheats = [
             ("sorry", "theorem ok : True := by sorry\n"),
+            ("sorryAx", "theorem ok : True := by exact sorryAx True\n"),
             ("admit", "theorem ok : True := by admit\n"),
             ("axiom", "axiom fake : False\ntheorem ok : True := trivial\n"),
             ("opaque", "opaque hidden : Nat\ntheorem ok : True := trivial\n"),
-            ("partial def", "partial def loop : Nat := loop\ntheorem ok : True := trivial\n"),
+            ("partial", "partial def loop : Nat := loop\ntheorem ok : True := trivial\n"),
+            ("partial", "partial instance : Inhabited Nat := ⟨0⟩\ntheorem ok : True := trivial\n"),
             ("unsafe", "unsafe def bad : Nat := 0\ntheorem ok : True := trivial\n"),
             ("native_decide", "theorem ok : True := by native_decide\n"),
             ("Lean.ofReduceBool", "theorem ok : Lean.ofReduceBool = Lean.ofReduceBool := rfl\n"),
+            ("Lean.ofReduceNat", "theorem ok : Lean.ofReduceNat = Lean.ofReduceNat := rfl\n"),
             ("Lean.trustCompiler", "theorem ok : Lean.trustCompiler = Lean.trustCompiler := rfl\n"),
             ("implemented_by", "@[implemented_by bad] def f : Nat := 0\ntheorem ok : True := trivial\n"),
             ("@[extern", "@[extern \"c_fn\"] opaque cfn : Nat\ntheorem ok : True := trivial\n"),
+            ("sorry", "def q : Char := '\"'\ntheorem ok : True := by sorry\n"),
+            ("non-Init import", "import Lean\ntheorem ok : True := trivial\n"),
         ]
         for label, snippet in cheats:
             with tempfile.TemporaryDirectory() as tmp:
@@ -217,25 +227,61 @@ class FormalGatesTest(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(check_lean_axioms.main(["--root", str(root)]), 1)
 
+        # Non-Mathlib [[require]] in lakefile.toml and missing coverage for @[simp] theorem.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_lean_fixture(
                 root,
-                inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n",
-                lakefile='name = "bad"\n[[require]]\nname = "mathlib"\n',
+                inv_body="namespace RsiboxFormal\n@[simp] theorem hidden : True := trivial\nend RsiboxFormal\n",
+                lakefile='name = "bad"\n[[require]]\nname = "batteries"\n',
+                verify="import RsiboxFormal\n#print axioms RsiboxFormal.ok\n",
             )
             errs = check_lean_axioms.check_lean_axioms(root)
-            self.assertTrue(any("mathlib" in e for e in errs), errs)
+            self.assertTrue(any("external require" in e for e in errs), errs)
+            self.assertTrue(any("RsiboxFormal.hidden" in e for e in errs), errs)
 
+        # VerifyAxioms.lean must not shadow via namespace/theorem/def or omit RsiboxFormal prefix.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_lean_fixture(
                 root,
                 inv_body="namespace RsiboxFormal\ntheorem ok : True := trivial\nend RsiboxFormal\n",
-                verify="import RsiboxFormal\n-- #print axioms RsiboxFormal.ok\n",
+                verify="import RsiboxFormal\nnamespace Fake\ntheorem ok : True := trivial\n#print axioms ok\n",
             )
             errs = check_lean_axioms.check_lean_axioms(root)
-            self.assertTrue(any("missing '#print axioms'" in e for e in errs), errs)
+            self.assertTrue(any("must not declare theorem, def, or namespace" in e for e in errs), errs)
+            self.assertTrue(any("RsiboxFormal.ok" in e for e in errs), errs)
+
+    def test_verify_axioms_output_strict_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_lean_fixture(
+                root,
+                inv_body="namespace RsiboxFormal\ntheorem t1 : True := trivial\ntheorem t2 : True := trivial\nend RsiboxFormal\n",
+                verify="import RsiboxFormal\n#print axioms RsiboxFormal.t1\n#print axioms RsiboxFormal.t2\n",
+            )
+            good_out = (
+                "'RsiboxFormal.t1' does not depend on any axioms\n"
+                "'RsiboxFormal.t2' depends on axioms: [propext, Quot.sound]\n"
+            )
+            self.assertEqual(check_lean_axioms.verify_axioms_output(good_out, root), [])
+            out_file = root / "axioms.out"
+            out_file.write_text(good_out, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    check_lean_axioms.main(["--root", str(root), "--verify-axioms-output", str(out_file)]), 0
+                )
+
+            bad_outputs = [
+                ("Classical.choice", "'RsiboxFormal.t1' depends on axioms: [propext, Classical.choice]\n'RsiboxFormal.t2' does not depend on any axioms\n"),
+                ("sorryAx", "'RsiboxFormal.t1' depends on axioms: [sorryAx]\n'RsiboxFormal.t2' does not depend on any axioms\n"),
+                ("myAxiom", "'RsiboxFormal.t1' depends on axioms: [myAxiom]\n'RsiboxFormal.t2' does not depend on any axioms\n"),
+                ("missing '#print axioms' output", "'RsiboxFormal.t1' does not depend on any axioms\n"),
+                ("Lean diagnostic", "VerifyAxioms.lean:1:0: warning: declaration uses 'sorry'\n'RsiboxFormal.t1' does not depend on any axioms\n'RsiboxFormal.t2' does not depend on any axioms\n"),
+            ]
+            for expected_substr, payload in bad_outputs:
+                errs = check_lean_axioms.verify_axioms_output(payload, root)
+                self.assertTrue(any(expected_substr in e for e in errs), (expected_substr, errs))
 
 
 if __name__ == "__main__":

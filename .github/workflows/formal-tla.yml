@@ -48,18 +48,18 @@ jobs:
       - name: Build Lean 4 proofs (core Init only)
         uses: leanprover/lean-action@v1
         with:
-          project-directory: core/livelab/formal/lean
+          lake-package-directory: core/livelab/formal/lean
           build: true
           test: false
       - name: Verify #print axioms output
         run: |
-          cd core/livelab/formal/lean
-          out=$(lake env lean VerifyAxioms.lean 2>&1)
-          echo "$out"
-          if echo "$out" | grep -Eq "sorryAx|Lean\.ofReduceBool|Lean\.trustCompiler|unrecognized"; then
-            echo "ERROR: forbidden axiom or Lean error detected in VerifyAxioms.lean output" >&2
-            exit 1
-          fi
+          set +e
+          out=$(cd core/livelab/formal/lean && lake env lean VerifyAxioms.lean 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$out"
+          test "$rc" -eq 0
+          printf '%s\n' "$out" | python3 core/livelab/formal/gates/check_lean_axioms.py --root core/livelab/formal/lean --verify-axioms-output -
   rule-ruff-bugs:
     name: "rule: Ruff high-signal bug scan"
     runs-on: ubuntu-latest
