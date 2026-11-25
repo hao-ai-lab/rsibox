@@ -88,14 +88,14 @@ def _validate_positive_finite(value: float | None, name: str) -> float | None:
     if not math.isfinite(numeric) or numeric <= 0.0:
         raise ValueError(f"{name} must be a positive finite number, got {value!r}")
     return numeric
-def _validate_max_agent_faults(max_agent_faults: int | None) -> int | None:
-    if max_agent_faults is None:
+def _validate_positive_int(value: int | None, name: str) -> int | None:
+    if value is None:
         return None
-    if isinstance(max_agent_faults, bool) or not isinstance(max_agent_faults, int):
-        raise TypeError(f"max_agent_faults must be a positive int or None, not {type(max_agent_faults).__name__}")
-    if max_agent_faults < 1:
-        raise ValueError(f"max_agent_faults must be >= 1, got {max_agent_faults!r}")
-    return max_agent_faults
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be a positive int or None, not {type(value).__name__}")
+    if value < 1:
+        raise ValueError(f"{name} must be >= 1, got {value!r}")
+    return value
 def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
         return None
@@ -251,12 +251,14 @@ class PoolSlot:
 
 class _SlotState:
     __slots__ = ("slot", "slot_id", "role", "lab", "view", "quarantined", "quarantine_reason",
-                 "in_use", "active_since", "dirty", "busy_s", "lab_closed")
+                 "in_use", "owner_agent_id", "active_since", "dirty", "busy_s", "lab_closed")
     def __init__(self, slot: PoolSlot) -> None:
         self.slot, self.slot_id, self.role, self.lab = slot, slot.slot_id, slot.role, slot.lab
         self.view = _SlotView(slot.slot_id, slot.role, types.MappingProxyType(dict(slot.metadata)))
         self.quarantined, self.quarantine_reason = False, None
-        self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = False, None, True, 0.0, False
+        self.in_use, self.owner_agent_id, self.active_since, self.dirty, self.busy_s, self.lab_closed = (
+            False, None, None, True, 0.0, False,
+        )
 
 class _Waiter:
     __slots__ = ("agent_id", "role", "fallback_roles", "priority", "enqueued_mono", "event",
@@ -320,14 +322,16 @@ class SandboxPool:
                  priority_aging_s: float | None = None,
                  max_agent_faults: int | None = None,
                  agent_fault_window_s: float | None = None,
-                 agent_cooldown_s: float | None = None) -> None:
+                 agent_cooldown_s: float | None = None,
+                 max_slots_per_agent: int | None = None) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
         self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
         self._priority_aging_s = _validate_positive_finite(priority_aging_s, "priority_aging_s")
-        self._max_agent_faults = _validate_max_agent_faults(max_agent_faults)
+        self._max_agent_faults = _validate_positive_int(max_agent_faults, "max_agent_faults")
         self._agent_fault_window_s = _validate_positive_finite(agent_fault_window_s, "agent_fault_window_s")
         self._agent_cooldown_s = _validate_positive_finite(agent_cooldown_s, "agent_cooldown_s")
+        self._max_slots_per_agent = _validate_positive_int(max_slots_per_agent, "max_slots_per_agent")
         if self._max_agent_faults is None and (self._agent_fault_window_s is not None or self._agent_cooldown_s is not None):
             raise ValueError("agent_fault_window_s and agent_cooldown_s require max_agent_faults")
         self._slots: dict[str, _SlotState] = {}
@@ -347,6 +351,7 @@ class SandboxPool:
         self._lock, self._trace_lock, self._waiters = threading.Lock(), threading.Lock(), deque()
         self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0, 0.0
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
+        self._agent_active_slots: dict[str, int] = {}
         self._agent_faults: dict[str, deque[float]] = {}
         self._agent_quarantined_until: dict[str, float | None] = {}
         self._agent_last_reset_mono: dict[str, float] = {}
@@ -388,46 +393,155 @@ class SandboxPool:
             pass
         return Fraction(waiter.priority) + Fraction(elapsed) / Fraction(self._priority_aging_s)
 
+    def _agent_under_cap_locked(self, agent_id: str | None) -> bool:
+        if self._max_slots_per_agent is None or agent_id is None:
+            return True
+        return self._agent_active_slots.get(agent_id, 0) < self._max_slots_per_agent
+
+    def _assign_slot_locked(self, slot_state: _SlotState, agent_id: str | None, now_mono: float) -> None:
+        slot_state.in_use, slot_state.active_since, slot_state.owner_agent_id = True, now_mono, agent_id
+        if agent_id is not None:
+            self._agent_active_slots[agent_id] = self._agent_active_slots.get(agent_id, 0) + 1
+
+    def _release_slot_owner_locked(self, slot_state: _SlotState) -> str | None:
+        prev_owner = slot_state.owner_agent_id
+        slot_state.owner_agent_id = None
+        if prev_owner is not None:
+            remaining = self._agent_active_slots.get(prev_owner, 0) - 1
+            if remaining > 0:
+                self._agent_active_slots[prev_owner] = remaining
+            else:
+                self._agent_active_slots.pop(prev_owner, None)
+        return prev_owner
+
+    def _best_waiter_for_slot_locked(
+        self, slot_state: _SlotState, now_mono: float
+    ) -> tuple[int, int, int | float | Fraction] | None:
+        """Select highest-priority eligible waiter for `slot_state` -> `(tier_rank, waiter_index, eff_priority)`."""
+        best_index: int | None = None
+        best_priority: int | float | Fraction = 0
+        # Tier 1: uncapped primary-role (or generalist) waiters take precedence on their home slot.
+        for index, waiter in enumerate(self._waiters):
+            if (
+                waiter.cancelled
+                or (waiter.role is not None and waiter.role != slot_state.role)
+                or not self._agent_under_cap_locked(waiter.agent_id)
+            ):
+                continue
+            effective_priority = self._effective_priority(waiter, now_mono)
+            if best_index is None or effective_priority > best_priority:
+                best_index, best_priority = index, effective_priority
+        if best_index is not None:
+            return (1, best_index, best_priority)
+        # Tier 2: elastic role borrowing when no eligible primary waiter can use this slot.
+        if slot_state.role is not None:
+            for index, waiter in enumerate(self._waiters):
+                if (
+                    waiter.cancelled
+                    or slot_state.role not in waiter.fallback_roles
+                    or not self._agent_under_cap_locked(waiter.agent_id)
+                ):
+                    continue
+                effective_priority = self._effective_priority(waiter, now_mono)
+                if best_index is None or effective_priority > best_priority:
+                    best_index, best_priority = index, effective_priority
+            if best_index is not None:
+                return (0, best_index, best_priority)
+        return None
+
+    def _handoff_waiter_locked(self, slot_state: _SlotState, waiter_index: int, now_mono: float) -> None:
+        waiter = self._waiters[waiter_index]
+        del self._waiters[waiter_index]
+        waiter.assigned_state, waiter.assigned_dirty = slot_state, slot_state.dirty
+        self._assign_slot_locked(slot_state, waiter.agent_id, now_mono)
+        waiter.event.set()
+
+    def _dispatch_idle_slots_locked(self, now_mono: float, preferred_slot: _SlotState | None = None) -> None:
+        if self._closed or not self._waiters:
+            return
+        idle_slots: list[_SlotState] = []
+        if preferred_slot is not None and not preferred_slot.in_use and not preferred_slot.quarantined:
+            idle_slots.append(preferred_slot)
+        for slot_state in self._slots.values():
+            if slot_state is not preferred_slot and not slot_state.in_use and not slot_state.quarantined:
+                idle_slots.append(slot_state)
+        if not idle_slots:
+            return
+        # Order non-cancelled waiters once by strict effective priority (with aging) and FIFO tie-break.
+        ranked = [
+            (self._effective_priority(waiter, now_mono), -index, waiter)
+            for index, waiter in enumerate(self._waiters)
+            if not waiter.cancelled
+        ]
+        if not ranked:
+            return
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        assigned_ids: set[int] = set()
+        # Pass 1 (Tier 1): primary-role (or generalist) matches take unconditional precedence across all idle slots.
+        for _, _, waiter in ranked:
+            if not idle_slots:
+                break
+            if not self._agent_under_cap_locked(waiter.agent_id):
+                continue
+            matched = next(
+                (slot for slot in idle_slots if not slot.in_use and (waiter.role is None or slot.role == waiter.role)),
+                None,
+            )
+            if matched is None:
+                continue
+            assigned_ids.add(id(waiter))
+            waiter.assigned_state, waiter.assigned_dirty = matched, matched.dirty
+            self._assign_slot_locked(matched, waiter.agent_id, now_mono)
+            waiter.event.set()
+            idle_slots.remove(matched)
+        # Pass 2 (Tier 2): elastic role borrowing in caller-specified fallback_roles order for remaining idle slots.
+        for _, _, waiter in ranked:
+            if not idle_slots:
+                break
+            if id(waiter) in assigned_ids or not waiter.fallback_roles or not self._agent_under_cap_locked(waiter.agent_id):
+                continue
+            matched = None
+            for fb_role in waiter.fallback_roles:
+                matched = next((slot for slot in idle_slots if not slot.in_use and slot.role == fb_role), None)
+                if matched is not None:
+                    break
+            if matched is None:
+                continue
+            assigned_ids.add(id(waiter))
+            waiter.assigned_state, waiter.assigned_dirty = matched, matched.dirty
+            self._assign_slot_locked(matched, waiter.agent_id, now_mono)
+            waiter.event.set()
+            idle_slots.remove(matched)
+        if assigned_ids:
+            self._waiters = deque(waiter for waiter in self._waiters if id(waiter) not in assigned_ids)
+
     def _complete_slot_locked(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                               *, preserve_dirty: bool = False, skip_close: bool = False) -> Any | None:
         slot_state = self._slots[slot_id]
         if slot_state.active_since is not None:
             slot_state.busy_s += max(0.0, finish_mono - slot_state.active_since)
+        prev_owner = self._release_slot_owner_locked(slot_state)
+        slot_state.in_use, slot_state.active_since = False, None
         slot_state.quarantined, slot_state.dirty = not healthy, (True if not healthy else preserve_dirty)
         slot_state.quarantine_reason = None if healthy else (reason or "recovery failed")
         slot_state.slot.quarantined, slot_state.slot.quarantine_reason = slot_state.quarantined, slot_state.quarantine_reason
-        if not self._closed and healthy:
-            best_index: int | None = None
-            best_priority: int | float | Fraction = 0
-            # Tier 1: primary-role (or generalist) waiters always take precedence on their home slot.
-            for index, waiter in enumerate(self._waiters):
-                if waiter.cancelled or (waiter.role is not None and waiter.role != slot_state.role):
-                    continue
-                effective_priority = self._effective_priority(waiter, finish_mono)
-                if best_index is None or effective_priority > best_priority:
-                    best_index, best_priority = index, effective_priority
-            # Tier 2: elastic role borrowing only when no primary waiter wants this slot.
-            if best_index is None and slot_state.role is not None:
-                for index, waiter in enumerate(self._waiters):
-                    if waiter.cancelled or slot_state.role not in waiter.fallback_roles:
-                        continue
-                    effective_priority = self._effective_priority(waiter, finish_mono)
-                    if best_index is None or effective_priority > best_priority:
-                        best_index, best_priority = index, effective_priority
-            if best_index is not None:
-                waiter = self._waiters[best_index]
-                del self._waiters[best_index]
-                waiter.assigned_state, waiter.assigned_dirty = slot_state, slot_state.dirty
-                slot_state.in_use, slot_state.active_since = True, finish_mono
-                waiter.event.set()
-                return None
-        slot_state.in_use, slot_state.active_since = False, None
         if not healthy:
             for waiter in self._waiters:
                 if not waiter.cancelled and not self._has_healthy_slot(waiter.role, waiter.fallback_roles):
                     waiter.failure = f"no healthy slot available for role={waiter.role!r}"
                     waiter.event.set()
             self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
+        if not self._closed and self._waiters:
+            if self._max_slots_per_agent is not None and prev_owner is not None:
+                # Select globally across idle healthy slots so a freed permit goes to the highest-priority
+                # eligible waiter (preventing cross-role priority inversion or lost cross-role wakeups).
+                self._dispatch_idle_slots_locked(finish_mono, preferred_slot=slot_state if healthy else None)
+            elif healthy:
+                candidate = self._best_waiter_for_slot_locked(slot_state, finish_mono)
+                if candidate is not None:
+                    self._handoff_waiter_locked(slot_state, candidate[1], finish_mono)
+        if slot_state.in_use:
+            return None
         return None if skip_close else self._mark_lab_to_close_locked(slot_state)
     def _prune_agent_state_locked(self, agent_id: str, now_mono: float) -> None:
         if agent_id in self._agent_quarantined_until:
@@ -550,35 +664,37 @@ class SandboxPool:
                     raise quarantined_err
             if not self._has_healthy_slot(role, fallback_roles):
                 raise PoolTimeoutError(f"no healthy slot available for role={role!r}")
-            # Prefer primary-role slots first, then fallback roles in caller-specified order.
-            candidate_roles: tuple[tuple[str | None, bool], ...] = ((role, False),) + tuple(
-                (fb_role, True) for fb_role in fallback_roles
-            )
-            for target_role, is_borrow in candidate_roles:
-                for slot_state in self._slots.values():
-                    if slot_state.in_use or slot_state.quarantined or (target_role is not None and slot_state.role != target_role):
-                        continue
-                    # Primary waiters for this slot block borrowers unconditionally and block equal/lower primary arrivals.
-                    if is_borrow:
-                        if any(
-                            not waiter.cancelled and (
-                                waiter.role is None or waiter.role == slot_state.role or (
-                                    slot_state.role is not None
-                                    and slot_state.role in waiter.fallback_roles
-                                    and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
+            # Prefer primary-role slots first, then fallback roles in caller-specified order (only if under per-agent cap).
+            if self._agent_under_cap_locked(agent_id):
+                candidate_roles: tuple[tuple[str | None, bool], ...] = ((role, False),) + tuple(
+                    (fb_role, True) for fb_role in fallback_roles
+                )
+                for target_role, is_borrow in candidate_roles:
+                    for slot_state in self._slots.values():
+                        if slot_state.in_use or slot_state.quarantined or (target_role is not None and slot_state.role != target_role):
+                            continue
+                        # Eligible (uncapped) primary waiters block borrowers unconditionally and block equal/lower primary arrivals.
+                        if is_borrow:
+                            if any(
+                                not waiter.cancelled and self._agent_under_cap_locked(waiter.agent_id) and (
+                                    waiter.role is None or waiter.role == slot_state.role or (
+                                        slot_state.role is not None
+                                        and slot_state.role in waiter.fallback_roles
+                                        and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
+                                    )
                                 )
-                            )
+                                for waiter in self._waiters
+                            ):
+                                continue
+                        elif any(
+                            not waiter.cancelled and self._agent_under_cap_locked(waiter.agent_id)
+                            and (waiter.role is None or waiter.role == slot_state.role)
+                            and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
                             for waiter in self._waiters
                         ):
                             continue
-                    elif any(
-                        not waiter.cancelled and (waiter.role is None or waiter.role == slot_state.role)
-                        and self._effective_priority(waiter, 0.0 if now_mono is None else now_mono) >= priority
-                        for waiter in self._waiters
-                    ):
-                        continue
-                    slot_state.in_use, slot_state.active_since = True, (now_mono if now_mono is not None else self._clock())
-                    return slot_state, slot_state.dirty
+                        self._assign_slot_locked(slot_state, agent_id, now_mono if now_mono is not None else self._clock())
+                        return slot_state, slot_state.dirty
             if deadline is not None or self._priority_aging_s is not None:
                 now_mono = now_mono if now_mono is not None else self._clock()
                 if deadline is not None and now_mono >= deadline:
@@ -874,6 +990,8 @@ class SandboxPool:
                 "quarantined_agents": sorted(self._agent_quarantined_until),
                 "circuit_breaker_rejections": self._circuit_breaker_rejections,
                 "agent_fault_counts": {aid: len(ts) for aid, ts in sorted(self._agent_faults.items()) if ts},
+                "max_slots_per_agent": self._max_slots_per_agent,
+                "agent_active_slots": {aid: cnt for aid, cnt in sorted(self._agent_active_slots.items()) if cnt},
                 "per_slot_utilization": per_slot_utilization, "trace_head": trace_head,
             }
 
