@@ -279,17 +279,15 @@ class AuxiliaryModelService:
                 if mem is not None and spec.handle_id is not None:
                     lease = mem.acquire_lease(spec.handle_id, caller, writable=False, expected_stamp=expected_stamp)
 
-                closed_now = stale = False
+                closed_now = not_found = stale = False
                 with self._lock:
                     if self._closed:
                         closed_now = True
                     else:
                         cur = self._stages.get(sid)
                         if cur is None:
-                            _release_lease_quiet(mem, lease)
-                            lease = None
-                            raise StageNotFoundError(f"unknown stage {sid!r}")
-                        if (cur is not entry or cur.epoch != start_epoch
+                            not_found = True
+                        elif (cur is not entry or cur.epoch != start_epoch
                                 or cur.spec.version != spec.version or cur.spec.handle_id != spec.handle_id):
                             stale = True
                         elif use_cache and cur.spec.max_cache_entries > 0:
@@ -310,6 +308,10 @@ class AuxiliaryModelService:
                     lease = None
                     self._teardown_done.wait(timeout=5.0)
                     raise AuxClosedError("AuxiliaryModelService is closed")
+                if not_found:
+                    _release_lease_quiet(mem, lease)
+                    lease = None
+                    raise StageNotFoundError(f"unknown stage {sid!r}")
                 if stale:
                     _release_lease_quiet(mem, lease)
                     lease = None
@@ -380,13 +382,16 @@ class AuxiliaryModelService:
         clean_hid = _require_str(new_handle_id, "new_handle_id") if new_handle_id is not None else None
         with self._lock:
             self._require_open_locked()
-            mem = self._get_entry_locked(sid).memory_service
+            orig_entry = self._get_entry_locked(sid)
+            mem = orig_entry.memory_service
         if clean_hid is not None and mem is None:
             raise AuxServiceError("new_handle_id requires a memory_service")
         resolved_gpus = _verify_ro_handle(mem, clean_hid).gpus if (clean_hid is not None and mem is not None) else None
         with self._lock:
             self._require_open_locked()
             entry = self._get_entry_locked(sid)
+            if entry is not orig_entry:
+                raise StageNotFoundError(f"stage {sid!r} was replaced during bump_version")
             target_hid = clean_hid if clean_hid is not None else entry.spec.handle_id
             target_gpus = resolved_gpus if resolved_gpus is not None else entry.spec.gpus
             entry.epoch += 1

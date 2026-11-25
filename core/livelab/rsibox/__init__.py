@@ -16,6 +16,7 @@ import os
 import sys
 
 from . import diffs, doctor, op_guard, pool, promote, services, warm
+from .autoscaler import AutoScalerPolicy, PoolAutoScaler
 from .diffs import apply as apply_diff, module_of as module_of_path, paths as diff_paths
 from .doctor import check_rlimit_nofile, run_preflight
 from .op_guard import op_redefine_guard
@@ -116,12 +117,14 @@ def bootstrap_livelab(
 __all__ = [
     "AfterImportHook",
     "AgentQuarantinedError",
+    "AutoScalerPolicy",
     "BaseLab",
     "FileChannelServer",
     "MAX_SOCK_PATH",
     "MailboxServer",
     "OverlayFinder",
     "PackageOverlay",
+    "PoolAutoScaler",
     "PoolClosedError",
     "PoolError",
     "PoolOverloadedError",
