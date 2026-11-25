@@ -136,8 +136,9 @@ class HostTest(unittest.TestCase):
             e = engines[pname] = eng.Engine()
             q = (quiesce or {}).get(pname) or (None if gap_mode else e.at_boundary)
             lp = C.LocalParticipant(pname, alias={"toy": name}, quiesce=q)
+            slow_for_rank = (slow or {}).get(pname) or {}
 
-            def rpc(method, payload, lp=lp, extra=(slow or {}).get(pname, {})):
+            def rpc(method, payload, lp=lp, extra=slow_for_rank):
                 time.sleep(0.001 + extra.get(method, 0))
                 return getattr(lp, method)(payload)
             lps.append(lp)
@@ -347,10 +348,10 @@ class UndoCascadeTest(unittest.TestCase):
     def test_a_later_transaction_left_in_doubt_still_gets_its_resets(self):
         """Input: t1 (undo_resets ["state"]) and t2 (["cache"]); an undo of t2 that dies
         after it started and before any participant ran (t2 in-doubt on the host, still
-        installed); then undo t1. Expected: base code; both resets ran, t2's first; t2 is
-        "undone". Pain point: the cascade took resets only from later transactions the host
-        held "committed", so t2 (in-doubt) was marked undone without its cache reset. Not:
-        a participant that half-undid t2."""
+        installed); then undo t1. Expected: undo(t2) latches recovery_required fail-closed,
+        so subsequent undo(t1) is refused until recovered() clears the fence (and held
+        committed later transactions still get their cascade resets in
+        `test_cascade_runs_the_later_transactions_resets_too`)."""
         ran = []
 
         class FirstUndoDies(C.Coordinator):
@@ -364,12 +365,18 @@ class UndoCascadeTest(unittest.TestCase):
         coordinator, part, eng = self._two("casc_partial", {
             "cache": lambda: ran.append("cache"), "state": lambda: ran.append("state")},
             ["state"], ["cache"], coordinator_cls=FirstUndoDies)
-        self.assertEqual(coordinator.undo("t2")["status"], "in-doubt")
+        u2 = coordinator.undo("t2")
+        self.assertEqual(u2["status"], "in-doubt")
+        self.assertTrue(u2["recovery_required"])
+        self.assertTrue(coordinator.is_recovery_required())
         self.assertEqual((coordinator.status("t2")["state"], eng.Engine().step(3)),
                          ("in-doubt", 1700))
         undo_res = coordinator.undo("t1")
-        self.assertEqual((undo_res["ok"], eng.Engine().step(3), ran), (True, 17, ["cache", "state"]))
-        self.assertEqual(coordinator.status("t2")["state"], "undone")
+        self.assertEqual((undo_res["ok"], undo_res["status"], undo_res["recovery_required"], ran),
+                         (False, "refused", True, []))
+        rec = coordinator.recovered()
+        self.assertEqual((rec["ok"], rec["incarnation"], coordinator.is_recovery_required()),
+                         (True, 2, False))
 
     def test_cascade_runs_the_later_transactions_resets_too(self):
         """Input: t1 (undo_resets ["state"]) then t2 on top (undo_resets ["cache"]); undo t1.
@@ -731,11 +738,11 @@ class ParallelFanoutTest(unittest.TestCase):
             stop = threading.Event()
             seen_states = []
 
-            def poller():
-                while not stop.is_set():
-                    st = co.status(txn_id)
+            def poller(tid=txn_id, ev=stop, states=seen_states):
+                while not ev.is_set():
+                    st = co.status(tid)
                     if st.get("ok"):
-                        seen_states.append(st.get("state"))
+                        states.append(st.get("state"))
                     time.sleep(0.001)
 
             co.done_seen.clear()
@@ -791,6 +798,557 @@ class ParallelFanoutTest(unittest.TestCase):
         run_after = co.run(next_plan)
         self.assertEqual(run_after["outcome"], "refused")
         self.assertEqual([f["check"] for f in run_after["findings"]], ["session_poisoned"])
+
+
+class CoordinatorHardeningRegressionTest(unittest.TestCase):
+    """Regression tests for C1-C9 coordinator hardening fixes."""
+
+    def test_c1_poll_rollback_binds_txn_id_per_call_across_timeouts(self):
+        """C1: `poll_rollback` binds `txn_id` and `incarnation` eagerly in the Lane lambda
+        so a timed-out `status` call on txn-1 never compares against txn-2."""
+        observed = []
+        orig_check_reply = C._check_reply
+        self.addCleanup(setattr, C, "_check_reply", orig_check_reply)
+
+        def spy_check_reply(p, method, r, expected_txn=None, expected_incarnation=None):
+            res = orig_check_reply(
+                p, method, r, expected_txn=expected_txn, expected_incarnation=expected_incarnation
+            )
+            observed.append({
+                "participant": p.name,
+                "reply_txn": r.get("txn"),
+                "expected_txn": expected_txn,
+                "stale": res.get("stale"),
+            })
+            return res
+
+        C._check_reply = spy_check_reply
+        status_gate = threading.Event()
+        p1_called = threading.Event()
+
+        def p1_rpc(method, payload):
+            if method == "status":
+                p1_called.set()
+                status_gate.wait(2.0)
+                return {"ok": True, "txn": payload["txn"],
+                        "incarnation": payload["incarnation"], "state": "undone"}
+            return F.ok()
+
+        def p2_rpc(method, payload):
+            if method == "status":
+                return {"ok": True, "txn": payload["txn"],
+                        "incarnation": payload["incarnation"], "state": "undone"}
+            return F.ok()
+
+        p1 = C.CallParticipant("p1", p1_rpc)
+        p2 = C.CallParticipant("p2", p2_rpc)
+        co = C.Coordinator([p1, p2], phase2_deadline_s=0.1)
+        co.poison.append(F.finding("deadline_missed", "late", "on time"))
+        co.txns["txn-1"] = {"state": "aborted", "pending_rollback": [p1]}
+        co.txns["txn-2"] = {"state": "aborted", "pending_rollback": [p2]}
+
+        res = co.poll_rollback(deadline_s=1e-6)
+        self.assertTrue(res)
+        status_gate.set()
+        self.assertTrue(p1_called.wait(2.0))
+        wait_for(lambda: any(entry["participant"] == "p1" for entry in observed), timeout=2.0)
+        p1_entries = [entry for entry in observed if entry["participant"] == "p1"]
+        self.assertEqual(len(p1_entries), 1)
+        self.assertEqual(p1_entries[0]["reply_txn"], "txn-1")
+        self.assertEqual(p1_entries[0]["expected_txn"], "txn-1")
+        self.assertIsNone(p1_entries[0]["stale"])
+
+    def test_c2_undo_refuses_prepared_and_indoubt_and_done_preserves_superseded(self):
+        """C2: `undo()` refuses `'prepared'` and `'in-doubt'` transactions without a receipt,
+        and `_done()` never overwrites `'superseded'` or a stale incarnation."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "r1.jsonl")
+        name, eng, _ = fresh("c2_prep")
+        lp = C.LocalParticipant("r0", alias={"toy": name})
+        gap_entered = threading.Event()
+        gap_release = threading.Event()
+
+        def blocking_gap(fn):
+            gap_entered.set()
+            gap_release.wait(5)
+            return fn()
+
+        co = C.StepGapCoordinator([lp], gap=blocking_gap, writer=R.ReceiptWriter(path),
+                                  phase2_deadline_s=None)
+        plan = {
+            "id": "txn-prep",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        }
+        run_out = {}
+        th = threading.Thread(target=lambda: run_out.update(co.run(plan)), daemon=True)
+        th.start()
+        self.assertTrue(gap_entered.wait(5))
+        self.assertEqual(co.status("txn-prep")["state"], "prepared")
+        u_prep = co.undo("txn-prep")
+        self.assertEqual((u_prep["ok"], u_prep["status"], u_prep["receipt"]),
+                         (False, "refused", None))
+        gap_release.set()
+        th.join(5)
+        self.assertEqual(run_out["outcome"], "committed")
+        self.assertEqual(co.status("txn-prep")["state"], "committed")
+        self.assertEqual([r["kind"] for r in R.read(path)], ["txn"])
+
+        # Phase-2 in-doubt (run timed out waiting for gap while commit runs)
+        name2, eng2, _ = fresh("c2_indoubt")
+        lp2 = C.LocalParticipant("r0", alias={"toy": name2})
+        commit_entered = threading.Event()
+        commit_release = threading.Event()
+        orig_commit = lp2.commit
+
+        def slow_commit(ref):
+            commit_entered.set()
+            commit_release.wait(5)
+            return orig_commit(ref)
+
+        lp2.commit = slow_commit
+
+        def timeout_gap(fn):
+            done = threading.Event()
+            box = {}
+
+            def worker():
+                box["r"] = fn()
+                done.set()
+
+            threading.Thread(target=worker, daemon=True).start()
+            if not done.wait(0.05):
+                raise TimeoutError("gap timed out")
+            return box["r"]
+
+        co2 = C.StepGapCoordinator([lp2], gap=timeout_gap, phase2_deadline_s=None)
+        res2 = co2.run({
+            "id": "txn-indoubt",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(res2["outcome"], "in-doubt")
+        self.assertTrue(commit_entered.wait(5))
+        self.assertEqual(co2.status("txn-indoubt")["state"], "in-doubt")
+        u_indoubt = co2.undo("txn-indoubt")
+        self.assertEqual((u_indoubt["ok"], u_indoubt["status"], u_indoubt["receipt"]),
+                         (False, "refused", None))
+        commit_release.set()
+        wait_for(lambda: co2.status("txn-indoubt")["state"] == "committed", timeout=5)
+        self.assertEqual(eng2.Engine().step(3), 170)
+
+        # _done() must not overwrite superseded after recovered().
+        co2.recovered()
+        self.assertEqual(co2.txns["txn-indoubt"]["state"], "superseded")
+        co2._done("txn-indoubt", {"outcome": "committed", "hashes": {}, "extra": [],
+                                  "rollback": {"status": "not_needed", "participants": {}}})
+        self.assertEqual(co2.txns["txn-indoubt"]["state"], "superseded")
+
+    def test_c3_c9_recovered_isolates_incarnation_across_undo_and_run(self):
+        """C3 & C9: `recovered()` isolates prior-incarnation in-flight `undo()` and `run()`,
+        never overwriting `'superseded'` and never calling or poisoning the new incarnation."""
+        # C3: undo() vs recovered()
+        name1, _, _ = fresh("c3_rec1")
+        lp1 = C.LocalParticipant("r0", alias={"toy": name1})
+        co = C.StepGapCoordinator([lp1], gap=lambda fn: fn(), phase2_deadline_s=None)
+        r1 = co.run({
+            "id": "inc1-txn",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(r1["outcome"], "committed")
+
+        undo_entered = threading.Event()
+        undo_release = threading.Event()
+
+        def gap_pause(fn):
+            undo_entered.set()
+            undo_release.wait(5)
+            return fn()
+
+        name2, _, _ = fresh("c3_rec2")
+        lp2 = C.LocalParticipant("r0", alias={"toy": name2})
+        lp2_calls = []
+
+        def fail_undo(txn):
+            lp2_calls.append(txn)
+            return F.not_ok("inc2 should never be called",
+                            [F.finding("undo_incomplete", "bad", "ok")])
+
+        lp2.undo = fail_undo
+        co.gap = gap_pause
+
+        undo_res = {}
+        th = threading.Thread(target=lambda: undo_res.update(co.undo("inc1-txn")), daemon=True)
+        th.start()
+        self.assertTrue(undo_entered.wait(5))
+
+        co.participants = [lp2]
+        rec = co.recovered()
+        self.assertEqual(rec["incarnation"], 2)
+        self.assertEqual(co.txns["inc1-txn"]["state"], "superseded")
+
+        undo_release.set()
+        th.join(5)
+        self.assertFalse(undo_res["ok"])
+        self.assertEqual(lp2_calls, [])
+        self.assertEqual(co.txns["inc1-txn"]["state"], "superseded")
+        self.assertFalse(co.is_recovery_required())
+        self.assertEqual(co.poison, [])
+
+        # C9: run() vs recovered()
+        n_a, _, _ = fresh("c9_run1")
+        lp_a = C.LocalParticipant("r0", alias={"toy": n_a})
+        prep_entered = threading.Event()
+        prep_release = threading.Event()
+        orig_prep = lp_a.prepare
+
+        def slow_prep(plan):
+            prep_entered.set()
+            prep_release.wait(5)
+            return orig_prep(plan)
+
+        lp_a.prepare = slow_prep
+        co2 = C.Coordinator([lp_a], phase2_deadline_s=None)
+        run_out = {}
+        th2 = threading.Thread(target=lambda: run_out.update(co2.run({
+            "id": "inc1-race",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })), daemon=True)
+        th2.start()
+        self.assertTrue(prep_entered.wait(5))
+
+        n_b, _, _ = fresh("c9_run2")
+        lp_b = C.LocalParticipant("r0", alias={"toy": n_b})
+        lp_b_calls = []
+        lp_b.abort = lambda ref: (lp_b_calls.append(("abort", ref)), F.not_ok("inc2 abort failed"))[1]
+        lp_b.validate = lambda ref: (lp_b_calls.append(("validate", ref)), F.not_ok("bad"))[1]
+        co2.participants = [lp_b]
+        co2.recovered()
+        self.assertEqual(co2.incarnation, 2)
+        self.assertEqual(co2.txns["inc1-race"]["state"], "superseded")
+
+        prep_release.set()
+        th2.join(5)
+        self.assertEqual(lp_b_calls, [])
+        self.assertEqual(co2.txns["inc1-race"]["state"], "superseded")
+        self.assertFalse(co2.is_recovery_required())
+        self.assertEqual(co2.poison, [])
+
+    def test_c4_undo_cascade_snapshots_inside_gap_and_preserves_undone(self):
+        """C4: `undo()` computes `later` and `resets` inside `undo_job()` (in the gap),
+        and never overwrites `'undone'` or `'superseded'` transactions during cascade."""
+        name, _, _ = fresh("c4_drift1")
+        reset_calls = []
+        lp = C.LocalParticipant("r0", alias={"toy": name},
+                                resets={"R2": lambda: reset_calls.append("R2") or "ok"})
+        undo_gap_wait = threading.Event()
+        undo_gap_go = threading.Event()
+        in_undo_gap = [False]
+
+        def gap(fn):
+            if in_undo_gap[0]:
+                undo_gap_wait.set()
+                undo_gap_go.wait(5)
+            return fn()
+
+        co = C.StepGapCoordinator([lp], gap=gap, phase2_deadline_s=None)
+        t1 = co.run({
+            "id": "t1",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(t1["outcome"], "committed")
+
+        in_undo_gap[0] = True
+        u_out = {}
+        th = threading.Thread(target=lambda: u_out.update(co.undo("t1")), daemon=True)
+        th.start()
+        self.assertTrue(undo_gap_wait.wait(5))
+
+        in_undo_gap[0] = False
+        t2 = co.run({
+            "id": "t2",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 100")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+            "undo_resets": ["R2"],
+        })
+        self.assertEqual(t2["outcome"], "committed")
+
+        undo_gap_go.set()
+        th.join(5)
+        self.assertTrue(u_out["ok"], u_out)
+        self.assertEqual(u_out["receipt"]["resets"], ["R2"])
+        self.assertEqual(reset_calls, ["R2"])
+        self.assertEqual(co.status("t2")["state"], "undone")
+
+        # Stale later snapshot must not overwrite an already-undone transaction to partial.
+        name2, _, _ = fresh("c4_drift2")
+        lp2 = C.LocalParticipant("r0", alias={"toy": name2})
+        wait2 = threading.Event()
+        go2 = threading.Event()
+        hold_a = [False]
+
+        def gap2(fn):
+            if hold_a[0]:
+                hold_a[0] = False
+                wait2.set()
+                go2.wait(5)
+            return fn()
+
+        co2 = C.StepGapCoordinator([lp2], gap=gap2, phase2_deadline_s=None)
+        self.assertEqual(co2.run({"id": "a", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 10")),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}})["outcome"], "committed")
+        self.assertEqual(co2.run({"id": "b", "modules": {"toy.engine": {
+            "source": edit(ENG, ("return y", "return y * 20")),
+            "targets": [["Engine.step", at(ENG, "def step")]],
+        }}})["outcome"], "committed")
+
+        hold_a[0] = True
+        ua_out = {}
+        th_a = threading.Thread(target=lambda: ua_out.update(co2.undo("a")), daemon=True)
+        th_a.start()
+        self.assertTrue(wait2.wait(5))
+
+        ub = co2.undo("b")
+        self.assertTrue(ub["ok"])
+        self.assertEqual(co2.status("b")["state"], "undone")
+
+        lp2.undo = lambda _txn: F.not_ok("a undo failed", [F.finding("undo_incomplete", "fail", "ok")])
+        go2.set()
+        th_a.join(5)
+        self.assertEqual(ua_out["status"], "partial")
+        self.assertEqual(co2.status("b")["state"], "undone")
+
+    def test_c5_undo_indoubt_latches_recovery_and_receipt_matches_status(self):
+        """C5: `undo()` receipt `status` matches `status_label` (`cancelled`, `in-doubt`,
+        `partial`, `undone`), `in-doubt` latches `recovery_required` under lock with incarnation
+        guard, and `undo_state['done']` is read under lock."""
+        name, _, _ = fresh("c5_main")
+        lp = C.LocalParticipant("r0", alias={"toy": name})
+        co = C.StepGapCoordinator([lp], gap=lambda fn: fn(), phase2_deadline_s=None)
+        r = co.run({
+            "id": "t-1",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(r["outcome"], "committed")
+
+        # Cancelled undo receipt status must be 'cancelled', not 'partial'.
+        co.gap = lambda _fn: (_ for _ in ()).throw(TimeoutError("gap busy"))
+        u_cancel = co.undo("t-1")
+        self.assertEqual((u_cancel["status"], u_cancel["receipt"]["status"]),
+                         ("cancelled", "cancelled"))
+        self.assertFalse(co.is_recovery_required())
+
+        # In-doubt undo latches recovery_required and refuses run() and second undo().
+        entered = threading.Event()
+        release = threading.Event()
+        orig_undo = lp.undo
+
+        def slow_undo(txn):
+            entered.set()
+            release.wait(5)
+            return orig_undo(txn)
+
+        lp.undo = slow_undo
+
+        def timeout_after_start(fn):
+            threading.Thread(target=fn, daemon=True).start()
+            self.assertTrue(entered.wait(5))
+            raise TimeoutError("gap timed out mid-undo")
+
+        co.gap = timeout_after_start
+        u_indoubt = co.undo("t-1")
+        self.assertEqual((u_indoubt["ok"], u_indoubt["status"], u_indoubt["receipt"]["status"]),
+                         (False, "in-doubt", "in-doubt"))
+        self.assertTrue(u_indoubt["recovery_required"])
+        self.assertTrue(co.is_recovery_required())
+        self.assertTrue(any(f["check"] == "deadline_missed" for f in co.poison), co.poison)
+        self.assertEqual(co.status()["state"], "poisoned")
+        self.assertEqual(co.run({"modules": {}})["outcome"], "refused")
+
+        co.gap = lambda fn: fn()
+        u_second = co.undo("t-1")
+        self.assertEqual((u_second["ok"], u_second["status"], u_second["recovery_required"]),
+                         (False, "refused", True))
+        release.set()
+
+        # Concurrent recovered() during in-doubt timeout must not poison new incarnation.
+        name2, _, _ = fresh("c5_rec")
+        lp2 = C.LocalParticipant("r0", alias={"toy": name2})
+        co2 = C.StepGapCoordinator([lp2], gap=lambda fn: fn(), phase2_deadline_s=None)
+        self.assertEqual(co2.run({
+            "id": "t-2",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })["outcome"], "committed")
+
+        started2 = threading.Event()
+        release2 = threading.Event()
+        lp2.undo = lambda _txn: (started2.set(), release2.wait(5), F.ok(undone=1))[2]
+
+        def gap_rec(fn):
+            threading.Thread(target=fn, daemon=True).start()
+            self.assertTrue(started2.wait(5))
+            co2.recovered()
+            raise TimeoutError("gap timed out after recovered")
+
+        co2.gap = gap_rec
+        co2.undo("t-2")
+        release2.set()
+        self.assertEqual(co2.incarnation, 2)
+        self.assertEqual(co2.poison, [])
+        self.assertFalse(co2.is_recovery_required())
+        self.assertEqual(co2.txns["t-2"]["state"], "superseded")
+
+    def test_c6_post_deadline_queued_abort_failure_latches_recovery(self):
+        """C6: Post-deadline queued `abort` stays non-blocking for the gap, and latches
+        `recovery_required` (`participant_failed`) if the queued `Lane` abort fails or raises."""
+        n0, _, _ = fresh("c6_ab0")
+        n1, _, _ = fresh("c6_ab1")
+        lp0 = C.LocalParticipant("r0", alias={"toy": n0})
+        lp1 = C.LocalParticipant("r1", alias={"toy": n1})
+        p1_abort_crashed = threading.Event()
+
+        def p0_rpc(method, payload):
+            if method == "validate":
+                time.sleep(0.15)
+                return F.not_ok("r0 validate late rejection")
+            return getattr(lp0, method)(payload)
+
+        def p1_rpc(method, payload):
+            if method == "abort":
+                p1_abort_crashed.set()
+                raise ConnectionError("r1 crashed during abort!")
+            return getattr(lp1, method)(payload)
+
+        p0 = C.CallParticipant("r0", p0_rpc, bounded=True)
+        p1 = C.CallParticipant("r1", p1_rpc, bounded=False)
+        co = C.StepGapCoordinator([p0, p1], gap=lambda fn: fn(), phase2_deadline_s=0.1)
+        res = co.run({
+            "id": "txn-unconf-ab",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(res["outcome"], "aborted")
+        self.assertTrue(p1_abort_crashed.wait(2))
+        wait_for(co.is_recovery_required, timeout=2.0)
+        self.assertTrue(co.is_recovery_required())
+        self.assertTrue(any(f["check"] == "participant_failed" and f["participant"] == "r1"
+                            for f in co.poison), co.poison)
+
+    def test_c7_stepgap_timed_out_run_then_undo_writes_txn_receipt_first(self):
+        """C7: When `StepGapCoordinator.run()` times out (`in-doubt`) and finishes committing,
+        calling `undo(txn)` before `status(txn)` flushes the `txn` receipt (with valid
+        `commit_hashes`) before writing the `undo` receipt."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        path = os.path.join(tmp, "r.jsonl")
+        name, _, _ = fresh("c7_ord")
+        lp = C.LocalParticipant("r0", alias={"toy": name})
+        done_gap = threading.Event()
+        commit_started = threading.Event()
+        commit_release = threading.Event()
+        orig_commit = lp.commit
+
+        def gated_commit(ref):
+            commit_started.set()
+            commit_release.wait(5)
+            return orig_commit(ref)
+
+        lp.commit = gated_commit
+
+        def timeout_gap(fn):
+            threading.Thread(target=lambda: (fn(), done_gap.set()), daemon=True).start()
+            self.assertTrue(commit_started.wait(5))
+            raise TimeoutError("gap timed out")
+
+        co = C.StepGapCoordinator([lp], gap=timeout_gap, writer=R.ReceiptWriter(path),
+                                  phase2_deadline_s=None)
+        r = co.run({
+            "id": "txn-ord",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(r["outcome"], "in-doubt")
+        commit_release.set()
+        self.assertTrue(done_gap.wait(5))
+
+        co.gap = lambda fn: fn()
+        u = co.undo("txn-ord")
+        self.assertEqual(u["status"], "undone")
+        recs = R.read(path)
+        self.assertEqual([x["kind"] for x in recs], ["txn", "undo"])
+        txn_rec = recs[0]
+        self.assertEqual(txn_rec["outcome"], "committed")
+        self.assertTrue(txn_rec["commit_hashes"]["participants"]["r0"])
+
+    def test_c8_at_base_false_during_inflight_commit_and_indoubt(self):
+        """C8: `LocalParticipant.at_base()` returns `ok=False` while a commit job is still
+        in-flight in `quiesce`, and `Coordinator.at_base()` returns `ok=False` while any
+        transaction is `in-doubt` or `recovery_required` is latched."""
+        name, _, _ = fresh("c8_atbase")
+        entered_q = threading.Event()
+        release_q = threading.Event()
+
+        def slow_quiesce(fn):
+            entered_q.set()
+            release_q.wait(5)
+            return fn()
+
+        lp = C.LocalParticipant("r0", alias={"toy": name}, quiesce=slow_quiesce)
+        co = C.StepGapCoordinator([lp], gap=lambda fn: fn(), phase2_deadline_s=None)
+
+        done_bg = threading.Event()
+
+        def gap_starts_then_times_out(fn):
+            threading.Thread(target=lambda: (fn(), done_bg.set()), daemon=True).start()
+            self.assertTrue(entered_q.wait(5))
+            raise TimeoutError("gap wait timed out")
+
+        co.gap = gap_starts_then_times_out
+        res = co.run({
+            "id": "txn-ab",
+            "modules": {"toy.engine": {
+                "source": edit(ENG, ("return y", "return y * 10")),
+                "targets": [["Engine.step", at(ENG, "def step")]],
+            }},
+        })
+        self.assertEqual(res["outcome"], "in-doubt")
+        self.assertEqual(co.status()["state"], "in-doubt")
+        self.assertFalse(lp.at_base()["ok"])
+        self.assertFalse(co.at_base()["ok"])
+        self.assertFalse(co.status()["at_base"])
+
+        release_q.set()
+        self.assertTrue(done_bg.wait(5))
+        self.assertEqual(co.status("txn-ab")["state"], "committed")
+        self.assertFalse(co.at_base()["ok"])
 
 
 if __name__ == "__main__":
