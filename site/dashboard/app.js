@@ -596,7 +596,7 @@
 
         <div class="card">
           <div class="card-header">
-            <h2 class="card-title">9 引擎适配器总览</h2>
+            <h2 class="card-title">${engines.length} 引擎适配器总览</h2>
             <a class="card-subtitle" href="#matrix">进入验收矩阵 →</a>
           </div>
           <div class="engine-mini-grid">${enginesHtml}</div>
@@ -969,7 +969,7 @@
 
         <div class="card">
           <div class="card-header">
-            <h2 class="card-title" id="tbl-engines-cap">9 引擎能力验收表</h2>
+            <h2 class="card-title" id="tbl-engines-cap">${engines.length} 引擎能力验收表</h2>
             <span class="badge badge-cobalt">${engines.length} 项</span>
           </div>
           ${
