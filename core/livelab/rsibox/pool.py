@@ -15,7 +15,10 @@ except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
 from .box import Box
 
-__all__ = ["PoolClosedError", "PoolError", "PoolSlot", "PoolTimeoutError", "SandboxPool", "SlotLease", "verify_trace"]
+__all__ = [
+    "AgentQuarantinedError", "PoolClosedError", "PoolError", "PoolSlot",
+    "PoolTimeoutError", "SandboxPool", "SlotLease", "verify_trace",
+]
 _GENESIS_HASH = "genesis"
 _CleanupOutcome = namedtuple("_CleanupOutcome", "healthy cleanup_s recovery_s recovered status_after error")
 _RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recovered", "borrowed", "status_after", "error")
@@ -23,6 +26,19 @@ _RUN_RESULT_KEYS = ("queue_wait_s", "hold_s", "cleanup_s", "recovery_s", "recove
 class PoolError(RuntimeError): """Base error raised by `SandboxPool`."""
 class PoolTimeoutError(TimeoutError, PoolError): """Raised when waiting for a healthy matching slot times out."""
 class PoolClosedError(PoolError): """Raised when attempting to acquire a slot from a closed `SandboxPool`."""
+class AgentQuarantinedError(PoolError):
+    """Raised when an agent's per-agent fault circuit breaker is open."""
+
+    def __init__(self, agent_id: str, *, fault_count: int, retry_after_s: float | None = None) -> None:
+        suffix = (
+            f"; retry after {retry_after_s:.3f}s"
+            if retry_after_s is not None
+            else "; call reset_agent_circuit() to re-enable"
+        )
+        super().__init__(f"agent {agent_id!r} quarantined after {fault_count} slot fault(s){suffix}")
+        self.agent_id = agent_id
+        self.fault_count = fault_count
+        self.retry_after_s = retry_after_s
 
 def _format_error(error: str | BaseException | None) -> str | None:
     if error is None:
@@ -60,18 +76,26 @@ def _validate_priority(priority: int) -> int:
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise TypeError(f"priority must be an int, not {type(priority).__name__}")
     return priority
-def _validate_priority_aging_s(priority_aging_s: float | None) -> float | None:
-    if priority_aging_s is None:
+def _validate_positive_finite(value: float | None, name: str) -> float | None:
+    if value is None:
         return None
-    if isinstance(priority_aging_s, bool) or not isinstance(priority_aging_s, (int, float)):
-        raise TypeError(f"priority_aging_s must be a positive finite number or None, not {type(priority_aging_s).__name__}")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a positive finite number or None, not {type(value).__name__}")
     try:
-        value = float(priority_aging_s)
+        numeric = float(value)
     except OverflowError as error:
-        raise ValueError(f"priority_aging_s must be a positive finite number, got {priority_aging_s!r}") from error
-    if not math.isfinite(value) or value <= 0.0:
-        raise ValueError(f"priority_aging_s must be a positive finite number, got {priority_aging_s!r}")
-    return value
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}") from error
+    if not math.isfinite(numeric) or numeric <= 0.0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}")
+    return numeric
+def _validate_max_agent_faults(max_agent_faults: int | None) -> int | None:
+    if max_agent_faults is None:
+        return None
+    if isinstance(max_agent_faults, bool) or not isinstance(max_agent_faults, int):
+        raise TypeError(f"max_agent_faults must be a positive int or None, not {type(max_agent_faults).__name__}")
+    if max_agent_faults < 1:
+        raise ValueError(f"max_agent_faults must be >= 1, got {max_agent_faults!r}")
+    return max_agent_faults
 def _validate_timeout(timeout_s: float | None, name: str = "timeout_s") -> float | None:
     if timeout_s is None:
         return None
@@ -235,13 +259,15 @@ class _SlotState:
         self.in_use, self.active_since, self.dirty, self.busy_s, self.lab_closed = False, None, True, 0.0, False
 
 class _Waiter:
-    __slots__ = ("role", "fallback_roles", "priority", "enqueued_mono", "event",
-                 "assigned_state", "assigned_dirty", "cancelled", "failure", "closed")
+    __slots__ = ("agent_id", "role", "fallback_roles", "priority", "enqueued_mono", "event",
+                 "assigned_state", "assigned_dirty", "cancelled", "failure", "quarantined_error", "closed")
     def __init__(self, role: str | None, priority: int = 0, enqueued_mono: float = 0.0,
-                 fallback_roles: tuple[str, ...] = ()) -> None:
-        self.role, self.fallback_roles, self.priority, self.enqueued_mono = role, fallback_roles, priority, enqueued_mono
+                 fallback_roles: tuple[str, ...] = (), agent_id: str | None = None) -> None:
+        self.agent_id, self.role, self.fallback_roles, self.priority, self.enqueued_mono = (
+            agent_id, role, fallback_roles, priority, enqueued_mono,
+        )
         self.event, self.assigned_state, self.assigned_dirty = threading.Event(), None, True
-        self.cancelled, self.failure, self.closed = False, None, False
+        self.cancelled, self.failure, self.quarantined_error, self.closed = False, None, None, False
 
 class SlotLease:
     """Exclusive lease over one `PoolSlot`; supports `with` and idempotent `release()`."""
@@ -291,11 +317,19 @@ class SandboxPool:
     def __init__(self, slots: Sequence[PoolSlot], *, trace_path: str | None = None,
                  clock: Callable[[], float] = time.monotonic, wall_clock: Callable[[], float] = time.time,
                  close_labs: bool = False, drain_timeout_s: float | None = 5.0,
-                 priority_aging_s: float | None = None) -> None:
+                 priority_aging_s: float | None = None,
+                 max_agent_faults: int | None = None,
+                 agent_fault_window_s: float | None = None,
+                 agent_cooldown_s: float | None = None) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
         self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
-        self._priority_aging_s = _validate_priority_aging_s(priority_aging_s)
+        self._priority_aging_s = _validate_positive_finite(priority_aging_s, "priority_aging_s")
+        self._max_agent_faults = _validate_max_agent_faults(max_agent_faults)
+        self._agent_fault_window_s = _validate_positive_finite(agent_fault_window_s, "agent_fault_window_s")
+        self._agent_cooldown_s = _validate_positive_finite(agent_cooldown_s, "agent_cooldown_s")
+        if self._max_agent_faults is None and (self._agent_fault_window_s is not None or self._agent_cooldown_s is not None):
+            raise ValueError("agent_fault_window_s and agent_cooldown_s require max_agent_faults")
         self._slots: dict[str, _SlotState] = {}
         seen_targets: set[int] = set()
         for slot in slots:
@@ -313,6 +347,10 @@ class SandboxPool:
         self._lock, self._trace_lock, self._waiters = threading.Lock(), threading.Lock(), deque()
         self._closed, self._total_leases, self._borrowed_leases, self._recoveries, self._total_recovery_s = False, 0, 0, 0, 0.0
         self._queue_waits, self._hold_times, self._trace_sequence, self._trace_previous_hash = [], [], 0, _GENESIS_HASH
+        self._agent_faults: dict[str, deque[float]] = {}
+        self._agent_quarantined_until: dict[str, float | None] = {}
+        self._agent_last_reset_mono: dict[str, float] = {}
+        self._circuit_breaker_rejections = 0
         if trace_path and os.path.isfile(trace_path):
             verified = verify_trace(trace_path)
             if not verified["ok"]:
@@ -391,10 +429,98 @@ class SandboxPool:
                     waiter.event.set()
             self._waiters = deque(waiter for waiter in self._waiters if not waiter.cancelled and waiter.failure is None)
         return None if skip_close else self._mark_lab_to_close_locked(slot_state)
+    def _prune_agent_state_locked(self, agent_id: str, now_mono: float) -> None:
+        if agent_id in self._agent_quarantined_until:
+            until = self._agent_quarantined_until[agent_id]
+            if until is not None and now_mono >= until:
+                del self._agent_quarantined_until[agent_id]
+                self._agent_faults.pop(agent_id, None)
+                self._agent_last_reset_mono[agent_id] = max(
+                    self._agent_last_reset_mono.get(agent_id, -math.inf), until
+                )
+            else:
+                # Preserve recorded fault history while actively quarantined so fault_count
+                # and metrics()["agent_fault_counts"] never shrink below max_agent_faults.
+                return
+        if self._agent_fault_window_s is not None and agent_id in self._agent_faults:
+            kept = deque(
+                ts for ts in self._agent_faults[agent_id]
+                if max(0.0, now_mono - ts) <= self._agent_fault_window_s
+            )
+            if kept:
+                self._agent_faults[agent_id] = kept
+            else:
+                del self._agent_faults[agent_id]
+
+    def _build_quarantined_error_locked(self, agent_id: str, now_mono: float) -> AgentQuarantinedError | None:
+        if self._max_agent_faults is None:
+            return None
+        self._prune_agent_state_locked(agent_id, now_mono)
+        if agent_id not in self._agent_quarantined_until:
+            return None
+        until = self._agent_quarantined_until[agent_id]
+        retry_after = None if until is None else round(max(0.0, until - now_mono), 6)
+        fault_count = max(len(self._agent_faults.get(agent_id, ())), self._max_agent_faults)
+        return AgentQuarantinedError(agent_id, fault_count=fault_count, retry_after_s=retry_after)
+
+    def _record_agent_fault_locked(self, agent_id: str, fault_mono: float) -> None:
+        if self._max_agent_faults is None:
+            return
+        if fault_mono < self._agent_last_reset_mono.get(agent_id, -math.inf):
+            return
+        self._prune_agent_state_locked(agent_id, fault_mono)
+        faults = self._agent_faults.setdefault(agent_id, deque())
+        faults.append(fault_mono)
+        if len(faults) < self._max_agent_faults:
+            return
+        if self._agent_cooldown_s is None:
+            until: float | None = None
+        else:
+            raw_until = fault_mono + self._agent_cooldown_s
+            if not math.isfinite(raw_until):
+                until = None
+            elif raw_until <= fault_mono:
+                next_val = math.nextafter(fault_mono, math.inf)
+                until = next_val if math.isfinite(next_val) else None
+            else:
+                until = raw_until
+        self._agent_quarantined_until[agent_id] = until
+        fault_count = max(len(faults), self._max_agent_faults)
+        retry_after = None if until is None else round(max(0.0, until - fault_mono), 6)
+        # Immediately reject any already-queued waiters from this tripped agent before slot handoff.
+        remaining_waiters: deque[_Waiter] = deque()
+        for waiter in self._waiters:
+            if not waiter.cancelled and waiter.agent_id == agent_id:
+                self._circuit_breaker_rejections += 1
+                waiter.quarantined_error = AgentQuarantinedError(
+                    agent_id, fault_count=fault_count, retry_after_s=retry_after
+                )
+                waiter.event.set()
+            else:
+                remaining_waiters.append(waiter)
+        self._waiters = remaining_waiters
+
+    def reset_agent_circuit(self, agent_id: str) -> bool:
+        """Clear recorded slot faults and re-enable a quarantined agent. Returns True if it was quarantined."""
+        if not isinstance(agent_id, str) or not agent_id.strip():
+            raise ValueError("agent_id must be a non-empty string")
+        with self._lock:
+            now_mono = self._safe_clock()
+            self._prune_agent_state_locked(agent_id, now_mono)
+            was_quarantined = self._agent_quarantined_until.pop(agent_id, False) is not False
+            had_faults = self._agent_faults.pop(agent_id, None) is not None
+            if was_quarantined or had_faults:
+                self._agent_last_reset_mono[agent_id] = max(
+                    self._agent_last_reset_mono.get(agent_id, -math.inf), now_mono
+                )
+            return was_quarantined
+
     def _finish_slot(self, slot_id: str, finish_mono: float, healthy: bool, reason: str | None,
                      *, preserve_dirty: bool = False, extra_recovery_s: float = 0.0,
-                     skip_close: bool = False) -> None:
+                     skip_close: bool = False, faulted_agent_id: str | None = None) -> None:
         with self._lock:
+            if faulted_agent_id is not None:
+                self._record_agent_fault_locked(faulted_agent_id, finish_mono)
             self._total_recovery_s += extra_recovery_s
             lab_to_close = self._complete_slot_locked(slot_id, finish_mono, healthy, reason,
                                                       preserve_dirty=preserve_dirty, skip_close=skip_close)
@@ -408,14 +534,22 @@ class SandboxPool:
         return self._complete_slot_locked(waiter.assigned_state.slot_id, self._safe_clock(), True, None,
                                           preserve_dirty=waiter.assigned_dirty)
 
-    def _claim_slot(self, role: str | None, deadline: float | None, *, priority: int = 0,
+    def _claim_slot(self, agent_id: str, role: str | None, deadline: float | None, *, priority: int = 0,
                     fallback_roles: tuple[str, ...] = ()) -> tuple[_SlotState, bool]:
         with self._lock:
             if self._closed:
                 raise PoolClosedError("SandboxPool is closed")
+            now_mono = self._clock() if (
+                self._max_agent_faults is not None or (self._priority_aging_s is not None and self._waiters)
+            ) else None
+            if self._max_agent_faults is not None:
+                assert now_mono is not None
+                quarantined_err = self._build_quarantined_error_locked(agent_id, now_mono)
+                if quarantined_err is not None:
+                    self._circuit_breaker_rejections += 1
+                    raise quarantined_err
             if not self._has_healthy_slot(role, fallback_roles):
                 raise PoolTimeoutError(f"no healthy slot available for role={role!r}")
-            now_mono = self._clock() if (self._priority_aging_s is not None and self._waiters) else None
             # Prefer primary-role slots first, then fallback roles in caller-specified order.
             candidate_roles: tuple[tuple[str | None, bool], ...] = ((role, False),) + tuple(
                 (fb_role, True) for fb_role in fallback_roles
@@ -450,6 +584,7 @@ class SandboxPool:
                 if deadline is not None and now_mono >= deadline:
                     raise PoolTimeoutError(f"timed out waiting for slot (role={role!r})")
             waiter = _Waiter(role, priority)
+            waiter.agent_id = agent_id
             if now_mono is not None:
                 waiter.enqueued_mono = now_mono
             if fallback_roles:
@@ -471,10 +606,13 @@ class SandboxPool:
             if waiter.assigned_state is not None and not self._closed:
                 return waiter.assigned_state, waiter.assigned_dirty
             closed_error = self._closed or waiter.closed
+            quarantined_error = waiter.quarantined_error
             lab_to_close = self._cancel_waiter_locked(waiter)
         _close_quietly(lab_to_close)
         if closed_error:
             raise PoolClosedError("SandboxPool closed while waiting for slot")
+        if quarantined_error is not None:
+            raise quarantined_error
         raise PoolTimeoutError(waiter.failure or f"timed out waiting for slot (role={role!r})")
 
     def _cleanup_in_place(self, lab: Any, *, force_reset_state: bool) -> str | None:
@@ -532,7 +670,7 @@ class SandboxPool:
         deadline = None if normalized_timeout is None else queue_start + normalized_timeout
         while True:
             slot_state, slot_dirty = self._claim_slot(
-                role, deadline, priority=normalized_priority, fallback_roles=normalized_fallbacks,
+                agent_id, role, deadline, priority=normalized_priority, fallback_roles=normalized_fallbacks,
             )
             slot_returned = False
             try:
@@ -542,15 +680,24 @@ class SandboxPool:
                                else self._clean_and_recover_slot(slot_state.lab, force_reset_state=True))
                 if preparation.healthy:
                     ready_mono, ready_wall = self._clock(), self._wall_clock()
+                    quarantined_err: AgentQuarantinedError | None = None
                     with self._lock:
                         if not self._closed:
-                            slot_state.dirty = False
-                            return SlotLease(self, slot_state, agent_id, role, idea_id, ready_wall, ready_mono,
-                                             round(max(0.0, claim_mono - queue_start), 6), preparation,
-                                             priority=normalized_priority, fallback_roles=normalized_fallbacks)
+                            quarantined_err = (
+                                self._build_quarantined_error_locked(agent_id, ready_mono)
+                                if self._max_agent_faults is not None else None
+                            )
+                            if quarantined_err is None:
+                                slot_state.dirty = False
+                                return SlotLease(self, slot_state, agent_id, role, idea_id, ready_wall, ready_mono,
+                                                 round(max(0.0, claim_mono - queue_start), 6), preparation,
+                                                 priority=normalized_priority, fallback_roles=normalized_fallbacks)
+                            self._circuit_breaker_rejections += 1
                         lab_to_close = self._complete_slot_locked(slot_state.slot_id, ready_mono, True, None)
                         slot_returned = True
                     _close_quietly(lab_to_close)
+                    if quarantined_err is not None:
+                        raise quarantined_err
                     raise PoolClosedError("SandboxPool closed while preparing slot")
                 self._finish_slot(slot_state.slot_id, self._safe_clock(fallback=claim_mono), False,
                                   preparation.error or "pre-acquire recovery failed",
@@ -646,10 +793,12 @@ class SandboxPool:
                 raise
             finally:
                 done_mono = finish_mono if finish_mono is not None else self._safe_clock(fallback=release_mono)
+                caused_slot_fault = (cleanup is None) or cleanup.recovered or (not cleanup.healthy)
                 self._finish_slot(
                     lease._slot_id, done_mono, bool(cleanup.healthy) if cleanup is not None else False,
                     cleanup.error if cleanup is not None else "lease release interrupted",
                     skip_close=undrained,
+                    faulted_agent_id=lease._agent_id if caused_slot_fault else None,
                 )
             return dict(finalized)
     def _append_trace(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -712,6 +861,8 @@ class SandboxPool:
                 busy = slot_state.busy_s + (max(0.0, now_mono - slot_state.active_since)
                                             if slot_state.active_since is not None else 0.0)
                 per_slot_utilization[slot_id] = round(0.0 if (elapsed_s <= 0.0 or busy <= 0.0) else min(1.0, busy / elapsed_s), 6)
+            for aid in list(set(self._agent_faults) | set(self._agent_quarantined_until)):
+                self._prune_agent_state_locked(aid, now_mono)
             return {
                 "total_leases": total_leases,
                 "borrowed_leases": self._borrowed_leases,
@@ -720,6 +871,9 @@ class SandboxPool:
                 "mean_hold_s": round(sum(self._hold_times) / total_leases, 6) if total_leases else 0.0,
                 "total_recovery_s": round(self._total_recovery_s, 6), "recoveries": self._recoveries,
                 "quarantined_slots": [slot_id for slot_id, state in self._slots.items() if state.quarantined],
+                "quarantined_agents": sorted(self._agent_quarantined_until),
+                "circuit_breaker_rejections": self._circuit_breaker_rejections,
+                "agent_fault_counts": {aid: len(ts) for aid, ts in sorted(self._agent_faults.items()) if ts},
                 "per_slot_utilization": per_slot_utilization, "trace_head": trace_head,
             }
 

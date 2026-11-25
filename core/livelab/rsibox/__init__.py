@@ -62,7 +62,8 @@ from .ipc import (
 )
 from .lab import BaseLab, RecaptureCoordinator, RoleEndpoint
 from .pool import (
-    PoolClosedError, PoolError, PoolSlot, PoolTimeoutError, SandboxPool, SlotLease, verify_trace,
+    AgentQuarantinedError, PoolClosedError, PoolError, PoolSlot, PoolTimeoutError,
+    SandboxPool, SlotLease, verify_trace,
 )
 from .proc import (
     descendants,
@@ -114,6 +115,7 @@ def bootstrap_livelab(
 
 __all__ = [
     "AfterImportHook",
+    "AgentQuarantinedError",
     "BaseLab",
     "FileChannelServer",
     "MAX_SOCK_PATH",

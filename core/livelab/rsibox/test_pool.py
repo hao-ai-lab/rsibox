@@ -24,6 +24,7 @@ from kernel import toy as kernel_toy
 from kernel import toy_lab
 
 from rsibox import (
+    AgentQuarantinedError,
     BaseLab,
     PoolClosedError,
     PoolError,
@@ -2122,6 +2123,315 @@ class SandboxPoolTests(unittest.TestCase):
         self.assertTrue(verified["ok"], verified)
         self.assertEqual(verified["count"], 13)
         self.assertEqual(sum(1 for rec in verified["records"] if rec["borrowed"]), 7)
+
+    def test_per_agent_fault_circuit_breaker_window_cooldown_and_queued_wakeup(self) -> None:
+        """Golden regression for SandboxPool per-agent fault circuit breaker:
+        1. Parameter validation rejects invalid max_agent_faults / window / cooldown combos.
+        2. Normal fail-closed install refusals, clean caller exceptions, and pre-existing dirty
+           slot preparation recoveries NEVER blame the acquiring agent.
+        3. Repeated slot-destabilizing faults trip AgentQuarantinedError for only the rogue agent,
+           protecting healthy teammates; reset_agent_circuit() re-enables cleanly.
+        4. Sliding window (agent_fault_window_s) expires stale faults, and timed cooldown
+           (agent_cooldown_s) auto-recovers with clean fault history.
+        5. Atomic trip-before-handoff immediately rejects queued duplicate waiters from the
+           tripped agent and hands the recovered slot to a waiting healthy teammate."""
+        lab_a = self._make_toy_lab()
+        lab_b = self._make_toy_lab()
+
+        # 1. Input validation
+        for bad_max in (0, -1, True, 1.5, "2"):
+            with self.assertRaises((TypeError, ValueError)):
+                SandboxPool([PoolSlot("s0", lab_a)], max_agent_faults=bad_max)  # type: ignore[arg-type]
+        for bad_win in (0.0, -1.0, float("nan"), float("inf"), True, "5", 10**400):
+            with self.assertRaises((TypeError, ValueError)):
+                SandboxPool([PoolSlot("s0", lab_a)], max_agent_faults=2, agent_fault_window_s=bad_win)  # type: ignore[arg-type]
+            with self.assertRaises((TypeError, ValueError)):
+                SandboxPool([PoolSlot("s0", lab_a)], max_agent_faults=2, agent_cooldown_s=bad_win)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("s0", lab_a)], agent_fault_window_s=10.0)
+        with self.assertRaises(ValueError):
+            SandboxPool([PoolSlot("s0", lab_a)], agent_cooldown_s=5.0)
+
+        now = [100.0]
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        trace_path = os.path.join(tmpdir.name, "circuit_breaker.jsonl")
+        pool = SandboxPool(
+            [PoolSlot("s0", lab_a), PoolSlot("s1", lab_b)],
+            trace_path=trace_path,
+            clock=lambda: now[0],
+            max_agent_faults=2,
+            agent_fault_window_s=10.0,
+            agent_cooldown_s=None,
+        )
+        self.addCleanup(pool.close)
+
+        with self.assertRaises(ValueError):
+            pool.reset_agent_circuit("")
+        self.assertFalse(pool.reset_agent_circuit("nobody"))
+
+        # 2. Zero false positives: fail-closed install refusal, clean caller error, and inherited dirty slot.
+        #    First poison lab_a externally BEFORE innocent acquires it so preparation recovers it.
+        lab_a.session.fault("participant_failed", "pre-existing dirty state", "clean")
+        res_inherited = pool.run_isolated("innocent", lambda lab, _l: lab.check(), timeout_s=2.0)
+        self.assertTrue(res_inherited["ok"], res_inherited)
+        self.assertTrue(res_inherited["recovered"])
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {})
+        self.assertEqual(pool.metrics()["quarantined_agents"], [])
+
+        # Fail-closed Session-level bad patch refusal (syntax error on toy.ops) + caller RuntimeError
+        # leaving slot clean must NOT count as slot faults.
+        bad_patch = {"files": {"toy.ops": "def broken(:\n"}}
+        for _ in range(3):
+            res_refusal = pool.run_isolated("innocent", lambda lab, _l: lab.install(bad_patch), timeout_s=2.0)
+            self.assertTrue(res_refusal["ok"])
+            self.assertFalse(res_refusal["result"]["ok"])
+            res_exc = pool.run_isolated("innocent", lambda lab, _l: (_ for _ in ()).throw(RuntimeError("user bug")), timeout_s=2.0)
+            self.assertFalse(res_exc["ok"])
+            self.assertFalse(res_exc["recovered"])
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {})
+        self.assertEqual(pool.metrics()["quarantined_agents"], [])
+
+        # 3. Sliding window expires stale fault (t=100 then t=115 > 10s window -> does NOT trip).
+        def poison_slot(lab, _l):
+            lab.session.fault("participant_failed", "rogue crash", "clean")
+            return "poisoned"
+
+        r_f1 = pool.run_isolated("rogue", poison_slot, timeout_s=2.0)
+        self.assertTrue(r_f1["ok"])
+        self.assertTrue(r_f1["recovered"])
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {"rogue": 1})
+        self.assertEqual(pool.metrics()["quarantined_agents"], [])
+
+        now[0] = 115.0  # > 10.0 s window: first fault expires!
+        r_f2 = pool.run_isolated("rogue", poison_slot, timeout_s=2.0)
+        self.assertTrue(r_f2["recovered"])
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {"rogue": 1})
+        self.assertEqual(pool.metrics()["quarantined_agents"], [])
+
+        # Second fault within window (t=120, delta=5s <= 10s) TRIPS the circuit breaker!
+        now[0] = 120.0
+        r_f3 = pool.run_isolated("rogue", poison_slot, timeout_s=2.0)
+        self.assertTrue(r_f3["recovered"])
+        self.assertEqual(pool.metrics()["quarantined_agents"], ["rogue"])
+
+        # Rogue is now rejected immediately on acquire() AND run_isolated(), while innocent keeps running!
+        with self.assertRaises(AgentQuarantinedError) as ctx:
+            pool.acquire("rogue", timeout_s=2.0)
+        self.assertEqual(ctx.exception.agent_id, "rogue")
+        self.assertEqual(ctx.exception.fault_count, 2)
+        self.assertIsNone(ctx.exception.retry_after_s)
+
+        r_rej = pool.run_isolated("rogue", lambda lab, _l: lab.check(), timeout_s=2.0)
+        self.assertFalse(r_rej["ok"])
+        self.assertIsNone(r_rej["slot_id"])
+        self.assertIn("AgentQuarantinedError", r_rej["error"])
+        self.assertEqual(pool.metrics()["circuit_breaker_rejections"], 2)
+
+        r_healthy = pool.run_isolated("innocent", lambda lab, _l: lab.check(), timeout_s=2.0)
+        self.assertTrue(r_healthy["ok"], r_healthy)
+
+        # Manual reset_agent_circuit() re-enables rogue cleanly and returns False on second call.
+        self.assertTrue(pool.reset_agent_circuit("rogue"))
+        self.assertFalse(pool.reset_agent_circuit("rogue"))
+        self.assertEqual(pool.metrics()["quarantined_agents"], [])
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {})
+        self.assertTrue(pool.run_isolated("rogue", lambda lab, _l: lab.check(), timeout_s=2.0)["ok"])
+
+        # 4. Timed cooldown auto-recovery & clean post-cooldown history + queued duplicate-waiter wakeup.
+        lab_c = self._make_toy_lab()
+        cd_now = [10.0]
+        cd_pool = SandboxPool(
+            [PoolSlot("sc", lab_c)],
+            clock=lambda: cd_now[0],
+            max_agent_faults=1,
+            agent_cooldown_s=5.0,
+        )
+        self.addCleanup(cd_pool.close)
+
+        # Hold sole slot as rogue-dup; queue rogue-dup (priority=10) AND healthy (priority=0).
+        held = cd_pool.acquire("rogue-dup", timeout_s=2.0)
+        rogue_errs: list[BaseException] = []
+        healthy_got: list[str] = []
+
+        t_rogue2 = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: cd_pool.acquire("rogue-dup", priority=10, timeout_s=2.0), rogue_errs
+            )
+        )
+        t_healthy = threading.Thread(
+            target=lambda: healthy_got.append(
+                cd_pool.run_isolated("healthy-peer", lambda lab, _l: "ok", priority=0, timeout_s=2.0)["result"]
+            )
+        )
+        t_rogue2.start()
+        self._wait_for_waiters(cd_pool, 1)
+        t_healthy.start()
+        self._wait_for_waiters(cd_pool, 2)
+
+        # Rogue poisons sole slot and releases -> circuit trips BEFORE handoff, rejecting t_rogue2
+        # with AgentQuarantinedError and handing the recovered slot to healthy-peer!
+        held.lab.session.fault("participant_failed", "boom", "clean")
+        held.release()
+        t_rogue2.join(timeout=5.0)
+        t_healthy.join(timeout=5.0)
+        self.assertFalse(t_rogue2.is_alive())
+        self.assertFalse(t_healthy.is_alive())
+        self.assertEqual(len(rogue_errs), 1)
+        self.assertIsInstance(rogue_errs[0], AgentQuarantinedError)
+        self.assertEqual(rogue_errs[0].retry_after_s, 5.0)
+        self.assertEqual(healthy_got, ["ok"])
+        self.assertEqual(cd_pool.metrics()["quarantined_agents"], ["rogue-dup"])
+
+        # Advance clock past 5.0 s cooldown -> rogue-dup auto-recovers with clean fault history!
+        cd_now[0] = 15.0
+        self.assertEqual(cd_pool.metrics()["quarantined_agents"], [])
+        self.assertEqual(cd_pool.metrics()["agent_fault_counts"], {})
+        self.assertTrue(cd_pool.run_isolated("rogue-dup", lambda lab, _l: lab.check(), timeout_s=2.0)["ok"])
+
+        # 5. Latched quarantine + sliding window: fault_count must NOT decay below max_agent_faults
+        #    while still quarantined, and stale pre-reset timestamps must be ignored.
+        now[0] = 200.0
+        self.assertTrue(pool.run_isolated("latched-rogue", poison_slot, timeout_s=2.0)["recovered"])
+        now[0] = 204.0
+        self.assertTrue(pool.run_isolated("latched-rogue", poison_slot, timeout_s=2.0)["recovered"])
+        self.assertEqual(pool.metrics()["quarantined_agents"], ["latched-rogue"])
+        for future_t in (211.0, 215.0, 500.0):
+            now[0] = future_t
+            with self.assertRaises(AgentQuarantinedError) as ctx_l:
+                pool.acquire("latched-rogue", timeout_s=2.0)
+            self.assertEqual(ctx_l.exception.fault_count, 2)
+            self.assertEqual(pool.metrics()["agent_fault_counts"].get("latched-rogue"), 2)
+            self.assertEqual(pool.metrics()["quarantined_agents"], ["latched-rogue"])
+        self.assertTrue(pool.reset_agent_circuit("latched-rogue"))
+        # Stale fault timestamp (< reset_mono=500.0) must be ignored; fresh fault at 500.0 counts.
+        with pool._lock:
+            pool._record_agent_fault_locked("latched-rogue", 499.0)
+        self.assertEqual(pool.metrics()["agent_fault_counts"], {})
+        # Out-of-order timestamps inside window must expire properly when clock advances.
+        lab_jit = self._make_toy_lab()
+        jit_now = [120.0]
+        jit_pool = SandboxPool(
+            [PoolSlot("sj", lab_jit)],
+            clock=lambda: jit_now[0],
+            max_agent_faults=3,
+            agent_fault_window_s=10.0,
+        )
+        self.addCleanup(jit_pool.close)
+        with jit_pool._lock:
+            jit_pool._record_agent_fault_locked("jitter", 120.0)
+            jit_pool._record_agent_fault_locked("jitter", 100.0)
+        jit_now[0] = 112.0  # 100.0 expired (delta 12s > 10s), while 120.0 remains (clamped delta 0s <= 10s)
+        self.assertEqual(jit_pool.metrics()["agent_fault_counts"], {"jitter": 1})
+        self.assertEqual(jit_pool.metrics()["quarantined_agents"], [])
+        now[0] = 500.0
+
+        # 6. Float64 ULP absorption (clock=1e9, cooldown=1e-8) must NOT self-expire or turn a
+        #    queued duplicate waiter into PoolTimeoutError.
+        lab_ulp = self._make_toy_lab()
+        ulp_now = [1e9]
+        ulp_pool = SandboxPool(
+            [PoolSlot("su", lab_ulp)],
+            clock=lambda: ulp_now[0],
+            max_agent_faults=1,
+            agent_cooldown_s=1e-8,
+        )
+        self.addCleanup(ulp_pool.close)
+        held_ulp = ulp_pool.acquire("ulp-rogue", timeout_s=2.0)
+        ulp_errs: list[BaseException] = []
+        t_ulp_wait = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: ulp_pool.acquire("ulp-rogue", timeout_s=None), ulp_errs
+            )
+        )
+        t_ulp_wait.start()
+        self._wait_for_waiters(ulp_pool, 1)
+        held_ulp.lab.session.fault("participant_failed", "ulp-boom", "clean")
+        held_ulp.release()
+        t_ulp_wait.join(timeout=5.0)
+        self.assertFalse(t_ulp_wait.is_alive())
+        self.assertEqual(len(ulp_errs), 1)
+        self.assertIsInstance(ulp_errs[0], AgentQuarantinedError)
+        self.assertEqual(ulp_pool.metrics()["quarantined_agents"], ["ulp-rogue"])
+        ulp_now[0] = 1e9 + 1.0
+        self.assertEqual(ulp_pool.metrics()["quarantined_agents"], [])
+
+        # 7. Pre-acquire TOCTOU: concurrent lease from same agent trips circuit while a second
+        #    acquire() is in pre-acquire cleanup -> returns clean slot and raises AgentQuarantinedError.
+        lab_toctou_a = self._make_toy_lab()
+        lab_toctou_b = self._make_toy_lab()
+        prep_entered = threading.Event()
+        prep_release = threading.Event()
+        orig_reset = lab_toctou_b.reset
+        blocked_once = [False]
+
+        def slow_prep_reset(kind: str = "state") -> dict[str, Any]:
+            if not blocked_once[0]:
+                blocked_once[0] = True
+                prep_entered.set()
+                prep_release.wait(timeout=5.0)
+            return orig_reset(kind)
+
+        lab_toctou_b.reset = slow_prep_reset  # type: ignore[method-assign]
+        toctou_pool = SandboxPool(
+            [PoolSlot("ta", lab_toctou_a), PoolSlot("tb", lab_toctou_b)],
+            max_agent_faults=1,
+            agent_cooldown_s=None,
+        )
+        self.addCleanup(toctou_pool.close)
+        lease_a = toctou_pool.acquire("racing-rogue", timeout_s=2.0)
+        toctou_errs: list[BaseException] = []
+        t_racing = threading.Thread(
+            target=lambda: self._capture_error(
+                lambda: toctou_pool.acquire("racing-rogue", timeout_s=2.0), toctou_errs
+            )
+        )
+        t_racing.start()
+        self.assertTrue(prep_entered.wait(timeout=5.0))
+        lease_a.lab.session.fault("participant_failed", "trip-during-prep", "clean")
+        lease_a.release()
+        prep_release.set()
+        t_racing.join(timeout=5.0)
+        self.assertFalse(t_racing.is_alive())
+        self.assertEqual(len(toctou_errs), 1)
+        self.assertIsInstance(toctou_errs[0], AgentQuarantinedError)
+        # Returned slot tb must remain healthy and immediately usable by a healthy agent.
+        self.assertTrue(toctou_pool.run_isolated("healthy-after-toctou", lambda lab, _l: lab.check(), timeout_s=2.0)["ok"])
+
+        # 8. Undrained fenced call exceeding drain_timeout_s attributes a slot fault to the offending agent.
+        lab_hang = self._make_toy_lab()
+        hang_started = threading.Event()
+        hang_release = threading.Event()
+        orig_check = lab_hang.check
+
+        def hanging_check(workload: Any = None) -> dict[str, Any]:
+            hang_started.set()
+            hang_release.wait(timeout=5.0)
+            return orig_check(workload)
+
+        lab_hang.check = hanging_check  # type: ignore[method-assign]
+        hang_pool = SandboxPool(
+            [PoolSlot("sh", lab_hang)],
+            drain_timeout_s=0.05,
+            max_agent_faults=1,
+            agent_cooldown_s=None,
+        )
+        self.addCleanup(hang_pool.close)
+        hang_lease = hang_pool.acquire("hang-rogue", timeout_s=2.0)
+        t_hang = threading.Thread(target=lambda: self._capture_error(lambda: hang_lease.lab.check(), []))
+        t_hang.start()
+        self.assertTrue(hang_started.wait(timeout=5.0))
+        hang_lease.release()
+        hang_release.set()
+        t_hang.join(timeout=5.0)
+        self.assertEqual(hang_pool.metrics()["quarantined_agents"], ["hang-rogue"])
+        self.assertEqual(hang_pool.metrics()["quarantined_slots"], ["sh"])
+
+        # 9. SHA-256 trace verification on primary pool.
+        metrics = pool.metrics()
+        verified = verify_trace(trace_path, expected_head=metrics["trace_head"])
+        self.assertTrue(verified["ok"], verified)
+        self.assertEqual(verified["count"], metrics["total_leases"])
 
     @staticmethod
     def _capture_error(operation, bucket: list[BaseException]) -> None:
