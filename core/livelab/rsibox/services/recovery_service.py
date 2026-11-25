@@ -7,7 +7,6 @@ owner-scoped teardown without importing `torch`, `numpy`, `kernel`, or `repos`.
 """
 from __future__ import annotations
 
-import contextlib
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 import threading
@@ -62,8 +61,8 @@ class _EndpointEntry:
     fallback_driver: RecoveryDriver | None; store: WeightStore | None
     lab: Any; lab_factory: Callable[[], Any] | None; quiesce_hooks: QuiesceHooks | None
     metadata: dict[str, Any]; own_driver: bool; own_store: bool; quarantine_threshold: int
-    status: ServiceHealthStatus = ServiceHealthStatus.HEALTHY; incarnation: int = 1
-    consecutive_failures: int = 0; last_error: str | None = None
+    owns_lab: bool = False; status: ServiceHealthStatus = ServiceHealthStatus.HEALTHY
+    incarnation: int = 1; consecutive_failures: int = 0; last_error: str | None = None
     last_recovered_s: float | None = None; recovery_count: int = 0; recovering: bool = False
 
 
@@ -110,6 +109,18 @@ def _snapshot_health(e: _EndpointEntry) -> ServiceHealth:
                          e.consecutive_failures, e.last_error, e.last_recovered_s, e.recovery_count)
 
 
+def _close_labs(labs: list[Any], seen: set[int] | None = None, errors: list[str] | None = None) -> None:
+    id_set = seen if seen is not None else set()
+    for lab in labs:
+        if lab is None or id(lab) in id_set: continue
+        closer = getattr(lab, "close", None)
+        if not callable(closer): continue
+        id_set.add(id(lab))
+        try: closer()
+        except Exception as exc:
+            if errors is not None: errors.append(f"lab({type(lab).__name__}): {_format_error(exc)}")
+
+
 def _invoke_driver(
     driver: RecoveryDriver, lab: Any, store: WeightStore | None, reason: str, driver_kwargs: dict[str, Any],
 ) -> tuple[bool, dict[str, Any], str | None]:
@@ -128,8 +139,7 @@ def _invoke_driver(
 def _close_driver_resources(driver: Any, seen: set[int], errors: list[str]) -> None:
     repl = getattr(driver, "_replenish_fn", None)
     for obj in (driver, repl, getattr(repl, "__self__", None)):
-        if obj is None or id(obj) in seen:
-            continue
+        if obj is None or id(obj) in seen: continue
         closer = getattr(obj, "close", None) if callable(getattr(obj, "close", None)) else getattr(obj, "stop", None)
         if callable(closer):
             seen.add(id(obj))
@@ -151,12 +161,9 @@ class RecoveryService:
     def __enter__(self) -> RecoveryService:
         with self._lock: self._require_open_locked()
         return self
-
     def __exit__(self, *_exc: Any) -> None: self.close()
-
     def _require_open_locked(self) -> None:
         if self._closed: raise RecoveryClosedError("RecoveryService is closed")
-
     def _get_entry_locked(self, endpoint_id: str) -> _EndpointEntry:
         entry = self._endpoints.get(endpoint_id)
         if entry is None: raise EndpointNotFoundError(f"unknown endpoint {endpoint_id!r}")
@@ -172,8 +179,7 @@ class RecoveryService:
     def _begin_op_locked(self, eid: str, *, set_recovering: bool) -> tuple[_EndpointEntry, ServiceHealthStatus]:
         self._require_open_locked()
         entry = self._get_entry_locked(eid)
-        if entry.recovering:
-            raise RecoveryInProgressError(f"recovery already in progress for endpoint {eid!r}")
+        if entry.recovering: raise RecoveryInProgressError(f"recovery already in progress for endpoint {eid!r}")
         entry.recovering = True
         prev_status = entry.status
         if set_recovering: entry.status = ServiceHealthStatus.RECOVERING
@@ -182,19 +188,25 @@ class RecoveryService:
     def register_endpoint(
         self, endpoint_id: str, *, engine: str, lab: Any = None, lab_factory: Callable[[], Any] | None = None,
         store: WeightStore | None = None, driver: RecoveryDriver | None = None,
-        tier: RecoveryTier | str = RecoveryTier.COLD_RESPAWN, fallback_driver: RecoveryDriver | None = None,
+        tier: RecoveryTier | str | None = None, fallback_driver: RecoveryDriver | None = None,
         quiesce_hooks: QuiesceHooks | None = None, metadata: dict[str, Any] | None = None,
-        own_driver: bool = True, own_store: bool = False, quarantine_threshold: int | None = None,
+        own_driver: bool = True, own_store: bool = False, own_lab: bool = False, quarantine_threshold: int | None = None,
     ) -> ServiceHealth:
         """Register an endpoint with its primary recovery driver, optional fallback, and hooks."""
-        eid, eng, resolved_tier = _require_str(endpoint_id, "endpoint_id"), _require_str(engine, "engine"), RecoveryTier(tier)
-        _require_bool(own_driver, "own_driver"); _require_bool(own_store, "own_store")
+        eid, eng = _require_str(endpoint_id, "endpoint_id"), _require_str(engine, "engine")
+        _require_bool(own_driver, "own_driver"); _require_bool(own_store, "own_store"); _require_bool(own_lab, "own_lab")
         if lab_factory is not None and not callable(lab_factory):
             raise TypeError(f"lab_factory must be callable or None, not {type(lab_factory).__name__}")
         if store is not None and not callable(getattr(store, "probe", None)):
             raise TypeError("store must implement probe() when provided")
+        if store is not None and own_store and not callable(getattr(store, "stop", None)):
+            raise TypeError("store must implement stop() when own_store=True")
         if metadata is not None and not isinstance(metadata, dict):
             raise TypeError(f"metadata must be a dict or None, not {type(metadata).__name__}")
+        resolved_tier = (
+            (_infer_tier(driver, RecoveryTier.COLD_RESPAWN) if driver is not None else RecoveryTier.COLD_RESPAWN)
+            if tier is None else RecoveryTier(tier)
+        )
         threshold = self._quarantine_threshold if quarantine_threshold is None else _require_pos_int(quarantine_threshold, "quarantine_threshold")
         if driver is not None: resolved_driver = _validate_driver(driver, "driver")
         elif resolved_tier == RecoveryTier.COLD_RESPAWN: resolved_driver = DefaultRespawnDriver()
@@ -205,8 +217,9 @@ class RecoveryService:
         with self._lock:
             self._require_open_locked()
             if eid in self._endpoints: raise RecoveryServiceError(f"endpoint {eid!r} is already registered")
-            entry = _EndpointEntry(eid, eng, resolved_tier, resolved_driver, fb_drv, store, lab, lab_factory,
-                                   hooks, dict(metadata) if metadata is not None else {}, own_driver, own_store, threshold)
+            entry = _EndpointEntry(eid, eng, resolved_tier, resolved_driver, fb_drv, store, lab, lab_factory, hooks,
+                                   dict(metadata) if metadata is not None else {}, own_driver, own_store, threshold,
+                                   owns_lab=(own_lab and lab is not None))
             self._endpoints[eid] = entry
             return _snapshot_health(entry)
 
@@ -243,34 +256,47 @@ class RecoveryService:
         with self._lock:
             entry, prev_status = self._begin_op_locked(eid, set_recovering=True)
             driver, fallback_driver, primary_tier = entry.driver, entry.fallback_driver, entry.tier
-            store, target_lab, lab_factory = entry.store, entry.lab, entry.lab_factory
+            store, old_lab, old_owns_lab, lab_factory = entry.store, entry.lab, entry.owns_lab, entry.lab_factory
 
-        committed, started = False, time.perf_counter()
+        committed, started, target_lab, created_lab, extra_labs = False, time.perf_counter(), old_lab, None, []
         try:
             lab_err: str | None = None
             if target_lab is None and lab_factory is not None:
-                try: target_lab = lab_factory()
+                try: created_lab = lab_factory(); target_lab = created_lab
                 except Exception as exc: lab_err = f"lab_factory failed: {_format_error(exc)}"
             ok1, raw1, err1 = ((False, {"ok": False, "error": lab_err}, lab_err) if lab_err is not None
                                else _invoke_driver(driver, target_lab, store, clean_reason, driver_kwargs))
-            fallback_used = bool(ok1 and raw1.get("fallback_from"))
+            fallback_used = bool(raw1.get("fallback_from"))
+            if fallback_used and raw1.get("promote_error") and not ok1:
+                err1 = f"promote: {raw1['promote_error']}; fallback: {err1}"
             tier_succeeded: RecoveryTier | None = None
             final_ok, final_raw, final_err = ok1, raw1, err1
             if ok1:
-                tier_succeeded = _infer_tier(driver, default=RecoveryTier.COLD_RESPAWN if fallback_used else primary_tier)
+                tier_succeeded = (
+                    _DRIVER_NAME_TO_TIER.get(str(raw1.get("driver", "")), RecoveryTier.COLD_RESPAWN)
+                    if fallback_used else _infer_tier(driver, default=primary_tier)
+                )
                 if fallback_used:
-                    tier_succeeded = _DRIVER_NAME_TO_TIER.get(str(raw1.get("driver", "")), tier_succeeded)
                     final_err = str(raw1.get("promote_error") or f"fallback from {raw1.get('fallback_from')}")
             elif allow_fallback and fallback_driver is not None:
                 with self._lock: self._require_open_locked()
+                fb_lab_err: str | None = None
                 if target_lab is None and lab_factory is not None:
-                    with contextlib.suppress(Exception): target_lab = lab_factory()
+                    try: created_lab = lab_factory(); target_lab = created_lab
+                    except Exception as exc: fb_lab_err = f"lab_factory failed: {_format_error(exc)}"
                 fb_tier = _infer_tier(fallback_driver, default=RecoveryTier.COLD_RESPAWN)
-                fb_ok, fb_raw, fb_err = _invoke_driver(fallback_driver, target_lab, store, clean_reason, driver_kwargs)
+                fb_ok, fb_raw, fb_err = ((False, {"ok": False, "error": fb_lab_err}, fb_lab_err) if fb_lab_err is not None
+                                         else _invoke_driver(fallback_driver, target_lab, store, clean_reason, driver_kwargs))
                 if fb_ok:
+                    r1_lab = raw1.get("lab")
+                    if r1_lab is not None and r1_lab is not old_lab and r1_lab is not target_lab:
+                        extra_labs.append(r1_lab)
                     fallback_used, final_ok, tier_succeeded = True, True, fb_tier
                     final_raw, final_err = {**fb_raw, "primary_error": err1}, err1
                 else:
+                    for cand in (raw1.get("lab"), fb_raw.get("lab")):
+                        if cand is not None and cand is not old_lab and cand is not created_lab:
+                            extra_labs.append(cand)
                     combined = f"primary ({primary_tier.value}) failed: {err1}; fallback ({fb_tier.value}) failed: {fb_err}"
                     with self._lock:
                         entry.recovering, committed = False, True
@@ -280,33 +306,48 @@ class RecoveryService:
                     raise EscalationFailedError(combined)
 
             cost_s = round(time.perf_counter() - started, 6)
+            labs_to_close: list[Any] = []
             with self._lock:
                 entry.recovering, committed = False, True
                 self._require_open_locked()
                 if final_ok:
                     entry.incarnation += 1; entry.recovery_count += 1; entry.last_recovered_s = cost_s
-                    if target_lab is not None: entry.lab = final_raw.get("lab", target_lab)
+                    returned_lab = final_raw.get("lab")
+                    new_lab = returned_lab if returned_lab is not None else target_lab
+                    if new_lab is not None:
+                        entry.lab = new_lab
+                        entry.owns_lab = old_owns_lab or (new_lab is created_lab) or (returned_lab is not None and returned_lab is not old_lab)
+                    if created_lab is not None and created_lab is not new_lab: labs_to_close.append(created_lab)
+                    if old_owns_lab and old_lab is not None and old_lab is not new_lab: labs_to_close.append(old_lab)
                     if fallback_used: entry.last_error = final_err
                     elif reset_after: entry.last_error = None
                     if reset_after: entry.consecutive_failures, entry.status = 0, ServiceHealthStatus.HEALTHY
                     else: entry.status = (ServiceHealthStatus.QUARANTINED if entry.consecutive_failures >= entry.quarantine_threshold
                                           else (ServiceHealthStatus.DEGRADED if entry.consecutive_failures > 0 else ServiceHealthStatus.HEALTHY))
                 else:
+                    if created_lab is not None: labs_to_close.append(created_lab)
+                    if final_raw.get("lab") is not None and final_raw.get("lab") is not old_lab: labs_to_close.append(final_raw.get("lab"))
                     entry.status = prev_status
                     self._apply_fault_locked(entry, final_err)
                 incarnation = entry.incarnation
+            _close_labs([*labs_to_close, *extra_labs])
             return RecoveryReceipt(eid, primary_tier, tier_succeeded, final_ok, fallback_used, cost_s, incarnation, final_raw, final_err)
+        except BaseException:
+            _close_labs([created_lab, *extra_labs])
+            raise
         finally:
             if not committed:
                 with self._lock:
                     entry.recovering = False
-                    if not self._closed and entry.status == ServiceHealthStatus.RECOVERING: entry.status = prev_status
+                    if not self._closed and entry.status == ServiceHealthStatus.RECOVERING:
+                        entry.status = (ServiceHealthStatus.QUARANTINED if entry.consecutive_failures >= entry.quarantine_threshold
+                                        else (ServiceHealthStatus.DEGRADED if entry.consecutive_failures > 0 and prev_status == ServiceHealthStatus.HEALTHY else prev_status))
 
     def quiesce_and_checkpoint(self, endpoint_id: str, *, skip_warmup: bool = False) -> QuiesceReceipt:
         """Run `warmup_for_snapshot()` -> `quiesce_for_snapshot()` (or K8s snapshot) fail-closed."""
         eid = _require_str(endpoint_id, "endpoint_id"); _require_bool(skip_warmup, "skip_warmup")
         with self._lock:
-            entry, prev_status = self._begin_op_locked(eid, set_recovering=False)
+            entry, _ = self._begin_op_locked(eid, set_recovering=False)
             hooks, driver, lab = entry.quiesce_hooks, entry.driver, entry.lab
         committed = False
         try:
@@ -328,14 +369,14 @@ class RecoveryService:
             with self._lock:
                 entry.recovering, committed = False, True
                 self._require_open_locked()
-                entry.status = prev_status
                 return receipt
         except RecoveryClosedError: raise
         except Exception as exc:
             err_text = _format_error(exc)
             with self._lock:
                 entry.recovering, committed = False, True
-                if not self._closed: self._apply_fault_locked(entry, err_text)
+                if self._closed: raise RecoveryClosedError("RecoveryService is closed") from exc
+                self._apply_fault_locked(entry, err_text)
             if isinstance(exc, RecoveryServiceError): raise
             raise RecoveryServiceError(err_text) from exc
         finally:
@@ -356,16 +397,24 @@ class RecoveryService:
         endpoints_out: dict[str, dict[str, Any]] = {}
         endpoints_ok = True
         for h, meta in ep_rows:
-            if h.status in (ServiceHealthStatus.DEGRADED, ServiceHealthStatus.QUARANTINED, ServiceHealthStatus.CLOSED):
-                endpoints_ok = False
+            if h.status != ServiceHealthStatus.HEALTHY: endpoints_ok = False
             endpoints_out[h.endpoint_id] = {**asdict(h), "tier": h.tier.value, "status": h.status.value, "metadata": meta}
         pools_out: dict[str, dict[str, Any]] = {}
         pools_ok = True
         for pid, pool, autoscaler, own in pool_rows:
-            slots, metrics = list(pool.slot_states()), dict(pool.metrics())
-            if any(s.get("quarantined") for s in slots): pools_ok = False
-            pools_out[pid] = {"pool_id": pid, "own": own, "slot_states": slots, "metrics": metrics,
-                              "autoscaler": dict(autoscaler.status()) if autoscaler is not None else None}
+            pool_closed = bool(getattr(pool, "_closed", False))
+            slots, metrics, scaler_status, pool_err = [], {}, None, None
+            try:
+                slots, metrics = list(pool.slot_states()), dict(pool.metrics())
+                if autoscaler is not None: scaler_status = dict(autoscaler.status())
+            except Exception as exc:
+                pool_err = _format_error(exc)
+            pool_ok = (not pool_closed) and (pool_err is None) and (not any(s.get("quarantined") for s in slots))
+            if not pool_ok: pools_ok = False
+            p_out: dict[str, Any] = {"pool_id": pid, "own": own, "ok": pool_ok, "closed": pool_closed,
+                                     "slot_states": slots, "metrics": metrics, "autoscaler": scaler_status}
+            if pool_err is not None: p_out["error"] = pool_err
+            pools_out[pid] = p_out
         return {"ok": (not closed) and endpoints_ok and pools_ok, "closed": closed,
                 "endpoint_count": len(endpoints_out), "pool_count": len(pools_out), "endpoints": endpoints_out, "pools": pools_out}
 
@@ -374,8 +423,7 @@ class RecoveryService:
         _require_bool(probe_stores, "probe_stores")
         snapshot = self.health_snapshot()
         with self._lock: store_rows = [(e.endpoint_id, e.store) for e in self._endpoints.values() if e.store is not None]
-        stores_out: dict[str, dict[str, Any]] = {}
-        stores_ok = True
+        stores_out, stores_ok = {}, True
         if probe_stores and not snapshot["closed"]:
             for eid, store in store_rows:
                 assert store is not None
@@ -387,7 +435,7 @@ class RecoveryService:
         return snapshot
 
     def teardown(self, close_owned_drivers: bool = True) -> dict[str, Any]:
-        """Idempotently close the service and stop owned pools, drivers, and stores outside locks."""
+        """Idempotently close the service and stop owned pools, drivers, labs, and stores outside locks."""
         _require_bool(close_owned_drivers, "close_owned_drivers")
         with self._lock:
             already = self._torn_down
@@ -397,15 +445,16 @@ class RecoveryService:
                 owned_drivers = ([d for e in self._endpoints.values() if e.own_driver for d in (e.driver, e.fallback_driver) if d is not None]
                                  if close_owned_drivers else [])
                 owned_stores = [e.store for e in self._endpoints.values() if e.own_store and e.store is not None]
+                owned_labs = [e.lab for e in self._endpoints.values() if e.owns_lab and e.lab is not None]
                 owned_pools = [p for p in self._pools.values() if p.own]
             else:
-                owned_drivers, owned_stores, owned_pools = [], [], []
+                owned_drivers, owned_stores, owned_labs, owned_pools = [], [], [], []
         if already:
             self._teardown_done.wait(timeout=5.0)
             return {"already_closed": True, "stopped_pools": [], "stopped_drivers": 0, "stopped_stores": [], "errors": []}
 
         stopped_pools, stopped_stores, errors = [], [], []
-        seen_driver_ids, seen_store_ids = set(), set()
+        seen_driver_ids, seen_store_ids, seen_lab_ids = set(), set(), set()
         try:
             for pentry in owned_pools:
                 for label, obj, method in (("autoscaler", pentry.autoscaler, "stop"), ("pool", pentry.pool, "close")):
@@ -415,6 +464,7 @@ class RecoveryService:
                             if label == "pool": stopped_pools.append(pentry.pool_id)
                         except Exception as exc: errors.append(f"{label}({pentry.pool_id}): {_format_error(exc)}")
             for drv in owned_drivers: _close_driver_resources(drv, seen_driver_ids, errors)
+            _close_labs(owned_labs, seen_lab_ids, errors)
             for store in owned_stores:
                 if id(store) not in seen_store_ids:
                     seen_store_ids.add(id(store))

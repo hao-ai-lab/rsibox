@@ -5,6 +5,8 @@ Pure CPU / stdlib tests — zero GPU, torch, numpy, or engine imports.
 from __future__ import annotations
 
 import contextlib
+import gc
+import os
 import sys
 import tempfile
 import threading
@@ -499,6 +501,267 @@ class RecoveryServicePoolQuiesceAndTeardownTests(unittest.TestCase):
         self.assertEqual(len(caught), 1)
         self.assertIsInstance(caught[0], RecoveryClosedError)
         self.assertEqual(svc.get_health("ep-race").status, ServiceHealthStatus.CLOSED)
+
+
+class _PipeLab(_StubLab):
+    """`_StubLab` holding an open `os.pipe()` pair so any leaked lab triggers `ResourceWarning`."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        r_fd, w_fd = os.pipe()
+        self._r_file = os.fdopen(r_fd, "rb")
+        self._w_file = os.fdopen(w_fd, "wb")
+        super().__init__(**kwargs)
+
+    def close(self) -> dict[str, Any]:
+        for fh in (self._r_file, self._w_file):
+            if not fh.closed:
+                fh.close()
+        return super().close()
+
+
+class RecoveryServiceHardeningTests(unittest.TestCase):
+    def test_pipe_lab_ownership_closes_on_fail_replacement_race_and_teardown(self) -> None:
+        class _FailDriver:
+            name = "default_respawn"
+
+            def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                return {"ok": False, "error": "spawn failed"}
+
+        class _ReplacingDriver:
+            name = "default_respawn"
+
+            def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                return {"ok": True, "driver": self.name, "lab": _PipeLab()}
+
+        created_fail: list[_PipeLab] = []
+        created_ok: list[_PipeLab] = []
+        foreign_lab = _PipeLab()
+        try:
+            with RecoveryService() as svc:
+                svc.register_endpoint(
+                    "ep-fail-pipe",
+                    engine="vllm",
+                    lab_factory=lambda: created_fail.append(p := _PipeLab()) or p,
+                    driver=_FailDriver(),
+                )
+                rec_fail = svc.recover("ep-fail-pipe")
+                self.assertFalse(rec_fail.ok)
+                self.assertTrue(created_fail[0].closed)
+
+                svc.register_endpoint(
+                    "ep-replace-pipe",
+                    engine="vllm",
+                    lab_factory=lambda: created_ok.append(p := _PipeLab()) or p,
+                    driver=_ReplacingDriver(),
+                )
+                rec_rep = svc.recover("ep-replace-pipe")
+                self.assertTrue(rec_rep.ok)
+                # Initial lab_factory lab was replaced & closed immediately; replacement stays open until teardown.
+                self.assertTrue(created_ok[0].closed)
+
+                svc.register_endpoint("ep-foreign-pipe", engine="sglang", lab=foreign_lab, own_lab=False)
+
+            # Service exited context manager -> teardown closed replacement lab, left foreign lab open.
+            self.assertFalse(foreign_lab.closed)
+
+            # Concurrent teardown during recover() closes created_lab before raising RecoveryClosedError.
+            entered = threading.Event()
+            release = threading.Event()
+            raced: list[_PipeLab] = []
+
+            class _SlowPipeDriver:
+                name = "default_respawn"
+
+                def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                    entered.set()
+                    release.wait(timeout=5.0)
+                    return {"ok": True, "driver": self.name}
+
+            svc2 = RecoveryService()
+            svc2.register_endpoint(
+                "ep-race-pipe",
+                engine="vllm",
+                lab_factory=lambda: raced.append(p := _PipeLab()) or p,
+                driver=_SlowPipeDriver(),
+            )
+            race_exc: list[BaseException] = []
+
+            def run_raced() -> None:
+                try:
+                    svc2.recover("ep-race-pipe")
+                except BaseException as exc:
+                    race_exc.append(exc)
+
+            t = threading.Thread(target=run_raced)
+            t.start()
+            self.assertTrue(entered.wait(timeout=2.0))
+            svc2.teardown()
+            release.set()
+            t.join(timeout=2.0)
+            self.assertIsInstance(race_exc[0], RecoveryClosedError)
+            self.assertTrue(raced[0].closed)
+            gc.collect()
+        finally:
+            foreign_lab.close()
+
+    def test_quiesce_concurrency_record_failure_and_teardown(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _SlowHooks(_StubHooks):
+            def quiesce_for_snapshot(self) -> QuiesceReceipt:
+                entered.set()
+                release.wait(timeout=5.0)
+                return super().quiesce_for_snapshot()
+
+        with RecoveryService(quarantine_threshold=2) as svc:
+            svc.register_endpoint("ep-q-race", engine="vllm", quiesce_hooks=_SlowHooks(ok=True))
+            out: list[QuiesceReceipt] = []
+
+            t = threading.Thread(target=lambda: out.append(svc.quiesce_and_checkpoint("ep-q-race")))
+            t.start()
+            self.assertTrue(entered.wait(timeout=2.0))
+            # Concurrent fault must NOT be clobbered when quiesce finishes.
+            svc.record_failure("ep-q-race", "concurrent worker fault")
+            release.set()
+            t.join(timeout=2.0)
+            self.assertTrue(out[0].ok)
+            self.assertEqual(svc.get_health("ep-q-race").status, ServiceHealthStatus.DEGRADED)
+
+        # Concurrent teardown during failing quiesce raises RecoveryClosedError.
+        entered2 = threading.Event()
+        release2 = threading.Event()
+
+        class _FailOnCloseHooks(_StubHooks):
+            def quiesce_for_snapshot(self) -> QuiesceReceipt:
+                entered2.set()
+                release2.wait(timeout=5.0)
+                return QuiesceReceipt(ok=False, error="aborted")
+
+        svc2 = RecoveryService()
+        svc2.register_endpoint("ep-q-close", engine="vllm", quiesce_hooks=_FailOnCloseHooks())
+        errs: list[BaseException] = []
+
+        def run_q() -> None:
+            try:
+                svc2.quiesce_and_checkpoint("ep-q-close")
+            except BaseException as exc:
+                errs.append(exc)
+
+        t2 = threading.Thread(target=run_q)
+        t2.start()
+        self.assertTrue(entered2.wait(timeout=2.0))
+        svc2.teardown()
+        release2.set()
+        t2.join(timeout=2.0)
+        self.assertIsInstance(errs[0], RecoveryClosedError)
+
+    def test_standby_shadow_promote_tier_inference_and_fallback_receipts(self) -> None:
+        with RecoveryService() as svc:
+            # Tier inferred automatically from StandbyShadowDriver when tier is omitted.
+            shadow_ok = StandbyShadowDriver(
+                promote_fn=lambda lab, store: {"ok": True, "reset": ["shadow promoted"]},
+                ready_count_fn=lambda: 1,
+            )
+            h = svc.register_endpoint("ep-sh-ok", engine="vllm", lab_factory=_StubLab, driver=shadow_ok)
+            self.assertEqual(h.tier, RecoveryTier.STANDBY_SHADOW)
+            rec = svc.recover("ep-sh-ok")
+            self.assertTrue(rec.ok)
+            self.assertFalse(rec.fallback_used)
+            self.assertEqual(rec.tier_succeeded, RecoveryTier.STANDBY_SHADOW)
+
+            # StandbyShadowDriver with internal failing fallback preserves promote_error & fallback_used.
+            class _FailFallback:
+                name = "default_respawn"
+
+                def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                    return {"ok": False, "driver": self.name, "error": "cold_respawn_oom"}
+
+            shadow_internal_fb = StandbyShadowDriver(
+                promote_fn=lambda lab, store: {"ok": False, "error": "promote_ipc_err"},
+                fallback_driver=_FailFallback(),
+            )
+            svc.register_endpoint("ep-sh-fb-fail", engine="vllm", lab_factory=_StubLab, driver=shadow_internal_fb)
+            rec_fb_fail = svc.recover("ep-sh-fb-fail")
+            self.assertFalse(rec_fb_fail.ok)
+            self.assertTrue(rec_fb_fail.fallback_used)
+            self.assertIn("promote_ipc_err", rec_fb_fail.error or "")
+            self.assertIn("cold_respawn_oom", rec_fb_fail.error or "")
+
+            # Fallback lab_factory error is reported cleanly instead of masked as None.
+            svc.register_endpoint(
+                "ep-fb-factory-err",
+                engine="sglang",
+                lab_factory=lambda: (_ for _ in ()).throw(RuntimeError("factory disk full")),
+                tier=RecoveryTier.STANDBY_SHADOW,
+                driver=StandbyShadowDriver(promote_fn=lambda lab, store: {"ok": False}, ready_count_fn=lambda: 0),
+                fallback_driver=DefaultRespawnDriver(),
+            )
+            with self.assertRaises(EscalationFailedError) as ctx:
+                svc.recover("ep-fb-factory-err")
+            self.assertIn("factory disk full", str(ctx.exception))
+
+    def test_closed_and_raising_pool_health_snapshot_and_recovering_readiness(self) -> None:
+        # Store missing stop() rejected when own_store=True.
+        with RecoveryService() as svc:
+            with self.assertRaises(TypeError):
+                svc.register_endpoint("ep-bad-store", engine="vllm", store=type("NoStop", (), {"probe": lambda self: None})(), own_store=True)  # type: ignore[arg-type]
+
+            lab = _StubLab()
+            closed_pool = SandboxPool([PoolSlot("s0", lab)], close_labs=True)
+            closed_pool.close()
+            svc.attach_pool("closed-pool", closed_pool, own=False)
+
+            class _RaisingPool:
+                _closed = False
+
+                def slot_states(self) -> list[dict[str, Any]]:
+                    raise RuntimeError("pool rpc broken")
+
+                def metrics(self) -> dict[str, Any]:
+                    return {}
+
+            svc.attach_pool("bad-pool", _RaisingPool(), own=False)  # type: ignore[arg-type]
+            snap = svc.health_snapshot()
+            self.assertFalse(snap["ok"])
+            self.assertFalse(snap["pools"]["closed-pool"]["ok"])
+            self.assertTrue(snap["pools"]["closed-pool"]["closed"])
+            self.assertFalse(snap["pools"]["bad-pool"]["ok"])
+            self.assertIn("pool rpc broken", snap["pools"]["bad-pool"]["error"])
+
+        # RECOVERING marks health_snapshot()["ok"] == False and BaseException restores concurrent fault status.
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _AbortDriver:
+            name = "default_respawn"
+
+            def respawn(self, lab: Any, store: Any = None, *, reason: str = "reset_respawn") -> dict[str, Any]:
+                entered.set()
+                release.wait(timeout=5.0)
+                raise SystemExit("simulated base exception")
+
+        with RecoveryService(quarantine_threshold=1) as svc_rec:
+            svc_rec.register_endpoint("ep-rec-ok", engine="vllm", driver=_AbortDriver())
+            caught_base: list[BaseException] = []
+
+            def run_abort() -> None:
+                try:
+                    svc_rec.recover("ep-rec-ok")
+                except BaseException as exc:
+                    caught_base.append(exc)
+
+            t = threading.Thread(target=run_abort)
+            t.start()
+            self.assertTrue(entered.wait(timeout=2.0))
+            snap_rec = svc_rec.health_snapshot()
+            self.assertFalse(snap_rec["ok"])
+            self.assertEqual(snap_rec["endpoints"]["ep-rec-ok"]["status"], "recovering")
+            svc_rec.record_failure("ep-rec-ok", "fatal fault during recovery")
+            release.set()
+            t.join(timeout=2.0)
+            self.assertIsInstance(caught_base[0], SystemExit)
+            self.assertEqual(svc_rec.get_health("ep-rec-ok").status, ServiceHealthStatus.QUARANTINED)
 
 
 if __name__ == "__main__":
