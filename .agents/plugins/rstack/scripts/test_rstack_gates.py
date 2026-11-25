@@ -353,6 +353,66 @@ class RstackGatesTest(unittest.TestCase):
                 1,
             )
 
+    def test_plugin_bundle_integrity(self) -> None:
+        plugin_root = SCRIPTS_DIR.parent
+        manifest_path = plugin_root / "plugin.json"
+        self.assertTrue(manifest_path.is_file(), "plugin.json missing")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        allowed_keys = {
+            "name",
+            "displayName",
+            "version",
+            "description",
+            "author",
+            "homepage",
+            "repository",
+            "logo",
+            "suggestedPrompts",
+            "disabled",
+        }
+        self.assertTrue(set(manifest).issubset(allowed_keys))
+        self.assertEqual(manifest.get("name"), "rstack")
+        self.assertLessEqual(len(manifest.get("suggestedPrompts", [])), 3)
+
+        rules_text = (plugin_root / "rules" / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertFalse(rules_text.lstrip().startswith("---"), "rules/AGENTS.md must not have frontmatter")
+
+        expected_agents = {
+            "rstack-worker.md",
+            "rstack-gate1-auditor.md",
+            "rstack-gate2-adversary.md",
+            "rstack-site-syncer.md",
+        }
+        actual_agents = {p.name for p in (plugin_root / "agents").glob("*.md")}
+        self.assertEqual(actual_agents, expected_agents)
+
+        expected_skills = {
+            "rsibox-mode",
+            "rsibox-claim",
+            "rsibox-build",
+            "rsibox-precheck",
+            "rsibox-gpu-receipt",
+            "rsibox-audit",
+            "rsibox-triage",
+            "rsibox-merge-train",
+            "rsibox-facts-sync",
+        }
+        for skill in expected_skills:
+            skill_md = plugin_root / "skills" / skill / "SKILL.md"
+            self.assertTrue(skill_md.is_file(), f"missing {skill_md}")
+            text = skill_md.read_text(encoding="utf-8")
+            self.assertIn(f"name: {skill}", text)
+            self.assertIn("description:", text)
+
+        workflows_dir = plugin_root / "skills" / "rsibox-mode" / "workflows"
+        expected_wfs = {
+            "01-claim-and-build.md",
+            "02-gpu-receipt-and-witness.md",
+            "03-adversarial-review-triangle.md",
+            "04-dag-merge-and-site-sync.md",
+        }
+        self.assertEqual({p.name for p in workflows_dir.glob("*.md")}, expected_wfs)
+
 
 if __name__ == "__main__":
     unittest.main()
