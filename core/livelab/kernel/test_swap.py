@@ -284,7 +284,6 @@ class SwapEdgeCaseTest(unittest.TestCase):
         `CompilationError ... StopIteration` failure). Expected: calling txn 1's lazy builder
         AFTER txn 2 still reads the exact nested kernel source via `inspect.getsourcelines`, and
         undoing both transactions removes all `<rsibox-live:...>` linecache entries."""
-        import inspect
         import linecache
         from . import coordinator as C
 
@@ -454,6 +453,253 @@ class SwapEdgeCaseTest(unittest.TestCase):
         self.assertEqual(len(nf), 1, res["findings"])
         self.assertEqual(nf[0]["subject"], f"{name}:Outer.Inner.extra")
         self.assertIn("Outer.Inner.f", nf[0]["observed"])
+
+
+class SwapHardeningTest(unittest.TestCase):
+    """Regression tests for swap rollback, closure decorators, validate TOCTOU, and stage gaps."""
+
+    def test_failed_apply_restores_witness_and_leaves_staged_and_hit_unmutated(self):
+        """S1+S2: a failed `apply()` restores pre-existing `witness` metadata, pops newly added
+        keys, never leaks `W.HIT` or `linecache` entries, and never mutates `st.swaps`/`st.adds`."""
+        import linecache
+
+        # S1: witness reset/pollution rollback on mid-apply _Deferred error
+        n1 = f"kt_h1_{next(_n)}"
+        (m1,) = temp_modules(self, {n1: "def f(x):\n    return x + 1\n"})
+        j, w = J.Journal(), W.Witness()
+        r1 = S.stage_and_apply(n1, "def f(x):\n    return x + 2\n", j, w)
+        self.assertTrue(r1["ok"], r1)
+        k = L.key_of(n1, "f", 1)
+        with w.capture():
+            m1.f(1)
+        w.probe_errors[k] = 7
+        w.first_hit[k] = 123.0
+        w.first_hit_wall[k] = 456.0
+        src2 = "def added_helper():\n    return 1\n\ndef f(x=(added_helper(), 1/0)):\n    return x\n"
+        st2 = S.stage(n1, src2, base_source="def f(x):\n    return x + 2\n")["staged"]
+        res = S.apply(st2, j, w)
+        self.assertFalse(res["ok"])
+        self.assertEqual(dict(w.capture_counts), {k: 1})
+        self.assertEqual(dict(w.probe_errors), {k: 7})
+        self.assertEqual(dict(w.first_hit), {k: 123.0})
+        self.assertEqual(dict(w.first_hit_wall), {k: 456.0})
+        self.assertEqual(set(w.counts), {k})
+
+        # S2: _build_adds W.HIT leak and st.adds / st.swaps in-place mutation
+        n2 = f"kt_h2_{next(_n)}"
+        (m2,) = temp_modules(self, {n2: "def outer():\n    def inner():\n        return 1\n    return inner()\n"})
+        src_fail = (
+            "def good_added():\n    return 1\n\n"
+            "def bad_dec(fn): raise RuntimeError('boom')\n\n"
+            "@bad_dec\ndef bad_added():\n    return 2\n\n"
+            "def outer():\n    def inner():\n        return 99\n    return inner()\n"
+        )
+        st = S.stage(n2, src_fail)["staged"]
+        nested_before = [c.co_filename for c in st.swaps[0][1].co_consts if hasattr(c, "co_code")]
+        self.assertNotIn(W.HIT, vars(m2))
+        self.assertEqual(st.adds, [])
+        res2 = S.apply(st, J.Journal(), W.Witness())
+        self.assertFalse(res2["ok"])
+        self.assertNotIn(W.HIT, vars(m2))
+        self.assertEqual(st.adds, [])
+        self.assertEqual(st.jit_adds, [])
+        nested_after = [c.co_filename for c in st.swaps[0][1].co_consts if hasattr(c, "co_code")]
+        self.assertEqual(nested_after, nested_before)
+        self.assertFalse(any(key.startswith(f"<rsibox-live:{m2.__file__}#") for key in linecache.cache))
+
+        # S1+S2 mid-apply failure in journal.set_code after W.HIT is bound
+        n3 = f"kt_h2b_{next(_n)}"
+        (m3,) = temp_modules(self, {n3: "def step(x):\n    def inner(y):\n        return y + 1\n    return inner(x)\n"})
+        st3 = S.stage(n3, "def step(x):\n    def inner(y):\n        return y + 2\n    return inner(x)\n")["staged"]
+        st3_nested_before = [c.co_filename for c in st3.swaps[0][1].co_consts if hasattr(c, "co_code")]
+        w3 = W.Witness()
+        k3 = st3.keys[0]
+        w3.capture_counts[k3] = 7
+
+        class _FailingSetCodeJournal(J.Journal):
+            def set_code(self, fn, code, defaults=J.KEEP, kwdefaults=J.KEEP):
+                raise RuntimeError("injected mid-apply failure")
+
+        res3 = S.apply(st3, _FailingSetCodeJournal(), w3)
+        self.assertFalse(res3["ok"])
+        self.assertEqual(w3.capture_counts[k3], 7)
+        self.assertNotIn(W.HIT, vars(m3))
+        st3_nested_after = [c.co_filename for c in st3.swaps[0][1].co_consts if hasattr(c, "co_code")]
+        self.assertEqual(st3_nested_after, st3_nested_before)
+        self.assertEqual(m3.step(1), 2)
+
+    def test_added_class_with_new_import_and_class_deferred_default(self):
+        """S4: added top-level class sees new `st.imports` in `mod.__dict__`, and `_Deferred`
+        defaults on methods see newly built class members (`built[cls_name]`)."""
+        n_a, n_b = f"kt_h4a_{next(_n)}", f"kt_h4b_{next(_n)}"
+        (ma, mb) = temp_modules(
+            self,
+            {
+                n_a: "def f(x):\n    return x\n",
+                n_b: "class C:\n    def f(self, fn=None):\n        return 1\n",
+            },
+        )
+        ja, wa = J.Journal(), W.Witness()
+        ma_mark = ja.mark("a")
+        res_a = S.stage_and_apply(
+            n_a,
+            "import math\n\nclass Box:\n    VAL = math.sqrt(16)\n\ndef f(x):\n    return x + Box.VAL\n",
+            ja,
+            wa,
+        )
+        self.assertTrue(res_a["ok"], res_a)
+        self.assertEqual(ma.f(1), 5.0)
+        self.assertTrue(ja.undo_to(ma_mark)["ok"])
+        self.assertFalse(hasattr(ma, "Box"))
+        self.assertFalse(hasattr(ma, "math"))
+        self.assertEqual(ma.f(1), 1)
+
+        jb, wb = J.Journal(), W.Witness()
+        mb_mark = jb.mark("b")
+        res_b = S.stage_and_apply(
+            n_b,
+            "class C:\n    def helper(self):\n        return 42\n    def f(self, fn=helper):\n        return fn(self)\n",
+            jb,
+            wb,
+        )
+        self.assertTrue(res_b["ok"], res_b)
+        self.assertEqual(mb.C().f(), 42)
+        self.assertTrue(jb.undo_to(mb_mark)["ok"])
+        self.assertFalse(hasattr(mb.C, "helper"))
+        self.assertEqual(mb.C().f(), 1)
+
+    def test_added_closure_decorated_method_fixes_super_retargets_and_tracks_closures(self):
+        """S5: `_member_functions` traverses `__closure__` cells so closure-decorated added
+        methods without `__wrapped__` get `__class__` cell fixing, `ver_file` retargeting, and
+        `closure_pairs` tracking."""
+        name = f"kt_h5_{next(_n)}"
+        base = (
+            "def mywrap(fn):\n"
+            "    def inner(self):\n"
+            "        return fn(self) + 10\n"
+            "    return inner\n\n"
+            "class Base:\n"
+            "    def base_val(self):\n"
+            "        return 5\n\n"
+            "class Sub(Base):\n"
+            "    def f(self):\n"
+            "        return 1\n"
+        )
+        (mod,) = temp_modules(self, {name: base})
+        new_src = base + (
+            "\n    @mywrap\n"
+            "    def g(self):\n"
+            "        def nested():\n"
+            "            return 1\n"
+            "        return super().base_val() + nested()\n"
+        )
+        j, w = J.Journal(), W.Witness()
+        mark = j.mark("t1")
+        res = S.stage_and_apply(name, new_src, j, w)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(mod.Sub().g(), 16)
+        inner_fn = mod.Sub.g.__closure__[0].cell_contents
+        nested_files = [c.co_filename for c in inner_fn.__code__.co_consts if hasattr(c, "co_code")]
+        self.assertTrue(nested_files and all(f.startswith("<rsibox-live:") for f in nested_files), nested_files)
+        self.assertTrue(S.closure_pairs(res["stage"]["staged"]))
+        self.assertTrue(j.undo_to(mark)["ok"])
+        self.assertFalse(hasattr(mod.Sub, "g"))
+
+    def test_validate_detects_rebound_fn_suspended_gen_import_collision_and_allows_attr_to_def(self):
+        """S6: `validate()` catches rebound bindings, suspended generators, and import collisions,
+        and does not emit a false `changed_since_prepare` when replacing an existing attr."""
+        na, nb, nc, nd = (f"kt_h6{tag}_{next(_n)}" for tag in "abcd")
+        ma, mb, mc, _ = temp_modules(
+            self,
+            {
+                na: "def f(x):\n    return x + 1\n",
+                nb: "def gen():\n    yield 1\n    yield 2\n",
+                nc: "def f(x):\n    return x\n",
+                nd: "x = 1\n",
+            },
+        )
+        # 6a: Rebound function between stage() and validate()
+        st_a = S.stage(na, "def f(x):\n    return x + 100\n")["staged"]
+        ma.f = lambda x: x + 1
+        v_a = S.validate(st_a)
+        self.assertFalse(v_a["ok"])
+        self.assertIn("changed_since_prepare", [f["check"] for f in v_a["findings"]])
+
+        # 6b: Generator suspended between stage() and validate()
+        st_b = S.stage(nb, "def gen():\n    yield 10\n    yield 20\n")["staged"]
+        g = mb.gen()
+        self.assertEqual(next(g), 1)
+        v_b = S.validate(st_b)
+        self.assertFalse(v_b["ok"])
+        self.assertIn("running_frame", [f["check"] for f in v_b["findings"]])
+        g.close()
+
+        # 6c: Import collision between stage() and validate()
+        st_c = S.stage(nc, "import math\n\ndef f(x):\n    return math.sqrt(x)\n")["staged"]
+        mc.math = "USER_CUSTOM_MATH"
+        v_c = S.validate(st_c)
+        self.assertFalse(v_c["ok"])
+        self.assertIn("changed_since_prepare", [f["check"] for f in v_c["findings"]])
+
+        # 6d: Replacing attribute x = 1 with def x() must not report false changed_since_prepare
+        st_d = S.stage(nd, "def x():\n    return 2\n")["staged"]
+        v_d = S.validate(st_d)
+        self.assertTrue(v_d["ok"], v_d["findings"])
+
+    def test_lambda_default_and_dataclass_default_factory_handling(self):
+        """S7: editing a lambda's default swaps the new default (no silent no-op), and adding a
+        `@dataclass` `field(default_factory=...)` read by a method triggers `new_fields`."""
+        na1, na2, nb = f"kt_h7a1_{next(_n)}", f"kt_h7a2_{next(_n)}", f"kt_h7b_{next(_n)}"
+        base_dc = (
+            "from dataclasses import dataclass, field\n\n"
+            "@dataclass\n"
+            "class Bag:\n"
+            "    items: list = field(default_factory=list)\n\n"
+            "    def count(self):\n"
+            "        return len(self.items)\n"
+        )
+        new_dc = (
+            "from dataclasses import dataclass, field\n\n"
+            "@dataclass\n"
+            "class Bag:\n"
+            "    items: list = field(default_factory=list)\n"
+            "    tags: list = field(default_factory=list)\n\n"
+            "    def count(self):\n"
+            "        return len(self.items) + len(self.tags)\n"
+        )
+        (ma1, ma2, mb) = temp_modules(
+            self,
+            {
+                na1: "f = lambda x=(\n    lambda y: y + 1\n): x(10)\n",
+                na2: "f = lambda x=1: x + 10\n",
+                nb: base_dc,
+            },
+        )
+        # 7a: nested lambda in default + scalar default on lambda
+        j1, w1 = J.Journal(), W.Witness()
+        m1 = j1.mark("l1")
+        r_a1 = S.stage_and_apply(na1, "f = lambda x=(\n    lambda y: y + 2\n): x(10)\n", j1, w1)
+        self.assertTrue(r_a1["ok"], r_a1)
+        self.assertEqual(ma1.f(), 12)
+        self.assertTrue(j1.undo_to(m1)["ok"])
+        self.assertEqual(ma1.f(), 11)
+
+        j2, w2 = J.Journal(), W.Witness()
+        m2 = j2.mark("l2")
+        r_a2 = S.stage_and_apply(na2, "f = lambda x=2: x + 10\n", j2, w2)
+        self.assertTrue(r_a2["ok"], r_a2)
+        self.assertEqual(ma2.f(), 12)
+        self.assertTrue(j2.undo_to(m2)["ok"])
+        self.assertEqual(ma2.f(), 11)
+
+        # 7b: @dataclass field(default_factory=...) triggers new_fields
+        bag = mb.Bag()
+        st_b = S.stage(nb, new_dc)
+        checks = [f["check"] for f in st_b["findings"]]
+        self.assertIn("new_fields", checks)
+        r_b = S.stage_and_apply(nb, new_dc, J.Journal(), W.Witness(), accept=["outside_changes"])
+        self.assertFalse(r_b["ok"])
+        self.assertEqual(bag.count(), 0)
 
 
 if __name__ == "__main__":

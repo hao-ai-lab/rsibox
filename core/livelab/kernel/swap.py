@@ -86,6 +86,8 @@ def qual_index(tree):
         elif isinstance(node, ast.Lambda):
             q = pre + "<lambda>"
             idx.setdefault(q, []).append(node)
+            for x in node.args.defaults + [d for d in node.args.kw_defaults if d]:
+                visit(x, pre)
             visit(node.body, q + ".<locals>.")
         elif isinstance(node, ast.GeneratorExp):
             # its own code object, a constant of the enclosing code (list/set/dict
@@ -206,6 +208,9 @@ class Staged:
         self.jit_adds = []       # (added JIT object, witness key), built at apply
         self.pending_adds = []   # added definitions to build at apply (analysis records)
         self.add_slots = []      # (owner, name) each added definition goes to
+        self.bindings = []       # (owner, name, bound object at stage) for validate
+        self.import_expect = {}  # name -> original mod.__dict__ value (or MISSING) at stage
+        self.add_expect = []     # (owner, name, original value or MISSING) at stage
 
 
 class _Deferred:
@@ -221,6 +226,7 @@ _compile = compile          # `stage` has a parameter named compile
 
 LIVE_BODY = "__rsibox_class_body__"
 SHELL_BODY = "__rsibox_outer_body__"
+LAMBDA_DEFAULTS = "__rsibox_lambda_defaults__"
 
 
 class _OuterShell:
@@ -300,11 +306,17 @@ def _futures(tree):
 
 
 def _defaults_stub(q, node, futures=()):
-    """The def with an empty body, inside a scratch class chain for the qualname's enclosing
-    classes whose innermost class reads the live class (`_shell`), compiled: running it in the
-    module's globals evaluates the new defaults as the live class body would."""
-    stub = copy.deepcopy(node)
-    stub.body, stub.decorator_list = [ast.Pass()], []
+    """The def (or lambda) with an empty body, inside a scratch class chain for the
+    qualname's enclosing classes whose innermost class reads the live class (`_shell`),
+    compiled: running it in the module's globals evaluates the new defaults as the live
+    class body would."""
+    if isinstance(node, ast.Lambda):
+        tp = {"type_params": []} if "type_params" in ast.FunctionDef._fields else {}
+        stub = ast.FunctionDef(LAMBDA_DEFAULTS, copy.deepcopy(node.args), [ast.Pass()],
+                               [], None, **tp)
+    else:
+        stub = copy.deepcopy(node)
+        stub.body, stub.decorator_list = [ast.Pass()], []
     parts = q.split(".")
     body = [stub] if len(parts) == 1 else [_shell(".".join(parts[:-1]), [stub])]
     return _try_compile(ast.fix_missing_locations(ast.Module(list(futures) + body, [])),
@@ -324,29 +336,49 @@ def _defaults(mod, q, stub, imports=None):
     if len(cls_parts) > 1:
         ns[SHELL_BODY] = _OuterShell(live_body)
     exec(_raise(stub), mod.__dict__, ns)
-    obj = ns[parts[0]] if len(parts) == 1 else _unwrap_shell(ns, cls_parts).__dict__[parts[-1]]
+    leaf = LAMBDA_DEFAULTS if parts[-1] == "<lambda>" else parts[-1]
+    obj = ns[leaf] if len(parts) == 1 else _unwrap_shell(ns, cls_parts).__dict__[leaf]
     return obj.__defaults__, obj.__kwdefaults__
 
 
 def _member_functions(obj):
-    """The plain functions an added class member runs: a function itself, a staticmethod's or
-    classmethod's `__func__`, a property's getter, setter and deleter, a cached_property's
-    `func`. A member that holds no code (a constant, a nested class, any other descriptor)
-    has none."""
-    if isinstance(obj, property):
-        fns = (obj.fget, obj.fset, obj.fdel)
-    elif isinstance(obj, (staticmethod, classmethod)):
-        fns = (obj.__func__,)
-    elif isinstance(obj, functools.cached_property):
-        fns = (obj.func,)
-    elif isinstance(getattr(obj, "__wrapped__", None), types.FunctionType):
-        fns = (obj.__wrapped__,)
-    else:
-        fns = (obj,)
-    return [f for f in fns if isinstance(f, types.FunctionType)]
+    """The plain functions an added class member runs: a function itself (and any wrapped
+    functions held in `__wrapped__` or closure cells), a staticmethod's or classmethod's
+    `__func__`, a property's getter, setter and deleter, a cached_property's `func`. A
+    member that holds no code (a constant, a nested class, any other descriptor) has none."""
+    out, seen, stack = [], set(), [obj]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, property):
+            stack.extend((cur.fdel, cur.fset, cur.fget))
+        elif isinstance(cur, (staticmethod, classmethod)):
+            stack.append(cur.__func__)
+        elif isinstance(cur, functools.cached_property):
+            stack.append(cur.func)
+        elif isinstance(cur, types.FunctionType):
+            out.append(cur)
+            wrapped = getattr(cur, "__wrapped__", None)
+            if wrapped is not None:
+                stack.append(wrapped)
+            for cell in cur.__closure__ or ():
+                try:
+                    val = cell.cell_contents
+                except ValueError:
+                    continue
+                if isinstance(val, (types.FunctionType, property, staticmethod, classmethod,
+                                    functools.cached_property)) or hasattr(val, "__wrapped__"):
+                    stack.append(val)
+        else:
+            wrapped = getattr(cur, "__wrapped__", None)
+            if wrapped is not None:
+                stack.append(wrapped)
+    return out
 
 
-def _set_class_cell(obj, cls):
+def _set_class_cell(obj, cls, scratch_cls=None):
     """Point the `__class__` cell (zero-argument super()) of an added member's functions at
     the live class (they were built in a scratch class). A member that is not a plain function
     (a @property, a staticmethod) has no `__closure__` of its own, so its functions come from
@@ -354,7 +386,9 @@ def _set_class_cell(obj, cls):
     for fn in _member_functions(obj):
         code = fn.__code__
         if fn.__closure__ and "__class__" in code.co_freevars:
-            fn.__closure__[code.co_freevars.index("__class__")].cell_contents = cls
+            cell = fn.__closure__[code.co_freevars.index("__class__")]
+            if scratch_cls is None or cell.cell_contents is scratch_cls:
+                cell.cell_contents = cls
 
 
 def analyze(base_src, source, targets, filename, key_module, live, trees=None):
@@ -504,7 +538,7 @@ def _analyze_trees(base_src, source, targets, filename, key_module, live,
     # 6. new defaults: a stub the caller evaluates in the module's globals
     for (q, i), r in zip(todo, [r for r in tres if r["status"] == "ok"]):
         bnode, pnode = bq[q][i], pq[q][i]
-        if not isinstance(pnode, _DEF) or _defaults_key(bnode) == _defaults_key(pnode):
+        if not isinstance(pnode, (*_DEF, ast.Lambda)) or _defaults_key(bnode) == _defaults_key(pnode):
             continue
         if "<locals>" not in q:
             r["defaults"] = _defaults_stub(q, pnode, futures)
@@ -635,14 +669,27 @@ def _is_dataclass(cls_def):
     return False
 
 
+def _is_field_without_default(value):
+    """Is `value` a `field(...)` / `dataclasses.field(...)` call without a `default=` kwarg?"""
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    is_field = (isinstance(func, ast.Name) and func.id == "field") or (
+        isinstance(func, ast.Attribute) and func.attr == "field")
+    if not is_field:
+        return False
+    return any(kw.arg == "default_factory" for kw in value.keywords) or not any(
+        kw.arg in ("default", None) for kw in value.keywords)
+
+
 def _dataclass_fields(cls_def):
-    """Bare annotated field names (`x: T`, no default) of a @dataclass body: the generated
-    __init__ sets them on instances, while the class body itself defines no attribute."""
+    """Annotated field names of a @dataclass body whose generated `__init__` sets them on
+    instances without defining a class-level attribute (`x: T` or `x: T = field(default_factory=...)`)."""
     if not _is_dataclass(cls_def):
         return set()
     return {node.target.id for node in cls_def.body
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-            and node.value is None}
+            and (node.value is None or _is_field_without_default(node.value))}
 
 
 def _class_map(tree):
@@ -890,12 +937,12 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
             if imp.get("changed") or any(name not in mod.__dict__ for name in imp["names"]):
                 scratch_ns = {}
                 exec(_raise(imp), mod.__dict__, scratch_ns)
-                st.imports.update({
-                    binding_name: bound_value
-                    for binding_name, bound_value in scratch_ns.items()
-                    if binding_name not in mod.__dict__
-                    or mod.__dict__[binding_name] is not bound_value
-                })
+                for binding_name, bound_value in scratch_ns.items():
+                    if binding_name not in mod.__dict__ or mod.__dict__[binding_name] is not bound_value:
+                        st.import_expect.setdefault(
+                            binding_name, mod.__dict__.get(binding_name, J.MISSING)
+                        )
+                        st.imports[binding_name] = bound_value
         if a["new_error"] is not None:
             raise _Failed(a["new_error"])
         new_idx, parent = {}, {}
@@ -916,6 +963,9 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                 raise _Failed(f"enclosing class {ad['cls']} is not live")
             st.pending_adds.append(ad)
             st.add_slots.append((owner, ad["name"]))
+            cur_val = (owner.get(ad["name"], J.MISSING) if isinstance(owner, dict)
+                       else vars(owner).get(ad["name"], J.MISSING))
+            st.add_expect.append((owner, ad["name"], cur_val))
             if ad["def"]:
                 k = L.key_of(kname, ad["q"], ad["line"])
                 st.keys.append(k)
@@ -996,6 +1046,14 @@ def stage(module, source, targets="auto", base_hash=None, key_module=None, scan=
                        "new_hash": L.content_hash(new),
                        "functions": sum(len(held.get(o, [])) for o in olds),
                        "via": sum(len(held.get(o, [])) for o, _ in chain)}
+        if "<locals>" not in q:
+            cls_path, dot, attr_name = q.rpartition(".")
+            owner = _live_class(mod, cls_path) if dot else mod.__dict__
+            if owner is not None:
+                bound = (owner.get(attr_name, J.MISSING) if isinstance(owner, dict)
+                         else vars(owner).get(attr_name, J.MISSING))
+                if bound is not J.MISSING:
+                    st.bindings.append((owner, attr_name, bound))
     for o, (c, d, kw) in plan.items():
         for fn in held.get(o, []):
             st.swaps.append((fn, c, d, kw))
@@ -1166,15 +1224,17 @@ def _invalid(msg, kname):
 
 def validate(st, frames=True):
     """Phase 2, inside the gap: is what `stage` saw still true? Every function to swap must
-    still run the exact code object staged against (identity and hash), and every name to add
-    must still be absent. With `frames`, no thread stack may hold a frame of an old code now
+    still run the exact code object staged against (identity and hash), every rebound/import
+    binding must still match what `stage` saw, and every name to add must still match its
+    staged presence. With `frames`, no thread stack or suspended frame may hold an old code now
     (`running_frame`: the quiesce point is where it matters; prepare saw steps in flight).
-    Cheap: no heap scan, no compile. Never raises."""
+    Cheap: no whole-heap scan, no compile. Never raises."""
     fs = []
     if frames:
-        on_stack = W.stack_codes()
+        all_olds = [o for olds in st.old_codes.values() for o in olds]
+        live = W.live_codes(suspended=True, codes=all_olds)
         for k, olds in st.old_codes.items():
-            if any(o in on_stack for o in olds):
+            if any(o in live for o in olds):
                 fs.append(F.finding("running_frame", "a frame of the old code is running at "
                                     "the quiesce point", "no running frame", subject=k))
     for fn, old, h in st.expect:
@@ -1183,11 +1243,27 @@ def validate(st, frames=True):
             fs.append(F.finding("changed_since_prepare",
                                 f"{fn.__qualname__} runs code {L.content_hash(now)}",
                                 f"the staged base {h}", subject=fn.__qualname__))
-    for owner, name in st.add_slots:
-        present = name in owner if isinstance(owner, dict) else name in vars(owner)
-        if present:
-            fs.append(F.finding("changed_since_prepare", f"{name} was added meanwhile",
-                                f"{name} absent, as at prepare", subject=name))
+    for owner, name, expected in st.bindings:
+        cur = owner.get(name, J.MISSING) if isinstance(owner, dict) else vars(owner).get(name, J.MISSING)
+        if cur is not expected:
+            fs.append(F.finding("changed_since_prepare", f"{name} was rebound meanwhile",
+                                f"{name} still bound as at prepare", subject=name))
+    mod_dict = vars(st.mod)
+    for name, expected in st.import_expect.items():
+        cur = mod_dict.get(name, J.MISSING)
+        if cur is not expected:
+            fs.append(F.finding("changed_since_prepare", f"import binding {name} changed meanwhile",
+                                f"{name} unchanged, as at prepare", subject=name))
+    add_checks = st.add_expect if st.add_expect else [(o, n, J.MISSING) for o, n in st.add_slots]
+    for owner, name, expected in add_checks:
+        cur = owner.get(name, J.MISSING) if isinstance(owner, dict) else vars(owner).get(name, J.MISSING)
+        if expected is J.MISSING:
+            if cur is not J.MISSING:
+                fs.append(F.finding("changed_since_prepare", f"{name} was added meanwhile",
+                                    f"{name} absent, as at prepare", subject=name))
+        elif cur is not expected:
+            fs.append(F.finding("changed_since_prepare", f"{name} changed meanwhile",
+                                f"{name} unchanged, as at prepare", subject=name))
     for owner, name in st.removes:
         present = name in owner if isinstance(owner, dict) else name in vars(owner)
         if not present:
@@ -1371,7 +1447,7 @@ def _walk_added_functions(obj, seen=None):
         yield fn_obj
 
 
-def closure_pairs(st):
+def closure_pairs(st, swaps=None, adds=None):
     """{id(new nested code): (new code, old code or None)} for every code `apply` installs:
     the nested codes from which the new code makes function objects at run time (closures,
     lambdas; not generator expressions, whose function never outlives the call). A new
@@ -1396,9 +1472,9 @@ def closure_pairs(st):
             if o is not c:
                 pairs.setdefault(id(c), (c, o))
 
-    for fn, code, _, _ in st.swaps:
+    for fn, code, _, _ in (st.swaps if swaps is None else swaps):
         pair(fn.__code__, code)
-    for _, _, obj in st.adds:
+    for _, _, obj in (st.adds if adds is None else adds):
         for fn_obj in _walk_added_functions(obj):
             pair(None, fn_obj.__code__)
     return pairs
@@ -1432,19 +1508,28 @@ def _retarget_added_nested(obj, filename):
         fn_obj.__code__ = _retarget_nested_filename(fn_obj.__code__, filename)
 
 
-def _build_adds(st, journal, ver_file=None):
+def _build_adds(st, journal, ver_file=None, adds_out=None, jit_adds_out=None):
     """Build the definitions the edit adds (stage only planned them), in a scratch namespace:
-    their decorators and class bodies run now, at the commit. Returns the namespace of new
-    imports and top-level definitions (for deferred defaults)."""
+    their decorators and class bodies run now, at the commit. Returns `(top, built)` where
+    `top` holds new imports and top-level definitions and `built` maps class qualnames to
+    newly built class members (for deferred defaults)."""
     mod, top = st.mod, dict(st.imports)
-    st.adds, st.jit_adds = [], []
+    if adds_out is None:
+        adds_out = st.adds
+    if jit_adds_out is None:
+        jit_adds_out = st.jit_adds
+    adds_out.clear()
+    jit_adds_out.clear()
+    built = {}                         # class -> {name: member added so far}
     if not st.pending_adds:
-        return top
+        return top, built
     # an added decorator runs here and may call the new body, which starts with the
     # witness call: bind the no-op stub where the module lacks the name (journaled)
-    # (the stub is what undo leaves anyway; at_base ignores the name)
-    mod.__dict__.setdefault(W.HIT, W.stub)
-    built = {}                         # class -> {name: member added so far}
+    # (the stub is removed below once building finishes so apply() binds the hook cleanly)
+    added_stub = W.HIT not in mod.__dict__
+    stub_entry_idx = len(journal.entries) if added_stub and hasattr(journal, "entries") else None
+    if added_stub:
+        journal.set_item(mod.__dict__, W.HIT, W.stub)
     for ad in st.pending_adds:
         ns = dict(top)
         cls_name, name = ad["cls"], ad["name"]
@@ -1461,18 +1546,23 @@ def _build_adds(st, journal, ver_file=None):
             if ver_file:
                 _retarget_added_nested(obj, ver_file)
             top[name] = obj       # a later added definition may use it
-            st.adds.append((mod.__dict__, name, obj))
+            adds_out.append((mod.__dict__, name, obj))
             if ad["def"] and JIT.unwrap(obj)[0] is not None:
-                st.jit_adds.append((obj, ad["key"]))
+                jit_adds_out.append((obj, ad["key"]))
         else:
-            obj = _unwrap_shell(ns, cls_name.split(".")).__dict__[name]
+            scratch_cls = _unwrap_shell(ns, cls_name.split("."))
+            obj = scratch_cls.__dict__[name]
             cls = _live_class(mod, cls_name)
             if ver_file:
                 _retarget_added_nested(obj, ver_file)
             built.setdefault(cls_name, {})[name] = obj
-            _set_class_cell(obj, cls)
-            st.adds.append((cls, name, obj))
-    return top
+            _set_class_cell(obj, cls, scratch_cls=scratch_cls)
+            adds_out.append((cls, name, obj))
+    if added_stub:
+        mod.__dict__.pop(W.HIT, None)
+        if stub_entry_idx is not None and len(journal.entries) > stub_entry_idx:
+            del journal.entries[stub_entry_idx]
+    return top, built
 
 
 def apply(st, journal, witness):
@@ -1487,6 +1577,15 @@ def apply(st, journal, witness):
     start = len(journal.entries)
     cb_start = len(getattr(journal, "_undo_callbacks", ()))
     g = st.mod.__dict__
+    hit_was_absent = W.HIT not in g
+    key_set = set(st.keys)
+    witness_snap = {}
+    for attr in ("capture_counts", "probe_errors", "first_hit", "first_hit_wall"):
+        d = getattr(witness, attr, None)
+        if isinstance(d, dict):
+            saved = {k: d[k] for k in d
+                     if k in key_set or any(k.startswith(b + W.LAUNCH_SEP) for b in key_set)}
+            witness_snap[attr] = (d, saved)
     try:
         mod_file = getattr(st.mod, "__file__", None)
         ver_file = None
@@ -1514,15 +1613,19 @@ def apply(st, journal, witness):
                     linecache.cache[version_file] = previous_ver
 
             journal.on_undo(_restore_linecache)
+        swaps_to_apply = list(st.swaps)
         if ver_file:
-            st.swaps = [
+            swaps_to_apply = [
                 (fn, _retarget_nested_filename(code, ver_file), d, kw)
-                for fn, code, d, kw in st.swaps
+                for fn, code, d, kw in swaps_to_apply
             ]
-        top = _build_adds(st, journal, ver_file=ver_file)
-        journal.record_closures(closure_pairs(st), mod=st.mod)
         for name, value in st.imports.items():
             journal.set_item(g, name, value)
+        adds_to_apply, jit_adds_to_apply = [], []
+        top, built = _build_adds(st, journal, ver_file=ver_file,
+                                 adds_out=adds_to_apply, jit_adds_out=jit_adds_to_apply)
+        journal.record_closures(closure_pairs(st, swaps=swaps_to_apply, adds=adds_to_apply),
+                                mod=st.mod)
         hook = getattr(witness, "hook", None) or witness.hit
         if g.get(W.HIT) is not hook:
             W.trace_safe(hook)         # torch.compile calls it while tracing, never traces it
@@ -1536,24 +1639,36 @@ def apply(st, journal, witness):
         for k in st.keys:
             if hasattr(witness, "reset"):
                 witness.reset(k)
-        for fn, code, d, kw in st.swaps:
+        for fn, code, d, kw in swaps_to_apply:
             if isinstance(d, _Deferred):
-                d, kw = _defaults(st.mod, d.q, d.stub, top)
+                cls_name = d.q.rpartition(".")[0]
+                eval_ns = {**top, **built.get(cls_name, {})} if cls_name else top
+                d, kw = _defaults(st.mod, d.q, d.stub, eval_ns)
             journal.set_code(fn, code, d, kw)
-        for owner, name, obj in st.adds:
+        for owner, name, obj in adds_to_apply:
             if isinstance(owner, dict):
                 journal.set_item(owner, name, obj)
             else:
                 journal.set_attr(owner, name, obj)
         for p, k in st.jits:               # after the code swap: undo restores it first
             JIT.apply(p, journal, witness, k)
-        for obj, k in st.jit_adds:
+        for obj, k in jit_adds_to_apply:
             JIT.arm_added(obj, k, [p for p, _ in st.jits], journal, witness,
-                          added=[other for other, _ in st.jit_adds if other is not obj])
+                          added=[other for other, _ in jit_adds_to_apply if other is not obj])
         for owner, name in st.removes:     # only reached when removed_definition was accepted
             journal.delete(owner, name)
     except Exception as e:
         u = (journal._undo_apply(start, cb_start)
              if hasattr(journal, "_undo_apply") else journal.undo_to(start))
+        if hit_was_absent:
+            g.pop(W.HIT, None)
+        for d, saved in witness_snap.values():
+            for k in list(d):
+                if k in key_set or any(k.startswith(b + W.LAUNCH_SEP) for b in key_set):
+                    d.pop(k, None)
+            d.update(saved)
         return F.not_ok(f"apply: {type(e).__name__}: {e}", u["findings"], undo=u)
+    st.swaps = swaps_to_apply
+    st.adds = adds_to_apply
+    st.jit_adds = jit_adds_to_apply
     return F.ok(changes=len(journal.entries) - start)

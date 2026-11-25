@@ -319,7 +319,7 @@ def _restore_closures(entry):
     (`gc.get_referrers` of those codes, frozen objects included): every function whose
     `__code__` is one of them gets its old code back when the free variables match; the rest
     are counted in a `closure_not_restored` finding."""
-    pairs, base = entry[0], entry[1]
+    pairs = entry[0]
     mod_obj = entry[2] if len(entry) > 2 else None
     cls_snapshots = entry[3] if len(entry) > 3 else ()
     module_keys = entry[4] if len(entry) > 4 else None
@@ -361,18 +361,12 @@ def _restore_closures(entry):
         reg_val = None
         saved_val = None
     attr_val = None
-    now = _refs(pairs)
-    pairs = {k: p for k, p in pairs.items() if now[k] != base[k]}
     if not pairs:
         return {"closures_restored": 0, "closure_codes_scanned": 0}
     t0 = time.perf_counter()
     restored, kept = 0, {}
     with L.unfrozen():
         gc.collect()
-        now = _refs(pairs)
-        pairs = {code_id: pair for code_id, pair in pairs.items() if now[code_id] != base[code_id]}
-        if not pairs:
-            return {"closures_restored": 0, "closure_codes_scanned": 0}
         refs = gc.get_referrers(*[new for new, _ in pairs.values()])
     try:
         for o in refs:
