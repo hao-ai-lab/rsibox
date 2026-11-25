@@ -485,22 +485,22 @@
    "folder": "repos/torchtitan",
    "recorded_facts": [
     {
-     "fact": "Onboarded PyTorch Native FSDP2 training adapter (real CUDA torch.distributed.fsdp.fully_shard at world_size=1 over synthetic TitanMLPNet + 2-rank CPU toy mode; upstream pytorch/torchtitan not yet imported) in 597 non-test adapter LOC reusing core/livelab unchanged.",
+     "fact": "Onboarded PyTorch Native FSDP2 training adapter (real CUDA torch.distributed.fsdp.fully_shard at world_size=1 and multi-rank world_size=2 NCCL over synthetic TitanMLPNet + 2-rank CPU toy mode; upstream pytorch/torchtitan not yet imported) in 791 non-test adapter LOC reusing core/livelab unchanged.",
      "source": "repos/torchtitan/README.md; repos/torchtitan/docs/architecture.md"
     },
     {
-     "fact": "Passed 11/11 CPU 2-rank conformance (ToyTorchTitanLab: c9 0.0142 s install / 0.0045 s undo) and 11/11 real-GPU FSDP2 conformance on 1x NVIDIA B200 via rsibox conformance torchtitan --real -- --mode fsdp2 (0.083 s live install+check vs 2.689 s cold boot = 32.5x, c9 0.0541 s install / 0.0458 s undo, c8 respawns 2.58-2.80 s, max_abs_loss_diff == 0.0, 0 MiB exit).",
+     "fact": "Passed 11/11 CPU 2-rank conformance (ToyTorchTitanLab: c9 0.0142 s install / 0.0045 s undo), 11/11 1x NVIDIA B200 FSDP2 conformance (world_size=1: 0.083 s live install+check vs 2.689 s cold boot = 32.5x, c9 0.0541 s / 0.0458 s, c8 respawns 2.58-2.80 s, 0 MiB exit), and 11/11 2x NVIDIA B200 multi-rank FSDP2 NCCL conformance (EXP-F7, world_size=2: 239.00 s c0-c10 / 248.34 s suite, 0.255 s 5x median full cycle vs 5.515 s cold boot = 21.63x, max_abs_loss_diff == 0.0).",
      "source": "repos/torchtitan/kb/costs.md"
     }
    ],
    "upstream_patches": {
     "ledger": null,
     "count": 0,
-    "note": "Runs against unmodified PyTorch FSDP2 (`torch.distributed.fsdp.fully_shard`, `world_size=1` synthetic `TitanMLPNet`) with zero upstream patches.",
+    "note": "Runs against unmodified PyTorch FSDP2 (`torch.distributed.fsdp.fully_shard`, `world_size=1` and `world_size=2` NCCL synthetic `TitanMLPNet`) with zero upstream patches.",
     "source": "repos/torchtitan/docs/architecture.md"
    },
    "notes": [
-    "597 non-test adapter LOC; 11/11 2-rank CPU conformance and 11/11 1x NVIDIA B200 FSDP2 (world_size=1 synthetic TitanMLPNet) real-GPU conformance verified."
+    "791 non-test adapter LOC; 11/11 2-rank CPU conformance, 11/11 1x NVIDIA B200 FSDP2 (world_size=1), and 11/11 2x NVIDIA B200 multi-rank FSDP2 NCCL (world_size=2, EXP-F7) real-GPU conformance verified."
    ]
   }
  ]
