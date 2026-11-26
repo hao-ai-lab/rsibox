@@ -508,22 +508,26 @@
    "folder": "repos/nemo-rl",
    "recorded_facts": [
     {
-     "fact": "Onboarded NVIDIA-NeMo/RL live-lab adapter (AutoModel FSDP2 trainer + colocated SGLang rollout Ray participants reusing core/livelab/ray_participants.py + 3-participant CPU toy mode) reusing core/livelab unchanged.",
+     "fact": "Onboarded NVIDIA-NeMo/RL live-lab adapter (ray_driver.py over AutomodelPolicyWorker FSDP2 + SGLangGeneration + SGLangColocatedWeightSynchronizer + ClippedPGLossFn Ray participants reusing core/livelab/ray_participants.py + 3-participant CPU toy mode) reusing core/livelab unchanged.",
      "source": "repos/nemo-rl/README.md; repos/nemo-rl/docs/architecture.md"
     },
     {
-     "fact": "Passed 11/11 CPU 3-participant conformance (ToyNemoRlLab: 3.823 s c0-c10, c9 0.0076 s install / 0.0015 s undo, c8 respawns 0.105-0.223 s) and 11/11 unit/golden tests with -W error::ResourceWarning; real 1x/2x B200 GPU NeMo-RL benchmarks are pending hardware/env staging.",
+     "fact": "Passed 11/11 CPU 3-participant conformance (ToyNemoRlLab: 3.942 s c0-c10, c9 0.0073 s install / 0.0015 s undo, c8 respawns 0.120-0.268 s) and 14/14 unit tests with -W error::ResourceWarning.",
      "source": "repos/nemo-rl/kb/costs.md"
+    },
+    {
+     "fact": "Verified NemoRlLab --real (PR #326) on 1x and 2x NVIDIA B200 (gemma-3-1b-it bf16, AutoModel FSDP2 + SGLang GRPO): post-final-edit 3-shape cold/warm/S0/live-vs-fresh/uninstall parity passed (g2_s2_mnt8_gpu1: 161.934 s cold -> 20.170 s warm, 4.825 s install, 228.752 s fresh; g2_s2_mnt8_gpu2: 186.756 s cold -> 18.985 s warm, 4.627 s install, 252.776 s fresh; g4_s3_mnt16_gpu2: 151.530 s cold -> 34.664 s warm, 4.721 s install, 251.258 s fresh; bit-exact S0, witness [4] / [2,2] / [6,6]), plus post-final-edit 2x B200 c8_crash_and_hang (731.472 s, respawns 91.960-124.851 s); c0-c7, c9-c10 (c9 install 3.840 s / undo 3.784 s) passed immediately prior to the Gate 2 P1 fresh_check/inject(hang) fix (single-run 11/11 --real rerun interrupted by GPU contention; follow-up P2 cleanup in issue #325).",
+     "source": "repos/nemo-rl/README.md; repos/nemo-rl/kb/costs.md; PR #326"
     }
    ],
    "upstream_patches": {
     "ledger": null,
     "count": 0,
-    "note": "Designed against unmodified NVIDIA-NeMo/RL colocated Ray actors via core/livelab/ray_participants.py with zero upstream patches.",
+    "note": "Attaches to unmodified NVIDIA-NeMo/RL colocated Ray actors via core/livelab/ray_participants.py (handle.__ray_call__) with zero upstream patches.",
     "source": "repos/nemo-rl/docs/architecture.md"
    },
    "notes": [
-    "11/11 3-participant CPU conformance verified; real 1x/2x B200 GPU conformance and benchmarks pending hardware/env staging."
+    "11/11 3-participant CPU conformance + 1x/2x B200 3-shape live-vs-fresh parity and c8 fault recovery verified (PR #326); pre-fix c0-c7, c9-c10 passed prior to Gate 2 P1 fix (follow-up P2 cleanup in issue #325)."
    ]
   },
   {
