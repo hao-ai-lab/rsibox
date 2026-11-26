@@ -634,7 +634,8 @@
      "status": "merged_gpu_verified",
      "source": "repos/transformers/livelab/adapter/snapshot_hooks.py; repos/transformers/kb/costs.md",
      "note": "Bit-exact generation and full post-resume RSIBox live hot-swap verified after restore on both Qwen3-0.6B and Qwen3-8B (0 MiB cleanup)."
-    }
+    },
+    {"name": "Autonomous Codex native hill-climb (`gemma-3-1b-it`, #289, PR #328)", "what": "Autonomous `codex-cli 0.171.0` (`gpt-6.2-astra`) 5-iteration live hill-climb over `TransformersLab` HTTP/CLI interface (`rmsnorm-addcmul.patch` replacing `output * (1.0 + self.weight.float())` with `torch.addcmul` in `Gemma3RMSNorm.forward`).", "startup_cost_removed": "18.840 s cold boot+check per iteration (`0.159-0.286 s` live install, `0.111-0.126 s` undo, `0` restarts).", "measured_saving": {"before": "0.562045 (2x32) / 0.256656 (1x16)", "after": "0.515439 (1.090x) / 0.229571 (1.118x)", "unit": "s", "setup": "1x NVIDIA B200 (GPU 3), gemma-3-1b-it bfloat16, 2 alternating fresh-worker pairs, 2026-11-26"}, "status": "merged_gpu_verified", "source": "repos/transformers/examples/codex-hillclimb/README.md; PR #328", "note": "Kept txn-6a399520 (5,024 witness calls/check on Shape 1); verified bit-exact fresh_check exact_match=True on both shapes (digests d25f052c37d9308a & 7887461c74a8bcc4)."}
    ]
   },
   {
@@ -782,7 +783,8 @@
      "startup_cost_removed": "Subprocess Python/PyTorch/CUDA context initialization and base kernel compilation.",
      "measured_saving": {"before": "4.6373 (Triton cold) / 2.9640 (CUDA .cu cold)", "after": "0.0398 (Triton 116.5x) / 0.9467 (CUDA .cu 3.13x, 0 ms undo recompile)", "unit": "s", "setup": "1x NVIDIA B200 (GPU 1), torch 2.14.0+cu130, triton 3.8.0, nvcc 13.3 sm_100, shapes 4096x128 & 16384x256"},
      "status": "gpu_verified",
-     "source": "repos/kernel/README.md; repos/kernel/kb/costs.md"
+     "source": "repos/kernel/README.md; repos/kernel/kb/costs.md; repos/kernel/examples/joint_s7_bench.py; docs/services.md",
+     "note": "Joint KernelService (S7, #331) x KernelLab (#329) multi-slot run on 1x B200 GPU 3 (K=1,2,4; wavec_joint_s7_kernel_receipt.json, 5.4208 s cold 2-worker boot / 0.0550 s warm lease+check, witness_nonzero=true, replay_verified=true, SandboxPool(slots_per_gpu=2) + fresh_check exact parity, sigstop_pg + NUMA [12..15]): 3.041x Triton 16384x256 at K=4 (20.082 evals/s, +5.62% p95 vs +40.0% unisolated; K=2 1.783x, +1.87% p95), 1.228x Triton 1048576x512 at K=4 (+19.67% p95; K=2 1.164x, +2.99% p95 vs +6.32% unisolated), and 2.292x CUDA .cu 16384x256 at K=4 (2.535 evals/s, +27.45% p95; K=2 1.714x, +0.0% p95 vs +27.45% unisolated)."
     }
    ]
   },

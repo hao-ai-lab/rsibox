@@ -1,6 +1,6 @@
 # RSIBox Shared Services (`rsibox.services`)
 
-`core/livelab/rsibox/services/` houses pure-stdlib, engine-agnostic control-plane services that sit beneath [`core/livelab/kernel/`](../core/livelab/INTERFACE.md) and compose across all ten supported engines (`vLLM`, `SGLang`, `Megatron-LM`, `FastVideo`, `veRL`, `miles`, `Transformers`, `TensorRT-LLM`, `TorchTitan`, and `NeMo-RL`).
+`core/livelab/rsibox/services/` houses pure-stdlib, engine-agnostic control-plane services that sit beneath [`core/livelab/kernel/`](../core/livelab/INTERFACE.md) and compose across the 15 supported engines (`vLLM`, `SGLang`, `Megatron-LM`, `FastVideo`, `veRL`, `miles`, `Transformers`, `TensorRT-LLM`, `TorchTitan`, `NeMo-RL`, `Isaac Lab`, `SGLang-Omni`, `Dynamo`, `Kernel`, and `vLLM-Omni`).
 
 Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight residency, fork servers, artifact caches, or crash recovery, shared services standardize ownership, lease fencing, and staleness-stamp contracts while keeping `core/livelab/` free of engine or torch imports.
 
@@ -16,7 +16,7 @@ core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
         │
         ▼
-repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERFACE.md contract)
+repos/<engine>/livelab/       (15 engine adapters implementing the 5-verb INTERFACE.md contract)
 ```
 
 ## Service Map (`S1`–`S7`)
@@ -152,7 +152,9 @@ Measured on `NVIDIA B200` (`gemma-3-1b-it`, PyTorch `2.14.0+cu130`, Triton `3.8.
 | **S4 `AuxiliaryModelService`** (`2× B200`) | `b1_seq8_gen8`, `b2_seq17_gen20` | `1.512 s` cold / `51 µs` warm (`27–105 µs` hits) | `1.832 s` model load; `3` forward calls total; `v2 == v1` exact; `2,119,732,224 B` unchanged on `bump_version` (`leaked_or_doubled=False`) |
 | **S5 `IndexedPrefetch` + `VersionedReplayBuffer`** | `short_1x8`, `batch_2x16` | `0.0004 s` index / `0.126–1.111 s` rollout | `RSIIDX01` (`12` items, cursor `4` restored); stale push/sample blocked; reset drained `4`, retained `0` (`epoch=1`, `v2`) |
 | **S6 `RecoveryService`** (`2× B200`) | `1_prompt_max8`, `2_prompts_max16` | `5.727 s` boot / `3.920 s` quiesce+resume | `SIGKILL` (`rc=-9`) escalated `standby_shadow -> cold_respawn` (`5.322 s`, `incarnation=2`); bit-exact & raw-equal recovery |
-| **S7 `KernelService`** (`1× B200 GPU 3` Triton micro-benchmark, `K=1,2,4`) | `8192x8192x8192_f32` (`>10 ms`), `106496x8192_bf16` (`~1 ms`), `65536x4096_bf16` (`~0.17 ms`) | `1.042 s` cold / `0.101–0.393 s` warm | Off-repo receipt `wavec_kernel_service_s7_receipt.json` (`witness_nonzero=true`, `replay_verified=true`): `2.87×` fused (`+6.26%` p95) / `2.43×` softmax (`+4.52%` p95 vs `+171.89%` unisolated) at `K=4` (`K=2` softmax: `1.67×`, `+28.93%` p95 `0.251` vs `0.194`/`0.195 ms` unisolated/exclusive); `sigstop_pg` + NUMA `[12..15]` kept `K=2`/`K=4` matmul p95 at `+0.23%`/`+0.41%` (`74.60 -> 16.78 ms` at `K=4`). **Not yet verified on `S7`**: multi-GPU / multi-stage `KernelLab` × `S7` integration (deferred to follow-up joint bench) |
+| **S7 `KernelService`** (`1× B200 GPU 3` Triton micro-benchmark, `K=1,2,4`) | `8192x8192x8192_f32` (`>10 ms`), `106496x8192_bf16` (`~1 ms`), `65536x4096_bf16` (`~0.17 ms`) | `1.042 s` cold / `0.101–0.393 s` warm | Off-repo receipt `wavec_kernel_service_s7_receipt.json` (`witness_nonzero=true`, `replay_verified=true`): `2.87×` fused (`+6.26%` p95) / `2.43×` softmax (`+4.52%` p95 vs `+171.89%` unisolated) at `K=4` (`K=2` softmax: `1.67×`, `+28.93%` p95 `0.251` vs `0.194`/`0.195 ms` unisolated/exclusive); `sigstop_pg` + NUMA `[12..15]` kept `K=2`/`K=4` matmul p95 at `+0.23%`/`+0.41%` (`74.60 -> 16.78 ms` at `K=4`). **Not yet verified on `S7`**: multi-GPU (`2+` GPUs) `KernelService` scaling |
+
+- **Joint `KernelService` (`S7`) × `KernelLab` Multi-Slot Run (`1× B200 GPU 3`, `K=1,2,4`, [`joint_s7_bench.py`](../repos/kernel/examples/joint_s7_bench.py)):** Off-repo receipt `wavec_joint_s7_kernel_receipt.json` (`cold_s=5.4208 s` measures 2-worker `SandboxPool` boot without `check()`; `warm_s=0.0550 s` measures a single `lease() + install + critical_region + check(200)`, `witness_nonzero=true`, `replay_verified=true`, `fresh_check` exact parity `max_abs_diff=0.0`; `sigstop_pg` freezes `KernelLab` worker children while NUMA CPU pinning `[12..15]` runs on the orchestrating `_worker_main` caller process): on short Triton `16384x256` (`iters=400`, `max_abs_diff=0.0`), `K=2` reached `1.783×` (`11.775 evals/s`, `+1.87%` p95 `0.0163` vs `0.0160 ms` exclusive) and `K=4` reached **`3.041×`** (`20.082 evals/s`, `1204.95 cand/min`, **`+5.62%`** p95 `0.0169` vs **`+40.0%`** `0.0224 ms` unisolated); on heavy Triton `1048576x512` (`iters=120`, `max_abs_diff=1e-06`), `K=2` reached `1.164×` (`+2.99%` p95 vs `+6.32%` unisolated) and `K=4` reached `1.228×` (`1.713 evals/s`, `+19.67%` p95 `0.3407 ms`); on CUDA `.cu` `16384x256` (`iters=400`, `nvcc` off-region + `critical_region` on-region, `max_abs_diff=0.0`), `K=2` reached `1.714×` (`+0.0%` p95 `0.0051 ms` vs `+27.45%` unisolated) and `K=4` reached **`2.292×`** (`2.535 evals/s`, `+27.45%` p95 `0.0065 ms`).
 
 ## S7: Per-GPU Region-Granular Kernel Exclusivity (`KernelService`, Shipped)
 
@@ -166,12 +168,13 @@ Measured on `NVIDIA B200` (`gemma-3-1b-it`, PyTorch `2.14.0+cu130`, Triton `3.8.
 | `KernelService` | Thread/IPC-safe per-GPU coordinator (`register_slot`, `unregister_slot`, `submission_gate`, `critical_region`, `holder_died`, `teardown`) |
 | `RegionGate` / `RegionTicket` | Per-GPU epoch gate (`is_blocked`, `wait_if_blocked`, `ack_drained`) and entry receipt (`epoch`, `frozen_slots`, `freeze_mode`, `pinned_cpus`) |
 
-## How the 10 Engines Compose `S1`–`S7`
+## How the 15 Engines Compose `S1`–`S7`
 
 | Workload Family | Engines | Services Composed Beneath `core/livelab/kernel/` |
 |---|---|---|
-| **LLM / Diffusion Inference** | `vLLM`, `SGLang`, `TensorRT-LLM`, `FastVideo`, `Transformers` | `S1` (`ro_weights`, `kv_pool`) + `S2` zygote / `S6` shadow recovery + `S3` kernel/graph cache |
+| **LLM / Diffusion / Multimodal Inference** | `vLLM`, `SGLang`, `TensorRT-LLM`, `FastVideo`, `Transformers`, `SGLang-Omni`, `vLLM-Omni`, `Dynamo` | `S1` (`ro_weights`, `kv_pool`, `ro_aux_weights`) + `S2` zygote / `S6` shadow recovery + `S3` kernel/graph cache + `S4` aux pool + `S5` stage buffer reset |
 | **Pretraining / Fine-tuning** | `Megatron-LM`, `TorchTitan` | `S1` (`cow_s0_snapshot` `S0` reset) + `S3` compile cache + `S5` step/optimizer buffers |
 | **Reinforcement Learning** | `veRL`, `miles`, `NeMo-RL` | `S1` (`ro_aux_weights`, `actor_rollout_shared`, `cow_s0_snapshot`) + `S4` aux pools + `S5` versioned replay + `S6` recovery |
+| **GPU Simulation & Standalone Kernels** | `Isaac Lab`, `Kernel` | `S7` per-GPU region-granular exclusivity (`KernelService.critical_region()` + `SandboxPool`) |
 
 See [`docs/mechanisms.md`](mechanisms.md) for the restart-boundary latency ladder and [`docs/engines.md`](engines.md) for per-engine verification summaries.

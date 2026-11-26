@@ -238,7 +238,7 @@
       notOwns: "Generic 2PC state machine or stdlib witness/journal implementation.",
       codePath: "`core/livelab/ray_participants.py`, `repos/{verl,miles,nemo-rl,torchtitan}/livelab/adapter/`",
       boundary: "Supports R0 multi-role live swaps + S0 resets; FSDP2 / Ray actor fault isolation.",
-      verifiedBy: "CPU CI suites (incl. 3-role `ToyNemoRlLab`) + B200/GB200 GPU runs (NeMo-RL GPU pending staging)" },
+      verifiedBy: "CPU CI suites (incl. 3-role `ToyNemoRlLab`) + B200/GB200 GPU runs (incl. 1×/2× B200 NeMo-RL)" },
     tla: { layer: "crosscut", name: "TLA+ Protocol & Pool Models", badge: "Bounded Formal Verification",
       owns: "TLC model-checked specs for `SandboxPool`, `Coordinator`, `SwapLifecycle`, `StandbyShadow`, `PoolAutoScaler`, plus kernel protocol specs (`Transaction`, `Participant`, `SequentialTx`, `Incarnation`) and trace-replay conformance.",
       notOwns: "Numerical equivalence of GPU kernels or OS/GIL memory-model proofs.",
