@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 
-VERBS = ("install", "check", "reset", "uninstall", "status")
+VERBS = ("install", "check", "reset", "uninstall", "status", "fresh_check")
 READS = ("info", "events", "receipts", "source")
 
 
@@ -27,6 +27,89 @@ def text_hash(text):
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _normalize_for_json(value):
+    if isinstance(value, dict):
+        return sorted(
+            ([f"{type(k).__name__}:{k!r}", _normalize_for_json(v)] for k, v in value.items()),
+            key=lambda pair: pair[0],
+        )
+    if isinstance(value, (list, tuple)):
+        return [_normalize_for_json(item) for item in value]
+    return value
+
+
+def _canonical_json(value):
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except TypeError:
+        try:
+            return json.dumps(_normalize_for_json(value), default=str)
+        except Exception:
+            return repr(value)
+
+
+def _read_fresh_base(lab, module):
+    base_text = getattr(lab, "base_text", None)
+    if isinstance(base_text, dict) and isinstance(base_text.get(module), str):
+        return base_text[module]
+    base_src_fn = getattr(lab, "_base_source", None)
+    if callable(base_src_fn):
+        try:
+            text = base_src_fn(module)
+            if isinstance(text, str):
+                return text
+        except (ImportError, FileNotFoundError, OSError):
+            return None
+        except RuntimeError as exc:
+            raise ValueError(f"cannot read base source for {module!r}: {exc}") from exc
+    disk_fn = getattr(lab, "_disk_source", None)
+    if callable(disk_fn):
+        try:
+            text = disk_fn(module)
+            if isinstance(text, str):
+                return text
+        except (ImportError, FileNotFoundError, OSError):
+            return None
+    return None
+
+
+def _prepare_fresh_patch(lab, patch):
+    if patch is None:
+        return None, None
+    if not isinstance(patch, dict):
+        return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                      "error": 'patch must be null or {"files": {module: full text}} or {"diff": unified diff}'}
+    files_val = patch.get("files")
+    diff_val = patch.get("diff")
+    has_files = "files" in patch and files_val is not None
+    has_diff = "diff" in patch and diff_val is not None
+    if not has_files and not has_diff:
+        return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                      "error": 'a patch is {"files": {module: full text}} or {"diff": unified diff}'}
+    if has_files and has_diff:
+        return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                      "error": "patch cannot supply both 'files' and 'diff'"}
+    if has_files:
+        if not isinstance(files_val, dict) or not files_val or any(
+            not isinstance(k, str) or not k or not isinstance(v, str) for k, v in files_val.items()
+        ):
+            return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                          "error": "'files' must be a non-empty {module: source_text} mapping of strings"}
+        return {k: v for k, v in patch.items() if k != "base"}, None
+    if not isinstance(diff_val, str) or not diff_val.strip():
+        return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                      "error": "'diff' must be a non-empty unified diff string"}
+    from . import diffs as D
+    try:
+        resolved = D.apply(diff_val, lambda m: _read_fresh_base(lab, m))
+    except ValueError as exc:
+        return None, {"ok": False, "outcome": "refused", "codes": ["patch_invalid"], "output": None,
+                      "error": f"{type(exc).__name__}: {exc}"}
+    cleaned = {k: v for k, v in patch.items() if k not in ("base", "diff")}
+    cleaned["files"] = resolved
+    return cleaned, None
+
+
 class Box:
     def __init__(self, lab_factory, spec="", state_dir=None, busy_wait_s=5.0, clock=time.monotonic):
         """`lab_factory(receipts=path)` builds the lab; it runs on a boot thread (`start()`)."""
@@ -37,6 +120,7 @@ class Box:
         self._gate = threading.Lock()            # held while a verb runs
         self._meta = threading.Lock()            # guards events and in_flight
         self.events, self.in_flight = [], None
+        self._base_digests = {}
         self.started_at = time.time()
         self._t0 = clock()
 
@@ -47,6 +131,7 @@ class Box:
 
     def boot(self):
         t0 = self.clock()
+        self._base_digests.clear()
         try:
             lab = self._factory(receipts=self.receipts)
         except BaseException as exc:  # noqa: BLE001 - a lab that cannot start must not kill the daemon
@@ -96,16 +181,56 @@ class Box:
                 reply = self._dispatch(verb, body)
                 if not isinstance(reply, dict):
                     reply = {"ok": False, "error": f"lab returned {type(reply).__name__}, not a dict"}
+                wall = round(self.clock() - t0, 6)
+                annotated = self._annotate(verb, body, reply, wall)
             except BaseException as exc:  # noqa: BLE001 - the interface says a lab never raises
+                wall = round(self.clock() - t0, 6)
                 reply = {"ok": False, "raised": True, "error": f"{type(exc).__name__}: {exc}",
                          "trace": traceback.format_exc()[-2000:]}
-            wall = round(self.clock() - t0, 6)
+                annotated = {**reply, "box": {"seq": None, "wall_s": wall}}
             seq = self._event(verb, reply, wall)
-            return 200, {**reply, "box": {"seq": seq, "wall_s": wall}}
+            annotated["box"]["seq"] = seq
+            return 200, annotated
         finally:
             with self._meta:
                 self.in_flight = None
             self._gate.release()
+
+    def _annotate(self, verb, body, reply, wall):
+        box_meta = {"seq": None, "wall_s": wall}
+        out = dict(reply)
+        if verb == "reset" and body.get("kind") == "respawn" and out.get("ok"):
+            self._base_digests.clear()
+        if verb == "status" and out.get("ok"):
+            ident = out.get("identity") if isinstance(out.get("identity"), dict) else None
+            mod_hashes = ident.get("modules") if ident else None
+            if isinstance(mod_hashes, dict):
+                box_meta["modules_digest"] = text_hash(_canonical_json(mod_hashes))
+            if "fingerprint" in out:
+                box_meta["fingerprint_scope"] = "process_local"
+        elif verb in ("check", "fresh_check") and out.get("ok"):
+            if verb == "check":
+                box_meta["timing"] = {
+                    "workload_s": out.get("seconds"),
+                    "verb_s": out.get("cost_s"),
+                    "wall_s": wall,
+                }
+                if out.get("proven") is not None:
+                    box_meta["proven_semantics"] = "witness_executed_only"
+            if "output" in out and out["output"] is not None:
+                digest = text_hash(_canonical_json(out["output"]))
+                wkey = _canonical_json(body.get("workload"))
+                is_base = (out.get("proven") is None) if verb == "check" else (body.get("patch") is None)
+                if is_base and wkey not in self._base_digests:
+                    self._base_digests[wkey] = digest
+                base_digest = self._base_digests.get(wkey)
+                exact = (digest == base_digest) if base_digest is not None else None
+                box_meta["output_digest"] = digest
+                box_meta["exact_match"] = exact
+                out.setdefault("output_digest", digest)
+                out.setdefault("exact_match", exact)
+        out["box"] = box_meta
+        return out
 
     def _dispatch(self, verb, body):
         lab = self.lab
@@ -121,6 +246,19 @@ class Box:
             return lab.install({k: v for k, v in patch.items() if k != "base"})
         if verb == "check":
             return lab.check(body.get("workload"))
+        if verb == "fresh_check":
+            fn = getattr(lab, "fresh_check", None)
+            if not callable(fn):
+                return {"ok": False, "codes": ["unsupported"], "output": None,
+                        "error": "the lab does not support fresh_check"}
+            patch, err = _prepare_fresh_patch(lab, body.get("patch"))
+            if err is not None:
+                return err
+            try:
+                return fn(patch, body.get("workload"))
+            except NotImplementedError as exc:
+                msg = f"fresh_check unsupported: {exc}" if str(exc) else "the lab does not support fresh_check"
+                return {"ok": False, "codes": ["unsupported"], "output": None, "error": msg}
         if verb == "reset":
             return lab.reset(body.get("kind", "state"))
         if verb == "uninstall":

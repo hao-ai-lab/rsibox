@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-POSTS = ("install", "check", "reset", "uninstall", "close")
+POSTS = ("install", "check", "reset", "uninstall", "fresh_check", "close")
 
 
 class Client:
@@ -63,7 +63,22 @@ class Client:
         return self.request("install", {"patch": patch})
 
     def check(self, workload=None):
+        """Run the workload in the warm engine.
+
+        `seconds` (when present) is workload-only time; `cost_s` is total verb wall time.
+        `proven=True` guarantees non-zero witness execution only (not numerical equivalence);
+        check `output`, `output_digest`, and `exact_match` alongside `proven`.
+        """
         return self.request("check", {"workload": workload} if workload is not None else {})
+
+    def fresh_check(self, patch=None, workload=None, *, timeout: float | None = None):
+        """Run `workload` in a fresh subprocess from base + `patch` (`None` for fresh base)."""
+        body = {}
+        if patch is not None:
+            body["patch"] = patch
+        if workload is not None:
+            body["workload"] = workload
+        return self.request("fresh_check", body, timeout=timeout)
 
     def reset(self, kind="state"):
         return self.request("reset", {"kind": kind})
@@ -72,6 +87,11 @@ class Client:
         return self.request("uninstall", {"id": id} if id else {})
 
     def status(self):
+        """Return live lab state.
+
+        `identity["modules"]` (and `box["modules_digest"]`) is process-invariant across
+        `reset("respawn")`, whereas `fingerprint` embeds process-local `id(code_obj)`.
+        """
         return self.request("status")
 
     def info(self):

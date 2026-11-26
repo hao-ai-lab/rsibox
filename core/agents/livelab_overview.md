@@ -23,12 +23,13 @@ rsibox wait                                 # wait until warm; prints boot_s
 rsibox source <module> > mod.py             # fetch live source text
 # ... edit mod.py ...
 rsibox install --file <module>=mod.py       # atomic swap across ranks (exit 2 if refused)
-rsibox check                                # output, proven, witness counts, cost_s
+rsibox check                                # output, proven, witness counts, seconds, cost_s
+rsibox fresh-check --file <module>=mod.py   # fresh subprocess parity check (optional --workload)
 rsibox uninstall                            # journaled revert to base
 rsibox down --state /tmp/box1
 ```
 
-Engine specifics: `repos/<engine>/livelab/README.md` (and `rsibox conformance <engine> --real -- --help` for GPU flags).
+Engine specifics: `repos/<engine>/docs/architecture.md` and/or `repos/<engine>/livelab/README.md` (not every engine has both — e.g. `transformers` uses [`repos/transformers/docs/architecture.md`](../../repos/transformers/docs/architecture.md)), plus `rsibox conformance <engine> --real -- --help` for GPU flags.
 
 ## Before every experiment
 
@@ -52,6 +53,8 @@ Startup logic, launch flags and environment variables need a restart.
 ## Rules
 
 - On `poisoned`, or when the cost hook says a call restarted, do not keep measuring on that lab.
-- A check counts only if it says the patched path ran.
+- A check counts only if it says the patched path ran (`proven=True`, non-zero `witness`). Note that `proven=True` proves execution only, **not** numerical equivalence — also verify `output` / `output_digest` / `exact_match` against the base.
+- When `check()` returns both `seconds` and `cost_s`, use `seconds` (workload-only) for performance comparisons and `cost_s` (total verb wall time) for overhead tracking.
+- Across `reset("respawn")`, compare `status()["identity"]["modules"]` (or `box["modules_digest"]`), which is process-invariant, rather than `status()["fingerprint"]` (which embeds process-local `id(code_obj)`).
 - A result counts only with the lab's receipt. Never write or edit one.
-- Slow check, failed install or an uncovered module: call `toolsmith_online`.
+- Slow check, failed install or an uncovered module: call `toolsmith_online` (or report the blocker in standalone `rsibox` sandbox runs with no toolsmith peer).

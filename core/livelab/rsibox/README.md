@@ -19,7 +19,8 @@ python3 -m rsibox status                     # base | edited | poisoned
 python3 -m rsibox source toy.ops > ops.py    # the text the engine runs now
 #   ... edit ops.py with any tool ...
 python3 -m rsibox install --file toy.ops=ops.py
-python3 -m rsibox check                      # output, proven, witness, cost_s
+python3 -m rsibox check                      # output, output_digest, exact_match, proven, witness, cost_s
+python3 -m rsibox fresh-check --file toy.ops=ops.py   # fresh subprocess check from base + patch
 python3 -m rsibox uninstall
 python3 -m rsibox events                     # every call so far, with its seconds
 python3 -m rsibox down
@@ -60,6 +61,7 @@ Every request carries `Authorization: Bearer <token>`. Bodies and replies are JS
 |---|---|
 | `POST /v1/install` | the lab's `install(patch)` |
 | `POST /v1/check` | `check(workload)`; body `{"workload": ...}` or empty |
+| `POST /v1/fresh_check` | `fresh_check(patch, workload)`; body `{"patch": ..., "workload": ...}` or empty |
 | `POST /v1/reset` | `reset(kind)`; `state` or `respawn` |
 | `POST /v1/uninstall` | `uninstall(id)` |
 | `GET /v1/status` | `status()` |
@@ -77,7 +79,12 @@ Every request carries `Authorization: Bearer <token>`. Bodies and replies are JS
 | 409 | the box cannot run the call now: `booting`, `failed`, `closed`, or `busy` past the wait |
 | 400 | the body is not a JSON object |
 
-The reply of a verb is the lab's reply unchanged, plus `box: {seq, wall_s}`.
+The reply of a verb is the lab's reply plus `box: {seq, wall_s, ...}` (`status` adds `modules_digest`
+when `identity.modules` is present and `fingerprint_scope` when `fingerprint` is present; `check`
+adds `timing: {workload_s, verb_s, wall_s}`, `output_digest`, `exact_match`, and on edited checks
+where `proven` is not `None`, `proven_semantics: "witness_executed_only"`; `fresh_check` adds
+`output_digest` and `exact_match`; `output_digest` and `exact_match` are also surfaced top-level
+when absent).
 
 ## Box states
 
