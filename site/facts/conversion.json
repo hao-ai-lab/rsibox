@@ -549,6 +549,15 @@
    ],
    "upstream_patches": {"ledger": null, "count": 0, "note": "Runs against Qwen3-VL-4B-Instruct + CUDA stage pipeline in juc049/sglang-omni-qwen3:deps (standalone sglang_omni package absent in image).", "source": "repos/sglang-omni/README.md"},
    "notes": ["11/11 CPU conformance + 2x B200 2-shape Qwen3-VL-4B-Instruct multi-stage verification passed."]
+  },
+  {
+   "engine": "Dynamo", "folder": "repos/dynamo",
+   "recorded_facts": [
+    {"fact": "Onboarded NVIDIA Dynamo adapter (`repos/dynamo/livelab/adapter/`) composing isolated `rust_http_proxy` / Python HTTP frontend (`FrontendDriver`), in-process Python planner (`adapter.planner_ops`), and per-GPU `gpu_memory_service 0.9.0` workers (`adapter.worker`) reusing `core/livelab` unchanged.", "source": "repos/dynamo/README.md; repos/dynamo/kb/costs.md"},
+    {"fact": "Passed 11/11 CPU conformance (`ToyDynamoLab`), 9/9 unit/golden tests (`-W error::ResourceWarning`), remapped `CUDA_VISIBLE_DEVICES=2,3` GMS UUID routing + fresh parity, and 11/11 real-GPU conformance via `rsibox conformance dynamo --real` on 2x B200 (`gemma-3-1b-it`, `rust_http_proxy`, `c9` 16.3 ms install / 7.4 ms undo, `c8` respawns 15.37-16.95 s, `0 MiB` exit); live planner swap ran in 0.160 s vs 14.643 s cold (91.4x) with `fresh_check` RO-GMS parity across 2 shapes, and `restart_frontend()` recycled the Rust HTTP proxy in 77.7 ms with `weight_reload_count=0` and GMS sockets committed (`97` allocations/GPU).", "source": "repos/dynamo/kb/costs.md; repos/dynamo/kb/workload.md"}
+   ],
+   "upstream_patches": {"ledger": null, "count": 0, "note": "Exercises `gpu_memory_service 0.9.0` RW->RO weight residency and `transformers` `gemma-3-1b-it` under an isolated `rustc 1.92.0` HTTP proxy frontend and Python planner; upstream full NATS/etcd Rust runtime was not built.", "source": "repos/dynamo/kb/workload.md"},
+   "notes": ["11/11 CPU conformance, 9/9 unit/golden tests, and 11/11 2x B200 real-GPU conformance verified."]
   }
  ]
 }
