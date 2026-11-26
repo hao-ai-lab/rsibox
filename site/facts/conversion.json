@@ -562,6 +562,14 @@
    ],
    "upstream_patches": {"ledger": null, "count": 0, "note": "Exercises `gpu_memory_service 0.9.0` RW->RO weight residency and `transformers` `gemma-3-1b-it` under an isolated `rustc 1.92.0` HTTP proxy frontend and Python planner; upstream full NATS/etcd Rust runtime was not built.", "source": "repos/dynamo/kb/workload.md"},
    "notes": ["11/11 CPU conformance, 9/9 unit/golden tests, and 11/11 2x B200 real-GPU conformance verified."]
+  },
+  {
+   "engine": "Kernel", "folder": "repos/kernel",
+   "recorded_facts": [
+    {"fact": "Onboarded standalone kernel engine adapter (`repos/kernel/livelab/adapter/`) supporting Triton `@triton.jit` (`core/livelab/kernel/jit.py`), CUDA `.cu` incremental `nvcc` + `ctypes.CDLL` reload, and optional `KernelService` (`critical_region`) duck-typing.", "source": "repos/kernel/README.md"},
+    {"fact": "Passed 11/11 CPU conformance (`ToyKernelLab`), 6/6 unit/golden tests (`-W error::ResourceWarning`), 11/11 real 1x B200 conformance (`rsibox conformance kernel --real`, `c9` 20.4 ms install / 2.9 ms undo) + 5/5 explicit `--backend cuda` conformance, 2-shape Triton live swap (`0.0398 s` vs `4.6373 s` = `116.5x`), 2-shape `.cu` live reload (`0.9467 s` vs `2.9640 s`, `0.0037 s` undo check), and real `CUDA_ERROR_MISALIGNED_ADDRESS` sticky poison respawn (`0 MiB` exit).", "source": "repos/kernel/kb/costs.md"}
+   ],
+   "notes": ["11/11 CPU conformance, 6/6 unit/golden tests, and 11/11 1x B200 real-GPU conformance + .cu reload verified."]
   }
  ]
 }

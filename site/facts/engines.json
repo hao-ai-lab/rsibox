@@ -772,6 +772,19 @@
      "note": "Passed 11/11 CPU conformance (`ToyDynamoLab`: c9 5.4 ms install / 1.8 ms undo), 9/9 unit/golden tests (`-W error::ResourceWarning`), remapped `CUDA_VISIBLE_DEVICES=2,3` GMS UUID smoke + parity, and 11/11 real-GPU conformance via `rsibox conformance dynamo --real` on 2x B200 (c9 16.3 ms install / 7.4 ms undo, c8 respawns 15.37-16.95 s, c3 fresh RO-GMS parity 33.770 s, 0 MiB exit)."
     }
    ]
+  },
+  {
+   "engine": "Kernel", "upstream": "standalone-kernel", "folder": "repos/kernel",
+   "mechanisms": [
+    {
+     "name": "Standalone Triton `@triton.jit` & CUDA `.cu` live swap (`KernelLab`)",
+     "what": "Hosts persistent GPU workers for KernelBench-style Triton `@triton.jit` (`core/livelab/kernel/jit.py`) and custom CUDA `.cu` (`nvcc` + `ctypes.CDLL`) kernels with `S0` multi-shape reference parity, `sticky_cuda` poison recovery, and optional `KernelService` (`critical_region`) duck-typing.",
+     "startup_cost_removed": "Subprocess Python/PyTorch/CUDA context initialization and base kernel compilation.",
+     "measured_saving": {"before": "4.6373 (Triton cold) / 2.9640 (CUDA .cu cold)", "after": "0.0398 (Triton 116.5x) / 0.9467 (CUDA .cu 3.13x, 0 ms undo recompile)", "unit": "s", "setup": "1x NVIDIA B200 (GPU 1), torch 2.14.0+cu130, triton 3.8.0, nvcc 13.3 sm_100, shapes 4096x128 & 16384x256"},
+     "status": "gpu_verified",
+     "source": "repos/kernel/README.md; repos/kernel/kb/costs.md"
+    }
+   ]
   }
  ],
  "caveats": [

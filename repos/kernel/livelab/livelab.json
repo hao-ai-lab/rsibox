@@ -1,0 +1,1 @@
+{"toy": "adapter.lab:ToyKernelLab", "real": "adapter.lab:KernelLab", "roles": ["kernel0"], "capabilities": {"mode": "kernel", "cuda_graph": false, "triton": true, "cuda_ext": true}}
