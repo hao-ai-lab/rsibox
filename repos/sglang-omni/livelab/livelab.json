@@ -1,0 +1,1 @@
+{"toy": "adapter.toy_lab:ToySglangOmniLab", "real": "adapter.lab:SglangOmniLab", "roles": ["thinker", "talker", "dit", "vocoder"], "capabilities": {"mode": "multimodal", "cuda_graph": false, "distributed": "pipeline"}}

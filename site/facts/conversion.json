@@ -539,6 +539,16 @@
      "source": "repos/isaac-lab/kb/costs.md"
     }
    ]
+  },
+  {
+   "engine": "SGLang-Omni",
+   "folder": "repos/sglang-omni",
+   "recorded_facts": [
+    {"fact": "Onboarded 4-stage multimodal live-lab adapter (thinker/talker/dit/vocoder RoleEndpoints, S1+S4 RO_AUX_WEIGHTS frozen stage residency, S5 VersionedReplayBufferService S0 reset) in <=600 non-test LOC.", "source": "repos/sglang-omni/README.md"},
+    {"fact": "Passed 11/11 CPU conformance (ToySglangOmniLab), 6/6 B200 unit+GPU tests, and 2-shape fresh_check parity (25.1992 s cold -> 0.0813 s warm, 0 B frozen VRAM delta, max_abs_diff=0.0) in juc049/sglang-omni-qwen3:deps with Qwen3-VL-4B-Instruct.", "source": "repos/sglang-omni/kb/costs.md"}
+   ],
+   "upstream_patches": {"ledger": null, "count": 0, "note": "Runs against Qwen3-VL-4B-Instruct + CUDA stage pipeline in juc049/sglang-omni-qwen3:deps (standalone sglang_omni package absent in image).", "source": "repos/sglang-omni/README.md"},
+   "notes": ["11/11 CPU conformance + 2x B200 2-shape Qwen3-VL-4B-Instruct multi-stage verification passed."]
   }
  ]
 }
