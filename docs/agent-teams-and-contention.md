@@ -447,6 +447,14 @@ Long-running agent teams rarely hold a fixed GPU allocation: clusters preempt id
 
 Across all `160` live leases during scale-down and scale-up, zero edits were aborted, zero engines restarted, and all `160` SHA-256 hash-chained records verified bit-exact (`global_max_abs_logprob_diff == 0.0`).
 
+### 4.9 Admission Backpressure & Self-Healing `PoolAutoScaler` (`EXP-H5` / `EXP-H6`, `2× B200`, `#278`)
+
+`SandboxPool(max_waiters=2)` + `slot_states()` (`EXP-H5`) and `PoolAutoScaler` (`EXP-H6`, `min_slots=1`, `max_slots=2`, `scale_up_queue_depth=1`, `scale_down_idle_s=1.0`, `poll_interval_s=0.25`, `max_heal_attempts=3`, `close_on_drain=True`) were verified live on `2× NVIDIA B200` (`vLLM 0.33.0`, `gemma-3-1b-it`, `200.19 s` cold / `5.67 s` warm, `1.14 s` warm edit cycle, `witness_nonzero=True`, bit-exact undo):
+
+- **`EXP-H5` admission backpressure (`max_waiters=2`):** `2` active holders + `2` admitted waiters (`100%` exact) rejected `4` excess requests in **`32–49 µs`** and performed **`1` priority eviction in `1.71 ms`** (`overload_rejections=5`, `overload_evictions=1`, `slot_states()` observed `idle`/`leased`/`queued`, `4/4` trace records verified).
+- **`EXP-H6` self-healing autoscaler (`1 → 2 → 1`):** `add_slot` scaled `1 → 2` (`auto-1` booted in `194.06 s`); after `SIGKILL` quarantined `auto-1`, `PoolAutoScaler` healed `auto-1` in **`49.39 s`** while healthy sibling `slot-gpu6` served **`36` uninterrupted leases** (`0` failures, post-heal exact on both shapes), then `drain_slot(close_on_drain=True)` scaled `2 → 1` after `1.001 s` idle (`32` reconciles, `0` errors, `42/42` trace records verified). Offline `rsibox verify-trace --strict` passed **`2/2` traces (`46` records)** with `0` compute apps / `0 MiB` VRAM on exit.
+- **Multi-instance `VllmLab(shared=False)` + `close()` isolation (`2× B200`):** two concurrent unshared instances (`195.93 s` / `195.38 s` boot) held `42,788 MiB` each; draining and closing `slot1` freed GPU 3 to **`0 MiB` (`0` apps)** while `slot0` stayed live (`42,790 MiB`, `6.88 s` warm, `76` witness calls, bit-exact undo), and pool `close()` returned both GPUs to **`0 MiB` (`0` apps)**.
+
 ![Wave 13-17 online healing, elastic scaling, and 2x B200 FSDP2](../assets/agent-teams-healing-elastic-and-fsdp2.svg)
 
 ---

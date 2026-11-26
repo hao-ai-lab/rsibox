@@ -80,3 +80,14 @@ Measured in our 2026-11-24 CPU run via `rsibox conformance torchtitan` (2 worker
 - **Per-rank witness**: `[2, 2]` across `rank0` and `rank1` for `adapter.model_ops:compute_loss:35`
 - **`c9_soak` (20 cycles)**: install median `0.0142 s`, uninstall median `0.0045 s`
 - **`c8_crash_and_hang` respawns**: `0.097–0.320 s` across `crash`, `hang`, `lost`, and `tamper`
+
+## Checkpoint-to-S0 & Conformance (`2× NVIDIA B200`, `world_size=2` NCCL FSDP2, `#282`)
+
+Measured on `2× NVIDIA B200` (`mode="fsdp2"`, `backend="nccl"`, `world_size=2`, `float32` deterministic, mid-run `s0_step=4` `save_checkpoint` + `mount_checkpoint_as_s0` across `cuda:0` and `cuda:1`):
+
+| Shape | Cold Boot + 1st Check | Warm Base Check | Step-4 `save_checkpoint` / `mount_s0` | Live Edit (`install` + `check` vs. Fresh) | Undo / Witness (`rank0`, `rank1`) / Diff |
+|---|---:|---:|---:|---:|---|
+| `bs8_h64_f128_l2_steps2` | `18.065 s` (`4.643 + 13.421 s`) | `1.291 s` | `5.83 ms` / `0.223 s` | `0.110 s` + `0.017 s` (vs. `7.205 s` fresh) | `0.142 s` / `[2, 2]` / **`0.0`** |
+| `bs16_h128_f256_l4_steps2` | `6.140 s` (`4.855 + 1.285 s`) | `1.182 s` | `6.47 ms` / `0.128 s` | `0.184 s` + `0.043 s` (vs. `6.203 s` fresh) | `0.155 s` / `[2, 2]` / **`0.0`** |
+
+- **`2×` B200 FSDP2 `world_size=2` CLI conformance (`rsibox conformance torchtitan --real --json -- --mode fsdp2 --world-size 2 --hidden 64 --ffn 128 --layers 2 --batch-size 8 --steps 2 --check-timeout 15`)**: **`11/11` PASS** (`c0` `2.64 s`, `c1` `2.80 s`, `c2` `2.59 s`, `c3` `23.53 s`, `c4` `2.58 s`, `c5` `2.59 s`, `c6` `2.65 s`, `c7` `3.25 s`, `c8` `46.33 s`, `c9` `7.71 s`, `c10` `9.34 s`).
