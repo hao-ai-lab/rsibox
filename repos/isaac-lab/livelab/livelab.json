@@ -1,0 +1,1 @@
+{"toy": "adapter.toy_lab:ToyIsaacLab", "real": "adapter.lab:IsaacLabLiveLab", "roles": ["sim"], "capabilities": {"mode": "robotics-rl", "cuda_graph": false, "distributed": "single-gpu"}}

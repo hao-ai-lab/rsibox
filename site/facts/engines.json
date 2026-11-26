@@ -717,6 +717,26 @@
      "note": "Adapter and Ray participant scaffolding implemented and tested on CPU via FakeActor/runtime_factory; real 1x/2x NVIDIA B200 GPU conformance and benchmarks are pending hardware/env staging."
     }
    ]
+  },
+  {
+   "engine": "Isaac Lab",
+   "upstream": "isaac-sim/IsaacLab",
+   "folder": "repos/isaac-lab",
+   "mechanisms": [
+    {
+     "name": "Resident GPU physics & step-gap RL swap (`IsaacLabLiveLab`, `newton_mjwarp`)",
+     "what": "Keeps multi-env Isaac Lab 3.0 `Isaac-Cartpole-Direct` (`newton_mjwarp`) resident on GPU while hot-swapping `compute_reward`, `compute_observations`, `policy_step`, and `summarize_rollout` in the step gap with seeded `S0` reset (`sim.reset()` + RNG restore).",
+     "startup_cost_removed": "Isaac Lab simulation launch, USD scene cloning, and Newton/MuJoCo-Warp solver initialization.",
+     "measured_saving": {
+      "before": "9.6616 (4096 envs, h=10) / 6.7864 (1024 envs, h=20)",
+      "after": "0.3968 (24.3x) / 0.3017 (22.5x)",
+      "unit": "s",
+      "setup": "1x NVIDIA B200, Isaac Lab 3.0 physics=newton_mjwarp, Isaac-Cartpole-Direct, 2026-11-25"
+     },
+     "status": "gpu_verified",
+     "source": "repos/isaac-lab/README.md; repos/isaac-lab/kb/costs.md"
+    }
+   ]
   }
  ],
  "caveats": [
