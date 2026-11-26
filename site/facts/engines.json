@@ -753,6 +753,20 @@
      "note": "Passed 11/11 CPU conformance (ToySglangOmniLab), 6/6 in-container B200 unit+GPU tests, and 2-shape fresh_check parity (img64_tok8_dit2 & img128_tok12_dit2, max_abs_diff=0.0, cuda:0 8,910,254,592 B & cuda:1 33,554,944 B unchanged)."
     }
    ]
+  },
+  {
+   "engine": "Dynamo", "upstream": "ai-dynamo/dynamo", "folder": "repos/dynamo",
+   "mechanisms": [
+    {
+     "name": "GMS-backed multi-worker planner live swap & frontend micro-restart (`DynamoLab`)",
+     "what": "Hosts an isolated `rust_http_proxy` (`rustc`-compiled HTTP proxy) or Python HTTP frontend over an in-process Python planner (`adapter.planner_ops`) and per-GPU `gpu_memory_service` workers (`adapter.worker`), supporting sub-20ms step-gap live swaps, RO-GMS `PackageOverlay` fresh parity, and `restart_frontend()` without reloading GPU weights.",
+     "startup_cost_removed": "Worker Python/CUDA imports, GMS weight allocation/disk load (`2.06 GB`/GPU), and cold multi-worker startup during planner edits or frontend restarts.",
+     "measured_saving": {"before": "14.643 (cold 2x B200 boot + 1st check)", "after": "0.160 (live swap + check; 19.7 ms install, 12.9 ms undo; frontend restart 77.7 ms with 0 weight reloads)", "unit": "s", "setup": "2x NVIDIA B200 (`CUDA_VISIBLE_DEVICES=0,1` & `2,3`), `gpu_memory_service 0.9.0`, `gemma-3-1b-it` bfloat16 (`2,059,403,264` B/GPU, `97` GMS allocations), `rust_http_proxy`, 2 shapes (`kv_aware` bs=1 & `round_robin` bs=2), 2026-11-26"},
+     "status": "gpu_verified",
+     "source": "repos/dynamo/README.md; repos/dynamo/kb/costs.md; repos/dynamo/kb/workload.md",
+     "note": "Passed 11/11 CPU conformance (`ToyDynamoLab`: c9 5.4 ms install / 1.8 ms undo), 9/9 unit/golden tests (`-W error::ResourceWarning`), remapped `CUDA_VISIBLE_DEVICES=2,3` GMS UUID smoke + parity, and 11/11 real-GPU conformance via `rsibox conformance dynamo --real` on 2x B200 (c9 16.3 ms install / 7.4 ms undo, c8 respawns 15.37-16.95 s, c3 fresh RO-GMS parity 33.770 s, 0 MiB exit)."
+    }
+   ]
   }
  ],
  "caveats": [
