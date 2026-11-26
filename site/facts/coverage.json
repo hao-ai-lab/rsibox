@@ -259,7 +259,7 @@
    "distributed and Ray placement-group initialization (requires respawn)"
   ],
   "Transformers": [
-   "multi-GPU device_map='auto' / accelerate sharding across ranks (single-worker subprocess today)",
+   "multi-node / multi-process distributed Accelerate launching (single persistent worker supports device_map='auto' sharding across GPUs, #269/#280)",
    "torch.compile-wrapped model forwards and constructors (require respawn)",
    "custom C++/CUDA extension builds (requires respawn)"
   ],

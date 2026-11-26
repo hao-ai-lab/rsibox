@@ -61,7 +61,7 @@ Every engine adapter must pass the sandbox verification suite ([`core/livelab/co
 
 ## Multi-Agent GPU Pool
 
-When multiple coding agents share a small GPU budget, `SandboxPool` multiplexes concurrent workers across warm slots with priority scheduling, elastic role borrowing, per-agent fault isolation, and hash-chained trace logs (`112/112` verified traces; see [`docs/agent-teams-and-contention.md`](agent-teams-and-contention.md)).
+When multiple coding agents share a small GPU budget, `SandboxPool` multiplexes concurrent workers across warm slots with priority scheduling, elastic role borrowing, per-agent fault isolation, and hash-chained trace logs (`114/114` verified traces; see [`docs/agent-teams-and-contention.md`](agent-teams-and-contention.md)).
 
 ## Where to Go Next
 

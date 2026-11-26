@@ -41,7 +41,7 @@ Measured in our 2026-11-24 B200 run:
 
 ## Multi-GPU `device_map="auto"` Sharded Quiesce, Live Edit & `SIGKILL` Fast-Fail (`2× NVIDIA B200`, `#280`)
 
-Measured on `2× NVIDIA B200` (`gemma-3-1b-it`, `bfloat16`, `device_map="auto"`, `max_memory={"0": "1100MiB", "1": "1100MiB"}` placing `11` layers on `cuda:0` and `19` on `cuda:1`; `2` prompts, `max_new_tokens` `8` and `16`):
+Measured on `2× NVIDIA B200` (`gemma-3-1b-it`, `bfloat16`, `device_map="auto"`, `max_memory={"0": "1100MiB", "1": "1100MiB"}` placing `11` layers on `cuda:0` and `19` on `cuda:1`; `2` shapes: `bs1×8` & `bs3×16`):
 
 | Operation / Stage | Measured | Notes |
 |---|---:|---|

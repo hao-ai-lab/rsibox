@@ -44,7 +44,7 @@
    "conformance": "11/11 CPU & 1x/2x B200 (TP=1 & TP=2 MPI)",
    "tiers": "R0 Python + TP>=2 MPIPoolExecutor Hook (#241) + R1 Lazy CUDA Graph Recapture + TrtllmQuiesceHooks (#215) + TrtllmShadowPromoter (#272/#281)",
    "speedup": "up to 249x cold / 116x warm (26.7 s / 12.4 s -> 0.107 s TP=1)",
-   "summary": "Unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend across TP=1 and TP=2 MPI (#215/#241/#281/#315): 0.107 s edit+check, 0.275 s Qwen3DecoderLayer.forward R1 install (224/224 witness/rank), 0.173 ms alive_fn SIGKILL fast-fail, TrtllmQuiesceHooks freeing 23.6 GiB (TP=1) / 46.7 GiB (TP=2) in 7.4-15.2 ms resume, and TrtllmShadowPromoter B200 failover (TP=1 0.329 s promote, 11/11; TP=2 post-fix 0.145 s promote, 0 orphan PIDs at 0 ms, 11/11).",
+   "summary": "Unmodified TensorRT-LLM 1.0.0rc6 PyTorch backend across TP=1 and TP=2 MPI (#215/#241/#281/#315): 0.107 s edit+check, 0.275 s Qwen3DecoderLayer.forward R1 install (224/224 witness/rank), 0.173 ms alive_fn SIGKILL fast-fail, TrtllmQuiesceHooks freeing 23.6 GiB (TP=1) / 46.7 GiB (TP=2) in 7.4-15.2 ms resume, and TrtllmShadowPromoter B200 failover (TP=1 0.329 s promote & TP=2 pre-fix 0.287 s promote with 11/11 conformance; TP=2 post-fix #315 0.145 s promote, 0 orphan PIDs at 0 ms, live swap & 28/28 tests).",
    "evidence": "repos/trtllm/kb/costs.md"
   },
   {
@@ -52,7 +52,7 @@
    "name": "Transformers",
    "category": "Inference",
    "status": "done",
-   "conformance": "11/11 CPU & 1x/2x B200 (Qwen3-0.6B / Qwen3-8B / gemma-3-1b-it device_map='auto')",
+   "conformance": "11/11 CPU & 1x B200 (Qwen3-0.6B); 2x B200 device_map='auto' (gemma-3-1b-it) live edit, quiesce/resume & SIGKILL verified",
    "tiers": "R0 Persistent Subprocess Multi-Module Swap + TransformersQuiesceHooks (#213) + device_map Multi-GPU & alive_fn Fast-Fail (#269/#280)",
    "speedup": "9.05x (0.6B) / 12.81x (8B: 7.75 s -> 0.605 s)",
    "summary": "Unmodified HuggingFace Transformers 5.20.2 persistent AF_UNIX worker (#213/#280): atomic swaps across generation/model modules (0.521-0.605 s edit+check), pinned-CPU TransformersQuiesceHooks freeing 15,778 MiB (15.4 GiB) on Qwen3-8B with 0.310 s H2D DMA resume, plus 2x B200 device_map='auto' sharded offload/resume (-1,050 / -892 MiB, 2.685 s quiesce, 0.160 s resume) and 0.153 s SIGKILL fast-fail.",
@@ -348,7 +348,7 @@
    "id": "EXP-H5",
    "title": "SandboxPool Admission Backpressure & Priority Queue Eviction (2x B200, #278)",
    "status": "done",
-   "result": "SandboxPool(max_waiters=2) on 2x B200 vLLM gemma-3-1b-it admits 2 holders + 2 waiters (100% exact), fast-fails 4 excess callers in 32-49 us, performs 1 priority eviction in 1.71 ms (overload_rejections=5, overload_evictions=1), and tracks idle/leased/queued slot_states().",
+   "result": "SandboxPool(max_waiters=2) on 2x B200 vLLM gemma-3-1b-it admits 2 holders + 2 waiters (100% exact), fast-fails 4 excess callers in 32-49 us, performs 1 priority eviction in 1.71 ms (overload_rejections=5, overload_evictions=1), and tracks idle/leased slot_states() while pool queue_depth=2 holds 2 queued waiters.",
    "traces": "1/1 (4 leases)",
    "evidence": "docs/agent-teams-and-contention.md"
   },
