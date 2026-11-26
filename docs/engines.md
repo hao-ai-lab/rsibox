@@ -19,6 +19,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 | **Isaac Lab** | CPU CI (`ToyIsaacLab`, 11/11) & 1× B200 (`Isaac-Cartpole-Direct`, `newton_mjwarp`, `4096` envs, `11/11` conformance) | `4096×10`: 9.66 s → **0.397 s** (**24.3×**); `1024×20`: 6.79 s → **0.302 s** (**22.5×**, `max_abs_diff=0.0`) | [readme](../repos/isaac-lab/README.md) · [costs](../repos/isaac-lab/kb/costs.md) |
 | **SGLang-Omni** | CPU CI (4-stage `ToySglangOmniLab` 11/11) & 2× B200 (`Qwen3-VL-4B-Instruct` Thinker + CUDA Talker/DiT/Vocoder in `juc049/sglang-omni-qwen3:deps`, standalone `sglang_omni` pkg absent) | 25.20 s cold → **0.0813 s** warm / **0.0874 s** `talker` swap (**0 B** frozen VRAM delta, 2 shapes `max_abs_diff=0.0`) | [README](../repos/sglang-omni/README.md) · [costs](../repos/sglang-omni/kb/costs.md) |
 | **Dynamo** | CPU CI (`ToyDynamoLab` 11/11) & 2× B200 (`gpu_memory_service 0.9.0`, `gemma-3-1b-it`, `rust_http_proxy`, `rsibox conformance dynamo --real` 11/11) | 14.64 s cold → **0.160 s** live (**91.4×**, `19.7 ms` install); Rust frontend micro-restart **77.7 ms** (`0` weight reloads) | [readme](../repos/dynamo/README.md) · [costs](../repos/dynamo/kb/costs.md) · [workload](../repos/dynamo/kb/workload.md) |
+| **Kernel** | CPU CI (`ToyKernelLab` 11/11) & 1× B200 (`KernelLab`: Triton 3.8.0 `@triton.jit` + CUDA `.cu` `nvcc 13.3` `CDLL`, `rsibox conformance kernel --real` 11/11 & `--backend cuda` 5/5) | Triton: 4.64 s → **0.040 s** (**116.5×**, `0.005 s` undo); `.cu`: 2.96 s → **0.947 s** (`917.4 ms` `nvcc`, `0.004 s` undo check) | [readme](../repos/kernel/README.md) · [costs](../repos/kernel/kb/costs.md) |
 | **Toy sandbox** | CPU CI (2-rank stdlib reference) | ~1.5 s for the full sandbox verification suite on a laptop | [verification suite](../core/livelab/conformance/README.md) |
 
 ## Repository layout
@@ -26,7 +27,7 @@ Each engine adapter under `repos/<engine>/` implements the shared [`core/livelab
 ```
 core/livelab/        shared stdlib runtime (kernel/, rsibox/, conformance/, survey/, forksafe.py, INTERFACE.md)
 core/agents/         prompts for coding agents (livelab_overview, developer, orchestrator, toolsmith)
-repos/<engine>/      vllm, fastvideo, megatron, verl, sglang, miles, transformers, trtllm, torchtitan, nemo-rl, isaac-lab, sglang-omni, dynamo (docs/, kb/, livelab/, examples/)
+repos/<engine>/      vllm, fastvideo, megatron, verl, sglang, miles, transformers, trtllm, torchtitan, nemo-rl, isaac-lab, sglang-omni, dynamo, kernel (docs/, kb/, livelab/, examples/)
 docs/                design notes on engines, restart mechanisms, kernels/CUDA graphs, and CI
 .github/             CPU workflows, automated review service, leak check, and Modal GPU CI runner
 scripts/             fact and consistency checks (verify_facts.py)
