@@ -46,6 +46,6 @@ Two runtime modes share the same `NemoRlLab` (`BaseLab`) contract:
 
 | Path | Mechanism | Scope | CPU Status | Real GPU Status |
 |---|---|---|---|---|
-| **Live step-gap swap** | `LocalParticipant` / `ray_participants.serve` `__code__` swap + AST witness + coupled `S0` reset | CPU `adapter.*`; GPU `nemo_rl.algorithms.loss.*`, `nemo_rl.models.automodel.train` | Verified (`c9` install `0.0073 s`, undo `0.0015 s`) | Verified `1×/2× B200` (`install 3.8–4.9 s`, bit-exact `S0` + `fresh_parity`) |
-| **Refused at prepare** | Fail-closed static checks before mutating state | `patch_invalid`, `closure_changed`, `outside_changes`, `empty_change`, `constructor_edit`, `unloaded_module` | Verified (`c6` + golden tests) | Verified (`c6` on `1×/2× B200`, pre-`_inject_actor_fault` 3-line edit) |
-| **Cold respawn** | `reset("respawn")` + `ray.kill`/`ray.shutdown` cleanup | Worker crash, hang, lost participant, external tamper, or startup-only edits | Verified (`c8` `0.120–0.268 s`) | Verified (`c8` on `2× B200` `755.525 s`, respawns `96.2–138.8 s`) |
+| **Live step-gap swap** | `LocalParticipant` / `ray_participants.serve` `__code__` swap + AST witness + coupled `S0` reset | CPU `adapter.*`; GPU `nemo_rl.algorithms.loss.*`, `nemo_rl.models.automodel.train` | Verified (`c9` install `0.0073 s`, undo `0.0015 s`) | Verified `1×/2× B200` (`install 4.6–4.8 s`, bit-exact `S0` + `fresh_parity`) |
+| **Refused at prepare** | Fail-closed static checks before mutating state | `patch_invalid`, `closure_changed`, `outside_changes`, `empty_change`, `constructor_edit`, `unloaded_module` | Verified (`c6` + golden tests) | Verified (`c6` on `2× B200`, pre-Gate 2 P1 fix) |
+| **Cold respawn** | `reset("respawn")` + `ray.kill`/`ray.shutdown` cleanup | Worker crash, hang, lost participant, external tamper, or startup-only edits | Verified (`c8` `0.120–0.268 s`) | Verified (`c8` on `2× B200` `731.472 s`, respawns `92.0–124.9 s`) |

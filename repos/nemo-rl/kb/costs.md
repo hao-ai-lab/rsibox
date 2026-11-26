@@ -19,7 +19,7 @@ Measured locally on CPU via `PYTHONPATH=core/livelab python3 -m rsibox conforman
 | `c8_crash_and_hang` | pass | `2.835` | Poisoned on `crash`/`hang`/`lost`/`tamper`; respawns `0.120–0.268 s` (`0.195 s` / `0.268 s` / `0.196 s` / `0.120 s`) |
 | `c9_soak` | pass | `0.287` | 20 cycles: install median **`0.0073 s`**, uninstall median **`0.0015 s`** |
 | `c10_not_proven` | pass | `0.119` | `proven=False` (`zero_witness`) on startup-only `init_policy_scale`; fresh diverges |
-| **Total (`c0–c10`)** | **11/11** | **3.942 s** | **Sum of `c0–c10` case times; 12/12 unit tests pass (`-W error::ResourceWarning`)** |
+| **Total (`c0–c10`)** | **11/11** | **3.942 s** | **Sum of `c0–c10` case times; 14/14 unit tests pass (`-W error::ResourceWarning`)** |
 
 ## 2. Real GPU (`1×` / `2× NVIDIA B200`, Colocated AutoModel FSDP2 + SGLang GRPO)
 
@@ -27,8 +27,8 @@ Measured inside `rsib/slime_grpo:b200-bw` on `NVIDIA B200` (`gemma-3-1b-it`, `bf
 
 | Shape / Suite | GPUs | Cold (`boot + check`) | Warm `check` | Reset / Install / Fresh | Notes (`witness_nonzero=true`, `S0` bit-exact) |
 |---|---:|---:|---:|---:|---|
-| `g2_s2_mnt8_gpu1` (`bs=4, steps=2, mnt=8`) | `1× B200` | `160.781 s` (`121.163 + 39.618`) | `20.115 s` | `4.138 / 4.277 / 222.200 s` | Post-final-edit; `trainer0` witness `4`, `fresh_parity=true`, `66411 MiB` |
-| `g2_s2_mnt8_gpu2` (`bs=4, steps=2, mnt=8`) | `2× B200` | `178.011 s` (`148.609 + 29.402`) | `17.195 s` | `3.524 / 4.911 / 237.793 s` | Post-final-edit; `trainer0/1` witness `[2, 2]`, `fresh_parity=true`, `68589 MiB/GPU` |
-| `g4_s3_mnt16_gpu2` (`bs=8, steps=3, mnt=16`) | `2× B200` | `165.302 s` (`106.336 + 58.966`) | `36.863 s` | `3.435 / 3.815 / 257.105 s` | Post-final-edit; `trainer0/1` witness `[6, 6]`, `fresh_parity=true`, `68589 MiB/GPU` |
-| `c8_crash_and_hang` (`rsibox conformance --real`) | `2× B200` | — | — | Respawns `96.240–138.833 s` | Post-final-edit `1/1 pass` (`755.525 s`: `crash`, `hang`, `lost`, `tamper`) |
-| `c0–c7, c9–c10` (`rsibox conformance --real`) | `2× B200` | — | — | `c9` install `3.840 s`, undo `3.784 s` | `10/11 pass` immediately prior to 3-line `_inject_actor_fault` fix (`c8`-only); final full rerun interrupted by external user GPU 4–7 launch |
+| `g2_s2_mnt8_gpu1` (`bs=4, steps=2, mnt=8`) | `1× B200` | `161.934 s` (`121.165 + 40.768`) | `20.170 s` | `4.331 / 4.825 / 228.752 s` | Post-final-edit; `trainer0` witness `4`, `fresh_parity=true`, `66411 MiB` |
+| `g2_s2_mnt8_gpu2` (`bs=4, steps=2, mnt=8`) | `2× B200` | `186.756 s` (`155.594 + 31.161`) | `18.985 s` | `4.856 / 4.627 / 252.776 s` | Post-final-edit; `trainer0/1` witness `[2, 2]`, `fresh_parity=true`, `68589 MiB/GPU` |
+| `g4_s3_mnt16_gpu2` (`bs=8, steps=3, mnt=16`) | `2× B200` | `151.530 s` (`104.373 + 47.157`) | `34.664 s` | `3.641 / 4.721 / 251.258 s` | Post-final-edit; `trainer0/1` witness `[6, 6]`, `fresh_parity=true`, `68589 MiB/GPU` |
+| `c8_crash_and_hang` (`rsibox conformance --real`) | `2× B200` | — | — | Respawns `91.960–124.851 s` | Post-final-edit `1/1 pass` (`731.472 s`: `crash`, `hang`, `lost`, `tamper`) |
+| `c0–c7, c9–c10` (`rsibox conformance --real`) | `2× B200` | — | — | `c9` install `3.840 s`, undo `3.784 s` | `10/11 pass` immediately prior to Gate 2 P1 `fresh_check`/`inject(hang)` fix |

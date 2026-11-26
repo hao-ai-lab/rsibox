@@ -679,7 +679,7 @@ def restore_automodel_s0(actor: Any) -> dict[str, Any]:
         torch.cuda.set_rng_state(snap["cuda_rng"])
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
-    return {"ok": True, "reset": ["weights_s0", "optimizer_state", "rng", "step_counter"]}
+    return {"ok": True, "reset": ["weights_s0", "optimizer_state", "scheduler_state", "rng", "step_counter"]}
 
 
 def coupled_nemo_rl_reset(

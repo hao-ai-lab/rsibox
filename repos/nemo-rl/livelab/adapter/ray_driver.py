@@ -156,7 +156,7 @@ def _init_rollout_actor(actor: Any) -> dict[str, Any]:
     return {"ok": True}
 
 
-def _inject_actor_fault(actor: Any, fault: str, hang_s: float = 150.0) -> dict[str, Any]:
+def _inject_actor_fault(actor: Any, fault: str, hang_s: float = 240.0) -> dict[str, Any]:
     import nemo_rl.algorithms.loss.clipped_pg as clipped_pg
     import nemo_rl.algorithms.loss.loss_functions as loss_fn_mod
 
@@ -281,17 +281,12 @@ def _start_cluster(cfg: dict[str, Any], *, rpc_timeout: float) -> dict[str, Any]
         )
         ray.get([h.__ray_call__.remote(_init_trainer_actor, seed) for h in trainers.values()], timeout=rpc_timeout)
         ray.get([h.__ray_call__.remote(_init_rollout_actor) for h in rollouts.values()], timeout=rpc_timeout)
-        loss_fn = ClippedPGLossFn(
-            ClippedPGLossConfig(
-                reference_policy_kl_penalty=0.01, ratio_clip_min=0.2, ratio_clip_max=0.2, ratio_clip_c=None,
-                loss_type="token_level", use_on_policy_kl_approximation=False, use_importance_sampling_correction=False,
-                sequence_level_importance_ratios=False, force_on_policy_ratio=False,
-            )
-        )
-        return {
-            "ray": ray, "cluster": cluster, "gen": gen, "policy": policy, "ws": ws,
-            "tok": tok, "loss_fn": loss_fn, "trainers": trainers, "rollouts": rollouts,
-        }
+        loss_fn = ClippedPGLossFn(ClippedPGLossConfig(
+            reference_policy_kl_penalty=0.01, ratio_clip_min=0.2, ratio_clip_max=0.2, ratio_clip_c=None,
+            loss_type="token_level", use_on_policy_kl_approximation=False, use_importance_sampling_correction=False,
+            sequence_level_importance_ratios=False, force_on_policy_ratio=False,
+        ))
+        return {"ray": ray, "cluster": cluster, "gen": gen, "policy": policy, "ws": ws, "tok": tok, "loss_fn": loss_fn, "trainers": trainers, "rollouts": rollouts}
     except BaseException:
         for obj in (gen, policy, cluster):
             if obj is not None:
@@ -302,19 +297,55 @@ def _start_cluster(cfg: dict[str, Any], *, rpc_timeout: float) -> dict[str, Any]
         raise
 
 
+def _shutdown_cluster(st: dict[str, Any], *, dirty: bool = False) -> None:
+    if dirty:
+        for handle in [*st["trainers"].values(), *st["rollouts"].values()]:
+            with contextlib.suppress(Exception):
+                st["ray"].kill(handle, no_restart=True)
+    else:
+        for obj in (st["gen"], st["policy"], st["cluster"]):
+            with contextlib.suppress(Exception):
+                obj.shutdown()
+    with contextlib.suppress(Exception):
+        if st["ray"].is_initialized():
+            st["ray"].shutdown()
+            time.sleep(1.5)
+    gc.collect()
+
+
+def run_fresh_subprocess(
+    spec_path: str, out_path: str, *, env: dict[str, str], overlay_root: str | None = None, timeout_s: float = 360.0
+) -> dict[str, Any]:
+    popen_cwd = overlay_root if overlay_root and os.path.isdir(overlay_root) else os.path.dirname(spec_path)
+    t0 = time.perf_counter()
+    with subprocess.Popen([sys.executable, "-u", "-m", "adapter.ray_driver", spec_path], env=env, cwd=popen_cwd, start_new_session=True) as child:
+        try:
+            rc = child.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": None, "error": f"fresh timed out after {timeout_s}s"}
+        finally:
+            with contextlib.suppress(Exception):
+                P.kill_tree(child.pid, signal.SIGKILL, include_pg=True)
+                child.wait(timeout=5)
+    if rc != 0:
+        return {"ok": False, "output": None, "error": f"fresh rc={rc}"}
+    with open(out_path, encoding="utf-8") as fh:
+        return {"ok": True, "output": json.load(fh)["output"], "cost_s": round(time.perf_counter() - t0, 4)}
+
+
 def launch_nemo_rl_runtime(lab: Any) -> dict[str, Any]:
     """Launch real Ray + AutoModel FSDP2 + SGLang runtime for `NemoRlLab`."""
     cfg = dict(lab.config)
     if not str(cfg.get("model") or "").strip():
         raise ValueError("RSIBOX_NEMORL_MODEL (--model) is required for NemoRlLab real mode")
     st = _start_cluster(cfg, rpc_timeout=lab.rpc_timeout)
-    ray = st["ray"]
-    trainers, rollouts = st["trainers"], st["rollouts"]
-    base_text = {mod: H.read_module(mod) for mod in lab._init_modules}
-    parts = [
-        NemoRlRayParticipant(name, handle, timeout_s=lab.rpc_timeout)
-        for name, handle in [*trainers.items(), *rollouts.items()]
-    ]
+    try:
+        ray, trainers, rollouts = st["ray"], st["trainers"], st["rollouts"]
+        base_text = {mod: H.read_module(mod) for mod in lab._init_modules}
+        parts = [NemoRlRayParticipant(name, handle, timeout_s=lab.rpc_timeout) for name, handle in [*trainers.items(), *rollouts.items()]]
+    except BaseException:
+        _shutdown_cluster(st, dirty=True)
+        raise
 
     state_flags = {"at_s0": True}
 
@@ -353,7 +384,8 @@ def launch_nemo_rl_runtime(lab: Any) -> dict[str, Any]:
                 ray.kill(target, no_restart=True)
                 return {"ok": True, "fault": "lost"}
             if fault in ("crash", "hang"):
-                hang_s = float(kwargs.get("hang_s", lab.check_timeout + 10.0))
+                default_hang = float(lab.check_timeout) + float(lab.rpc_timeout) + 60.0
+                hang_s = float(kwargs.get("seconds") or kwargs.get("hang_s") or default_hang)
                 return ray.get(target.__ray_call__.remote(_inject_actor_fault, fault, hang_s), timeout=lab.rpc_timeout)
             if fault == "tamper":
                 kwargs.setdefault("module", CLIPPED_PG_MOD)
@@ -390,29 +422,14 @@ def launch_nemo_rl_runtime(lab: Any) -> dict[str, Any]:
             lab._stop_engine()
             spec_path = os.path.join(tmp, "spec.json")
             out_path = os.path.join(tmp, "fresh.json")
+            overlay_root = overlay if files else ""
             with open(spec_path, "w", encoding="utf-8") as fh:
-                json.dump({"config": dict(cfg), "workload": {**lab.default_workload(), **(workload or {})}, "out": out_path, "rpc_timeout": lab.rpc_timeout}, fh)
+                json.dump({"config": dict(cfg), "workload": {**lab.default_workload(), **(workload or {})}, "out": out_path, "rpc_timeout": lab.rpc_timeout, "overlay_root": overlay_root}, fh)
             existing = [p for p in (os.environ.get("PYTHONPATH") or "").split(os.pathsep) if p]
             py_entries = [*([overlay] if files else []), ll, core, *existing]
             env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": os.pathsep.join(dict.fromkeys(py_entries))}
             boot_to = float(cfg.get("boot_timeout", 300.0)) + lab.check_timeout
-            t0 = time.perf_counter()
-            with subprocess.Popen([sys.executable, "-u", "-m", "adapter.ray_driver", spec_path], env=env, start_new_session=True) as child:
-                try:
-                    rc = child.wait(timeout=boot_to)
-                except subprocess.TimeoutExpired:
-                    P.kill_tree(child.pid, signal.SIGKILL, include_pg=True)
-                    child.wait()
-                    return {"ok": False, "output": None, "error": f"fresh timed out after {boot_to}s"}
-                except BaseException:
-                    if child.poll() is None:
-                        P.kill_tree(child.pid, signal.SIGKILL, include_pg=True)
-                        child.wait()
-                    raise
-            if rc != 0:
-                return {"ok": False, "output": None, "error": f"fresh rc={rc}"}
-            with open(out_path, encoding="utf-8") as fh:
-                return {"ok": True, "output": json.load(fh)["output"], "cost_s": round(time.perf_counter() - t0, 4)}
+            return run_fresh_subprocess(spec_path, out_path, env=env, overlay_root=overlay_root or None, timeout_s=boot_to)
         except Exception as exc:
             return {"ok": False, "output": None, "error": f"{type(exc).__name__}: {exc}"}
         finally:
@@ -424,31 +441,12 @@ def launch_nemo_rl_runtime(lab: Any) -> dict[str, Any]:
                         raise RuntimeError(f"failed to replay live stack after fresh_check: {re_res}")
 
     def shutdown() -> None:
-        if lab._dirty:
-            for handle in [*trainers.values(), *rollouts.values()]:
-                with contextlib.suppress(Exception):
-                    ray.kill(handle, no_restart=True)
-        else:
-            for obj in (st["gen"], st["policy"], st["cluster"]):
-                with contextlib.suppress(Exception):
-                    obj.shutdown()
-        with contextlib.suppress(Exception):
-            if ray.is_initialized():
-                ray.shutdown()
-                time.sleep(1.5)
-        gc.collect()
+        _shutdown_cluster(st, dirty=bool(lab._dirty))
 
     return {
-        "participants": parts,
-        "modules": list(lab._init_modules),
-        "base_text": base_text,
-        "reset_state": reset_state,
-        "run_step": run_step,
-        "probe": probe,
-        "inject": inject,
-        "fresh_check": fresh_check,
-        "patches": lambda: real_patches(lab._base_source),
-        "shutdown": shutdown,
+        "participants": parts, "modules": list(lab._init_modules), "base_text": base_text,
+        "reset_state": reset_state, "run_step": run_step, "probe": probe, "inject": inject,
+        "fresh_check": fresh_check, "patches": lambda: real_patches(lab._base_source), "shutdown": shutdown,
     }
 
 
@@ -480,6 +478,9 @@ def real_patches(base_source: Any) -> dict[str, Any]:
 
 
 def run_fresh_ray(spec: dict[str, Any]) -> int:
+    ov = spec.get("overlay_root")
+    if ov:
+        sys.path[:] = [ov, *[p for p in sys.path if p != ov]]
     cfg, wl, rpc_to = dict(spec["config"]), dict(spec.get("workload") or {}), float(spec.get("rpc_timeout", 60.0))
     st = _start_cluster(cfg, rpc_timeout=rpc_to)
     try:
@@ -488,12 +489,7 @@ def run_fresh_ray(spec: dict[str, Any]) -> int:
             json.dump({"output": output}, fh)
         return 0
     finally:
-        for obj in (st["gen"], st["policy"], st["cluster"]):
-            with contextlib.suppress(Exception):
-                obj.shutdown()
-        with contextlib.suppress(Exception):
-            st["ray"].shutdown()
-        gc.collect()
+        _shutdown_cluster(st)
 
 
 if __name__ == "__main__":
