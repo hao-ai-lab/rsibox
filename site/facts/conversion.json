@@ -570,6 +570,7 @@
     {"fact": "Passed 11/11 CPU conformance (`ToyKernelLab`), 6/6 unit/golden tests (`-W error::ResourceWarning`), 11/11 real 1x B200 conformance (`rsibox conformance kernel --real`, `c9` 20.4 ms install / 2.9 ms undo) + 5/5 explicit `--backend cuda` conformance, 2-shape Triton live swap (`0.0398 s` vs `4.6373 s` = `116.5x`), 2-shape `.cu` live reload (`0.9467 s` vs `2.9640 s`, `0.0037 s` undo check), and real `CUDA_ERROR_MISALIGNED_ADDRESS` sticky poison respawn (`0 MiB` exit).", "source": "repos/kernel/kb/costs.md"}
    ],
    "notes": ["11/11 CPU conformance, 6/6 unit/golden tests, and 11/11 1x B200 real-GPU conformance + .cu reload verified."]
-  }
+  },
+  {"engine": "vLLM-Omni", "folder": "repos/vllm-omni", "recorded_facts": [{"fact": "Onboarded 4-stage multimodal live-lab adapter (thinker/talker/dit/vocoder RoleEndpoints, S1+S4 RO_AUX_WEIGHTS frozen stage residency, S5 VersionedReplayBufferService S0 reset) in <=600 non-test LOC.", "source": "repos/vllm-omni/README.md"}, {"fact": "Passed 11/11 CPU conformance (ToyVllmOmniLab), 6/6 B200 unit+GPU tests, 11/11 real-GPU conformance (rsibox conformance vllm-omni --real, c9 0.0224 s install / 0.3007 s undo), and 2-shape fresh_check parity (35.5983 s cold -> 0.0082 s warm, 0 B frozen VRAM delta, max_abs_diff=0.0) using vllm 0.33.0 with Qwen3-VL-4B-Instruct.", "source": "repos/vllm-omni/kb/costs.md"}], "upstream_patches": {"ledger": null, "count": 0, "note": "Runs against vllm 0.33.0 Qwen3-VL-4B-Instruct + CUDA stage pipeline (standalone vllm_omni pkg absent).", "source": "repos/vllm-omni/README.md"}, "notes": ["11/11 CPU conformance, 11/11 1x B200 real-GPU conformance, and 2-shape Qwen3-VL-4B-Instruct multi-stage verification passed."]}
  ]
 }

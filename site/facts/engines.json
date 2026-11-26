@@ -785,7 +785,8 @@
      "source": "repos/kernel/README.md; repos/kernel/kb/costs.md"
     }
    ]
-  }
+  },
+  {"engine": "vLLM-Omni", "upstream": "vllm-project/vllm-omni", "folder": "repos/vllm-omni", "mechanisms": [{"name": "Targeted multi-stage live swap with S4 frozen stage residency & S5 S0 reset (`VllmOmniLab`)", "what": "Coordinates targeted stage swaps across `thinker`, `talker`, `dit`, and `vocoder` `RoleEndpoint`s while holding frozen `vllm.LLM` Thinker (`Qwen3-VL-4B-Instruct`, `cuda:0`) and Vocoder (`cuda:0`) stages in `MemoryService` (`RO_AUX_WEIGHTS`) + `AuxiliaryModelService` and resetting `VersionedReplayBufferService` (`S5`) stage buffers to `S0`.", "startup_cost_removed": "Reloading frozen vLLM Vision+LM and Vocoder backbones across mutable stage edits.", "measured_saving": {"before": "35.5983 cold boot+check (35.4228 boot + 0.1755 check)", "after": "0.0082 warm / 0.0276 install / 0.5513 uninstall (0 B frozen VRAM delta)", "unit": "s", "setup": "1x NVIDIA B200 (GPU 2), vllm 0.33.0 + torch 2.14.0+cu130, Qwen3-VL-4B-Instruct Thinker + CUDA Talker/DiT/Vocoder (standalone vllm_omni pkg absent)"}, "status": "gpu_verified", "source": "repos/vllm-omni/README.md; repos/vllm-omni/kb/costs.md", "note": "Passed 11/11 CPU conformance (ToyVllmOmniLab), 6/6 B200 unit+GPU tests (-W error::ResourceWarning), 11/11 real-GPU conformance via rsibox conformance vllm-omni --real (c9 0.0224 s install / 0.3007 s undo, c8 respawns 30.58-31.63 s), and 2-shape fresh_check parity (img64_tok8_dit2 & img128_tok12_dit2, max_abs_diff=0.0, 0 B frozen VRAM delta)."}]}
  ],
  "caveats": [
   "GPU receipts are summaries inside PR descriptions and kb files; the raw run logs are not in the repo (PR #141).",

@@ -1,0 +1,3 @@
+# vLLM-Omni (`repos/vllm-omni/`)
+Multi-stage multimodal live-lab adapter (`Thinker -> Talker -> DiT -> Vocoder`): targeted `RoleEndpoint` live swaps (`thinker`/`talker`/`dit`/`vocoder`), `S1`+`S4` frozen stage residency (`MemoryService` `RO_AUX_WEIGHTS` + `AuxiliaryModelService`, `0 B` VRAM delta), and `S5` `VersionedReplayBufferService` `S0` reset. Verified `11/11` CPU conformance (`ToyVllmOmniLab`), `6/6` B200 unit+GPU tests (`-W error::ResourceWarning`), and `11/11` real 1× B200 conformance (`vllm 0.33.0`, `Qwen3-VL-4B-Instruct` Thinker + CUDA Talker/DiT/Vocoder; standalone `vllm_omni` pkg absent).
+- [kb/workload.md](kb/workload.md) · [kb/costs.md](kb/costs.md) · `livelab/livelab.json` · `livelab/adapter/`
