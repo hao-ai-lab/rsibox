@@ -32,9 +32,15 @@ The orchestrator's brief names these. Ask for whichever is missing; do not guess
    anything on top of it.
    *Why:* an undo unwinds from its target through the newest transaction, so a stray swap found
    late takes the keeps installed after it down with it (`docs/lessons.md` lesson 16).
+   *Process-invariant identity check:* `status()["identity"]["modules"]` (and `box["modules_digest"]`
+   over HTTP) is the process-invariant SHA-256 module content hash across `reset("respawn")`.
+   Do **not** assert `status()["fingerprint"]` equality across a respawn or restart — `fingerprint`
+   embeds process-local `id(code_obj)`.
 2. **Know the noise.** Run the base against itself, or take the figure from `kb/` if it was
    measured in this setup. That base-to-base spread is the smallest gain you can claim from one
-   pair of runs.
+   pair of runs. When `check()` returns both `seconds` and `cost_s`, use `seconds` (workload-only
+   execution time) for speedup comparisons and `cost_s` (total verb wall time including probe/proof
+   overhead) / `box["wall_s"]` (HTTP round-trip wall time) for loop-overhead accounting.
 3. **Find where the time goes.** Start from a profile or the phase timings of a base check, not
    from reading the code. Rank ideas by the seconds they could remove.
 
@@ -48,10 +54,13 @@ The orchestrator's brief names these. Ask for whichever is missing; do not guess
 3. **Install.** Call `install(patch)`. If refused, read the reason; restart only if the knowledge
    base says so.
 4. **Check.** Call `check(workload)` with the cheapest probe that runs the changed path. Read the
-   result in this order: did the patched path run, is the output within the gate, and only then
-   is it faster.
+   result in this order: did the patched path run (`proven=True` and non-zero `witness` — note that
+   `proven=True` verifies execution only, **not** numerical equivalence), is the output within the
+   gate (`output` / `output_digest` / `exact_match`), and only then is it faster (`seconds` when
+   present, else `cost_s`).
 5. **Decide.** Keep (`reset()`) or revert (`uninstall()`).
-6. **Promote** promising edits to the full evaluation F(x), asynchronously.
+6. **Promote** promising edits to the full evaluation F(x), asynchronously, or confirm single-shape
+   fresh-process parity via `rsibox fresh-check` / `Client.fresh_check()`.
 7. When the cost hook alarms (slow check, fallback restart) or you enter an uncovered module,
    call `toolsmith_online` instead of writing an ad-hoc script.
 
@@ -91,7 +100,9 @@ A keep inside one long-running lab says the edit is worth confirming. Before a g
 
 ## Calling `toolsmith_online`
 
-Send a request it can act on without your context:
+When an orchestrator + toolsmith peer is attached, send a request it can act on without your
+context (standalone `rsibox` sandbox runs have no `toolsmith_online` RPC verb on the box; in
+standalone sessions, record the symptom and blocker in your report instead):
 
 - the symptom: slow check, refused install, fallback restart, zero witness, or uncovered module;
 - the call that showed it, its seconds and its findings, copied from the record, not retyped;

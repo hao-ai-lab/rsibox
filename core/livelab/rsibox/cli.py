@@ -6,6 +6,7 @@
     rsibox wait | status | info | events | receipts | source MODULE
     rsibox install (--file MODULE=PATH ... | --patch FILE | --diff FILE) [--accept CHECK ...]
     rsibox check [--workload JSON] | reset [--kind state|respawn] | uninstall [--id TXN]
+    rsibox fresh-check [--file MODULE=PATH ... | --patch FILE | --diff FILE] [--workload JSON] [--timeout SEC]
     rsibox verify-trace PATH [PATH ...] [--expected-count N --expected-hash SHA] [--json]
 
 Client commands read `RSIBOX` (a box file) or `RSIBOX_URL` + `RSIBOX_TOKEN`; `--box FILE`
@@ -122,6 +123,22 @@ def _call(a):
         reply = box.install(patch)
     elif cmd == "check":
         reply = box.check(json.loads(a.workload) if a.workload else None)
+    elif cmd in ("fresh-check", "fresh_check"):
+        if sum(bool(x) for x in (a.patch, a.diff, a.file)) > 1:
+            raise SystemExit("rsibox fresh-check: give at most one of --file, --patch, or --diff")
+        try:
+            if a.patch:
+                patch = json.loads(_read(a.patch))
+            elif a.diff:
+                patch = {"diff": _read(a.diff)}
+            elif a.file:
+                patch = {"files": {mod: _read(path) for mod, path in _pairs(a.file, "--file").items()}}
+            else:
+                patch = None
+            workload = json.loads(a.workload) if a.workload else None
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"rsibox fresh-check: {exc}")
+        reply = box.fresh_check(patch, workload=workload, timeout=a.timeout)
     elif cmd == "reset":
         reply = box.reset(a.kind)
     elif cmd == "uninstall":
@@ -260,8 +277,8 @@ def main(argv=None):
     p = sub.add_parser("down", help="close a box and remove what `up` started")
     p.add_argument("--state", required=True)
 
-    def client_cmd(name, help_text):
-        q = sub.add_parser(name, help=help_text)
+    def client_cmd(name, help_text, aliases=()):
+        q = sub.add_parser(name, help=help_text, aliases=aliases)
         q.add_argument("--box", default=None, help="box file (default: $RSIBOX)")
         return q
 
@@ -280,6 +297,16 @@ def main(argv=None):
     q.add_argument("--keep-receipt", action="store_true")
     q = client_cmd("check", "run the workload in the warm engine")
     q.add_argument("--workload", help="JSON")
+    q = client_cmd(
+        "fresh-check",
+        "run the workload in a fresh subprocess from base plus optional patch",
+        aliases=("fresh_check",),
+    )
+    q.add_argument("--file", action="append", default=[], metavar="MODULE=PATH")
+    q.add_argument("--patch")
+    q.add_argument("--diff")
+    q.add_argument("--workload", help="JSON")
+    q.add_argument("--timeout", type=float, default=None, help="HTTP request timeout in seconds")
     client_cmd("reset", "reset volatile state").add_argument("--kind", default="state")
     client_cmd("uninstall", "undo the newest edit, or down to --id").add_argument("--id")
 
