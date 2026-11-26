@@ -49,6 +49,10 @@ def _env_config() -> dict[str, Any]:
         "group_size": int(g("RSIBOX_NEMORL_GROUP_SIZE", "4")),
         "steps": int(g("RSIBOX_NEMORL_STEPS", "2")),
         "seed": int(g("RSIBOX_NEMORL_SEED", "0")),
+        "max_new_tokens": int(g("RSIBOX_NEMORL_MAX_NEW_TOKENS", "8")),
+        "context_length": int(g("RSIBOX_NEMORL_CONTEXT_LENGTH", "128")),
+        "mem_fraction": float(g("RSIBOX_NEMORL_MEM_FRACTION", "0.35")),
+        "boot_timeout": float(g("RSIBOX_NEMORL_BOOT_TIMEOUT", "300.0")),
     }
 
 
@@ -77,14 +81,21 @@ class NemoRlLab(BaseLab):
         merged["num_trainers"] = validate_positive_int(merged.get("num_trainers", 1), "num_trainers")
         merged["num_rollouts"] = validate_positive_int(merged.get("num_rollouts", 1), "num_rollouts")
         self.config = merged
-        self._init_modules = list(modules if modules is not None else DEFAULT_MODULES)
+        if modules is not None:
+            self._init_modules = list(modules)
+        elif str(merged.get("mode", "ray")) == "cpu" or callable(runtime_factory):
+            self._init_modules = list(DEFAULT_MODULES)
+        else:
+            from adapter.ray_driver import REAL_MODULES
+            self._init_modules = list(REAL_MODULES)
         self.startup_timeout = float(startup_timeout)
         self._runtime_factory = runtime_factory
         self._runtime: dict[str, Any] = {}
         self._workers: dict[str, dict[str, Any]] = {}
         self._gen = 0
+        default_ct = "30.0" if str(merged.get("mode", "ray")) == "cpu" else "120.0"
         ct = float(
-            check_timeout if check_timeout is not None else os.environ.get("RSIBOX_NEMORL_CHECK_TIMEOUT", "30.0")
+            check_timeout if check_timeout is not None else os.environ.get("RSIBOX_NEMORL_CHECK_TIMEOUT", default_ct)
         )
         super().__init__(
             receipts=receipts,
@@ -112,7 +123,12 @@ class NemoRlLab(BaseLab):
             ("--hidden", 8, int),
             ("--group-size", 4, int),
             ("--steps", 2, int),
-            ("--check-timeout", 30.0, float),
+            ("--seed", 0, int),
+            ("--max-new-tokens", 8, int),
+            ("--context-length", 128, int),
+            ("--mem-fraction", 0.35, float),
+            ("--boot-timeout", 300.0, float),
+            ("--check-timeout", 120.0, float),
         ):
             p.add_argument(flag, default=default, type=typ)
         ns = p.parse_args(list(args[1:] if args[:1] == ["--"] else args))
@@ -127,6 +143,11 @@ class NemoRlLab(BaseLab):
                 "hidden",
                 "group_size",
                 "steps",
+                "seed",
+                "max_new_tokens",
+                "context_length",
+                "mem_fraction",
+                "boot_timeout",
                 "check_timeout",
             )
         }
@@ -169,10 +190,24 @@ class NemoRlLab(BaseLab):
 
         if str(self.config.get("mode", "ray")) != "cpu":
             require_nemo_rl_deps()
-            raise RuntimeError(
-                "NemoRlLab real mode requires a NeMo-RL Ray cluster runtime_factory or "
-                "configured --model/--data GRPO driver (not yet staged on this host)."
-            )
+            from adapter.ray_driver import launch_nemo_rl_runtime
+
+            try:
+                rt = self._runtime = launch_nemo_rl_runtime(self)
+                self.base_text = dict(rt["base_text"])
+                co = RecaptureCoordinator(
+                    list(rt["participants"]),
+                    gap=rt.get("gap", lambda fn: fn()),
+                    writer=self.writer,
+                    interface_version="1-draft",
+                    engine={"name": self.name, "version": "nemo-rl", "commit": os.environ.get("RSIBOX_ENGINE_COMMIT")},
+                    phase2_deadline_s=self.rpc_timeout,
+                    post_commit_reset="state",
+                )
+                return co, list(rt["modules"])
+            except BaseException:
+                self._stop_engine()
+                raise
 
         self._gen += 1
         ll, core = self._livelab_paths()
@@ -430,6 +465,10 @@ class NemoRlLab(BaseLab):
     def patches(self) -> dict[str, Any]:
         if callable(custom_patches := self._runtime.get("patches")):
             return custom_patches()
+        if str(self.config.get("mode", "ray")) != "cpu":
+            from adapter.ray_driver import real_patches
+
+            return real_patches(self._base_source)
         g_mod, r_mod, s_mod = DEFAULT_MODULES
         g_src = self._base_source(g_mod)
         r_src = self._base_source(r_mod)

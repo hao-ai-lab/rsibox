@@ -635,6 +635,11 @@ def snapshot_automodel_s0(actor: Any) -> dict[str, Any]:
     snap = {
         "params": params,
         "optimizer": opt_state,
+        "scheduler": (
+            copy.deepcopy(actor.scheduler.state_dict())
+            if getattr(actor, "scheduler", None) is not None and hasattr(actor.scheduler, "state_dict")
+            else None
+        ),
         "python_rng": random.getstate(),
         "torch_rng": torch.get_rng_state(),
         "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
@@ -661,7 +666,11 @@ def restore_automodel_s0(actor: Any) -> dict[str, Any]:
             local_p.copy_(saved.to(device=local_p.device, dtype=local_p.dtype))
             param.grad = None
     if optimizer is not None and snap.get("optimizer") is not None:
+        if not snap["optimizer"].get("state") and hasattr(optimizer, "state"):
+            optimizer.state.clear()
         optimizer.load_state_dict(copy.deepcopy(snap["optimizer"]))
+    if getattr(actor, "scheduler", None) is not None and snap.get("scheduler") is not None:
+        actor.scheduler.load_state_dict(copy.deepcopy(snap["scheduler"]))
     if hasattr(actor, "step_counter"):
         actor.step_counter = int(snap.get("step_counter", 0))
     random.setstate(snap["python_rng"])

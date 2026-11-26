@@ -23,12 +23,7 @@ Two runtime modes share the same `NemoRlLab` (`BaseLab`) contract:
    `core/livelab/ray_participants.py` (`serve`, `actor_view`, `file_namespace`, `unloaded`),
    running a full GRPO episode (`rollout0.generate -> coordinator0.prepare_batch ->
    trainer0.train_step -> rollout0.refit_weights`) per `check()`.
-2. **Real colocated Ray (`NemoRlLab`, `mode="ray"`):** Reuses `core/livelab/ray_participants.py`
-   via `NemoRlRayParticipant` and `serve_nemo_rl_actor` over `handle.__ray_call__.remote(...)` for
-   NeMo-RL AutoModel FSDP2 policy workers and SGLang generation workers, plus `snapshot_automodel_s0` /
-   `restore_automodel_s0` / `coupled_nemo_rl_reset` (`DTensor.to_local()` + `AdamW` + per-device
-   CUDA RNG + `refit_policy_generation` + `flush_cache`). When `nemo_rl`, `ray`, `torch`, or
-   `sglang` are absent, `require_nemo_rl_deps()` fails closed cleanly with an actionable error.
+2. **Real colocated Ray (`NemoRlLab`, `mode="ray"`):** Implemented in [ray_driver.py](../livelab/adapter/ray_driver.py) over `RayVirtualCluster`, `SGLangGeneration`, `Policy` (`AutomodelPolicyWorker` FSDP2), `SGLangColocatedWeightSynchronizer`, and `ClippedPGLossFn`, hot-swapping upstream `nemo_rl` modules (`clipped_pg`, `loss_functions`, `automodel.train`, `automodel.setup`) via `NemoRlRayParticipant` (`__ray_call__`) plus `snapshot_automodel_s0`/`restore_automodel_s0` and `invalidate_kv_cache()`. When deps are absent, `require_nemo_rl_deps()` fails closed.
 
 ## Step-Gap Barrier, Abstain Semantics, and Coupled `S0` Reset
 
@@ -51,6 +46,6 @@ Two runtime modes share the same `NemoRlLab` (`BaseLab`) contract:
 
 | Path | Mechanism | Scope | CPU Status | Real GPU Status |
 |---|---|---|---|---|
-| **Live step-gap swap** | `LocalParticipant` / `ray_participants.serve` `__code__` swap + AST witness + coupled `S0` reset | `adapter.grpo_ops`, `adapter.rollout_ops`, `adapter.shared_ops`, `@ray.remote` methods (`#actor`), `sys.modules`-less `.py` files (`file_namespace`) | Verified (`c9` install `0.0085 s`, undo `0.0016 s`) | `pending hardware/env staging` |
-| **Refused at prepare** | Fail-closed static checks before mutating state | `patch_invalid`, `closure_changed`, `outside_changes`, `empty_change`, `constructor_edit`, `unloaded_module` | Verified (`c6` + golden tests) | `pending hardware/env staging` |
-| **Cold respawn** | `reset("respawn")` (or pluggable `recovery_driver` / `weight_store`) | Worker crash, hang, lost participant, external tamper, or constructor/topology edits | Verified (`c8` `0.114–0.220 s`) | `pending hardware/env staging` |
+| **Live step-gap swap** | `LocalParticipant` / `ray_participants.serve` `__code__` swap + AST witness + coupled `S0` reset | CPU `adapter.*`; GPU `nemo_rl.algorithms.loss.*`, `nemo_rl.models.automodel.train` | Verified (`c9` install `0.0073 s`, undo `0.0015 s`) | Verified `1×/2× B200` (`install 3.8–4.9 s`, bit-exact `S0` + `fresh_parity`) |
+| **Refused at prepare** | Fail-closed static checks before mutating state | `patch_invalid`, `closure_changed`, `outside_changes`, `empty_change`, `constructor_edit`, `unloaded_module` | Verified (`c6` + golden tests) | Verified (`c6` on `1×/2× B200`, pre-`_inject_actor_fault` 3-line edit) |
+| **Cold respawn** | `reset("respawn")` + `ray.kill`/`ray.shutdown` cleanup | Worker crash, hang, lost participant, external tamper, or startup-only edits | Verified (`c8` `0.120–0.268 s`) | Verified (`c8` on `2× B200` `755.525 s`, respawns `96.2–138.8 s`) |

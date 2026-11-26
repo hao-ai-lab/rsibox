@@ -507,6 +507,69 @@ class NemoRlGoldenTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restore_automodel_s0(actor)
 
+    def test_ray_driver_zero_eager_imports_and_real_mode_requires_model(self):
+        """Input: subprocess importing `adapter.ray_driver` and `launch_environment` with `--max-new-tokens`,
+        plus `NemoRlLab({'mode': 'ray'})` with mocked runtime deps and missing `--model`.
+        Expected: zero eager GPU/Ray imports, CLI flags mapped cleanly, and fail-closed missing `--model` error."""
+        import importlib
+        import types
+        from unittest import mock
+        from adapter.ray_driver import REAL_MODULES, launch_nemo_rl_runtime, real_patches
+
+        livelab_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        probe = (
+            "import json, sys; import adapter.ray_driver; from adapter.lab import NemoRlLab; "
+            "env = NemoRlLab.launch_environment(['--', '--mode', 'ray', '--model', '/m', "
+            "'--num-trainers', '2', '--max-new-tokens', '12', '--boot-timeout', '420']); "
+            "bad = [m for m in ('torch', 'ray', 'nemo_rl', 'sglang', 'transformers') if m in sys.modules]; "
+            "print(json.dumps({'env': env, 'bad': bad}))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            env={**os.environ, "PYTHONPATH": livelab_dir},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout.strip())
+        self.assertEqual(data["bad"], [])
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_MODEL"], "/m")
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_MAX_NEW_TOKENS"], "12")
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_BOOT_TIMEOUT"], "420.0")
+
+        lab_stub = types.SimpleNamespace(config={"mode": "ray", "model": ""})
+        with self.assertRaisesRegex(ValueError, "RSIBOX_NEMORL_MODEL"):
+            launch_nemo_rl_runtime(lab_stub)
+
+        fake_specs = {pkg: object() for pkg in ("ray", "torch", "nemo_rl", "sglang")}
+        with mock.patch.object(importlib.util, "find_spec", side_effect=lambda name: fake_specs.get(name)):
+            with self.assertRaisesRegex(ValueError, "RSIBOX_NEMORL_MODEL"):
+                NemoRlLab({"mode": "ray", "model": ""})
+
+        fake_sources = {
+            REAL_MODULES[0]: (
+                "from typing import Optional\n"
+                "def clipped_pg_actor_objective():\n"
+                "    if True:\n"
+                "        log_ratios = curr_logprobs - prev_logprobs\n"
+                "        clip_loss = torch.maximum(-advantages * ratios, -advantages * ratios_clamped)\n"
+                "    return actor_loss, ratios, ratios_clamped\n"
+                "def clipped_pg_diagnostic_metrics():\n"
+                "    gen_kl_error = masked_mean(\n        x)\n"
+            ),
+            REAL_MODULES[1]: (
+                "            return self.objective_reduction.reduce(\n"
+                "                per_token_values,\n"
+            ),
+            REAL_MODULES[2]: "        return loss, loss_metrics\n",
+            REAL_MODULES[3]: "                **optimizer_kwargs,\n",
+        }
+        patch_tbl = real_patches(fake_sources.__getitem__)
+        self.assertEqual(set(patch_tbl), {"noop", "visible", "chain", "multi", "unreached", "refused"})
+        self.assertEqual(len(patch_tbl["chain"]), 3)
+        self.assertEqual(set(patch_tbl["multi"]["files"]), {REAL_MODULES[0], REAL_MODULES[2]})
+        self.assertEqual(set(patch_tbl["refused"]), {"syntax", "closure", "module_state", "empty"})
+
 
 if __name__ == "__main__":
     unittest.main()
