@@ -1,0 +1,1 @@
+{"toy": "adapter.toy_lab:ToyVllmOmniLab", "real": "adapter.lab:VllmOmniLab", "roles": ["thinker", "talker", "dit", "vocoder"], "capabilities": {"mode": "omni", "cuda_graph": false, "distributed": "pipeline"}}
