@@ -138,6 +138,20 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `SnapshotLease` | Frozen reader/writer lease (`lease_id`, `handle_id`, `holder_id`, `epoch`, `writable`, `epoch_state_keys`) |
 | `MemoryService` | Thread-safe coordinator (`attach_store`, `register_region`, `acquire_lease`, `restore_s0`, `release_lease`, `holder_died`, `share_handle`, `probe_all`, `teardown`) |
 
+## Real B200 Hardware Verification (`S1`–`S6` + Dynamo GMS `0.9.0`)
+
+Measured on `NVIDIA B200` (`gemma-3-1b-it`, PyTorch `2.14.0+cu130`, Triton `3.8.0`, Transformers `5.20.2`, vLLM `0.33.0`): the unified `2× B200` `S1`–`S6` suite ran `18.886 s` cold / `2.654 s` warm (`witness_nonzero=True`, `replay_verified=True`), and real `Dynamo GMS 0.9.0` (`bfloat16`, `1× B200`) verified cross-process RO fencing with `0` handshake errors and `0 MiB` `bump_version` delta.
+
+| Service / Suite | Shapes Tested | Cold / Warm | Verified Invariants & Measurements |
+|---|---|---:|---|
+| **S1 `MemoryService`** (`2× B200`) | `1024x1024_bf16`, `2048x4096_bf16` | `0.712 s` alloc / `2.689 s` IPC (`4.149 s` total) | Cross-GPU SHA/sum exact; RO write/RW-share blocked; `holder_died` cleared `1` orphan; `stamp_diff` mutation fail-closed |
+| **S1 + S4 (`Dynamo GMS 0.9.0`, `1× B200`)** | `short_9in_16out`, `long_33in_24out` | `1.328 s` cold / `76 µs` LRU hit (`0.367 s` GPU warm replay) | `2,059,403,264 B` (`97` allocs); RO writable & RW connect refused; `0` handshake errors; `2,862 -> 2,862 MiB` (`0 MiB` on `v2` bump) |
+| **S2 `ZygoteService`** (`2× B200`) | `1x32x1024`, `4x128x1024` | `14.749 s` cold / `1.142 s` warm (**`12.91×`**) | `7.026 s` parent boot; `2` children reaped across GPUs `0, 1`; `cuInit`/CUDA-poisoned fork rejected fail-closed |
+| **S3 `CompileCacheService`** (`2× B200`) | `2x64x1024`, `8x256x1024` | `2.626 s` cold / `1.512 s` warm | Alternating `procA`/`procB` warm hits (`1.445–1.619 s`, `51` files restored, `220,659 B`); `4`-proc `flock`, tamper & FP mismatch blocked |
+| **S4 `AuxiliaryModelService`** (`2× B200`) | `b1_seq8_gen8`, `b2_seq17_gen20` | `1.512 s` cold / `51 µs` warm (`27–105 µs` hits) | `1.832 s` model load; `3` forward calls total; `v2 == v1` exact; `2,119,732,224 B` unchanged on `bump_version` (`leaked_or_doubled=False`) |
+| **S5 `IndexedPrefetch` + `VersionedReplayBuffer`** | `short_1x8`, `batch_2x16` | `0.0004 s` index / `0.126–1.111 s` rollout | `RSIIDX01` (`12` items, cursor `4` restored); stale push/sample blocked; reset drained `4`, retained `0` (`epoch=1`, `v2`) |
+| **S6 `RecoveryService`** (`2× B200`) | `1_prompt_max8`, `2_prompts_max16` | `5.727 s` boot / `3.920 s` quiesce+resume | `SIGKILL` (`rc=-9`) escalated `standby_shadow -> cold_respawn` (`5.322 s`, `incarnation=2`); bit-exact & raw-equal recovery |
+
 ## How the 10 Engines Compose `S1`–`S6`
 
 | Workload Family | Engines | Services Composed Beneath `core/livelab/kernel/` |

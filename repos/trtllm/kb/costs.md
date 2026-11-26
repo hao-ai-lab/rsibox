@@ -86,3 +86,13 @@ Verified live on `2x NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `Qwen3-0.6B`, `TP=2`
 | `Qwen3DecoderLayer.forward` live `uninstall` (auto-`R1` invalidate) | **0.1491 s** | Both ranks invalidated & restored cleanly |
 | `TrtllmQuiesceHooks` `quiesce_for_snapshot()` (`TP=2`) | **-46.67 GiB** (`-23.33 GiB`/GPU) | `rank0`: `47,256 -> 23,362 MiB`, `rank1`: `45,920 -> 22,026 MiB` |
 | `TrtllmQuiesceHooks` `resume_after_restore()` (`TP=2`) | **0.0152 s** (`15.2 ms`) | `rank0`: `6.3 ms`, `rank1`: `7.1 ms`, `participants_ok=True`; post-restore `Qwen3DecoderLayer.forward` edit & bit-exact rollback passed |
+
+## `TrtllmShadowPromoter` Scratch-KV Failover & Orphan PG Fix (`1×` & `2× MPI B200`, `#281`)
+
+Measured on `1×` and `2× NVIDIA B200` (`TensorRT-LLM 1.0.0rc6`, `Qwen3-0.6B`, `short_single_1x16` & `batch_4x32`):
+
+| Mode & Commit | Boot / Park (KV Freed) | `promote()` Breakdown | Orphan & VRAM Hygiene | Post-Promote Swap & Conformance |
+|---|---|---|---|---|
+| **`TP=1` (`02e09ea`)** | `28.05 s` primary / `22.33 s` shadow; `0.113 s` park (`-22,566 MiB`) | **`0.329 s`** (`0.314 s` stop + `0.012 s` resume; `0.315 s` dead-head skip) | `pointer_shift=False`, `0.0 MiB` on close | Bit-exact parity; `0.061 s` install (`16`/`49` witness, bit-exact fresh/undo); **`11/11`** real (`c9` `59.1 ms` / `7.2 ms`) |
+| **`TP=2` MPI pre-fix (`02e09ea`)** | `40.05 s` primary / `35.94 s` shadow; `0.292 s` park (`-22,004 MiB`/rank) | **`0.287 s`** (`0.265 s` stop + `0.016 s` resume) | Temporary MPI child rank orphan (`<5 s`, `[57,293, 55,194] MiB`), `0.0 MiB` on close | Bit-exact parity; `0.116 s` install (`16`/`49` witness × 2 ranks); **`11/11`** real (`c9` `65.4 ms` / `10.9 ms`) |
+| **`TP=2` MPI post-fix (PR `#315` / `d0cf50b7`, receipt run `e93bbfa`, PG sweep)** | `54.38 s` primary / `37.61 s` shadow; `0.299 s` park (`-22,004 MiB`/rank) | **`0.145 s`** (`0.14511 s`: `0.072 s` stop + `0.069 s` resume) | **`0` orphan PIDs / `0` orphan apps at `0 ms`** (`[35,287, 33,188] -> [26,604, 25,194] MiB`; `0.0 MiB` on close) | Bit-exact parity; `0.069 s` install (`16`/`49` witness × 2 ranks, `25.8–30.2 s` fresh parity, `0.015 s` undo); `28/28` unit tests + `doctor_ok` |

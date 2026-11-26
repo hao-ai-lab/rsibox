@@ -38,3 +38,16 @@ Measured in our 2026-11-24 B200 run:
 
 - **Real GPU (`TransformersLab`, 1× NVIDIA B200, `Qwen3-0.6B` `bfloat16` via `rsibox conformance transformers --real`)**: **11/11 PASS** (`c0–c10`), `c9_soak` (20 cycles) install median `0.2727 s` / uninstall median `0.0843 s`, `c8_crash_and_hang` respawns `4.26–4.50 s` across `crash`/`hang`/`lost`/`tamper`, `c3_fresh_equivalence` visible & 3-edit chain bit-exact (`22.820 s`), `c10_not_proven` `zero_witness` with fresh divergence via `PreTrainedModel.tie_weights` (`7.954 s`), clean `0 MiB` exit.
 - **CPU (`ToyTransformersLab` via `rsibox conformance transformers`)**: **11/11 PASS** (`c0–c10`), total ~3.7 s on CPU (`c9_soak` install median `~0.007 s` / uninstall median `~0.002 s`, `c8` respawn `~0.05–0.17 s`).
+
+## Multi-GPU `device_map="auto"` Sharded Quiesce, Live Edit & `SIGKILL` Fast-Fail (`2× NVIDIA B200`, `#280`)
+
+Measured on `2× NVIDIA B200` (`gemma-3-1b-it`, `bfloat16`, `device_map="auto"`, `max_memory={"0": "1100MiB", "1": "1100MiB"}` placing `11` layers on `cuda:0` and `19` on `cuda:1`; `2` shapes: `bs1×8` & `bs3×16`):
+
+| Operation / Stage | Measured | Notes |
+|---|---:|---|
+| Cold boot + 1st check | **21.496 s** | `5.223 s` boot + `16.273 s` 1st check |
+| Warm steady base check | **0.1656 s** / **0.8923 s** | Shape A (`bs1`, `8` tok) / Shape B (`bs3`, `16` tok) |
+| `TransformersQuiesceHooks` quiesce (`offload_to_cpu=True, pin_memory=True`) | **2.685 s** (`0.173 s` warmup) | Freed **`1,050 MiB` / `892 MiB`** (`1,894 -> 844` & `1,734 -> 842 MiB`); generate blocked while quiesced |
+| `TransformersQuiesceHooks` resume | **0.160 s** (`0.153 s` reported) | Restored both GPUs (`1,900` / `1,750 MiB`) with `post_resume_parity=True` |
+| Post-resume live edit (`GenerationMixin._sample`) | **`0.293 s`** install + **`0.193 s`** check | Proven (`1` / `2` witness), bit-exact vs. fresh (`22.479 s` / `14.203 s`), `0.116 s` bit-exact undo |
+| Unassisted `SIGKILL` fast-fail | **0.153 s** (`0.1533 s`) | Immediate `ConnectionError` + `dirty=True`, clean respawn & post-respawn parity |

@@ -44,7 +44,7 @@
 - **Keep GPU weights and states warm while swapping only what changed:** RSIBox applies each edit at the lowest safe tier — runtime flags, Python functions, `@triton.jit` kernels, selective CUDA graphs, or `.cu` side-libraries — with pre-warmed fork server and NVIDIA Dynamo GMS & Snapshot fallback when an edit crosses a process boundary or crashes a worker.
 - **Atomic step-gap commit with execution proof and rollback:** Edits stage while the engine runs, commit atomically across all GPU ranks between steps, record per-rank call counts (`witness`) to prove the new code executed, and reverse bit-for-bit via a per-mutation journal (`~0.05 s` undo).
 - **Formally verified protocols & sandbox verification suite:** Core swap, multi-rank coordinator, pool, standby shadow, and autoscaler protocols are specified in TLA+ ([`core/livelab/formal/`](core/livelab/formal/)) and validated against the growing **sandbox verification suite** (`rsibox conformance`, [`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)).
-- **Multi-agent GPU pool (`SandboxPool`):** Concurrent coding agents share warm GPUs via priority scheduling, anti-starvation aging, elastic role borrowing, per-agent fault isolation, and **`112/112`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
+- **Multi-agent GPU pool (`SandboxPool`):** Concurrent coding agents share warm GPUs via priority scheduling, anti-starvation aging, elastic role borrowing, per-agent fault isolation, and **`114/114`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
 
 Explore the interactive map in [`docs/architecture.html`](docs/architecture.html) or read the layer breakdown in [`docs/concepts.md`](docs/concepts.md):
 
@@ -165,7 +165,7 @@ rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
 | Milestone | Status | Scope |
 | :--- | :---: | :--- |
 | **v0** | ✅ Done | Core hot-reload runtime (`install` / `check` / `reset` / `uninstall` / `status`), 10 engine adapters, TLA+ formal suite (`SwapLifecycle`, `Coordinator`, `SandboxPool`, `StandbyShadow`, `PoolAutoScaler`) |
-| **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`112/112` verified traces), in-repo `rstack` gates |
+| **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`114/114` verified traces), in-repo `rstack` gates |
 | **v2** | 🚧 Roadmap | Remaining GPU receipts for `NeMo-RL` & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
 
 - **[`docs/concepts.md`](docs/concepts.md)** — Plain-English overview of `rsibox`, hot-reload tiers, execution proof (`witness`), and journaled rollback.
