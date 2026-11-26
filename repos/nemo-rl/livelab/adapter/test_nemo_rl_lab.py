@@ -507,6 +507,202 @@ class NemoRlGoldenTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 restore_automodel_s0(actor)
 
+    def test_ray_driver_zero_eager_imports_and_real_mode_requires_model(self):
+        """Input: subprocess importing `adapter.ray_driver` and `launch_environment` with `--max-new-tokens`,
+        plus `NemoRlLab({'mode': 'ray'})` with mocked runtime deps and missing `--model`.
+        Expected: zero eager GPU/Ray imports, CLI flags mapped cleanly, and fail-closed missing `--model` error."""
+        import importlib
+        import types
+        from unittest import mock
+        from adapter.ray_driver import REAL_MODULES, launch_nemo_rl_runtime, real_patches
+
+        livelab_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        probe = (
+            "import json, sys; import adapter.ray_driver; from adapter.lab import NemoRlLab; "
+            "env = NemoRlLab.launch_environment(['--', '--mode', 'ray', '--model', '/m', "
+            "'--num-trainers', '2', '--max-new-tokens', '12', '--boot-timeout', '420']); "
+            "bad = [m for m in ('torch', 'ray', 'nemo_rl', 'sglang', 'transformers') if m in sys.modules]; "
+            "print(json.dumps({'env': env, 'bad': bad}))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", probe],
+            env={**os.environ, "PYTHONPATH": livelab_dir},
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(proc.stdout.strip())
+        self.assertEqual(data["bad"], [])
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_MODEL"], "/m")
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_MAX_NEW_TOKENS"], "12")
+        self.assertEqual(data["env"]["RSIBOX_NEMORL_BOOT_TIMEOUT"], "420.0")
+
+        lab_stub = types.SimpleNamespace(config={"mode": "ray", "model": ""})
+        with self.assertRaisesRegex(ValueError, "RSIBOX_NEMORL_MODEL"):
+            launch_nemo_rl_runtime(lab_stub)
+
+        fake_specs = {pkg: object() for pkg in ("ray", "torch", "nemo_rl", "sglang")}
+        with mock.patch.object(importlib.util, "find_spec", side_effect=lambda name: fake_specs.get(name)):
+            with self.assertRaisesRegex(ValueError, "RSIBOX_NEMORL_MODEL"):
+                NemoRlLab({"mode": "ray", "model": ""})
+
+        fake_sources = {
+            REAL_MODULES[0]: (
+                "from typing import Optional\n"
+                "def clipped_pg_actor_objective():\n"
+                "    if True:\n"
+                "        log_ratios = curr_logprobs - prev_logprobs\n"
+                "        clip_loss = torch.maximum(-advantages * ratios, -advantages * ratios_clamped)\n"
+                "    return actor_loss, ratios, ratios_clamped\n"
+                "def clipped_pg_diagnostic_metrics():\n"
+                "    gen_kl_error = masked_mean(\n        x)\n"
+            ),
+            REAL_MODULES[1]: (
+                "            return self.objective_reduction.reduce(\n"
+                "                per_token_values,\n"
+            ),
+            REAL_MODULES[2]: "        return loss, loss_metrics\n",
+            REAL_MODULES[3]: "                **optimizer_kwargs,\n",
+        }
+        patch_tbl = real_patches(fake_sources.__getitem__)
+        self.assertEqual(set(patch_tbl), {"noop", "visible", "chain", "multi", "unreached", "refused"})
+        self.assertEqual(len(patch_tbl["chain"]), 3)
+        self.assertEqual(set(patch_tbl["multi"]["files"]), {REAL_MODULES[0], REAL_MODULES[2]})
+        self.assertEqual(set(patch_tbl["refused"]), {"syntax", "closure", "module_state", "empty"})
+
+    def test_fresh_subprocess_sets_cwd_sys_path_and_kills_pg_on_nonzero_rc(self):
+        """Input: `run_fresh_subprocess` with an overlay dir + failing child (`rc=2`), and `run_fresh_ray` with `overlay_root`.
+        Expected: `Popen` runs with `cwd=overlay_root`, `kill_tree(..., include_pg=True)` sweeps even on `rc != 0`, and `sys.path[0] == overlay_root`."""
+        import tempfile
+        from unittest import mock
+        from adapter import ray_driver
+
+        with tempfile.TemporaryDirectory() as ov_dir:
+            spec_p = os.path.join(ov_dir, "spec.json")
+            out_p = os.path.join(ov_dir, "fresh.json")
+            seen_popen = {}
+            killed = []
+
+            class _FakeProc:
+                pid = 424242
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *args):
+                    return False
+
+                def wait(self, timeout=None):
+                    return 2
+
+            def _fake_popen(cmd, **kw):
+                seen_popen["cmd"] = cmd
+                seen_popen.update(kw)
+                return _FakeProc()
+
+            with mock.patch.object(subprocess, "Popen", side_effect=_fake_popen), \
+                 mock.patch.object(ray_driver.P, "kill_tree", side_effect=lambda pid, sig, include_pg=False: killed.append((pid, sig, include_pg))):
+                res = ray_driver.run_fresh_subprocess(spec_p, out_p, env={"PATH": os.environ.get("PATH", "")}, overlay_root=ov_dir, timeout_s=10.0)
+            self.assertFalse(res["ok"])
+            self.assertIn("rc=2", res["error"])
+            self.assertEqual(seen_popen["cwd"], ov_dir)
+            self.assertTrue(seen_popen["start_new_session"])
+            self.assertTrue(any(p == 424242 and pg is True for p, _, pg in killed))
+
+            # Verify run_fresh_ray prepends overlay_root to sys.path[0] before _start_cluster imports
+            seen_sys_path0 = []
+            saved_sys_path = list(sys.path)
+            fake_st = {
+                "gen": mock.Mock(),
+                "policy": mock.Mock(),
+                "cluster": mock.Mock(),
+                "ray": mock.Mock(is_initialized=lambda: False),
+                "trainers": {},
+                "rollouts": {},
+            }
+            try:
+                with mock.patch.object(ray_driver, "_start_cluster", side_effect=lambda *a, **kw: (seen_sys_path0.append(sys.path[0]), fake_st)[1]), \
+                     mock.patch.object(ray_driver, "_run_grpo_steps", return_value={"ok": True}):
+                    rc = ray_driver.run_fresh_ray({"config": {"steps": 1, "group_size": 2}, "out": out_p, "overlay_root": ov_dir})
+                self.assertEqual(rc, 0)
+                self.assertEqual(seen_sys_path0, [ov_dir])
+            finally:
+                sys.path[:] = saved_sys_path
+
+    def test_ray_inject_hang_defaults_past_check_plus_rpc_plus_60(self):
+        """Input: `launch_nemo_rl_runtime` with mocked `_start_cluster` + `inject('hang')`, and post-cluster init error.
+        Expected: default `hang_s >= check_timeout + rpc_timeout + 60.0`, and post-cluster errors shut down cleanly."""
+        import types
+        from unittest import mock
+        from adapter import ray_driver
+
+        captured_calls = []
+
+        class _FakeRemote:
+            def __init__(self):
+                self._obj = None
+
+            def remote(self, fn, *args, **kwargs):
+                captured_calls.append((fn, args, kwargs))
+                return fn(self._obj, *args, **kwargs) if fn is ray_driver._inject_actor_fault else {"ok": True}
+
+        class _FakeHandle:
+            def __init__(self):
+                self.__ray_call__ = _FakeRemote()
+
+        fake_ray = mock.Mock()
+        fake_ray.is_initialized.return_value = True
+        fake_ray.get.side_effect = lambda ref, timeout=None: ref
+        fake_st = {
+            "ray": fake_ray,
+            "cluster": mock.Mock(),
+            "gen": mock.Mock(),
+            "policy": mock.Mock(),
+            "ws": mock.Mock(),
+            "tok": mock.Mock(),
+            "loss_fn": mock.Mock(),
+            "trainers": {"trainer0": _FakeHandle()},
+            "rollouts": {"rollout0": _FakeHandle()},
+        }
+        lab_stub = types.SimpleNamespace(
+            config={"mode": "ray", "model": "/m", "steps": 2, "group_size": 2},
+            _init_modules=list(ray_driver.REAL_MODULES),
+            check_timeout=120.0,
+            rpc_timeout=30.0,
+            _dirty=False,
+            _base_source=lambda m: "",
+        )
+        fake_cpg = types.SimpleNamespace(clipped_pg_actor_objective=lambda *a, **kw: None)
+        fake_lf = types.SimpleNamespace(clipped_pg_actor_objective=fake_cpg.clipped_pg_actor_objective)
+        fake_loss = types.SimpleNamespace(clipped_pg=fake_cpg, loss_functions=fake_lf)
+        fake_alg = types.SimpleNamespace(loss=fake_loss)
+        fake_nrl = types.SimpleNamespace(algorithms=fake_alg)
+        fake_mods = {
+            "nemo_rl": fake_nrl,
+            "nemo_rl.algorithms": fake_alg,
+            "nemo_rl.algorithms.loss": fake_loss,
+            "nemo_rl.algorithms.loss.clipped_pg": fake_cpg,
+            "nemo_rl.algorithms.loss.loss_functions": fake_lf,
+        }
+        with mock.patch.object(ray_driver, "_start_cluster", return_value=fake_st), \
+             mock.patch.object(ray_driver.H, "read_module", return_value="def f(): pass\n"), \
+             mock.patch.object(ray_driver, "NemoRlRayParticipant", side_effect=lambda name, h, **kw: mock.Mock(name=name)), \
+             mock.patch.dict(sys.modules, fake_mods):
+            rt = ray_driver.launch_nemo_rl_runtime(lab_stub)
+            res = rt["inject"]("hang")
+            self.assertTrue(res["ok"], res)
+            hang_args = [args for fn, args, _ in captured_calls if fn is ray_driver._inject_actor_fault][-1]
+            self.assertGreaterEqual(hang_args[1], lab_stub.check_timeout + lab_stub.rpc_timeout + 60.0)
+            rt["shutdown"]()
+
+        # Verify post-_start_cluster init errors shut down the booted cluster
+        fake_st["ray"].reset_mock()
+        with mock.patch.object(ray_driver, "_start_cluster", return_value=fake_st), \
+             mock.patch.object(ray_driver.H, "read_module", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                ray_driver.launch_nemo_rl_runtime(lab_stub)
+        fake_st["ray"].kill.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main()
