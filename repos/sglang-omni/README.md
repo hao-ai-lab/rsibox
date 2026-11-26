@@ -1,0 +1,3 @@
+# SGLang-Omni (`repos/sglang-omni/`)
+Multi-stage multimodal live-lab adapter (`Thinker -> Talker -> DiT -> Vocoder`): targeted `RoleEndpoint` live swaps (`talker`/`dit`/`thinker`/`vocoder`), `S1`+`S4` frozen stage residency (`MemoryService` `RO_AUX_WEIGHTS` + `AuxiliaryModelService`, `0 B` VRAM delta), and `S5` `VersionedReplayBufferService` `S0` reset. Verified `11/11` CPU conformance (`ToySglangOmniLab`) and `2× B200` (`GPU 2,3`, `juc049/sglang-omni-qwen3:deps`) with `Qwen3-VL-4B-Instruct` Thinker + CUDA Talker/DiT/Vocoder (standalone `sglang_omni` package absent in image).
+- [kb/workload.md](kb/workload.md) · [kb/costs.md](kb/costs.md) · `livelab/livelab.json` · `livelab/adapter/`

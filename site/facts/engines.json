@@ -737,6 +737,22 @@
      "source": "repos/isaac-lab/README.md; repos/isaac-lab/kb/costs.md"
     }
    ]
+  },
+  {
+   "engine": "SGLang-Omni",
+   "upstream": "sgl-project/sglang-omni",
+   "folder": "repos/sglang-omni",
+   "mechanisms": [
+    {
+     "name": "Targeted multi-stage live swap with S4 frozen stage residency & S5 S0 reset (`SglangOmniLab`)",
+     "what": "Coordinates targeted stage swaps across `thinker`, `talker`, `dit`, and `vocoder` `RoleEndpoint`s while holding frozen `Thinker` (`Qwen3-VL-4B-Instruct`, `cuda:0`) and `Vocoder` (`cuda:1`) stages in `MemoryService` (`RO_AUX_WEIGHTS`) + `AuxiliaryModelService` and resetting `VersionedReplayBufferService` (`S5`) stage buffers to `S0`.",
+     "startup_cost_removed": "Reloading frozen multimodal Vision+LM and Vocoder backbones across mutable stage edits.",
+     "measured_saving": {"before": "25.1992 cold boot+check (23.6205 boot + 1.5787 check)", "after": "0.0813 warm / 0.0874 install / 0.1570 uninstall (0 B frozen VRAM delta)", "unit": "s", "setup": "2x NVIDIA B200 (GPU 2,3), juc049/sglang-omni-qwen3:deps, Qwen3-VL-4B-Instruct Thinker + CUDA Talker/DiT/Vocoder (standalone sglang_omni package not installed in image)"},
+     "status": "gpu_verified",
+     "source": "repos/sglang-omni/README.md; repos/sglang-omni/kb/costs.md",
+     "note": "Passed 11/11 CPU conformance (ToySglangOmniLab), 6/6 in-container B200 unit+GPU tests, and 2-shape fresh_check parity (img64_tok8_dit2 & img128_tok12_dit2, max_abs_diff=0.0, cuda:0 8,910,254,592 B & cuda:1 33,554,944 B unchanged)."
+    }
+   ]
   }
  ],
  "caveats": [
