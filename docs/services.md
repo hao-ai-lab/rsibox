@@ -10,7 +10,7 @@ Instead of each `repos/<engine>/livelab/services/` adapter reinventing weight re
 core/livelab/kernel/          (two-phase txns, code swap, JIT rebuild, witness, journal)
         │
         ▼
-core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux [shipped] · S5 Buffers [shipped] · S6 Recovery [shipped])
+core/livelab/rsibox/services/ (S1 Memory [shipped] · S2 Zygote [shipped] · S3 Cache [shipped] · S4 Aux [shipped] · S5 Buffers [shipped] · S6 Recovery [shipped] · S7 Kernel [shipped])
         │
         ▼
 core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, RecoveryDriver, stamp_diff)
@@ -19,7 +19,7 @@ core/livelab/rsibox/warm/     (WeightStore, DynamoGmsStore, QuiesceHooks, Recove
 repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERFACE.md contract)
 ```
 
-## Service Map (`S1`–`S6`)
+## Service Map (`S1`–`S7`)
 
 | Service | Scope | Status | Primary Contract & Mechanism |
 |---|---|---|---|
@@ -29,6 +29,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | **S4 Auxiliary** | Shared frozen VAE, text encoder, reward, reference, and judge stage pool | **Shipped** ([`auxiliary.py`](../core/livelab/rsibox/services/auxiliary.py)) | `AuxiliaryModelService`, `AuxStageKind`, `AuxStageSpec`, `AuxInvocationReceipt`; S1 `ro_aux_weights` RO leases + LRU cache |
 | **S5 Buffers** | Indexed mmap prefetch & `code_version`-fenced RL replay buffers | **Shipped** ([`buffers.py`](../core/livelab/rsibox/services/buffers.py)) | `IndexedPrefetchService`, `VersionedReplayBufferService`, `PrefetchItem`, `VersionedEntry`, `BufferResetReceipt` |
 | **S6 Recovery** | Coordinated fault detection, shadow failover, and snapshot restore | **Shipped** ([`recovery_service.py`](../core/livelab/rsibox/services/recovery_service.py)) | `RecoveryService`, `RecoveryTier`, `ServiceHealth`, `RecoveryReceipt`; `RecoveryDriver` + `QuiesceHooks` + `SandboxPool` |
+| **S7 Kernel** | Per-GPU region-granular exclusivity for concurrent multi-slot GPU sharing | **Shipped** ([`kernel_service.py`](../core/livelab/rsibox/services/kernel_service.py)) | `KernelService`, `RegionGate`, `RegionTicket`, `critical_region()`; sibling drain + `cgroup2`/`SIGSTOP` quiesce + NUMA CPU pinning |
 
 ## S1: Unified GPU Memory & State Service (Shipped)
 
@@ -138,7 +139,7 @@ repos/<engine>/livelab/       (10 engine adapters implementing the 5-verb INTERF
 | `SnapshotLease` | Frozen reader/writer lease (`lease_id`, `handle_id`, `holder_id`, `epoch`, `writable`, `epoch_state_keys`) |
 | `MemoryService` | Thread-safe coordinator (`attach_store`, `register_region`, `acquire_lease`, `restore_s0`, `release_lease`, `holder_died`, `share_handle`, `probe_all`, `teardown`) |
 
-## Real B200 Hardware Verification (`S1`–`S6` + Dynamo GMS `0.9.0`)
+## Real B200 Hardware Verification (`S1`–`S7` + Dynamo GMS `0.9.0`)
 
 Measured on `NVIDIA B200` (`gemma-3-1b-it`, PyTorch `2.14.0+cu130`, Triton `3.8.0`, Transformers `5.20.2`, vLLM `0.33.0`): the unified `2× B200` `S1`–`S6` suite ran `18.886 s` cold / `2.654 s` warm (`witness_nonzero=True`, `replay_verified=True`), and real `Dynamo GMS 0.9.0` (`bfloat16`, `1× B200`) verified cross-process RO fencing with `0` handshake errors and `0 MiB` `bump_version` delta.
 
@@ -151,8 +152,21 @@ Measured on `NVIDIA B200` (`gemma-3-1b-it`, PyTorch `2.14.0+cu130`, Triton `3.8.
 | **S4 `AuxiliaryModelService`** (`2× B200`) | `b1_seq8_gen8`, `b2_seq17_gen20` | `1.512 s` cold / `51 µs` warm (`27–105 µs` hits) | `1.832 s` model load; `3` forward calls total; `v2 == v1` exact; `2,119,732,224 B` unchanged on `bump_version` (`leaked_or_doubled=False`) |
 | **S5 `IndexedPrefetch` + `VersionedReplayBuffer`** | `short_1x8`, `batch_2x16` | `0.0004 s` index / `0.126–1.111 s` rollout | `RSIIDX01` (`12` items, cursor `4` restored); stale push/sample blocked; reset drained `4`, retained `0` (`epoch=1`, `v2`) |
 | **S6 `RecoveryService`** (`2× B200`) | `1_prompt_max8`, `2_prompts_max16` | `5.727 s` boot / `3.920 s` quiesce+resume | `SIGKILL` (`rc=-9`) escalated `standby_shadow -> cold_respawn` (`5.322 s`, `incarnation=2`); bit-exact & raw-equal recovery |
+| **S7 `KernelService`** (`1× B200 GPU 3` Triton micro-benchmark, `K=1,2,4`) | `8192x8192x8192_f32` (`>10 ms`), `106496x8192_bf16` (`~1 ms`), `65536x4096_bf16` (`~0.17 ms`) | `1.042 s` cold / `0.101–0.393 s` warm | Off-repo receipt `wavec_kernel_service_s7_receipt.json` (`witness_nonzero=true`, `replay_verified=true`): `2.87×` fused (`+6.26%` p95) / `2.43×` softmax (`+4.52%` p95 vs `+171.89%` unisolated) at `K=4` (`K=2` softmax: `1.67×`, `+28.93%` p95 `0.251` vs `0.194`/`0.195 ms` unisolated/exclusive); `sigstop_pg` + NUMA `[12..15]` kept `K=2`/`K=4` matmul p95 at `+0.23%`/`+0.41%` (`74.60 -> 16.78 ms` at `K=4`). **Not yet verified on `S7`**: multi-GPU / multi-stage `KernelLab` × `S7` integration (deferred to follow-up joint bench) |
 
-## How the 10 Engines Compose `S1`–`S6`
+## S7: Per-GPU Region-Granular Kernel Exclusivity (`KernelService`, Shipped)
+
+[`core/livelab/rsibox/services/kernel_service.py`](../core/livelab/rsibox/services/kernel_service.py) lets `K` persistent worker slots share a GPU with warm CUDA contexts during off-region CPU compilation, input generation, and correctness checks, while serializing timed benchmark loops inside `with svc.critical_region(gpu_id, slot_id, sync_gpu_fn=..., flush_l2_fn=...):`.
+
+- **Epoch-fenced drain & sibling quiesce:** Acquires a per-GPU `RegionGate` lock (`non-reentrant threading.Lock + flock`), blocks sibling GPU submissions, drains in-flight sibling work (`drain_fn` / epoch ack), and freezes sibling process trees via delegated `cgroup2` `cgroup.freeze` or verified `(pgid, sid, start_ticks)` `SIGSTOP`/`SIGCONT`.
+- **NUMA CPU pinning & thaw-before-unlock:** Pins the timed-loop submission thread to a per-GPU NUMA slice (`select_numa_cpu_slice`), invokes `flush_l2_fn`, and on exit, exception, or `holder_died()` recovery syncs host submissions, restores CPU affinity, and thaws siblings before releasing the gate lock.
+
+| Symbol | Purpose |
+|---|---|
+| `KernelService` | Thread/IPC-safe per-GPU coordinator (`register_slot`, `unregister_slot`, `submission_gate`, `critical_region`, `holder_died`, `teardown`) |
+| `RegionGate` / `RegionTicket` | Per-GPU epoch gate (`is_blocked`, `wait_if_blocked`, `ack_drained`) and entry receipt (`epoch`, `frozen_slots`, `freeze_mode`, `pinned_cpus`) |
+
+## How the 10 Engines Compose `S1`–`S7`
 
 | Workload Family | Engines | Services Composed Beneath `core/livelab/kernel/` |
 |---|---|---|

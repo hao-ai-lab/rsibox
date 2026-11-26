@@ -394,6 +394,22 @@ class SlotLease:
     def _has_active_calls(self) -> bool:
         with self._call_cond:
             return self._active_calls > 0
+    @contextlib.contextmanager
+    def critical_region(self, *, sync_gpu_fn: Callable[[], Any] | None = None,
+                        flush_l2_fn: Callable[[], Any] | None = None, timeout_s: float | None = None) -> Iterator[Any]:
+        """Enter per-GPU `KernelService` exclusivity for this slot if configured (else no-op)."""
+        with self._call_cond:
+            if self._released: raise PoolError(f"lease for slot {self._slot_id!r} has already been released")
+            self._active_calls += 1
+        try:
+            with self._pool._enter_slot_critical_region(self._slot_id, sync_gpu_fn=sync_gpu_fn, flush_l2_fn=flush_l2_fn, timeout_s=timeout_s) as ticket:
+                yield ticket
+        finally:
+            notify_drained = False
+            with self._call_cond:
+                self._active_calls -= 1
+                if self._active_calls == 0: self._call_cond.notify_all(); notify_drained = self._released
+            if notify_drained: self._pool._on_undrained_lease_drained(self)
     def release(self, error: str | BaseException | None = None) -> dict[str, Any]:
         return self._pool._release_lease(self, error=error)
     def __enter__(self) -> SlotLease: return self
@@ -412,7 +428,9 @@ class SandboxPool:
                  agent_fault_window_s: float | None = None,
                  agent_cooldown_s: float | None = None,
                  max_slots_per_agent: int | None = None,
-                 max_waiters: int | None = None) -> None:
+                 max_waiters: int | None = None,
+                 kernel_service: Any | None = None,
+                 slots_per_gpu: int = 1) -> None:
         if not slots:
             raise ValueError("SandboxPool requires at least one PoolSlot")
         self._drain_timeout_s = _validate_timeout(drain_timeout_s, "drain_timeout_s")
@@ -422,6 +440,10 @@ class SandboxPool:
         self._agent_cooldown_s = _validate_positive_finite(agent_cooldown_s, "agent_cooldown_s")
         self._max_slots_per_agent = _validate_positive_int(max_slots_per_agent, "max_slots_per_agent")
         self._max_waiters = _validate_non_negative_int(max_waiters, "max_waiters")
+        self._slots_per_gpu: int = _validate_positive_int(slots_per_gpu, "slots_per_gpu") or 1
+        if kernel_service is not None and not (callable(getattr(kernel_service, "register_slot", None)) and callable(getattr(kernel_service, "critical_region", None))):
+            raise TypeError("kernel_service must implement register_slot() and critical_region()")
+        self._kernel_service, self._slot_gpu_ids, self._ks_slot_index = kernel_service, {}, 0
         if self._max_agent_faults is None and (self._agent_fault_window_s is not None or self._agent_cooldown_s is not None):
             raise ValueError("agent_fault_window_s and agent_cooldown_s require max_agent_faults")
         self._slots: dict[str, _SlotState] = {}
@@ -462,6 +484,35 @@ class SandboxPool:
             if not verified["ok"]:
                 raise PoolError(f"existing trace {trace_path!r} is invalid: {verified.get('error')}")
             self._trace_sequence, self._trace_previous_hash = verified["head"]
+        if self._kernel_service is not None:
+            for slot in slots: self._register_kernel_slot(slot)
+
+    @property
+    def kernel_service(self) -> Any | None: return self._kernel_service
+    @property
+    def slots_per_gpu(self) -> int: return self._slots_per_gpu
+
+    def _register_kernel_slot(self, slot: PoolSlot) -> None:
+        if self._kernel_service is None: return
+        meta = slot.metadata
+        gpu_id = int(meta["gpu_id"]) if meta.get("gpu_id") is not None else (self._ks_slot_index // self._slots_per_gpu)
+        self._ks_slot_index += 1
+        self._kernel_service.register_slot(
+            gpu_id, slot.slot_id, pid=int(meta["pid"]) if meta.get("pid") is not None else None,
+            pgid=int(meta["pgid"]) if meta.get("pgid") is not None else None,
+            cgroup_path=meta.get("cgroup_path"), drain_fn=meta.get("drain_fn"),
+        )
+        self._slot_gpu_ids[slot.slot_id] = gpu_id
+
+    def _unregister_kernel_slot(self, slot_id: str) -> None:
+        if self._kernel_service is not None and (gid := self._slot_gpu_ids.pop(slot_id, None)) is not None:
+            with contextlib.suppress(Exception): self._kernel_service.unregister_slot(gid, slot_id)
+
+    @contextlib.contextmanager
+    def _enter_slot_critical_region(self, slot_id: str, **kwargs: Any) -> Iterator[Any]:
+        if self._kernel_service is None: yield None; return
+        with self._kernel_service.critical_region(self._slot_gpu_ids.get(slot_id, 0), slot_id, **kwargs) as ticket:
+            yield ticket
 
     def _safe_clock(self, fallback: float | None = None) -> float:
         try:
@@ -978,6 +1029,7 @@ class SandboxPool:
             now_mono = self._clock() if self._waiters else 0.0
             if slot.box is None and unwrapped_box is not None:
                 slot.box = unwrapped_box
+            self._register_kernel_slot(slot)
             slot_state = _SlotState(slot)
             self._slots[slot.slot_id] = slot_state
             self._added_slots += 1
@@ -1036,6 +1088,7 @@ class SandboxPool:
                 immediate = False
         if immediate:
             _close_quietly(lab_to_close)
+            self._unregister_kernel_slot(slot_id)
             return {
                 "ok": True,
                 "slot_id": slot_id,
@@ -1089,6 +1142,7 @@ class SandboxPool:
                 slot_id, slot_state, close_lab=close_lab,
             )
         _close_quietly(lab_to_close)
+        self._unregister_kernel_slot(slot_id)
         return {
             "ok": True,
             "slot_id": slot_id,
@@ -1558,16 +1612,19 @@ class SandboxPool:
                 "max_waiters": self._max_waiters,
                 "overload_rejections": self._overload_rejections,
                 "overload_evictions": self._overload_evictions,
+                "slots_per_gpu": self._slots_per_gpu,
                 "per_slot_utilization": per_slot_utilization, "trace_head": trace_head,
             }
 
     def close(self, *, close_labs: bool | None = None) -> None:
         """Idempotently close the pool, fail queued waiters, and optionally close idle labs."""
         labs_to_close: list[Any] = []
+        slot_ids_to_unregister: list[str] = []
         with self._lock:
             if close_labs is True or (close_labs is False and not self._closed):
                 self._close_labs = close_labs
             self._closed = True
+            slot_ids_to_unregister = list(self._slots)
             for state in self._slots.values():
                 if state.drain_event is not None:
                     state.drain_event.set()
@@ -1579,6 +1636,8 @@ class SandboxPool:
             if self._close_labs:
                 labs_to_close = [lab for state in self._slots.values() if not state.in_use
                                  for lab in (self._mark_lab_to_close_locked(state),) if lab is not None]
+        for sid in slot_ids_to_unregister:
+            self._unregister_kernel_slot(sid)
         for lab in labs_to_close:
             _close_quietly(lab)
 
