@@ -88,7 +88,7 @@ Explore the interactive map in [`docs/architecture.html`](docs/architecture.html
 | **`veRL`** | RL Post-Training | 21 Ray actors (eager & FSDP CUDA graphs) + coupled state reset | `298 s` | **`36.4 s`** (`12.6 ms` replay) | **8.2×** |
 | **`miles`** | RL Post-Training | Ray rollout + trainer actors + coupled state reset (`38 ms` median commit) | `82.4 s` | **`0.89 s`** | **up to 93×** |
 | **`TorchTitan`** | Training (FSDP2) | PyTorch FSDP2 (`1` & `2` GPU NCCL) + 2-rank CPU sandbox, state & RNG reset | `2.69 s` / `5.52 s` | **`0.083 s`** / **`0.255 s`** (`2`-rank cycle) | **32.5× / 21.6×** |
-| **`NeMo-RL`** | RL Post-Training | AutoModel FSDP2 + SGLang GRPO (3-participant CPU verified; GPU pending) | `pending` | `8.5 ms` CPU install (`1.6 ms` undo) | **CPU verified (GPU pending)** |
+| **`NeMo-RL`** | RL Post-Training | AutoModel FSDP2 + SGLang GRPO (`1×/2×` B200 Ray actors + coupled `S0` reset; `c8` `731.5 s`, pre-fix `c0–c7, c9–c10`) | `186.8 s` / `151.5 s` | **`19.0 s`** / **`34.7 s`** (`4.6–4.8 s` install) | **9.8× / 4.4×** |
 
 On `Megatron-LM`, an autonomous agent ran an **82-iteration** live hill-climb with **zero restarts** and found **+5.1% tokens/s/GPU** ([walkthrough](repos/megatron/examples/codex-hillclimb/README.md)). See **[`docs/concepts.md`](docs/concepts.md)** for core concepts, **[`docs/mechanisms.md`](docs/mechanisms.md)** for restart boundaries and Dynamo benchmarks, and **[`docs/engines.md`](docs/engines.md)** for full engine tables and per-tier costs.
 
@@ -166,7 +166,7 @@ rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
 | :--- | :---: | :--- |
 | **v0** | ✅ Done | Core hot-reload runtime (`install` / `check` / `reset` / `uninstall` / `status`), 10 engine adapters, TLA+ formal suite (`SwapLifecycle`, `Coordinator`, `SandboxPool`, `StandbyShadow`, `PoolAutoScaler`) |
 | **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`114/114` verified traces), in-repo `rstack` gates |
-| **v2** | 🚧 Roadmap | Remaining GPU receipts for `NeMo-RL` & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
+| **v2** | 🚧 Roadmap | `NeMo-RL` post-fix `11/11` `--real` conformance (`#325`) & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
 
 - **[`docs/concepts.md`](docs/concepts.md)** — Plain-English overview of `rsibox`, hot-reload tiers, execution proof (`witness`), and journaled rollback.
 - **[`docs/engines.md`](docs/engines.md)** — Full 10-engine summary, measured speedups, and repository layout.

@@ -705,16 +705,21 @@
      "measured_saving": null,
      "status": "merged_cpu_only",
      "source": "repos/nemo-rl/docs/architecture.md; repos/nemo-rl/kb/costs.md",
-     "note": "Passed 11/11 CPU conformance on 3-participant ToyNemoRlLab (3.823 s c0-c10 sum, c9 0.0076 s install / 0.0015 s undo, c8 respawns 0.105-0.223 s) and 11/11 unit/golden tests with -W error::ResourceWarning."
+     "note": "Passed 11/11 CPU conformance on 3-participant ToyNemoRlLab (3.942 s c0-c10 sum, c9 0.0073 s install / 0.0015 s undo, c8 respawns 0.120-0.268 s) and 14/14 unit tests with -W error::ResourceWarning."
     },
     {
      "name": "Colocated AutoModel FSDP2 + SGLang GRPO Ray actor swap (`NemoRlLab --real`)",
-     "what": "Reuses core/livelab/ray_participants.py via NemoRlRayParticipant and serve_nemo_rl_actor over handle.__ray_call__.remote(...) for colocated NeMo-RL AutoModel FSDP2 policy workers and SGLang generation workers, with lazy DTensor/AdamW/CUDA RNG S0 snapshot/restore and refit_policy_generation + flush_cache hooks (fail-closed require_nemo_rl_deps guard).",
-     "startup_cost_removed": "Ray placement group, AutoModel FSDP2 initialization, SGLang server boot/CUDA graph capture, and initial policy weight refit.",
-     "measured_saving": null,
-     "status": "planned",
-     "source": "repos/nemo-rl/docs/architecture.md; repos/nemo-rl/kb/costs.md",
-     "note": "Adapter and Ray participant scaffolding implemented and tested on CPU via FakeActor/runtime_factory; real 1x/2x NVIDIA B200 GPU conformance and benchmarks are pending hardware/env staging."
+     "what": "Reuses core/livelab/ray_participants.py via NemoRlRayParticipant and serve_nemo_rl_actor over handle.__ray_call__.remote(...) in ray_driver.py for colocated NVIDIA-NeMo/RL AutomodelPolicyWorker FSDP2 trainers, SGLangGeneration workers, SGLangColocatedWeightSynchronizer, and ClippedPGLossFn, with coupled DTensor/AdamW/CUDA RNG S0 snapshot/restore (`snapshot_automodel_s0`/`restore_automodel_s0`) and `invalidate_kv_cache()` (fail-closed require_nemo_rl_deps guard).",
+     "startup_cost_removed": "Ray placement group, AutoModel FSDP2 initialization, SGLang eager worker boot, and initial policy weight refit.",
+     "measured_saving": {
+      "before": "186.8 (2x B200 g2_s2_mnt8) / 151.5 (2x B200 g4_s3_mnt16) / 161.9 (1x B200 g2_s2_mnt8)",
+      "after": "19.0 (2x B200 g2_s2_mnt8 warm, 9.8x) / 34.7 (2x B200 g4_s3_mnt16 warm, 4.4x) / 20.2 (1x B200 warm, 8.0x; 4.6-4.8 s install)",
+      "unit": "s",
+      "setup": "1x and 2x NVIDIA B200, rsib/slime_grpo:b200-bw, NVIDIA-NeMo/RL AutoModel FSDP2 + colocated SGLang GRPO, gemma-3-1b-it bf16 deterministic sdpa, 3 shapes post-final-edit (PR #326)"
+     },
+     "status": "merged_gpu_verified",
+     "source": "repos/nemo-rl/README.md; repos/nemo-rl/docs/architecture.md; repos/nemo-rl/kb/costs.md; PR #326",
+     "note": "Post-final-edit 1x/2x B200 (PR #326): g2_s2_mnt8_gpu1 161.934 s cold (121.165+40.768) -> 20.170 s warm (4.331 s reset, 4.825 s install, 228.752 s fresh, witness 4, 66411 MiB); g2_s2_mnt8_gpu2 186.756 s cold (155.594+31.161) -> 18.985 s warm (4.856 s reset, 4.627 s install, 252.776 s fresh, witness [2,2], 68589 MiB/GPU); g4_s3_mnt16_gpu2 151.530 s cold (104.373+47.157) -> 34.664 s warm (3.641 s reset, 4.721 s install, 251.258 s fresh, witness [6,6], 68589 MiB/GPU), all with bit-exact S0, fresh_parity=true, and uninstall_parity=true. Conformance on 2x B200: post-final-edit c8_crash_and_hang passed in 731.472 s (respawns 91.960-124.851 s across crash/hang/lost/tamper); c0-c7, c9-c10 (c9 install 3.840 s / undo 3.784 s, 10/11 pass) ran immediately prior to the Gate 2 P1 fresh_check/inject(hang) fix (single-run 11/11 --real rerun interrupted by GPU contention; follow-up P2 cleanup tracked in issue #325)."
     }
    ]
   },

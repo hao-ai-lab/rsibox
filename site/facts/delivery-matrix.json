@@ -118,10 +118,10 @@
    "name": "NeMo-RL",
    "category": "RL Post-Training",
    "status": "in_progress",
-   "conformance": "11/11 CPU (3-participant ToyNemoRlLab); real GPU pending hardware/env staging",
-   "tiers": "RayActorParticipant Colocated AutoModel FSDP2 + SGLang GRPO + Coupled S0 Trainer/Rollout Reset",
-   "speedup": "CPU 11/11 verified (c9 8.5 ms install / 1.6 ms undo); GPU pending hardware/env staging",
-   "summary": "Onboarded NVIDIA-NeMo/RL live-lab adapter reusing ray_participants.py: 3-participant CPU toy (coordinator0 + trainer0 + rollout0) passes 11/11 conformance and 11/11 unit/golden tests; real 1x/2x B200 GPU run pending hardware/env staging.",
+   "conformance": "11/11 CPU (ToyNemoRlLab); 1x/2x B200 post-fix 3-shape parity + c8 (731.5 s); pre-fix c0-c7, c9-c10 pass (#326, #325)",
+   "tiers": "NemoRlRayParticipant Colocated AutoModel FSDP2 + SGLang GRPO + Coupled S0 Trainer/Rollout Reset (#326)",
+   "speedup": "9.8x (2x B200 g2_s2: 186.8 s cold -> 19.0 s warm); 4.4x (2x B200 g4_s3: 151.5 s -> 34.7 s warm); 8.0x (1x B200: 161.9 s -> 20.2 s warm)",
+   "summary": "Onboarded NVIDIA-NeMo/RL live-lab adapter reusing ray_participants.py (#326): 3-participant CPU toy passes 11/11 conformance and 14/14 unit tests; 1x/2x B200 (gemma-3-1b-it) passes post-final-edit 3-shape live-vs-fresh parity (4.6-4.8 s install, bit-exact S0) + c8_crash_and_hang (731.5 s), with pre-P1-fix c0-c7, c9-c10 passing and full post-fix 11/11 --real rerun + P2 cleanup tracked in #325.",
    "evidence": "repos/nemo-rl/kb/costs.md"
   }
  ],
@@ -368,9 +368,9 @@
    "status": "in_progress",
    "progress_pct": 30,
    "owner_track": "Engine Onboarding",
-   "summary": "Expand from 9 to 14 live-lab engines: NVIDIA NeMo-RL (Engine #10, AutoModel FSDP2 + SGLang GRPO, CPU 11/11 verified, real GPU pending hardware/env staging), vLLM-Omni & SGLang-Omni (#11-#12, multi-stage multimodal), NVIDIA Dynamo (#13, Python Planner live swap + Rust Frontend/cdylib micro-restart + GMS), Isaac Lab (#14, 4,096-env GPU PhysX + RL live swap), and TorchTitan real upstream Llama3 PR replay.",
+   "summary": "Expand from 9 to 14 live-lab engines: NVIDIA NeMo-RL (Engine #10, #326: AutoModel FSDP2 + SGLang GRPO 1x/2x B200 3-shape parity + c8 731.5 s, pre-fix c0-c7,c9-c10, #325 open), vLLM-Omni & SGLang-Omni (#11-#12, multi-stage multimodal), NVIDIA Dynamo (#13, Python Planner live swap + Rust Frontend/cdylib micro-restart + GMS), Isaac Lab (#14, 4,096-env GPU PhysX + RL live swap), and TorchTitan real upstream Llama3 PR replay.",
    "items": [
-    "NVIDIA NeMo-RL (Engine #10): AutoModel FSDP2 + SGLang GRPO reusing ray_participants.py (CPU 11/11 verified -> B200 Qwen3/Inkling2 live GRPO pending hardware/env staging)",
+    "NVIDIA NeMo-RL (Engine #10, #326): AutoModel FSDP2 + SGLang GRPO 1x/2x B200 3-shape parity (186.8 s -> 19.0 s / 151.5 s -> 34.7 s) + post-fix c8 731.5 s; full post-fix 11/11 --real rerun & P2 cleanup in #325",
     "vLLM-Omni & SGLang-Omni (Engines #11-#12): multi-stage Thinker/Talker/DiT/Vocoder live swap, Tier-A/R1, targeted teardown & stage-buffer S0 reset",
     "NVIDIA Dynamo (Engine #13): Python Planner/Router live swap (~50 ms) + Rust Frontend/cdylib micro-restart (2-6 s) atop GMS-resident GPU workers",
     "Isaac Lab (Engine #14): resident 4,096-env GPU PhysX/USD simulation + RL reward/observation/policy sub-second swap + seeded S0 reset",
