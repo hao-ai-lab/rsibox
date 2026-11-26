@@ -17,10 +17,13 @@ Provides engine-agnostic control-plane services composed beneath `core/livelab/k
 - `recovery_service` (`S6`): Unified Recovery & Health Service (`RecoveryService`,
   `RecoveryTier`, `ServiceHealthStatus`, `ServiceHealth`, `RecoveryReceipt`) unifying
   `RecoveryDriver` escalation, `QuiesceHooks` checkpoints, and `SandboxPool` health.
+- `kernel_service` (`S7`): Per-GPU Region-Granular Kernel Exclusivity Service (`KernelService`,
+  `RegionGate`, `RegionTicket`, `critical_region`) coordinating multi-slot GPU sharing with
+  sibling drain, `cgroup2`/`SIGSTOP` quiesce, NUMA CPU pinning, and L2 cache flushing.
 """
 from __future__ import annotations
 
-from . import auxiliary, buffers, cache, memory, recovery_service, zygote
+from . import auxiliary, buffers, cache, kernel_service, memory, recovery_service, zygote
 from .auxiliary import (
     AuxClosedError,
     AuxiliaryModelService,
@@ -54,6 +57,17 @@ from .cache import (
     CompileCacheService,
     EnvFingerprint,
     FingerprintMismatchError,
+)
+from .kernel_service import (
+    GateTimeoutError,
+    KernelClosedError,
+    KernelService,
+    KernelServiceError,
+    RegionGate,
+    RegionTicket,
+    SlotNotFoundError,
+    SlotRegistration,
+    select_numa_cpu_slice,
 )
 from .memory import (
     DEFAULT_S0_STATE_KEYS,
@@ -118,9 +132,13 @@ __all__ = [
     "EscalationFailedError",
     "FingerprintMismatchError",
     "ForkPoisonedError",
+    "GateTimeoutError",
     "HandleNotFoundError",
     "IndexCorruptError",
     "IndexedPrefetchService",
+    "KernelClosedError",
+    "KernelService",
+    "KernelServiceError",
     "LeaseError",
     "MemoryHandle",
     "MemoryPoolKind",
@@ -135,8 +153,12 @@ __all__ = [
     "RecoveryService",
     "RecoveryServiceError",
     "RecoveryTier",
+    "RegionGate",
+    "RegionTicket",
     "ServiceHealth",
     "ServiceHealthStatus",
+    "SlotNotFoundError",
+    "SlotRegistration",
     "SnapshotLease",
     "SpawnError",
     "SpawnedChild",
@@ -154,9 +176,11 @@ __all__ = [
     "auxiliary",
     "buffers",
     "cache",
+    "kernel_service",
     "list_profiles",
     "memory",
     "profile_for_engine",
     "recovery_service",
+    "select_numa_cpu_slice",
     "zygote",
 ]
