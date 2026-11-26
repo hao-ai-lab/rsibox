@@ -445,7 +445,8 @@
     {
      "fact": "Passed 11/11 CPU conformance (ToyTransformersLab), 11/11 real-GPU conformance on 1x B200 Qwen3-0.6B via rsibox conformance transformers --real (c9 0.2727 s install / 0.0843 s undo, c8 respawns 4.26-4.50 s, 0 MiB exit), live multi-module swaps on Qwen3-0.6B (0.521 s vs 4.718 s cold, 9.05x) and Qwen3-8B (0.605 s vs 7.746 s cold, 12.81x), and DynamoK8sSnapshotDriver quiesce/resume freeing 1,166 MiB (0.032 s resume) and 15,778 MiB (0.310 s resume).",
      "source": "repos/transformers/kb/costs.md"
-    }
+    },
+    {"fact": "Autonomous Codex native hill-climb (#289, PR #328) on 1x B200 gemma-3-1b-it (5 iterations, 1 kept txn-6a399520: torch.addcmul in Gemma3RMSNorm.forward, 2 alternating fresh-worker pairs) achieved 1.090x (0.562045 -> 0.515439 s, 2x32) and 1.118x (0.256656 -> 0.229571 s, 1x16) with 5,024 witness calls/check, fresh_check exact_match=True parity (digests d25f052c37d9308a & 7887461c74a8bcc4), and 18.840 s cold / 0.159-0.286 s install.", "source": "repos/transformers/examples/codex-hillclimb/README.md; PR #328"}
    ],
    "upstream_patches": {
     "ledger": null,
@@ -567,7 +568,8 @@
    "engine": "Kernel", "folder": "repos/kernel",
    "recorded_facts": [
     {"fact": "Onboarded standalone kernel engine adapter (`repos/kernel/livelab/adapter/`) supporting Triton `@triton.jit` (`core/livelab/kernel/jit.py`), CUDA `.cu` incremental `nvcc` + `ctypes.CDLL` reload, and optional `KernelService` (`critical_region`) duck-typing.", "source": "repos/kernel/README.md"},
-    {"fact": "Passed 11/11 CPU conformance (`ToyKernelLab`), 6/6 unit/golden tests (`-W error::ResourceWarning`), 11/11 real 1x B200 conformance (`rsibox conformance kernel --real`, `c9` 20.4 ms install / 2.9 ms undo) + 5/5 explicit `--backend cuda` conformance, 2-shape Triton live swap (`0.0398 s` vs `4.6373 s` = `116.5x`), 2-shape `.cu` live reload (`0.9467 s` vs `2.9640 s`, `0.0037 s` undo check), and real `CUDA_ERROR_MISALIGNED_ADDRESS` sticky poison respawn (`0 MiB` exit).", "source": "repos/kernel/kb/costs.md"}
+    {"fact": "Passed 11/11 CPU conformance (`ToyKernelLab`), 6/6 unit/golden tests (`-W error::ResourceWarning`), 11/11 real 1x B200 conformance (`rsibox conformance kernel --real`, `c9` 20.4 ms install / 2.9 ms undo) + 5/5 explicit `--backend cuda` conformance, 2-shape Triton live swap (`0.0398 s` vs `4.6373 s` = `116.5x`), 2-shape `.cu` live reload (`0.9467 s` vs `2.9640 s`, `0.0037 s` undo check), and real `CUDA_ERROR_MISALIGNED_ADDRESS` sticky poison respawn (`0 MiB` exit).", "source": "repos/kernel/kb/costs.md"},
+    {"fact": "Joint KernelService (S7, #331) x KernelLab (#329) multi-slot B200 GPU 3 run (K=1,2,4; 5.4208 s cold 2-worker boot / 0.0550 s warm lease+check, witness_nonzero=true, replay_verified=true, SandboxPool + fresh_check exact parity, sigstop_pg + NUMA [12..15]) delivered 3.041x (16384x256 Triton K=4, +5.62% p95 vs +40.0% unisolated; K=2 1.783x), 1.228x (1048576x512 Triton K=4; K=2 1.164x, +2.99% p95), and 2.292x (16384x256 CUDA .cu K=4; K=2 1.714x, +0.0% p95 vs +27.45% unisolated).", "source": "docs/services.md; repos/kernel/kb/costs.md; repos/kernel/examples/joint_s7_bench.py"}
    ],
    "notes": ["11/11 CPU conformance, 6/6 unit/golden tests, and 11/11 1x B200 real-GPU conformance + .cu reload verified."]
   },
