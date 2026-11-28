@@ -22,15 +22,45 @@
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` adds safe live hot-reload and multi-agent GPU sharing to existing ML serving, training, and RL engines without rewriting them from scratch. Instead of paying a multi-minute cold restart on every edit to reload weights and recapture CUDA graphs, coding agents swap Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/rsibox-dynamo-4bar-dark.png">
-    <source media="(prefers-color-scheme: light)" srcset="assets/rsibox-dynamo-4bar-light.png">
-    <img alt="RSIBox live hot-reload and NVIDIA Dynamo GMS and Snapshot latency comparison on NVIDIA B200" src="assets/rsibox-dynamo-4bar-light.png" width="100%">
-  </picture>
-</p>
+
+RSIBox provides live hot-reload and multi-agent GPU sharing for RSI workloads on AI infra. 
+Today, an agent optimizing a production-grade ML engine must sit through minutes of cold restart for even a one-line change. 
+RSIBox eliminates this bottleneck while keeping shared GPU state safe and isolated. 
+Agents hot-swap Python code, Triton/C++/CUDA kernels, and CUDA graphs directly into a warm engine, with live execution checks, instant rollback, and crash recovery in seconds.
+On vLLM, this cuts edit turnaround from 228 s down to as low as ~100 ms across most of the codebase.
+
+RSIBox works out of the box with existing serving (vLLM, SGLang), training (Megatron-LM), and RL (veRL, Miles) engines. We also provide a set of agents to (toolsmiths) to transfer existing codebase into live-editable ones without intrusive code changes. 
+
+## Quick Start
+
+Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
+
+```bash
+git clone https://github.com/hao-ai-lab/rsibox.git && cd rsibox
+python3 -m venv .venv && . .venv/bin/activate && pip install -e .
+
+# 1. Start a live sandbox and wait until warm
+rsibox up --launcher local --lab toy --state /tmp/rsibox-toy
+export RSIBOX=/tmp/rsibox-toy/box.json
+rsibox wait
+
+# 2. Fetch live source, edit 1 line, hot-reload, verify, and roll back
+rsibox source toy.ops > /tmp/ops.py
+sed -i.bak 's/return x + 1/return x + 100/' /tmp/ops.py
+rsibox install --file toy.ops=/tmp/ops.py
+rsibox check          # proves the edited function ran and shows the new output
+rsibox uninstall      # instant journaled rollback to base
+rsibox down --state /tmp/rsibox-toy
+```
+
+For real GPU engines (local, Docker, gVisor, or Slurm), pass `--real` and see [`core/livelab/rsibox/README.md`](core/livelab/rsibox/README.md) or `rsibox conformance <engine> --real -- --help`:
+
+```bash
+rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
+  --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
+```
+
 
 ## Why RSIBox
 
@@ -131,34 +161,7 @@ git clone https://github.com/hao-ai-lab/rsibox.git
 mkdir -p ~/.claude/skills/rsibox && ln -sf "$(pwd)/rsibox/core/agents/livelab_overview.md" ~/.claude/skills/rsibox/SKILL.md
 ```
 
-## Quick Start
 
-Requires Python 3.11+ (CPU-only, zero third-party dependencies for core and toy labs):
-
-```bash
-git clone https://github.com/hao-ai-lab/rsibox.git && cd rsibox
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
-
-# 1. Start a live sandbox and wait until warm
-rsibox up --launcher local --lab toy --state /tmp/rsibox-toy
-export RSIBOX=/tmp/rsibox-toy/box.json
-rsibox wait
-
-# 2. Fetch live source, edit 1 line, hot-reload, verify, and roll back
-rsibox source toy.ops > /tmp/ops.py
-sed -i.bak 's/return x + 1/return x + 100/' /tmp/ops.py
-rsibox install --file toy.ops=/tmp/ops.py
-rsibox check          # proves the edited function ran and shows the new output
-rsibox uninstall      # instant journaled rollback to base
-rsibox down --state /tmp/rsibox-toy
-```
-
-For real GPU engines (local, Docker, gVisor, or Slurm), pass `--real` and see [`core/livelab/rsibox/README.md`](core/livelab/rsibox/README.md) or `rsibox conformance <engine> --real -- --help`:
-
-```bash
-rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
-  --env RSIBOX_VLLM_MODEL=Qwen/Qwen3-8B
-```
 
 ## Roadmap & Documentation Map
 
