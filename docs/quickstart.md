@@ -1,6 +1,6 @@
 # Quick Start
 
-Get an `rsibox` live sandbox running, hot-reload a function between steps, verify execution proof, and roll back cleanly. Requires Python 3.11+.
+Get an `rsibox` live sandbox running, hot-reload a function between steps, run live execution checks, and roll back cleanly. Requires Python 3.11+.
 
 ## Install
 
@@ -76,6 +76,6 @@ Run `rsibox conformance <engine> --real -- --help` to inspect engine-specific fl
 
 ## Next Steps
 
-- **[`docs/concepts.md`](concepts.md)** — Hot-reload layers, execution proof (`witness`), journaled rollback, and restart boundaries.
+- **[`docs/concepts.md`](concepts.md)** — Hot-reload layers, live execution checks (`witness`), journaled rollback, and restart boundaries.
 - **[`docs/engines.md`](engines.md)** — Supported ML engines, measured speedups, and repository layout.
-- **[`core/agents/livelab_overview.md`](../core/agents/livelab_overview.md)** — Coding-agent skill reference (installable as `~/.claude/skills/rsibox/SKILL.md`; see [`README.md`](../README.md#use-with-your-coding-agent)).
+- **[`core/agents/livelab_overview.md`](../core/agents/livelab_overview.md)** — Coding-agent skill reference (installable as `~/.claude/skills/rsibox/SKILL.md`; see [`README.md`](../README.md#agent-native-starting)).
