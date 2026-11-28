@@ -23,19 +23,18 @@ from the RSIBox blog post, drawn in the blog's style (white plate, rust start-up
 | `raceGrid` | Fig. 5, end-to-end races: all six races, every run | `race_runs.csv`; tile names, edit counts and the Miles pick in `fig.js` (`RACE_TILES`, from the post) |
 
 `data/` is a link to `site/landing/dash/data/`, so the site and the landing figures share one
-copy of every number. The Pages workflow copies the real files in (`cp -RL`).
+copy of every number.
 `data-extra/` holds race rows for the deck only, read on top of `data/` by `raceGrid` (same file
 names and headers; `data/` wins for a workload in both): the FastVideo (T2VA) race, restored from
 `git show cabc09b8^:site/landing/dash/data/` because the blog still reports it, and the SGLang and
 Miles runs the blog's Figure 5 draws (SGLang r2 and r3; Miles r1 and r2 on RSIBox, r3 and r4 on
 Baseline), taken from the race records the blog figure was drawn from.
 
-## Deploy
+## Serve it
 
-`.github/workflows/pages.yml` publishes this folder to the repository's GitHub Pages site,
-<https://haoailab.com/rsibox/>, on every push to `main` that touches `site/deck/` or its
-data. The repository's Pages source is "GitHub Actions". The org site’s domain applies, so the page lives at `haoailab.com/rsibox/`; this repository sets no domain of its own. Paths in the
-site are relative, so it works under the `/rsibox/` prefix and from a local static server.
+The site is static. `data` is a link, so copy the real files out before serving from anywhere
+else: `cp -RL site/deck <dir>`, then any static server on `<dir>`. Paths in the site are
+relative, so it works at the root of a host or under a prefix.
 
 ## Rules
 
