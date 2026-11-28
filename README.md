@@ -22,7 +22,7 @@
   <a href="https://github.com/hao-ai-lab"><b>Hao AI Lab</b></a>
 </p>
 
-`rsibox` adds safe live hot-reload and multi-agent GPU sharing to existing ML serving, training, and RL engines without rewriting them from scratch. Instead of paying a multi-minute cold restart on every edit to reload weights and recapture CUDA graphs, coding agents swap Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with execution proof and instant bit-exact rollback.
+`rsibox` adds safe live hot-reload and multi-agent GPU sharing to existing ML serving, training, and RL engines without rewriting them from scratch. Instead of paying a multi-minute cold restart on every edit to reload weights and recapture CUDA graphs, coding agents swap Python, Triton kernels, CUDA graphs, and C++/CUDA directly into the warm running engine — with live execution checks and instant bit-exact rollback.
 
 <p align="center">
   <img alt="Across six AI systems, testing one edit drops from minutes to seconds with RSIBox" src="assets/rsibox-cross-engine-hero.png" width="100%">
@@ -38,7 +38,7 @@
 ## How It Works
 
 - **Keep GPU weights and states warm while swapping only what changed:** RSIBox applies each edit at the lowest safe tier — runtime flags, Python functions, `@triton.jit` kernels, selective CUDA graphs, or `.cu` side-libraries — with pre-warmed fork server and NVIDIA Dynamo GMS & Snapshot fallback when an edit crosses a process boundary or crashes a worker.
-- **Atomic step-gap commit with execution proof and rollback:** Edits stage while the engine runs, commit atomically across all GPU ranks between steps, record per-rank call counts (`witness`) to prove the new code executed, and reverse bit-for-bit via a per-mutation journal (`~0.05 s` undo).
+- **Atomic step-gap commit with live execution checks and rollback:** Edits stage while the engine runs, commit atomically across all GPU ranks between steps, record per-rank call counts (`witness`) to prove the new code executed, and reverse bit-for-bit via a per-mutation journal (`~0.05 s` undo).
 - **Formally verified protocols & sandbox verification suite:** Core swap, multi-rank coordinator, pool, standby shadow, and autoscaler protocols are specified in TLA+ ([`core/livelab/formal/`](core/livelab/formal/)) and validated against the growing **sandbox verification suite** (`rsibox conformance`, [`core/livelab/conformance/README.md`](core/livelab/conformance/README.md)).
 - **Multi-agent GPU pool (`SandboxPool`):** Concurrent coding agents share warm GPUs via priority scheduling, anti-starvation aging, elastic role borrowing, per-agent fault isolation, and **`114/114`** verified tamper-evident traces (`43.7×–54.4×` faster than restarting; [study](docs/agent-teams-and-contention.md)).
 
@@ -164,7 +164,7 @@ rsibox up --launcher local --lab vllm --real --state /tmp/rsibox-vllm \
 | **v1** | ✅ Done | NVIDIA Dynamo GMS & Snapshot recovery ([`rsibox.warm`](core/livelab/rsibox/warm/README.md)), `SandboxPool` multi-agent resilience (`114/114` verified traces), in-repo `rstack` gates |
 | **v2** | 🚧 Roadmap | `NeMo-RL` post-fix `11/11` `--real` conformance (`#325`) & `TorchTitan` Llama3, `Tier-A` `cuGraphExecKernelNodeSetParams` generalization, NVIDIA Dynamo & Omni engine onboarding |
 
-- **[`docs/concepts.md`](docs/concepts.md)** — Plain-English overview of `rsibox`, hot-reload tiers, execution proof (`witness`), and journaled rollback.
+- **[`docs/concepts.md`](docs/concepts.md)** — Plain-English overview of `rsibox`, hot-reload tiers, live execution checks (`witness`), and journaled rollback.
 - **[`docs/engines.md`](docs/engines.md)** — Full 10-engine summary, measured speedups, and repository layout.
 - **[`docs/mechanisms.md`](docs/mechanisms.md)** — Restart-boundary table, NVIDIA Dynamo GMS & Snapshot alignment benchmarks, and CPU tests.
 - **[`docs/kernels-and-graphs.md`](docs/kernels-and-graphs.md)** — Deep dive into Python bytecode swaps, Triton `@jit` rebuilds, and CUDA graph replay / `Tier-A` patching.
